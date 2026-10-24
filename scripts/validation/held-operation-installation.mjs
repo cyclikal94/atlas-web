@@ -11,8 +11,9 @@
 //  - resolution cannot leave it: no other `node_modules` may stand between any execution origin and the filesystem root, Node's global
 //    folders must be absent, NODE_OPTIONS must be empty and every NODE_PATH entry (the children's and every `.bin` shim's) must lie
 //    inside it. A file that names the live worktree's installation is a refusal (a fallback into unmeasured bytes);
-//  - tool CACHES under node_modules (Vite's `.vite` and `.vite-temp`) are outputs, never inputs: they are not copied into a snapshot,
-//    are measured by neither side and start empty in every run.
+//  - tool CACHES under node_modules (Vite's `.vite` and `.vite-temp`) are not copied into a snapshot and are measured by neither side.
+//    Revision 29 (R28-N1): they are not "outputs, never inputs" (Vite imported a generated config module from `.vite-temp`): a snapshot
+//    has none, nothing it runs creates one, and creating one after sealing changes the sealed node_modules entry.
 // The execution root's own absolute path is replaced by a token before hashing (`n` marks such an entry), so the same content at another
 // private path has the same identity, while a path to anywhere else still counts as content. pnpm's `lastValidatedTimestamp` (when it
 // last checked, not what is installed) is the one field normalised away from its workspace state file.
@@ -483,7 +484,7 @@ export function createSnapshot({ root, files, dir }) {
 }
 
 /** Writes `bytes` to the existing regular file `path` without following a link, keeping its mode (revision 28: no write through a link). */
-function writeNoFollow(path, bytes, mode) {
+export function writeNoFollow(path, bytes, mode) {
   const fd = openSync(
     path,
     constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
@@ -572,15 +573,16 @@ export function statInventory(root) {
   return { sha256: sha256(lines.join("\n")), entries: lines.length, lines };
 }
 
-/** Makes the snapshot's installation and source files read-only and creates the (writable, unmeasured) caches; returns the baseline. */
+/** Makes the snapshot's installation and source files read-only (revision 29: no tool cache is created); returns the baseline. */
 export function seal(root) {
   // Revision 28: the root must still be the owned real directory and its installation a real directory (never chmod through a link).
   assertOwnedRoot(root, "before sealing");
   const rootProblems = installationRootProblems(root);
   if (rootProblems.length)
     throw new Error(`sealing refused: ${rootProblems.join("; ")}`);
-  const modules = join(root, "node_modules");
-  for (const c of CACHE_DIRS) mkdirSync(join(modules, c), { recursive: true });
+  // Revision 29 (R28-N1): the tool caches are no longer created. Vite's bundled config module was written, imported and deleted there,
+  // outside the inventory; build and preview now load their config in memory, and a cache directory created after sealing changes the
+  // sealed node_modules entry, which every check sees.
   mkdirSync(join(root, ".agtx"), { recursive: true });
   const walk = (dir, rel) => {
     for (const e of readdirSync(dir, { withFileTypes: true })) {

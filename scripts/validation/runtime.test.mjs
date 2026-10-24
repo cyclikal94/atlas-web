@@ -228,25 +228,41 @@ test("missing executables fail and owned long-running children are cleaned up", 
 
 // WEB-08d revision 28: the held-operation runner gives its children a frozen environment and its execution snapshot's directory (both
 // read at each start); without the option every child still gets this process's environment and the fixed root.
+// Revision 29 (review r28 R28-N2): `output` is the merged log, so the child's record travels in its own exclusively written file
+// and the log only has to keep the launcher's lines. The child writes one deterministic warning before and one after its record,
+// whatever the host's proxy mode, and a missing record, a malformed one or a non-zero exit still fails.
+const INHERITANCE_WARNING =
+  "(node:1) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.";
+async function inheritanceRecord(proc, file) {
+  const print = `const w=(s)=>process.stderr.write(s+"\\n");w(${JSON.stringify(`${INHERITANCE_WARNING} (before)`)});require("node:fs").writeFileSync(process.argv[1],JSON.stringify({cwd:process.cwd(),inherited:process.env.ATLAS_PROCESSES_INHERITED??null,base:process.env.ATLAS_PROCESSES_BASE??null,call:process.env.ATLAS_PROCESSES_CALL??null}),{flag:"wx"});w(${JSON.stringify(`${INHERITANCE_WARNING} (after)`)});`;
+  const result = await proc.run(process.execPath, ["-e", print, file], {
+    ATLAS_PROCESSES_CALL: "call",
+  });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(result.signal, null, result.output);
+  for (const when of ["before", "after"])
+    assert.ok(
+      result.output.includes(`${INHERITANCE_WARNING} (${when})`),
+      `the merged log keeps the child's warning (${when}): ${result.output}`,
+    );
+  return JSON.parse(readFileSync(file, "utf8"));
+}
 test("processes() keeps the inherited environment by default and uses a given base environment and root instead", async (t) => {
   const root = fixture(t);
   const other = mkdtempSync(join(tmpdir(), "atlas-processes-root-"));
   t.after(() => rmSync(other, { recursive: true, force: true }));
-  const print =
-    "process.stdout.write(JSON.stringify({cwd:process.cwd(),inherited:process.env.ATLAS_PROCESSES_INHERITED??null,base:process.env.ATLAS_PROCESSES_BASE??null,call:process.env.ATLAS_PROCESSES_CALL??null}))";
+  const records = mkdtempSync(join(tmpdir(), "atlas-processes-records-"));
+  t.after(() => rmSync(records, { recursive: true, force: true }));
+  const had = Object.hasOwn(process.env, "ATLAS_PROCESSES_INHERITED");
+  const previous = process.env.ATLAS_PROCESSES_INHERITED;
   process.env.ATLAS_PROCESSES_INHERITED = "inherited";
   t.after(() => {
-    delete process.env.ATLAS_PROCESSES_INHERITED;
+    if (had) process.env.ATLAS_PROCESSES_INHERITED = previous;
+    else delete process.env.ATLAS_PROCESSES_INHERITED;
   });
   const plain = processes(root);
   t.after(() => plain.close());
-  const a = JSON.parse(
-    (
-      await plain.run(process.execPath, ["-e", print], {
-        ATLAS_PROCESSES_CALL: "call",
-      })
-    ).output,
-  );
+  const a = await inheritanceRecord(plain, join(records, "inherited.json"));
   assert.deepEqual(a, {
     cwd: realpathSync(root),
     inherited: "inherited",
@@ -259,19 +275,52 @@ test("processes() keeps the inherited environment by default and uses a given ba
   });
   t.after(() => frozen.close());
   dir = other;
-  const b = JSON.parse(
-    (
-      await frozen.run(process.execPath, ["-e", print], {
-        ATLAS_PROCESSES_CALL: "call",
-      })
-    ).output,
-  );
+  const b = await inheritanceRecord(frozen, join(records, "frozen.json"));
   assert.deepEqual(b, {
     cwd: realpathSync(other),
     inherited: null,
     base: "base",
     call: "call",
   });
+});
+// The record's framing is not a log filter: a child that writes nothing, writes a malformed record or exits non-zero after a valid
+// one is still a failure of this helper.
+test("the environment record helper refuses a missing, malformed or failed child record", async (t) => {
+  const records = mkdtempSync(join(tmpdir(), "atlas-processes-records-"));
+  t.after(() => rmSync(records, { recursive: true, force: true }));
+  const proc = processes(records);
+  t.after(() => proc.close());
+  const fake = (body) => ({
+    run: (command, args, env) =>
+      proc.run(command, ["-e", body, ...args.slice(2)], env),
+  });
+  const warn = (when) =>
+    `process.stderr.write(${JSON.stringify(`${INHERITANCE_WARNING} (${when})\n`)});`;
+  await assert.rejects(
+    inheritanceRecord(
+      fake(`${warn("before")}${warn("after")}`),
+      join(records, "missing.json"),
+    ),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    inheritanceRecord(
+      fake(
+        `${warn("before")}require("node:fs").writeFileSync(process.argv[1],"{");${warn("after")}`,
+      ),
+      join(records, "malformed.json"),
+    ),
+    SyntaxError,
+  );
+  await assert.rejects(
+    inheritanceRecord(
+      fake(
+        `${warn("before")}require("node:fs").writeFileSync(process.argv[1],"{}");${warn("after")}process.exit(3)`,
+      ),
+      join(records, "failed.json"),
+    ),
+    assert.AssertionError,
+  );
 });
 test("a valid assertion cannot conceal an unrelated runtime timeout", () => {
   const mixed = report("failed", "Error: expect(x)");

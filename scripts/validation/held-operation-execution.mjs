@@ -38,10 +38,41 @@
 // Limits, stated rather than claimed away: a process of the same user that deliberately unseals a private copy and edits it between
 // two checks is detected by the next check, not prevented; the operating system's own executables and libraries (/bin/sh, /usr/bin/env,
 // ps, the dynamic loader) are outside this writer model; an administrator who sets the clock back could forge a change time.
+//
+// Revision 29 (review r28 R28-N1; design assessment d3cff73e RC1, RC2, I1, I3, I4, I6, steps 1-4): GENERATED files were classified by
+// their location ("outputs, never inputs") rather than by their use, and some of them are executed. Playwright's transform cache was a
+// private writable directory outside every seal: a cached JavaScript entry under the normal key, with a self-consistent checksum, was
+// executed in place of the measured config and restored, and the completed run was admitted (review r28's cache probe). Vite's default
+// config loader writes, imports and deletes a bundled config module under node_modules/.vite-temp the same way, and Corepack enables
+// Node's compile cache in the shared TMPDIR. A path, a privacy bit or a payload checksum proves nothing about where executed code came
+// from. One versioned EXECUTION POLICY (EXECUTION_POLICY, its definition's digest POLICY_SHA256) now classifies every generated input
+// by its use, and every child runs under it:
+//  - Playwright's transform cache is ELIMINATED: adaptPlaywright applies a version-bound adapter to the snapshot's own Playwright
+//    (exactly 1.63.0: both bundled compilation caches, lib/common/index.js and lib/transform/esmLoader.js, by their exact upstream
+//    digests; anything else refuses) before it is measured and sealed. Transformed code is never read from or written to disk: every
+//    process (controller, in-thread or worker-thread ESM loader, worker, replacement worker) derives it from the measured source with
+//    the measured transformer, and its source map travels by value (memory and the serialised cache), never through a file;
+//  - Vite's bundled-config file is ELIMINATED: build and preview load their config with `--configLoader runner` (in memory, through
+//    Vite's module runner; no temporary module). node_modules/.vite and .vite-temp are no longer created in the snapshot: their creation
+//    changes the sealed node_modules entry, which the guard sees;
+//  - Node's compile cache is DISABLED (NODE_DISABLE_COMPILE_CACHE=1: Corepack's enableCompileCache() is then a no-op);
+//  - the environment is CLOSED: a child inherits only the names in INHERITED_ENV (locale, terminal, TMPDIR, the user's name; nothing
+//    that can select code: no NODE_*, PW_*/PLAYWRIGHT_* such as PW_TEST_SOURCE_TRANSFORM, package-manager settings such as node-options,
+//    VITE_*, JITI_*, ESBUILD_BINARY_PATH, NAPI_RS_*), plus the policy's own values; injection and path-valued settings still refuse;
+//  - a copied package-manager configuration file that selects code (node-options, script-shell, pnpmfile, use-node-version, ...)
+//    refuses (configProblems): its digest would measure the setting, not the code it names;
+//  - the two remaining locations a child is pointed at, the (now unused) Playwright cache directory and pnpm's state directory (pnpm
+//    only probes it with a file it creates and deletes at each launch, and carries on when refused), are made READ ONLY and GUARDED
+//    EMPTY from sealing to the end, their own directory entries included (a write, even one created, read and deleted between two
+//    checks by a writer that restores the mode, changes the directory's change time);
+//  - the policy's identity and digest are recorded by the snapshot journal and the applicability record (`runtime.policy`,
+//    `runtime.policy_sha256`) and bound into the completion record; every admission reader requires the current policy, and a record of
+//    an older or missing policy is unknown, never admitted.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   accessSync,
+  chmodSync,
   constants,
   copyFileSync,
   cpSync,
@@ -55,10 +86,19 @@ import {
   symlinkSync,
 } from "node:fs";
 import { createRequire } from "node:module";
-import { basename, delimiter, dirname, isAbsolute, join, sep } from "node:path";
+import {
+  basename,
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  sep,
+} from "node:path";
 import {
   allocateSnapshot,
   assertOwnedRoot,
+  CACHE_DIRS,
   createSnapshot,
   installationRootProblems,
   preparePnpm,
@@ -71,6 +111,7 @@ import {
   sourceState,
   statInventory,
   unsealTree,
+  writeNoFollow,
 } from "./held-operation-installation.mjs";
 
 export const RUNTIME_SCHEMA = "web08d-held-operation-runtime/1";
@@ -110,6 +151,214 @@ const ENGINE_INSTALLS = {
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const inside = (base, p) => p === base || p.startsWith(`${base}${sep}`);
+
+// ---- The execution policy (revision 29) ------------------------------------------------------------------------------------------
+export const EXECUTION_POLICY = "web08d-held-operation-execution-policy/1";
+export const PLAYWRIGHT_ADAPTER = "web08d-playwright-transform-adapter/1";
+/** The one Playwright release the adapter knows; any other refuses (an unknown layout is never adapted by guesswork). */
+export const PLAYWRIGHT_VERSION = "1.63.0";
+/** The inherited variables a child may receive: locale, terminal, the disposable-file location and the user's name, nothing else. */
+export const INHERITED_ENV = [
+  "LANG",
+  "LC_ALL",
+  "LC_COLLATE",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_MONETARY",
+  "LC_NUMERIC",
+  "LC_TIME",
+  "TZ",
+  "TERM",
+  "COLORTERM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "CI",
+  "DEBUG",
+  "TMPDIR",
+  "USER",
+  "LOGNAME",
+];
+/** The values the policy itself sets for every child (besides the private runtime's locations). */
+export const POLICY_ENV = { NODE_DISABLE_COMPILE_CACHE: "1" };
+/** How build and preview load vite.mutant.config.ts: in memory through Vite's module runner, never a generated module on disk. */
+export const VITE_CONFIG_LOADER = ["--configLoader", "runner"];
+/** A package-manager configuration key (normalised: lower case, no `-`/`_`) that selects code to run: a copied file setting one refuses. */
+const CODE_SETTINGS =
+  /^(nodeoptions|scriptshell|pnpmfile|globalpnpmfile|usenodeversion|nodeversion|npmpath|nodegyp|nodepath|shell)$/;
+/**
+ * The adapter's edits, the same in both bundled compilation caches: `[upstream, adapted]`, each upstream text present exactly once.
+ * (1) a source map is retrieved from memory, never read from a file; (2) the cache entries hold the map by value and no code path;
+ * (3) a lookup never reads cached code, and a transform is never written: every process transforms the measured source itself.
+ */
+const ADAPTER_EDITS = [
+  [
+    '      const sourceMapPath = sourceMaps.get(source);\n      try {\n        return {\n          map: JSON.parse(import_fs.default.readFileSync(sourceMapPath, "utf-8")),\n          url: source\n        };\n      } catch {\n        return null;\n      }\n    }',
+    '      const map = sourceMaps.get(source);\n      return map && typeof map === "object" ? { map, url: source } : null;\n    }',
+  ],
+  [
+    "  sourceMaps.set(entry.moduleUrl || filename, entry.sourceMapPath);\n  memoryCache.set(filename, entry);\n  return {\n    sourceMaps: [[entry.moduleUrl || filename, entry.sourceMapPath]],\n    memoryCache: [[filename, entry]],",
+    "  sourceMaps.set(entry.moduleUrl || filename, entry.sourceMap);\n  memoryCache.set(filename, { moduleUrl: entry.moduleUrl });\n  return {\n    sourceMaps: [[entry.moduleUrl || filename, entry.sourceMap]],\n    memoryCache: [[filename, { moduleUrl: entry.moduleUrl }]],",
+  ],
+  [
+    'function getFromCompilationCache(filename, contentHash, moduleUrl) {\n  const cache = memoryCache.get(filename);\n  if (cache?.codePath) {\n    try {\n      return { cachedCode: readCodeCache(cache.codePath) };\n    } catch {\n    }\n  }\n  const filePathHash = calculateFilePathHash(filename);\n  const hashPrefix = filePathHash + "_" + contentHash.substring(0, 7);\n  const cacheFolderName = filePathHash.substring(0, 2);\n  const cachePath = calculateCachePath(filename, cacheFolderName, hashPrefix);\n  const codePath = cachePath + ".js";\n  const sourceMapPath = cachePath + ".map";\n  try {\n    const cachedCode = readCodeCache(codePath);\n    const serializedCache = _innerAddToCompilationCacheAndSerialize(filename, { codePath, sourceMapPath, moduleUrl });\n    return { cachedCode, serializedCache };\n  } catch {\n  }\n  return {\n    addToCache: (code, map) => {\n      if ((0, import_globals.isWorkerProcess)())\n        return {};\n      clearOldCacheEntries(cacheFolderName, filePathHash);\n      import_fs.default.mkdirSync(import_path.default.dirname(cachePath), { recursive: true });\n      if (map)\n        import_fs.default.writeFileSync(sourceMapPath, JSON.stringify(map), "utf8");\n      writeCodeCache(codePath, code);\n      const serializedCache = _innerAddToCompilationCacheAndSerialize(filename, { codePath, sourceMapPath, moduleUrl });\n      return { serializedCache };\n    }\n  };\n}\n',
+    `function getFromCompilationCache(filename, contentHash, moduleUrl) {\n  // ${PLAYWRIGHT_ADAPTER} (WEB-08d held-operation execution policy): no transformed code is read from or written to disk.\n  return {\n    addToCache: (code, map) => ({ serializedCache: _innerAddToCompilationCacheAndSerialize(filename, { sourceMap: map || null, moduleUrl }) })\n  };\n}\n`,
+  ],
+];
+/** The two files the adapter changes, inside the playwright package: their exact upstream and adapted digests. */
+export const ADAPTED_FILES = {
+  "lib/common/index.js": {
+    upstream:
+      "f4a6b14f5ba21a118b58a6a25eb0b281a3acc4157023b014e0197145056124a4",
+    adapted: "7add3a334a4052d8cbbf7d6d2e02751c2bd331afe9e66d21aabb18aea5f18785",
+  },
+  "lib/transform/esmLoader.js": {
+    upstream:
+      "51a0a75a3aee8ec1dcfd545ad5c45300c282b5c4fe6d0a74b5a6cdcb649ad0de",
+    adapted: "0e541e9693836aaa31d4829acf4d827dc32df36bc235a9be96a01d0fcc87968e",
+  },
+};
+/** Applies the adapter's edits to one upstream file's text; throws unless every upstream text occurs exactly once. */
+export function adaptedText(text, file = "the file") {
+  let out = text;
+  for (const [from, to] of ADAPTER_EDITS) {
+    const n = out.split(from).length - 1;
+    if (n !== 1)
+      throw new Error(
+        `the transform adapter's anchor occurs ${n} times in ${file}, not once: an unknown Playwright layout is not adapted`,
+      );
+    out = out.replace(from, () => to);
+  }
+  return out;
+}
+/** The policy's definition: what it covers and how, each adapted file by its digests. POLICY_SHA256 is its canonical digest. */
+export const POLICY_DEFINITION = {
+  id: EXECUTION_POLICY,
+  playwright_transform_cache: {
+    disposition: "eliminated",
+    adapter: PLAYWRIGHT_ADAPTER,
+    version: PLAYWRIGHT_VERSION,
+    files: ADAPTED_FILES,
+    edits_sha256: sha256(JSON.stringify(ADAPTER_EDITS)),
+  },
+  vite_config: { disposition: "eliminated", loader: VITE_CONFIG_LOADER },
+  vite_cache_dirs: { disposition: "absent-and-sealed" },
+  node_compile_cache: { disposition: "disabled", env: POLICY_ENV },
+  environment: { disposition: "closed", inherited: INHERITED_ENV },
+  package_manager_config: {
+    disposition: "refused-when-selecting-code",
+    settings: CODE_SETTINGS.source,
+  },
+  generated_dirs: {
+    disposition: "guarded-empty-read-only",
+    dirs: [".agtx/cache/playwright", ".agtx/state/pnpm"],
+  },
+};
+const sortedJson = (v) =>
+  JSON.stringify(v, (_, x) =>
+    x && typeof x === "object" && !Array.isArray(x)
+      ? Object.fromEntries(
+          Object.keys(x)
+            .sort()
+            .map((k) => [k, x[k]]),
+        )
+      : x,
+  );
+export const POLICY_SHA256 = sha256(sortedJson(POLICY_DEFINITION));
+/** The guarded-empty trees' names in a run's journal (snapshotProblems requires each of them). */
+export const GENERATED_TREES = POLICY_DEFINITION.generated_dirs.dirs.map(
+  (d) => `generated ${d}`,
+);
+
+/** The snapshot's own playwright package directory (resolved as its test runner does), which must lie inside its installation. */
+export function playwrightDir(root) {
+  const test = createRequire(join(root, "package.json")).resolve(
+    "@playwright/test/package.json",
+  );
+  const dir = dirname(
+    realpathSync(createRequire(test).resolve("playwright/package.json")),
+  );
+  const base = realpathSync(join(root, "node_modules"));
+  if (!inside(base, dir))
+    throw new Error(
+      `playwright resolves to ${dir}, outside the installation: it is not adapted`,
+    );
+  return dir;
+}
+/**
+ * Applies the transform adapter to the snapshot `root`'s Playwright (before it is measured and sealed) and returns what it did. Refuses
+ * another release, an upstream file of other bytes (an unknown layout) or an adapted result of other bytes; writes only through
+ * no-follow descriptors into the owned snapshot, keeping each file's mode, and re-reads what it wrote.
+ */
+export function adaptPlaywright(root) {
+  assertOwnedRoot(root, "before the transform adapter was applied");
+  const dir = playwrightDir(root);
+  const version = JSON.parse(
+    readFileSync(join(dir, "package.json"), "utf8"),
+  ).version;
+  if (version !== PLAYWRIGHT_VERSION)
+    throw new Error(
+      `the snapshot's Playwright is ${version}, not ${PLAYWRIGHT_VERSION}: the transform adapter knows no other release, so nothing is run`,
+    );
+  const files = {};
+  for (const [rel, want] of Object.entries(ADAPTED_FILES)) {
+    const full = join(dir, rel);
+    const st = lstatSync(full);
+    if (!st.isFile())
+      throw new Error(`Playwright's ${rel} is not a regular file`);
+    const text = readFileSync(full, "utf8");
+    if (sha256(text) !== want.upstream)
+      throw new Error(
+        `Playwright's ${rel} is not the known ${PLAYWRIGHT_VERSION} upstream file (${sha256(text)}): an unknown layout is not adapted`,
+      );
+    const adapted = adaptedText(text, rel);
+    if (sha256(adapted) !== want.adapted)
+      throw new Error(
+        `the adapted ${rel} is ${sha256(adapted)}, not the reviewed ${want.adapted}`,
+      );
+    writeNoFollow(full, Buffer.from(adapted), st.mode);
+    if (sha256(readFileSync(full)) !== want.adapted)
+      throw new Error(`the adapted ${rel} was not written as adapted`);
+    files[rel] = {
+      upstream_sha256: want.upstream,
+      adapted_sha256: want.adapted,
+    };
+  }
+  return {
+    adapter: PLAYWRIGHT_ADAPTER,
+    version,
+    package: relative(realpathSync(root), dir).split(sep).join("/"),
+    files,
+  };
+}
+/** Why the snapshot `root`'s Playwright is not exactly the adapted one (an empty list when it is). Reads only. */
+export function adaptationProblems(root) {
+  try {
+    const dir = playwrightDir(root);
+    return Object.entries(ADAPTED_FILES)
+      .filter(
+        ([rel, want]) => sha256(readFileSync(join(dir, rel))) !== want.adapted,
+      )
+      .map(([rel]) => `Playwright's ${rel} is not the adapted file`);
+  } catch (error) {
+    return [String(error.message ?? error)];
+  }
+}
+/** Why a copied package-manager configuration file `text` may not be used: a setting that selects code (configuration keys normalised). */
+export function configProblems(text, file = "the configuration file") {
+  const problems = [];
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
+    const m = /^([^=:\s]+)\s*[=:]/.exec(line);
+    if (!m) continue;
+    const key = m[1].replace(/^["']|["']$/g, "");
+    if (CODE_SETTINGS.test(key.toLowerCase().replace(/[-_]/g, "")))
+      problems.push(
+        `${file} sets ${key}, which selects code no measurement follows`,
+      );
+  }
+  return problems;
+}
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
 /** The first executable `name` on `env.PATH`, as a shell or spawn finds it: its path and real path. Throws when there is none. */
@@ -375,6 +624,10 @@ export function createRuntime(rt, chain, env, browsers) {
     if (existsSync(from)) {
       if (!statSync(from).isFile())
         throw new Error(`the configuration file ${from} is not a regular file`);
+      // Revision 29: a setting that selects code (node-options, script-shell, pnpmfile, ...) would run what its digest does not measure.
+      const problems = configProblems(readFileSync(from, "utf8"), from);
+      if (problems.length)
+        throw new Error(`${problems.join("; ")}: nothing is run`);
       mkdirSync(dirname(join(rt, "home", to)), { recursive: true });
       copyFileSync(from, join(rt, "home", to));
     }
@@ -444,11 +697,14 @@ export function frozenEnv(base, rt, root) {
         `the environment's package-manager setting ${k}=${v} names a path outside the runtime: nothing is run`,
       );
   }
-  const env = { ...base };
-  for (const k of REPLACED_ENV) delete env[k];
-  for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
+  // Revision 29 (the execution policy): only INHERITED_ENV is inherited; nothing else in `base` (NODE_*, PW_*, package-manager settings,
+  // VITE_*, loader and native-binary overrides) reaches a child, whatever it names.
+  const env = {};
+  for (const k of INHERITED_ENV)
+    if (base[k] !== undefined && base[k] !== "") env[k] = String(base[k]);
   return {
     ...env,
+    ...POLICY_ENV,
     PATH: [join(rt, "bin"), ...SYSTEM_PATH].join(delimiter),
     HOME: join(rt, "home"),
     XDG_CONFIG_HOME: join(rt, "home/.config"),
@@ -456,15 +712,21 @@ export function frozenEnv(base, rt, root) {
     COREPACK_ENABLE_NETWORK: "0",
     PLAYWRIGHT_BROWSERS_PATH: join(rt, "ms-playwright"),
     PWTEST_CACHE_DIR: cacheDir(root),
-    // pnpm's data/state directory (it writes there on every launch): private, writable, outside every seal (revision 28).
+    // pnpm's data/state directory (revision 28: it must exist). Revision 29: guarded EMPTY from sealing to the end, as is the cache.
     PNPM_HOME: stateDir(root),
   };
 }
 
-/** The path a run's Playwright transform cache lives at inside its snapshot (private, writable, outside the stat inventory). */
+/** The path Playwright's transform cache would live at inside a run's snapshot: unused under the adapter, guarded empty (revision 29). */
 export const cacheDir = (root) => join(root, ".agtx/cache/playwright");
-/** The path pnpm's own data and state go to inside a run's snapshot (private, writable, outside the stat inventory). */
+/** The path pnpm's own data and state go to inside a run's snapshot: guarded empty from sealing to the end (revision 29). */
 export const stateDir = (root) => join(root, ".agtx/state/pnpm");
+
+/** A directory's own entry as a write changes it (revision 29: guarded-empty generated directories): inode, mode, links and times. */
+function selfLine(root) {
+  const st = lstatSync(root, { bigint: true });
+  return `${st.ino} ${st.mode} ${st.nlink} ${st.mtimeNs} ${st.ctimeNs}`;
+}
 
 /**
  * Verifies one sealed tree against its baseline; returns the current digest or throws naming the first difference. The root itself must
@@ -486,6 +748,12 @@ function verifyTree(root, baseline, label, when) {
   )
     throw new Error(
       `${label} changed ${when}: its root ${root} is not the directory that was sealed`,
+    );
+  // Revision 29: a guarded-empty generated directory's own entry is part of its seal (a file created, read and deleted between two
+  // checks leaves no entry behind, but it changes the directory's modification and change times).
+  if (baseline.self !== undefined && selfLine(root) !== baseline.self)
+    throw new Error(
+      `${label} changed ${when}: its own directory ${root} was written`,
     );
   const now = statInventory(root);
   if (now.sha256 === baseline.sha256) return now.sha256;
@@ -513,6 +781,7 @@ export function newExecution({ journal, save = () => {}, afterGuard = null }) {
     env: null,
     launcher: null,
     chain: null,
+    policy: null,
     baseline: null,
     runtimeBaseline: null,
     trees: new Map(),
@@ -554,16 +823,21 @@ export function newExecution({ journal, save = () => {}, afterGuard = null }) {
       save();
       return entry;
     },
-    /** Seals a tree the run will read from now on (a copied test tree, a build, a mutant's build input) and guards it until the end. */
-    guard(name, root, { outside = false } = {}) {
+    /**
+     * Seals a tree the run will read from now on (a copied test tree, a build, a mutant's build input) and guards it until the end.
+     * `self` (revision 29: the policy's guarded-empty generated directories) also seals the tree root's own directory entry.
+     */
+    guard(name, root, { outside = false, self = false } = {}) {
       if (ex.trees.has(name))
         throw new Error(`the tree ${name} is already guarded`);
       const baseline = withRoot(sealTree(root), root);
+      if (self) baseline.self = selfLine(root);
       ex.trees.set(name, { root, baseline, outside });
       journal.trees[name] = {
         root,
         sealed_sha256: baseline.sha256,
         entries: baseline.entries,
+        ...(self ? { self: baseline.self } : {}),
       };
       save();
     },
@@ -627,6 +901,14 @@ export function prepareExecution(
   j.runtime_sealed_sha256 = ex.runtimeBaseline.sha256;
   j.runtime_entries = ex.runtimeBaseline.entries;
   j.relocated = relocate(ex.root, source);
+  // Revision 29: the execution policy, before anything is measured or sealed (the adapted Playwright is what every reader measures).
+  j.policy = {
+    id: EXECUTION_POLICY,
+    sha256: POLICY_SHA256,
+    playwright: adaptPlaywright(ex.root),
+    generated: GENERATED_TREES,
+  };
+  ex.policy = j.policy;
   ex.launcher = join(ex.runtime, "bin/pnpm");
   ex.env = frozenEnv(env, ex.runtime, ex.root);
   mkdirSync(cacheDir(ex.root), { recursive: true });
@@ -641,6 +923,23 @@ export function prepareExecution(
   ex.baseline = withRoot(seal(ex.root), ex.root);
   j.sealed_sha256 = ex.baseline.sha256;
   j.sealed_entries = ex.baseline.entries;
+  // Revision 29: no tool cache exists when the snapshot is sealed (so creating one later changes the sealed node_modules entry), and the
+  // two writable locations are guarded empty, their own entries included, from now to the end.
+  for (const c of CACHE_DIRS)
+    if (existsSync(join(ex.root, "node_modules", c)))
+      throw new Error(
+        `node_modules/${c} exists when the snapshot is sealed: a generated cache is not an input`,
+      );
+  POLICY_DEFINITION.generated_dirs.dirs.forEach((d, n) => {
+    if (readdirSync(join(ex.root, d)).length)
+      throw new Error(
+        `${d} is not empty when the snapshot is sealed: a generated file is not an input`,
+      );
+    // Read only (pnpm still writes a probe into its state directory at each launch; refused, it carries on): no ordinary write can
+    // land there, and a writer that restores the mode still changes the directory's change time.
+    chmodSync(join(ex.root, d), 0o555);
+    ex.guard(GENERATED_TREES[n], join(ex.root, d), { self: true });
+  });
   // The runtime's seal continues unbroken into the snapshot's (the runtime is never re-sealed).
   ex.check("when the snapshot was sealed");
   const after = sourceState(source);
@@ -727,6 +1026,7 @@ export function snapshotJournal(source, used) {
     source_state_after_sha256: null,
     source_state_entries: null,
     relocated: [],
+    policy: null,
     prepared: false,
     sealed_sha256: null,
     sealed_entries: null,

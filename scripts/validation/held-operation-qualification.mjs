@@ -46,6 +46,11 @@ import {
   canonical,
   compareApplicability,
 } from "./held-operation-applicability.mjs";
+import {
+  EXECUTION_POLICY,
+  GENERATED_TREES,
+  POLICY_SHA256,
+} from "./held-operation-execution.mjs";
 import { SNAPSHOT_SCHEMA } from "./held-operation-installation.mjs";
 
 /** The terminal completion record of a held-operation run (revision 28): the only evidence of a COMPLETED run. */
@@ -2421,6 +2426,11 @@ function identityProblems(kind, planned, got) {
  * included) and at the end, removed, and bound to the record's `runtime` digest and root; every guarded tree (a copied test tree once its
  * patches were installed, a completed build, a mutant's build input) unchanged at every later check and at the end; and the source
  * installation's state the same after preparation as before it. One failed check stays a failure: nothing later clears it.
+ *
+ * Revision 29 (review r28 R28-N1; design assessment d3cff73e I6, I7): the snapshot record must also name the CURRENT execution policy
+ * (held-operation-execution.mjs EXECUTION_POLICY and its digest), the same one its applicability record names, and show each of the
+ * policy's generated directories guarded empty (its own entry sealed) from sealing to the end. A record of an older or missing policy
+ * is unknown: what generated code it ran was never classified, and nothing is inferred from an empty list of checks.
  */
 export function snapshotProblems(snapshot, record) {
   if (!snapshot || typeof snapshot !== "object")
@@ -2494,6 +2504,16 @@ export function snapshotProblems(snapshot, record) {
     problems.push(
       "the source installation is not recorded unchanged by the snapshot's preparation",
     );
+  // Revision 29 (review r28 R28-N1): the execution policy every child ran under, its guarded-empty generated directories included. A
+  // record of an older or missing policy is unknown: nothing it does not record (what generated code ran) is inferred.
+  const policy = snapshot.policy;
+  if (policy?.id !== EXECUTION_POLICY || policy?.sha256 !== POLICY_SHA256)
+    problems.push(
+      `its execution ran under no current execution policy (${policy?.id ?? "none recorded"}, ${policy?.sha256 ?? "no digest"}; this reader requires ${EXECUTION_POLICY})`,
+    );
+  for (const name of GENERATED_TREES)
+    if (trees?.[name]?.entries !== 0 || typeof trees?.[name]?.self !== "string")
+      problems.push(`its ${name} was not guarded empty from sealing`);
   if (!record || typeof record !== "object")
     problems.push(
       "its execution snapshot cannot be bound: there is no applicability record of what it measured",
@@ -2520,6 +2540,10 @@ export function snapshotProblems(snapshot, record) {
     )
       problems.push(
         `its private runtime is ${snapshot.runtime_root}, but its applicability record was collected from ${record.runtime?.root}`,
+      );
+    if (record.runtime?.policy_sha256 !== policy?.sha256)
+      problems.push(
+        `its execution ran under policy ${policy?.sha256}, but its applicability record names ${record.runtime?.policy_sha256}`,
       );
   }
   return problems;
@@ -2555,6 +2579,16 @@ export function completionProblems(run, expect = {}) {
     );
   if (c.processes_closed !== true)
     problems.push("its completion record does not show every process closed");
+  // Revision 29: the execution policy the run's own records bind (an older or missing policy is never admitted).
+  if (
+    c.policy !== EXECUTION_POLICY ||
+    c.policy_sha256 !== POLICY_SHA256 ||
+    c.policy_sha256 !==
+      run.applicability?.before?.record?.runtime?.policy_sha256
+  )
+    problems.push(
+      `its completion record names execution policy ${c.policy ?? "none"} (${c.policy_sha256 ?? "no digest"}), not the current ${EXECUTION_POLICY} its run's applicability record binds`,
+    );
   if (
     !DIGEST.test(String(c.source_sha256)) ||
     c.source_after_sha256 !== c.source_sha256

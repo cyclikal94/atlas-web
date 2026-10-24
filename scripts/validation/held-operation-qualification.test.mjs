@@ -2258,7 +2258,43 @@ function applicabilityAssessments(q, e, a, check) {
         c.processes_closed = false;
       }),
     "every process closed",
+  ); // Revision 29 (review r28 R28-N1): the execution policy the run ran under, in its completion and snapshot records.
+  completionCase(
+    "a completion record of an older execution policy",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        c.policy = "web08d-held-operation-execution-policy/0";
+      }),
+    "names execution policy web08d-held-operation-execution-policy/0",
   );
+  completionCase(
+    "a completion record that names no execution policy (a revision 28 run)",
+    (ev) =>
+      withCompletion(ev, (c) => {
+        delete c.policy;
+        delete c.policy_sha256;
+      }),
+    "names execution policy none",
+  );
+  check(
+    "prerequisite: a controls run whose snapshot record names no execution policy (a revision 28 run) is not met",
+    () =>
+      prereq((ev) => {
+        ev.snapshot = snapshotRecord(T, (x) => {
+          delete x.policy;
+        });
+      }).some((p) => p.includes("no current execution policy")),
+  );
+  check(
+    "prerequisite: a controls run whose generated directory was not guarded empty is not met",
+    () =>
+      prereq((ev) => {
+        ev.snapshot = snapshotRecord(T, (x) => {
+          delete x.trees[executionModule.GENERATED_TREES[0]];
+        });
+      }).some((p) => p.includes("was not guarded empty")),
+  );
+
   completionCase(
     "a completed run whose source changed",
     (ev) =>
@@ -4224,6 +4260,119 @@ const EVALUATOR_MUTANTS = [
     "Q",
     "never completed (no completion record)",
   ],
+  // Revision 29 (review r28 R28-N1; design assessment d3cff73e I1, I3, I4, I6): the execution policy, each by its intended check.
+  [
+    "EM169 the shared preparation does not apply the transform adapter (revision 29)",
+    "    playwright: adaptPlaywright(ex.root),",
+    "    playwright: null,",
+    "X",
+    "the shared preparation adapts the snapshot's Playwright",
+  ],
+  [
+    "EM170 the adapter edits an unknown layout (an anchor missing or doubled is accepted)",
+    "    if (n !== 1)",
+    "    if (false)",
+    "X",
+    "the adapter refuses an unknown layout",
+  ],
+  [
+    "EM171 a guarded-empty directory's own entry is not sealed (write/read/delete unseen)",
+    "  if (baseline.self !== undefined && selfLine(root) !== baseline.self)",
+    "  if (false)",
+    "X",
+    "created, read and deleted in a guarded-empty directory",
+  ],
+  [
+    "EM172 the generated directories are not guarded",
+    "    ex.guard(GENERATED_TREES[n], join(ex.root, d), { self: true });",
+    "    void n;",
+    "X",
+    "a cache entry written into the Playwright cache directory after sealing is seen",
+  ],
+  [
+    "EM173 the frozen environment inherits everything again",
+    '    if (base[k] !== undefined && base[k] !== "") env[k] = String(base[k]);',
+    "    Object.assign(env, base);",
+    "X",
+    "only the policy's inherited names reach a child",
+  ],
+  [
+    "EM174 Node's compile cache is not disabled",
+    "    ...POLICY_ENV,\n",
+    "",
+    "X",
+    "only the policy's inherited names reach a child",
+  ],
+  [
+    "EM175 a copied configuration file that selects code is accepted",
+    `      if (problems.length)\n        throw new Error(\`\${problems.join("; ")}: nothing is run\`);`,
+    "      void problems;",
+    "X",
+    "a copied package-manager configuration file that selects code is refused",
+  ],
+  [
+    "EM176 a tool cache present when the snapshot is sealed is accepted",
+    '    if (existsSync(join(ex.root, "node_modules", c)))',
+    "    if (false)",
+    "X",
+    "a tool cache that exists when the snapshot is sealed is refused",
+  ],
+  [
+    "EM177 another Playwright release is adapted by guesswork",
+    "  if (version !== PLAYWRIGHT_VERSION)",
+    "  if (false)",
+    "X",
+    "another Playwright release, or an upstream file of other bytes, is refused",
+  ],
+  [
+    "EM178 sealing creates the tool caches again (outside the inventory)",
+    '  mkdirSync(join(root, ".agtx"), { recursive: true });',
+    '  for (const c of CACHE_DIRS)\n    mkdirSync(join(root, "node_modules", c), { recursive: true });\n  mkdirSync(join(root, ".agtx"), { recursive: true });',
+    "I",
+    "it has no tool cache, and one created after sealing is seen",
+  ],
+  [
+    "EM179 the record's policy digest is not compared",
+    '  ["runtime.policy_sha256", "digest"],\n',
+    "",
+    "A",
+    "one of another policy is not applicable",
+  ],
+  [
+    "EM180 the collector does not require the current execution policy",
+    "    execution.policy?.id !== EXECUTION_POLICY ||\n    execution.policy?.sha256 !== POLICY_SHA256\n  )",
+    "    false\n  )",
+    "A",
+    "an execution without it is not collected",
+  ],
+  [
+    "EM181 a snapshot record without the current execution policy is accepted",
+    "  if (policy?.id !== EXECUTION_POLICY || policy?.sha256 !== POLICY_SHA256)",
+    "  if (false)",
+    "Q",
+    "snapshot record: one naming no execution policy",
+  ],
+  [
+    "EM182 a generated directory not guarded empty is accepted",
+    '    if (trees?.[name]?.entries !== 0 || typeof trees?.[name]?.self !== "string")',
+    "    if (false)",
+    "Q",
+    "a generated directory that was not guarded, or not empty, is refused",
+  ],
+  [
+    "EM183 a run of another policy than its applicability record is accepted",
+    "    if (record.runtime?.policy_sha256 !== policy?.sha256)",
+    "    if (false)",
+    "Q",
+    "a run of another policy than its applicability record names is refused",
+  ],
+  [
+    "EM184 a completion record of an older execution policy is accepted",
+    "    c.policy !== EXECUTION_POLICY ||",
+    "    false ||",
+    "Q",
+    "a completion record of an older execution policy",
+  ],
 ];
 
 test("Q3: every evaluator mutant fails at least one of these checks; the evaluator itself passes all", async (t) => {
@@ -5057,6 +5206,13 @@ function driverFixture(t) {
       change: (c) =>
         Object.assign(c, { schema: "web08d-held-operation-completion/0" }),
     },
+    // Revision 29: a completion record of an older execution policy (its generated inputs unclassified).
+    oldpolicyrun: {
+      change: (c) =>
+        Object.assign(c, {
+          policy: "web08d-held-operation-execution-policy/0",
+        }),
+    },
   };
   for (const [name, v] of Object.entries(variants)) {
     writeBundle(join(dir, `.agtx/${name}/nc1`), bundles.nc1);
@@ -5326,6 +5482,11 @@ for (const [label, bundle, why] of [
     "a completion record of another schema",
     "legacyrun/nc1",
     "not web08d-held-operation-completion/1",
+  ],
+  [
+    "a completion record of an older execution policy (revision 29)",
+    "oldpolicyrun/nc1",
+    "names execution policy",
   ],
 ])
   test(`H11/H13 (revisions 27-28): an admission of a bundle published by ${label} exits 1, never admission-eligible`, (t) => {

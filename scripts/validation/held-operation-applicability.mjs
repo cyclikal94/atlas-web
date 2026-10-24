@@ -46,6 +46,13 @@
 // /3 adds `runtime` (its schema, the launcher form, the digest and entry count of its whole content outside the browsers, which are
 // digested separately); the behavioural environment is recorded with the run's own private roots replaced by tokens. /2 and /1 records
 // are of unsupported schemas here: `unknown`, never admitted, still replayable as history. There is no collection without the guard.
+//
+// Revision 29 (review r28 R28-N1; design assessment d3cff73e I6, step 4): `runtime.policy` and `runtime.policy_sha256` name the
+// EXECUTION POLICY every child ran under (held-operation-execution.mjs: generated inputs classified by use; Playwright's transform cache
+// eliminated by the adapter, whose adapted bytes the installation manifest measures; Vite's config loaded in memory; Node's compile
+// cache disabled; the environment closed). A /3 record without them (revision 28) is `unknown`, one of another policy `incompatible`:
+// never admitted. The collector refuses an execution that was not prepared under the current policy, so a consumer's own target always
+// names it, and the snapshot and completion readers require it too (held-operation-qualification.mjs).
 import { createHash } from "node:crypto";
 import {
   accessSync,
@@ -70,8 +77,10 @@ import {
   sep,
 } from "node:path";
 import {
+  EXECUTION_POLICY,
   finishExecution,
   newExecution,
+  POLICY_SHA256,
   prepareExecution,
   RUNTIME_SCHEMA,
   runtimeManifest,
@@ -162,6 +171,9 @@ export const FIELDS = [
   ["runtime.form", "word"],
   ["runtime.sha256", "digest"],
   ["runtime.entries", "count"],
+  // Revision 29: the execution policy every child ran under (held-operation-execution.mjs); an older or missing one is unknown.
+  ["runtime.policy", "word"],
+  ["runtime.policy_sha256", "digest"],
   ["child.node", "version"],
   ["child.exec_sha256", "digest"],
   ["child.platform", "word"],
@@ -422,6 +434,14 @@ export function collectApplicability({
     throw new Error(
       "no execution: the record is collected only from a private runtime (held-operation-execution.mjs)",
     );
+  // Revision 29: and only under the current execution policy (prepareExecution applied it before anything was measured).
+  if (
+    execution.policy?.id !== EXECUTION_POLICY ||
+    execution.policy?.sha256 !== POLICY_SHA256
+  )
+    throw new Error(
+      `no current execution policy (${execution.policy?.id ?? "none"}): nothing is collected`,
+    );
   const env = execution.env;
   const rt = realpathSync(execution.runtime);
   const exec = realpathSync(controller.execPath);
@@ -544,6 +564,8 @@ export function collectApplicability({
       sha256: runtime.sha256,
       entries: runtime.entries,
       root: rt,
+      policy: execution.policy.id,
+      policy_sha256: execution.policy.sha256,
     },
     child: {
       node: child.node,

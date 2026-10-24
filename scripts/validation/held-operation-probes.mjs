@@ -76,6 +76,10 @@
 // end check at the latest) and fails the run for good. When everything has closed, been checked, compared and removed, the run publishes
 // its TERMINAL completion record (completion.json, exclusively, last): the split-stage prerequisite and the judge CLI admit a part only
 // from a run whose completion record passed and binds it (held-operation-qualification.mjs completionProblems).
+// Revision 29 (review r28 R28-N1): every child runs under the shared EXECUTION POLICY (held-operation-execution.mjs): the snapshot's
+// Playwright adapted so that no transformed code is read from or written to disk, build and preview loading vite.mutant.config.ts in
+// memory (`--configLoader runner`), Node's compile cache disabled, the environment closed and the writable directories guarded empty;
+// the completion record names the policy and its digest, and every reader requires the current one.
 //
 // Usage: node scripts/validation/held-operation-probes.mjs [--check] [--stage all|controls|negatives]
 //          [--probes P01,S7,...] [--only HM10,...] [--browsers chromium,firefox,webkit]
@@ -118,11 +122,13 @@ import {
   writeArtefact,
 } from "./held-operation-evidence.mjs";
 import {
+  EXECUTION_POLICY,
   finishExecution,
   journalUnchanged,
   newExecution,
   prepareExecution,
   snapshotJournal,
+  VITE_CONFIG_LOADER,
 } from "./held-operation-execution.mjs";
 import {
   installationRootProblems,
@@ -251,6 +257,8 @@ if (rootRefusal.length) {
       passed: false,
       reasons: [`failed: ${why}`],
       processes_closed: true,
+      policy: EXECUTION_POLICY,
+      policy_sha256: null,
       source_sha256: null,
       source_after_sha256: null,
       applicability_sha256: null,
@@ -405,6 +413,8 @@ async function build(mutantDir, buildDir, log) {
       "fixture",
       "--config",
       "vite.mutant.config.ts",
+      // Revision 29 (the execution policy): the config is loaded in memory, never from a generated module on disk.
+      ...VITE_CONFIG_LOADER,
     ],
     { ATLAS_MUTANT_DIR: mutantDir ?? "", ATLAS_MUTANT_OUT_DIR: buildDir },
   );
@@ -430,6 +440,8 @@ async function withPreview(buildDir, action) {
       "fixture",
       "--config",
       "vite.mutant.config.ts",
+      // Revision 29 (the execution policy): the config is loaded in memory, never from a generated module on disk.
+      ...VITE_CONFIG_LOADER,
       "--host",
       "127.0.0.1",
       "--port",
@@ -1196,6 +1208,9 @@ writeFileSync(
     passed: outcome.passed,
     reasons: outcome.reasons,
     processes_closed: true,
+    // Revision 29: the execution policy every child ran under, as this run's applicability record and snapshot record name it.
+    policy: EXECUTION_POLICY,
+    policy_sha256: target?.runtime?.policy_sha256 ?? null,
     source_sha256: before.sha256,
     source_after_sha256: after.sha256,
     applicability_sha256: targetSha,

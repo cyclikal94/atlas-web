@@ -24,6 +24,14 @@
 // (prepareExecution/finishExecution) is run end to end over a fake launcher chain whose Corepack only exits: allocated, copied,
 // sealed, prepared through the guard, removed; a linked root refused before any allocation (also through collectSnapshotTarget); a write
 // into the source installation during preparation refused, naming it, with every allocation removed.
+//
+// Revision 29 (review r28 R28-N1; design assessment d3cff73e Q1, Q2, Q12): the execution policy. The fake installation's playwright is
+// 1.63.0 with the two REAL upstream compilation-cache files (copied, read only, from this worktree's installation), so the shared
+// lifecycle applies the actual adapter: both files adapted exactly as reviewed, an unknown layout, another release or other upstream
+// bytes refused before anything is written, the snapshot (never the source) adapted, the policy recorded, the generated directories
+// guarded empty (a cache entry, and a file created, read and deleted between two checks, both seen), a tool cache present at sealing
+// refused, the environment closed to the policy's inherited names, a copied configuration file that selects code refused, the record's
+// policy required and compared. The real loaders themselves are exercised by held-operation-policy.test.mjs.
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
@@ -46,8 +54,16 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+// Revision 29: the policy's constants (fixtures name them; the modules under test are always the ones passed in).
+import {
+  ADAPTED_FILES,
+  EXECUTION_POLICY,
+  GENERATED_TREES,
+  POLICY_SHA256,
+} from "./held-operation-execution.mjs";
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const write = (path, text, mode) => {
@@ -231,6 +247,8 @@ function executionAt(s, rt = runtimeAt(s)) {
     runtime: rt,
     launcher: join(rt, "bin/pnpm"),
     chain: { form: "task-shim", pnpm: { path: "/x/pnpm-shim/pnpm" } },
+    // Revision 29: what prepareExecution records once it has applied the execution policy.
+    policy: { id: EXECUTION_POLICY, sha256: POLICY_SHA256 },
     env: {
       PATH: join(rt, "bin"),
       HOME: join(rt, "home"),
@@ -704,6 +722,43 @@ export function installationAssessments(i, a, q, check, x) {
         );
       },
     );
+    // Revision 29 (review r28 R28-N1): the record names the execution policy; an execution without the current one is not collected,
+    // and a record without it (revision 28) or of another policy is never applicable.
+    check(
+      "collector: a record names the current execution policy; an execution without it is not collected (revision 29)",
+      () => {
+        const { d } = fresh();
+        const r = collect(d);
+        const ex = executionAt(s);
+        ex.policy = null;
+        return (
+          r.runtime.policy === EXECUTION_POLICY &&
+          r.runtime.policy_sha256 === POLICY_SHA256 &&
+          throwsLike(
+            () => collect(d, undefined, ex),
+            /no current execution policy/,
+          )
+        );
+      },
+    );
+    check(
+      "comparison: a record without an execution policy (revision 28) is unknown, and one of another policy is not applicable (revision 29)",
+      () => {
+        const { d } = fresh();
+        const r = collect(d);
+        const none = structuredClone(r);
+        delete none.runtime.policy;
+        delete none.runtime.policy_sha256;
+        const other = structuredClone(r);
+        other.runtime.policy_sha256 = "d".repeat(64);
+        return (
+          a.compareApplicability(none, none).decision === "unknown" &&
+          a.compareApplicability(r, none).decision !== "applicable" &&
+          a.compareApplicability(r, other).decision !== "applicable" &&
+          a.compareApplicability(r, r).decision === "applicable"
+        );
+      },
+    );
     check(
       "collector: two collections of the same tree are applicable to each other",
       () => {
@@ -1049,17 +1104,23 @@ export function installationAssessments(i, a, q, check, x) {
         );
       }
     };
+    // Revision 29 (review r28 R28-N1), a labelled ADAPTATION of revision 27's "an untouched sealed snapshot verifies, and its caches
+    // stay writable": the untouched snapshot still verifies (the original's first half, unchanged), but Vite's `.vite-temp` held an
+    // executed config module, so a sealed snapshot has no tool cache and one created after sealing is now a change that is seen.
     check(
-      "seal: an untouched sealed snapshot verifies, and its caches stay writable",
+      "seal: an untouched sealed snapshot verifies; it has no tool cache, and one created after sealing is seen (revision 29)",
       () => {
         const { x, baseline } = sealed();
+        const untouched =
+          i.verifySealed(x, baseline, "unchanged").sha256 === baseline.sha256;
+        const none = i.CACHE_DIRS.every(
+          (c) => !existsSync(join(x, "node_modules", c)),
+        );
         write(
           join(x, "node_modules/.vite-temp/config.mjs"),
           "export default {}",
         );
-        return (
-          i.verifySealed(x, baseline, "unchanged").sha256 === baseline.sha256
-        );
+        return untouched && none && seen(x, baseline);
       },
     );
     check("seal: the sealed installation refuses a write", () => {
@@ -1121,12 +1182,21 @@ export function installationAssessments(i, a, q, check, x) {
     // The snapshot record (qualification.mjs snapshotProblems), against the record it measured.
     const record = {
       installation: { sha256: "a".repeat(64), root: "/t/x" },
-      runtime: { sha256: "e".repeat(64), root: "/t/rt" },
+      runtime: {
+        sha256: "e".repeat(64),
+        root: "/t/rt",
+        policy: EXECUTION_POLICY,
+        policy_sha256: POLICY_SHA256,
+      },
     };
     const R = "f".repeat(64);
     const T = "9".repeat(64);
+    // Revision 29: the policy's guarded-empty generated directories, unchanged from sealing to the end.
+    const E = sha("");
+    const G = Object.fromEntries(GENERATED_TREES.map((n) => [n, E]));
     const good = {
       schema: i.SNAPSHOT_SCHEMA,
+      policy: { id: EXECUTION_POLICY, sha256: POLICY_SHA256 },
       root: "/t/x",
       sealed_sha256: "b".repeat(64),
       installation_sha256: "a".repeat(64),
@@ -1138,24 +1208,32 @@ export function installationAssessments(i, a, q, check, x) {
       ],
       source_state_before_sha256: "8".repeat(64),
       source_state_after_sha256: "8".repeat(64),
-      trees: { "build b": { sealed_sha256: T } },
+      trees: {
+        ...Object.fromEntries(
+          GENERATED_TREES.map((n) => [
+            n,
+            { sealed_sha256: E, entries: 0, self: "1 16832 2 1 1" },
+          ]),
+        ),
+        "build b": { sealed_sha256: T },
+      },
       checks: [
         {
           when: "before the build",
           sha256: "b".repeat(64),
           runtime_sha256: R,
-          trees: {},
+          trees: { ...G },
         },
         {
           when: "before the preview",
           sha256: "b".repeat(64),
           runtime_sha256: R,
-          trees: { "build b": T },
+          trees: { ...G, "build b": T },
         },
       ],
       end_sha256: "b".repeat(64),
       runtime_end_sha256: R,
-      trees_end: { "build b": T },
+      trees_end: { ...G, "build b": T },
       unchanged: true,
       removed: true,
       runtime_removed: true,
@@ -1228,6 +1306,39 @@ export function installationAssessments(i, a, q, check, x) {
     );
     check("snapshot record: no record to bind it to is refused", () =>
       q.snapshotProblems(good, null).some((p) => p.includes("cannot be bound")),
+    );
+    // Revision 29: the execution policy and its guarded-empty generated directories in the snapshot record.
+    check(
+      "snapshot record: one naming no execution policy (revision 28) is refused",
+      () =>
+        problems((x) => {
+          delete x.policy;
+        }).some((p) => p.includes("no current execution policy")),
+    );
+    check("snapshot record: one of an older execution policy is refused", () =>
+      problems((x) => {
+        x.policy.id = "web08d-held-operation-execution-policy/0";
+      }).some((p) => p.includes("no current execution policy")),
+    );
+    check(
+      "snapshot record: a generated directory that was not guarded, or not empty, is refused",
+      () =>
+        problems((x) => {
+          delete x.trees[GENERATED_TREES[0]];
+        }).some((p) => p.includes("was not guarded empty")) &&
+        problems((x) => {
+          x.trees[GENERATED_TREES[1]].entries = 1;
+        }).some((p) => p.includes("was not guarded empty")),
+    );
+    check(
+      "snapshot record: a run of another policy than its applicability record names is refused",
+      () =>
+        q
+          .snapshotProblems(good, {
+            ...record,
+            runtime: { ...record.runtime, policy_sha256: "d".repeat(64) },
+          })
+          .some((p) => p.includes("but its applicability record names")),
     );
     // Revision 28: the private runtime, the guarded trees and the source installation's state in the snapshot record.
     check("snapshot record: a runtime never sealed is refused", () =>
@@ -1316,7 +1427,18 @@ export function installationAssessments(i, a, q, check, x) {
   }
 }
 
-/** A pnpm tree whose installation also holds a minimal @playwright/test -> playwright -> playwright-core chain (browsers.json). */
+/** This worktree's own installed playwright package (read only: the source of the adapter's upstream files in the fixtures). */
+const UPSTREAM_PLAYWRIGHT = dirname(
+  createRequire(
+    createRequire(join(import.meta.dirname, "../../package.json")).resolve(
+      "@playwright/test/package.json",
+    ),
+  ).resolve("playwright/package.json"),
+);
+/**
+ * A pnpm tree whose installation also holds a minimal @playwright/test -> playwright -> playwright-core chain (browsers.json).
+ * Revision 29: its playwright is 1.63.0 with the two upstream compilation-cache files the transform adapter changes.
+ */
 function playwrightTree(dir) {
   const files = pnpmTree(dir);
   const nm = join(dir, "node_modules");
@@ -1331,6 +1453,16 @@ function playwrightTree(dir) {
     "@playwright/test",
   );
   pkg("playwright@1.0.0/node_modules/playwright", "playwright");
+  // Revision 29: the transform adapter's release and its two upstream files, by their exact bytes (copied from this installation).
+  write(
+    join(store, "playwright@1.0.0/node_modules/playwright/package.json"),
+    JSON.stringify({ name: "playwright", version: "1.63.0" }),
+  );
+  for (const rel of Object.keys(ADAPTED_FILES))
+    write(
+      join(store, "playwright@1.0.0/node_modules/playwright", rel),
+      readFileSync(join(UPSTREAM_PLAYWRIGHT, rel)),
+    );
   pkg("playwright-core@1.0.0/node_modules/playwright-core", "playwright-core");
   write(
     join(
@@ -2078,18 +2210,24 @@ function executionAssessments(i, a, x, check, s) {
           new RegExp(k),
         ),
     );
+  // Revision 29 (review r28 R28-N1), a labelled ADAPTATION of revision 28's "a package-manager setting that names no path is kept":
+  // such a setting is still not refused (the original's intent: only path-valued settings refuse), but it is no longer inherited,
+  // because a setting without an absolute path can still select code (node-options with a relative --require, for one).
   check(
-    "environment: a package-manager setting that names no path is kept",
+    "environment: a package-manager setting that names no path is not refused, and is not inherited (revision 29)",
     () => {
       const env = x.frozenEnv(
         {
           PATH: "/usr/bin",
           npm_config_user_agent: "pnpm/12.4.2 npm/? node/v22 darwin arm64",
+          npm_config_node_options: "--require=./.agtx/cache/x.cjs",
         },
         "/rt",
         "/c",
       );
-      return env.npm_config_user_agent.startsWith("pnpm/12.4.2");
+      return (
+        !("npm_config_user_agent" in env) && !("npm_config_node_options" in env)
+      );
     },
   );
   const launchRuntime = () => {
@@ -2436,6 +2574,267 @@ function executionAssessments(i, a, x, check, s) {
             ["firefox"],
           ),
         /not installed/,
+      );
+    },
+  );
+
+  // Revision 29 (review r28 R28-N1; design assessment d3cff73e Q1, Q2, Q5, Q12): the execution policy through the shared lifecycle.
+  const upstreamOf = (rel) =>
+    readFileSync(join(UPSTREAM_PLAYWRIGHT, rel), "utf8");
+  check(
+    "policy: the adapter turns both upstream compilation caches into exactly their reviewed adapted files",
+    () =>
+      Object.entries(x.ADAPTED_FILES).every(([rel, want]) => {
+        const text = upstreamOf(rel);
+        return (
+          sha(text) === want.upstream &&
+          sha(x.adaptedText(text, rel)) === want.adapted
+        );
+      }),
+  );
+  check(
+    "policy: the adapter refuses an unknown layout (an anchor missing or doubled)",
+    () => {
+      const text = upstreamOf("lib/common/index.js");
+      const from = text.indexOf(
+        "function _innerAddToCompilationCacheAndSerialize(",
+      );
+      const block = text.slice(from, text.indexOf("\n}\n", from) + 3);
+      return (
+        throwsLike(
+          () => x.adaptedText(text.replace(block, "")),
+          /occurs 0 times/,
+        ) &&
+        throwsLike(
+          () => x.adaptedText(text.replace(block, block + block)),
+          /occurs 2 times/,
+        )
+      );
+    },
+  );
+  const preparedRun = (options = {}) => {
+    const { d, c, journal, ex, files } = lifecycle();
+    x.prepareExecution(ex, {
+      source: d,
+      files,
+      browsers: ["chromium"],
+      env: c.env,
+      ...options,
+    });
+    return { d, c, journal, ex };
+  };
+  const pw = (root) =>
+    join(root, "node_modules/.pnpm/playwright@1.0.0/node_modules/playwright");
+  check(
+    "policy: the shared preparation adapts the snapshot's Playwright (never the source's), records the policy and guards the generated directories empty",
+    () => {
+      const { d, journal, ex } = preparedRun();
+      const ok =
+        journal.policy?.id === x.EXECUTION_POLICY &&
+        journal.policy?.sha256 === x.POLICY_SHA256 &&
+        Object.keys(journal.policy?.playwright?.files ?? {}).length === 2 &&
+        x.adaptationProblems(ex.root).length === 0 &&
+        Object.entries(x.ADAPTED_FILES).every(
+          ([rel, want]) =>
+            sha(readFileSync(join(pw(d), rel))) === want.upstream &&
+            sha(readFileSync(join(pw(ex.root), rel))) === want.adapted,
+        ) &&
+        x.GENERATED_TREES.every(
+          (n) =>
+            journal.trees[n]?.entries === 0 &&
+            typeof journal.trees[n]?.self === "string",
+        ) &&
+        ex.env.NODE_DISABLE_COMPILE_CACHE === "1";
+      x.finishExecution(ex);
+      return ok && x.journalUnchanged(journal);
+    },
+  );
+  check(
+    "policy: a cache entry written into the Playwright cache directory after sealing is seen by the next check",
+    () => {
+      const { ex } = preparedRun();
+      // A same-user writer: the directory is read only, so it gives itself write permission first.
+      chmodSync(x.cacheDir(ex.root), 0o755);
+      write(join(x.cacheDir(ex.root), "ab/entry.js"), "// x\n");
+      const seen = throwsLike(
+        () => ex.check("before Playwright"),
+        /guarded tree generated \.agtx\/cache\/playwright changed before Playwright/,
+      );
+      x.finishExecution(ex, { check: false });
+      return seen;
+    },
+  );
+  check(
+    "policy: a file created, read and deleted in a guarded-empty directory between two checks is seen (write/read/delete)",
+    () => {
+      const { ex } = preparedRun();
+      const f = join(x.stateDir(ex.root), "transient.js");
+      const read = (() => {
+        try {
+          writeFileSync(f, "refused?\n");
+          return false;
+        } catch (error) {
+          return error.code === "EACCES";
+        }
+      })();
+      // A same-user writer that restores everything it can: the mode, the bytes (none left) and the times.
+      chmodSync(x.stateDir(ex.root), 0o755);
+      writeFileSync(f, "module.exports = 1;\n");
+      readFileSync(f);
+      unlinkSync(f);
+      chmodSync(x.stateDir(ex.root), 0o555);
+      if (!read) return false;
+      const seen = throwsLike(
+        () => ex.check("before Playwright"),
+        /its own directory .*pnpm was written/,
+      );
+      x.finishExecution(ex, { check: false });
+      return seen;
+    },
+  );
+  check(
+    "policy: a tool cache that exists when the snapshot is sealed is refused (a generated config is not an input)",
+    () => {
+      const { d, c, journal, ex, files } = lifecycle();
+      const refused = throwsLike(
+        () =>
+          x.prepareExecution(ex, {
+            source: d,
+            files,
+            browsers: ["chromium"],
+            env: c.env,
+            barrier: (point) => {
+              if (point === "runtime")
+                mkdirSync(join(ex.root, "node_modules/.vite-temp"));
+            },
+          }),
+        /node_modules\/\.vite-temp exists when the snapshot is sealed/,
+      );
+      x.finishExecution(ex, { check: false });
+      return refused && journal.removed && journal.runtime_removed;
+    },
+  );
+  check(
+    "policy: another Playwright release, or an upstream file of other bytes, is refused before anything is written",
+    () => {
+      const at = (change) => {
+        const { d, c, ex, files } = lifecycle();
+        change(d);
+        const refusal = (() => {
+          try {
+            x.prepareExecution(ex, {
+              source: d,
+              files,
+              browsers: ["chromium"],
+              env: c.env,
+            });
+            return null;
+          } catch (error) {
+            return String(error.message);
+          }
+        })();
+        const untouched =
+          ex.root === null ||
+          sha(readFileSync(join(pw(ex.root), "lib/common/index.js"))) ===
+            sha(readFileSync(join(pw(d), "lib/common/index.js")));
+        x.finishExecution(ex, { check: false });
+        return { refusal, untouched };
+      };
+      const release = at((d) =>
+        writeFileSync(
+          join(pw(d), "package.json"),
+          JSON.stringify({ name: "playwright", version: "1.62.0" }),
+        ),
+      );
+      const bytes = at((d) =>
+        writeFileSync(
+          join(pw(d), "lib/transform/esmLoader.js"),
+          `${upstreamOf("lib/transform/esmLoader.js")}\n// changed\n`,
+        ),
+      );
+      return (
+        /is 1\.62\.0, not 1\.63\.0/.test(release.refusal ?? "") &&
+        release.untouched &&
+        /esmLoader\.js is not the known 1\.63\.0 upstream file/.test(
+          bytes.refusal ?? "",
+        )
+      );
+    },
+  );
+  check(
+    "environment: only the policy's inherited names reach a child; executable-cache, loader and code-selecting settings never do",
+    () => {
+      const env = x.frozenEnv(
+        {
+          PATH: "/usr/bin",
+          LANG: "en_GB.UTF-8",
+          TZ: "Europe/London",
+          TMPDIR: "/t",
+          SHELL: "/bin/zsh",
+          NODE_COMPILE_CACHE: "/t/node-compile-cache",
+          NODE_EXTRA_CA_CERTS: "/t/ca.pem",
+          NODE_USE_ENV_PROXY: "1",
+          PW_TEST_SOURCE_TRANSFORM: "./transform.js",
+          PW_TEST_SOURCE_TRANSFORM_SCOPE: "/s",
+          PLAYWRIGHT_FORCE_ASYNC_LOADER: "1",
+          VITE_FIXTURE: "1",
+          JITI_FS_CACHE: "1",
+          ESBUILD_BINARY_PATH: "/t/esbuild",
+          NAPI_RS_NATIVE_LIBRARY_PATH: "/t/lib.node",
+          ATLAS_E2E_WORKERS: "4",
+        },
+        "/rt",
+        "/s",
+      );
+      const inherited = Object.keys(env).filter(
+        (k) =>
+          ![
+            "PATH",
+            "HOME",
+            "XDG_CONFIG_HOME",
+            "COREPACK_HOME",
+            "COREPACK_ENABLE_NETWORK",
+            "PLAYWRIGHT_BROWSERS_PATH",
+            "PWTEST_CACHE_DIR",
+            "PNPM_HOME",
+            ...Object.keys(x.POLICY_ENV),
+          ].includes(k),
+      );
+      return (
+        JSON.stringify(inherited.sort()) ===
+          JSON.stringify(["LANG", "TMPDIR", "TZ"]) &&
+        env.NODE_DISABLE_COMPILE_CACHE === "1"
+      );
+    },
+  );
+  check(
+    "config: a copied package-manager configuration file that selects code is refused before anything runs; an ordinary one is copied",
+    () => {
+      const d = s.make("cfg");
+      playwrightTree(d);
+      const c = fakeChain(s, { project: d });
+      const chain = x.launcherChain(c.env, d);
+      const rt = i.allocateSnapshot(s.make("parent"), "held-op-runtime-");
+      write(join(c.home, ".npmrc"), "registry=https://registry.example/\n");
+      const ordinary = x.createRuntime(rt, chain, c.env, []);
+      const copied = existsSync(join(rt, "home/.npmrc"));
+      i.removeSnapshot(rt);
+      write(
+        join(c.home, ".npmrc"),
+        "registry=https://registry.example/\nnode-options=--require ./hook.cjs\n",
+      );
+      const rt2 = i.allocateSnapshot(s.make("parent"), "held-op-runtime-");
+      const refused = throwsLike(
+        () => x.createRuntime(rt2, chain, c.env, []),
+        /sets node-options, which selects code/,
+      );
+      i.removeSnapshot(rt2);
+      return (
+        Boolean(ordinary) &&
+        copied &&
+        refused &&
+        x.configProblems("scriptShell: /bin/bash\n").length === 1 &&
+        x.configProblems("store-dir=/x\n# node-options=y\n").length === 0
       );
     },
   );

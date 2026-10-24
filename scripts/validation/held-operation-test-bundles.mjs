@@ -23,6 +23,9 @@
 // (the runtime's seal and checks, the guarded trees, the source installation's state), `r27Record(change)` builds the revision 27 /2
 // record, and `completedRun` / `writeCompletedRun` build a producing run's terminal completion record CONSISTENT with the records it
 // binds (in memory as held-operation-evidence.mjs readRunCompletion returns it, or on disk as the runner writes it).
+// Revision 29 (review r28 R28-N1): the record names the execution policy (`runtime.policy`, `runtime.policy_sha256`), the snapshot
+// record its policy and the guarded-empty generated directories, the completion record the policy; `r28Record(change)` builds the
+// revision 28 /3 record without a policy.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -30,7 +33,12 @@ import {
   canonical,
 } from "./held-operation-applicability.mjs";
 import { MANIFEST, probeArgv, sha256 } from "./held-operation-evidence.mjs";
-import { RUNTIME_SCHEMA } from "./held-operation-execution.mjs";
+import {
+  EXECUTION_POLICY,
+  GENERATED_TREES,
+  POLICY_SHA256,
+  RUNTIME_SCHEMA,
+} from "./held-operation-execution.mjs";
 import {
   INSTALLATION_SCHEMA,
   SNAPSHOT_SCHEMA,
@@ -86,6 +94,8 @@ export function applicabilityRecord(change) {
       sha256: digest("private runtime"),
       entries: 620,
       root: "/t/held-op-runtime-aaaaaa",
+      policy: EXECUTION_POLICY,
+      policy_sha256: POLICY_SHA256,
     },
     child: {
       node: "v22.23.2",
@@ -176,6 +186,9 @@ export function snapshotRecord(record = TARGET, change) {
   const rt = digest("sealed runtime");
   const build = digest("sealed build");
   const state = digest("source installation state");
+  // Revision 29: the policy's guarded-empty generated directories (an empty stat inventory), checked from sealing to the end.
+  const empty = sha256(Buffer.from(""));
+  const generated = Object.fromEntries(GENERATED_TREES.map((n) => [n, empty]));
   const s = {
     schema: SNAPSHOT_SCHEMA,
     root: record.installation?.root,
@@ -193,12 +206,34 @@ export function snapshotRecord(record = TARGET, change) {
     source_state_after_sha256: state,
     source_state_entries: 28460,
     relocated: [".bin/vite"],
+    policy: {
+      id: EXECUTION_POLICY,
+      sha256: POLICY_SHA256,
+      playwright: {
+        adapter: "web08d-playwright-transform-adapter/1",
+        version: "1.63.0",
+        package: "node_modules/.pnpm/playwright@1.63.0/node_modules/playwright",
+        files: {},
+      },
+      generated: GENERATED_TREES,
+    },
     prepared: true,
     sealed_sha256: sealed,
     sealed_entries: 29545,
     installation_sha256: record.installation?.sha256,
     runtime_sha256: record.runtime?.sha256,
     trees: {
+      ...Object.fromEntries(
+        GENERATED_TREES.map((n) => [
+          n,
+          {
+            root: `${record.installation?.root}/${n.slice("generated ".length)}`,
+            sealed_sha256: empty,
+            entries: 0,
+            self: "1 16832 2 1 1",
+          },
+        ]),
+      ),
       "build control-build": {
         root: "/w/run/control-build",
         sealed_sha256: build,
@@ -210,18 +245,18 @@ export function snapshotRecord(record = TARGET, change) {
         when: "after the applicability was collected",
         sha256: sealed,
         runtime_sha256: rt,
-        trees: {},
+        trees: { ...generated },
       },
       {
         when: "before the preview",
         sha256: sealed,
         runtime_sha256: rt,
-        trees: { "build control-build": build },
+        trees: { ...generated, "build control-build": build },
       },
     ],
     end_sha256: sealed,
     runtime_end_sha256: rt,
-    trees_end: { "build control-build": build },
+    trees_end: { ...generated, "build control-build": build },
     unchanged: true,
     removed: true,
     removal_error: null,
@@ -230,6 +265,15 @@ export function snapshotRecord(record = TARGET, change) {
   };
   change?.(s);
   return s;
+}
+/** The revision 28 record (schema /3): the private runtime, but no execution policy (its generated inputs unclassified: unknown). */
+export function r28Record(change) {
+  const r = applicabilityRecord((x) => {
+    delete x.runtime.policy;
+    delete x.runtime.policy_sha256;
+  });
+  change?.(r);
+  return r;
 }
 /** The revision 27 record (schema /2): the complete installation, but no private runtime (its launcher chain measured outside the run). */
 export function r27Record(change) {
@@ -280,6 +324,8 @@ export function completedRun({
     passed: true,
     reasons: [],
     processes_closed: true,
+    policy: EXECUTION_POLICY,
+    policy_sha256: before?.runtime?.policy_sha256 ?? null,
     source_sha256: digest("source"),
     source_after_sha256: digest("source"),
     applicability_sha256: sha256(b),
