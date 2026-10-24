@@ -69,6 +69,21 @@ export function useEditingSession<Update>(
   );
 }
 
+/**
+ * Whether this VIEW is still the one shown (review 9, finding 1): a handler of a view that was replaced (another field's route, the reads
+ * read again) and is still reachable ends nothing and navigates nowhere; only the view shown now acts for its target.
+ */
+export function useShown(): () => boolean {
+  const shown = useRef(false);
+  useLayoutEffect(() => {
+    shown.current = true;
+    return () => {
+      shown.current = false;
+    };
+  }, []);
+  return useCallback(() => shown.current, []);
+}
+
 /** The session a kept draft belongs to (undefined: none, or not a session's). */
 export function sessionOf(kept: unknown): string | undefined {
   if (typeof kept !== "object" || kept === null) return undefined;

@@ -33,6 +33,7 @@ import {
   sessionOf,
   settle,
   useEditingSession,
+  useShown,
 } from "../lifetime";
 import {
   isCurrentMemory,
@@ -86,8 +87,9 @@ import {
 } from "../model/values";
 import { sendOnline, sentSomething } from "../online";
 import { Banner, Choices, FieldError, useOutboxSave } from "../parts";
-import { OutstandingChain, usePersonLinkage } from "../reads";
+import { ConfirmedAbsence, OutstandingChain, usePersonLinkage } from "../reads";
 import { type HoldOutcome, heldAttemptOf, holdChange } from "./held";
+import { editorReads } from "./prerequisites";
 import { ValueInput } from "./ValueInput";
 
 /**
@@ -120,48 +122,112 @@ export function FieldEditorDialog({
   onClose(): void;
 }) {
   const env = usePeopleEnv();
-  const person = useCachedResource(personId);
-  const field = useCachedResource(fieldId ?? "");
-  // "Try again" reads this device's unsent changes afresh (new watches: a live query ends at its first error).
+  // ONE owner per TARGET (review 9, finding 1): the identity, the person and the field (or a new one). Another field's route, even one the
+  // router shows through this same component, mounts another owner: its title, its kept session and what Cancel ends are all its own,
+  // and nothing of the previous target's view can act for it.
+  return (
+    <EditorTarget
+      key={`${env.identity}\u0000${personId}\u0000${fieldId ?? "new"}`}
+      env={env}
+      personId={personId}
+      fieldId={fieldId}
+      onClose={onClose}
+    />
+  );
+}
+
+function EditorTarget({
+  env,
+  personId,
+  fieldId,
+  onClose,
+}: {
+  env: PeopleEnv;
+  personId: string;
+  fieldId: string | null;
+  onClose(): void;
+}) {
+  // "Try again" reads EVERY read of the editor afresh, together (review 9, finding 2): the person, the field, this device's unsent changes
+  // and any confirmation of an absence. New watches (a live query ends at its first error); the session kept for the target stays.
   const [reading, setReading] = useState(0);
   return (
-    <OutstandingChain key={reading}>
+    <EditorReads
+      key={reading}
+      env={env}
+      personId={personId}
+      fieldId={fieldId}
+      retry={() => setReading((value) => value + 1)}
+      onClose={onClose}
+    />
+  );
+}
+
+function EditorReads({
+  env,
+  personId,
+  fieldId,
+  retry,
+  onClose,
+}: {
+  env: PeopleEnv;
+  personId: string;
+  fieldId: string | null;
+  retry(): void;
+  onClose(): void;
+}) {
+  const person = useCachedResource(personId);
+  const field = useCachedResource(fieldId ?? "");
+  const draftKey = `field:${personId}:${fieldId ?? "new"}`;
+  return (
+    <OutstandingChain>
       {(outstanding) => {
-        // The edit's snapshot needs this device's whole chain of saves (finding 5): a later window still loading is not "none".
-        if (
-          person.status === "loading" ||
-          (fieldId !== null && field.status === "loading") ||
-          outstanding.status === "loading" ||
-          (outstanding.status === "ready" &&
-            !outstanding.complete &&
-            !outstanding.capped)
-        )
-          return null;
-        // A chain that failed (or is more than this page reads) is not an empty one: nothing is edited on a guessed base (review 7's
-        // design assessment, C15). Input kept for the editor stays kept for when the read succeeds.
-        if (outstanding.status === "failed" || outstanding.capped)
+        // The edit's snapshot needs the person, the field and this device's whole chain of saves (finding 5), each READ: a read that
+        // failed, or a chain that is more than this page reads, is not an empty one, and nothing is edited on a guessed base (review 7's
+        // design assessment, C15; review 9, finding 2). Input kept for the editor stays kept for when the reads succeed.
+        const reads = editorReads(
+          person,
+          fieldId === null ? null : field,
+          outstanding,
+        );
+        if (reads.kind === "loading") return null;
+        if (reads.kind !== "read") {
+          // The field's name only while both it and its person were read here, under that person (PPL-5): never from a read that failed.
+          const label =
+            person.status === "ready" &&
+            person.value.merged?.kind === "person" &&
+            field.status === "ready" &&
+            field.value.merged?.kind === "field" &&
+            field.value.merged.parent_id === personId
+              ? field.value.merged.label
+              : copy.FIELD_FALLBACK_NAME;
           return (
             <EditorUnread
+              state={
+                reads.kind === "capped"
+                  ? "editor-unread"
+                  : unreadState(reads.read)
+              }
               title={
                 fieldId === null
                   ? copy.ADD_FIELD_TITLE
-                  : copy.EDIT_FIELD_TITLE(
-                      field.status === "ready" && field.value.merged !== null
-                        ? field.value.merged.label
-                        : copy.FIELD_FALLBACK_NAME,
-                    )
+                  : copy.EDIT_FIELD_TITLE(label)
               }
               message={
-                outstanding.capped
+                reads.kind === "capped"
                   ? copy.EDITOR_CHANGES_CAPPED
-                  : copy.EDITOR_CHANGES_UNREAD
+                  : reads.read === "person"
+                    ? copy.EDITOR_PERSON_UNREAD
+                    : reads.read === "field"
+                      ? copy.EDITOR_FIELD_UNREAD
+                      : copy.EDITOR_CHANGES_UNREAD
               }
               memory={env.memory}
-              draftKey={`field:${personId}:${fieldId ?? "new"}`}
-              onRetry={() => setReading((value) => value + 1)}
+              draftKey={draftKey}
+              onRetry={retry}
               onClose={onClose}
             />
           );
+        }
         const changes = changesOfAll(outstanding.rows);
         const personRow = foldRows(
           person.status === "ready" && person.value.merged?.kind === "person"
@@ -170,6 +236,7 @@ export function FieldEditorDialog({
           changes,
           "person",
         ).find((row) => row.row.id === personId);
+        // PPL-5: nothing of a person who isn't shown. The detail around the editor owns the person's absence (it withdraws the editor).
         if (personRow === undefined) return null;
         const fieldRow =
           fieldId === null
@@ -184,11 +251,52 @@ export function FieldEditorDialog({
                 "field",
                 personId,
               ).find((row) => row.row.id === fieldId) ?? null);
-        // PPL-5 and a field that is gone: nothing to edit.
-        if (fieldId !== null && fieldRow === null) return null;
+        if (fieldId !== null && fieldRow === null)
+          // A field the separate reads don't show is "not on this device" only once ONE read of the cache and the unsent changes agrees
+          // (DA7-12: the queue's read can answer before the cache's when the field is published); meanwhile nothing is drawn.
+          return (
+            <ConfirmedAbsence
+              id={fieldId}
+              limit={1}
+              pages={1}
+              absent={({ resource, drafts }) =>
+                foldRows(
+                  resource !== null &&
+                    resource.kind === "field" &&
+                    resource.parent_id === personId
+                    ? [resource]
+                    : [],
+                  changesOfAll(drafts),
+                  "field",
+                  personId,
+                ).every((row) => row.row.id !== fieldId)
+              }
+            >
+              {(confirmation) =>
+                confirmation === "absent" || confirmation === "failed" ? (
+                  <EditorUnread
+                    state={
+                      confirmation === "absent"
+                        ? "editor-not-on-device"
+                        : "editor-read-failed"
+                    }
+                    title={copy.EDIT_FIELD_TITLE(copy.FIELD_FALLBACK_NAME)}
+                    message={
+                      confirmation === "absent"
+                        ? copy.FIELD_NOT_ON_DEVICE
+                        : copy.EDITOR_FIELD_UNREAD
+                    }
+                    memory={env.memory}
+                    draftKey={draftKey}
+                    onRetry={confirmation === "failed" ? retry : null}
+                    onClose={onClose}
+                  />
+                ) : null
+              }
+            </ConfirmedAbsence>
+          );
         return (
           <Editor
-            key={`${env.identity}\u0000${personId}\u0000${fieldId ?? "new"}`}
             env={env}
             person={personRow}
             field={fieldRow}
@@ -201,12 +309,23 @@ export function FieldEditorDialog({
   );
 }
 
+type UnreadState =
+  | "editor-unread"
+  | "editor-read-failed"
+  | "editor-not-on-device";
+const unreadState = (read: "person" | "field" | "changes"): UnreadState =>
+  read === "changes" ? "editor-unread" : "editor-read-failed";
+
 /**
- * The editor while this device's unsent changes cannot be read whole: nothing is edited, but the editing session kept for it is still
+ * The editor while it cannot edit: this device's unsent changes cannot be read whole, the person or the field could not be read (review 9,
+ * finding 2), or the field is confirmed not to be on this device. Nothing is edited, but the editing session kept for the target is still
  * the person's to end (review 8, finding 1). Cancel, Escape, the close icon and the overlay end the session SHOWN here (the one kept under
- * the key when this view opened; none: nothing to end), exactly as the editor's own do; Try again and the in-dialog sync control keep it.
+ * the target's key when this view opened; none: nothing to end), exactly as the editor's own do; Try again and the in-dialog sync control
+ * keep it. The view belongs to ONE target and ONE reading of it (its owner is keyed, review 9, finding 1): a handler of a view that was
+ * replaced ends nothing and navigates nowhere.
  */
 function EditorUnread({
+  state,
   title,
   message,
   memory,
@@ -214,22 +333,29 @@ function EditorUnread({
   onRetry,
   onClose,
 }: {
+  state: UnreadState;
   title: string;
   message: string;
   memory: PeopleMemory;
   draftKey: string;
-  onRetry(): void;
+  /** null: nothing to read again (the field is confirmed not to be here). */
+  onRetry: (() => void) | null;
   onClose(): void;
 }) {
-  const [session] = useState(() => sessionOf(memory.drafts.get(draftKey)));
+  const [shownSession] = useState(() => sessionOf(memory.drafts.get(draftKey)));
+  const shown = useShown();
   const discard = () => {
-    if (session !== undefined) retireSession(memory, draftKey, session);
+    if (shown() && shownSession !== undefined)
+      retireSession(memory, draftKey, shownSession);
+  };
+  const close = () => {
+    if (shown()) onClose();
   };
   return (
     <Dialog
       open
       title={title}
-      onClose={onClose}
+      onClose={close}
       onDiscard={discard}
       onRetainDraft={() => undefined}
       footer={
@@ -238,20 +364,27 @@ function EditorUnread({
             variant="quiet"
             onClick={() => {
               discard();
-              onClose();
+              close();
             }}
           >
             {copy.CANCEL}
           </Button>
-          <span className="ml-auto">
-            <Button variant="primary" onClick={onRetry}>
-              {copy.TRY_AGAIN}
-            </Button>
-          </span>
+          {onRetry === null ? null : (
+            <span className="ml-auto">
+              <Button
+                variant="primary"
+                onClick={() => {
+                  if (shown()) onRetry();
+                }}
+              >
+                {copy.TRY_AGAIN}
+              </Button>
+            </span>
+          )}
         </>
       }
     >
-      <p data-people-state="editor-unread" className="text-[13.5px] text-ink-1">
+      <p data-people-state={state} className="text-[13.5px] text-ink-1">
         {message}
       </p>
     </Dialog>
@@ -388,12 +521,16 @@ function Editor({
     initial.retained.newFieldId,
     initial.retained.createDigest,
   ]);
-  // Only this session ends (never a later session's under the same key).
+  // Only this session ends (never a later session's under the same key), and only by the view shown now: a handler of an editor that was
+  // replaced (another field's route, the reads read again) ends nothing and navigates nowhere (review 9, finding 1).
+  const shown = useShown();
   const forget = () => {
+    if (!shown()) return;
     retired.current = true;
     retireSession(env.memory, draftKey, session);
   };
   const close = () => {
+    if (!shown()) return;
     forget();
     onClose();
   };
@@ -1019,7 +1156,9 @@ function Editor({
     <Dialog
       open
       title={title}
-      onClose={onClose}
+      onClose={() => {
+        if (shown()) onClose();
+      }}
       onDiscard={forget}
       onRetainDraft={() => undefined}
       initialFocusSelector="input"

@@ -16982,14 +16982,15 @@ export const UNIT = [
     id: "MU-2150",
     title:
       "WEB-11a R1 finding 5: the editor binds an edit before this device's whole chain of saves has been read",
-    file: "src/features/people/field/FieldEditorDialog.tsx",
+    // Re-anchored in WEB-11a revision 9 (review 9, finding 2): the editor's read decision moved to `field/prerequisites.ts`; the same intent.
+    file: "src/features/people/field/prerequisites.ts",
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect: /the editor waits for this device's WHOLE chain of saves/,
     patch: (t) =>
       sub(
         t,
-        "            !outstanding.complete &&\n            !outstanding.capped)",
-        "            false)",
+        "      !outstanding.complete &&\n      !outstanding.capped)",
+        "      false)",
       ),
   },
   {
@@ -20415,13 +20416,36 @@ export const UNIT = [
       "WEB-11a R6 F1: the field editor's success closes the instance that submitted it (the reviewer's defect: a new 'Add a field' after Cancel is closed and its input forgotten)",
     file: "src/features/people/field/FieldEditorDialog.tsx",
     tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    // Revision 9: a replaced view's `close` now acts only while its view is shown (`useShown`, review 9, finding 1), so the submitting
+    // instance, unmounted by Cancel, no longer closes the new editor: the reviewer's schedules are masked by that second layer (they fail
+    // with it removed too: MU-2368). The schedules where the completion must reach the RESTORED mount of the same session still fail by
+    // assertion and are added to the expect (the survivor run is kept: revision-9/mutants-touched-1).
     expect:
-      /the reviewer's schedule: the new editor and its input stay|a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays/,
+      /the reviewer's schedule: the new editor and its input stay|a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays|the SAME session remounted \(a 403 elsewhere\) while its save runs: the completion closes the restored editor|the same session remounted and typed in further: the completion keeps the later input/,
     patch: (t) =>
       sub(
         t,
         "    ended(ticket);\n  };\n",
         "    if (stateRef.current.revision === ticket) close();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-2368",
+    title:
+      "WEB-11a R9 F1 with R6 F1: the field editor's success closes the instance that submitted it, and a replaced view's close still acts (both layers)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /the reviewer's schedule: the new editor and its input stay|a queued create after Cancel and a new "Add a field": the new editor and its input stay|an update of an existing field after Cancel and Edit again: the second edit stays/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    ended(ticket);\n  };\n",
+          "    if (stateRef.current.revision === ticket) close();\n  };\n",
+        ),
+        "    if (!shown()) return;\n    forget();\n",
+        "    forget();\n",
       ),
   },
   {
@@ -20944,14 +20968,20 @@ export const UNIT = [
     id: "MU-2328",
     title:
       "WEB-11a R7 assessment: the field editor opens on an unreadable (or capped) chain of unsent changes",
-    file: "src/features/people/field/FieldEditorDialog.tsx",
+    // Re-anchored in WEB-11a revision 9 (review 9, finding 2): the failed and capped chain decisions moved to `field/prerequisites.ts`
+    // (two sites, as the one condition was); the same intent.
+    file: "src/features/people/field/prerequisites.ts",
     tests: ["tests/features/people/list-reads.test.tsx"],
     expect: /the editor does not open on a guessed base/,
     patch: (t) =>
       sub(
-        t,
-        '        if (outstanding.status === "failed" || outstanding.capped)\n',
-        "        if (false as boolean)\n",
+        sub(
+          t,
+          '  if (outstanding.status === "failed")\n    return { kind: "failed", read: "changes" };\n',
+          "",
+        ),
+        '  if (outstanding.capped) return { kind: "capped" };\n',
+        "",
       ),
   },
   {
@@ -21222,8 +21252,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "            onClick={() => {\n              discard();\n              onClose();\n            }}\n",
-        "            onClick={() => {\n              onClose();\n            }}\n",
+        // Re-anchored in WEB-11a revision 9: the unread view's close is guarded by `shown()` (review 9, finding 1); the same intent.
+        "            onClick={() => {\n              discard();\n              close();\n            }}\n",
+        "            onClick={() => {\n              close();\n            }}\n",
       ),
   },
   {
@@ -21236,8 +21267,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '            <Button variant="primary" onClick={onRetry}>\n',
-        '            <Button\n              variant="primary"\n              onClick={() => {\n                discard();\n                onRetry();\n              }}\n            >\n',
+        // Re-anchored in WEB-11a revision 9: Try again is guarded by `shown()` (review 9, finding 1); the same intent.
+        "                  if (shown()) onRetry();\n",
+        "                  discard();\n                  if (shown()) onRetry();\n",
       ),
   },
   {
@@ -21308,6 +21340,158 @@ export const UNIT = [
         t,
         '    isObject(slot) && (typeof slot.value === "boolean" || slot.value === null)\n',
         "    isObject(slot)\n",
+      ),
+  },
+  {
+    id: "MU-2358",
+    title:
+      "WEB-11a R9 F1: the field editor's owner is not keyed by its target (another field's route keeps the first field's view and session)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-target.test.tsx"],
+    expect:
+      /First → Second, (Cancel|Close|Escape): Second's session ends|First kept nothing, Second kept input/,
+    patch: (t) =>
+      sub(t, /key=\{`\$\{env\.identity\}[^`]*`\}/, "key={env.identity}"),
+  },
+  {
+    id: "MU-2359",
+    title:
+      "WEB-11a R9 F1: a replaced unread view's handlers still act (its Cancel ends a session and navigates after another view is shown)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-target.test.tsx"],
+    expect:
+      /the unread First's Cancel, invoked after Second is shown|the unread view's Cancel, invoked after Try again/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (shown() && shownSession !== undefined)\n",
+          "    if (shownSession !== undefined)\n",
+        ),
+        "  const close = () => {\n    if (shown()) onClose();\n  };\n",
+        "  const close = () => {\n    onClose();\n  };\n",
+      ),
+  },
+  {
+    id: "MU-2360",
+    title:
+      "WEB-11a R9 F1: a replaced editor's Cancel still acts (it ends its session and navigates away from the field shown now)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-target.test.tsx"],
+    expect: /the normal First's Cancel, invoked after Second is shown/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (!shown()) return;\n    retired.current = true;\n",
+          "    retired.current = true;\n",
+        ),
+        "    if (!shown()) return;\n    forget();\n",
+        "    forget();\n",
+      ),
+  },
+  {
+    id: "MU-2361",
+    title:
+      "WEB-11a R9 F2: the editor's Try again reads nothing afresh (its failed watches stay failed)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect:
+      /repaired without any notification|one Try again reads both afresh|Try again while the read still fails|the field's read fails DURING an edit/,
+    patch: (t) => sub(t, "      key={reading}\n", ""),
+  },
+  {
+    id: "MU-2362",
+    title:
+      "WEB-11a R9 F2: a failed read of the edited field is taken as no field (the editor shows nothing)",
+    file: "src/features/people/field/prerequisites.ts",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect:
+      /the field's read fails (on the first open|DURING an edit|during an edit, Cancel|while the chain still loads)|repaired without any notification/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (field !== null && statusOf(field) === "failed")\n    return { kind: "failed", read: "field" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2363",
+    title:
+      "WEB-11a R9 F2: a failed read of the person in the editor is taken as no person (the editor shows nothing)",
+    file: "src/features/people/field/prerequisites.ts",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect: /the editor's read of the PERSON fails/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (statusOf(person) === "failed") return { kind: "failed", read: "person" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2364",
+    title:
+      "WEB-11a R9 F2: a known failure waits behind a read still loading (the chain's wait starves it)",
+    file: "src/features/people/field/prerequisites.ts",
+    tests: [
+      "tests/features/people/editor-reads.test.tsx",
+      "tests/features/people/editor-prerequisites.test.ts",
+    ],
+    expect:
+      /fails while the chain still loads|a failure is said even while every other read still loads/,
+    patch: (t) =>
+      sub(
+        t,
+        "): EditorReads {\n",
+        '): EditorReads {\n  if (outstanding.status === "loading") return { kind: "loading" };\n',
+      ),
+  },
+  {
+    id: "MU-2365",
+    title:
+      "WEB-11a R9 F2: a field the separate reads miss is said not to be here at once (no composed confirmation)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect: /delivered first: never 'not here'/,
+    patch: (t) =>
+      sub(
+        t,
+        "              absent={({ resource, drafts }) =>\n                foldRows(\n",
+        "              absent={({ resource, drafts }) =>\n                true ||\n                foldRows(\n",
+      ),
+  },
+  {
+    id: "MU-2366",
+    title:
+      "WEB-11a R9 F2: the unread editor names a field of another person in its title (PPL-5)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect: /the title names nothing of it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            field.value.merged.parent_id === personId\n              ? field.value.merged.label\n",
+        "            true\n              ? field.value.merged.label\n",
+      ),
+  },
+  {
+    id: "MU-2367",
+    title:
+      "WEB-11a R9 F2: Try again reads only the unsent changes afresh (the person's and the field's failed watches are above it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-reads.test.tsx"],
+    expect:
+      /repaired without any notification|one Try again reads both afresh|Try again while the read still fails|the field's read fails DURING an edit/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(t, "      key={reading}\n", "      reading={reading}\n"),
+          "  retry,\n  onClose,\n}: {\n  env: PeopleEnv;\n",
+          "  retry,\n  onClose,\n  reading,\n}: {\n  reading?: number;\n  env: PeopleEnv;\n",
+        ),
+        "  return (\n    <OutstandingChain>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
+        "  return (\n    <OutstandingChain key={reading}>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
       ),
   },
 ];
@@ -24725,6 +24909,33 @@ export const ENGINE = [
         ),
         "        rect.width > 0 &&\n        rect.height > 0\n      ) {\n",
         "        rect.width > 0 &&\n        (false as boolean)\n      ) {\n",
+      ),
+  },
+  {
+    id: "MU-2369",
+    title:
+      "WEB-11a R9 F1: (REAL ENGINE) the field editor's owner is not keyed by its target: another field reached through the same route (in-app or Back) is dismissed with the first field's session",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P36:",
+    expect:
+      /E-P36: .*(route reuse|Back): the failed read is said, and only the field shown ends its session/,
+    patch: (t) =>
+      sub(t, /key=\{`\$\{env\.identity\}[^`]*`\}/, "key={env.identity}"),
+  },
+  {
+    id: "MU-2370",
+    title:
+      "WEB-11a R9 F2: (REAL ENGINE) a real IndexedDB read of the edited field that fails is taken as no field: the editor shows nothing",
+    file: "src/features/people/field/prerequisites.ts",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P36:",
+    expect: /E-P36: /,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (field !== null && statusOf(field) === "failed")\n    return { kind: "failed", read: "field" };\n',
+        "",
       ),
   },
 ];

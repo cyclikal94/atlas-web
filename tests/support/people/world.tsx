@@ -379,7 +379,17 @@ export interface PeopleWorld {
     plan: string,
     match?: (input: Record<string, unknown>) => boolean,
   ): void;
-  restoreReads(): void;
+  /**
+   * The faults end. `notify: false` (review 9's design assessment, DA9-05) repairs the store WITHOUT any notification: an existing watch
+   * that failed stays failed (a live query ends at its first error), so only a NEW watch can show the repair, as the editor's "Try again"
+   * must make one.
+   */
+  restoreReads(options?: { notify?: boolean }): void;
+  /** Every watch made, in order (its plan and input): a test counts the NEW watches a "Try again" made. */
+  readonly watches: ReadonlyArray<{
+    plan: string;
+    input: Record<string, unknown>;
+  }>;
   /**
    * A controlled read boundary (review 5, finding 2): every NEW watch of `plan` whose input `match` accepts starts `loading` and stays so
    * (one stable snapshot) until `releaseReads`, as a live query's first answer does; watches made earlier answer as before. `gated` lists
@@ -436,6 +446,7 @@ export function peopleWorld(
   }> = [];
   let holding = 0;
   const gated: Record<string, unknown>[] = [];
+  const watches: Array<{ plan: string; input: Record<string, unknown> }> = [];
   /** Plans whose EXISTING watches answer what they last answered (`freezeReads`): a commit their live query has not delivered yet. */
   const frozen = new Set<string>();
   const faults: Array<{
@@ -586,6 +597,7 @@ export function peopleWorld(
       watch: (plan: { name: string }, input: Record<string, unknown>) => {
         const key = `${plan.name}:${JSON.stringify(input)}`;
         const compute = plans[plan.name];
+        watches.push({ plan: plan.name, input });
         // A watch that answered a `failRead` fault stays failed (a live query ENDS at its first error): only a new watch reads again.
         let ended = false;
         // A watch made while a `holdReads` gate matches it answers only once that gate is released.
@@ -1125,10 +1137,10 @@ export function peopleWorld(
       faults.push({ plan, match });
       act(() => notify());
     },
-    restoreReads() {
+    restoreReads(options) {
       faults.length = 0;
       failing = false;
-      act(() => notify());
+      if (options?.notify !== false) act(() => notify());
     },
     holdReads(plan, match = () => true) {
       holds.push({ plan, match });
@@ -1151,6 +1163,7 @@ export function peopleWorld(
       act(() => notify());
     },
     gated,
+    watches,
     advanceRevision() {
       appliedRevision += 1;
       act(() => notify());

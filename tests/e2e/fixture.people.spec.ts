@@ -44,7 +44,8 @@ import {
  * (finding 3); E-P23 the generic Sync dialog never resends a People change under an audience the person did not review (finding 1);
  * E-P24 held changes past a thousand ended copies stay reachable in real IndexedDB (finding 4). E-P15 asserts D1's "Send now".
  * Review 7 (23 October 2026): E-P34 a field's actions and E-P35 a header action and a list row keep their place through an answer during
- * a press (finding 3).
+ * a press (finding 3). Review 9 (24 October 2026): E-P36 the field editor whose real IndexedDB read of its field fails says so, and the
+ * overlay, the close icon and Escape end only the session of the field shown, reached through the same route (in-app or Back).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -2870,4 +2871,131 @@ test.describe("E-P35: a header action and a list row keep their place through an
           if (answer !== "control") expect(pressed).toEqual(before);
         });
     });
+});
+
+/**
+ * The next real IndexedDB reads of the cache row `ids` FAIL (an `IDBObjectStore.get` that throws, as a read the engine refuses), until
+ * `readsOfCacheRows(page, [])`; `window.__ep36Faults` counts the reads it refused, so a case knows the fault was reached.
+ */
+const readsOfCacheRows = (page: Page, ids: string[]) =>
+  page.evaluate((failing) => {
+    const w = window as unknown as {
+      __ep36Get?: typeof IDBObjectStore.prototype.get;
+      __ep36Faults?: number;
+    };
+    if (w.__ep36Get === undefined) w.__ep36Get = IDBObjectStore.prototype.get;
+    const get = w.__ep36Get;
+    w.__ep36Faults = 0;
+    IDBObjectStore.prototype.get =
+      failing.length === 0
+        ? get
+        : (function (this: IDBObjectStore, key: IDBValidKey | IDBKeyRange) {
+            if (this.name === "cache" && failing.includes(String(key))) {
+              w.__ep36Faults = (w.__ep36Faults ?? 0) + 1;
+              throw new DOMException("injected: read refused", "UnknownError");
+            }
+            return get.call(this, key);
+          } as typeof get);
+  }, ids);
+const faultsReached = (page: Page) =>
+  page.evaluate(
+    () => (window as unknown as { __ep36Faults?: number }).__ep36Faults ?? 0,
+  );
+
+test.describe("E-P36: the field editor's target and its failed reads (review 9, findings 1 and 2)", () => {
+  const G = "68686868-6868-4686-8686-686868686868";
+  const resources = () => [
+    personP(P, "Ada"),
+    fieldP(F, P, "First", { kind: "text", text: "First saved" }),
+    fieldP(G, P, "Second", { kind: "text", text: "Second saved" }),
+  ];
+  const field = (id: string) => `/people/${P}/fields/${id}`;
+  /** Types `text` into the field's editor, then leaves it by navigation (its input is kept, not discarded). */
+  async function keep(page: Page, id: string, name: string, text: string) {
+    await navigateInApp(page, field(id));
+    const d = page.getByRole("dialog", { name: `Edit ${name}` });
+    await d.getByRole("textbox", { name: "Value", exact: true }).fill(text);
+    await navigateInApp(page, `/people/${P}`);
+    await expect(d).toBeHidden();
+  }
+  async function reopened(page: Page, id: string, name: string) {
+    await navigateInApp(page, field(id));
+    const d = page.getByRole("dialog", { name: `Edit ${name}` });
+    await expect(d).toBeVisible();
+    return d.getByRole("textbox", { name: "Value", exact: true });
+  }
+  const failed = (page: Page) =>
+    page.locator('[data-people-state="editor-read-failed"]');
+
+  for (const ending of ["overlay", "Close", "Escape"] as const)
+    for (const reached of ["route reuse", "Back", "control"] as const)
+      test(`${ending}, ${reached}: the failed read is said, and ${reached === "control" ? "the field shown" : "only the field shown"} ends its session`, async ({
+        context,
+      }, info) => {
+        const { page } = await setup(context, `/people/${P}`, resources());
+        await expect(page.locator(`[data-field-row="${G}"]`)).toBeVisible();
+        await keep(page, F, "First", "First kept");
+        await keep(page, G, "Second", "Second kept");
+        await readsOfCacheRows(page, [F, G]);
+        // The shown target is Second, reached through the same route component (in-app navigation, or Back from a later entry).
+        if (reached === "route reuse") {
+          await navigateInApp(page, field(F));
+          await expect(failed(page)).toBeVisible();
+          await navigateInApp(page, field(G));
+        } else if (reached === "Back") {
+          await navigateInApp(page, field(G));
+          await expect(failed(page)).toBeVisible();
+          await navigateInApp(page, field(F));
+          await expect.poll(() => new URL(page.url()).pathname).toBe(field(F));
+          await page.goBack();
+        } else await navigateInApp(page, field(G));
+        await expect.poll(() => new URL(page.url()).pathname).toBe(field(G));
+        const d = page.getByRole("dialog", { name: "Edit field" });
+        await expect(
+          d.locator('[data-people-state="editor-read-failed"]'),
+        ).toBeVisible();
+        await expect(
+          d.getByRole("button", { name: "Try again" }),
+        ).toBeVisible();
+        expect(await faultsReached(page)).toBeGreaterThan(0);
+        if (ending === "overlay") await page.mouse.click(8, 8);
+        else if (ending === "Close")
+          await d.getByRole("button", { name: "Close", exact: true }).click();
+        else await page.keyboard.press("Escape");
+        await expect(d).toBeHidden();
+        await expect
+          .poll(() => new URL(page.url()).pathname)
+          .toBe(`/people/${P}`);
+        await readsOfCacheRows(page, []);
+        const second = await (await reopened(page, G, "Second")).inputValue();
+        await navigateInApp(page, `/people/${P}`);
+        const first = await (await reopened(page, F, "First")).inputValue();
+        recordEvidence(info, "e-p36", { ending, reached, second, first });
+        expect(second, "the session shown was ended").toBe("Second saved");
+        expect(first, "another field's session is not touched").toBe(
+          "First kept",
+        );
+      });
+
+  test("Try again after the read is repaired: the editor, with the input kept (nothing is sent)", async ({
+    context,
+  }, info) => {
+    const { page, net } = await setup(context, `/people/${P}`, resources());
+    await expect(page.locator(`[data-field-row="${G}"]`)).toBeVisible();
+    await keep(page, G, "Second", "Second kept");
+    await readsOfCacheRows(page, [G]);
+    await navigateInApp(page, field(G));
+    const d = page.getByRole("dialog", { name: "Edit field" });
+    await expect(
+      d.locator('[data-people-state="editor-read-failed"]'),
+    ).toBeVisible();
+    await readsOfCacheRows(page, []);
+    await d.getByRole("button", { name: "Try again" }).click();
+    const editor = page.getByRole("dialog", { name: "Edit Second" });
+    await expect(
+      editor.getByRole("textbox", { name: "Value", exact: true }),
+    ).toHaveValue("Second kept");
+    recordEvidence(info, "e-p36-retry", { commands: net.commands.length });
+    expect(net.commands).toHaveLength(0);
+  });
 });
