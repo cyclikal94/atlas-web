@@ -21505,6 +21505,12 @@ export const UNIT = [
  */
 export const RETIRED = [
   {
+    id: "MU-2370",
+    why: "(REAL ENGINE; WEB-11a revision 9, review 9 finding 2) a failed field read taken as no field, alone: a real read fault of the row also fails the editor's composed absence confirmation (`readInventory` reads the same row), which says the read failed, so E-P36 passes with this mutant in three engines (pool request-0a91b0a1271943d7b398, job mutant-mu-2370 on the controller: caught 0, controls passing). The two layers are independent; the unit mutant MU-2362 keeps the prerequisite layer sensitive (its fault is specific to the field read)",
+    replacedBy:
+      "MU-2372 (real engine, E-P36: both layers removed) and MU-2362 (unit)",
+  },
+  {
     id: "MU-2305",
     why: "(REAL ENGINE; WEB-11a revision 9, review 9 finding 1) the field editor's success closes the instance that submitted it: since revision 9 a view's `close` acts only while that view is shown (`useShown`), so the submitting instance, unmounted by Cancel, closes nothing and E-P32 passes with this mutant in three engines (campaign 27, `validation/runs/2026-10-24T07-31-15.848Z-e1ff4136`, pool `request-e1e5957c04824b419bd6`, job `mutant-mu-2305` on m4-air: caught 0, controls passing). Completion through the current owner (`completeSession`) and the view guard are two independent layers; E-P32 has no restored-mount schedule, so the single-layer mutant is equivalent for what it asserts. Its unit counterpart MU-2286 stays (restored-mount schedules)",
     replacedBy:
@@ -24937,18 +24943,22 @@ export const ENGINE = [
       sub(t, /key=\{`\$\{env\.identity\}[^`]*`\}/, "key={env.identity}"),
   },
   {
-    id: "MU-2370",
+    id: "MU-2372",
     title:
-      "WEB-11a R9 F2: (REAL ENGINE) a real IndexedDB read of the edited field that fails is taken as no field: the editor shows nothing",
-    file: "src/features/people/field/prerequisites.ts",
+      "WEB-11a R9 F2: (REAL ENGINE) the editor does not wait for or check its field's read, and a failed absence confirmation draws nothing: a real IndexedDB read of the field that fails shows nothing",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P36:",
-    expect: /E-P36: /,
+    expect: /E-P36: .*the failed read is said/,
     patch: (t) =>
       sub(
-        t,
-        '  if (field !== null && statusOf(field) === "failed")\n    return { kind: "failed", read: "field" };\n',
-        "",
+        sub(
+          t,
+          "          fieldId === null ? null : field,\n          outstanding,\n",
+          "          null,\n          outstanding,\n",
+        ),
+        '                confirmation === "absent" || confirmation === "failed" ? (\n',
+        '                confirmation === "absent" ? (\n',
       ),
   },
 ];
