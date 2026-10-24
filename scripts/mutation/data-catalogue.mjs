@@ -20577,11 +20577,17 @@ export const UNIT = [
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect:
       /another page edited meanwhile|with ANOTHER body than the editor read/,
+    // Re-anchored in WEB-11a revision 12 (as MU-2385/MU-2386): the older form is ALSO refused at the write unless it names the save it
+    // follows, so the review-2 defect (an unguarded fallback) is the page's check bypassed AND no predecessor named.
     patch: (t) =>
       sub(
-        t,
-        "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
-        "      if (false as boolean) {",
+        sub(
+          t,
+          "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(bound, base.fieldId),\n",
+        "",
       ),
   },
   {
@@ -20591,11 +20597,17 @@ export const UNIT = [
     file: "src/features/people/detail/IdentityHeader.tsx",
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect: /by another page while the form was open/,
+    // Re-anchored in WEB-11a revision 12 (as MU-2385/MU-2386): the older form is ALSO refused at the write unless it names the save it
+    // follows, so the review-2 defect (an unguarded fallback) is the page's check bypassed AND no predecessor named.
     patch: (t) =>
       sub(
-        t,
-        "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
-        "      if (false as boolean) {",
+        sub(
+          t,
+          "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(snapshot, person.id),\n",
+        "",
       ),
   },
   {
