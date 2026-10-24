@@ -44,6 +44,9 @@
 // (review 16 R16-SYNC, design assessment DA16-H1; contract version 11): `sync-request-sample/3` and `draft-request-sample/4`. LABELLED
 // HARNESS CORRECTION: a sync read now closes after the last line it retains (a later step's tick at `commit + 2` was retained by a read
 // timed `commit + 0.75`, a chronology no writer can produce); the measured values do not depend on the read's time and are unchanged.
+// Revision 17 (review 17 R17-REQUEST/R17-BUFFER; contract version 12): `draft-request-sample/5`. The generated draft witnesses already
+// satisfy its relations (each call begins before its entry starts and returns after its body ends; both buffer totals 1), so only the
+// method and contract literals change.
 //
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
@@ -1595,7 +1598,7 @@ export function writeProgramme(
       }
     }
     json(`samples/P-4.draft.${engine}.json`, {
-      method: "draft-request-sample/4",
+      method: "draft-request-sample/5",
       engine,
       warmup: 20,
       samples: drafts,
@@ -2118,7 +2121,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 11,
+      contract_version: 12,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

@@ -1,9 +1,10 @@
 export const SYNC_WITNESS_METHOD: "sync-request-sample/3";
-export const DRAFT_WITNESS_METHOD: "draft-request-sample/4";
+export const DRAFT_WITNESS_METHOD: "draft-request-sample/5";
 export const SYNC_PATH: "/api/experimental/v1/sync";
 export const COMMANDS_PATH: "/api/experimental/v1/commands";
 export const TRACE_ROUNDING_MS: number;
 export const RESOURCE_BUFFER: number;
+export const RAW_CLOCK_ALLOWANCE_MS: number;
 
 export interface RequestEntry {
   name: string;
@@ -54,6 +55,16 @@ export interface DraftValues {
 export function syncWitnessSelection(
   witness: unknown,
 ): WitnessSelection<SyncSelected, SyncValues>;
+export interface BufferSnapshot {
+  /** The whole ResourceTiming buffer's entry count at the read. */
+  total: number;
+  /** The endpoint's entries the same read retained or counted. */
+  retained: number;
+}
+export function bufferLifetimeProblem(
+  earlier: BufferSnapshot,
+  later: BufferSnapshot,
+): string | null;
 export function draftBindingChange(
   before: unknown,
   after: unknown,

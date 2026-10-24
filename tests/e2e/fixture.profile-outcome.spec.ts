@@ -23,7 +23,9 @@ import {
   type DraftWitness,
   p2SampleProblems,
   prepareSyncSample,
+  readDraftSample,
   readSyncSample,
+  type SamplePage,
   type SyncMark,
   type SyncWitness,
   samplePageOf,
@@ -698,4 +700,338 @@ test("P-4 draft natively (revision 14): a receipt not yet admitted or not yet de
   // Whatever the failure, the witness that was read is kept, and no draft of it is selected.
   const w = reloaded.failure?.witness as DraftWitness | null;
   if (w?.completion) expect(draftWitnessSelection(w).status).toBe("invalid");
+});
+
+/**
+ * WEB-09c revision 17 (review 17 R17-REQUEST/R17-BUFFER; design assessment DA17-RQ/BF/HR, Q10/Q13): the `draft-request-sample/5` relations
+ * natively, in Chromium, Firefox and WebKit, through the production dispatcher, its stamped sender and real ResourceTiming, with the stubbed
+ * network. (1) The raw-clock policy (no allowance between the observer's `performance.now()` and ResourceTiming): every one of 100 healthy samples'
+ * call begins no later than its entry starts and returns no earlier than its request was sent; the margins are recorded, never widened.
+ * (2) DA17-HR: the stamped sender returns a FULLY READ response (`fetchFor`), so the observer's `request_end` is the stamped return, not
+ * the headers: a LABELLED fixture fetch wrapper (this test's init script only) delivers the real response's headers and holds its body
+ * at the page's fetch boundary; no `request_end` is recorded while it is held, and the sample completes after its release. The network
+ * itself is not held (the stub fulfils at once), so this is the stamped sender's contract, not a network body hold. (3) The buffer:
+ * unrelated entries between the reads (a growth to 249) keep the sample; 250 at the completion read refuses it as full; another tab's
+ * clear and fetch never touch this page's buffer. Not a measurement: no figure here is evidence, and nothing is recorded into a programme.
+ */
+test("P-4 draft natively (revision 17): every healthy call begins no later than its entry and returns no earlier than its request (margins recorded); a held body keeps the stamped call open until it is read; unrelated growth and 249 entries keep the sample, 250 refuses it, and another tab's buffer is its own", async ({
+  context,
+}, info) => {
+  test.setTimeout(300_000);
+  await stubNetwork(context);
+  await context.route("**/__fill/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/plain", body: "x" }),
+  );
+  // LABELLED FIXTURE FETCH WRAPPER (DA17-HR): armed once by the test; the real fetch runs, its headers are delivered, its body is held.
+  await context.addInitScript(() => {
+    const real = window.fetch.bind(window);
+    const hold: {
+      armed: boolean;
+      headersAt: number | null;
+      pulledAt: number | null;
+      releasedAt: number | null;
+      release: () => void;
+    } = {
+      armed: false,
+      headersAt: null,
+      pulledAt: null,
+      releasedAt: null,
+      release: () => {},
+    };
+    (globalThis as { __heldCommandsBody?: typeof hold }).__heldCommandsBody =
+      hold;
+    window.fetch = async (input, init) => {
+      const response = await real(input, init);
+      const url = new URL(
+        input instanceof Request ? input.url : String(input),
+        location.href,
+      );
+      if (!hold.armed || !url.pathname.endsWith("/commands") || !response.body)
+        return response;
+      hold.armed = false;
+      hold.headersAt = performance.now();
+      const released = new Promise<void>((resolve) => {
+        hold.release = () => {
+          hold.releasedAt = performance.now();
+          resolve();
+        };
+      });
+      const reader = response.body.getReader();
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          hold.pulledAt ??= performance.now();
+          await released;
+          const { done, value } = await reader.read();
+          if (done) controller.close();
+          else controller.enqueue(value);
+        },
+      });
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    };
+  });
+  await seedSettled(context);
+  const page = await bootSession(context);
+  await startOutbox(page, ACCOUNT, { observeDispatch: true });
+  const base = samplePageOf(page);
+  // A hook run once, right after the timing read and before the completion read (the collector's own order).
+  let afterTiming: (() => Promise<void>) | null = null;
+  const sampler: SamplePage = {
+    run: base.run,
+    async poll(fn, arg, o) {
+      const out = await base.poll(fn, arg, o);
+      if ((fn as unknown) === readDraftSample && afterTiming) {
+        const hook = afterTiming;
+        afterTiming = null;
+        await hook();
+      }
+      return out;
+    },
+  };
+  const options = {
+    timeout: 30_000,
+    polling: 10,
+    account: ACCOUNT,
+    person: () => crypto.randomUUID(),
+  };
+  const isolated = await page.evaluate(() => crossOriginIsolated);
+
+  // (1) The raw-clock policy on 100 healthy samples after a warm-up. Firefox and WebKit clamp both clocks to 1 ms here (not cross-origin
+  // isolated), so a call and its entry often share a millisecond: about one sample in five ties (revision 17's diagnostic, 20 per engine).
+  // A tie is where clamping that differed between the two clocks would invert them; 100 samples give some twenty ties per engine for a
+  // few seconds. The first inversion fails the test (the collector keeps it), never widened.
+  const healthy = await collectDraftSamples(sampler, {
+    ...options,
+    warmup: 1,
+    samples: 100,
+  });
+  expect(healthy.failure).toBeNull();
+  const margins = healthy.samples.map((e) => {
+    const begin = e.records.find((r) => r.event === "request_begin");
+    const end = e.records.find((r) => r.event === "request_end");
+    const r = e.resources[e.selected.request];
+    if (!begin || !end || !r) throw new Error("a healthy sample lost its call");
+    return {
+      begin_to_start: r.startTime - begin.at,
+      request_to_return: end.at - r.requestStart,
+      body_to_return: end.at - r.responseEnd,
+      totals: [e.timing.resource_entries, e.completion.resource_entries],
+    };
+  });
+  for (const m of margins) {
+    expect(m.begin_to_start).toBeGreaterThanOrEqual(0);
+    expect(m.request_to_return).toBeGreaterThanOrEqual(0);
+  }
+  const least = (
+    k: "begin_to_start" | "request_to_return" | "body_to_return",
+  ) => Math.min(...margins.map((m) => m[k]));
+  const clock = {
+    engine: info.project.name,
+    cross_origin_isolated: isolated,
+    samples: margins.length,
+    least_begin_to_start_ms: least("begin_to_start"),
+    least_request_to_return_ms: least("request_to_return"),
+    least_body_to_return_ms: least("body_to_return"),
+    margins,
+  };
+  console.log(`(1) raw-clock margins: ${JSON.stringify(clock)}`);
+  await info.attach("raw-clock-margins.json", {
+    body: JSON.stringify(clock, null, 2),
+    contentType: "application/json",
+  });
+  // LABELLED CONSUMER-INTEGRITY COPIES (not a writer's output) of a real witness: review 17's late begin, and its buffer contradictions.
+  for (const [label, edit, problem] of [
+    [
+      "the call begun 0.05 ms after its entry ended",
+      (w: DraftWitness) => {
+        const begin = w.records.find((r) => r.event === "request_begin");
+        const entry = w.resources[0];
+        if (begin && entry) begin.at = entry.responseEnd + 0.05;
+      },
+      "the dispatcher's request began after its /commands entry started: the entry is not that call's",
+    ],
+    [
+      "the timing total missing",
+      (w: DraftWitness) => {
+        delete (w.timing as { resource_entries?: number }).resource_entries;
+      },
+      "its timing read does not record the resource buffer's entries",
+    ],
+    [
+      "the completion total zero",
+      (w: DraftWitness) => {
+        w.completion.resource_entries = 0;
+      },
+      "the completion read retains more requests than the buffer held",
+    ],
+    [
+      "249 at the timing read",
+      (w: DraftWitness) => {
+        w.timing.resource_entries = 249;
+      },
+      "the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries",
+    ],
+  ] as const) {
+    const copy = structuredClone(healthy.samples[0]) as DraftWitness;
+    edit(copy);
+    expect(draftWitnessSelection(copy).problem, label).toBe(problem);
+  }
+
+  // (2) DA17-HR: the body held after the headers; the stamped call stays open until it is read.
+  await page.evaluate(() => {
+    const h = (globalThis as { __heldCommandsBody?: { armed: boolean } })
+      .__heldCommandsBody;
+    if (h) h.armed = true;
+  });
+  const holding = collectDraftSamples(sampler, {
+    ...options,
+    warmup: 0,
+    samples: 1,
+  });
+  const heldState = () =>
+    page.evaluate(() => {
+      const h = (
+        globalThis as {
+          __heldCommandsBody?: {
+            headersAt: number | null;
+            pulledAt: number | null;
+          };
+        }
+      ).__heldCommandsBody;
+      const log = window.__atlasData?.dispatchLog ?? [];
+      const begin = log.filter((r) => r.event === "request_begin").at(-1);
+      return {
+        headersAt: h?.headersAt ?? null,
+        pulledAt: h?.pulledAt ?? null,
+        begun: begin?.seq ?? null,
+        ended: log.some(
+          (r) => r.event === "request_end" && r.of === begin?.seq,
+        ),
+        now: performance.now(),
+      };
+    });
+  await expect
+    .poll(async () => (await heldState()).pulledAt !== null, {
+      timeout: 30_000,
+    })
+    .toBe(true);
+  // The sender is reading the body (its pull began); give its continuation further turns of the page's event loop: still no result.
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 250)));
+  const whileHeld = await heldState();
+  console.log(`(2) while held: ${JSON.stringify(whileHeld)}`);
+  expect(whileHeld.headersAt).not.toBeNull();
+  expect(whileHeld.begun).not.toBeNull();
+  expect(whileHeld.ended).toBe(false);
+  await page.evaluate(() =>
+    (
+      globalThis as { __heldCommandsBody?: { release: () => void } }
+    ).__heldCommandsBody?.release(),
+  );
+  const held = await holding;
+  expect(held.failure).toBeNull();
+  const releasedAt = await page.evaluate(
+    () =>
+      (globalThis as { __heldCommandsBody?: { releasedAt: number | null } })
+        .__heldCommandsBody?.releasedAt ?? null,
+  );
+  const hw = held.samples[0];
+  const hend = hw?.records.find((r) => r.event === "request_end");
+  const hentry = hw?.resources[hw.selected.request];
+  if (!hw || !hend || !hentry || releasedAt === null)
+    throw new Error("the held sample lost its call");
+  console.log(
+    `(2) stamped return ${hend.at}, body released ${releasedAt}, headers ${whileHeld.headersAt}, entry responseEnd ${hentry.responseEnd}`,
+  );
+  expect(hend.at).toBeGreaterThanOrEqual(releasedAt);
+  expect(releasedAt).toBeGreaterThanOrEqual(whileHeld.headersAt ?? Infinity);
+  expect(hend.at).toBeGreaterThanOrEqual(hentry.responseEnd);
+  expect(draftWitnessSelection(hw).status).toBe("complete");
+
+  // (3) The buffer between the reads: unrelated growth (one entry, then up to 249) keeps the sample; 250 refuses it as full.
+  /** In the page: same-origin unrelated fetches, one at a time, each waited for in the buffer, until it holds `target` entries. */
+  const fillTo = (target: number) =>
+    page.evaluate(async (n) => {
+      const count = () => performance.getEntriesByType("resource").length;
+      for (let i = 0; count() < n; i += 1) {
+        const before = count();
+        await (await fetch(`/__fill/${crypto.randomUUID()}`)).text();
+        for (let t = 0; count() === before; t += 1) {
+          if (t > 400) throw new Error(`no resource entry after fetch ${i}`);
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      }
+      return count();
+    }, target);
+  const grown: number[] = [];
+  for (const [label, target] of [
+    ["one more", 0],
+    ["249", 249],
+  ] as const) {
+    afterTiming = async () => {
+      const now = await page.evaluate(
+        () => performance.getEntriesByType("resource").length,
+      );
+      grown.push(await fillTo(target === 0 ? now + 1 : target));
+    };
+    const c = await collectDraftSamples(sampler, {
+      ...options,
+      warmup: 0,
+      samples: 1,
+    });
+    expect(c.failure, label).toBeNull();
+    const e = c.samples[0];
+    console.log(
+      `(3) ${label}: totals ${e?.timing.resource_entries} -> ${e?.completion.resource_entries}`,
+    );
+    expect(e?.completion.resource_entries, label).toBe(grown.at(-1));
+    expect(e?.completion.resource_entries ?? 0, label).toBeGreaterThan(
+      e?.timing.resource_entries ?? Infinity,
+    );
+    expect(e?.resources, label).toHaveLength(1);
+  }
+  afterTiming = async () => {
+    grown.push(await fillTo(250));
+  };
+  const full = await collectDraftSamples(sampler, {
+    ...options,
+    warmup: 0,
+    samples: 1,
+  });
+  expect(grown.at(-1)).toBe(250);
+  expect(full.values).toEqual([]);
+  expect(full.failure?.problem).toBe(
+    "the resource-timing buffer was full: requests may be missing",
+  );
+  const fullWitness = full.failure?.witness as DraftWitness | undefined;
+  expect(fullWitness?.completion.resource_entries).toBe(250);
+
+  // Another tab clears its own buffer and fetches between the reads: this page's totals are its own (unchanged between the reads).
+  const other = await context.newPage();
+  await other.goto("/__fill/start");
+  afterTiming = async () => {
+    await other.evaluate(async () => {
+      performance.clearResourceTimings();
+      await (await fetch(`/__fill/${crypto.randomUUID()}`)).text();
+    });
+    await expect
+      .poll(() =>
+        other.evaluate(() => performance.getEntriesByType("resource").length),
+      )
+      .toBe(1);
+  };
+  const beside = await collectDraftSamples(sampler, {
+    ...options,
+    warmup: 0,
+    samples: 1,
+  });
+  expect(beside.failure).toBeNull();
+  const b = beside.samples[0];
+  console.log(
+    `(3) another tab: totals ${b?.timing.resource_entries} -> ${b?.completion.resource_entries}`,
+  );
+  expect(b?.completion.resource_entries).toBe(b?.timing.resource_entries);
+  await other.close();
 });

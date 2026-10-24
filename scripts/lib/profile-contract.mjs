@@ -1471,7 +1471,8 @@ function syncSupportProblems(ev, file, segment, samples, row, engine) {
  * 15 R2, DA15-R2a/R2b): the rule also checks every record's schema and its call, the closed time interval and the completion read's
  * recorded start; here each mark's `t0` must not precede the previous sample's completion read in time either. Contract version 11
  * (`draft-request-sample/4`, revision 16, DA16-D1): the dispatcher's request and every retained entry are the exact `/commands` pathname,
- * and every entry lies inside [t0, completion.at].
+ * and every entry lies inside [t0, completion.at]. Contract version 12 (`draft-request-sample/5`, revision 17, DA17-RQ/BF): the
+ * dispatcher's call is causally possible for its entry and both buffer snapshots are credible and of one uninterrupted buffer.
  */
 function draftSupportProblems(ev, file, segment, samples, row, engine) {
   const { problems, v } = supportFrameProblems(

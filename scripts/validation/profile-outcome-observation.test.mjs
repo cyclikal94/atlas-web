@@ -310,10 +310,10 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 11; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 12; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 11);
+  assert.equal(evidence.CONTRACT_VERSION, 12);
   assert.equal(device.DEVICE_SCHEMA, 4);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
@@ -1577,9 +1577,10 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 
 // ---- versions -----------------------------------------------------------------------------------------------------------------------
 
-// Revision 16 (adapted): version 10 (revision 15) joins the list and the current version is 11.
-test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12), 8 (revision 13), 9 (revision 14) and 10 (revision 15) are not evidence of version 11", (t) => {
-  for (const version of [3, 4, 5, 6, 7, 8, 9, 10]) {
+// Revision 16 (adapted): version 10 (revision 15) joins the list and the current version is 11. Revision 17 (adapted, version literals
+// only): version 11 (revision 16) joins the list and the current version is 12.
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12), 8 (revision 13), 9 (revision 14), 10 (revision 15) and 11 (revision 16) are not evidence of version 12", (t) => {
+  for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1592,7 +1593,7 @@ test("case: stages recorded under contract versions 3 (review 9's Air request), 
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 11`),
+          .includes(`recorded under contract ${version}, not 12`),
       ),
     );
   }
@@ -1906,9 +1907,10 @@ test("control R13-K1: the complete programme's sync and draft witnesses resolve 
   );
   assert.ok(p4.samples.some((e) => e.read.to > e.selected.end + 1));
   // Revision 14 (adapted from `draft-request-sample/1`): the draft witness is version 2; some receipts removed their row (absent).
-  // Revision 15 (adapted again): version 3, whose completion read records its start. Revision 16 (adapted): version 4.
+  // Revision 15 (adapted again): version 3, whose completion read records its start. Revision 16 (adapted): version 4. Revision 17
+  // (adapted, version literal only): version 5.
   const drafts = readJson(draftFile(dir, "webkit"));
-  assert.equal(drafts.method, "draft-request-sample/4");
+  assert.equal(drafts.method, "draft-request-sample/5");
   assert.ok(
     drafts.samples.some(
       (e) => e.completion.row.kind === "absent" && e.records[5].removed,
@@ -2328,11 +2330,15 @@ test("case R13-D2 (DA-N1): the draft witness's other relations: a draft waiting 
     ],
     [
       "second request",
-      (e) =>
+      // REVISION 17 HARNESS CORRECTION (labelled; review 17 R17-BUFFER, DA17-BF invariant 4): the added entry is in the buffer the
+      // completion read counted (its total was left at 1, below its two retained entries, which no writer records); reason unchanged.
+      (e) => {
         e.resources.push({
           ...e.resources[0],
           startTime: e.resources[0].startTime + 0.05,
-        }),
+        });
+        e.completion.resource_entries += 1;
+      },
       /2 \/commands requests lie inside the operation/,
     ],
     // Revision 14 adaptations of revision 13's "not settled" and "another draft settled": the completion is now the receipt's own
@@ -2607,6 +2613,9 @@ test("case R14-C1 (review 14 R2): the review's schedules with their timing value
           requestStart: at + 1,
           responseEnd: at + 8,
         });
+        // REVISION 17 HARNESS CORRECTION (labelled; R17-BUFFER, DA17-BF invariant 4): the resend's entry is counted in the completion
+        // read's total, as the writer counts it from the same array; schedule and reason unchanged.
+        e.completion.resource_entries += 1;
         e.completion.to += 2;
         e.completion.log_to += 6;
         e.completion.at = at + 13;
@@ -2751,8 +2760,12 @@ test("case R14-C2 (DA-R14-A/B/C): the receipt's actual result, the actor and epo
     ],
     [
       "request unseen by the timing read",
+      // REVISION 17 HARNESS CORRECTION (labelled; R17-BUFFER, DA17-BF invariant 5): the timing read that did not yet see the request saw
+      // an empty buffer (its total was left at 1: an entry that was not a request, gone by the completion read, which no uninterrupted
+      // buffer allows); reason unchanged.
       (e) => {
         e.timing.requests = 0;
+        e.timing.resource_entries = 0;
       },
       /its timing read did not see its request/,
     ],
@@ -2813,7 +2826,8 @@ test("case R14-C3: version-8 draft support (`draft-request-sample/1`) is refused
   assert.deepEqual(unsatisfied(r), draftIds("firefox"));
   assert.match(
     reasons(cell(r, "P-4 draft claim_ms[firefox]")),
-    /samples\/P-4\.draft\.firefox\.json is not draft-request-sample\/4/, // revision 16 (adapted): the current method is /4
+    // Revision 16 (adapted): the current method was /4; revision 17 (adapted, version literal only): it is /5.
+    /samples\/P-4\.draft\.firefox\.json is not draft-request-sample\/5/,
   );
   dir = `${scratch(t)}-overlap`;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -3106,7 +3120,8 @@ test("case R15-C3: version-9 draft support (`draft-request-sample/2`) is refused
   assert.deepEqual(unsatisfied(r), draftIds("webkit"));
   assert.match(
     reasons(cell(r, "P-4 draft claim_ms[webkit]")),
-    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/4/, // revision 16 (adapted): the current method is /4
+    // Revision 16 (adapted): the current method was /4; revision 17 (adapted, version literal only): it is /5.
+    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/5/,
   );
   dir = `${scratch(t)}-overlap`;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -3421,6 +3436,239 @@ test("case R16-C3 (DA16-D1): a draft whose request, its result and its entry agr
   assert.deepEqual(unsatisfied(r), draftIds("chromium"));
   assert.match(
     reasons(cell(r, "P-4 draft request_ms[chromium]")),
-    /samples\/P-4\.draft\.chromium\.json is not draft-request-sample\/4/,
+    // Revision 17 (adapted, version literal only): the current draft method is `/5`.
+    /samples\/P-4\.draft\.chromium\.json is not draft-request-sample\/5/,
+  );
+});
+
+// ---- revision 17 (review 17 R17-REQUEST/R17-BUFFER, design assessment DA17-RQ/BF/HR, Q1-Q7 and Q12) ------------------------------------
+// `draft-request-sample/5` (contract version 12): the dispatcher's observed call is causally possible for its selected entry (it began no
+// later than the entry started and returned no earlier than the entry's request was sent; raw page-clock times, no allowance, ties
+// valid), and both ResourceTiming snapshots are typed, below the buffer, contain their counts and belong to one uninterrupted buffer.
+// Each case edits ONLY the first P-4 draft witness of every engine, as review 17's diagnostics did: the selections, the six values, every
+// series, summary and hash stay exactly as written, so only the relation can refuse the sample; ordinary assembly regenerates hashes.
+
+/** Edits the first draft witness of every engine; the selection and every series row stay as the writer wrote them. */
+const editFirstDrafts = (dir, label, edit) => {
+  const before = readFileSync(join(dir, "measurements.jsonl"), "utf8");
+  for (const engine of ENGINES)
+    editJson(draftFile(dir, engine), (v) => {
+      const selected = structuredClone(v.samples[0].selected);
+      edit(v.samples[0]);
+      assert.deepEqual(v.samples[0].selected, selected, label);
+    });
+  assert.equal(
+    readFileSync(join(dir, "measurements.jsonl"), "utf8"),
+    before,
+    label,
+  );
+};
+/** Healthy end to end: every cell ok, desktop support, both validator modes 0. */
+const supportedEndToEnd = (dir, label) => {
+  assert.deepEqual(unsatisfied(contract.resolveEvidence(dir)), [], label);
+  const results = assemble(dir);
+  assert.equal(results.acceptance_scope.desktop_decision.supports, true, label);
+  for (const extra of [[], ["--allow-partial"]]) {
+    const run = validate(dir, ...extra);
+    assert.equal(
+      run.status,
+      0,
+      `${label} ${extra}: ${run.stdout}${run.stderr}`,
+    );
+  }
+};
+/** Refused end to end: exactly the seven draft cells of every engine, each with the reason, support withheld, both modes 1. */
+const draftsRefusedEndToEnd = (dir, label, reason) => {
+  try {
+    const r = contract.resolveEvidence(dir);
+    assert.deepEqual(unsatisfied(r), ENGINES.flatMap(draftIds).sort());
+    for (const engine of ENGINES)
+      for (const id of draftIds(engine))
+        assert.match(
+          reasons(cell(r, id)),
+          new RegExp(`sample 0: its operation is invalid: ${reason.source}`),
+          id,
+        );
+    assert.equal(r.complete, false);
+    refusedEndToEnd(dir);
+  } catch (error) {
+    error.message = `${label}: ${error.message}`;
+    throw error;
+  }
+};
+const requestOf = (w) => w.records.find((r) => r.event === "request_begin");
+const resultOf = (w) => w.records.find((r) => r.event === "request_end");
+
+test("case R17-C1 (review 17 R17-REQUEST, DA17-RQ, Q1/Q2/Q12): a dispatcher call that began after its entry ended (the review's schedule), one that began well after the entry started inside the send and answer, one just after, and a call that returned before the entry's request was sent are refused in all seven draft cells of every engine, support withheld, both modes 1; a foreign endpoint keeps its own reason", (t) => {
+  const BEGAN =
+    /the dispatcher's request began after its \/commands entry started: the entry is not that call's/;
+  const RETURNED =
+    /the dispatcher's request returned before its \/commands entry's request was sent: the entry is not that call's/;
+  const cases = [
+    [
+      "begins 0.05 ms after the entry ended (review 17)",
+      (w) => {
+        requestOf(w).at = w.resources[0].responseEnd + 0.05;
+      },
+      BEGAN,
+    ],
+    [
+      "begins midway between the entry's start and its request",
+      (w) => {
+        const r = w.resources[0];
+        requestOf(w).at = (r.startTime + r.requestStart) / 2;
+      },
+      BEGAN,
+    ],
+    [
+      "begins within the trace rounding after the entry started",
+      (w) => {
+        requestOf(w).at = w.resources[0].startTime + 0.001;
+      },
+      BEGAN,
+    ],
+    [
+      "returns between its begin and the entry's start (review 17's sub-millisecond variant)",
+      (w) => {
+        resultOf(w).at = (requestOf(w).at + w.resources[0].startTime) / 2;
+      },
+      RETURNED,
+    ],
+    [
+      "returns just before the entry's request was sent",
+      (w) => {
+        resultOf(w).at = w.resources[0].requestStart - 0.001;
+      },
+      RETURNED,
+    ],
+    [
+      "foreign endpoint (review 17's known-invalid control)",
+      (w) => {
+        w.resources[0].name = "/not-commands";
+      },
+      /a retained request entry is not the \/commands endpoint \(\/not-commands\)/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editFirstDrafts(dir, label, edit);
+    draftsRefusedEndToEnd(dir, label, reason);
+  }
+});
+
+test("case R17-C2 (review 17 R17-BUFFER, DA17-BF, Q4-Q7/Q12): the timing total missing, mistyped, zero below its request, or full while the later total is 1; the completion total zero below its retained entry, or full; both totals zero; and a buffer that shrank from 249 to 1 are refused in all seven draft cells of every engine, support withheld, both modes 1", (t) => {
+  const cases = [
+    [
+      "timing total missing",
+      (w) => {
+        delete w.timing.resource_entries;
+      },
+      /its timing read does not record the resource buffer's entries/,
+    ],
+    [
+      "timing total a string",
+      (w) => {
+        w.timing.resource_entries = "1";
+      },
+      /its timing read does not record the resource buffer's entries/,
+    ],
+    [
+      "timing total zero with one counted request",
+      (w) => {
+        w.timing.resource_entries = 0;
+      },
+      /its timing read saw more requests than the buffer held/,
+    ],
+    [
+      "timing total full (250), the later total 1",
+      (w) => {
+        w.timing.resource_entries = 250;
+      },
+      /the resource-timing buffer was full at the timing read: requests may be missing/,
+    ],
+    [
+      "completion total zero with one retained entry",
+      (w) => {
+        w.completion.resource_entries = 0;
+      },
+      /the completion read retains more requests than the buffer held/,
+    ],
+    [
+      "both totals zero",
+      (w) => {
+        w.timing.resource_entries = 0;
+        w.completion.resource_entries = 0;
+      },
+      /the completion read retains more requests than the buffer held/,
+    ],
+    [
+      "the buffer shrank from 249 to 1",
+      (w) => {
+        w.timing.resource_entries = 249;
+      },
+      /the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries/,
+    ],
+    [
+      "completion total full (review 17's known-invalid control)",
+      (w) => {
+        w.completion.resource_entries = 250;
+      },
+      /the resource-timing buffer was full: requests may be missing/,
+    ],
+  ];
+  for (const [label, edit, reason] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editFirstDrafts(dir, label, edit);
+    draftsRefusedEndToEnd(dir, label, reason);
+  }
+});
+
+test("control R17-C3 (DA17-RQ/BF/HR, Q3/Q6/Q7/Q12): a call beginning exactly at its entry's start and returning exactly when its request was sent (the generic headers-return boundary), totals 249 at both reads, and a buffer that grew by an unrelated entry keep their selections and values and support the desktop decision with both modes 0; version-11 draft support (`draft-request-sample/4`) is refused", (t) => {
+  const cases = [
+    [
+      "begin at the entry's start, return at its request's start",
+      (w) => {
+        const r = w.resources[0];
+        requestOf(w).at = r.startTime;
+        resultOf(w).at = r.requestStart;
+      },
+    ],
+    [
+      "both totals 249",
+      (w) => {
+        w.timing.resource_entries = 249;
+        w.completion.resource_entries = 249;
+      },
+    ],
+    [
+      "an unrelated entry between the reads (1 then 2)",
+      (w) => {
+        w.completion.resource_entries = 2;
+      },
+    ],
+  ];
+  for (const [label, edit] of cases) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editFirstDrafts(dir, label, edit);
+    // Every cell ok: the contract re-derived each edited sample's selection and values and found the writer's.
+    supportedEndToEnd(dir, label);
+  }
+  const dir = `${scratch(t)}-old-draft-4`;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeComplete(dir);
+  editJson(draftFile(dir, "webkit"), (v) => {
+    v.method = "draft-request-sample/4";
+  });
+  const r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), draftIds("webkit"));
+  assert.match(
+    reasons(cell(r, "P-4 draft request_ms[webkit]")),
+    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/5/,
   );
 });

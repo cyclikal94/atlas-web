@@ -30,10 +30,17 @@
 // (its request, result and entry agreeing on a foreign path is not `/commands`) and the observation bounds of its entries. Revision 15's
 // `/2` sync rule accepted a read timed before its mark, absent times, a step end traced before its tick and an entry named `/not-sync`.
 //
+// Revision 17 (review 17 R17-REQUEST/R17-BUFFER, design assessment DA17-RQ/BF/HR, invariants 2, 4 and 5): `draft-request-sample/5` binds
+// the selected entry to the dispatcher's observed call (the observer appends `request_begin` before it calls the stamped sender, so the
+// call began no later than its entry started; the call returned no earlier than its entry's request was sent) and validates BOTH buffer
+// snapshots: each total typed and below the buffer, each count within its own total, and the totals of one uninterrupted buffer (nothing
+// clears it between the timing and completion reads) never shrinking, nor losing entries other than the retained requests. Revision 16's
+// `/4` accepted a call that began after its entry ended, a missing or zero timing total and a later total below its retained entries.
+//
 // Pending (the operation has not finished) is distinct from invalid (it finished, or the witness shows it cannot be the sample's).
 
 export const SYNC_WITNESS_METHOD = "sync-request-sample/3";
-export const DRAFT_WITNESS_METHOD = "draft-request-sample/4";
+export const DRAFT_WITNESS_METHOD = "draft-request-sample/5";
 /**
  * The pathnames the measurement writers store for their requests (`new URL(entry.name).pathname`): `apiUrl("/sync")` and
  * `apiUrl("/commands")` under `API_BASE` (src/lib/api-client/wire.ts; tests/profiling/profile-samples.test.ts checks the route). A query
@@ -45,6 +52,12 @@ export const COMMANDS_PATH = "/api/experimental/v1/commands";
 export const TRACE_ROUNDING_MS = 1;
 /** The default ResourceTiming buffer: at this many entries the browser drops new ones, so the inventory may be incomplete. */
 export const RESOURCE_BUFFER = 250;
+/**
+ * The draft request's causal edges (revision 17, DA17-RQ, invariant 2) compare two raw page-clock times, the observer's `performance.now()`
+ * and ResourceTiming's: no allowance. The trace's rounding is not a timestamp tolerance; ties are valid (inclusive comparisons). Qualified
+ * on the pinned native engines (tests/e2e/fixture.profile-outcome.spec.ts records each healthy margin).
+ */
+export const RAW_CLOCK_ALLOWANCE_MS = 0;
 
 const isObj = (x) => typeof x === "object" && x !== null && !Array.isArray(x);
 const isCount = (x) => Number.isInteger(x) && x >= 0;
@@ -83,6 +96,22 @@ const pending = (problem) => ({
 
 /** A page time: a finite, non-negative number (never a string, null or a coerced value). */
 const isPageTime = (x) => fin(x) && x >= 0;
+
+/**
+ * Two ResourceTiming snapshots of ONE uninterrupted buffer (revision 17, DA17-BF, invariant 5): `earlier` and `later` are
+ * `{ total, retained }`, each total the whole buffer's entry count and each `retained` the endpoint's entries in that same read, already
+ * judged credible on their own. With nothing cleared between the reads the total never shrinks, and entries other than the retained ones
+ * never leave (a later total that grew by less than the retained count did lost entries). Null, or the problem. In a complete draft
+ * witness both reads retain exactly the one request, so the second relation adds nothing to the first there (it names a different reason
+ * only for witnesses that are invalid anyway).
+ */
+export function bufferLifetimeProblem(earlier, later) {
+  if (later.total < earlier.total)
+    return "the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries";
+  if (later.total - later.retained < earlier.total - earlier.retained)
+    return "entries other than the requests left the resource-timing buffer between the timing and completion reads";
+  return null;
+}
 
 /**
  * The shape, page identity, trace continuity and observation interval of a sync witness (revision 16, invariant I1); a problem string or
@@ -511,7 +540,7 @@ function changeProblem(a, b, where) {
 }
 
 /**
- * The operation of a `draft-request-sample/4` witness (WEB-09c revision 15; review 15 R2, design assessment DA15-R2a/R2b; revision 14's
+ * The operation of a `draft-request-sample/5` witness (WEB-09c revision 15; review 15 R2, design assessment DA15-R2a/R2b; revision 14's
  * DA-R14-A/B/C kept): `{ status, problem, selected, values }`. `selected` holds the absolute outbox trace positions of the send and the
  * answer, the request's index in `resources` and the sequence numbers of the dispatcher's claim, request, receipt call and receipt result.
  *
@@ -525,6 +554,8 @@ function changeProblem(a, b, where) {
  * row read through the bound service corroborates (`removed` ⇒ gone, otherwise `acknowledged`); a read failure or a contradiction is
  * invalid, never absence. The values are revision 13's: completion is evidence, not an endpoint. Revision 16 (`/4`; DA16-D1, I3/I4): the
  * dispatcher's request is to the `/commands` pathname, and every retained entry is that pathname and lies inside [t0, completion.at].
+ * Revision 17 (`/5`; DA17-RQ/BF): the dispatcher's call began no later than its entry started and returned no earlier than the entry's
+ * request was sent; both buffer snapshots are typed, below the buffer and contain their counts, and the buffer never shrank between them.
  */
 export function draftWitnessSelection(w) {
   if (
@@ -602,8 +633,28 @@ export function draftWitnessSelection(w) {
     return invalid(
       "the resource-timing buffer was full: requests may be missing",
     );
+  // Revision 17 (DA17-BF, invariants 4 and 5): both snapshots, each read's count within its own total, and one uninterrupted buffer.
+  if (w.resources.length > completion.resource_entries)
+    return invalid(
+      "the completion read retains more requests than the buffer held",
+    );
+  if (!isCount(timing.resource_entries))
+    return invalid(
+      "its timing read does not record the resource buffer's entries",
+    );
+  if (timing.resource_entries >= RESOURCE_BUFFER)
+    return invalid(
+      "the resource-timing buffer was full at the timing read: requests may be missing",
+    );
+  if (timing.requests > timing.resource_entries)
+    return invalid("its timing read saw more requests than the buffer held");
   if (timing.requests > w.resources.length)
     return invalid("its timing read saw requests the completion read lost");
+  const lifetime = bufferLifetimeProblem(
+    { total: timing.resource_entries, retained: timing.requests },
+    { total: completion.resource_entries, retained: w.resources.length },
+  );
+  if (lifetime) return invalid(lifetime);
   if (mark.waiting !== 0)
     return invalid("another draft was waiting when the sample began");
   if (
@@ -879,6 +930,18 @@ export function draftWitnessSelection(w) {
   if (r.name !== issued.path)
     return invalid(
       "the dispatcher's request was made to another path than its /commands entry",
+    );
+  // Revision 17 (DA17-RQ, invariant 2): the entry is causally possible for the dispatcher's one observed call. The observer records the
+  // call's begin before it calls the stamped sender, so the call began no later than its entry started; its result is recorded once
+  // the sender returned, which needs at least the response headers, so no earlier than the entry's request was sent. Not required:
+  // `responseEnd <= request_end` (a generic fetch can return before its body ends; review 17).
+  if (!(issued.at <= r.startTime + RAW_CLOCK_ALLOWANCE_MS))
+    return invalid(
+      "the dispatcher's request began after its /commands entry started: the entry is not that call's",
+    );
+  if (!(r.requestStart <= answered.at + RAW_CLOCK_ALLOWANCE_MS))
+    return invalid(
+      "the dispatcher's request returned before its /commands entry's request was sent: the entry is not that call's",
     );
   return {
     status: "complete",

@@ -93,9 +93,14 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * `draft-request-sample/4` (the dispatcher's request and every retained entry the exact `/commands` pathname, every entry inside
  * [t0, completion.at]). Version 10's sync support accepted a read timed before its mark, absent observation times, a step end traced
  * before its tick and an entry to another path; version 10 evidence (no Air request was recorded under it) resolves incomplete and stays
- * history, unchanged.
+ * history, unchanged. Version 12 (WEB-09c revision 17, review 17 R17-REQUEST/R17-BUFFER, design assessment DA17-RQ/BF, invariants 2, 4
+ * and 5): the draft support is `draft-request-sample/5` (the dispatcher's observed call began no later than its selected entry started and
+ * returned no earlier than the entry's request was sent; both ResourceTiming snapshots typed, below the buffer and containing their counts,
+ * the buffer never shrinking between them). Sync support stays `sync-request-sample/3`. Version 11's draft support accepted a call that
+ * began after its entry ended and missing, zero or shrinking buffer totals; version 11 evidence (no Air request was recorded under it)
+ * resolves incomplete and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 11;
+export const CONTRACT_VERSION = 12;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [

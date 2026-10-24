@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  type BufferSnapshot,
+  bufferLifetimeProblem,
   COMMANDS_PATH,
   DRAFT_WITNESS_METHOD,
   draftWitnessSelection,
@@ -894,9 +896,10 @@ describe("P-4/P-10 sync `sync-request-sample/3`: the observation interval and th
     expect(SYNC_PATH).toBe(PATH);
     expect(apiUrl("/commands").pathname).toBe(COMMANDS_PATH);
     expect(new URL(SYNC).pathname).toBe(PATH);
+    // Revision 17 (adapted, version literal only): the draft method's successor is `/5`.
     expect([SYNC_WITNESS_METHOD, DRAFT_WITNESS_METHOD]).toEqual([
       "sync-request-sample/3",
-      "draft-request-sample/4",
+      "draft-request-sample/5",
     ]);
     // The page read stores exactly that pathname from a full URL with its query.
     resources = [{ name: SYNC, startTime: 1, requestStart: 2, responseEnd: 3 }];
@@ -2318,6 +2321,170 @@ describe("P-4 draft: one send, its answer, its request and its own completion pe
       }
     }
   });
+
+  // Revision 17 (review 17 R17-REQUEST/R17-BUFFER, design assessment DA17-BF/RQ, Q8/Q9): the writer's two ResourceTiming snapshots and the
+  // collector's first failure. The page's buffer holds unrelated entries too (an asset), so a total is never the request count.
+  const ASSET = "http://127.0.0.1:4100/assets/app.js";
+  const asset = (at: number) => ({
+    name: ASSET,
+    startTime: at,
+    requestStart: at,
+    responseEnd: at + 0.5,
+  });
+
+  it("Q8 (revision 17): each read takes its total and its /commands entries from ONE ResourceTiming read of the whole buffer; prepare clears it once, before the mark, and neither read clears it; an unrelated entry between the reads is counted by the completion read only", async () => {
+    enqueueWith((id, base) => [
+      act.claim(id, base + 4),
+      act.send(id, base + 9),
+      () => {
+        resources.push(asset(base + 9.5));
+        act.respond(id, {
+          startTime: base + 10,
+          requestStart: base + 11,
+          responseEnd: base + 19,
+        })();
+      },
+      act.answer(id, base + 20, base + 21),
+      () => {
+        resources.push(asset(base + 25));
+      },
+      act.receipt(id, base + 30),
+    ]);
+    harness.onBoundDraft = () => {
+      clock += 1;
+    };
+    resources = [asset(0)]; // a page entry from before the sample: the mark's clear removes it
+    clock = 1;
+    const c = await one();
+    expect(c.failure).toBeNull();
+    expect(clears).toBe(1);
+    const w = witness(c);
+    expect(w.timing).toMatchObject({ requests: 1, resource_entries: 2 });
+    expect(w.completion.resource_entries).toBe(3);
+    expect(w.resources).toEqual([
+      { name: PATH, startTime: 11, requestStart: 12, responseEnd: 20 },
+    ]);
+    expect(c.values).toEqual([
+      {
+        enqueue_ms: 1,
+        claim_ms: 8,
+        stamping_ms: 2,
+        request_ms: 8,
+        record_ms: 1,
+        total_ms: 21,
+      },
+    ]);
+    // The page functions themselves: one buffer read each, no clear.
+    const read = vi.mocked(performance.getEntriesByType);
+    resources = [
+      asset(1),
+      { name: COMMANDS, startTime: 11, requestStart: 12, responseEnd: 20 },
+      asset(2),
+    ];
+    const reads = read.mock.calls.length;
+    const timing = readDraftSample({ mark: w.mark, force: true });
+    expect(read.mock.calls.length - reads).toBe(1);
+    expect(timing).toMatchObject({ requests: 1, resource_entries: 3 });
+    resources.push(asset(3));
+    const closed = await closeDraftSample({
+      mark: w.mark,
+      local_id: w.local_id as string,
+    });
+    expect(read.mock.calls.length - reads).toBe(2);
+    expect(closed.completion.resource_entries).toBe(4);
+    expect(closed.resources.map((r) => r.name)).toEqual([PATH]);
+    expect(clears).toBe(1);
+  });
+
+  it("Q9 (revision 17): a call recorded after its entry started, or a buffer cleared and partly refilled between the reads (another collector's clear), stops the collection at that sample, as a warm-up or after a healthy one, with its witness kept, no value and nothing further enqueued", async () => {
+    /** The dispatcher's call begins at the send line (+9), half a millisecond after its entry started (+8.5). */
+    const lateBegin = (id: string, base: number) => [
+      act.claim(id, base + 4),
+      act.send(id, base + 9),
+      act.respond(id, {
+        startTime: base + 8.5,
+        requestStart: base + 9.5,
+        responseEnd: base + 19,
+      }),
+      act.answer(id, base + 20, base + 21),
+      act.receipt(id, base + 30),
+    ];
+    /** Two unrelated entries and the request at the timing read; then a clear and only the request back before the completion read. */
+    const refilled = (id: string, base: number) => {
+      const entry = {
+        name: COMMANDS,
+        startTime: base + 10,
+        requestStart: base + 11,
+        responseEnd: base + 19,
+      };
+      return [
+        act.claim(id, base + 4),
+        act.send(id, base + 9),
+        () => {
+          resources.push(asset(base + 9.2), asset(base + 9.4));
+          act.respond(id, entry)();
+        },
+        act.answer(id, base + 20, base + 21),
+        () => {
+          performance.clearResourceTimings();
+          resources.push({ ...entry });
+        },
+        act.receipt(id, base + 30),
+      ];
+    };
+    const BEGAN =
+      "the dispatcher's request began after its /commands entry started: the entry is not that call's";
+    const SHRANK =
+      "the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries";
+    for (const [label, bad, problem] of [
+      ["late begin", lateBegin, BEGAN],
+      ["cleared and refilled", refilled, SHRANK],
+    ] as const)
+      for (const warm of [true, false]) {
+        enqueues = 0;
+        clears = 0;
+        harness.rows = [];
+        let n = 0;
+        enqueueWith((id, base) => {
+          n += 1;
+          return (warm ? n === 1 : n === 2) ? bad(id, base) : healthy(id, base);
+        });
+        harness.onBoundDraft = () => {
+          clock += 1;
+        };
+        const c = await collectDraftSamples(driven(), {
+          ...OPT,
+          warmup: 1,
+          samples: 2,
+        });
+        const what = `${label}, ${warm ? "as the warm-up" : "after a healthy warm-up"}`;
+        expect(c.values, what).toEqual([]);
+        expect(c.samples, what).toEqual([]);
+        expect(c.failure, what).toMatchObject({
+          index: warm ? 0 : 1,
+          warmup: warm,
+          problem,
+        });
+        const kept = c.failure?.witness as DraftWitness;
+        expect(
+          kept.records.map((r) => r.event),
+          what,
+        ).toEqual([
+          "commit_begin",
+          "commit_end",
+          "request_begin",
+          "request_end",
+          "commit_begin",
+          "commit_end",
+        ]);
+        expect(draftWitnessSelection(kept), what).toMatchObject({
+          status: "invalid",
+          problem,
+        });
+        expect(enqueues, what).toBe(warm ? 1 : 2);
+        actions = [];
+      }
+  });
 });
 
 /**
@@ -2971,5 +3138,228 @@ describe("P-4 draft `draft-request-sample/3`: schema, pairing and the closed int
       status: "complete",
       values: { ...VALUES, record_ms: 0, total_ms: 19 },
     });
+  });
+
+  // Revision 17 (review 17 R17-REQUEST/R17-BUFFER, design assessment DA17-RQ/BF/HR, Q1-Q7; `draft-request-sample/5`). The healthy
+  // witness's call begins at 109 and returns at 119.1; its entry starts at 110, sends its request at 111 and ends at 119; both reads count
+  // one entry, the request. Every expected problem and value is written here.
+  const BEGAN =
+    "the dispatcher's request began after its /commands entry started: the entry is not that call's";
+  const RETURNED =
+    "the dispatcher's request returned before its /commands entry's request was sent: the entry is not that call's";
+
+  it("cases (revision 17, R17-REQUEST, DA17-RQ Q1/Q2): a call that began after its entry ended, after it started (by much, by half the trace rounding, by a microsecond), or that returned before the entry's request was sent (by much, or a microsecond) is invalid with its own reason, the trace and the other relations unchanged", () => {
+    // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+    const cases: Array<[string, (w: any) => void, string]> = [
+      // Review 17: begun 0.05 ms after the entry's response ended (the records stay ordered, the call still after its send line).
+      ["begun after the entry ended", (w) => (w.records[2].at = 119.05), BEGAN],
+      [
+        "begun 5 ms after the entry started",
+        (w) => (w.records[2].at = 115),
+        BEGAN,
+      ],
+      [
+        "begun within the trace rounding after the entry started",
+        (w) => (w.records[2].at = 110.5),
+        BEGAN,
+      ],
+      [
+        "begun 0.001 ms after the entry started",
+        (w) => (w.records[2].at = 110.001),
+        BEGAN,
+      ],
+      [
+        "returned before the entry started",
+        (w) => (w.records[3].at = 109.5),
+        RETURNED,
+      ],
+      [
+        "returned within the trace rounding before the entry's request",
+        (w) => (w.records[3].at = 110.5),
+        RETURNED,
+      ],
+      [
+        "returned 0.001 ms before the entry's request",
+        (w) => (w.records[3].at = 110.999),
+        RETURNED,
+      ],
+    ];
+    for (const [label, edit, problem] of cases)
+      expect(judge(edit), label).toEqual({
+        status: "invalid",
+        problem,
+        selected: null,
+        values: null,
+      });
+  });
+
+  it("controls (revision 17, DA17-RQ/HR Q3): a call beginning exactly at its entry's start, returning exactly when its request was sent (the generic headers-return boundary), both at once with the entry's start equal to its request, and a return before the body ended are complete with their hand-computed values", () => {
+    for (const [label, edit] of [
+      ["begin at the entry's start", (w) => (w.records[2].at = 110)],
+      ["return at the entry's request", (w) => (w.records[3].at = 111)],
+      [
+        "both ties, start = request",
+        (w) => {
+          w.resources[0].startTime = 111;
+          w.records[2].at = 111;
+          w.records[3].at = 111;
+        },
+      ],
+      ["return before the body ended", (w) => (w.records[3].at = 118.5)],
+      // biome-ignore lint/suspicious/noExplicitAny: see above
+    ] as Array<[string, (w: any) => void]>)
+      expect(judge(edit), label).toMatchObject({
+        status: "complete",
+        problem: null,
+        values: VALUES,
+      });
+  });
+
+  it("cases (revision 17, R17-BUFFER, DA17-BF Q4-Q7): either total or the counted requests missing, null, a string, fractional or negative; a count above its own read's total; either total at the buffer's 250; a total that shrank are invalid with their own reason", () => {
+    const NOT_RECORDED =
+      "the witness does not record the resource buffer's entries";
+    const TIMING_NOT_RECORDED =
+      "its timing read does not record the resource buffer's entries";
+    // biome-ignore lint/suspicious/noExplicitAny: a hand-written JSON witness, edited freely by each case
+    const cases: Array<[string, (w: any) => void, string]> = [];
+    for (const [what, bad] of [
+      ["missing", undefined],
+      ["null", null],
+      ["a string", "1"],
+      ["fractional", 1.5],
+      ["negative", -1],
+    ] as Array<[string, unknown]>) {
+      cases.push(
+        [
+          `timing total ${what}`,
+          (w) => (w.timing.resource_entries = bad),
+          TIMING_NOT_RECORDED,
+        ],
+        [
+          `completion total ${what}`,
+          (w) => (w.completion.resource_entries = bad),
+          NOT_RECORDED,
+        ],
+        [
+          `timing requests ${what}`,
+          (w) => (w.timing.requests = bad),
+          NOT_RECORDED,
+        ],
+      );
+    }
+    cases.push(
+      [
+        "timing total 0 with its 1 request",
+        (w) => (w.timing.resource_entries = 0),
+        "its timing read saw more requests than the buffer held",
+      ],
+      [
+        "completion total 0 with its 1 retained entry",
+        (w) => (w.completion.resource_entries = 0),
+        "the completion read retains more requests than the buffer held",
+      ],
+      [
+        "both totals 0",
+        (w) => {
+          w.timing.resource_entries = 0;
+          w.completion.resource_entries = 0;
+        },
+        "the completion read retains more requests than the buffer held",
+      ],
+      [
+        "timing total 250, completion 1",
+        (w) => (w.timing.resource_entries = 250),
+        "the resource-timing buffer was full at the timing read: requests may be missing",
+      ],
+      [
+        "both totals 251",
+        (w) => {
+          w.timing.resource_entries = 251;
+          w.completion.resource_entries = 251;
+        },
+        "the resource-timing buffer was full: requests may be missing",
+      ],
+      [
+        "timing total 1, completion 250",
+        (w) => (w.completion.resource_entries = 250),
+        "the resource-timing buffer was full: requests may be missing",
+      ],
+      [
+        "249 at the timing read, 1 at the completion read",
+        (w) => (w.timing.resource_entries = 249),
+        "the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries",
+      ],
+      [
+        "2 then 1",
+        (w) => (w.timing.resource_entries = 2),
+        "the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries",
+      ],
+      // Conservation's own reason, on a witness one-request selection refuses anyway (its second entry): the timing read's other entry
+      // left the buffer while the request count grew, totals equal.
+      [
+        "an unrelated entry replaced by a second request (2/1 then 2/2)",
+        (w) => {
+          w.timing.resource_entries = 2;
+          w.completion.resource_entries = 2;
+          w.resources.push({
+            name: PATH,
+            startTime: 110.5,
+            requestStart: 111,
+            responseEnd: 118,
+          });
+        },
+        "entries other than the requests left the resource-timing buffer between the timing and completion reads",
+      ],
+    );
+    for (const [label, edit, problem] of cases) {
+      let s: ReturnType<typeof judge> | undefined;
+      expect(() => {
+        s = judge(edit);
+      }, label).not.toThrow();
+      expect(s, label).toEqual({
+        status: "invalid",
+        problem,
+        selected: null,
+        values: null,
+      });
+    }
+  });
+
+  it("controls (revision 17, DA17-BF Q6/Q7): totals 249 at both reads, 1 then 2 (an unrelated entry between the reads), 1 then 249, and 248 then 249 with the request and an unrelated entry are complete with their hand-computed values", () => {
+    for (const [label, timing, completion] of [
+      ["249 and 249", 249, 249],
+      ["1 then 2", 1, 2],
+      ["1 then 249", 1, 249],
+      ["248 then 249", 248, 249],
+    ] as Array<[string, number, number]>)
+      expect(
+        judge((w) => {
+          w.timing.resource_entries = timing;
+          w.completion.resource_entries = completion;
+        }),
+        label,
+      ).toMatchObject({ status: "complete", problem: null, values: VALUES });
+  });
+
+  it("bufferLifetimeProblem itself (revision 17, DA17-BF Q7): equal or growing totals whose other entries never leave are one buffer; a total that shrank, or other entries that left while the requests grew more than the total, are not", () => {
+    const shrank =
+      "the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries";
+    const left =
+      "entries other than the requests left the resource-timing buffer between the timing and completion reads";
+    for (const [earlier, later, problem] of [
+      [{ total: 1, retained: 1 }, { total: 1, retained: 1 }, null],
+      [{ total: 0, retained: 0 }, { total: 1, retained: 1 }, null],
+      [{ total: 1, retained: 0 }, { total: 2, retained: 1 }, null],
+      [{ total: 1, retained: 1 }, { total: 3, retained: 1 }, null],
+      [{ total: 249, retained: 1 }, { total: 249, retained: 1 }, null],
+      [{ total: 249, retained: 1 }, { total: 1, retained: 1 }, shrank],
+      [{ total: 2, retained: 0 }, { total: 1, retained: 0 }, shrank],
+      [{ total: 2, retained: 1 }, { total: 2, retained: 2 }, left],
+      [{ total: 2, retained: 1 }, { total: 3, retained: 3 }, left],
+    ] as Array<[BufferSnapshot, BufferSnapshot, string | null]>)
+      expect(
+        bufferLifetimeProblem(earlier, later),
+        JSON.stringify([earlier, later]),
+      ).toBe(problem);
   });
 });

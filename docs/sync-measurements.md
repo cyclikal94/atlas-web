@@ -144,6 +144,13 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > whole witness translated earlier in time and a draft whose request, result and entry agree on another endpoint. Revision 16 closes each sync sample's
 > observation interval and requires the exact endpoint pathname for both request kinds (`sync-request-sample/3`, `draft-request-sample/4`, contract
 > version 11, below). No measurement was taken under version 10, and no figure here changes.
+>
+> **Status after review 17 (revision 17, 22 October 2026).** Review 17 found two further draft omissions: a selected `/commands` entry that had finished
+> before the dispatcher's observed call began still completed its sample, and the timing read's buffer total was never checked (missing, zero below its one
+> counted request, or full while the later total was 1), nor the completion read's total against its retained entry. Each still supported the desktop
+> decision in an otherwise complete synthetic package (all three engines). Revision 17 binds the entry to its call causally and validates both buffer
+> snapshots as one uninterrupted buffer (`draft-request-sample/5`, contract version 12, below). No measurement was taken under version 11, and no figure
+> here changes.
 
 ## Read this first
 
@@ -652,6 +659,21 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   refuses such a mark too. Every metric definition, count, workload, throttle and timer is unchanged; version-10 support resolves incomplete and stays
   history. The synthetic programme's sync reads now close after the last line they retain (a labelled harness correction: a later step's tick previously
   followed its read).
+* **A draft request is causally its call's, and both buffer snapshots are one buffer (revision 17; contract version 12).** The draft witness is
+  `draft-request-sample/5`. The fixture observer records the dispatcher's `request_begin` before it calls the stamped sender, so the call must begin no later
+  than its selected entry's `startTime`; it records `request_end` once the stamped sender returned, which needs at least the response headers, so the call
+  must return no earlier than the entry's `requestStart`. Both are raw page-clock comparisons with no allowance (`RAW_CLOCK_ALLOWANCE_MS = 0`) and ties valid:
+  the 1 ms trace rounding is not a timestamp tolerance. The rule does not require the call to return after the entry's `responseEnd`: a generic fetch may
+  return with its headers. The production stamped sender (`fetchFor`) in fact returns a fully read response, which the native control shows (a body held
+  at the page's fetch boundary keeps `request_end` unrecorded until it is released); whether the contract should also encode that stronger ordering is left
+  to independent review. Each ResourceTiming snapshot must be credible on its own: the timing read's total and its counted requests, and the completion
+  read's total, are integers below the 250-entry buffer, the timing read's request count is within its total and the completion read's retained entries
+  within its total. Nothing clears the buffer between the two reads (the sample's one clear precedes its mark), so the total must not shrink and entries
+  other than the requests must not leave (`bufferLifetimeProblem`); in a complete witness both reads hold exactly the one request, so the second relation
+  adds nothing to the first there. Native qualification (Chromium, Firefox, macOS WebKit; 100 healthy samples each, not cross-origin isolated): Chromium
+  clamps to 0.1 ms and Firefox and WebKit to 1 ms, so a call and its entry often share a millisecond there (ties); no inversion has been observed. Every
+  metric definition, sample count, workload, throttle and timer is unchanged; sync support stays `sync-request-sample/3`; version-11 support resolves
+  incomplete and stays history.
 * **Device results are schema 4 (revision 12; schema 3 below is its predecessor).** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
   admitted run's figures must equal; W5 and killed attempts carry none. Schema 4 adds the run's own observation (made by the page with the same cold
