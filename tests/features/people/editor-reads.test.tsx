@@ -13,6 +13,7 @@ import {
   EDITOR_FIELD_UNREAD,
   EDITOR_PERSON_UNREAD,
   FIELD_NOT_ON_DEVICE,
+  PUBLISHED_NOT_SAVED,
   RESTORED_DRAFT,
 } from "../../../src/features/people/copy";
 import { forgetAllPeopleMemory } from "../../../src/features/people/memory";
@@ -489,6 +490,34 @@ describe("DA9-08: one commit publishing the field, its reads delivered in either
       expect(seen).not.toContain("editor-not-on-device");
       expect(seen).not.toContain("editor-read-failed");
       expect(w.built).toHaveLength(1);
+      // Review 10, finding 1 (DA9-08's subsequent save): the kept input is reviewed on the published field and saved as its update.
+      await waitFor(() =>
+        expect(
+          again.querySelector("[data-review-published]")?.textContent,
+        ).toBe(PUBLISHED_NOT_SAVED),
+      );
+      const mine = await waitFor(() => {
+        const b = within(again).getByRole("button", {
+          name: "Save mine on the current version",
+        });
+        expect(b).toBeEnabled();
+        return b;
+      });
+      fireEvent.click(mine);
+      await waitFor(() => expect(w.built).toHaveLength(2));
+      expect(
+        ((w.built[1]?.command ?? {}) as { command: Record<string, unknown> })
+          .command,
+      ).toEqual({
+        kind: "put_field",
+        id,
+        parent_id: P,
+        expected_version: w.cache.get(id)?.version,
+        expected_policy_version: 1,
+        label: "Queued",
+        value: { kind: "text", text: "Typed over the create" },
+      });
+      await closed();
     });
 
   test("control: the create discarded (no publication): the field is said not to be here", async () => {

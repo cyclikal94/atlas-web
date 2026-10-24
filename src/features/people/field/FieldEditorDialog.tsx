@@ -399,14 +399,26 @@ interface Retained {
   newFieldId: string;
   /** The audience choice was changed by the person (an existing field's choice otherwise follows its policy). */
   touched: boolean;
-  /** What an edit of an existing field began on (finding 1); kept with the draft, so a remount restores the same binding. */
-  snapshot: EditSnapshot | null;
   /**
-   * The body of the unsent CREATE an edit of a projected field began on (its `command_digest`; review 2, finding 3): the edit in place
-   * replaces only exactly that body. null for any other edit.
+   * What an edit of an existing field is bound to (finding 1); kept with the draft, so a remount restores the same binding. null for a new
+   * field, and for an edit that began on an unsent create until the person reviews the published field and binds to it (review 10).
    */
-  createDigest: string | null;
+  snapshot: EditSnapshot | null;
+  /** What the edit BEGAN on; fixed for the session (review 10, finding 1): a create published meanwhile does not change it. */
+  origin: EditOrigin;
 }
+
+/**
+ * Where an edit began (review 10, finding 1): a new field; a published field (bound at once, `snapshot`); or a field's unsent CREATE, which
+ * the edit replaces in place only while it is stored with exactly the body the edit read (its `command_digest`, review 2, finding 3). Once
+ * that create is published the edit has NO binding to the field yet: no version or audience was ever reviewed for it (unknown is not
+ * unchanged). The person sees the field and who can see it as they are now and chooses "Save mine on the current version", which binds the
+ * edit; nothing binds or saves because the create was published.
+ */
+type EditOrigin =
+  | { kind: "new" }
+  | { kind: "field" }
+  | { kind: "create"; localId: string | null; digest: string | null };
 
 type Outcome =
   | null
@@ -458,6 +470,18 @@ function Editor({
         : existing !== null
           ? { ...newFieldForm(), name: existing.label }
           : newFieldForm();
+    const origin: EditOrigin =
+      field === null
+        ? { kind: "new" }
+        : field.projected
+          ? {
+              kind: "create",
+              localId: field.createDraft,
+              digest:
+                drafts.find((d) => d.local_id === field.createDraft)
+                  ?.command_digest ?? null,
+            }
+          : { kind: "field" };
     return {
       retained: {
         session: env.newId(),
@@ -465,17 +489,15 @@ function Editor({
         newFieldId: env.newId(),
         touched: false,
         snapshot:
-          existing === null || field?.projected
+          existing === null || origin.kind !== "field"
             ? null
             : snapshotOf(existing, drafts, field?.latest?.localId ?? null),
-        createDigest: field?.projected
-          ? (drafts.find((d) => d.local_id === field.createDraft)
-              ?.command_digest ?? null)
-          : null,
+        origin,
       },
       restored: false,
     };
   });
+  const origin = initial.retained.origin;
   // The outstanding saves as they are read NOW (a save decides on the latest read, not the one of the render that started it).
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
@@ -509,7 +531,7 @@ function Editor({
       newFieldId: initial.retained.newFieldId,
       touched,
       snapshot,
-      createDigest: initial.retained.createDigest,
+      origin,
     } satisfies Retained);
   }, [
     env,
@@ -519,7 +541,7 @@ function Editor({
     touched,
     snapshot,
     initial.retained.newFieldId,
-    initial.retained.createDigest,
+    origin,
   ]);
   // Only this session ends (never a later session's under the same key), and only by the view shown now: a handler of an editor that was
   // replaced (another field's route, the reads read again) ends nothing and navigates nowhere (review 9, finding 1).
@@ -662,6 +684,36 @@ function Editor({
     !projected &&
     snapshot !== null &&
     (!stillBound(snapshot, existing) || policyMoved);
+  // ---- the edit began on the field's unsent create, which is published now (review 10, finding 1) ------------------------------
+  // It has no binding to the published field: the person reviews the field and who can see it as they are NOW, and only "Save mine on the
+  // current version" binds the edit (never a guessed version, never the audience it was created with, never on its own).
+  const needsReview =
+    origin.kind === "create" &&
+    existing !== null &&
+    !projected &&
+    snapshot === null &&
+    canEdit;
+  /** Why the published field's current audience is not shown (it must be, before the edit is bound to it), or null when it is. */
+  const reviewAudienceReason =
+    nowAudience !== null
+      ? null
+      : livePolicyVersion === null ||
+          (known !== undefined && known.version > livePolicyVersion)
+        ? copy.WAIT_FOR_SYNC_FIELD
+        : policyLoad === "forbidden"
+          ? copy.PUBLISHED_AUDIENCE_OWNER_ONLY
+          : !env.online
+            ? copy.CONFLICT_NEEDS_AUDIENCE
+            : policyLoad === "failed"
+              ? copy.AUDIENCE_LOAD_FAILED
+              : copy.AUDIENCE_LOADING;
+  // Said once when it happens while the editor is open (the Save button's reason changes under the person's hands).
+  const reviewSaid = useRef(needsReview);
+  useEffect(() => {
+    if (needsReview && !reviewSaid.current)
+      announcer.announce(copy.PUBLISHED_TITLE, "polite");
+    reviewSaid.current = needsReview;
+  }, [needsReview, announcer]);
 
   // ---- a version conflict of this field's draft --------------------------------------------------------------------------------
   const conflict =
@@ -850,10 +902,14 @@ function Editor({
       if (draft === undefined || request === null)
         return fail(copy.WAIT_FOR_SYNC_FIELD);
       // Only the create body the edit began on is replaced (another page's edit of it, or of its review, is never overwritten).
-      const reviewed = initial.retained.createDigest;
-      if (reviewed === null || draft.command_digest !== reviewed)
+      const reviewed = origin.kind === "create" ? origin.digest : null;
+      if (
+        reviewed === null ||
+        draft.local_id !== (origin.kind === "create" ? origin.localId : null) ||
+        draft.command_digest !== reviewed
+      )
         return fail(copy.CREATE_CHANGED);
-      let changed = false;
+      let refusal = null as string | null;
       const outcome = await save(async (outbox) => {
         const edited = await outbox.editQueued(draft.local_id, {
           ...request,
@@ -862,18 +918,20 @@ function Editor({
             stored.status === "queued" &&
             stored.command_digest === reviewed,
         });
-        changed =
-          edited.kind === "refused" && edited.reason === "draft_changed";
+        if (edited.kind === "refused") refusal = edited.reason;
         return edited;
       });
-      if (changed) return fail(copy.CREATE_CHANGED);
+      // Never a new create instead (review 10's design assessment, DA10-04): the input stays; a create being sent is published
+      // eventually, and then the edit is reviewed on the field.
+      if (refusal === "draft_changed") return fail(copy.CREATE_CHANGED);
+      if (refusal === "not_queued") return fail(copy.CREATE_SENDING);
       if (!outcome.ok) return fail(outcome.message ?? null);
       return succeeded(copy.SAVED_NOT_SENT, ticket);
     }
-    // ---- update: bound to what the edit began on (finding 1) ----
+    // ---- update: bound to what the edit began on (finding 1), or, after its create was published, to what the person reviewed ----
     const bound = snapshot;
-    if (bound === null || bound.policyVersion === null)
-      return fail(copy.WAIT_FOR_SYNC_FIELD);
+    if (bound === null) return fail(copy.PUBLISHED_REVIEW_FIRST);
+    if (bound.policyVersion === null) return fail(copy.WAIT_FOR_SYNC_FIELD);
     if (
       !stillBound(bound, existing) ||
       (known !== undefined && known.version !== bound.policyVersion)
@@ -1065,25 +1123,42 @@ function Editor({
     livePolicyVersion !== null &&
     livePolicyVersion !== snapshot.policyVersion;
   /**
-   * "Save mine on the current version" after a change since the edit began: the person's explicit act, after seeing the current value and
-   * (when it changed) the current audience, re-binds the edit to the field as it is now; the save then runs on that binding.
+   * "Save mine on the current version" after a change since the edit began, or after the create it began on was published (review 10):
+   * the person's explicit act, after seeing the current value and (when it changed, or was never reviewed) the current audience, binds the
+   * edit to the field as THIS view shows it; the save then runs on that binding, once, on the render that holds it. The decision is the
+   * one captured at the click (the binding and the input's revision): when either is no longer the view's by then (a save's report
+   * re-bound it, the input changed), nothing is saved by it. It is the view's own state, so it never outlives the view.
    */
-  const [resubmit, setResubmit] = useState(false);
+  const [resubmit, setResubmit] = useState<{
+    binding: EditSnapshot;
+    revision: number;
+  } | null>(null);
   const rebind = () => {
-    if (existing === null) return;
-    setSnapshot(snapshotOf(existing, drafts, field?.latest?.localId ?? null));
+    if (!shown() || existing === null) return;
+    const binding = snapshotOf(
+      existing,
+      drafts,
+      field?.latest?.localId ?? null,
+    );
+    setSnapshot(binding);
     setOutcome(null);
-    setResubmit(true);
+    setResubmit({ binding, revision: state.revision });
   };
   // biome-ignore lint/correctness/useExhaustiveDependencies: runs the save once, on the render that holds the new binding
   useEffect(() => {
-    if (!resubmit) return;
-    setResubmit(false);
+    if (resubmit === null) return;
+    setResubmit(null);
+    if (
+      resubmit.binding !== snapshot ||
+      resubmit.revision !== stateRef.current.revision
+    )
+      return;
     void submit();
   }, [resubmit]);
-  /** The current audience must be known before an edit is re-bound to a changed one (offline it cannot be checked). */
-  const rebindReason =
-    policyChangedSince && nowAudience === null
+  /** The current audience must be known before an edit is re-bound to a changed one, or bound to a published one (review 10). */
+  const rebindReason = needsReview
+    ? reviewAudienceReason
+    : policyChangedSince && nowAudience === null
       ? copy.CONFLICT_NEEDS_AUDIENCE
       : null;
 
@@ -1148,9 +1223,11 @@ function Editor({
       ? copy.SAVING
       : isNew && state.audience === "defaults" && defaults.status === "loading"
         ? copy.DEFAULTS_LOADING_REASON
-        : !isNew && !projected && snapshot?.policyVersion == null
-          ? copy.WAIT_FOR_SYNC_FIELD
-          : null;
+        : needsReview
+          ? copy.PUBLISHED_REVIEW_FIRST
+          : !isNew && !projected && snapshot?.policyVersion == null
+            ? copy.WAIT_FOR_SYNC_FIELD
+            : null;
 
   return (
     <Dialog
@@ -1277,6 +1354,23 @@ function Editor({
                 if (conflicted !== null) await saveConflicted(conflicted);
               }}
             />
+          ) : needsReview && existing !== null ? (
+            <ReviewPanel
+              title={copy.PUBLISHED_TITLE}
+              note={copy.PUBLISHED_NOT_SAVED}
+              current={existing}
+              audienceNow={nowAudience ?? false}
+              audienceUnknown={copy.PUBLISHED_AUDIENCE_UNKNOWN}
+              mine={(() => {
+                const ready = applicable(state);
+                return ready.ok
+                  ? { label: ready.label, value: ready.value }
+                  : null;
+              })()}
+              saveReason={rebindReason}
+              onDiscard={async () => close()}
+              onSaveMine={async () => rebind()}
+            />
           ) : (unbound || outcome?.kind === "stale") && existing !== null ? (
             <ReviewPanel
               title={copy.STALE_TITLE}
@@ -1360,7 +1454,7 @@ function Editor({
             <AudienceSection
               env={env}
               isNew={isNew}
-              projected={projected}
+              projected={projected || needsReview}
               audience={audience}
               current={current}
               currentChoice={currentChoice}
@@ -1576,8 +1670,10 @@ function OfflineChoice({
  */
 function ReviewPanel({
   title,
+  note,
   current,
   audienceNow,
+  audienceUnknown = copy.CONFLICT_AUDIENCE_UNKNOWN,
   mine,
   saveReason,
   refused = false,
@@ -1585,9 +1681,13 @@ function ReviewPanel({
   onSaveMine,
 }: {
   title: string;
+  /** What the review is for, when the title alone doesn't say it (a published create's edit, review 10). */
+  note?: string;
   current: CacheRow;
-  /** The current audience's label; `false`: it changed and is not known here; null: unchanged (nothing to say). */
+  /** The current audience's label; `false`: it changed (or was never reviewed) and is not known here; null: unchanged (nothing to say). */
   audienceNow: string | false | null;
+  /** What `audienceNow: false` says. */
+  audienceUnknown?: string;
   mine: { label: string; value: FieldValue } | null;
   saveReason: string | null;
   /** A save was just refused because of this change: said, so a refused save is never silent. */
@@ -1602,6 +1702,11 @@ function ReviewPanel({
       className="flex flex-col gap-2 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
     >
       <h3 className="text-[14px] font-medium text-ink-1">{title}</h3>
+      {note === undefined ? null : (
+        <p className="text-[12.5px] text-ink-1" data-review-published="">
+          {note}
+        </p>
+      )}
       {refused ? (
         <p className="text-[12.5px] text-ink-1" data-review-refused="">
           {copy.STALE_NOT_SAVED}
@@ -1614,7 +1719,7 @@ function ReviewPanel({
       {audienceNow === null ? null : (
         <p className="text-[12.5px] text-ink-1" data-review-audience="">
           {audienceNow === false
-            ? copy.CONFLICT_AUDIENCE_UNKNOWN
+            ? audienceUnknown
             : copy.CONFLICT_AUDIENCE_NOW(audienceNow)}
         </p>
       )}

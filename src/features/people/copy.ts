@@ -397,6 +397,17 @@ export const STALE_NOT_SAVED =
 export const CREATE_CHANGED =
   "This field was changed in another window since you opened it. Close it and open it again to see the change; nothing was saved."; // PROVISIONAL (review 2, finding 3)
 export const STALE_TITLE = "This field changed since you opened it"; // PROVISIONAL (finding 1)
+export const PUBLISHED_TITLE = "This field has finished syncing"; // PROVISIONAL (review 10, finding 1)
+export const PUBLISHED_NOT_SAVED =
+  "Your change isn't saved yet. Check the field as it is now, then save yours on it or discard it."; // PROVISIONAL (review 10, finding 1)
+export const PUBLISHED_REVIEW_FIRST =
+  "Check the field as it is now before saving your change"; // PROVISIONAL (review 10, finding 1)
+export const PUBLISHED_AUDIENCE_UNKNOWN =
+  "Who can see it now isn't known on this device yet."; // PROVISIONAL (review 10, finding 1)
+export const PUBLISHED_AUDIENCE_OWNER_ONLY =
+  "Only the field's owner can check who can see it, so yours can't be saved on it here"; // PROVISIONAL (review 10, finding 1)
+export const CREATE_SENDING =
+  "This field is being sent. Your change is kept: save it once the field has finished syncing."; // PROVISIONAL (review 10, finding 1)
 export const STALE_RENAME =
   "This person changed since you started. Review the name, then save again."; // PROVISIONAL
 export const SAVE_MINE = "Save mine on the current version";

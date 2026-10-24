@@ -17770,8 +17770,9 @@ export const UNIT = [
       sub(
         sub(
           t,
-          "      if (reviewed === null || draft.command_digest !== reviewed)",
-          "      if (reviewed === null)",
+          // Revision 10 (review 10, finding 1): the comparison is the last of the pre-check's three (the origin's local id is the second).
+          "        draft.command_digest !== reviewed\n      )\n",
+          "        false\n      )\n",
         ),
         "            stored.command_digest === reviewed,",
         "            true,",
@@ -21494,6 +21495,113 @@ export const UNIT = [
         "  return (\n    <OutstandingChain key={reading}>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
       ),
   },
+  {
+    id: "MU-2373",
+    title:
+      "WEB-11a R10 F1: an edit begun on an unsent create has no review once the create is published (Save waits for a sync that has happened)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: [
+      "tests/features/people/editor-publication.test.tsx",
+      "tests/features/people/editor-reads.test.tsx",
+    ],
+    expect:
+      /DA10-01: .*reviewed on the published field|DA9-08: .*delivered first/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const needsReview =\n    origin.kind === "create" &&\n',
+        "  const needsReview =\n    (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2374",
+    title:
+      "WEB-11a R10 F1: an unknown audience is taken as unchanged: the published field's edit is bound without its current audience having been read",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-03: .*withheld/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const reviewAudienceReason =\n    nowAudience !== null\n",
+        "  const reviewAudienceReason =\n    (true as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2375",
+    title:
+      "WEB-11a R10 F1: the edit is bound (and saved) by itself when its create is published, without the person's review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-01: .* while-open:|DA10-03: .*withheld/,
+    patch: (t) =>
+      sub(
+        t,
+        '      announcer.announce(copy.PUBLISHED_TITLE, "polite");\n',
+        "      rebind();\n",
+      ),
+  },
+  {
+    id: "MU-2376",
+    title:
+      "WEB-11a R10 F1 (DA10-04): an unsent create is edited in place when it is not the create the edit began on (another create of the same field replaced it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-04: .*replaced the one the edit began on/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '        draft.local_id !== (origin.kind === "create" ? origin.localId : null) ||\n',
+          "",
+        ),
+        '            stored.local_id === draft.local_id &&\n            stored.status === "queued" &&\n            stored.command_digest === reviewed,',
+        '            stored.status === "queued" &&\n            stored.command_digest === reviewed,',
+      ),
+  },
+  {
+    id: "MU-2377",
+    title:
+      "WEB-11a R10 F1 (DA10-04): a create being sent is reported as a storage failure (Try again), not as being sent with the input kept",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-04: .*being sent/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (refusal === "not_queued") return fail(copy.CREATE_SENDING);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2378",
+    title:
+      "WEB-11a R10 F1 (DA10-07): the edit's origin is not kept with its input: a remount after the create was published takes the edit for one of the published field",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect: /DA10-01: .* (retained-remount|while-away):/,
+    patch: (t) =>
+      sub(
+        t,
+        "        retained: { ...kept, session: sessionOf(kept) ?? env.newId() },\n",
+        '        retained: {\n          ...kept,\n          origin: { kind: "field" },\n          session: sessionOf(kept) ?? env.newId(),\n        },\n',
+      ),
+  },
+  {
+    id: "MU-2379",
+    title:
+      "WEB-11a R10 F1 (DA10-03): the published field's edit is bound to the policy version the create made (a guessed 1), not to the one reviewed",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-publication.test.tsx"],
+    expect:
+      /DA10-03: .*(shared since it was created|NEWER than the cached field)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setSnapshot(binding);\n    setOutcome(null);\n    setResubmit({ binding, revision: state.revision });\n",
+        "    const guessed = { ...binding, policyVersion: 1 };\n    setSnapshot(guessed);\n    setOutcome(null);\n    setResubmit({ binding: guessed, revision: state.revision });\n",
+      ),
+  },
 ];
 
 /**
@@ -24959,6 +25067,38 @@ export const ENGINE = [
         ),
         '                confirmation === "absent" || confirmation === "failed" ? (\n',
         '                confirmation === "absent" ? (\n',
+      ),
+  },
+  {
+    id: "MU-2380",
+    title:
+      "WEB-11a R10 F1: (REAL ENGINE) an edit begun on an unsent create has no review once the create is published: Save waits for a sync that has happened",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P37:",
+    expect:
+      /E-P37: .*while (open|away): the kept input is reviewed on the published field/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const needsReview =\n    origin.kind === "create" &&\n',
+        "  const needsReview =\n    (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2381",
+    title:
+      "WEB-11a R10 F1: (REAL ENGINE) the edit is bound and saved by itself when its create is published, without the person's review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    spec: "tests/e2e/fixture.people.spec.ts",
+    grep: "E-P37:",
+    expect:
+      /E-P37: .*while open: the kept input is reviewed on the published field/,
+    patch: (t) =>
+      sub(
+        t,
+        '      announcer.announce(copy.PUBLISHED_TITLE, "polite");\n',
+        "      rebind();\n",
       ),
   },
 ];

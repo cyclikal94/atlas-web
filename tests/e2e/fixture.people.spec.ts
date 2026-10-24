@@ -3126,3 +3126,173 @@ test.describe("E-P36: the field editor's target and its failed reads (review 9, 
     expect(net.commands).toHaveLength(0);
   });
 });
+
+test.describe("E-P37: an edit of an unsent create after the create is published (review 10, finding 1)", () => {
+  /** The account's draft bodies in real IndexedDB, by local id. */
+  const bodiesOf = async (page: Page) =>
+    (await page.evaluate(
+      (a) => window.__atlasData?.rows(a, "draft_commands"),
+      ME,
+    )) as Array<{
+      local_id: string;
+      command: { command?: Record<string, unknown> };
+    }>;
+  /** Creates a private field offline (an unsent create), and serves its audience. */
+  async function queued(context: Parameters<typeof setup>[0]): Promise<{
+    page: Page;
+    net: Awaited<ReturnType<typeof setup>>["net"];
+    id: string;
+  }> {
+    const { page, net, served } = await setup(
+      context,
+      `/people/${P}/fields/new`,
+      [personP(P, "Ada")],
+    );
+    await startOutbox(page, ME);
+    await connectivity(context, page, false);
+    const d = page.getByRole("dialog", { name: "Add a field" });
+    await d.getByRole("textbox", { name: "Name", exact: true }).fill("Queued");
+    await d
+      .getByRole("textbox", { name: "Value", exact: true })
+      .fill("First value");
+    await d.getByRole("radio", { name: "Only you", exact: true }).click();
+    await d.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(d).toBeHidden();
+    const [draft] = await draftsOf(page);
+    expect(draft?.status).toBe("queued");
+    const id = (
+      draft?.target_resource_ids as string[] | undefined
+    )?.[0] as string;
+    served.policies.set(id, { version: 1, policy: PRIVATE });
+    return { page, net, id };
+  }
+  /** Opens the queued field's editor and types the second value (the editor of an unsent create: no Archive). */
+  async function typed(page: Page, id: string) {
+    await navigateInApp(page, `/people/${P}/fields/${id}`);
+    const d = page.getByRole("dialog", { name: "Edit Queued" });
+    await expect(d).toBeVisible();
+    await expect(
+      d.getByRole("button", { name: "Archive", exact: true }),
+    ).toHaveCount(0);
+    const box = d.getByRole("textbox", { name: "Value", exact: true });
+    await box.fill("Second value");
+    await expect(box).toHaveValue("Second value");
+    return d;
+  }
+  /** Sends the create, observes its acknowledgement, and publishes the field through the fixture leader (one real page application). */
+  async function sendAndPublish(
+    context: Parameters<typeof setup>[0],
+    page: Page,
+    net: Awaited<ReturnType<typeof setup>>["net"],
+    id: string,
+  ) {
+    await connectivity(context, page, true);
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await expect.poll(() => net.commands.length).toBe(1);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.status))
+      .toEqual(["acknowledged"]);
+    await publish(
+      page,
+      net,
+      [fieldP(id, P, "Queued", { kind: "text", text: "First value" })],
+      {
+        start: false,
+      },
+    );
+  }
+  /** The one queued draft after the save: exactly the update of the same field on the reviewed versions. */
+  async function expectUpdate(page: Page, id: string) {
+    await expect
+      .poll(
+        async () =>
+          (await draftsOf(page)).filter((d) => d.status === "queued").length,
+      )
+      .toBe(1);
+    const [draft] = (await draftsOf(page)).filter((d) => d.status === "queued");
+    const body = (await bodiesOf(page)).find(
+      (b) => b.local_id === draft?.local_id,
+    );
+    expect(body?.command.command).toEqual({
+      kind: "put_field",
+      id,
+      parent_id: P,
+      expected_version: 1,
+      expected_policy_version: 1,
+      label: "Queued",
+      value: { kind: "text", text: "Second value" },
+    });
+    return draft;
+  }
+
+  for (const timing of ["while open", "while away"] as const)
+    test(`${timing}: the kept input is reviewed on the published field and stored as its update, after the person's choice only`, async ({
+      context,
+    }, info) => {
+      const { page, net, id } = await queued(context);
+      await typed(page, id);
+      if (timing === "while away") {
+        await navigateInApp(page, `/people/${P}`);
+        await expect(page.getByRole("dialog")).toHaveCount(0);
+      }
+      await sendAndPublish(context, page, net, id);
+      if (timing === "while away")
+        await navigateInApp(page, `/people/${P}/fields/${id}`);
+      const d = page.getByRole("dialog", { name: "Edit Queued" });
+      // Published (the positive witness): Archive is offered; the input is kept; the review is shown and Save waits for it.
+      await expect(
+        d.getByRole("button", { name: "Archive", exact: true }),
+      ).toBeVisible();
+      await expect(
+        d.getByRole("textbox", { name: "Value", exact: true }),
+      ).toHaveValue("Second value");
+      await expect(d.locator("[data-review-published]")).toHaveText(
+        "Your change isn't saved yet. Check the field as it is now, then save yours on it or discard it.",
+      );
+      await expect(
+        d.getByRole("button", { name: "Save", exact: true }),
+      ).toBeDisabled();
+      await expect(d.locator("[data-review-audience]")).toContainText(
+        "Only you",
+      );
+      // Nothing was bound or stored because the create was published.
+      expect(
+        (await draftsOf(page)).filter((x) => x.status === "queued"),
+      ).toHaveLength(0);
+      await d
+        .getByRole("button", {
+          name: "Save mine on the current version",
+          exact: true,
+        })
+        .click();
+      await expect(d).toBeHidden();
+      const draft = await expectUpdate(page, id);
+      recordEvidence(info, "e-p37", {
+        timing,
+        id,
+        draft,
+        commands: net.commands.length,
+      });
+      expect(net.commands).toHaveLength(1);
+    });
+
+  test("control: published before the editor opened: an ordinary bound edit, stored as the same update", async ({
+    context,
+  }, info) => {
+    const { page, net, id } = await queued(context);
+    await sendAndPublish(context, page, net, id);
+    await navigateInApp(page, `/people/${P}/fields/${id}`);
+    const d = page.getByRole("dialog", { name: "Edit Queued" });
+    await expect(
+      d.getByRole("button", { name: "Archive", exact: true }),
+    ).toBeVisible();
+    await expect(d.locator("[data-review-published]")).toHaveCount(0);
+    await expect(d.getByRole("radio", { name: "Only you" })).toBeChecked();
+    const box = d.getByRole("textbox", { name: "Value", exact: true });
+    await box.fill("Second value");
+    await d.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(d).toBeHidden();
+    const draft = await expectUpdate(page, id);
+    recordEvidence(info, "e-p37-control", { id, draft });
+  });
+});

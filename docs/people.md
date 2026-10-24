@@ -219,6 +219,13 @@ reopens it with its draft), and `/settings/archived`.
   saved: the editor shows "This field changed since you opened it" with the current value, the audience now (when it changed) and the
   person's own, and only "Save mine on the current version" (withheld while a changed audience cannot be shown) re-binds the edit. A rename
   is bound the same way (Q21: the version is captured when the form opens).
+  (Revision 10, review 10 finding 1) An edit that began on a field's unsent create keeps that ORIGIN (the create's local id and body
+  digest) for its session; it is not bound to the published field, since no version or audience of it was ever reviewed. Once the create
+  is published the editor keeps the input and shows "This field has finished syncing" with the field and who can see it as they are now
+  (read at the field's policy version: an unknown, unreadable or newer audience withholds the action with its reason); Save waits for the
+  review, and only "Save mine on the current version" binds the edit, after which the save is an update of the same field on the reviewed
+  versions. Nothing binds or saves because the create was published. While still unsent, only the create the edit began on (its local id
+  and body) is edited in place; a create being sent is said as such ("being sent"), the input kept, never a second create.
 - **D-11a-18** (revision 1, finding 3) A version conflict shows the CONFLICTED save's own content ("Yours", read from the queue with
   `useDraftWithCommand`) beside the current value; "Save mine on the current version" supersedes with that content on the current version,
   after the current audience is shown when the save was made under another policy version.
