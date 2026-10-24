@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -18,9 +17,10 @@ import {
   useOptionalDataEnv,
 } from "../../../data";
 import { CacheGate } from "../../sync/CacheGate";
+import { useArchiveAction } from "../archive";
 import * as copy from "../copy";
 import { useSteadyWhilePressed } from "../detail/steady";
-import { archiveRequest } from "../model/commands";
+import { PeopleBoundary } from "../env";
 import {
   type Change,
   changesById,
@@ -28,7 +28,7 @@ import {
   foldOne,
   type ShownRow,
 } from "../model/project";
-import { PendingBadge, useOutboxSave } from "../parts";
+import { PendingBadge } from "../parts";
 import { OutstandingChain, ResourceScan } from "../reads";
 import { archivedLedgerKinds, type LedgerReport } from "./ledger";
 
@@ -68,9 +68,13 @@ export function ArchivedItems() {
         </p>
       </div>
       {env === null ? null : (
-        <CacheGate>
-          <Ledger headingId={heading} />
-        </CacheGate>
+        // The people env of the displayed identity, outside the cache gate: a restore's claim lives in its page memory (review 8,
+        // finding 2), and no identity shown means no ledger.
+        <PeopleBoundary>
+          <CacheGate>
+            <Ledger headingId={heading} />
+          </CacheGate>
+        </PeopleBoundary>
       )}
     </div>
   );
@@ -199,13 +203,10 @@ function LedgerRow({
   name: string;
   shown: ShownRow;
 }) {
-  const save = useOutboxSave();
-  const announcer = useAnnouncer();
-  const [message, setMessage] = useState<string | null>(null);
-  // One restore of the row at a time (review 7, finding 1): taken before anything is awaited, so a second press adds nothing. The
-  // ledger is outside the people screens' page memory; the row is the action's owner here.
-  const restoring = useRef(false);
-  const [pending, setPending] = useState(false);
+  // One restore of the target at a time, whichever view asks (review 8, finding 2): the claim and what it said are the identity's page
+  // memory's, not this row's, so a remounted row (another reading or page of the ledger, its parent read again, the tree remounted) still
+  // shows it as saving, and the detail's buttons of the same target wait for it too.
+  const action = useArchiveAction(shown.row.id);
   const nameId = useId();
   return (
     <li
@@ -219,11 +220,13 @@ function LedgerRow({
           {name}
         </span>
         <PendingBadge mark={shown.pending} />
-        {message ? (
-          <span className="text-[12px] text-conflict-text">{message}</span>
+        {action.message ? (
+          <span className="text-[12px] text-conflict-text">
+            {action.message}
+          </span>
         ) : null}
       </span>
-      {shown.row.can_edit && !shown.projected && pending ? (
+      {shown.row.can_edit && !shown.projected && action.pending ? (
         <Button variant="quiet" disabled reason={copy.SAVING}>
           {copy.RESTORE}
         </Button>
@@ -232,26 +235,7 @@ function LedgerRow({
           variant="quiet"
           aria-describedby={nameId}
           data-people-action="ledger-restore"
-          onClick={async () => {
-            if (restoring.current) return;
-            restoring.current = true;
-            setPending(true);
-            let outcome: Awaited<ReturnType<typeof save>>;
-            try {
-              outcome = await save((outbox) =>
-                outbox.enqueue(
-                  archiveRequest({ id: shown.row.id, archived: false }),
-                ),
-              );
-            } finally {
-              restoring.current = false;
-              setPending(false);
-            }
-            if (outcome.ok) {
-              setMessage(null);
-              announcer.announce(copy.SAVED_NOT_SENT, "polite");
-            } else if (outcome.message !== null) setMessage(outcome.message);
-          }}
+          onClick={() => void action.run(false, shown.row.version)}
         >
           {copy.RESTORE}
         </Button>

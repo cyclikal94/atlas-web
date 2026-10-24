@@ -15,6 +15,7 @@ import { PageHeading } from "../../../components/ui/page-heading";
 import type { DraftWithCommand } from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
 import type { PeopleFailure } from "../api";
+import { useArchiveAction } from "../archive";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
 import {
@@ -22,13 +23,13 @@ import {
   completeSession,
   isPending,
   reportSession,
+  retireSession,
   sessionOf,
   settle,
   useEditingSession,
 } from "../lifetime";
 import { isCurrentMemory, useMemoryRevision } from "../memory";
 import {
-  archiveRequest,
   baseGuard,
   renameEditRequest,
   renameProfileBody,
@@ -402,7 +403,10 @@ function RenameForm({
   const errorId = useId();
   const max = route.kind === "rename_profile" ? 200 : 300;
   // The typed name is kept across a remount of the tree (a 403 elsewhere), for this identity and this person only.
+  // Nothing of this form keeps it again once the session ended (review 8, finding 1).
+  const retired = useRef(false);
   useEffect(() => {
+    if (retired.current) return;
     env.memory.drafts.set(retainedKey, {
       session,
       name,
@@ -417,8 +421,8 @@ function RenameForm({
       message: { text: copy.STALE_RENAME },
     });
   const close = () => {
-    if (sessionOf(env.memory.drafts.get(retainedKey)) === session)
-      env.memory.drafts.delete(retainedKey);
+    retired.current = true;
+    retireSession(env.memory, retainedKey, session);
     onDone();
   };
   const owns = useEditingSession<RenameReport>(env.memory, session, {
@@ -766,14 +770,10 @@ function UnlinkDialog({
 /** Archive / Restore of the person (D-11a-10): a queued `archive`, offline-capable, no confirmation (none is drawn). */
 function ArchiveEntry({ shown }: { shown: ShownRow }) {
   const env = usePeopleEnv();
-  const announcer = useAnnouncer();
-  const save = useOutboxSave();
-  useMemoryRevision(env.memory);
-  const [message, setMessage] = useState<string | null>(null);
   const person = shown.row;
   const label = person.archived ? copy.RESTORE : copy.ARCHIVE;
-  // One archive or restore of the person at a time (review 7, finding 1): a second press while one is saved adds nothing.
-  const target = `archive:${person.id}`;
+  // One archive or restore of the person at a time, whichever view asks (review 7, finding 1; review 8, finding 2).
+  const action = useArchiveAction(person.id);
   if (shown.projected)
     return (
       <Button variant="quiet" disabled reason={copy.WAIT_FOR_SYNC_PERSON}>
@@ -792,7 +792,7 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
         {label}
       </Button>
     );
-  if (isPending(env.memory, target))
+  if (action.pending)
     return (
       <Button variant="quiet" disabled reason={copy.SAVING}>
         {label}
@@ -805,29 +805,12 @@ function ArchiveEntry({ shown }: { shown: ShownRow }) {
         data-people-action={
           person.archived ? "restore-person" : "archive-person"
         }
-        onClick={async () => {
-          const admission = admit(env.memory, [target], env.newId);
-          if (admission === null) return;
-          let outcome: Awaited<ReturnType<typeof save>>;
-          try {
-            outcome = await save((outbox) =>
-              outbox.enqueue(
-                archiveRequest({ id: person.id, archived: !person.archived }),
-              ),
-            );
-          } finally {
-            settle(admission);
-          }
-          if (outcome.ok) {
-            setMessage(null);
-            announcer.announce(copy.SAVED_NOT_SENT, "polite");
-          } else if (outcome.message !== null) setMessage(outcome.message);
-        }}
+        onClick={() => void action.run(!person.archived, person.version)}
       >
         {label}
       </Button>
-      {message ? (
-        <span className="text-[12px] text-conflict-text">{message}</span>
+      {action.message ? (
+        <span className="text-[12px] text-conflict-text">{action.message}</span>
       ) : null}
     </span>
   );

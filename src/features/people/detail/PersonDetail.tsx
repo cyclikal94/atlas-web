@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import {
@@ -16,9 +15,9 @@ import {
 } from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
 import { CacheGate } from "../../sync/CacheGate";
+import { useArchiveAction } from "../archive";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
-import { admit, isPending, settle } from "../lifetime";
 import { useMemoryRevision } from "../memory";
 import {
   audienceLabel,
@@ -26,7 +25,6 @@ import {
   fieldDefaultsLabel,
   primaryHousehold,
 } from "../model/audience";
-import { archiveRequest } from "../model/commands";
 import {
   type Change,
   changesById,
@@ -43,7 +41,7 @@ import {
   policyShownFor,
   summaryCurrentFor,
 } from "../model/summary";
-import { Banner, PendingBadge, useOutboxSave } from "../parts";
+import { Banner, PendingBadge } from "../parts";
 import {
   ConfirmedAbsence,
   OutstandingChain,
@@ -744,7 +742,12 @@ function FieldRow({
             </Link>
           )}
           {field.projected || !row.can_edit ? null : (
-            <ArchiveFieldButton id={row.id} archived={false} nameId={nameId} />
+            <ArchiveFieldButton
+              id={row.id}
+              archived={false}
+              version={row.version}
+              nameId={nameId}
+            />
           )}
         </span>
       </div>
@@ -771,27 +774,25 @@ function FieldRow({
 function ArchiveFieldButton({
   id,
   archived,
+  version,
   nameId,
 }: {
   id: string;
   archived: boolean;
+  version: number;
   nameId: string;
 }) {
   const env = usePeopleEnv();
-  const announcer = useAnnouncer();
-  const save = useOutboxSave();
-  useMemoryRevision(env.memory);
-  const [message, setMessage] = useState<string | null>(null);
   const label = archived ? copy.RESTORE : copy.ARCHIVE;
-  // One archive or restore of the field at a time, whichever button asks (review 7, finding 1).
-  const target = `archive:${id}`;
+  // One archive or restore of the field at a time, whichever view asks (review 7, finding 1; review 8, finding 2).
+  const action = useArchiveAction(id);
   if (!env.writable)
     return (
       <Button variant="quiet" disabled reason={copy.READ_ONLY_COMPAT}>
         {label}
       </Button>
     );
-  if (isPending(env.memory, target))
+  if (action.pending)
     return (
       <Button variant="quiet" disabled reason={copy.SAVING}>
         {label}
@@ -803,27 +804,12 @@ function ArchiveFieldButton({
         variant="quiet"
         aria-describedby={nameId}
         data-people-action={archived ? "restore-field" : "archive-field"}
-        onClick={async () => {
-          const admission = admit(env.memory, [target], env.newId);
-          if (admission === null) return;
-          let outcome: Awaited<ReturnType<typeof save>>;
-          try {
-            outcome = await save((outbox) =>
-              outbox.enqueue(archiveRequest({ id, archived: !archived })),
-            );
-          } finally {
-            settle(admission);
-          }
-          if (outcome.ok) {
-            setMessage(null);
-            announcer.announce(copy.SAVED_NOT_SENT, "polite");
-          } else if (outcome.message !== null) setMessage(outcome.message);
-        }}
+        onClick={() => void action.run(!archived, version)}
       >
         {label}
       </Button>
-      {message ? (
-        <span className="text-[12px] text-conflict-text">{message}</span>
+      {action.message ? (
+        <span className="text-[12px] text-conflict-text">{action.message}</span>
       ) : null}
     </span>
   );
@@ -867,7 +853,12 @@ function ArchivedFieldRow({ field }: { field: ShownRow }) {
       <PendingBadge mark={field.pending} />
       {field.row.can_edit && !field.projected ? (
         <span className="ml-auto">
-          <ArchiveFieldButton id={field.row.id} archived nameId={nameId} />
+          <ArchiveFieldButton
+            id={field.row.id}
+            archived
+            version={field.row.version}
+            nameId={nameId}
+          />
         </span>
       ) : null}
     </li>

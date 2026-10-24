@@ -7,6 +7,7 @@ import { Input } from "../../../components/ui/input";
 import {
   type CacheRow,
   type DraftWithCommand,
+  type EnqueueRequest,
   useCachedResource,
   useConflictInbox,
   useDataActions,
@@ -18,6 +19,7 @@ import {
   applyPolicyChange,
   policyChangeCommands,
 } from "../../sharing/apply-policy-change";
+import { archiveRequestFor, archiveSaved, archiveTarget } from "../archive";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
 import {
@@ -27,11 +29,17 @@ import {
   isPending,
   preparedFor,
   reportSession,
+  retireSession,
   sessionOf,
   settle,
   useEditingSession,
 } from "../lifetime";
-import { isCurrentMemory, notePolicy, useMemoryRevision } from "../memory";
+import {
+  isCurrentMemory,
+  notePolicy,
+  type PeopleMemory,
+  useMemoryRevision,
+} from "../memory";
 import {
   type AudienceClass,
   audienceLabel,
@@ -42,7 +50,6 @@ import {
   subjectNote,
 } from "../model/audience";
 import {
-  archiveRequest,
   baseGuard,
   editCreateRequest,
   putFieldCreateRequest,
@@ -149,6 +156,8 @@ export function FieldEditorDialog({
                   ? copy.EDITOR_CHANGES_CAPPED
                   : copy.EDITOR_CHANGES_UNREAD
               }
+              memory={env.memory}
+              draftKey={`field:${personId}:${fieldId ?? "new"}`}
               onRetry={() => setReading((value) => value + 1)}
               onClose={onClose}
             />
@@ -192,25 +201,46 @@ export function FieldEditorDialog({
   );
 }
 
+/**
+ * The editor while this device's unsent changes cannot be read whole: nothing is edited, but the editing session kept for it is still
+ * the person's to end (review 8, finding 1). Cancel, Escape, the close icon and the overlay end the session SHOWN here (the one kept under
+ * the key when this view opened; none: nothing to end), exactly as the editor's own do; Try again and the in-dialog sync control keep it.
+ */
 function EditorUnread({
   title,
   message,
+  memory,
+  draftKey,
   onRetry,
   onClose,
 }: {
   title: string;
   message: string;
+  memory: PeopleMemory;
+  draftKey: string;
   onRetry(): void;
   onClose(): void;
 }) {
+  const [session] = useState(() => sessionOf(memory.drafts.get(draftKey)));
+  const discard = () => {
+    if (session !== undefined) retireSession(memory, draftKey, session);
+  };
   return (
     <Dialog
       open
       title={title}
       onClose={onClose}
+      onDiscard={discard}
+      onRetainDraft={() => undefined}
       footer={
         <>
-          <Button variant="quiet" onClick={onClose}>
+          <Button
+            variant="quiet"
+            onClick={() => {
+              discard();
+              onClose();
+            }}
+          >
             {copy.CANCEL}
           </Button>
           <span className="ml-auto">
@@ -335,8 +365,11 @@ function Editor({
   // Whether this session's save runs, whichever mount of it started the save (review 7, finding 1).
   const saving = isPending(env.memory, session);
 
-  // The draft is kept for this identity while the editor is open (a remount reopens it); dismissing the editor forgets it.
+  // The draft is kept for this identity while the editor is open (a remount reopens it); dismissing the editor forgets it, and nothing
+  // of this form keeps it again after that (review 8, finding 1).
+  const retired = useRef(false);
   useEffect(() => {
+    if (retired.current) return;
     env.memory.drafts.set(draftKey, {
       session,
       form: state,
@@ -355,10 +388,10 @@ function Editor({
     initial.retained.newFieldId,
     initial.retained.createDigest,
   ]);
-  // Only this session's input is forgotten (never a later session's under the same key).
+  // Only this session ends (never a later session's under the same key).
   const forget = () => {
-    if (sessionOf(env.memory.drafts.get(draftKey)) === session)
-      env.memory.drafts.delete(draftKey);
+    retired.current = true;
+    retireSession(env.memory, draftKey, session);
   };
   const close = () => {
     forget();
@@ -1020,19 +1053,28 @@ function Editor({
             </Button>
             {!isNew && !projected && canEdit ? (
               <ArchiveInEditor
-                id={existing.id}
                 pending={
-                  saving || isPending(env.memory, `archive:${existing.id}`)
+                  saving || isPending(env.memory, archiveTarget(existing.id))
                 }
                 admission={() =>
                   owns()
                     ? admit(
                         env.memory,
-                        [session, `archive:${existing.id}`],
+                        [session, archiveTarget(existing.id)],
                         env.newId,
                       )
                     : null
                 }
+                request={() =>
+                  archiveRequestFor(
+                    env.memory,
+                    existing.id,
+                    true,
+                    existing.version,
+                    env.newId,
+                  )
+                }
+                onSaved={() => archiveSaved(env.memory, existing.id)}
                 onRefused={(text) => fail(text)}
                 onDone={() => ended(null)}
               />
@@ -1469,18 +1511,21 @@ function ReviewPanel({
 
 /**
  * Archive from the editor: admitted with the editing session AND the field's archive (review 7, finding 1), so it never runs beside
- * the session's save or another archive of the field; a refusal is told to the session's form now.
+ * the session's save or another archive of the field (from the detail or the ledger, `archive.ts`); its request is the field's prepared
+ * archive (a retry is the same save); a refusal is told to the session's form now.
  */
 function ArchiveInEditor({
-  id,
   pending,
   admission,
+  request,
+  onSaved,
   onRefused,
   onDone,
 }: {
-  id: string;
   pending: boolean;
   admission(): Admission | null;
+  request(): EnqueueRequest;
+  onSaved(): void;
   onRefused(text: string): void;
   onDone(): void;
 }) {
@@ -1499,15 +1544,15 @@ function ArchiveInEditor({
       onClick={async () => {
         const admitted = admission();
         if (admitted === null) return;
+        const prepared = request();
         let outcome: Awaited<ReturnType<typeof save>>;
         try {
-          outcome = await save((outbox) =>
-            outbox.enqueue(archiveRequest({ id, archived: true })),
-          );
+          outcome = await save((outbox) => outbox.enqueue(prepared));
         } finally {
           settle(admitted);
         }
         if (outcome.ok) {
+          onSaved();
           announcer.announce(copy.SAVED_NOT_SENT, "polite");
           onDone();
         } else if (outcome.message !== null) onRefused(outcome.message);

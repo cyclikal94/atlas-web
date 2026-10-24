@@ -13,6 +13,7 @@ import {
   isPending,
   preparedFor,
   reportSession,
+  retireSession,
   sessionOf,
   settle,
   useEditingSession,
@@ -81,11 +82,8 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
   const nameError = useId();
   const noteError = useId();
   const noteId = useId();
-  /** This session's kept input only (never a later session's). */
-  const forget = () => {
-    if (sessionOf(env.memory.drafts.get(RETAINED)) === session)
-      env.memory.drafts.delete(RETAINED);
-  };
+  /** This session ends (never a later session's kept input). */
+  const forget = () => retireSession(env.memory, RETAINED, session);
   // The person saved by this session is shown when the save completes, through whichever mount shows the session now.
   const owns = useEditingSession<{ refusal: string }>(env.memory, session, {
     revision: () => stateRef.current.revision,

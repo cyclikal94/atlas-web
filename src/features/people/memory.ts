@@ -18,6 +18,7 @@ import type { LinkageState } from "./model/linkage";
  *  - `drafts`: editor input kept by the in-dialog sync control or across a remount (field editor, rename, new person), each with its
  *    editing session; `sessions`: the mounted form of each session, the only one a save's completion may close (`lifetime.ts`);
  *    `pending`, `reports` and `prepared`: each session's running save, what its last one said, and the request it was prepared as;
+ *    `actionReports`: what an archive or restore of a target last said (`archive.ts`);
  *  - `attempts`: the uncertain attempt of an online-only command, per target (same key and body on "Try again");
  *  - `summaries`: the viewer-safe summaries read for this identity (finding 8, `summaries.tsx`), per query, for the CURRENT invalidation
  *    `summaryGeneration` only, with the highest `preferences_version` applied and each row's highest versions (the contract's
@@ -94,8 +95,16 @@ export class PeopleMemory {
   readonly pending = new Map<string, string>();
   /** What a session's last save said, kept for its next mount while none is mounted (`lifetime.ts` `reportSession`). */
   readonly reports = new Map<string, unknown>();
-  /** The request a session's save was prepared as, with the input it was prepared from (`lifetime.ts` `prepared`). */
+  /**
+   * The request a session's save was prepared as, with the input it was prepared from (`lifetime.ts` `prepared`); also, by target
+   * (`archive:<id>`), the request an archive or restore was prepared as (`archive.ts`).
+   */
   readonly prepared = new Map<string, { basis: string; value: unknown }>();
+  /**
+   * What an action on a target (`archive:<id>`) last said, a refusal, for whichever view shows the target NOW (review 8, finding 2): the
+   * row or button that pressed it may be gone (a remount, another page of the ledger), and another view of the same target says it too.
+   */
+  readonly actionReports = new Map<string, string>();
   /**
    * Field policies this page read or confirmed (owner-only `GET /policies/{id}`), with their versions and when they were read: the only
    * audiences the table names besides the summaries, and only while no later policy version of the field is known (`policyShownFor`).

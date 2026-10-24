@@ -20430,8 +20430,10 @@ export const UNIT = [
       "WEB-11a R6 F1: an unmounted form is never withdrawn from its session (a closed editor still ends a later session's form)",
     file: "src/features/people/lifetime.ts",
     tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    // Revision 8: Cancel now withdraws the session's form itself (`retireSession`), so the schedules where ONLY the unmount withdraws it
+    // (the form kept by the sync control and left closed) are where this defect is seen; the Cancel schedules no longer reach it.
     expect:
-      /the reviewer's schedule: the new editor and its input stay|the new editor and its input stay/,
+      /the reviewer's schedule: the new editor and its input stay|the new editor and its input stay|gone elsewhere \(the session kept, no editor open\): the completion forgets the saved input and does not navigate|kept by the in-dialog sync control and not reopened: the completion forgets the saved input and does not navigate/,
     patch: (t) =>
       sub(
         t,
@@ -20773,13 +20775,11 @@ export const UNIT = [
       sub(
         sub(
           t,
-          "                  saving || isPending(env.memory, `archive:$" +
-            "{existing.id}`)\n",
-          "                  isPending(env.memory, `archive:$" +
-            "{existing.id}`)\n",
+          "                  saving || isPending(env.memory, archiveTarget(existing.id))\n",
+          "                  isPending(env.memory, archiveTarget(existing.id))\n",
         ),
-        "                        [session, `archive:$" + "{existing.id}`],\n",
-        "                        [`archive:$" + "{existing.id}`],\n",
+        "                        [session, archiveTarget(existing.id)],\n",
+        "                        [archiveTarget(existing.id)],\n",
       ),
   },
   {
@@ -20814,29 +20814,29 @@ export const UNIT = [
   {
     id: "MU-2319",
     title:
-      "WEB-11a R7 F1: the person's Archive admits every press (pressed twice, it archives twice)",
-    file: "src/features/people/detail/IdentityHeader.tsx",
+      "WEB-11a R7 F1: the person's Archive admits every press (pressed twice, it archives twice); re-anchored in revision 8 to the shared owner (`archive.ts`), where every archive is now admitted",
+    file: "src/features/people/archive.ts",
     tests: ["tests/features/people/session-admission.test.tsx"],
     expect: /the person's Archive pressed twice while the first is saved/,
     patch: (t) =>
       sub(
         t,
-        "          const admission = admit(env.memory, [target], env.newId);\n          if (admission === null) return;\n",
-        '          const admission = { memory: env.memory, keys: [] as string[], token: "" };\n',
+        "      const admission = admit(memory, [target], newId);\n      if (admission === null) return;\n",
+        '      const admission = { memory, keys: [] as string[], token: "" };\n',
       ),
   },
   {
     id: "MU-2320",
     title:
-      "WEB-11a R7 F1: a field's Archive admits every press (pressed twice, it archives twice)",
+      "WEB-11a R7 F1: a field's Archive admits every press (pressed twice, it archives twice); re-anchored in revision 8 (the admission is the shared owner's, `archive.ts`): the field's button offers a second press while its archive runs",
     file: "src/features/people/detail/PersonDetail.tsx",
     tests: ["tests/features/people/session-admission.test.tsx"],
     expect: /the field's Archive pressed twice while the first is saved/,
     patch: (t) =>
       sub(
         t,
-        "          const admission = admit(env.memory, [target], env.newId);\n          if (admission === null) return;\n",
-        '          const admission = { memory: env.memory, keys: [] as string[], token: "" };\n',
+        '  if (action.pending)\n    return (\n      <Button variant="quiet" disabled reason={copy.SAVING}>\n',
+        '  if (false)\n    return (\n      <Button variant="quiet" disabled reason={copy.SAVING}>\n',
       ),
   },
   {
@@ -21090,6 +21090,224 @@ export const UNIT = [
         t,
         "          ].every((row) => row.row.archived);\n",
         "          ].every(() => true);\n",
+      ),
+  },
+  // ---- WEB-11a revision 8: review 8's findings 1 and 2 and observation 3 ----------------------------------------------------------
+  {
+    id: "MU-2342",
+    title:
+      "WEB-11a R8 F2: the ledger row ignores the target's running restore (a remounted row offers Restore again)",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect:
+      /while the first restore is unsaved: Restore shows saving|restored from the detail, then the ledger opened/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {shown.row.can_edit && !shown.projected && action.pending ? (\n",
+        "      {shown.row.can_edit && !shown.projected && false ? (\n",
+      ),
+  },
+  {
+    id: "MU-2343",
+    title:
+      "WEB-11a R8 F2: each press claims a key of its own (the row-local latch: a remounted view's press is admitted beside the first)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect:
+      /while the first restore is unsaved: Restore shows saving|share the target's claim/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const admission = admit(memory, [target], newId);\n",
+        "      const admission = admit(memory, [newId()], newId);\n",
+      ),
+  },
+  {
+    id: "MU-2344",
+    title:
+      "WEB-11a R8 F2: the target's claim is let go before its save ends (as a row's latch is, on unmount)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /while the first restore is unsaved: Restore shows saving/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (admission === null) return;\n",
+        "      if (admission === null) return;\n      settle(admission);\n",
+      ),
+  },
+  {
+    id: "MU-2345",
+    title:
+      "WEB-11a R8 F2: every restore is a fresh request (a retry of one whose answer was lost is written twice)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /admits the retry as the SAME request/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const request = archiveRequestFor(memory, id, archived, version, newId);\n",
+        "      const request = archiveRequest({ id, archived });\n",
+      ),
+  },
+  {
+    id: "MU-2346",
+    title:
+      "WEB-11a R8 F2: the prepared request ignores the action (the opposite action reuses the earlier one's local id)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /the same action on the same version is the same request/,
+    patch: (t) =>
+      sub(
+        t,
+        "    `$" + "{archived}:$" + "{version}`,\n",
+        "    `$" + "{version}`,\n",
+      ),
+  },
+  {
+    id: "MU-2347",
+    title:
+      "WEB-11a R8 F2: a saved archive's request is not spent (the next deliberate action reuses its local id)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /the same action on the same version is the same request/,
+    patch: (t) => sub(t, "  memory.prepared.delete(target);\n", ""),
+  },
+  {
+    id: "MU-2348",
+    title:
+      "WEB-11a R8 F2: a refusal is told to no view but the one that pressed (a remounted row never says it)",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /told to the remounted row/,
+    patch: (t) =>
+      sub(
+        t,
+        "        memory.actionReports.set(target, outcome.message);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2349",
+    title:
+      "WEB-11a R8 F2: a restore's answer is said whichever identity is shown by then",
+    file: "src/features/people/archive.ts",
+    tests: ["tests/features/people/archive-owner.test.tsx"],
+    expect: /another identity is shown before the restore answers/,
+    patch: (t) => sub(t, "        !isCurrentMemory(memory) ||\n", ""),
+  },
+  {
+    id: "MU-2350",
+    title:
+      "WEB-11a R8 F1: the unread editor's close icon and Escape do not end the session (no discard given to the dialog)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect: /chain, (Close|Escape): the kept input is forgotten/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onDiscard={discard}\n      onRetainDraft={() => undefined}\n",
+        "      onRetainDraft={() => undefined}\n",
+      ),
+  },
+  {
+    id: "MU-2351",
+    title:
+      "WEB-11a R8 F1: the unread editor's Cancel only closes (the session's input stays kept)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect:
+      /chain, Cancel: the kept input is forgotten|a new field's kept input, its chain unreadable, Cancel/,
+    patch: (t) =>
+      sub(
+        t,
+        "            onClick={() => {\n              discard();\n              onClose();\n            }}\n",
+        "            onClick={() => {\n              onClose();\n            }}\n",
+      ),
+  },
+  {
+    id: "MU-2352",
+    title:
+      "WEB-11a R8 F1: the unread editor's Try again ends the session (its input is lost to the read's repair)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect: /repaired, Try again: the same input comes back/,
+    patch: (t) =>
+      sub(
+        t,
+        '            <Button variant="primary" onClick={onRetry}>\n',
+        '            <Button\n              variant="primary"\n              onClick={() => {\n                discard();\n                onRetry();\n              }}\n            >\n',
+      ),
+  },
+  {
+    id: "MU-2353",
+    title:
+      "WEB-11a R8 F1: the unread editor's sync control ends the session (its input is not kept for the next open)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/unread-discard.test.tsx"],
+    expect: /the sync control: the input is kept for the next open/,
+    patch: (t) =>
+      sub(
+        t,
+        "      onDiscard={discard}\n      onRetainDraft={() => undefined}\n",
+        "      onDiscard={discard}\n      onRetainDraft={discard}\n",
+      ),
+  },
+  {
+    id: "MU-2354",
+    title:
+      "WEB-11a R8 O3: a quantity slot is restored without its texts checked (a numeric amount or a null unit is restored)",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect: /(numeric quantity amount|null quantity unit).*nothing is restored/,
+    patch: (t) =>
+      sub(
+        t,
+        '  quantity: (slot) => texts(slot, ["amount", "unit"]),\n',
+        "  quantity: (slot) => (isObject(slot) ? (slot as never) : null),\n",
+      ),
+  },
+  {
+    id: "MU-2355",
+    title:
+      "WEB-11a R8 O3: a list entry's flag is not checked (a choice selected by a text is restored)",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect: /a choice whose selection is a text/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (read === null || !isObject(item) || typeof item[flag] !== "boolean")\n',
+        "  if (read === null || !isObject(item))\n",
+      ),
+  },
+  {
+    id: "MU-2356",
+    title:
+      "WEB-11a R8 O3: a malformed list entry is skipped instead of refusing the capture",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect:
+      /(checklist entry that is null|choice without a label|checklist item whose id is a number).*nothing is restored/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read === null) return null;\n",
+        "    if (read === null) continue;\n",
+      ),
+  },
+  {
+    id: "MU-2357",
+    title: "WEB-11a R8 O3: the boolean slot is restored whatever its value",
+    file: "src/features/people/model/recovery.ts",
+    tests: ["tests/features/people/recovery.test.ts"],
+    expect: /a boolean that is a text/,
+    patch: (t) =>
+      sub(
+        t,
+        '    isObject(slot) && (typeof slot.value === "boolean" || slot.value === null)\n',
+        "    isObject(slot)\n",
       ),
   },
 ];

@@ -77,6 +77,25 @@ export function sessionOf(kept: unknown): string | undefined {
 }
 
 /**
+ * The person ENDED `session` (Cancel, Escape, the close icon, the overlay; review 8, finding 1): its kept input under `key`, what its last
+ * save said and the request it was prepared as are forgotten, and its mounted form no longer owns it (a handler or effect of that form
+ * still reachable has no say). Only that session: another session kept under the same key (a later "Add a field") is never touched, so a
+ * caller names the session it SHOWS, never whichever one the key holds when it runs. Works whether or not a form of the session could be
+ * drawn (an editor whose reads failed shows none). A save already admitted is not undone: it settles its own claim, and its completion
+ * finds nothing to close (`completeSession` answers `gone`).
+ */
+export function retireSession(
+  memory: PeopleMemory,
+  key: string,
+  session: string,
+): void {
+  if (sessionOf(memory.drafts.get(key)) === session) memory.drafts.delete(key);
+  memory.reports.delete(session);
+  memory.prepared.delete(session);
+  memory.sessions.delete(session);
+}
+
+/**
  * A save of `session` (at input revision `ticket`; null: whatever was typed since, as an archive from the editor) completed, having made
  * `saved` (or null). Ends the session as described above and says what happened: `closed` (its kept input forgotten, its open form, if
  * any, closed), `kept` (later input stays), or `gone` (the session had already ended or been replaced, or the identity changed: nothing

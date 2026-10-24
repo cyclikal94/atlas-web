@@ -311,12 +311,17 @@ export function renameEditRequest(input: {
   };
 }
 
-/** Archive or restore a person or a field (`/task-commands`, content-version-checked, no policy check). */
+/**
+ * Archive or restore a person or a field (`/task-commands`, content-version-checked, no policy check). `localId`: the identity of this
+ * save, the same on a retry of the same action (`features/people/archive.ts`), so one whose answer was lost is not made twice.
+ */
 export function archiveRequest(input: {
   id: string;
   archived: boolean;
+  localId?: string;
 }): EnqueueRequest {
   return {
+    ...(input.localId === undefined ? {} : { localId: input.localId }),
     endpoint: "/task-commands",
     targets: [checked(input.id)],
     build: (bases) => ({

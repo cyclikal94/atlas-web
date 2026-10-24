@@ -3,6 +3,7 @@ import {
   type FieldFormState,
   newFieldForm,
   reduceFieldForm,
+  type ValueSlots,
 } from "./field-form";
 import { type NewPersonState, newPersonForm } from "./person-form";
 import { FIELD_KINDS, type FieldKind } from "./values";
@@ -41,6 +42,77 @@ export function fieldRecoveryFields(
 type Obj = Record<string, unknown>;
 const isObject = (value: unknown): value is Obj =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+/** `value`'s own texts named `keys`, or null when one is missing or not a text. */
+function texts<K extends string>(
+  value: unknown,
+  keys: readonly K[],
+): Record<K, string> | null {
+  if (!isObject(value)) return null;
+  const out = {} as Record<K, string>;
+  for (const key of keys) {
+    const text = value[key];
+    if (typeof text !== "string") return null;
+    out[key] = text;
+  }
+  return out;
+}
+/** Every entry of the list `value` read by `entry`, or null when it is not a list or one entry is not one (review 8, observation 3). */
+function entries<T>(
+  value: unknown,
+  entry: (item: unknown) => T | null,
+): T[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: T[] = [];
+  for (const item of value) {
+    const read = entry(item);
+    if (read === null) return null;
+    out.push(read);
+  }
+  return out;
+}
+const flagged = <K extends string, F extends string>(
+  item: unknown,
+  keys: readonly K[],
+  flag: F,
+): (Record<K, string> & Record<F, boolean>) | null => {
+  const read = texts(item, keys);
+  if (read === null || !isObject(item) || typeof item[flag] !== "boolean")
+    return null;
+  return { ...read, [flag]: item[flag] } as Record<K, string> &
+    Record<F, boolean>;
+};
+
+/**
+ * Each slot read back with the SHAPE of its input (review 8, observation 3): texts are texts, the boolean is a boolean or null, and a list
+ * holds only its slot's entries. Only the shape is checked: an unfinished entry (a half-typed amount or date) is kept exactly as typed,
+ * never validated as a value, trimmed or coerced. Built afresh from what was checked, never cast from the capture.
+ */
+const SLOT_READERS: {
+  [K in FieldKind]: (slot: unknown) => ValueSlots[K] | null;
+} = {
+  text: (slot) => texts(slot, ["text"]),
+  quantity: (slot) => texts(slot, ["amount", "unit"]),
+  date: (slot) => texts(slot, ["day", "month", "year"]),
+  url: (slot) => texts(slot, ["url"]),
+  boolean: (slot) =>
+    isObject(slot) && (typeof slot.value === "boolean" || slot.value === null)
+      ? { value: slot.value }
+      : null,
+  choices: (slot) => {
+    if (!isObject(slot)) return null;
+    const options = entries(slot.options, (item) =>
+      flagged(item, ["key", "label"], "selected"),
+    );
+    return options === null ? null : { options };
+  },
+  checklist: (slot) => {
+    if (!isObject(slot)) return null;
+    const items = entries(slot.items, (item) =>
+      flagged(item, ["id", "label"], "checked"),
+    );
+    return items === null ? null : { items };
+  },
+};
 
 /** A captured field editor read back, or null when it is not one (nothing is restored then). */
 export function restoreFieldForm(
@@ -57,13 +129,10 @@ export function restoreFieldForm(
   if (!isObject(parsed.slots)) return null;
   const empty = newFieldForm();
   const slots = { ...empty.slots };
+  // Every slot, the hidden ones too: the capture holds them all, and a malformed one is not restored by halves.
   for (const kind of FIELD_KINDS) {
-    const slot = parsed.slots[kind];
-    if (!isObject(slot)) return null;
-    // Each slot must have exactly the shape of an empty one (texts, a boolean or null, and lists of the slot's entries).
-    const template = empty.slots[kind] as Obj;
-    for (const key of Object.keys(template))
-      if (!Object.hasOwn(slot, key)) return null;
+    const slot = SLOT_READERS[kind](parsed.slots[kind]);
+    if (slot === null) return null;
     slots[kind] = slot as never;
   }
   const audience = parsed.audience;
