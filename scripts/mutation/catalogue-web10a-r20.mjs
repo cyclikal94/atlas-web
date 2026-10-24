@@ -18,13 +18,9 @@ const fallback = (t) =>
     `        chosen = input.pinned;\n        chosenRow = kept.value;\n      } else {\n        selection = "unavailable";\n        lost = true;\n      }\n`,
     `        chosen = input.pinned;\n        chosenRow = kept.value;\n      }\n`,
   );
-/** The visit does not hold the day's progress amount (revision 19: the card's unmount drops it). */
+/** The visit does not hold the day's progress amount (revision 19: the card's unmount drops it). Re-anchored in revision 21 (`holdDay`). */
 const noAmountHold = (t) =>
-  sub(
-    t,
-    `      holdKept(keptKey(env.identity, \`record:\${targetProgress}\`)),\n`,
-    "",
-  );
+  sub(t, `    holdKept(keptKey(identity, \`record:\${progress}\`)),\n`, "");
 
 /** Unit mutants (layer L1b: the app's router over the production data controller and the IndexedDB double), MU-2367..MU-2376. */
 export const UNIT_R20 = [
@@ -61,7 +57,8 @@ export const UNIT_R20 = [
     patch: (t) =>
       sub(
         t,
-        `      holdKeptFix(\`\${env.identity}\\u0000\${targetProgress}\`),\n`,
+        // Re-anchored in revision 21 (same intent): the visit's holds are made by `holdDay`.
+        `    holdKeptFix(\`\${identity}\\u0000\${progress}\`),\n`,
         "",
       ),
   },
@@ -76,7 +73,8 @@ export const UNIT_R20 = [
     patch: (t) =>
       sub(
         t,
-        "      holdCorrection(correctionKey(env.identity, target)),\n",
+        // Re-anchored in revision 21 (same intent): the visit's holds are made by `holdDay`.
+        "    holdCorrection(correctionKey(identity, occurrence)),\n",
         "",
       ),
   },
@@ -147,7 +145,8 @@ export const UNIT_R20 = [
     patch: (t) =>
       sub(
         t,
-        "    if (keep && (held.revision > 0 || held.submitting !== null)) {\n      held.kept = true;\n      return;\n    }\n    dropUnheld(key, held);\n",
+        // Re-anchored in revision 21 (same intent): the condition also keeps a session the visit adopted.
+        "    if (\n      keep &&\n      (held.revision > 0 ||\n        held.submitting !== null ||\n        held.session === adopted)\n    ) {\n      held.kept = true;\n      return;\n    }\n    dropUnheld(key, held);\n",
         "    dropUnheld(key, held);\n",
       ),
   },
@@ -159,7 +158,13 @@ export const UNIT_R20 = [
     file: DETAIL,
     tests: [RETURN],
     expect: /choosing again keeps day A's amount with day A/,
-    patch: (t) => sub(t, "      keepOnRelease.current = target;\n", ""),
+    // Re-anchored in revision 21 (same intent): choosing again parks the day in the visit instead of marking it kept on release.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (visit.current !== null) visit.current.target = null;\n",
+        "",
+      ),
   },
 
   {
@@ -173,8 +178,9 @@ export const UNIT_R20 = [
     patch: (t) =>
       sub(
         t,
-        "      keepOnRelease.current = target;\n      pinned.current = null;\n",
-        "      keepOnRelease.current = target;\n",
+        // Re-anchored in revision 21 (same intent).
+        "      if (visit.current !== null) visit.current.target = null;\n      pinned.current = null;\n",
+        "      if (visit.current !== null) visit.current.target = null;\n",
       ),
   },
 ];

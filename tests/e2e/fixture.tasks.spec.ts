@@ -5933,3 +5933,188 @@ test.describe("E-T42: the visit's day leaving after the person came back keeps i
     expect(await draftsOf(writer)).toEqual([]);
   });
 });
+
+test.describe("E-T43: the logical visit owns its day and the input typed for it (A8, A14; DA21-I1/I2 of revision 21)", () => {
+  // The design assessment of Review 21 (Q11) in real engines over the real IndexedDB, with a second real tab of the same account holding
+  // the fixture leader, as E-T42. DA21-I1: the other tab commits a page removing the task's DETAILS (its execution row; the task and its
+  // days stay): the person's tab says day A is unavailable and writes nothing; the details back, the same raw amount is on day A and
+  // only the explicit Record writes, naming it. DA21-I2: the person checks the queue with the visible sync control, the other tab removes
+  // day A meanwhile, browser Back shows it unavailable; leaving that visit by "‹ Tasks" ends it, so day A back and opened again (browser
+  // Back to the detail, a new visit) is blank with nothing written (control: staying in the visit, day A back shows 7.125). The account
+  // database is read through the writer's harness. Each case acts once the trees are quiet (`untilTreeSettled`).
+  const DAY = 24 * 60 * 60;
+  const EARLIER = "eeeeeeee-0000-4000-8000-000000000044";
+  const dayBefore = (days: number) =>
+    new Date(Date.parse(`${TODAY}T00:00:00Z`) - days * DAY * 1000)
+      .toISOString()
+      .slice(0, 10);
+  type Upsert = { kind: string; resource: Record<string, unknown> };
+  /** A daily task whose default day (A, two days ago, open for recording) is the latest saved one; day B (three days ago) is saved too. */
+  function twoDays(n: number) {
+    const task = buildTask({
+      n,
+      title: "The visit keeps my day",
+      date: dayBefore(2),
+      goal: { kind: "numeric", minimum: "10", maximum: null, unit: "cups" },
+      action: { outcome: "incomplete", amount: "1", checked: [] },
+      slotKey: "day-a",
+      closesAt: Math.floor(Date.now() / 1000) + 5 * DAY,
+    });
+    const definition = (
+      task.data as { definition: { schedule: Record<string, unknown> } }
+    ).definition;
+    definition.schedule.repeat = { frequency: "daily", interval: 1 };
+    const of = (kind: string) => {
+      const found = (task.upserts as Upsert[]).find(
+        (u) => u.resource.kind === kind,
+      );
+      if (found === undefined) throw new Error(`setup: no ${kind}`);
+      return found;
+    };
+    const occurrence = of("occurrence");
+    const data = occurrence.resource.value as Record<string, unknown>;
+    (task.upserts as Upsert[]).push({
+      kind: "upsert",
+      resource: {
+        ...occurrence.resource,
+        id: EARLIER,
+        value: {
+          ...data,
+          slot: { ...(data.slot as object), key: "day-b", date: dayBefore(3) },
+        },
+      },
+    });
+    return {
+      task,
+      dayA: structuredClone(occurrence),
+      details: structuredClone(of("execution")),
+    };
+  }
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  const daySelect = (page: Page) => page.locator("[data-day-picker] select");
+  const amount = (page: Page) =>
+    page.getByLabel("Amount (cups)", { exact: true });
+  async function detailBesideWriter(
+    context: BrowserContext,
+    path: string,
+    task: BuiltTask,
+  ) {
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await seedSettled(context);
+    const writer = await bootAt(context, "/tasks");
+    await cacheTasks(writer, net, [task]);
+    const page = await bootAt(context, path);
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(daySelect(page).locator("option")).toHaveCount(2);
+    return { net, writer, page };
+  }
+  /** The writer's leader commits the page and the test waits until the account's cache holds it (E-T42's `commitOnWriter`). */
+  async function commitOnWriter(
+    writer: Page,
+    net: SyncStub,
+    revision: number,
+    changes: unknown[],
+    landed: (ids: string[]) => boolean,
+  ) {
+    await commitDelta(writer, net, revision, changes);
+    await expect
+      .poll(async () => {
+        const ids = (
+          (await rowsOf(writer, "cache")) as Array<{ id: string }>
+        ).map((row) => row.id);
+        if (landed(ids)) return true;
+        await writer.evaluate(() => window.__atlasData?.nudgeSync());
+        return false;
+      })
+      .toBe(true);
+  }
+
+  test("another tab's sync page removes the task's details: day A unavailable, nothing written; details back, the same 7.125 on A, and Record names A once", async ({
+    context,
+  }) => {
+    const { task, details } = twoDays(148);
+    const path = `/tasks/${task.taskId}`;
+    const { net, writer, page } = await detailBesideWriter(context, path, task);
+    await amount(page).fill("7.125");
+    await expect(amount(page)).toHaveValue("7.125");
+    await commitOnWriter(
+      writer,
+      net,
+      2,
+      [{ kind: "remove", id: task.executionId }],
+      (ids) => !ids.includes(task.executionId),
+    );
+    await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+    await expect(page.locator("[data-record-card]")).toHaveCount(0);
+    expect(await draftsOf(writer)).toEqual([]);
+    await commitOnWriter(writer, net, 3, [details], (ids) =>
+      ids.includes(task.executionId),
+    );
+    await expect(page.locator("[data-record-card]")).toBeVisible();
+    await expect(page.locator("[data-day-unavailable]")).toHaveCount(0);
+    await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+    await expect(amount(page)).toHaveValue("7.125");
+    expect(await draftsOf(writer)).toEqual([]);
+    await page
+      .locator("[data-record-card]")
+      .getByRole("button", { name: "Record", exact: true })
+      .click();
+    await expect.poll(async () => (await recordsOf(writer)).length).toBe(1);
+    expect((await recordsOf(writer))[0]?.command).toMatchObject({
+      occurrence_id: task.occurrenceId,
+      evidence: { kind: "quantity", amount: "7.125" },
+    });
+  });
+
+  for (const leave of [true, false])
+    test(`${leave ? "day A removed while the person is in the sync screens, Back shows it unavailable; leaving that visit ends its amount: opened again once A is back, blank, nothing written" : "control: the same, staying in the visit: day A back shows 7.125, nothing written"}`, async ({
+      context,
+    }) => {
+      const { task, dayA } = twoDays(149 + (leave ? 0 : 1));
+      const path = `/tasks/${task.taskId}`;
+      const { net, writer, page } = await detailBesideWriter(
+        context,
+        path,
+        task,
+      );
+      await amount(page).fill("7.125");
+      await expect(amount(page)).toHaveValue("7.125");
+      await syncControl(page).click();
+      await expect(page).toHaveURL(/\/sync(\?|$)/);
+      await commitOnWriter(
+        writer,
+        net,
+        2,
+        [{ kind: "remove", id: task.occurrenceId }],
+        (ids) => !ids.includes(task.occurrenceId),
+      );
+      await page.goBack();
+      await expect(page).toHaveURL(new RegExp(`${path}$`));
+      await expect(page.locator("[data-day-unavailable]")).toBeVisible();
+      await expect(page.locator("[data-record-card]")).toHaveCount(0);
+      if (leave) {
+        await page.getByRole("link", { name: "‹ Tasks" }).click();
+        await expect(page).toHaveURL(/\/tasks$/);
+      }
+      await commitOnWriter(writer, net, 3, [dayA], (ids) =>
+        ids.includes(task.occurrenceId),
+      );
+      if (leave) {
+        // Browser Back to the detail: a new visit of the task, its default day A again.
+        await page.goBack();
+        await expect(page).toHaveURL(new RegExp(`${path}$`));
+      }
+      await expect(page.locator("[data-record-card]")).toBeVisible();
+      await expect(daySelect(page)).toHaveValue(task.occurrenceId);
+      await expect(amount(page)).toHaveValue(leave ? "" : "7.125");
+      expect(await draftsOf(writer)).toEqual([]);
+    });
+});

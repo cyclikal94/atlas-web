@@ -389,6 +389,15 @@ failed read stays stale, not absent; controls: the day still present, nothing ty
 E-T42 (another real tab's leader removes and restores the day; a reload forgets the unsaved input; E-T41 Q3 gained a commit-readiness wait,
 labelled) in three engines; unit MU-2367…MU-2376 and real-engine MU-2377…MU-2378 (`scripts/mutation/catalogue-web10a-r20.mjs`; MU-2345,
 MU-2351 and MU-2355 re-anchored, same intent).
+Revision 21 (the design assessment of Review 21: DA21-I1 and DA21-I2; decision 47): `sync-return-context.test.tsx` "DA21" (the task's
+details removed or unreadable by a committed page: the day unavailable, the amount, open fix and open correction held and back with the
+details, one explicit record naming the day; input taken back from the sync screens, a correction retained and never reopened, and days
+parked by choosing again, each ended by an ordinary departure, by another identity too; a fix save answered between that end and its
+drop; controls: only the label changing, a failed details read, an explicit address, staying in the visit, reopening the correction, the
+fix's own drop, picking the parked day again within the visit or after a sync visit); native E-T43 (another real tab removes and restores
+the details; a sync visit with day A removed meanwhile, Back, then "‹ Tasks" ends it, with the staying control) in three engines; unit
+MU-2379…MU-2387 and real-engine MU-2388…MU-2389 (`scripts/mutation/catalogue-web10a-r21.mjs`; MU-2340, MU-2352, MU-2368…MU-2370 and
+MU-2374…MU-2376 re-anchored, same intent).
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -520,6 +529,19 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     Leaving for the sync screens keeps it as before; any other departure drops it; choosing another day in place keeps it with its own
     day; another identity or a reload never sees it (page memory only). A failed read is not absence: the last complete read stays,
     marked stale. Before this, a day removed after the restored editor had mounted fell back to another day and its input was dropped.
+47. **The logical visit owns its day and the input typed for it (DA21-I1/I2, revision 21).** The visit's own day (the one it showed, or
+    the one kept with input through a sync visit) is its target BEFORE anything says whether the task's details (its execution) can be
+    read: a committed page that removes the details, or leaves them unreadable, shows the day as unavailable (nothing to record against)
+    and the amount, the open or parked fix and the open correction typed for it stay held; the details back, the same raw input is on
+    that day, and only an explicit save writes. An address naming a day keeps its own rule. The detail's LOGICAL visit (the time on the
+    task's detail, its sync visits included) owns every day it holds: its shown day, the days it parked with "Show this task's days",
+    and the sessions it took back from the sync screens (a mount coming back from `/sync` adopts them, whether or not their editors
+    ever mount again, including a correction kept by its in-dialog sync control and not reopened). How a mount ends decides for all of
+    them: at the sync screens everything it holds is kept for the next mount; at the task's own detail again (the day picker's address,
+    or a remount in place) the shown day is let go as before and the parked days stay the visit's; anywhere else, or another identity,
+    ends the visit and drops everything it holds, the parked days included, so no later visit resumes it. A save's answer arriving after
+    that end cannot keep a dropped fix (the drop no longer compares the kept entry's object). Before this, the details leaving dropped
+    the input, and input taken back from the sync screens or parked outlived an ordinary departure until some later editor resumed it.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -622,7 +644,8 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 - **Unfinished input is kept for a sync visit only (decision 44, revision 18).** ia.md §1.3.3 requires it for checking sync state; a
   `403` re-check's remount at the same address, a reload, a crash or another tab keep nothing new here (the enrolment draft and the
   correction keep their own owners; Q4 update recovery is WEB-14a's). A kept session lasts until its editor opens again, a save consumes
-  it, another identity opens an editor or the page is reloaded.
+  it, the detail visit that took it back from the sync screens (or parked it) ends (decision 47), another identity opens an editor or the
+  page is reloaded. Leaving the sync screens for anywhere but the screen it was typed on still keeps it, as decision 44 decided.
 
 ## Not claimed
 

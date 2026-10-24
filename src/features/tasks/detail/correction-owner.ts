@@ -131,11 +131,18 @@ function dropReleasing(key: string, session: number): void {
 
 /**
  * The task detail's visit of a day holds that day's correction (revision 20, DA20-I1): a dialog that unmounts because the day left this
- * device keeps its session, still resumable by the next dialog for the day. Letting go: `keep` (the visit ended at the sync screens, or the
- * person chose another day) retains a session holding input as the in-dialog sync control does; otherwise an unheld session is dropped.
+ * device keeps its session, still resumable by the next dialog for the day. Holding ADOPTS a session the in-dialog sync control retained
+ * (revision 21, DA21-I2): it is the visit's from then on (still resumable), whether or not the dialog is opened again, so the visit's end
+ * ends it. Letting go: `keep` (the visit went to the sync screens, or keeps the day parked) retains a session holding input (or the one it
+ * adopted) as the in-dialog sync control does; otherwise an unheld session is dropped.
  */
 export function holdCorrection(key: string): (keep: boolean) => void {
   visits.set(key, (visits.get(key) ?? 0) + 1);
+  const found = entries.get(key);
+  const adopted =
+    found?.retained === true && found.holders === 0 ? found.session : null;
+  if (found !== undefined && adopted !== null)
+    entries.set(key, { ...found, retained: false, releasing: true });
   let holding = true;
   return (keep) => {
     if (!holding) return;
@@ -145,7 +152,12 @@ export function holdCorrection(key: string): (keep: boolean) => void {
     else visits.delete(key);
     const held = entries.get(key);
     if (held === undefined || held.holders > 0 || held.retained) return;
-    if (keep && (held.revision > 0 || held.submitting !== null)) {
+    if (
+      keep &&
+      (held.revision > 0 ||
+        held.submitting !== null ||
+        held.session === adopted)
+    ) {
       entries.set(key, { ...held, retained: true });
       return;
     }

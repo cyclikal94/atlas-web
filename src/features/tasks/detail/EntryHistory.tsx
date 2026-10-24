@@ -232,12 +232,15 @@ export const hasKeptFix = (owner: string): boolean => keptFixes.has(owner);
 
 /** Owners held by an open visit of the task detail showing their day (`holdKeptFix`), by count. */
 const fixVisits = new Map<string, number>();
+/** How many times a history has kept its owner's input (`keptFixes.set` at its unmount): a settlement's rewrite of the entry is not one. */
+const fixKeeps = new Map<string, number>();
 
 /**
  * The task detail's visit of a day holds that day's fix input (revision 20, DA20-I1): a history that unmounts because the day left this
  * device keeps its open fix and parked draft as a sync visit does, for the owner's next history. Letting go without `keep` (an ordinary
- * departure) drops it after the current turn unless a visit holds it again by then; `keep` (the sync screens, or another day chosen in
- * place) leaves it kept.
+ * departure) drops it after the current turn unless a visit holds it again, or a history kept it anew, by then (revision 21, DA21-I2: a
+ * save's answer rewriting the kept entry meanwhile does not save it from the drop); `keep` (the sync screens, or the day kept parked)
+ * leaves it kept.
  */
 export function holdKeptFix(owner: string): (keep: boolean) => void {
   fixVisits.set(owner, (fixVisits.get(owner) ?? 0) + 1);
@@ -249,9 +252,9 @@ export function holdKeptFix(owner: string): (keep: boolean) => void {
     if (left > 0) fixVisits.set(owner, left);
     else fixVisits.delete(owner);
     if (keep) return;
-    const kept = keptFixes.get(owner);
+    const keeps = fixKeeps.get(owner) ?? 0;
     setTimeout(() => {
-      if (!fixVisits.has(owner) && keptFixes.get(owner) === kept)
+      if (!fixVisits.has(owner) && (fixKeeps.get(owner) ?? 0) === keeps)
         keptFixes.delete(owner);
     }, 0);
   };
@@ -261,6 +264,7 @@ export function holdKeptFix(owner: string): (keep: boolean) => void {
 export function forgetKeptFixes(): void {
   keptFixes.clear();
   fixVisits.clear();
+  fixKeeps.clear();
 }
 
 /**
@@ -1037,8 +1041,10 @@ export function EntryHistory({
           ? { entry: held.entry, session: held.session, draft: held.draft }
           : null;
       const parkedNow = parked.current?.owner === owner ? parked.current : null;
-      if (open !== null || parkedNow !== null)
+      if (open !== null || parkedNow !== null) {
         keptFixes.set(owner, { open, parked: parkedNow });
+        fixKeeps.set(owner, (fixKeeps.get(owner) ?? 0) + 1);
+      }
     };
   }, [owner]);
   const fixForm =

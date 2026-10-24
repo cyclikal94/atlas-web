@@ -175,7 +175,8 @@ export const UNIT_R18 = [
     patch: (t) =>
       sub(
         t,
-        `  return () => atSync(router?.latestLocation.pathname ?? "");`,
+        // Re-anchored in revision 21 (same intent): the router's path is read through \`useLatestPath\`.
+        "  return () => atSync(path());",
         `  return () => atSync("");`,
       ),
   },
@@ -363,7 +364,8 @@ export const ENGINE_R18 = [
     patch: (t) =>
       sub(
         t,
-        `  return () => atSync(router?.latestLocation.pathname ?? "");`,
+        // Re-anchored in revision 21 (same intent): the router's path is read through \`useLatestPath\`.
+        "  return () => atSync(path());",
         `  return () => atSync("");`,
       ),
   },

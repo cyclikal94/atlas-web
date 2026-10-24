@@ -15,7 +15,9 @@ import { useEffect, useRef, useState } from "react";
  * dropped after the current turn (so React's development remount of the same editor resumes it). Cancel, Escape and the close icon leave
  * for somewhere else, so they discard it; leaving for anywhere but the sync screens does, after the person came back from them too. The
  * task detail's visit also holds the sessions of the day it shows (`holdKept`, revision 20): an editor the data hides (its day gone from
- * this device) is not a departure, and its session waits for the day to come back.
+ * this device) is not a departure, and its session waits for the day to come back. Holding adopts a session kept through a sync visit,
+ * so the visit's own end decides for it even if its editor never mounts again (revision 21, DA21-I2; `keepVisit`/`resumeVisit` carry the
+ * days the visit owns between its mounts).
  *
  * A save takes a ticket naming the session and the revision it submitted. Its completion, whichever mount made it and whether or not any
  * editor is mounted then, consumes the session only if it is still that session at that revision; newer input stays (with the note the
@@ -66,14 +68,20 @@ export const atSync = (pathname: string): boolean =>
   pathname.replace(/\/+$/, "") === "/sync";
 
 /**
- * Whether the router is at the sync screens now: read when an editor unmounts, after the navigation that unmounts it (the router's latest
- * location moves before the screens it shows). A component shown outside any router (a test) is never at them.
+ * Where the router is now: read when a screen unmounts, after the navigation that unmounts it (the router's latest location moves before
+ * the screens it shows). A component shown outside any router (a test) is nowhere ("").
  */
-export function useLeftForSync(): () => boolean {
+export function useLatestPath(): () => string {
   const router = useRouter({ warn: false }) as ReturnType<
     typeof useRouter
   > | null;
-  return () => atSync(router?.latestLocation.pathname ?? "");
+  return () => router?.latestLocation.pathname ?? "";
+}
+
+/** Whether the router is at the sync screens now (see `useLatestPath`). */
+export function useLeftForSync(): () => boolean {
+  const path = useLatestPath();
+  return () => atSync(path());
 }
 
 /** The session an editor opening `key` now would resume, or null. */
@@ -147,12 +155,16 @@ function dropUnheld(key: string, held: Held): void {
 /**
  * The visit of the screen showing the day an editor is for holds that editor's key (revision 20, DA20-I1): while it does, an editor that
  * unmounts because the data hid it (its day left this device and is shown unavailable) keeps its session, input and pending save, and the
- * next editor of the key resumes it. The visit lets go when it ends or another day is chosen in place; `keep` (it ended at the sync screens,
- * or the person chose another day) keeps a session holding input for the key's next editor, as a sync visit does; otherwise the session is
- * dropped once nothing holds it, as any departure drops it.
+ * next editor of the key resumes it. Holding ADOPTS a session kept through a sync visit (revision 21, DA21-I2): the visit owns it from then
+ * on, whether or not an editor of it ever mounts again. The visit lets go when it ends or parks the day; `keep` (it went to the sync screens,
+ * or keeps the day parked) keeps a session holding input (or the one it adopted) for the key's next editor, as a sync visit does;
+ * otherwise the session is dropped once nothing holds it, as any departure drops it.
  */
 export function holdKept(key: string): (keep: boolean) => void {
   visits.set(key, (visits.get(key) ?? 0) + 1);
+  const found = entries.get(key);
+  const adopted = found?.kept === true ? found.session : null;
+  if (found !== undefined) found.kept = false;
   let holding = true;
   return (keep) => {
     if (!holding) return;
@@ -162,12 +174,43 @@ export function holdKept(key: string): (keep: boolean) => void {
     else visits.delete(key);
     const held = entries.get(key);
     if (held === undefined) return;
-    if (keep && (held.revision > 0 || held.submitting !== null)) {
+    if (
+      keep &&
+      (held.revision > 0 ||
+        held.submitting !== null ||
+        held.session === adopted)
+    ) {
       held.kept = true;
       return;
     }
     dropUnheld(key, held);
   };
+}
+
+/**
+ * The days a screen's logical visit owns between its mounts (revision 21, DA21-I2): what it held when it went to the sync screens, and the
+ * days it parked when it was remounted at its own address. The next mount of the same screen and identity takes them (`resumeVisit`) and
+ * holds them, so ending THAT visit ends their input too. Page memory only; another identity's are forgotten.
+ */
+const visitDays = new Map<string, ReadonlyArray<readonly [string, string]>>();
+
+export function keepVisit(
+  key: string,
+  days: ReadonlyArray<readonly [string, string]>,
+): void {
+  if (days.length > 0) visitDays.set(key, days);
+  else visitDays.delete(key);
+}
+
+export function resumeVisit(
+  key: string,
+  identity: string,
+): ReadonlyArray<readonly [string, string]> {
+  for (const other of [...visitDays.keys()])
+    if (!other.startsWith(`${identity}\u0000`)) visitDays.delete(other);
+  const days = visitDays.get(key) ?? [];
+  visitDays.delete(key);
+  return days;
 }
 
 export function editKept<T>(key: string, session: number, value: T): void {
@@ -236,6 +279,7 @@ export function subscribeKept(
 export function forgetKept(): void {
   entries.clear();
   visits.clear();
+  visitDays.clear();
 }
 
 /** What an editor holds of its session: the input shown, whether a save of it is pending, and the note a settled save left. */

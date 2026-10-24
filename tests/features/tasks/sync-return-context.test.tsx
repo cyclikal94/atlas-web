@@ -1020,3 +1020,463 @@ describe("DA20-I1: the visit's day leaves after the person came back", () => {
     expect(t.bodies()).toEqual([]);
   });
 });
+
+/**
+ * Revision 21 (design assessment of Review 21: DA21-I1 and DA21-I2, `incomplete_fix` of R33/DA19-I1/DA20-I1; ia.md §1.3.3, decision 47).
+ * The LOGICAL visit of a task's detail owns its day and the input typed for it, independently of what the data lets it render:
+ * - DA21-I1 (Q2): the day's parent (the task's details, its execution) leaves this device or cannot be read. That is not a departure: the
+ *   view says the day is unavailable and the amount, the open fix and the open correction typed for it are held; the details back, the
+ *   same raw input is on day A, and only an explicit save writes. Controls: only the task's label changes; the details' read fails
+ *   (stale, not absent); an address naming day A.
+ * - DA21-I2 (Q3, Q4): input the visit took back from the sync screens, or parked by "Show this task's days", without its editor ever
+ *   mounting again, ends with the visit: after an ordinary departure a later visit of day A starts blank. Controls: staying in the visit,
+ *   picking day A again within it, and reopening the correction, keep it.
+ */
+describe("DA21: the logical visit owns its day and the input typed for it", () => {
+  const EARLIER = "eeeeeeee-0000-4000-8000-0000000000c3";
+  const unavailable = () =>
+    document.querySelector("[data-day-unavailable]") !== null;
+  const dialog = () => screen.queryByRole("dialog");
+  const minimum = () =>
+    within(dialog() as HTMLElement).getByLabelText(
+      CORRECTION_COPY.minimum,
+    ) as HTMLInputElement;
+  async function to(t: Mounted, path: string) {
+    await act(async () => {
+      await t.router.navigate({ to: path, search: {} } as never);
+    });
+    await t.settle();
+    expect(t.router.state.location.pathname).toBe(path);
+  }
+  /** Day A (two days ago, my entry E there) is the default: the latest saved day. Day B (three days ago) is saved too. */
+  async function open(explicit = false) {
+    const task = await dailyCups(addDays(TODAY, -2));
+    const path = `/tasks/${task.taskId}`;
+    const t = await mountTasks({
+      path: explicit ? `${path}?occurrence=${task.occurrenceId}` : path,
+      rows: [
+        ...task.rows,
+        ...(await anotherDay(task, EARLIER, addDays(TODAY, -3))),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => recordCard() !== null && daySelect()?.value === task.occurrenceId,
+    );
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(daySelect()?.options.length).toBe(2);
+    const execution = task.rows[1] as CacheRow;
+    return {
+      t,
+      task,
+      path,
+      /**
+       * A committed page removes the task's details (its execution row); the task and both days stay. Resolves with what the view said
+       * (asserted by the test AFTER the input, so a lost input is what fails first).
+       */
+      removeDetails: async () => {
+        await t.commitSync([], [execution.id]);
+        const said = { unavailable: unavailable(), card: recordCard() };
+        await t.settle();
+        return said;
+      },
+      /** A committed page leaves the details unreadable (a value that is no task definition); resolves as `removeDetails` does. */
+      spoilDetails: async () => {
+        await t.commitSync([
+          { ...execution, value: { broken: true } as never, version: 2 },
+        ]);
+        const said = { unavailable: unavailable(), card: recordCard() };
+        await t.settle();
+        return said;
+      },
+      restoreDetails: async () => {
+        await t.commitSync([{ ...execution, version: 3 }]);
+        await t.until(() => recordCard() !== null);
+      },
+      removeA: async () => {
+        await t.commitSync([], [task.occurrenceId]);
+        await t.settle();
+      },
+      restoreA: async () => {
+        await t.commitSync([task.rows[2] as CacheRow]);
+        await t.settle();
+      },
+      /** Opens the correction, types 12, keeps it with the in-dialog sync control and goes to the sync screens. */
+      retainCorrection: async () => {
+        press(CORRECTION_COPY.open);
+        await t.until(() => dialog() !== null);
+        fireEvent.change(minimum(), { target: { value: "12" } });
+        const chip = within(dialog() as HTMLElement)
+          .getAllByRole("button")
+          .find((b) => b.hasAttribute("data-sync-tone"));
+        expect(chip, "the in-dialog sync control").toBeDefined();
+        fireEvent.click(chip as HTMLElement);
+        await t.until(() => dialog() === null);
+        await toSync(t);
+      },
+      /** A new visit of the task (from the task list) once day A is back: the default is day A again. */
+      revisit: async () => {
+        await to(t, path);
+        await t.until(
+          () =>
+            recordCard() !== null && daySelect()?.value === task.occurrenceId,
+        );
+      },
+    };
+  }
+  const nothingWritten = (t: Mounted) => expect(t.bodies()).toEqual([]);
+
+  // ---- Q2, DA21-I1: the visit's target does not depend on its parent being readable -------------------------------------------------
+
+  test("the task's details leave this device: day A is unavailable and its amount held; details back, the same raw amount on A, saved once", async () => {
+    const { t, task, removeDetails, restoreDetails } = await open();
+    type(amount, "7.125");
+    const said = await removeDetails();
+    nothingWritten(t);
+    await restoreDetails();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    expect(said).toEqual({ unavailable: true, card: null });
+    nothingWritten(t);
+    press("Record");
+    await t.until(() => records(t).length === 1);
+    expect(records(t)).toEqual([
+      expect.objectContaining({
+        occurrence_id: task.occurrenceId,
+        evidence: { kind: "quantity", amount: "7.125" },
+      }),
+    ]);
+  });
+
+  test("the task's details unreadable: day A is unavailable and its amount held; readable again, the same raw amount on A", async () => {
+    const { t, task, spoilDetails, restoreDetails } = await open();
+    type(amount, "7.125");
+    const said = await spoilDetails();
+    await restoreDetails();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    expect(said).toEqual({ unavailable: true, card: null });
+    nothingWritten(t);
+  });
+
+  test("the open fix keeps its value through the task's details leaving and coming back; nothing is queued", async () => {
+    const { t, task, removeDetails, restoreDetails } = await open();
+    press(HISTORY_COPY.fix);
+    type(newValue, "4.5");
+    const said = await removeDetails();
+    await restoreDetails();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    await t.until(() => screen.queryByLabelText(newValue) !== null);
+    expect(field(newValue).value).toBe("4.5");
+    expect(said).toEqual({ unavailable: true, card: null });
+    nothingWritten(t);
+  });
+
+  test("the open correction (not kept by its sync control) keeps its value through the task's details leaving and coming back", async () => {
+    const { t, task, removeDetails, restoreDetails } = await open();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    fireEvent.change(minimum(), { target: { value: "12" } });
+    const said = await removeDetails();
+    const hidden = dialog() === null;
+    await restoreDetails();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("12");
+    expect(said).toEqual({ unavailable: true, card: null });
+    expect(hidden, "the dialog was hidden with its day").toBe(true);
+    nothingWritten(t);
+  });
+
+  test("control: only the task's label changes: day A stays shown with its amount", async () => {
+    const { t, task } = await open();
+    type(amount, "7.125");
+    await t.commitSync([
+      { ...(task.rows[0] as CacheRow), label: "Renamed", version: 2 },
+    ]);
+    expect(unavailable()).toBe(false);
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    nothingWritten(t);
+  });
+
+  test("control: a failed read of the task's details is not their absence: the last complete read stays, stale, with the amount on A", async () => {
+    const { t, task } = await open();
+    type(amount, "7.125");
+    const service = t.data.service();
+    if (service === null) throw new Error("no service");
+    const store = service.store as { run: typeof service.store.run };
+    const original = store.run.bind(service.store);
+    store.run = (async (plan, input, options) => {
+      const asked = input as { kind?: string; parentId?: string };
+      if (asked.kind === "execution" && asked.parentId === task.taskId)
+        throw new StoreFailure("error");
+      return original(plan, input, options);
+    }) as typeof service.store.run;
+    await t.commitSync([
+      { ...(task.rows[0] as CacheRow), label: "Renamed", version: 2 },
+    ]);
+    await t.until(
+      () => document.querySelector("[data-detail-row-stale]") !== null,
+    );
+    expect(unavailable()).toBe(false);
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    store.run = original;
+    nothingWritten(t);
+  });
+
+  test("control: an address naming day A: the details leave and come back, the amount stays on A", async () => {
+    const { t, task, removeDetails, restoreDetails } = await open(true);
+    type(amount, "7.125");
+    expect(await removeDetails()).toEqual({ unavailable: true, card: null });
+    await restoreDetails();
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    nothingWritten(t);
+  });
+
+  // ---- Q3, DA21-I2: input taken back from the sync screens ends with the visit, mounted again or not ---------------------------------
+
+  test("day A removed while the person is in the sync screens, Back (unavailable), an ordinary departure: the amount ends with that visit", async () => {
+    const { t, path, removeA, restoreA, revisit } = await open();
+    type(amount, "7.125");
+    await toSync(t);
+    await removeA();
+    await back(t, path);
+    await t.until(() => detailShown() && unavailable());
+    await to(t, "/tasks");
+    await restoreA();
+    await revisit();
+    expect(field(amount).value).toBe("");
+    nothingWritten(t);
+  });
+
+  test("control: staying in that unavailable visit, day A back: its amount is there", async () => {
+    const { t, task, path, removeA, restoreA } = await open();
+    type(amount, "7.125");
+    await toSync(t);
+    await removeA();
+    await back(t, path);
+    await t.until(() => detailShown() && unavailable());
+    await restoreA();
+    await t.until(() => recordCard() !== null);
+    expect(daySelect()?.value).toBe(task.occurrenceId);
+    expect(field(amount).value).toBe("7.125");
+    nothingWritten(t);
+  });
+
+  test("a correction kept by the dialog's sync control and never reopened ends with the visit it came back to (day A present)", async () => {
+    const { t, path, retainCorrection } = await open();
+    await retainCorrection();
+    await back(t, path);
+    await t.until(() => detailShown() && recordCard() !== null);
+    expect(dialog()).toBeNull();
+    await to(t, "/tasks");
+    await to(t, path);
+    await t.until(() => recordCard() !== null);
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("10");
+    nothingWritten(t);
+  });
+
+  test("control: the same correction reopened in the visit it came back to resumes the person's 12", async () => {
+    const { t, path, retainCorrection } = await open();
+    await retainCorrection();
+    await back(t, path);
+    await t.until(() => detailShown() && recordCard() !== null);
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("12");
+    nothingWritten(t);
+  });
+
+  test("a correction kept through the sync screens while day A left, Back (unavailable), an ordinary departure: a later visit starts afresh", async () => {
+    const { t, path, retainCorrection, removeA, restoreA, revisit } =
+      await open();
+    await retainCorrection();
+    await removeA();
+    await back(t, path);
+    await t.until(() => detailShown() && unavailable());
+    await to(t, "/tasks");
+    await restoreA();
+    await revisit();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("10");
+    nothingWritten(t);
+  });
+
+  test("control: the fix kept through the sync screens while day A left ends with the visit it came back to (its own drop)", async () => {
+    const { t, path, removeA, restoreA, revisit } = await open();
+    press(HISTORY_COPY.fix);
+    type(newValue, "4.5");
+    await toSync(t);
+    await removeA();
+    await back(t, path);
+    await t.until(() => detailShown() && unavailable());
+    await to(t, "/tasks");
+    await restoreA();
+    await revisit();
+    expect(screen.queryByLabelText(newValue)).toBeNull();
+    nothingWritten(t);
+  });
+
+  test("a fix save answered after the visit ended, before its drop (the answer rewrites the kept fix), does not keep the fix", async () => {
+    const { t, path, removeA, restoreA, revisit } = await open();
+    const gate = holdWrites(t, true);
+    press(HISTORY_COPY.fix);
+    type(newValue, "7");
+    press(HISTORY_COPY.fixSave);
+    await t.settle();
+    await toSync(t);
+    await removeA();
+    await back(t, path);
+    await t.until(() => detailShown() && unavailable());
+    // The ordinary departure and the refused save's answer land in the same turn, before the visit's drop runs.
+    await act(async () => {
+      await t.router.navigate({ to: "/tasks", search: {} } as never);
+      await gate.open();
+    });
+    await t.settle();
+    await restoreA();
+    await revisit();
+    expect(screen.queryByLabelText(newValue)).toBeNull();
+    nothingWritten(t);
+  });
+
+  // ---- Q4, DA21-I2: the days a visit parked end with it ------------------------------------------------------------------------------
+
+  test("choosing again parks day A's amount with A; an ordinary departure ends it: A back, a new visit shows A blank", async () => {
+    const { t, removeA, restoreA, revisit } = await open();
+    type(amount, "7.125");
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    expect(daySelect()?.value ?? EARLIER).toBe(EARLIER);
+    await to(t, "/tasks");
+    await restoreA();
+    await revisit();
+    expect(field(amount).value).toBe("");
+    nothingWritten(t);
+  });
+
+  test("choosing again parks day A's open fix; an ordinary departure ends it: a new visit of A has no fix open", async () => {
+    const { t, removeA, restoreA, revisit } = await open();
+    press(HISTORY_COPY.fix);
+    type(newValue, "4.5");
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    await to(t, "/tasks");
+    await restoreA();
+    await revisit();
+    expect(screen.queryByLabelText(newValue)).toBeNull();
+    nothingWritten(t);
+  });
+
+  test("choosing again parks day A's open correction; an ordinary departure ends it: Correct on a new visit of A starts afresh", async () => {
+    const { t, removeA, restoreA, revisit } = await open();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    fireEvent.change(minimum(), { target: { value: "12" } });
+    await removeA();
+    expect(dialog()).toBeNull();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    await to(t, "/tasks");
+    await restoreA();
+    await revisit();
+    expect(dialog()).toBeNull();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("10");
+    nothingWritten(t);
+  });
+
+  test("a day parked before a sync visit is still the visit's after Back: an ordinary departure then ends its amount", async () => {
+    const { t, path, removeA, restoreA, revisit } = await open();
+    type(amount, "7.125");
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    await toSync(t);
+    await back(t, path);
+    await t.until(() => detailShown() && recordCard() !== null);
+    await to(t, "/tasks");
+    await restoreA();
+    await revisit();
+    expect(field(amount).value).toBe("");
+    nothingWritten(t);
+  });
+
+  test("control: a day parked before a sync visit, picked again after Back once it is back, shows its amount", async () => {
+    const { t, task, path, removeA, restoreA } = await open();
+    type(amount, "7.125");
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    await toSync(t);
+    await back(t, path);
+    await t.until(() => detailShown() && recordCard() !== null);
+    await restoreA();
+    await t.until(() => daySelect() !== null);
+    fireEvent.change(daySelect() as HTMLSelectElement, {
+      target: { value: task.occurrenceId },
+    });
+    await t.until(() => daySelect()?.value === task.occurrenceId);
+    await t.until(() => recordCard() !== null);
+    expect(field(amount).value).toBe("7.125");
+    nothingWritten(t);
+  });
+
+  test("a parked correction is the identity's: another identity ends that visit, and day A picked again starts afresh", async () => {
+    const { t, task, removeA, restoreA } = await open();
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    fireEvent.change(minimum(), { target: { value: "12" } });
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    t.rerender(tasksEnv(t.api, { online: false, identity: `${OTHER}:1` }));
+    await t.settle();
+    t.rerender(tasksEnv(t.api, { online: false }));
+    await t.settle();
+    await restoreA();
+    await t.until(() => daySelect() !== null);
+    fireEvent.change(daySelect() as HTMLSelectElement, {
+      target: { value: task.occurrenceId },
+    });
+    await t.until(() => daySelect()?.value === task.occurrenceId);
+    await t.until(() => recordCard() !== null);
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("10");
+    nothingWritten(t);
+  });
+
+  test("control: the parked fix and correction of day A are there when day A is picked again within the visit", async () => {
+    const { t, task, removeA, restoreA } = await open();
+    press(HISTORY_COPY.fix);
+    type(newValue, "4.5");
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    fireEvent.change(minimum(), { target: { value: "12" } });
+    await removeA();
+    press(DETAIL_COPY.showDays);
+    await t.until(() => recordCard() !== null);
+    await restoreA();
+    await t.until(() => daySelect() !== null);
+    fireEvent.change(daySelect() as HTMLSelectElement, {
+      target: { value: task.occurrenceId },
+    });
+    await t.until(() => daySelect()?.value === task.occurrenceId);
+    await t.until(() => screen.queryByLabelText(newValue) !== null);
+    expect(field(newValue).value).toBe("4.5");
+    press(CORRECTION_COPY.open);
+    await t.until(() => dialog() !== null);
+    expect(minimum().value).toBe("12");
+    nothingWritten(t);
+  });
+});
