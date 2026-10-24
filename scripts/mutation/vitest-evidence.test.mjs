@@ -73,8 +73,9 @@ const occurrenceOf = (receipt, over = {}) => ({
   phase: "body",
   attempt: 1,
   concurrent: false,
-  unobserved: [],
-  aggregate: false,
+  opaque: [],
+  complete: true,
+  path: [],
   receipt,
   edges: terminalOf(receipt),
   ...over,
@@ -509,7 +510,52 @@ test("admission (revision 29, kept in revision 30): an assertion only by the rec
     occurrenceOf(r, { id: "1" }),
     occurrenceOf(r, { edges: [{ invocation: 7, kind: "other" }] }),
     occurrenceOf(r, { edges: "none" }),
-    occurrenceOf(r, { unobserved: [null] }),
+    occurrenceOf(r, { opaque: [null] }),
+    // revision 31: the collection path and completeness are part of the shape
+    occurrenceOf(r, { complete: "yes" }),
+    occurrenceOf(r, { complete: undefined }),
+    occurrenceOf(r, { path: "none" }),
+    occurrenceOf(r, { path: undefined }),
+    occurrenceOf(r, { path: [null] }),
+    occurrenceOf(r, {
+      path: [{ kind: "tuple", object: true, receipt: null, edges: [] }],
+    }),
+    occurrenceOf(r, {
+      path: [{ kind: "array", object: "yes", receipt: null, edges: [] }],
+    }),
+    occurrenceOf(r, {
+      path: [
+        {
+          kind: "array",
+          object: true,
+          receipt: null,
+          edges: [{ invocation: "7", kind: "sync" }],
+        },
+      ],
+    }),
+    occurrenceOf(r, {
+      path: [
+        {
+          kind: "array",
+          object: true,
+          receipt: { ...r, root: "1" },
+          edges: [],
+        },
+      ],
+    }),
+    occurrenceOf(r, {
+      path: [
+        { kind: "aggregate", object: true, receipt: null, edges: [] },
+        { kind: "array", object: true, receipt: null, edges: [] },
+      ],
+    }),
+    occurrenceOf(r, {
+      path: [
+        { kind: "array", object: true, receipt: null, edges: [] },
+        { kind: "aggregate", object: true, receipt: null, edges: [] },
+        { kind: "aggregate", object: true, receipt: null, edges: [] },
+      ],
+    }),
     occurrenceOf(r, { phase: undefined }),
     occurrenceOf("receipt"),
   ])
@@ -624,7 +670,7 @@ test("admission (revision 30): per occurrence, by its collection phase, attempt,
       "unknown",
     ].map((phase) => [genuine({ phase }), new RegExp(`the ${phase} phase`)]),
     [genuine({ phase: "elsewhere" }), /unknown collection phase/],
-    [genuine({ unobserved: [5] }), /settled without observable completion/],
+    [genuine({ opaque: [5] }), /non-intrinsic thenable/],
     [genuine({ concurrent: true }), /another test was running/],
     [genuine({ id: 2 }), /did not attest/],
     [genuine({ test: "t-other" }), /collected for another test/],
@@ -699,6 +745,84 @@ test("admission (revision 30): per occurrence, by its collection phase, attempt,
     "afterEach",
   );
   assert.equal(admission(genuine(), ok).phase, "body");
+});
+
+test("admission (revision 31): the framework's array/aggregate expansion keeps every container's veto; opaque asynchronous matchers refuse", () => {
+  const ok = { nonce: "n", adapter: ADAPTER, testId: "t-oracle", issued: [1] };
+  const bound = (e) => bind(e, "t-oracle");
+  const r = receiptOf("chai.Assertion#assert", "comparison");
+  const genuine = (over) => bound(chaiError(r, "expected 1 to be 2", over));
+  const container = (kind, edges = [], receipt = null) => ({
+    kind,
+    object: true,
+    receipt,
+    edges,
+  });
+  // A genuine comparison wrapped by TEST code (no container left an invocation) stays a clean catch, through either expansion.
+  for (const path of [
+    [container("aggregate")],
+    [container("array")],
+    [container("array"), container("aggregate")],
+  ])
+    assert.equal(
+      classify(genuine({ path }), ok),
+      "assertion",
+      JSON.stringify(path),
+    );
+  // A container that left another matcher (thrown, its handler's throw, its rejection, or soft-collected in it) vetoes the child.
+  for (const kind of ["sync", "async-result", "async-rejection", "soft"]) {
+    for (const path of [
+      [container("aggregate", [{ invocation: 9, kind }])],
+      [container("array", [{ invocation: 9, kind }])],
+      [container("array", [{ invocation: 9, kind }]), container("aggregate")],
+      [container("array"), container("aggregate", [{ invocation: 9, kind }])],
+    ]) {
+      const a = admission(genuine({ path }), ok);
+      assert.equal(a.kind, "error", JSON.stringify(path));
+      assert.match(a.why, /that left a matcher invocation/);
+    }
+    // Even an edge naming the child's own invocation: a container is never a comparison.
+    assert.equal(
+      classify(
+        genuine({ path: [container("aggregate", [{ invocation: 7, kind }])] }),
+        ok,
+      ),
+      "error",
+    );
+  }
+  assert.match(
+    admission(genuine({ path: [container("array", [], r)] }), ok).why,
+    /carrying a construction receipt/,
+  );
+  // An incomplete record (a snapshot or the collection context failed) is never admitted.
+  assert.match(
+    admission(genuine({ complete: false }), ok).why,
+    /incomplete occurrence record/,
+  );
+  // An opaque asynchronous matcher earlier in the attempt refuses every later occurrence, whatever else it carries.
+  assert.match(
+    admission(genuine({ opaque: [3] }), ok).why,
+    /non-intrinsic thenable/,
+  );
+  // The container veto also applies to an occurrence without a receipt and to the inversion phase.
+  assert.match(
+    admission(
+      bound(
+        project({
+          name: "Error",
+          message: "x",
+          [OCCURRENCE_KEY]: occurrenceOf(null, {
+            path: [container("aggregate", [{ invocation: 9, kind: "sync" }])],
+          }),
+        }),
+      ),
+      ok,
+    ).why,
+    /that left a matcher invocation/,
+  );
+  const inversionInPath = bound(invertedError());
+  inversionInPath.occurrence.path = [container("aggregate")];
+  assert.equal(classify(inversionInPath, { ...ok, fails: true }), "error");
 });
 
 test("project records a live function constructor by its name only", () => {

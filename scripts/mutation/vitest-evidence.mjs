@@ -33,6 +33,15 @@
 // invocation and NO other one (a borrowed error leaving another matcher is that matcher's execution failure), no asynchronous matcher of
 // that attempt settled unobserved, no other test was running, and the worker attested the occurrence (its per-file health record). A
 // hook, cleanup or lifecycle collection is a veto whatever it carries. Envelope schema 4 requires every run module's health record.
+//
+// Revision 31 (review r30 R31/R33 incomplete_fix, design assessment 34d402c4 RC1/RC2, C1-C4): the framework flattens a thrown array and
+// each AggregateError in it before collecting, so a donor's genuine comparison wrapped and thrown by ANOTHER matcher reached the reader
+// with only the donor's clean edges, and both consumers continued. An occurrence (origin schema 4) now carries its collection PATH (the
+// array the framework iterated and the AggregateError it expanded, each with the edges and receipt it had when collection began): an
+// edge on any of them is a veto, and a record whose snapshots could not be taken (`complete: false`) is never admitted. An asynchronous
+// matcher result or `.resolves`/`.rejects` subject that was not an intrinsic promise makes the WORKER opaque from then on (`opaque`:
+// every later occurrence refused whatever its handler did);
+// an intrinsic promise's rejection is observed by the framework's own reaction, so it needs no wait. Envelope schema 5.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import {
   adapterDigest,
@@ -55,7 +64,7 @@ export {
   SITES,
 };
 export const REQUEST_SCHEMA = "atlas-vitest-request/1";
-export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/4";
+export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/5";
 /** The lifecycle this adapter was qualified against. Any other version is refused, not assumed compatible. */
 export const PINNED_VITEST = "5.0.1";
 export const ORIGIN_SETUP = ORIGIN_FILES.setup;
@@ -149,10 +158,38 @@ function receiptOf(record) {
   };
 }
 
+const PATH_KINDS = ["array", "aggregate"];
+const isEdge = (e) =>
+  e !== null &&
+  typeof e === "object" &&
+  isInt(e.invocation) &&
+  EDGE_KINDS.includes(e.kind);
+
+/** One element of an occurrence's collection path (revision 31), exactly of its shape, or `undefined` when malformed. */
+function pathElementOf(p) {
+  if (p === null || typeof p !== "object") return undefined;
+  const { kind, object, receipt, edges } = p;
+  const r = receiptOf(receipt);
+  if (
+    !PATH_KINDS.includes(kind) ||
+    typeof object !== "boolean" ||
+    r === undefined ||
+    !Array.isArray(edges) ||
+    !edges.every(isEdge)
+  )
+    return undefined;
+  return {
+    kind,
+    object,
+    receipt: r,
+    edges: edges.map((e) => ({ invocation: e.invocation, kind: e.kind })),
+  };
+}
+
 /**
  * The occurrence record of one serialised error, read without trusting it: `null` when absent, `{ invalid: true }` when present but
- * not exactly of the record's shape (or unreadable), else `{ schema, nonce, adapter, id, test, phase, attempt, concurrent, unobserved,
- * aggregate, receipt, edges }`. Whether it ADMITS the error is `admission`'s decision.
+ * not exactly of the record's shape (or unreadable), else `{ schema, nonce, adapter, id, test, phase, attempt, concurrent, opaque,
+ * complete, path, receipt, edges }`. Whether it ADMITS the error is `admission`'s decision.
  */
 function occurrenceOf(value) {
   let record;
@@ -172,25 +209,31 @@ function occurrenceOf(value) {
       phase,
       attempt,
       concurrent,
-      unobserved,
-      aggregate,
+      opaque,
+      complete,
+      path,
       receipt,
       edges,
     } = record;
     const r = receiptOf(receipt);
+    const elements = Array.isArray(path) ? path.map(pathElementOf) : null;
     if (
       ![schema, nonce, adapter, phase].every((v) => typeof v === "string") ||
       !isInt(id) ||
       !isOptionalString(test) ||
       !isOptionalInt(attempt) ||
       typeof concurrent !== "boolean" ||
-      typeof aggregate !== "boolean" ||
-      !Array.isArray(unobserved) ||
-      !unobserved.every(isInt) ||
+      typeof complete !== "boolean" ||
+      !Array.isArray(opaque) ||
+      !opaque.every(isInt) ||
+      elements === null ||
+      elements.length > PATH_KINDS.length ||
+      elements.some((p) => p === undefined) ||
+      // outermost first: at most the iterated array, then the expanded aggregate
+      (elements.length === 2 &&
+        (elements[0].kind !== "array" || elements[1].kind !== "aggregate")) ||
       !Array.isArray(edges) ||
-      !edges.every(
-        (e) => e && isInt(e.invocation) && EDGE_KINDS.includes(e.kind),
-      ) ||
+      !edges.every(isEdge) ||
       r === undefined
     )
       return { invalid: true };
@@ -203,8 +246,9 @@ function occurrenceOf(value) {
       phase,
       attempt,
       concurrent,
-      unobserved: [...unobserved],
-      aggregate,
+      opaque: [...opaque],
+      complete,
+      path: elements,
       receipt: r,
       edges: edges.map((e) => ({ invocation: e.invocation, kind: e.kind })),
     };
@@ -262,7 +306,8 @@ function shapeProblem(error, constructs) {
  *   inverted   the runner's `test.fails` inversion of this very test, which is a test.fails case
  *   assertion  (revision 30) an occurrence collected in this test's body, of this run and adapter, attested by its worker, whose object
  *              is a completed comparison (or explicit failure) of an un-nested invocation of this test and attempt, that left that
- *              invocation and no other one, with no asynchronous matcher of the attempt settled unobserved and no other test running
+ *              invocation and no other one, with no opaque asynchronous matcher earlier in the attempt and no other test running, and
+ *              (revision 31) a complete record whose framework-expanded containers left no invocation
  *   error      anything else, with `why`, whatever its name, frames or text say
  * `issued` is the list of occurrence ids the worker attested for this test (its module's health record), or null when none.
  */
@@ -313,6 +358,20 @@ export function admission(
     return no(
       "collected while another test was running (concurrent tests are unsupported)",
     );
+  // Revision 31 (RC1/I2): a container the framework expanded to reach this error is not an assertion; if it left any invocation (by a
+  // throw, a soft collection, a handler or a rejection) that invocation failed by executing, and the children cannot launder it.
+  if (!occurrence.complete)
+    return no(
+      "an incomplete occurrence record (a snapshot or the collection context could not be taken)",
+    );
+  for (const p of occurrence.path) {
+    if (p.edges.length > 0)
+      return no(
+        `collected out of ${p.kind === "array" ? "an array" : "an AggregateError"} that left a matcher invocation (an execution failure of that matcher)`,
+      );
+    if (p.receipt !== null)
+      return no(`collected out of ${p.kind} carrying a construction receipt`);
+  }
   if (receipt === null) return no("no assertion origin");
   if (receipt.schema !== ORIGIN_SCHEMA)
     return no(`unsupported origin schema ${JSON.stringify(receipt.schema)}`);
@@ -342,16 +401,19 @@ export function admission(
     return receipt.role === "inversion" &&
       fails &&
       ofThisTest(receipt.test) &&
-      occurrence.edges.length === 0
+      occurrence.edges.length === 0 &&
+      occurrence.path.length === 0
       ? yes("inverted")
       : no(
           "an inversion of another test, of no test.fails case or of another error",
         );
   if (occurrence.phase !== "body")
     return no(`collected in the ${occurrence.phase} phase, not the test body`);
-  if (occurrence.unobserved.length > 0)
+  // Revision 31 (RC2/I5): an asynchronous matcher result (or `.resolves`/`.rejects` subject) that was not an intrinsic promise may have
+  // handed anything back; every later occurrence of the worker is refused, whatever its handler did.
+  if (occurrence.opaque.length > 0)
     return no(
-      "an asynchronous matcher of this attempt settled without observable completion",
+      "an earlier asynchronous matcher result or promise subject of this worker was a non-intrinsic thenable (its outcome cannot be observed)",
     );
   switch (receipt.role) {
     case "comparison":

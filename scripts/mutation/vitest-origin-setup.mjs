@@ -7,6 +7,7 @@
 // `attest`), so this file adds no hook to the suites under test.
 //
 // Revision 29 checked receipts on the error objects themselves; revision 30 keeps them in the runtime (the errors are untouched).
+// Revision 31 (review r30 R33, design assessment 34d402c4 C4) also proves the intrinsic-promise decision on known cases.
 import { chai, expect } from "vitest";
 import {
   ASYNC_CONTEXT_FLAG,
@@ -121,6 +122,30 @@ if (
   refuse(`the borrowed probe's edges: ${JSON.stringify(borrowedEdges)}`);
 if (registry.receiptOf(new Error("probe")) !== null)
   refuse("an ordinary error carries a receipt");
+// Revision 31 (RC2): the intrinsic-promise decision of this realm. A plain promise (and an async function's) is intrinsic; a subclass,
+// an own `constructor`, a proxy and a custom thenable are not. Only own descriptors are read: the probe getter below must never run.
+let probeGetterRan = false;
+const ownConstructor = Promise.resolve();
+Object.defineProperty(ownConstructor, "constructor", {
+  get() {
+    probeGetterRan = true;
+    return Promise;
+  },
+});
+const intrinsicCases = [
+  ["plain", Promise.resolve(), true],
+  ["async function", (async () => {})(), true],
+  ["subclass", new (class extends Promise {})(() => {}), false],
+  ["own constructor", ownConstructor, false],
+  ["proxy", new Proxy(Promise.resolve(), {}), false],
+  // biome-ignore lint/suspicious/noThenProperty: a custom thenable is this probe's subject
+  ["thenable", { then() {} }, false],
+];
+for (const [label, value, expected] of intrinsicCases)
+  if (registry.intrinsic(value) !== expected)
+    refuse(`the intrinsic-promise probe (${label}) is not ${expected}`);
+if (probeGetterRan)
+  refuse("the intrinsic-promise decision ran a constructor getter");
 if (registry.depth() !== 0)
   refuse("matcher frames are unbalanced after the probes");
 if (registry.failures.length > 0)

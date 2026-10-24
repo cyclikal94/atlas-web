@@ -24,6 +24,22 @@
 // handler is the framework's, edited in place). Only a genuine native promise whose `then` is the intrinsic one (checked without running
 // user code) also gets an inert reaction to observe a rejection, which no user code can see; any other thenable is left to the
 // framework's call alone, and until its handler runs the invocation counts as unobserved (that attempt's occurrences are ambiguous).
+//
+// Revision 31 (review r30 R31/R33 incomplete_fix; design assessment 34d402c4 RC1/RC2, C1-C4, I2-I5):
+//   - COLLECTION PATHS (RC1): Vitest's `failTask` expands a thrown array and then each AggregateError it meets (one level of each), and
+//     only the children become errors. The wrapper that left a matcher carried the edge; its children did not. `collection` and
+//     `snapshot` now take the receipt and edges of the root array and of each expanded aggregate (WeakMap lookups only, before the
+//     framework serialises anything, without touching or traversing the objects) and every child's occurrence carries that `path`. An
+//     edge on a framework-expanded container vetoes its children; nothing is written onto the shared children themselves.
+//   - NO EXTRA REACTION (RC2): revision 30's second `then` on a native promise read its constructor and species (user code). It is
+//     gone. The framework's own single `result.then(handler)` call stays the only subscription. When, BEFORE the framework reads
+//     `result.then`, the result is proven an intrinsic promise whose whole species path is intrinsic (`intrinsic`: own and prototype
+//     descriptors only, no user code), that one call also gets an explicit rejection handler that records the edge and rethrows: for an
+//     intrinsic `then` the argument count is unobservable and a rethrowing handler settles the derived promise exactly as the implicit
+//     thrower does, in the same job. Any other thenable keeps its one-argument call, and the worker is OPAQUE from then on: its handler
+//     running proves nothing about what the thenable's `then` returned, and a thenable made in a hook, an earlier test or an earlier
+//     attempt can hand anything to a later one, so every later occurrence of the worker is refused (fail closed). The same applies to
+//     a `.resolves`/`.rejects` subject whose species path is not intrinsic (`consuming`).
 import { AsyncLocalStorage } from "node:async_hooks";
 import { types } from "node:util";
 import {
@@ -40,8 +56,15 @@ import {
 const nonce = process.env[ORIGIN_NONCE_ENV] ?? null;
 const { digest: adapter } = adapterDigest();
 const als = new AsyncLocalStorage();
-const nativeThen = Promise.prototype.then;
 const { getPrototypeOf, getOwnPropertyDescriptor, hasOwn, freeze } = Object;
+// The intrinsics a promise's `then` uses, captured when the worker loads this module (before any test code runs).
+const IntrinsicPromise = Promise;
+const intrinsicProto = Promise.prototype;
+const nativeThen = intrinsicProto.then;
+const nativeCatch = intrinsicProto.catch;
+const nativeFinally = intrinsicProto.finally;
+const speciesGetter = getOwnPropertyDescriptor(Promise, Symbol.species)?.get;
+const iteratorKey = Symbol.iterator;
 
 const frames = [];
 const handlers = [];
@@ -122,7 +145,6 @@ function invocation(root, parent, testId) {
     test: state,
     attempt: state?.attempt ?? null,
     async: null,
-    settled: false,
   };
 }
 
@@ -207,63 +229,155 @@ export function threw(value) {
   }
 }
 
-/** Whether `value` is a genuine native promise whose `then` is the intrinsic one, decided without running any user code. */
-function nativePromise(value) {
+/** A data property that is exactly `value` (an own descriptor read: no getter runs). */
+const dataIs = (object, key, value) => {
+  const d = getOwnPropertyDescriptor(object, key);
+  return d !== undefined && hasOwn(d, "value") && d.value === value;
+};
+
+/**
+ * Revision 31 (RC2): whether the framework's `result.then(...)` call is, by the language's own steps, intrinsic code from end to end,
+ * decided BEFORE the framework reads `result.then` and without running any user code (internal-slot checks and own descriptor reads of
+ * a non-proxy object only). Then: `result` is a genuine non-proxy promise with no own `then` or `constructor` and the intrinsic
+ * prototype, whose `then` and `constructor` are the intrinsic data properties, and `Promise[Symbol.species]` is the intrinsic getter.
+ * So the framework's two reads of `result.then` read data, its call is the intrinsic `then`, whose SpeciesConstructor step reads the
+ * prototype's data `constructor` and runs the intrinsic species getter, and its derived promise is a %Promise% made by the intrinsic
+ * constructor (its `prototype` is non-writable). Nothing runs between this decision and that call except the framework's reads and
+ * this adapter's argument evaluation. Anything else (a subclass, an own or inherited `constructor` getter, a replaced species, a proxy,
+ * a foreign realm, a custom thenable) is not intrinsic.
+ */
+export function intrinsic(result) {
   try {
-    if (!types.isPromise(value) || types.isProxy(value)) return false;
-    if (hasOwn(value, "then")) return false;
-    const proto = getPrototypeOf(value);
-    if (proto !== Promise.prototype) return false;
-    const d = getOwnPropertyDescriptor(Promise.prototype, "then");
-    return d !== undefined && hasOwn(d, "value") && d.value === nativeThen;
-  } catch {
+    if (!types.isPromise(result) || types.isProxy(result)) return false;
+    if (hasOwn(result, "then") || hasOwn(result, "constructor")) return false;
+    if (getPrototypeOf(result) !== intrinsicProto) return false;
+    return intrinsicGlobals();
+  } catch (error) {
+    fail("intrinsic", error);
     return false;
   }
 }
+/** The shared half of `intrinsic`: %Promise.prototype%'s `then` and `constructor` and %Promise%'s species getter are the intrinsic ones. */
+function intrinsicGlobals() {
+  if (!dataIs(intrinsicProto, "then", nativeThen)) return false;
+  if (!dataIs(intrinsicProto, "constructor", IntrinsicPromise)) return false;
+  const species = getOwnPropertyDescriptor(IntrinsicPromise, Symbol.species);
+  return (
+    typeof speciesGetter === "function" &&
+    species !== undefined &&
+    species.get === speciesGetter
+  );
+}
 
 /**
- * Vitest's asynchronous extended-matcher path (R33): called while the framework evaluates the arguments of its own one
- * `result.then(handler)` call (after it read `result.then`), inside the matcher's invocation. It returns that invocation for the handler
- * the framework is about to pass. For a genuine native promise (decided without running user code) it also registers an inert reaction,
- * through the intrinsic `then` captured at load (no property of `result` is read), just before the framework's: it runs no user code,
- * its derived promise always fulfils, and every other job keeps its relative order. Any other thenable is left to the framework's
- * call alone, and the invocation is unobserved until its handler runs.
+ * Revision 31: every asynchronous invocation or promise subject found NOT intrinsic so far in this worker. Monotone: a non-intrinsic
+ * thenable made in a hook, an earlier test or an earlier attempt can hand anything to a later one, so every later occurrence of the
+ * worker is refused (fail closed; the population has none).
  */
-export function async(result) {
+const opaqueSeen = [];
+const markOpaque = (id) => {
+  try {
+    opaqueSeen.push(id);
+  } catch (error) {
+    fail("opaque", error);
+  }
+};
+
+/**
+ * Revision 31: Vitest's `.resolves`/`.rejects` wrappers are about to consume `subject` with `Promise.resolve(subject).then(...).catch(...)`
+ * (and `recordAsyncExpect`'s `finally`), returning the derived promise to the test. A custom (non-promise) thenable is assimilated by
+ * intrinsic code there (its own `then`'s return value is ignored), but a genuine promise with a non-intrinsic species path, or replaced
+ * global promise methods, could hand the test a laundering derived promise. Decided without running user code, immediately before
+ * that `Promise.resolve`; a non-intrinsic path is opaque for the rest of the worker. Returns nothing (the framework's code is unchanged).
+ */
+export function consuming(subject) {
+  try {
+    const promise = types.isPromise(subject) && !types.isProxy(subject);
+    const ok =
+      (promise ? intrinsic(subject) : intrinsicGlobals()) &&
+      dataIs(intrinsicProto, "catch", nativeCatch) &&
+      dataIs(intrinsicProto, "finally", nativeFinally);
+    if (!ok) {
+      invocations += 1;
+      markOpaque(invocations);
+    }
+  } catch (error) {
+    fail("consuming", error);
+  }
+}
+
+/** The invocation `async` armed for the framework's call being evaluated (`rejection` takes it: evaluated right after, no user code between). */
+let armed = null;
+/**
+ * Vitest's asynchronous extended-matcher path: called while the framework evaluates the FIRST argument of its own one
+ * `result.then(handler)` call (after it read `result.then`), inside the matcher's invocation. It returns that invocation for the handler
+ * the framework is about to pass. `isIntrinsic` is `intrinsic(result)`, decided before the framework's reads. A non-intrinsic result
+ * makes the worker OPAQUE from now on (`opaqueSeen`; its handler running would not prove what its `then` returned).
+ */
+export function async(_result, isIntrinsic) {
   let inv = null;
+  armed = null;
   try {
     inv = frames.at(-1)?.inv ?? null;
-    if (inv === null) return null;
-    const owner = inv;
-    if (nativePromise(result)) {
-      owner.async = "observed";
-      Reflect.apply(nativeThen, result, [
-        undefined,
-        (reason) => {
-          owner.settled = true;
-          edge(reason, owner, "async-rejection");
-        },
-      ]);
-    } else {
-      owner.async = "unobserved";
-      owner.test?.unobserved.add(owner);
+    armed = freeze({ inv, intrinsic: isIntrinsic === true });
+  } catch (error) {
+    fail("async", error);
+  }
+  try {
+    if (inv !== null) inv.async = isIntrinsic === true ? "intrinsic" : "opaque";
+    if (isIntrinsic !== true) {
+      if (inv === null) invocations += 1;
+      markOpaque(inv?.id ?? invocations);
     }
   } catch (error) {
     fail("async", error);
   }
   return inv;
 }
+
+const NO_ARGUMENTS = freeze({
+  [iteratorKey]: () => ({ next: () => ({ done: true, value: undefined }) }),
+});
+/**
+ * The remaining arguments of the framework's `result.then(handler, ...)` call, spread from an iterable made of own data properties only
+ * (no prototype method, so no user code runs): none for a non-intrinsic result (its `then` sees exactly the framework's one argument),
+ * and for an intrinsic promise ONE rejection handler that records the edge and rethrows the same value. For the intrinsic `then` that is
+ * the framework's own implicit pass-through, made explicit: the derived promise is rejected with the same value in the same job, the
+ * result has the same one reaction, and nothing else is enqueued.
+ */
+export function rejection() {
+  const at = armed;
+  armed = null;
+  try {
+    if (at?.intrinsic !== true) return NO_ARGUMENTS;
+    const owner = at.inv;
+    const onRejected = (reason) => {
+      edge(reason, owner, "async-rejection");
+      throw reason;
+    };
+    let given = false;
+    return {
+      [iteratorKey]: () => ({
+        next: () => {
+          if (given) return { done: true, value: undefined };
+          given = true;
+          return { done: false, value: onRejected };
+        },
+      }),
+    };
+  } catch (error) {
+    fail("rejection", error);
+    return NO_ARGUMENTS;
+  }
+}
+
 const handlerContexts = [];
 /** The framework's handler of `inv`'s asynchronous result starts: it runs in that invocation. */
 export function handling(inv) {
   try {
     handlerContexts.push(als.getStore());
     handlers.push(inv);
-    if (inv !== null) {
-      inv.settled = true;
-      inv.test?.unobserved.delete(inv);
-      als.enterWith(inv);
-    }
+    if (inv !== null) als.enterWith(inv);
   } catch (error) {
     fail("handling", error);
   }
@@ -387,7 +501,6 @@ export function running(test) {
       id: typeof test?.id === "string" ? test.id : null,
       phase: "prepare",
       attempt: 0,
-      unobserved: new Set(),
     });
     runningTests.add(test);
   } catch (error) {
@@ -409,7 +522,6 @@ export function phase(test, name) {
     if (state === null) throw new Error("phase of a test that is not running");
     if (name === "before-try") {
       state.attempt += 1;
-      state.unobserved = new Set();
     }
     state.phase = name;
   } catch (error) {
@@ -426,16 +538,15 @@ function context(test, name, advance) {
         phase: name ?? "unknown",
         attempt: null,
         concurrent: runningTests.size > 1,
-        unobserved: [],
+        opaque: [...opaqueSeen],
       });
     const at = freeze({
       test: state.id,
       phase: name ?? state.phase,
       attempt: state.attempt,
       concurrent: runningTests.size > 1,
-      unobserved: [...state.unobserved]
-        .filter((inv) => !inv.settled)
-        .map((inv) => inv.id),
+      // Every opaque asynchronous invocation or promise subject of this worker so far (revision 31: never resolved by a later handler).
+      opaque: [...opaqueSeen],
     });
     if (advance) state.phase = "after-body";
     return at;
@@ -447,8 +558,50 @@ function context(test, name, advance) {
 /** The context in which the runner collects `test`'s error: a fixed phase, or (null) the phase the first try had reached. */
 export const failing = (test, name) => context(test, name, name === null);
 /**
+ * Revision 31 (RC1, C1): the receipt and edges `value` carries NOW, as a frozen snapshot. WeakMap lookups only: nothing of `value` is
+ * read, traversed or written (a proxy's traps do not run). A primitive has neither. `null` only if the lookup itself failed.
+ */
+export function snapshot(value) {
+  try {
+    if (
+      value === null ||
+      (typeof value !== "object" && typeof value !== "function")
+    )
+      return freeze({ object: false, receipt: null, edges: freeze([]) });
+    return freeze({
+      object: true,
+      receipt: receipts.get(value) ?? null,
+      edges: freeze([...(edges.get(value) ?? [])]),
+    });
+  } catch (error) {
+    fail("snapshot", error);
+    return null;
+  }
+}
+
+/**
+ * Revision 31 (RC1, C1/C2): `failTask` starts collecting `root` in `at` (`undefined`: an uninstrumented call, nothing is recorded).
+ * `expanded` is the framework's own decision (`errors === err`: it iterated `root` as an array); the array's snapshot is taken here,
+ * before any child is serialised, and becomes the first element of every child occurrence's path.
+ */
+export function collection(at, root, expanded) {
+  if (at === undefined) return undefined;
+  try {
+    return freeze({
+      at,
+      array: expanded === true ? snapshot(root) : undefined,
+      leaf: undefined,
+    });
+  } catch (error) {
+    fail("collection", error);
+    return freeze({ at: null, array: null, leaf: undefined });
+  }
+}
+
+/**
  * `expect.soft`'s collection: the current phase, which continues. Inside a soft matcher's frame the error leaves that invocation by
- * being collected (a `soft` edge of it); collected after an asynchronous soft assertion settled, it already left its invocation.
+ * being collected (a `soft` edge of it); collected after an asynchronous soft assertion settled, it already left its invocation. Called
+ * before the framework serialises the error; the error's snapshot (taken after its soft edge) is the occurrence's leaf.
  */
 export function soft(test, error) {
   try {
@@ -457,16 +610,39 @@ export function soft(test, error) {
   } catch (failure) {
     fail("soft", failure);
   }
-  return context(test, null, false);
+  try {
+    return freeze({
+      at: context(test, null, false),
+      array: undefined,
+      leaf: snapshot(error),
+    });
+  } catch (failure) {
+    fail("soft", failure);
+    return freeze({ at: null, array: null, leaf: null });
+  }
 }
 
-/** `failTask`/`handleTestError` serialised `original` as `copy` in `at`: this occurrence's record goes on the copy. */
-export function occurrence(original, copy, at, aggregate) {
+/** A path element: one container the framework expanded (`null` element: its snapshot failed). */
+const element = (kind, s) =>
+  s === null || s === undefined
+    ? null
+    : freeze({ kind, object: s.object, receipt: s.receipt, edges: s.edges });
+
+/**
+ * `failTask`/`handleTestError` serialised one collected value as `copy`: this occurrence's record goes on the copy. `leaf` is the
+ * value's snapshot taken before serialisation (`undefined`: the collection's own `leaf`), `from` the collection (`collection`/`soft`),
+ * `wrapper` the snapshot of the AggregateError the framework expanded to reach it (or null). The record's `path` lists, outermost first,
+ * the containers the framework expanded on the way: their edges veto the child (vitest-evidence.mjs). Each call is its own occurrence.
+ */
+export function occurrence(leaf0, copy, from, wrapper) {
   try {
-    if (at === undefined) return copy;
-    const object =
-      (typeof original === "object" && original !== null) ||
-      typeof original === "function";
+    if (from === undefined) return copy;
+    const at = from?.at ?? null;
+    const leaf = leaf0 === undefined ? from?.leaf : leaf0;
+    const path = [];
+    if (from?.array !== undefined) path.push(element("array", from?.array));
+    if (wrapper !== null && wrapper !== undefined)
+      path.push(element("aggregate", wrapper));
     occurrences += 1;
     const id = occurrences;
     const record = {
@@ -478,10 +654,16 @@ export function occurrence(original, copy, at, aggregate) {
       phase: at?.phase ?? "unknown",
       attempt: at?.attempt ?? null,
       concurrent: at?.concurrent ?? true,
-      unobserved: at?.unobserved ?? [],
-      aggregate: aggregate === true,
-      receipt: object ? (receipts.get(original) ?? null) : null,
-      edges: object ? [...(edges.get(original) ?? [])] : [],
+      opaque: at?.opaque ?? [],
+      // false when any snapshot (leaf or path) or the collection context could not be taken: never admitted
+      complete:
+        at !== null &&
+        leaf !== null &&
+        leaf !== undefined &&
+        path.every((p) => p !== null),
+      path: path.filter((p) => p !== null),
+      receipt: leaf?.receipt ?? null,
+      edges: [...(leaf?.edges ?? [])],
     };
     if (record.test !== null)
       issued.set(record.test, [...(issued.get(record.test) ?? []), id]);
@@ -502,7 +684,12 @@ export function inversion(test, copy) {
   try {
     const state = stateOf(test);
     const at = context(test, "inversion", false);
-    occurrence(null, copy, at, false);
+    occurrence(
+      snapshot(null),
+      copy,
+      freeze({ at, array: undefined, leaf: undefined }),
+      null,
+    );
     const record = copy?.[OCCURRENCE_KEY];
     if (record === undefined) throw new Error("the inversion was not recorded");
     record.receipt = freeze({
@@ -588,6 +775,8 @@ Object.defineProperty(globalThis, REGISTRY, {
     depth: () => frames.length + handlers.length,
     receiptOf: (error) => receipts.get(error) ?? null,
     edgesOf: (error) => [...(edges.get(error) ?? [])],
+    /** Revision 31: the intrinsic-promise decision (the setup proves it on known intrinsic and non-intrinsic promises). */
+    intrinsic,
     /** Whether the asynchronous context reaches a promise reaction (the worker's async-context mode is checked by the setup). */
     propagates: () => {
       const probe = freeze({ probe: true });

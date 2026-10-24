@@ -128,7 +128,49 @@ test("each module instruments with every site exactly once, the runtime import o
     ).length - 1,
     1,
   );
-  assert.equal(expect.split("})(__atlasOrigin.async(result)));").length - 1, 1);
+  // Revision 31 (RC2): no second subscription and no Reflect/native `then` of our own; the intrinsic decision ends the line before, and
+  // the call's remaining arguments are spread from the runtime's own-property iterable.
+  assert.equal(
+    expect.split(
+      "})(__atlasOrigin.async(result, __atlasIntrinsic)), ...__atlasOrigin.rejection());",
+    ).length - 1,
+    1,
+  );
+  const resultLine = expectSource.findIndex((l) =>
+    l.includes("const result = expectAssertion.call(state, obj, ...args);"),
+  );
+  assert.equal(resultLine, thenLine - 1);
+  assert.equal(
+    expectLines[resultLine],
+    `${expectSource[resultLine]} const __atlasIntrinsic = __atlasOrigin.intrinsic(result);`,
+  );
+  assert.equal(
+    expect.split(".then(").length,
+    expectSource.join("\n").split(".then(").length,
+  );
+  assert.equal(
+    expect.split("Reflect.apply").length,
+    expectSource.join("\n").split("Reflect.apply").length,
+  );
+  // Revision 31: `.resolves`/`.rejects` classify their subject at the end of the line before their own `Promise.resolve`.
+  for (const subject of ["obj", "wrapper"]) {
+    const line = expectSource.findIndex(
+      (l, i) =>
+        l.includes('utils.flag(this, "_name", key);') &&
+        expectSource[i + 1]?.includes(
+          `const promise = Promise.resolve(${subject}).then(`,
+        ),
+    );
+    assert.ok(line > 0, subject);
+    assert.equal(
+      expectLines[line],
+      `${expectSource[line]} __atlasOrigin.consuming(${subject});`,
+    );
+  }
+  assert.equal(
+    expect.split("Promise.resolve(").length,
+    expectSource.join("\n").split("Promise.resolve(").length,
+  );
   assert.equal(expect.split("asyncExtension").length - 1, 0);
   assert.equal(expect.split("subscribe").length - 1, 0);
   // The JestExtendError constructions are untouched (they mark themselves in the constructor).
@@ -136,7 +178,7 @@ test("each module instruments with every site exactly once, the runtime import o
   assert.equal(expect.split("__atlasOrigin.extendError(this);").length - 1, 1);
   assert.equal(
     expect.split(
-      "__atlasOrigin.occurrence(err, processError(err), __atlasOrigin.soft(test, err), false)",
+      "\ttest.result.errors ||= []; const __atlasSoft = __atlasOrigin.soft(test, err);\n\ttest.result.errors.push(__atlasOrigin.occurrence(void 0, processError(err), __atlasSoft, null));",
     ).length - 1,
     1,
   );
@@ -162,12 +204,21 @@ test("each module instruments with every site exactly once, the runtime import o
     ['__atlasOrigin.failing(test, "aroundEach")', 1],
     ['__atlasOrigin.failing(test, "fixture-cleanup")', 1],
     ["function failTask(result, err, diffOptions, __atlasFailing) {", 1],
+    // Revision 31 (RC1): the framework's own decisions (`errors === err`, its loop variable, its one `e.errors.map`) feed the path.
     [
-      "__atlasOrigin.occurrence(e, processError(e, diffOptions), __atlasFailing, true)",
+      "const errors = Array.isArray(err) ? err : [err]; const __atlasPath = __atlasOrigin.collection(__atlasFailing, err, errors === err);",
       1,
     ],
     [
-      "__atlasOrigin.occurrence(e, processError(e, diffOptions), __atlasFailing, false)",
+      "for (const e of errors) { const __atlasEntry = __atlasOrigin.snapshot(e);",
+      1,
+    ],
+    [
+      "e.errors.map((e) => __atlasOrigin.occurrence(__atlasOrigin.snapshot(e), processError(e, diffOptions), __atlasPath, __atlasEntry))",
+      1,
+    ],
+    [
+      "[__atlasOrigin.occurrence(__atlasEntry, processError(e, diffOptions), __atlasPath, null)]",
       1,
     ],
     [
@@ -179,6 +230,19 @@ test("each module instruments with every site exactly once, the runtime import o
     ["failTask(test.result, error, runner.config._diffOptions);", 0],
   ])
     assert.equal(runner.split(text).length - 1, count, text);
+  // Revision 31: the adapter adds no array test, prototype check or traversal of its own to the runner.
+  const runnerSource = readFileSync(installed["vitest-runner"], "utf8");
+  for (const text of [
+    "Array.isArray(",
+    "instanceof AggregateError",
+    ".errors",
+    "for (const ",
+  ])
+    assert.equal(
+      runner.split(text).length,
+      runnerSource.split(text).length,
+      text,
+    );
 });
 
 test("any drift refuses: one changed byte, a pinned hash that matches changed text, an anchor count that differs", () => {

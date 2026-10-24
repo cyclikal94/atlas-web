@@ -1,3 +1,11 @@
+// WEB-14a revision 31 (review r30 R31/R33 incomplete_fix, design assessment 34d402c4 C1-C4): schema 4. `failTask` now gives every
+// child it collects the snapshot of the array it iterated and of the AggregateError it expanded (the framework's own decisions, read
+// from its own variables: no second `Array.isArray`/`instanceof`, no traversal), so a container's edge reaches its children (RC1). The
+// extended matcher's one `result.then(handler)` call keeps its column and its first argument; an intrinsic promise result (decided at
+// the end of the previous line, before the framework reads `result.then`) also gets an explicit rethrowing rejection handler, spread from
+// an own-property iterable (none for any other thenable), replacing revision 30's second `then` (RC2). `handleTestError` takes the soft
+// context before serialising. An asynchronous result or `.resolves`/`.rejects` subject whose path is not intrinsic makes the worker opaque.
+//
 // WEB-14a revision 30 (review r29 R31 incomplete_fix / R33 harness, design assessment b8e8e25d C1-C4): a construction site's role is now
 // DIAGNOSTIC origin only. The edits below also give the runtime (vitest-origin-runtime.mjs) every invocation boundary (chai's wrappers,
 // with a rethrowing catch that records the edge), the asynchronous extended matcher's single subscription (`subscribe`, R33: replaces
@@ -34,7 +42,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ORIGIN_SCHEMA = "atlas-assertion-origin/3";
+export const ORIGIN_SCHEMA = "atlas-assertion-origin/4";
 export const ORIGIN_KEY = "__atlasAssertionOrigin";
 /** The property of a SERIALISED error copy holding its occurrence record (the runner's copy; the original error is never changed). */
 export const OCCURRENCE_KEY = "__atlasAssertionOccurrence";
@@ -44,7 +52,7 @@ export const HEALTH_META_KEY = "atlasAssertionOriginHealth";
 export const ASYNC_CONTEXT_FLAG = "--experimental-async-context-frame";
 export const ORIGIN_NONCE_ENV = "ATLAS_VITEST_ORIGIN_NONCE";
 /** The worker-realm registry (runtime → setup). Not a source of evidence: admission reads the occurrence records on serialised errors. */
-export const REGISTRY = Symbol.for("atlas.assertion-origin/3");
+export const REGISTRY = Symbol.for("atlas.assertion-origin/4");
 /** The chai flag holding an `expect()` root's record (copied along a chain by chai's transferFlags, absent on internal assertions). */
 export const ROOT_FLAG = "atlas-origin-root";
 
@@ -404,13 +412,31 @@ export const MODULES = Object.freeze([
       // invocation (`async`, evaluated with the arguments, after the framework's own `then` read), its body runs in that invocation and
       // records a throw as that invocation's edge; the destructuring of the result moves into the body so that a throwing result
       // getter is covered too. `async` also observes the rejection of a genuine native promise (an inert reaction, no user code).
+      // Revision 31 (RC2): whether the result is an intrinsic promise is decided at the end of the line that produced it, before the
+      // framework's own `typeof result.then` and `result.then` reads.
+      edit(
+        "const result = expectAssertion.call(state, obj, ...args);",
+        "const result = expectAssertion.call(state, obj, ...args); const __atlasIntrinsic = __atlasOrigin.intrinsic(result);",
+      ),
       edit(
         "return result.then(({ pass, message, actual, expected, meta }) => {",
         "return result.then(((__atlasInvocation) => (__atlasResult) => { __atlasOrigin.handling(__atlasInvocation); try { const { pass, message, actual, expected, meta } = __atlasResult;",
       ),
+      // Revision 31 (RC2): no second subscription. After the handler, the call's remaining arguments are spread from `rejection()`:
+      // none (a custom thenable's `then` still sees one argument), or, for an intrinsic promise, the rethrowing rejection handler.
       edit(
         "\t\t\t\t});\n\t\t\t\tconst { pass, message, actual, expected, meta } = result;",
-        "\t\t\t\t} catch (__atlasThrown) { __atlasOrigin.handlerThrew(__atlasInvocation, __atlasThrown); throw __atlasThrown; } finally { __atlasOrigin.handled(__atlasInvocation); } })(__atlasOrigin.async(result)));\n\t\t\t\tconst { pass, message, actual, expected, meta } = result;",
+        "\t\t\t\t} catch (__atlasThrown) { __atlasOrigin.handlerThrew(__atlasInvocation, __atlasThrown); throw __atlasThrown; } finally { __atlasOrigin.handled(__atlasInvocation); } })(__atlasOrigin.async(result, __atlasIntrinsic)), ...__atlasOrigin.rejection());\n\t\t\t\tconst { pass, message, actual, expected, meta } = result;",
+      ),
+      // Revision 31 (RC2): `.resolves`/`.rejects` consume their subject with `Promise.resolve(subject).then(...)`; whether that path is
+      // intrinsic is decided at the end of the line before (no user code runs between), and a non-intrinsic one makes the worker opaque.
+      edit(
+        '\t\t\t\tutils.flag(this, "_name", key);\n\t\t\t\tconst promise = Promise.resolve(obj).then((value) => {',
+        '\t\t\t\tutils.flag(this, "_name", key); __atlasOrigin.consuming(obj);\n\t\t\t\tconst promise = Promise.resolve(obj).then((value) => {',
+      ),
+      edit(
+        '\t\t\t\tutils.flag(this, "_name", key);\n\t\t\t\tconst promise = Promise.resolve(wrapper).then((value) => {',
+        '\t\t\t\tutils.flag(this, "_name", key); __atlasOrigin.consuming(wrapper);\n\t\t\t\tconst promise = Promise.resolve(wrapper).then((value) => {',
       ),
       // Both JestExtendError sites: the error marks itself when its fields are set (the runtime tells the sites apart).
       edit(
@@ -418,10 +444,10 @@ export const MODULES = Object.freeze([
         "\t\tthis.__vitest_error_context__ = __vitest_error_context__; __atlasOrigin.extendError(this);\n\t}\n}",
       ),
       // `expect.soft` collects its failure itself, inside the soft matcher's own invocation (that is its terminal edge): an occurrence
-      // in the phase the test is in.
+      // in the phase the test is in. Revision 31: the soft context and the error's snapshot are taken before `processError` runs.
       edit(
-        "test.result.errors.push(processError(err));",
-        "test.result.errors.push(__atlasOrigin.occurrence(err, processError(err), __atlasOrigin.soft(test, err), false));",
+        "\ttest.result.errors ||= [];\n\ttest.result.errors.push(processError(err));",
+        "\ttest.result.errors ||= []; const __atlasSoft = __atlasOrigin.soft(test, err);\n\ttest.result.errors.push(__atlasOrigin.occurrence(void 0, processError(err), __atlasSoft, null));",
       ),
     ],
     exports: ["JestExtendError"],
@@ -484,9 +510,13 @@ export const MODULES = Object.freeze([
         "function failTask(result, err, diffOptions) {",
         "function failTask(result, err, diffOptions, __atlasFailing) {",
       ),
+      // Revision 31 (RC1, C1/C2): the collection starts after the framework decided whether `err` is an array (`errors === err` reads
+      // that decision back without calling `Array.isArray` again); each entry the framework iterates is snapshotted before anything is
+      // serialised (`__atlasEntry`, a per-iteration constant, so a callback run later still sees its own entry); an aggregate's children
+      // carry that entry as their wrapper, a plain entry is its own leaf. `e.errors.map` is still the framework's one call.
       edit(
-        "const errors = e instanceof AggregateError ? e.errors.map((e) => processError(e, diffOptions)) : [processError(e, diffOptions)];",
-        "const errors = e instanceof AggregateError ? e.errors.map((e) => __atlasOrigin.occurrence(e, processError(e, diffOptions), __atlasFailing, true)) : [__atlasOrigin.occurrence(e, processError(e, diffOptions), __atlasFailing, false)];",
+        "\tconst errors = Array.isArray(err) ? err : [err];\n\tfor (const e of errors) {\n\t\tconst errors = e instanceof AggregateError ? e.errors.map((e) => processError(e, diffOptions)) : [processError(e, diffOptions)];",
+        "\tconst errors = Array.isArray(err) ? err : [err]; const __atlasPath = __atlasOrigin.collection(__atlasFailing, err, errors === err);\n\tfor (const e of errors) { const __atlasEntry = __atlasOrigin.snapshot(e);\n\t\tconst errors = e instanceof AggregateError ? e.errors.map((e) => __atlasOrigin.occurrence(__atlasOrigin.snapshot(e), processError(e, diffOptions), __atlasPath, __atlasEntry)) : [__atlasOrigin.occurrence(__atlasEntry, processError(e, diffOptions), __atlasPath, null)];",
       ),
       edit(
         'const error = processError(/* @__PURE__ */ new Error("Expect test to fail"));',
