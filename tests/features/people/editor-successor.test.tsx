@@ -9,7 +9,10 @@ import {
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import type { DraftWithCommand, EnqueueRequest } from "../../../src/data";
 import { digestOf } from "../../../src/data/model/canonical";
-import { forgetAllPeopleMemory } from "../../../src/features/people/memory";
+import {
+  forgetAllPeopleMemory,
+  peopleMemory,
+} from "../../../src/features/people/memory";
 import {
   putFieldUpdateRequest,
   renameEditRequest,
@@ -17,7 +20,7 @@ import {
 import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
-import { record } from "../../support/people/records";
+import { HOME, record } from "../../support/people/records";
 import {
   fieldRow,
   type PeopleWorld,
@@ -394,5 +397,160 @@ describe("reverse schedule (unsent create): an edit of the create is refused onc
         await closed();
         expect(stored(w)).toEqual([[create.local_id, "Editor C"]]);
       }
+    });
+});
+
+// ---- DA12-06: the content step after the audience step (online), and the offline "Save now" -----------------------------------------
+const HOME_VIEW = {
+  grants: [{ kind: "household" as const, id: HOME, edit: false }],
+  exclude_accounts: [],
+};
+function deferred<T>() {
+  let release!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+/** The field world with L claimed (in flight) and the audience shown as the household's, version 6. */
+function claimedWithAudience(online: boolean): PeopleWorld {
+  const w = peopleWorld({ online });
+  w.setCache([
+    person({ id: P, label: "Ada", version: 4, policy_version: 6 }),
+    fieldRow({
+      id: F,
+      parent_id: P,
+      label: "Note",
+      version: 4,
+      policy_version: 6,
+    }),
+  ]);
+  w.env.setDefaults(record());
+  w.setDrafts([
+    draftRow({
+      local_id: "L",
+      created_seq: 1,
+      status: "in_flight",
+      endpoint: "/task-commands",
+      kind: "put_field",
+      target_resource_ids: [F],
+      index_targets: [F],
+      bases: { [F]: 4 },
+      bumped: [F],
+      expected_version: 4,
+      command: field.request("A").build({ [F]: 4 }).command,
+    }),
+  ]);
+  w.versions.set(F, 5);
+  peopleMemory(w.people.identity).policies.set(F, {
+    version: 6,
+    policy: HOME_VIEW,
+    checkedAt: Date.now(),
+  });
+  return w;
+}
+const peerEditOfL = async (w: PeopleWorld, read: string) => {
+  w.setDrafts([{ ...(w.drafts[0] as DraftWithCommand), status: "queued" }]);
+  expect(
+    await w.env.outbox()?.editQueued("L", {
+      ...field.request("Peer B"),
+      expectDraft: (d) => d.command_digest === read,
+    }),
+  ).toEqual({ kind: "edited", localId: "L" });
+};
+
+describe("DA12-06: the content is judged where it is written after the audience step, which is never repeated", () => {
+  for (const peer of [true, false])
+    test(`online: the audience change is confirmed, ${peer ? "while L was returned to the queue and edited elsewhere: the content is refused, the input kept and the review shown; the audience change happened once, and the person's explicit save then edits L in place without sending it again" : "nothing else changed (control): the content follows L on the confirmed policy version"}`, async () => {
+      const w = claimedWithAudience(true);
+      const send = deferred<unknown>();
+      // The read before the change, then the confirming read after it (the editor's own read is the page's memory above).
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      w.sharing.next.management.push(() => send.promise as never);
+      const { form, input } = await field.open(w);
+      fireEvent.change(input, { target: { value: "Editor C" } });
+      fireEvent.click(within(form).getByRole("radio", { name: "Only you" }));
+      field.save(form);
+      await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+      const read = (w.drafts[0] as DraftWithCommand).command_digest;
+      if (peer) await act(async () => peerEditOfL(w, read));
+      await act(async () => send.release(ok({ revision: 1 })));
+      if (peer) {
+        await waitFor(() =>
+          expect(within(form).queryByText(field.review)).not.toBeNull(),
+        );
+        expect(stored(w)).toEqual([["L", "Peer B"]]);
+        expect(input).toHaveValue("Editor C");
+        expect(w.sharing.sent).toHaveLength(1);
+        // The audience change reaches the field's row through sync, as it does in the app (the sharing double does not publish it).
+        await act(async () =>
+          w.setCache([
+            person({ id: P, label: "Ada", version: 4, policy_version: 6 }),
+            fieldRow({
+              id: F,
+              parent_id: P,
+              label: "Note",
+              version: 4,
+              policy_version: 7,
+            }),
+          ]),
+        );
+        await field.again(form);
+        await waitFor(() => expect(stored(w)).toEqual([["L", "Editor C"]]));
+        expect(
+          (w.drafts[0] as DraftWithCommand).command as {
+            command: { expected_policy_version: number };
+          },
+        ).toMatchObject({ command: { expected_policy_version: 7 } });
+        expect(w.sharing.sent).toHaveLength(1);
+      } else {
+        await waitFor(() => expect(w.drafts).toHaveLength(2));
+        const successor = w.drafts[1] as DraftWithCommand;
+        expect(successor.command).toMatchObject({
+          command: {
+            expected_version: 5,
+            expected_policy_version: 7,
+            value: { kind: "text", text: "Editor C" },
+          },
+        });
+        expect(successor.depends_on).toEqual(["L"]);
+        expect(w.sharing.sent).toHaveLength(1);
+      }
+    });
+
+  for (const peer of [true, false])
+    test(`offline "Save now" (the audience unchanged for now): the save is held at its write ${peer ? "while L is returned to the queue and edited elsewhere: refused, nothing written, the input kept and the review shown" : "(control): it follows L at base 5"}`, async () => {
+      const w = claimedWithAudience(false);
+      const { form, input } = await field.open(w);
+      fireEvent.change(input, { target: { value: "Editor C" } });
+      fireEvent.click(within(form).getByRole("radio", { name: "Only you" }));
+      field.save(form);
+      await within(form).findByText(
+        "You're offline, so the audience can't change yet",
+      );
+      fireEvent.click(
+        within(form).getByRole("radio", { name: /Save the Note now/ }),
+      );
+      const g = gate(w, "enqueue");
+      fireEvent.click(within(form).getByRole("button", { name: "Save now" }));
+      await waitFor(() => expect(g.state.entered).toBe(1));
+      const read = (w.drafts[0] as DraftWithCommand).command_digest;
+      if (peer) await act(async () => peerEditOfL(w, read));
+      await g.release();
+      if (peer) {
+        await waitFor(() =>
+          expect(within(form).queryByText(field.review)).not.toBeNull(),
+        );
+        expect(stored(w)).toEqual([["L", "Peer B"]]);
+        expect(input).toHaveValue("Editor C");
+      } else {
+        await waitFor(() => expect(w.drafts).toHaveLength(2));
+        expect(w.drafts[1]?.depends_on).toEqual(["L"]);
+        expect(w.drafts[1]?.bases[F]).toBe(5);
+      }
+      expect(w.sharing.sent).toEqual([]);
     });
 });
