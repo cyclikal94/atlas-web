@@ -431,6 +431,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         i14d: 2,
         data: 32,
         calendar: 13,
+        people: 16,
         traces: 16,
         registration: 20,
         oidc: 10,
@@ -441,7 +442,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         sharing: 7,
         snapshot: 6,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(200);
+      expect(inBrowser(whole, browser)).toHaveLength(216);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -450,7 +451,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       ).toBe(s.name === "sharing" || s.name === "snapshot");
   }, 120_000);
 
-  test("compared with the schedule review 14 ran, only sharing, snapshot, pages and password-path cases move: from base to their own fresh stacks", async () => {
+  test("compared with the schedule review 14 ran, sharing, snapshot, pages, password-path and People cases move from base to their own fresh stacks", async () => {
     // The stacks of candidate b003cff (review 14), verbatim (scripts/integration/run.mjs STACKS).
     const OLD: Array<[string, string[]]> = [
       [
@@ -494,15 +495,33 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       expect(was).toBe("base");
       moved[name] = (moved[name] ?? 0) + 1;
     }
-    // Per engine: sharing 7, snapshot 6 (R17), pages 13 and password-path 8 (the measured base overrun).
+    // Per engine: sharing 7, snapshot 6 (R17), pages 13 and password-path 8, plus WEB-11a's 16 People cases.
     expect(moved).toEqual({
       sharing: 21,
       snapshot: 18,
       pages: 39,
       "password-path": 24,
+      people: 48,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
+
+  test("omitting the People stack refuses all 48 unassigned cases before any backend starts", async () => {
+    const w = await world({
+      stacks: STACKS.filter((s) => s.name !== "people"),
+    });
+    expect(w.status).toBe(1);
+    expect(w.launches).toEqual([]);
+    const discovery = JSON.parse(
+      readFileSync(join(w.evidence, "discovery/discovery.json"), "utf8"),
+    );
+    expect(discovery.assignment.ok).toBe(false);
+    expect(discovery.assignment.problems).toHaveLength(48);
+    for (const problem of discovery.assignment.problems)
+      expect(problem).toMatch(
+        /in no stack: integration-.*integration\.people\.spec\.ts/,
+      );
+  });
 
   test("an unknown spec file, an unmatched case or a case in two stacks stops the run before any stack starts", async () => {
     const unknown = await world({
@@ -611,8 +630,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 200,
-        passed: 194,
+        planned_cases: 216,
+        passed: 210,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -1220,6 +1239,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-i14d",
     "-data",
     "-calendar",
+    "-people",
     "-traces",
     "-registration",
     "-oidc",

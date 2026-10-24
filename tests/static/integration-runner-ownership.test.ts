@@ -426,6 +426,7 @@ describe("R17: the source budget the pinned backend counts, and each stack's rec
       );
     expect(owners("integration.sharing.spec.ts")).toEqual(["sharing"]);
     expect(owners("integration.snapshot.spec.ts")).toEqual(["snapshot"]);
+    expect(owners("integration.people.spec.ts")).toEqual(["people"]);
     expect(owners("integration.password-path.spec.ts")).toEqual([
       "password-path",
     ]);

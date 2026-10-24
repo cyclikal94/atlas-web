@@ -1,13 +1,10 @@
-import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import {
   ACCOUNTS,
   bootHarness,
   expect,
   exposeSession,
-  ORIGIN,
+  paceSignIn,
   proxy,
   signIn as signInUnpaced,
   test,
@@ -31,33 +28,8 @@ import {
  */
 const API = "/api/experimental/v1";
 
-const LEDGER = join(
-  tmpdir(),
-  `atlas-signin-ledger-${new URL(ORIGIN || "http://x").port}.json`,
-);
-async function budget(who: Who): Promise<void> {
-  for (;;) {
-    let all: Record<string, number[]> = {};
-    try {
-      all = JSON.parse(readFileSync(LEDGER, "utf8")) as Record<
-        string,
-        number[]
-      >;
-    } catch {
-      all = {};
-    }
-    const now = Date.now();
-    const recent = (all[who] ?? []).filter((t) => now - t < 60_000);
-    if (recent.length < 8) {
-      all[who] = [...recent, now];
-      writeFileSync(LEDGER, JSON.stringify(all));
-      return;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, 60_000 - (now - (recent[0] ?? now)) + 250),
-    );
-  }
-}
+// The merged runner owns a fresh ledger per stack; keep its pacing across worker restarts.
+const budget = (who: Who) => paceSignIn(who);
 test.beforeEach(async ({ context }, info) => {
   void context;
   info.setTimeout(180_000);
