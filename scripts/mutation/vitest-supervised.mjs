@@ -22,6 +22,10 @@
 // the error it constructs (vitest-origin-sites.mjs). The setup proves in every worker that this happened. The envelope (schema 3)
 // records the adapter digest of the exact table and files used; a project without the setup first or without the hook is unsupported.
 // Each witnessed test records its id, to which an assertion's receipt must belong.
+//
+// Revision 30 (review r29 R31/R33, design assessment b8e8e25d C3/C4): workers also run with `--experimental-async-context-frame` (the
+// runtime's asynchronous invocation context without promise hooks), and each witnessed module carries the runtime's per-file health
+// attestation from its task meta (vitest-origin-setup.mjs); envelope schema 4.
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,6 +41,7 @@ import {
   project,
   REQUEST_SCHEMA,
 } from "./vitest-evidence.mjs";
+import { ASYNC_CONTEXT_FLAG, HEALTH_META_KEY } from "./vitest-origin-sites.mjs";
 
 const request = JSON.parse(readFileSync(process.argv[2], "utf8"));
 if (request.schema !== REQUEST_SCHEMA) {
@@ -84,6 +89,7 @@ const originPlugin = {
     project.config.execArgv = [
       "--import",
       REGISTER_URL,
+      ASYNC_CONTEXT_FLAG,
       ...(project.config.execArgv ?? []),
     ];
   },
@@ -121,6 +127,17 @@ const errorsOf = (list) => {
   const errors = Array.isArray(list) ? list : [];
   return { errorCount: errors.length, errors: errors.map(project) };
 };
+/** The runtime's per-file attestation as a plain copy, or null (never thrown: its absence is the reader's to judge). */
+const healthOf = (module) => {
+  try {
+    const health = module.meta()?.[HEALTH_META_KEY];
+    return health && typeof health === "object"
+      ? JSON.parse(JSON.stringify(health))
+      : null;
+  } catch {
+    return null;
+  }
+};
 const ancestorsOf = (entity) => {
   const names = [];
   for (let at = entity.parent; at && at.type === "suite"; at = at.parent)
@@ -141,6 +158,7 @@ const witnessReporter = {
         witness.modules.push({
           id,
           state: module.state(),
+          health: healthOf(module),
           ...errorsOf(module.errors()),
         });
         for (const suite of module.children.allSuites())
@@ -227,11 +245,12 @@ try {
         p.setupFiles[0] === ORIGIN_SETUP &&
         p.execArgv[0] === "--import" &&
         p.execArgv[1] === REGISTER_URL &&
+        p.execArgv[2] === ASYNC_CONTEXT_FLAG &&
         p.pool === "forks",
     );
   if (!origin.installed)
     unsupported.push(
-      "the assertion-origin setup and loading hook are not installed in every project (setup first, --import hook, forks pool)",
+      "the assertion-origin setup and loading hook are not installed in every project (setup first, --import hook, async context, forks pool)",
     );
   if (ctx.version !== PINNED_VITEST)
     unsupported.push(`Vitest ${ctx.version}, qualified ${PINNED_VITEST}`);

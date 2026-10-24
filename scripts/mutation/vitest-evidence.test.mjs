@@ -1,7 +1,8 @@
 // Pure controls of the supervised-evidence contract (vitest-evidence.mjs) and the unit runner's verdict rule (WEB-14a revision 27,
 // review r26 R31 / design assessment DA-H2, Q3/Q4/Q6; revision 28, review r27 R31: assertion origin, C1-C3; revision 29, review r28
-// R31: per-occurrence site receipts bound to the test and adapter, schema 3). The real Vitest boundary is qualified separately with
-// actual runs.
+// R31: per-occurrence site receipts bound to the test and adapter, schema 3; revision 30, review r29 R31: occurrence records with
+// collection phase, attempt, propagation edges and the worker's health attestation, schema 4). The real Vitest boundary is qualified
+// separately with actual runs.
 //   node --test scripts/mutation/vitest-evidence.test.mjs
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
@@ -16,35 +17,74 @@ import {
   currentAdapter,
   ENVELOPE_SCHEMA,
   namePatternOf,
-  ORIGIN_KEY,
+  OCCURRENCE_KEY,
   ORIGIN_SCHEMA,
   project,
   readRun,
+  SITES,
   selectionProblems,
   unitVerdict,
   validateEnvelope,
 } from "./vitest-evidence.mjs";
 
-// A serialised error as Vitest hands it over, with the receipt an audited site attaches in the worker (vitest-origin-runtime.mjs).
+// A serialised error as Vitest hands it over, with the OCCURRENCE record the runner attaches in the worker (vitest-origin-runtime.mjs,
+// revision 30): the construction receipt of the object, the phase and attempt it was collected in, and the invocations it left.
 // `test`/`current` "@case" stand for the id of the case the error is placed in (caseOf binds them).
 const ADAPTER = currentAdapter();
+const FRAMELESS = new Set([
+  "vitest.resolves.rejected",
+  "vitest.rejects.resolved",
+  "chai.expect.fail",
+  "chai.assert.fail",
+  "vitest.runner.fails-inversion",
+]);
 const receiptOf = (site, role, over = {}) => ({
   schema: ORIGIN_SCHEMA,
   nonce: "n",
   adapter: ADAPTER,
   site,
   role,
+  invocation: 7,
+  framed: !FRAMELESS.has(site),
   root: 1,
   test: "@case",
   current: "@case",
+  phase: "body",
+  attempt: 1,
+  concurrent: false,
   ...over,
 });
-const chaiError = (receipt, message = "expected 1 to be 2") =>
+/** The edge by which a framed construction left its own invocation (none for a frameless one). */
+const terminalOf = (receipt) =>
+  receipt?.framed === true && Number.isInteger(receipt.invocation)
+    ? [
+        {
+          invocation: receipt.invocation,
+          kind: SITES[receipt.site]?.handler ? "async-result" : "sync",
+        },
+      ]
+    : [];
+const occurrenceOf = (receipt, over = {}) => ({
+  schema: ORIGIN_SCHEMA,
+  nonce: "n",
+  adapter: ADAPTER,
+  id: 1,
+  test: "@case",
+  phase: "body",
+  attempt: 1,
+  concurrent: false,
+  unobserved: [],
+  aggregate: false,
+  receipt,
+  edges: terminalOf(receipt),
+  ...over,
+});
+const chaiError = (receipt, message = "expected 1 to be 2", over = {}) =>
   project({
     name: "AssertionError",
     message,
     stack: `AssertionError: ${message}`,
-    [ORIGIN_KEY]: receipt,
+    [OCCURRENCE_KEY]: occurrenceOf(receipt, over),
   });
 const assertion = chaiError(receiptOf("chai.Assertion#assert", "comparison"));
 const extended = project({
@@ -54,31 +94,51 @@ const extended = project({
     "Error: expect(element).toBeVisible()\n at Proxy.__VITEST_EXTEND_ASSERTION__ (x)",
   constructor: "Function<JestExtendError>",
   __vitest_error_context__: { assertionName: "toBeVisible" },
-  [ORIGIN_KEY]: receiptOf("vitest.extend.result", "comparison"),
+  [OCCURRENCE_KEY]: occurrenceOf(
+    receiptOf("vitest.extend.result", "comparison"),
+  ),
 });
 const invertedError = (over = {}) =>
   project(
     Object.assign(new Error("Expect test to fail"), {
-      [ORIGIN_KEY]: receiptOf("vitest.runner.fails-inversion", "inversion", {
-        root: null,
-        current: null,
-        ...over,
-      }),
+      [OCCURRENCE_KEY]: occurrenceOf(
+        receiptOf("vitest.runner.fails-inversion", "inversion", {
+          invocation: null,
+          root: null,
+          current: null,
+          phase: "after-try",
+          ...over,
+        }),
+        { phase: "inversion" },
+      ),
     }),
   );
-const plain = project(new Error("boom"));
+const plain = project(
+  Object.assign(new Error("boom"), {
+    [OCCURRENCE_KEY]: occurrenceOf(null),
+  }),
+);
 const errors = (list) => ({ errorCount: list.length, errors: list });
-const bind = (error, id) =>
-  error?.origin && typeof error.origin === "object" && !error.origin.invalid
-    ? {
-        ...error,
-        origin: {
-          ...error.origin,
-          test: error.origin.test === "@case" ? id : error.origin.test,
-          current: error.origin.current === "@case" ? id : error.origin.current,
-        },
-      }
-    : error;
+const bindId = (value, id) => (value === "@case" ? id : value);
+const bind = (error, id) => {
+  const o = error?.occurrence;
+  if (!o || typeof o !== "object" || o.invalid) return error;
+  return {
+    ...error,
+    occurrence: {
+      ...o,
+      test: bindId(o.test, id),
+      receipt:
+        o.receipt === null
+          ? null
+          : {
+              ...o.receipt,
+              test: bindId(o.receipt.test, id),
+              current: bindId(o.receipt.current, id),
+            },
+    },
+  };
+};
 const caseOf = (name, state, list = [], extra = {}) => ({
   id: `t-${name}`,
   module: "tests/a.test.ts",
@@ -91,7 +151,47 @@ const caseOf = (name, state, list = [], extra = {}) => ({
   ...errors(list.map((e) => bind(e, extra.id ?? `t-${name}`))),
   ...extra,
 });
+/** The worker's per-file attestation: every occurrence id of the module's tests, per test (revision 30). */
+const healthOf = (tests, module) => ({
+  schema: ORIGIN_SCHEMA,
+  nonce: "n",
+  adapter: ADAPTER,
+  failures: [],
+  depth: 0,
+  invocations: 9,
+  occurrences: 9,
+  issued: Object.fromEntries(
+    tests
+      .filter((t) => t.module === module)
+      .map((t) => [
+        t.id,
+        t.errors.map((e) => e?.occurrence?.id).filter(Number.isInteger),
+      ]),
+  ),
+});
 function envelope(over = {}, witness = {}) {
+  const w = {
+    onTestRunEndCalls: 1,
+    reason: "failed",
+    modules: [{ id: "tests/a.test.ts", state: "failed", ...errors([]) }],
+    suites: [{ module: "tests/a.test.ts", fullName: "S", ...errors([]) }],
+    tests: [caseOf("oracle", "failed", [assertion]), caseOf("other", "passed")],
+    unhandledCount: 0,
+    unhandled: [],
+    failureCount: 0,
+    failures: [],
+    ...witness,
+  };
+  // A module that names no health of its own gets the attestation of its tests (an explicit `health` is kept as given).
+  if (Array.isArray(w.modules))
+    w.modules = w.modules.map((m) =>
+      m && typeof m === "object" && !("health" in m)
+        ? {
+            ...m,
+            health: healthOf(Array.isArray(w.tests) ? w.tests : [], m.id),
+          }
+        : m,
+    );
   return {
     schema: ENVELOPE_SCHEMA,
     nonce: "n",
@@ -99,21 +199,7 @@ function envelope(over = {}, witness = {}) {
     vitest: "5.0.1",
     supported: true,
     unsupported: [],
-    witness: {
-      onTestRunEndCalls: 1,
-      reason: "failed",
-      modules: [{ id: "tests/a.test.ts", state: "failed", ...errors([]) }],
-      suites: [{ module: "tests/a.test.ts", fullName: "S", ...errors([]) }],
-      tests: [
-        caseOf("oracle", "failed", [assertion]),
-        caseOf("other", "passed"),
-      ],
-      unhandledCount: 0,
-      unhandled: [],
-      failureCount: 0,
-      failures: [],
-      ...witness,
-    },
+    witness: w,
     lateUnhandledCount: 0,
     lateUnhandled: [],
     logged: { count: 0, calls: [] },
@@ -204,8 +290,8 @@ test("project keeps one occurrence for every thrown value, whatever it is", () =
   assert.equal(project(Symbol("s")).text, "Symbol(s)");
 });
 
-test("admission (revision 29): an assertion only by the receipt of a completed comparison of THIS test, never by class, name, frames or text", () => {
-  const ok = { nonce: "n", adapter: ADAPTER, testId: "t-oracle" };
+test("admission (revision 29, kept in revision 30): an assertion only by the receipt of a completed comparison of THIS test, never by class, name, frames or text", () => {
+  const ok = { nonce: "n", adapter: ADAPTER, testId: "t-oracle", issued: [1] };
   const bound = (e) => bind(e, "t-oracle");
   assert.equal(classify(bound(assertion), ok), "assertion");
   assert.equal(classify(bound(extended), ok), "assertion");
@@ -242,6 +328,7 @@ test("admission (revision 29): an assertion only by the receipt of a completed c
       project(
         Object.assign(new Error("expected 1 to be 2"), {
           name: "AssertionError",
+          [OCCURRENCE_KEY]: occurrenceOf(null),
         }),
       ),
       ok,
@@ -260,6 +347,7 @@ test("admission (revision 29): an assertion only by the receipt of a completed c
           name: "Error",
           message: "matcher crashed before comparing",
           stack: `Error: matcher crashed before comparing\n at ${frame} (x)`,
+          [OCCURRENCE_KEY]: occurrenceOf(null),
         }),
         ok,
       ),
@@ -308,14 +396,14 @@ test("admission (revision 29): an assertion only by the receipt of a completed c
   ];
   for (const [error, pattern] of refused) {
     const a = admission(bound(error), ok);
-    assert.equal(a.kind, "error", JSON.stringify(error.origin));
+    assert.equal(a.kind, "error", JSON.stringify(error.occurrence));
     assert.match(a.why, pattern);
   }
   // The receipt must be of this run, this adapter, a known site, a role that site can have, this test, and fit the site's class.
   assert.equal(classify(bound(assertion)), "error");
   assert.equal(classify(bound(assertion), { ...ok, nonce: "m" }), "error");
   const variants = [
-    [{ ...assertion, origin: { invalid: true } }, /invalid/],
+    [{ ...assertion, occurrence: { invalid: true } }, /invalid occurrence/],
     [
       chaiError(
         receiptOf("chai.Assertion#assert", "comparison", {
@@ -385,10 +473,12 @@ test("admission (revision 29): an assertion only by the receipt of a completed c
       project({
         name: "AssertionError",
         message: "x",
-        [ORIGIN_KEY]: receiptOf("vitest.extend.result", "comparison", {
-          test: "t-oracle",
-          current: "t-oracle",
-        }),
+        [OCCURRENCE_KEY]: occurrenceOf(
+          receiptOf("vitest.extend.result", "comparison", {
+            test: "t-oracle",
+            current: "t-oracle",
+          }),
+        ),
       }),
       /class or assertion name/,
     ],
@@ -396,26 +486,41 @@ test("admission (revision 29): an assertion only by the receipt of a completed c
   ];
   for (const [error, pattern] of variants) {
     const a = admission(bound(error), ok);
-    assert.equal(a.kind, "error", JSON.stringify(error.origin));
+    assert.equal(a.kind, "error", JSON.stringify(error.occurrence));
     assert.match(a.why, pattern);
   }
-  // An unreadable or malformed receipt is an occurrence with no proof, never an assertion.
+  // An unreadable or malformed occurrence (or receipt inside it) is an occurrence with no proof, never an assertion.
   const hostileOrigin = project({
     name: "AssertionError",
-    get [ORIGIN_KEY]() {
-      throw new Error("origin getter");
+    get [OCCURRENCE_KEY]() {
+      throw new Error("occurrence getter");
     },
   });
-  assert.deepEqual(hostileOrigin.origin, { invalid: true });
+  assert.deepEqual(hostileOrigin.occurrence, { invalid: true });
   assert.equal(classify(hostileOrigin, ok), "error");
+  const r = receiptOf("chai.Assertion#assert", "comparison");
   for (const bad of [
     { schema: 1 },
-    { ...receiptOf("chai.Assertion#assert", "comparison"), root: "1" },
-    { ...receiptOf("chai.Assertion#assert", "comparison"), test: 3 },
-    { ...receiptOf("chai.Assertion#assert", "comparison"), site: undefined },
+    occurrenceOf({ ...r, root: "1" }),
+    occurrenceOf({ ...r, test: 3 }),
+    occurrenceOf({ ...r, site: undefined }),
+    occurrenceOf({ ...r, framed: "yes" }),
+    occurrenceOf({ ...r, concurrent: undefined }),
+    occurrenceOf(r, { id: "1" }),
+    occurrenceOf(r, { edges: [{ invocation: 7, kind: "other" }] }),
+    occurrenceOf(r, { edges: "none" }),
+    occurrenceOf(r, { unobserved: [null] }),
+    occurrenceOf(r, { phase: undefined }),
+    occurrenceOf("receipt"),
   ])
-    assert.deepEqual(project({ [ORIGIN_KEY]: bad }).origin, { invalid: true });
-  assert.equal(project(new Error("x")).origin, null);
+    assert.deepEqual(project({ [OCCURRENCE_KEY]: bad }).occurrence, {
+      invalid: true,
+    });
+  assert.equal(project(new Error("x")).occurrence, null);
+  assert.match(
+    admission(project(new Error("x")), ok).why,
+    /no occurrence record/,
+  );
   // Time-outs are a veto recognised by text, before origin (text can only refuse, never admit).
   assert.equal(
     classify(project(new Error("Test timed out in 5000ms.")), ok),
@@ -442,6 +547,158 @@ test("admission (revision 29): an assertion only by the receipt of a completed c
   );
   for (const value of [null, undefined, "", 0, false])
     assert.equal(classify(project(value), ok), "error");
+});
+
+test("admission (revision 30): per occurrence, by its collection phase, attempt, propagation edges and worker attestation", () => {
+  const ok = { nonce: "n", adapter: ADAPTER, testId: "t-oracle", issued: [1] };
+  const bound = (e) => bind(e, "t-oracle");
+  const r = receiptOf("chai.Assertion#assert", "comparison");
+  const genuine = (over) => bound(chaiError(r, "expected 1 to be 2", over));
+  assert.equal(classify(genuine(), ok), "assertion");
+  // The asynchronous extended matcher's failing result left through its handler; the frameless promise sites need no edge of their own.
+  const asyncResult = receiptOf("vitest.extend.async-result", "comparison");
+  const asyncError = (over) =>
+    bound(
+      project({
+        name: "Error",
+        message: "genuine mismatch",
+        constructor: "Function<JestExtendError>",
+        __vitest_error_context__: { assertionName: "toCustom" },
+        [OCCURRENCE_KEY]: occurrenceOf(asyncResult, over),
+      }),
+    );
+  assert.equal(classify(asyncError(), ok), "assertion");
+  assert.equal(
+    admission(asyncError({ edges: [{ invocation: 7, kind: "sync" }] }), ok).why,
+    "never left its own invocation as that invocation's failure",
+  );
+  assert.equal(
+    classify(
+      bound(chaiError(receiptOf("vitest.resolves.rejected", "comparison"))),
+      ok,
+    ),
+    "assertion",
+  );
+  const refusedBy = [
+    // Review r29: a genuine error rethrown from another matcher's body, message function or getter left THAT invocation.
+    [
+      genuine({
+        edges: [
+          { invocation: 7, kind: "sync" },
+          { invocation: 9, kind: "sync" },
+        ],
+      }),
+      /propagated out of another matcher invocation/,
+    ],
+    [
+      genuine({
+        edges: [
+          { invocation: 7, kind: "sync" },
+          { invocation: 9, kind: "async-result" },
+        ],
+      }),
+      /propagated out of another matcher invocation/,
+    ],
+    [
+      genuine({
+        edges: [
+          { invocation: 7, kind: "sync" },
+          { invocation: 9, kind: "async-rejection" },
+        ],
+      }),
+      /rejection of an asynchronous matcher/,
+    ],
+    [genuine({ edges: [] }), /never left its own invocation/],
+    // A hook, cleanup or lifecycle collection is a veto, whatever it carries.
+    ...[
+      "beforeEach",
+      "afterEach",
+      "aroundEach",
+      "fixture-cleanup",
+      "task-finished",
+      "test-hook",
+      "after-try",
+      "after-body",
+      "before-try",
+      "prepare",
+      "unknown",
+    ].map((phase) => [genuine({ phase }), new RegExp(`the ${phase} phase`)]),
+    [genuine({ phase: "elsewhere" }), /unknown collection phase/],
+    [genuine({ unobserved: [5] }), /settled without observable completion/],
+    [genuine({ concurrent: true }), /another test was running/],
+    [genuine({ id: 2 }), /did not attest/],
+    [genuine({ test: "t-other" }), /collected for another test/],
+    [genuine({ test: null }), /collected for another test/],
+    [genuine({ attempt: 2 }), /outside this attempt's test body/],
+    [
+      bound(chaiError({ ...r, phase: "beforeEach" })),
+      /outside this attempt's test body/,
+    ],
+    [
+      bound(chaiError({ ...r, concurrent: true })),
+      /outside this attempt's test body/,
+    ],
+    [
+      bound(chaiError({ ...r, invocation: null, framed: false })),
+      /without an invocation/,
+    ],
+    [
+      bound(chaiError(receiptOf("chai.expect.fail", "nested"))),
+      /nested in another matcher/,
+    ],
+    [
+      bound(
+        project({
+          name: "Error",
+          message: "x",
+          constructor: "Function<JestExtendError>",
+          __vitest_error_context__: { assertionName: "toCustom" },
+          [OCCURRENCE_KEY]: occurrenceOf({
+            ...asyncResult,
+            role: "unattributed",
+          }),
+        }),
+      ),
+      /outside its matcher's handler/,
+    ],
+    [genuine({ schema: "atlas-assertion-origin/2" }), /occurrence schema/],
+    [genuine({ nonce: "m" }), /occurrence of another run/],
+    [genuine({ adapter: "0".repeat(64) }), /occurrence of another adapter/],
+    [bound(chaiError({ ...r, nonce: "m" })), /assertion origin of another run/],
+    [
+      bound(chaiError({ ...r, adapter: "0".repeat(64) })),
+      /assertion origin of another adapter/,
+    ],
+    [bound(chaiError({ ...r, schema: "x" })), /unsupported origin schema/],
+  ];
+  for (const [error, pattern] of refusedBy) {
+    const a = admission(error, ok);
+    assert.equal(a.kind, "error", JSON.stringify(error.occurrence));
+    assert.match(a.why, pattern, JSON.stringify(error.occurrence));
+  }
+  // No attestation at all, or one of another shape, is no attestation.
+  assert.match(
+    admission(genuine(), { ...ok, issued: null }).why,
+    /did not attest/,
+  );
+  assert.match(
+    admission(genuine(), { ...ok, issued: [] }).why,
+    /did not attest/,
+  );
+  // The inversion is collected in its own phase with no edge; anything else carrying its receipt is refused.
+  assert.equal(
+    classify(bound(invertedError()), { ...ok, fails: true }),
+    "inverted",
+  );
+  const inversionWithEdge = bound(invertedError());
+  inversionWithEdge.occurrence.edges = [{ invocation: 3, kind: "sync" }];
+  assert.equal(classify(inversionWithEdge, { ...ok, fails: true }), "error");
+  // The phase is reported for every kind, so a refusal says where the error was collected.
+  assert.equal(
+    admission(genuine({ phase: "afterEach" }), ok).phase,
+    "afterEach",
+  );
+  assert.equal(admission(genuine(), ok).phase, "body");
 });
 
 test("project records a live function constructor by its name only", () => {
@@ -777,6 +1034,7 @@ test("unitVerdict (revision 28): a matcher crash with assertion frames is an err
     stack:
       "TypeError: matcher crashed before comparing\n at Proxy.__VITEST_EXTEND_ASSERTION__ (x)",
     constructor: "Function<TypeError>",
+    [OCCURRENCE_KEY]: occurrenceOf(null),
   });
   const alone = unitVerdict(
     runWith([caseOf("oracle", "failed", [crash])]),
@@ -813,7 +1071,13 @@ test("unitVerdict (revision 28): a matcher crash with assertion frames is an err
   // An assertion recorded in ANOTHER run's worker is not this run's assertion.
   const foreign = runWith([
     caseOf("oracle", "failed", [
-      { ...assertion, origin: { ...assertion.origin, nonce: "m" } },
+      {
+        ...assertion,
+        occurrence: {
+          ...assertion.occurrence,
+          receipt: { ...assertion.occurrence.receipt, nonce: "m" },
+        },
+      },
     ]),
   ]);
   assert.equal(unitVerdict(foreign, named).verdict, "crash_only");
@@ -884,7 +1148,8 @@ test("unitVerdict keeps the earlier runner's kinds fields (suite) and counts eve
     [caseOf("oracle", "failed", [assertion])],
     {},
     {
-      modules: [{ id: "m", ...errors([project("")]) }],
+      // Revision 30: the module is the tests' own (its worker attests their occurrences).
+      modules: [{ id: "tests/a.test.ts", ...errors([project("")]) }],
       unhandledCount: 1,
       unhandled: [project(null)],
     },

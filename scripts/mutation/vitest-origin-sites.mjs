@@ -1,3 +1,9 @@
+// WEB-14a revision 30 (review r29 R31 incomplete_fix / R33 harness, design assessment b8e8e25d C1-C4): a construction site's role is now
+// DIAGNOSTIC origin only. The edits below also give the runtime (vitest-origin-runtime.mjs) every invocation boundary (chai's wrappers,
+// with a rethrowing catch that records the edge), the asynchronous extended matcher's single subscription (`subscribe`, R33: replaces
+// revision 29's second `then`), and the runner's test phases, attempts and error collection (`failTask`, `expect.soft`, the `test.fails`
+// inversion), where each collected error gets its OCCURRENCE record. Schema 3; the receipts no longer touch the error objects.
+//
 // WEB-14a revision 29 (review r28 R31 incomplete_fix, design assessment C1-C3): the AUDITED assertion-producing sites of the installed
 // framework, and the exact load-time edits that record, on the one error object each site constructs, which site made it and in
 // what role. Pure data plus a pure transform: the loader (vitest-origin-loader.mjs) applies it in each Vitest worker, the worker
@@ -14,7 +20,7 @@
 //                 Vitest's direct mismatch sites, promise wrong-settlement, an extended matcher's failing result after its message).
 //                 The runtime still decides per occurrence: a comparison counts only on an `expect()` root (not chai's internal
 //                 `new Assertion(..., true)` preconditions: `internal`), not created or evaluated inside another matcher (`nested`).
-//   explicit      an explicit failure the test wrote (`expect.fail`, `assert.fail`)
+//   explicit      an explicit failure the test wrote (`expect.fail`, `assert.fail`); inside a matcher's execution it is `nested`
 //   inversion     Vitest's runner failing a `test.fails` case that passed
 //   precondition  argument/subject validation before any comparison (never an assertion)
 //   execution     an execution error wrapped by the framework (never an assertion)
@@ -28,11 +34,17 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const ORIGIN_SCHEMA = "atlas-assertion-origin/2";
+export const ORIGIN_SCHEMA = "atlas-assertion-origin/3";
 export const ORIGIN_KEY = "__atlasAssertionOrigin";
+/** The property of a SERIALISED error copy holding its occurrence record (the runner's copy; the original error is never changed). */
+export const OCCURRENCE_KEY = "__atlasAssertionOccurrence";
+/** The file task's meta key of the runtime's per-file health attestation (vitest-origin-setup.mjs → witness → reader). */
+export const HEALTH_META_KEY = "atlasAssertionOriginHealth";
+/** Every worker runs with this Node option: AsyncLocalStorage without promise hooks (the runtime's asynchronous invocation context). */
+export const ASYNC_CONTEXT_FLAG = "--experimental-async-context-frame";
 export const ORIGIN_NONCE_ENV = "ATLAS_VITEST_ORIGIN_NONCE";
-/** The worker-realm registry (runtime → setup). Not a source of evidence: receipts are read from the errors themselves. */
-export const REGISTRY = Symbol.for("atlas.assertion-origin/2");
+/** The worker-realm registry (runtime → setup). Not a source of evidence: admission reads the occurrence records on serialised errors. */
+export const REGISTRY = Symbol.for("atlas.assertion-origin/3");
 /** The chai flag holding an `expect()` root's record (copied along a chain by chai's transferFlags, absent on internal assertions). */
 export const ROOT_FLAG = "atlas-origin-root";
 
@@ -54,10 +66,32 @@ export const ROLES = Object.freeze([
   "unsupported",
 ]);
 /** Roles the runtime may assign to a `comparison` site's occurrence instead (each a refusal). */
-export const DERIVED_ROLES = Object.freeze(["internal", "nested"]);
+export const DERIVED_ROLES = Object.freeze([
+  "internal",
+  "nested",
+  "unattributed",
+]);
+/** Where the runner collects a test's error (vitest-origin-runtime.mjs `failing`); only `body` (and `inversion`) can be admitted. */
+export const PHASES = Object.freeze([
+  "prepare",
+  "before-try",
+  "beforeEach",
+  "body",
+  "after-try",
+  "after-body",
+  "task-finished",
+  "afterEach",
+  "aroundEach",
+  "fixture-cleanup",
+  "test-hook",
+  "inversion",
+  "unknown",
+]);
 
 // One construction site: `ids` names each occurrence of `text` in source order (identical statements share a role).
 const site = (role, receiver, text, ...ids) => ({ role, receiver, text, ids });
+// Revision 30: a site inside the extended matcher's asynchronous result handler (its invocation is the handler's, not a frame's).
+const inHandler = (s) => ({ ...s, handler: true });
 
 const CHAI_SITES = [
   site(
@@ -266,11 +300,13 @@ const VITEST_SITES = [
     'new AssertionError(`promise resolved "${utils.inspect(value)}" instead of rejecting`, {\n\t\t\t\t\t\tshowDiff: true,\n\t\t\t\t\t\texpected: /* @__PURE__ */ new Error("rejected promise"),\n\t\t\t\t\t\tactual: value\n\t\t\t\t\t})',
     "vitest.rejects.resolved",
   ),
-  site(
-    "comparison",
-    "assertion",
-    "new JestExtendError(errorMessage, actual, expected, {\n\t\t\t\t\t\t\tassertionName: expectAssertionName,\n\t\t\t\t\t\t\tmeta\n\t\t\t\t\t\t})",
-    "vitest.extend.async-result",
+  inHandler(
+    site(
+      "comparison",
+      "assertion",
+      "new JestExtendError(errorMessage, actual, expected, {\n\t\t\t\t\t\t\tassertionName: expectAssertionName,\n\t\t\t\t\t\t\tmeta\n\t\t\t\t\t\t})",
+      "vitest.extend.async-result",
+    ),
   ),
   site(
     "comparison",
@@ -301,14 +337,19 @@ const markEdits = (sites) =>
   }));
 
 // chai's chain wrappers: the body of every assertion method/property runs between enter(this) and exit(), so the runtime knows
-// which root's matcher is executing (an `expect()` created inside one is nested). No function is added to the stack.
-const frame = (call) => ({
-  from: `let result = ${call};`,
+// which invocation is executing (an `expect()` created inside one is nested). No function is added to the stack. Revision 30: a
+// rethrowing catch tells the runtime what left the frame (the same object is rethrown; nothing else happens there), and the call keeps
+// its exact line AND column (so every stack frame of a wrapper is unchanged): `enter` and `try {` end the previous line, and
+// `let result` becomes the same-length `var result` (its only declaration in that function), read after the block as before.
+const frame = (before, indent, call) => ({
+  from: `${before}\n${indent}let result = ${call};`,
   count: 1,
   to: [
-    `__atlasOrigin.enter(this); let result; try { result = ${call}; } finally { __atlasOrigin.exit(); }`,
+    `${before} __atlasOrigin.enter(this); try {\n${indent}var result = ${call}; } catch (__atlasThrown) { __atlasOrigin.threw(__atlasThrown); throw __atlasThrown; } finally { __atlasOrigin.exit(); }`,
   ],
 });
+// One exact edit (`from` found exactly `to.length` times, each occurrence replaced in order).
+const edit = (from, ...to) => ({ from, count: to.length, to });
 
 /** The pinned modules: `path` is matched as a suffix of the loaded file's real path, `sha256` against its exact bytes. */
 export const MODULES = Object.freeze([
@@ -319,18 +360,27 @@ export const MODULES = Object.freeze([
     sites: CHAI_SITES,
     edits: [
       ...markEdits(CHAI_SITES),
-      frame("getter.call(this)"),
-      frame("method.apply(this, arguments)"),
-      frame("getter(_super).call(this)"),
-      frame("method(_super).apply(this, arguments)"),
-      frame("chainableBehavior.method.apply(this, arguments)"),
-      {
-        from: "      chainableBehavior.chainingBehavior.call(this);\n",
-        count: 1,
-        to: [
-          "      __atlasOrigin.enter(this); try { chainableBehavior.chainingBehavior.call(this); } finally { __atlasOrigin.exit(); }\n",
-        ],
-      },
+      frame("      }", "      ", "getter.call(this)"),
+      frame("    }", "    ", "method.apply(this, arguments)"),
+      frame(
+        '      flag(this, "lockSsfi", true);',
+        "      ",
+        "getter(_super).call(this)",
+      ),
+      frame(
+        '    flag(this, "lockSsfi", true);',
+        "    ",
+        "method(_super).apply(this, arguments)",
+      ),
+      frame(
+        "        }",
+        "        ",
+        "chainableBehavior.method.apply(this, arguments)",
+      ),
+      edit(
+        "    get: /* @__PURE__ */ __name(function chainableMethodGetter() {\n      chainableBehavior.chainingBehavior.call(this);\n",
+        "    get: /* @__PURE__ */ __name(function chainableMethodGetter() { __atlasOrigin.enter(this); try {\n      chainableBehavior.chainingBehavior.call(this); } catch (__atlasThrown) { __atlasOrigin.threw(__atlasThrown); throw __atlasThrown; } finally { __atlasOrigin.exit(); }\n",
+      ),
     ],
     exports: ["AssertionError", "Assertion"],
   },
@@ -340,19 +390,39 @@ export const MODULES = Object.freeze([
     sha256: "f56631635acaf90deb3b99e037afd8a2431ef685781ae3aa1109bb33d1d02702",
     sites: VITEST_SITES,
     edits: [
-      ...markEdits(VITEST_SITES),
+      // The two JestExtendError sites are marked from the class's constructor (below), so their construction keeps its column.
+      ...markEdits(
+        VITEST_SITES.filter((s) => s.text.startsWith("new AssertionError(")),
+      ),
       {
         from: "const assert = chai.expect(value, message);",
         count: 1,
         to: ["const assert = __atlasOrigin.root(chai.expect(value, message));"],
       },
-      {
-        from: "return result.then(({ pass, message, actual, expected, meta }) => {",
-        count: 1,
-        to: [
-          "return __atlasOrigin.asyncExtension(result) || result.then(({ pass, message, actual, expected, meta }) => {",
-        ],
-      },
+      // R33 (revision 30): the framework's one `result.then(handler)` call stays exactly that call, at its column, with its one
+      // argument (revision 29 subscribed a second time). Its handler is edited IN PLACE: built by an arrow that captures the matcher's
+      // invocation (`async`, evaluated with the arguments, after the framework's own `then` read), its body runs in that invocation and
+      // records a throw as that invocation's edge; the destructuring of the result moves into the body so that a throwing result
+      // getter is covered too. `async` also observes the rejection of a genuine native promise (an inert reaction, no user code).
+      edit(
+        "return result.then(({ pass, message, actual, expected, meta }) => {",
+        "return result.then(((__atlasInvocation) => (__atlasResult) => { __atlasOrigin.handling(__atlasInvocation); try { const { pass, message, actual, expected, meta } = __atlasResult;",
+      ),
+      edit(
+        "\t\t\t\t});\n\t\t\t\tconst { pass, message, actual, expected, meta } = result;",
+        "\t\t\t\t} catch (__atlasThrown) { __atlasOrigin.handlerThrew(__atlasInvocation, __atlasThrown); throw __atlasThrown; } finally { __atlasOrigin.handled(__atlasInvocation); } })(__atlasOrigin.async(result)));\n\t\t\t\tconst { pass, message, actual, expected, meta } = result;",
+      ),
+      // Both JestExtendError sites: the error marks itself when its fields are set (the runtime tells the sites apart).
+      edit(
+        "\t\tthis.__vitest_error_context__ = __vitest_error_context__;\n\t}\n}",
+        "\t\tthis.__vitest_error_context__ = __vitest_error_context__; __atlasOrigin.extendError(this);\n\t}\n}",
+      ),
+      // `expect.soft` collects its failure itself, inside the soft matcher's own invocation (that is its terminal edge): an occurrence
+      // in the phase the test is in.
+      edit(
+        "test.result.errors.push(processError(err));",
+        "test.result.errors.push(__atlasOrigin.occurrence(err, processError(err), __atlasOrigin.soft(test, err), false));",
+      ),
     ],
     exports: ["JestExtendError"],
   },
@@ -361,7 +431,73 @@ export const MODULES = Object.freeze([
     path: "/node_modules/vitest/dist/chunks/run.C5UmxDPh.js",
     sha256: "890fef0254ad442f55902adc9a7d0e639bb9ba5a78ef4fc53a30f10f1aa9f77c",
     sites: RUNNER_SITES,
-    edits: markEdits(RUNNER_SITES),
+    // Revision 30: the runner's phases of each attempt, its running tests and each error it collects for a test (an occurrence, with
+    // the phase it was collected in). The six identical `failTask(test.result, e, ...)` statements are, in source order: the parallel
+    // and sequential test hooks (onFinished/onFailed), the first try (before-try, beforeEach, body, after-try: its phase is the one
+    // reached), onTaskFinished, afterEach with its cleanups and fixtures, and the fixture cleanup after aroundEach. Every insertion
+    // ends a line (or follows the last argument of a call), so no runner frame of any stack moves.
+    edits: [
+      edit(
+        "const cleanupRunningTest = addRunningTest(test);",
+        "const cleanupRunningTest = addRunningTest(test); __atlasOrigin.running(test);",
+      ),
+      edit(
+        "cleanupRunningTest();",
+        "cleanupRunningTest(); __atlasOrigin.ended(test);",
+        "cleanupRunningTest(); __atlasOrigin.ended(test);",
+      ),
+      edit(
+        "try {\n\t\t\t\t\tawait runner.onBeforeTryTask?.(test, {",
+        'try { __atlasOrigin.phase(test, "before-try");\n\t\t\t\t\tawait runner.onBeforeTryTask?.(test, {',
+      ),
+      edit(
+        'test.result.repeatCount = repeatCount;\n\t\t\t\t\tbeforeEachCleanups = await $("test.beforeEach"',
+        'test.result.repeatCount = repeatCount; __atlasOrigin.phase(test, "beforeEach");\n\t\t\t\t\tbeforeEachCleanups = await $("test.beforeEach"',
+      ),
+      edit(
+        'beforeEachCleanups = await $("test.beforeEach", () => callSuiteHook(suite, test, "beforeEach", runner, [test.context, suite]));\n',
+        'beforeEachCleanups = await $("test.beforeEach", () => callSuiteHook(suite, test, "beforeEach", runner, [test.context, suite])); __atlasOrigin.phase(test, "body");\n',
+      ),
+      edit(
+        "}\n\t\t\t\t\tawait runner.onAfterTryTask?.(test, {",
+        '} __atlasOrigin.phase(test, "after-try");\n\t\t\t\t\tawait runner.onAfterTryTask?.(test, {',
+      ),
+      edit(
+        "failTask(test.result, e, runner.config._diffOptions);",
+        ...[
+          "test-hook",
+          "test-hook",
+          null,
+          "task-finished",
+          "afterEach",
+          "fixture-cleanup",
+        ].map(
+          (name) =>
+            `failTask(test.result, e, runner.config._diffOptions, __atlasOrigin.failing(test, ${JSON.stringify(name)}));`,
+        ),
+      ),
+      edit(
+        "failTask(test.result, error, runner.config._diffOptions);",
+        'failTask(test.result, error, runner.config._diffOptions, __atlasOrigin.failing(test, "aroundEach"));',
+      ),
+      edit(
+        "function failTask(result, err, diffOptions) {",
+        "function failTask(result, err, diffOptions, __atlasFailing) {",
+      ),
+      edit(
+        "const errors = e instanceof AggregateError ? e.errors.map((e) => processError(e, diffOptions)) : [processError(e, diffOptions)];",
+        "const errors = e instanceof AggregateError ? e.errors.map((e) => __atlasOrigin.occurrence(e, processError(e, diffOptions), __atlasFailing, true)) : [__atlasOrigin.occurrence(e, processError(e, diffOptions), __atlasFailing, false)];",
+      ),
+      edit(
+        'const error = processError(/* @__PURE__ */ new Error("Expect test to fail"));',
+        'const error = processError(/* @__PURE__ */ new Error("Expect test to fail")); __atlasOrigin.inversion(test, error);',
+      ),
+      // The file's health attestation, after every afterAll hook, cleanup and fixture cleanup of the file suite has run (or failed).
+      edit(
+        "\t\t\t\t\t} catch (e) {\n\t\t\t\t\t\tfailTask(suite.result, e, runner.config._diffOptions);\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t});",
+        "\t\t\t\t\t} catch (e) {\n\t\t\t\t\t\tfailTask(suite.result, e, runner.config._diffOptions);\n\t\t\t\t\t} if (suite.file === suite) __atlasOrigin.attest(suite, failTask, runner.config._diffOptions);\n\t\t\t\t}\n\t\t\t});",
+      ),
+    ],
     exports: ["getCurrentTest"],
   },
 ]);
@@ -377,6 +513,7 @@ export const SITES = Object.freeze(
             module: m.name,
             role: s.role,
             receiver: s.receiver,
+            handler: s.handler === true,
             constructs: s.text.match(/new (\w+)\(/)[1],
           }),
         ]),

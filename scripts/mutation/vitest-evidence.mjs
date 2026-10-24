@@ -22,18 +22,32 @@
 // class that site constructs. Precondition, execution-wrapper, internal, nested, unsupported, unknown, foreign or absent receipts are
 // errors. The `test.fails` inversion is admitted from its own runner-site receipt, no longer from its name and text. Envelope schema 3
 // binds the adapter digest, which the reader recomputes from the files it would run, so older evidence cannot satisfy this rule.
+//
+// Revision 30 (review r29 R31 incomplete_fix, design assessment b8e8e25d I2-I4/I6, C2/C4): a construction receipt is not the failure
+// that reached the runner. Review r29 rethrew a genuine comparison error (caught earlier in the same test) from a later matcher's body,
+// message function or getter, used a receiver made before an asynchronous matcher inside it, and called `expect.fail` in a formatter: all
+// admitted by their receipts. Admission is now per OCCURRENCE: the runner's record of ONE collected error (vitest-origin-runtime.mjs),
+// with the phase and attempt it was collected in, the construction receipt of the object, and every invocation the object left. It is an
+// assertion only when it was collected in the test body of the attempt that made it, its receipt is a comparison (or explicit failure)
+// that the runtime did not find nested in another invocation (synchronous frames or the asynchronous context), the object left its own
+// invocation and NO other one (a borrowed error leaving another matcher is that matcher's execution failure), no asynchronous matcher of
+// that attempt settled unobserved, no other test was running, and the worker attested the occurrence (its per-file health record). A
+// hook, cleanup or lifecycle collection is a veto whatever it carries. Envelope schema 4 requires every run module's health record.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import {
   adapterDigest,
+  OCCURRENCE_KEY,
   ORIGIN_FILES,
   ORIGIN_KEY,
   ORIGIN_NONCE_ENV,
   ORIGIN_SCHEMA,
+  PHASES,
   SITES,
 } from "./vitest-origin-sites.mjs";
 
 export {
   adapterDigest,
+  OCCURRENCE_KEY,
   ORIGIN_FILES,
   ORIGIN_KEY,
   ORIGIN_NONCE_ENV,
@@ -41,7 +55,7 @@ export {
   SITES,
 };
 export const REQUEST_SCHEMA = "atlas-vitest-request/1";
-export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/3";
+export const ENVELOPE_SCHEMA = "atlas-vitest-evidence/4";
 /** The lifecycle this adapter was qualified against. Any other version is refused, not assumed compatible. */
 export const PINNED_VITEST = "5.0.1";
 export const ORIGIN_SETUP = ORIGIN_FILES.setup;
@@ -74,7 +88,7 @@ export function project(value) {
       type: text("type"),
       stack: text("stack"),
       constructor: text("constructor"),
-      origin: originOf(value),
+      occurrence: occurrenceOf(value),
       assertionName: assertionNameOf(value),
     };
   } catch {
@@ -82,32 +96,118 @@ export function project(value) {
   }
 }
 
+const isInt = (v) => Number.isInteger(v);
+const isOptionalInt = (v) => v === null || Number.isInteger(v);
+const isOptionalString = (v) => v === null || typeof v === "string";
+const EDGE_KINDS = ["sync", "soft", "async-result", "async-rejection"];
+
+/** A construction receipt inside an occurrence record, exactly of its shape, or `undefined` when malformed. */
+function receiptOf(record) {
+  if (record === null) return null;
+  if (typeof record !== "object") return undefined;
+  const {
+    schema,
+    nonce,
+    adapter,
+    site,
+    role,
+    invocation,
+    framed,
+    root,
+    test,
+    current,
+    phase,
+    attempt,
+    concurrent,
+  } = record;
+  if (
+    ![schema, nonce, adapter, site, role].every((v) => typeof v === "string") ||
+    !isOptionalInt(invocation) ||
+    typeof framed !== "boolean" ||
+    !isOptionalInt(root) ||
+    !isOptionalString(test) ||
+    !isOptionalString(current) ||
+    !isOptionalString(phase) ||
+    !isOptionalInt(attempt) ||
+    typeof concurrent !== "boolean"
+  )
+    return undefined;
+  return {
+    schema,
+    nonce,
+    adapter,
+    site,
+    role,
+    invocation,
+    framed,
+    root,
+    test,
+    current,
+    phase,
+    attempt,
+    concurrent,
+  };
+}
+
 /**
- * The receipt of one serialised error, read without trusting it: `null` when absent, `{ invalid: true }` when present but not of the
- * receipt's shape (or unreadable), else exactly `{ schema, nonce, adapter, site, role, root, test, current }`. Whether it ADMITS the
- * error is `admission`'s decision.
+ * The occurrence record of one serialised error, read without trusting it: `null` when absent, `{ invalid: true }` when present but
+ * not exactly of the record's shape (or unreadable), else `{ schema, nonce, adapter, id, test, phase, attempt, concurrent, unobserved,
+ * aggregate, receipt, edges }`. Whether it ADMITS the error is `admission`'s decision.
  */
-function originOf(value) {
+function occurrenceOf(value) {
   let record;
   try {
-    record = value[ORIGIN_KEY];
+    record = value[OCCURRENCE_KEY];
   } catch {
     return { invalid: true };
   }
   if (record === undefined || record === null) return null;
   try {
-    const { schema, nonce, adapter, site, role, root, test, current } = record;
-    const optional = (v) => v === null || typeof v === "string";
+    const {
+      schema,
+      nonce,
+      adapter,
+      id,
+      test,
+      phase,
+      attempt,
+      concurrent,
+      unobserved,
+      aggregate,
+      receipt,
+      edges,
+    } = record;
+    const r = receiptOf(receipt);
     if (
-      ![schema, nonce, adapter, site, role].every(
-        (v) => typeof v === "string",
+      ![schema, nonce, adapter, phase].every((v) => typeof v === "string") ||
+      !isInt(id) ||
+      !isOptionalString(test) ||
+      !isOptionalInt(attempt) ||
+      typeof concurrent !== "boolean" ||
+      typeof aggregate !== "boolean" ||
+      !Array.isArray(unobserved) ||
+      !unobserved.every(isInt) ||
+      !Array.isArray(edges) ||
+      !edges.every(
+        (e) => e && isInt(e.invocation) && EDGE_KINDS.includes(e.kind),
       ) ||
-      !(root === null || Number.isInteger(root)) ||
-      !optional(test) ||
-      !optional(current)
+      r === undefined
     )
       return { invalid: true };
-    return { schema, nonce, adapter, site, role, root, test, current };
+    return {
+      schema,
+      nonce,
+      adapter,
+      id,
+      test,
+      phase,
+      attempt,
+      concurrent,
+      unobserved: [...unobserved],
+      aggregate,
+      receipt: r,
+      edges: edges.map((e) => ({ invocation: e.invocation, kind: e.kind })),
+    };
   } catch {
     return { invalid: true };
   }
@@ -156,78 +256,150 @@ function shapeProblem(error, constructs) {
 }
 
 /**
- * The admission of ONE projected error of the test `testId` (each error separately, so an assertion never conceals another, DA-H2):
+ * The admission of ONE projected error occurrence of the test `testId` (each separately, so an assertion never conceals another, DA-H2):
  * `{ kind, why, site, role }` with kind
  *   timeout    a test or hook time-out (a veto; recognised by its text, which can only refuse, never admit)
- *   inverted   the runner's `test.fails` inversion site, for this very test, which is a test.fails case
- *   assertion  a completed comparison (or explicit fail) of an `expect()` root of this test, at an audited site, of this run and adapter
+ *   inverted   the runner's `test.fails` inversion of this very test, which is a test.fails case
+ *   assertion  (revision 30) an occurrence collected in this test's body, of this run and adapter, attested by its worker, whose object
+ *              is a completed comparison (or explicit failure) of an un-nested invocation of this test and attempt, that left that
+ *              invocation and no other one, with no asynchronous matcher of the attempt settled unobserved and no other test running
  *   error      anything else, with `why`, whatever its name, frames or text say
+ * `issued` is the list of occurrence ids the worker attested for this test (its module's health record), or null when none.
  */
 export function admission(
   error,
-  { fails = false, nonce, adapter, testId } = {},
+  { fails = false, nonce, adapter, testId, issued = null } = {},
 ) {
-  const no = (why, origin) => ({
+  const occurrence = error?.occurrence;
+  const receipt = occurrence?.receipt ?? null;
+  const no = (why) => ({
     kind: "error",
     why,
-    site: origin?.site ?? null,
-    role: origin?.role ?? null,
+    site: receipt?.site ?? null,
+    role: receipt?.role ?? null,
+    phase: occurrence?.phase ?? null,
   });
   if (error?.kind !== "object") return no("not an object");
   const message = error.message ?? "";
   if (/timed out/i.test(message.split("\n")[0] ?? ""))
-    return { kind: "timeout", why: "time-out", site: null, role: null };
-  const origin = error.origin;
-  if (origin === null || origin === undefined) return no("no assertion origin");
-  if (origin.invalid === true) return no("invalid assertion origin");
-  if (origin.schema !== ORIGIN_SCHEMA)
-    return no(`unsupported origin schema ${JSON.stringify(origin.schema)}`);
-  if (typeof nonce !== "string" || origin.nonce !== nonce)
-    return no("assertion origin of another run", origin);
-  if (typeof adapter !== "string" || origin.adapter !== adapter)
-    return no("assertion origin of another adapter", origin);
-  const spec = Object.hasOwn(SITES, origin.site) ? SITES[origin.site] : null;
-  if (spec === null)
-    return no(`unknown site ${JSON.stringify(origin.site)}`, origin);
-  const shape = shapeProblem(error, spec.constructs);
-  if (shape !== null) return no(shape, origin);
-  const derivable =
-    spec.role === "comparison" ? ["comparison", "internal", "nested"] : [];
-  if (origin.role !== spec.role && !derivable.includes(origin.role))
-    return no(`role ${origin.role} is not ${origin.site}'s`, origin);
+    return {
+      kind: "timeout",
+      why: "time-out",
+      site: null,
+      role: null,
+      phase: occurrence?.phase ?? null,
+    };
+  if (occurrence === null || occurrence === undefined)
+    return no(
+      "no occurrence record (not collected by an instrumented runner path)",
+    );
+  if (occurrence.invalid === true) return no("invalid occurrence record");
+  if (occurrence.schema !== ORIGIN_SCHEMA)
+    return no(
+      `unsupported occurrence schema ${JSON.stringify(occurrence.schema)}`,
+    );
+  if (typeof nonce !== "string" || occurrence.nonce !== nonce)
+    return no("an occurrence of another run");
+  if (typeof adapter !== "string" || occurrence.adapter !== adapter)
+    return no("an occurrence of another adapter");
   const ofThisTest = (id) => typeof testId === "string" && id === testId;
+  if (!ofThisTest(occurrence.test))
+    return no("an occurrence collected for another test (or for none)");
+  if (!Array.isArray(issued) || !issued.includes(occurrence.id))
+    return no("an occurrence its worker did not attest");
+  if (!PHASES.includes(occurrence.phase))
+    return no(`unknown collection phase ${JSON.stringify(occurrence.phase)}`);
+  if (occurrence.concurrent)
+    return no(
+      "collected while another test was running (concurrent tests are unsupported)",
+    );
+  if (receipt === null) return no("no assertion origin");
+  if (receipt.schema !== ORIGIN_SCHEMA)
+    return no(`unsupported origin schema ${JSON.stringify(receipt.schema)}`);
+  if (receipt.nonce !== nonce) return no("assertion origin of another run");
+  if (receipt.adapter !== adapter)
+    return no("assertion origin of another adapter");
+  const spec = Object.hasOwn(SITES, receipt.site) ? SITES[receipt.site] : null;
+  if (spec === null) return no(`unknown site ${JSON.stringify(receipt.site)}`);
+  const shape = shapeProblem(error, spec.constructs);
+  if (shape !== null) return no(shape);
+  const derivable =
+    spec.role === "comparison"
+      ? ["comparison", "internal", "nested", "unattributed"]
+      : spec.role === "explicit"
+        ? ["explicit", "nested"]
+        : [];
+  if (receipt.role !== spec.role && !derivable.includes(receipt.role))
+    return no(`role ${receipt.role} is not ${receipt.site}'s`);
   const yes = (kind) => ({
     kind,
     why: null,
-    site: origin.site,
-    role: origin.role,
+    site: receipt.site,
+    role: receipt.role,
+    phase: occurrence.phase,
   });
-  switch (origin.role) {
+  if (occurrence.phase === "inversion")
+    return receipt.role === "inversion" &&
+      fails &&
+      ofThisTest(receipt.test) &&
+      occurrence.edges.length === 0
+      ? yes("inverted")
+      : no(
+          "an inversion of another test, of no test.fails case or of another error",
+        );
+  if (occurrence.phase !== "body")
+    return no(`collected in the ${occurrence.phase} phase, not the test body`);
+  if (occurrence.unobserved.length > 0)
+    return no(
+      "an asynchronous matcher of this attempt settled without observable completion",
+    );
+  switch (receipt.role) {
     case "comparison":
-      return ofThisTest(origin.test) && ofThisTest(origin.current)
-        ? yes("assertion")
-        : no("a comparison of another test (or of none)", origin);
+      if (!(ofThisTest(receipt.test) && ofThisTest(receipt.current)))
+        return no("a comparison of another test (or of none)");
+      break;
     case "explicit":
-      return ofThisTest(origin.current)
-        ? yes("assertion")
-        : no("an explicit fail outside this test", origin);
-    case "inversion":
-      return fails && ofThisTest(origin.test)
-        ? yes("inverted")
-        : no("an inversion of another test or of no test.fails case", origin);
+      if (!ofThisTest(receipt.current))
+        return no("an explicit fail outside this test");
+      break;
     case "internal":
-      return no(
-        "an internal (precondition) assertion, not an expect() root",
-        origin,
-      );
+      return no("an internal (precondition) assertion, not an expect() root");
     case "nested":
-      return no("an assertion nested in another matcher's execution", origin);
+      return no("an assertion nested in another matcher's execution");
+    case "unattributed":
+      return no("an asynchronous result outside its matcher's handler");
     default:
-      return no(
-        `the ${origin.role} site ${origin.site}, not a comparison`,
-        origin,
-      );
+      return no(`the ${receipt.role} site ${receipt.site}, not a comparison`);
   }
+  if (
+    receipt.phase !== "body" ||
+    receipt.attempt !== occurrence.attempt ||
+    receipt.concurrent
+  )
+    return no(
+      "made outside this attempt's test body (or while another test was running)",
+    );
+  if (receipt.invocation === null)
+    return no("a comparison without an invocation");
+  if (occurrence.edges.some((e) => e.kind === "async-rejection"))
+    return no(
+      "propagated as the rejection of an asynchronous matcher's body (an execution failure)",
+    );
+  if (occurrence.edges.some((e) => e.invocation !== receipt.invocation))
+    return no(
+      "propagated out of another matcher invocation (an execution failure of that matcher)",
+    );
+  // A framed comparison must have left its own invocation: by a throw out of its outermost frame (or by being collected inside it by
+  // `expect.soft`), or, for the extended matcher's asynchronous result, through that matcher's handler.
+  const terminal = spec.handler === true ? ["async-result"] : ["sync", "soft"];
+  if (
+    receipt.framed &&
+    !occurrence.edges.some(
+      (e) => e.invocation === receipt.invocation && terminal.includes(e.kind),
+    )
+  )
+    return no("never left its own invocation as that invocation's failure");
+  return yes("assertion");
 }
 
 /** The kind alone (`admission(...).kind`). */
@@ -307,6 +479,41 @@ export function validateEnvelope(
   }
   if (!Array.isArray(w.modules) || w.modules.length === 0)
     fail("no test module was reported");
+  // Revision 30: every module that ran carries the runtime's health attestation of THIS run and adapter, with no instrumentation
+  // failure and balanced frames (a module whose tests were all skipped runs no hook and may have none).
+  for (const m of Array.isArray(w.modules) ? w.modules : []) {
+    const h = m?.health;
+    if (h === null || h === undefined) {
+      if (m?.state !== "skipped")
+        fail(
+          `module ${JSON.stringify(m?.id)} has no assertion-origin health attestation`,
+        );
+      continue;
+    }
+    if (
+      typeof h !== "object" ||
+      h.schema !== ORIGIN_SCHEMA ||
+      (nonce !== undefined && h.nonce !== nonce) ||
+      h.adapter !== adapter ||
+      !Array.isArray(h.failures) ||
+      !isCount(h.depth) ||
+      h.issued === null ||
+      typeof h.issued !== "object"
+    ) {
+      fail(
+        `module ${JSON.stringify(m.id)}: malformed or foreign assertion-origin health attestation`,
+      );
+      continue;
+    }
+    if (h.failures.length > 0)
+      fail(
+        `module ${JSON.stringify(m.id)}: assertion-origin instrumentation failed: ${h.failures.slice(0, 3).join("; ")}`,
+      );
+    if (h.depth !== 0)
+      fail(
+        `module ${JSON.stringify(m.id)}: assertion-origin frames unbalanced (${h.depth})`,
+      );
+  }
   for (const [key, count, list] of [
     ["unhandled", w.unhandledCount, w.unhandled],
     ["witness failures", w.failureCount, w.failures],
@@ -373,6 +580,10 @@ export function readRun({
   if (problems.length > 0) return { complete: false, problems };
 
   const w = envelope.witness;
+  // Revision 30: the occurrence ids each module's worker attested, per test id.
+  const attested = new Map(
+    w.modules.map((m) => [m.id, m.health?.issued ?? {}]),
+  );
   // Case titles need not be unique (parametrised tests repeat them, files share them): cases are a list, matched to the JSON report
   // by module and name in order of appearance.
   const cases = w.tests.map((t) => ({
@@ -385,17 +596,20 @@ export function readRun({
     fails: t.fails === true,
     ms: t.ms ?? null,
     errors: t.errors.map((e) => {
+      const issued = attested.get(t.module)?.[t.id];
       const a = admission(e, {
         fails: t.fails === true,
         nonce,
         adapter,
         testId: t.id,
+        issued: Array.isArray(issued) ? issued : null,
       });
       return {
         kind: a.kind,
         firstLine: firstLine(e),
         site: a.site,
         role: a.role,
+        phase: a.phase,
         ...(a.kind === "error" ? { why: a.why } : {}),
       };
     }),
