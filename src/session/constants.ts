@@ -19,9 +19,16 @@ export interface SessionConfig {
   /** A recording or cover transaction with no `complete`. */
   recordingStallMs: number;
   coverStallMs: number;
+  /**
+   * The display check's own record read (`evaluate`: boot, resume, hints, visibility; matrix 3.7.2 "Read pending"): how long it may stay
+   * pending, with the gate up, before the page treats the store as stalled and fails closed. Human decision T22-READ-BOUND-20261012
+   * (Kieran, 12 October 2026): 6 s, so T22's local check held for 5 s is decided by its answer, not by a timer race. Only this read; every
+   * cover, lease, observation, exposure and other read or write keeps its hard 5 s bound. Nothing is shown or sent while it waits.
+   */
+  displayReadStallMs: number;
   /** Every stamped request; also the give-up interval of a deferred cover. */
   stampedRequestTimeoutMs: number;
-  /** Resume verification and the displaying page's scan. */
+  /** Resume verification and the scan of a displaying page (and of a visible page on recovery state 2 or 3: WEB-08c revision 4, R9). */
   resumeVerificationMinIntervalMs: number;
   scanIntervalMs: number;
   /** Show `1e.waiting` after this long waiting for another window. */
@@ -71,6 +78,7 @@ export const DEFAULT_CONFIG: SessionConfig = Object.freeze({
   backoffMaxMs: 60_000,
   recordingStallMs: 5_000,
   coverStallMs: 5_000,
+  displayReadStallMs: 6_000,
   stampedRequestTimeoutMs: 30_000,
   resumeVerificationMinIntervalMs: 30_000,
   scanIntervalMs: 30_000,

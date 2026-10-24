@@ -64,7 +64,9 @@ describe("a read that fails after the page has displayed", () => {
     const l = await signedInPage(f);
     const stop = failReads(f, l.page, "pending");
     const reading = evaluate(l.page.kernel, "review-stalled-read");
-    await f.world.advance(l.page.kernel.config.recordingStallMs + 1);
+    // ADAPTED (WEB-08c revision 2, human decision T22-READ-BOUND-20261012): was `recordingStallMs + 1`. The display check's own read now
+    // has its own bound, `displayReadStallMs` (6 s); every other read and write keeps the 5 s. Same outcome one bound later.
+    await f.world.advance(l.page.kernel.config.displayReadStallMs + 1);
     await reading;
     readFailureCard(l.page);
     expect(l.page.surface.mounted).toBeNull();

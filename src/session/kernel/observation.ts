@@ -142,6 +142,8 @@ export interface Observation {
   kind: ObservationKind;
   reason?: InvalidReason;
   retire?: readonly LeaseId[];
+  /** An identity read's `fence_seq` at sending: the `credential_unverified` entries its answer replaces (WEB-08c, T21). */
+  replaces_unverified?: number;
   /** The hold this recording releases when it completes. */
   hold_id: string;
 }
@@ -188,6 +190,9 @@ export async function recordAndHold(
             now: k.ports.clock.iso(),
             reason: observation.reason,
             retire: observation.retire,
+            ...(observation.replaces_unverified === undefined
+              ? {}
+              : { replaces_unverified: observation.replaces_unverified }),
           }),
         { durability: "strict", label: "record" },
       );
@@ -239,11 +244,15 @@ export async function classify403(
 }
 
 /** A non-invalidating answer to a request that surrendered (E1): delete the lease, tell the others, reopen. */
-export function cleanRelease(k: Kernel, inflight: InFlight): void {
+export function cleanRelease(
+  k: Kernel,
+  inflight: InFlight,
+  confirm?: Parameters<typeof retireLease>[3],
+): void {
   // The lease is removed BEFORE its lock is released; a lock already surrendered stays surrendered.
   const handle = inflight.activity.leaseHandle;
   inflight.activity.leaseHandle = null;
-  void retireLease(k, inflight.lease, handle).then(() => {
+  void retireLease(k, inflight.lease, handle, confirm).then(() => {
     k.ports.hints.post({ type: "auth_state_changed" });
   });
 }

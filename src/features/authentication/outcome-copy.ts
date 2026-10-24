@@ -198,3 +198,16 @@ export const LOCK_WAIT_BANNER = {
   heading: NEUTRAL_COPY["1c.lock_wait"].heading,
   message: NEUTRAL_COPY["1c.lock_wait"].message,
 } as const;
+/** WEB-08c: "That sign-in didn't finish" above a public form ([W], the card's heading and message, without its button). */
+export const ENDED_BANNER = {
+  heading: NEUTRAL_COPY["1c.ended"].heading,
+  message: NEUTRAL_COPY["1c.ended"].message,
+} as const;
+/**
+ * WEB-08c: the same fact while the outgoing account is displayed again (its session was still valid). [W] excerpt: the card's last
+ * sentence ("Sign in again to carry on.") is left out because the person is still signed in; flagged for copy review.
+ */
+export const ENDED_IN_TREE = {
+  heading: ENDED_BANNER.heading,
+  message: ENDED_BANNER.message.replace(/\s*Sign in again to carry on\.$/, ""),
+} as const;

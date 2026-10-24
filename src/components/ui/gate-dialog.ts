@@ -7,6 +7,10 @@
  * `visibilitychange` and `pagehide` handlers, and React's scheduler gives no such guarantee. It lives in
  * `src/components/ui` because that is where a dialog may be attached to the document (lint rule R3), and it shares the
  * neutral gate's classes so it looks the same. The heading and message never contain account data.
+ *
+ * WEB-08c (R4 of the review of 11 October 2026; matrix §3.7.2 step 3 "Read pending", T22 t4): when the page is shown again while the
+ * gate is still open, the local check has begun, and its `role="status"` message says "Checking your account" ONCE for that opening
+ * (a polite status: a screen reader announces it while the check is pending). It is cleared when the gate closes; a lift adds nothing.
  */
 export const GATE_HEADING = "Checking your account";
 export const GATE_ID = "resume-gate";
@@ -36,6 +40,17 @@ export function createGateDialog(doc: Document = document): GateDialog {
   let dialog: HTMLDialogElement | null = null;
   let heading: HTMLElement | null = null;
   let message: HTMLElement | null = null;
+  const view = doc.defaultView;
+  /** The page is shown again while the gate is open: the read is pending (once per opening; an existing message is kept). */
+  const readPending = () => {
+    if (doc.visibilityState !== "visible" || !dialog?.open || !message) return;
+    if (message.textContent === "") message.textContent = GATE_HEADING;
+  };
+  const watch = (on: boolean) => {
+    const method = on ? "addEventListener" : "removeEventListener";
+    doc[method]("visibilitychange", readPending);
+    view?.[method]("pageshow", readPending);
+  };
 
   const build = (): HTMLDialogElement => {
     const element = doc.createElement("dialog");
@@ -68,9 +83,11 @@ export function createGateDialog(doc: Document = document): GateDialog {
       if (dialog.open) return;
       if (typeof dialog.showModal === "function") dialog.showModal();
       else dialog.setAttribute("open", "");
+      watch(true);
     },
     close() {
       if (!dialog?.open) return;
+      watch(false);
       if (typeof dialog.close === "function") dialog.close();
       else dialog.removeAttribute("open");
       if (message) message.textContent = "";

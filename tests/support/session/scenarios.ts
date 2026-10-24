@@ -143,6 +143,33 @@ export function installAttempt(
   return verifier;
 }
 
+/**
+ * How many identity reads (`GET /browser-sessions/current`) the server has received so far. Since HF1-SHARED-CONFIRMATION-20261013 a page
+ * that displays a freshly settled session makes no identity read of its own, so a test addresses "the next identity read" by this count, not
+ * by a fixed ordinal that assumed the post-sign-in resume verification.
+ */
+export const identityReadsSoFar = (fixture: Fixture): number =>
+  fixture.server.requests.filter((r) =>
+    r.path.endsWith("/browser-sessions/current"),
+  ).length;
+
+/**
+ * HF1-SHARED-CONFIRMATION-20261013: a page's resume verification runs when it lifts and the session's latest confirmation (shared by every
+ * page) is at least the interval old. This lets the interval pass, then hides and shows the page, as a person returning to it does.
+ */
+export async function forceResumeVerification(
+  fixture: Fixture,
+  page: FakePage,
+): Promise<void> {
+  await fixture.world.advance(
+    page.kernel.config.resumeVerificationMinIntervalMs + 1_000,
+  );
+  page.hide();
+  await fixture.settle();
+  page.show();
+  await fixture.world.runUntilIdle();
+}
+
 /** Hold the server's answers to matching requests (`Da` unbounded) until `release()`. */
 export function holdAnswers(
   fixture: Fixture,

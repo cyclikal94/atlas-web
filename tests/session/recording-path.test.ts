@@ -12,6 +12,7 @@ import {
   fencesOf,
   holdAnswers,
   holdLock,
+  identityReadsSoFar,
   installAttempt,
   leaseIds,
   newWorld,
@@ -188,9 +189,14 @@ describe("T23 variant B2: the marker is written while the resolution is in progr
       phase: "verifying",
       cancel: "session_revoked",
     });
+    // ADAPTED (WEB-08c revision 2, HF1-SHARED-CONFIRMATION-20261013): was `r.ordinal === 2` (the first identity read after the post-sign-in
+    // resume verification, which the shared confirmation now spares); the same "OBSERVE's own read".
+    const before = identityReadsSoFar(f);
     const held = holdAnswers(
       f,
-      (r) => r.path.endsWith("/browser-sessions/current") && r.ordinal === 2,
+      (r) =>
+        r.path.endsWith("/browser-sessions/current") &&
+        r.ordinal === before + 1,
     );
     l.page.session.actions.retry();
     await f.world.runUntilIdle();
@@ -203,7 +209,9 @@ describe("T23 variant B2: the marker is written while the resolution is in progr
     const reads = f.server.requests.filter((r) =>
       r.path.endsWith("/browser-sessions/current"),
     );
-    expect(reads.length).toBeGreaterThanOrEqual(3); // csrf + held answer + the second observation
+    // ADAPTED (WEB-08c revision 2, HF1-SHARED-CONFIRMATION-20261013): was `>= 3` (this page's own CSRF read + the held answer + the second
+    // observation); the token is now the settlement's shared one, so: the held answer and the second observation, after the baseline.
+    expect(reads.length).toBeGreaterThanOrEqual(before + 2);
     expect(stateOf(f).attempt).toBeNull();
     expect(leaseIds(f)).toEqual([]);
   });

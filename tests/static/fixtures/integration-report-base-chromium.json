@@ -1,0 +1,1059 @@
+{
+  "config": {
+    "version": "1.63.0"
+  },
+  "suites": [
+    {
+      "title": "../integration/integration.compat-settings.spec.ts",
+      "file": "../integration/integration.compat-settings.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "I-11: api_version",
+          "file": "../integration/integration.compat-settings.spec.ts",
+          "line": 20,
+          "column": 6,
+          "specs": [
+            {
+              "title": "the released backend reports 0.28.0: supported, and sign-in is offered",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 360,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:04.963Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-fdbb8d41408013867d7a",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 24,
+              "column": 3
+            },
+            {
+              "title": "a proxy that rewrites api_version to 0.29.0: unsupported; the compatibility screen replaces the sign-in entry",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 268,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:05.578Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-ad5aae86b2f4c9ad60d7",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 41,
+              "column": 5
+            },
+            {
+              "title": "a proxy that rewrites api_version to 0.27.9: unsupported; the compatibility screen replaces the sign-in entry",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 266,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:05.850Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-5671c1c74f91879b6224",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 41,
+              "column": 5
+            },
+            {
+              "title": "api_version removed: missing (also a refusal)",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 165,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:06.121Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-955a241d81eecb87d3a3",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 62,
+              "column": 3
+            },
+            {
+              "title": "a 502: unreachable, which offers nothing new and hides nothing",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 264,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:06.290Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-fc0f9dc1c508d18e6ff1",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 79,
+              "column": 3
+            },
+            {
+              "title": "an unsupported server never hides an account that is already settled (only sign-in is gated)",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 407,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:06.559Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-f403e20666e4873ea7e0",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 98,
+              "column": 3
+            }
+          ]
+        },
+        {
+          "title": "I-16: the Settings screens with real data",
+          "file": "../integration/integration.compat-settings.spec.ts",
+          "line": 119,
+          "column": 6,
+          "specs": [
+            {
+              "title": "two real sessions and the real device list render with neutral labels; axe is clean; the dialogs are inside the protected portal",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 598,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:06.970Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-d16eca026c0bb1dc7751",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 120,
+              "column": 3
+            },
+            {
+              "title": "retiring ANOTHER device (SA-10) uses the read's own token, removes it, and revokes its sessions",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 333,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:07.573Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-266d2a04a552ac1d17f2",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 185,
+              "column": 3
+            },
+            {
+              "title": "Your data renders with the real pending count and no request of its own",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 279,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:07.910Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "23e9ec697c7827b6bab0-f8f27a97db378dc87e6d",
+              "file": "../integration/integration.compat-settings.spec.ts",
+              "line": 230,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "../integration/integration.faults.spec.ts",
+      "file": "../integration/integration.faults.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "I-04: late activation after cancel (T8 at module level)",
+          "file": "../integration/integration.faults.spec.ts",
+          "line": 21,
+          "column": 6,
+          "specs": [
+            {
+              "title": "the late response installs a DEAD cookie; the next stamped request is a 401; the fence is recorded; the reconnect card shows",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 294,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:08.198Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "e170c1fd09975c3156a4-a5f71dde4200071f6a6a",
+              "file": "../integration/integration.faults.spec.ts",
+              "line": 22,
+              "column": 3
+            }
+          ]
+        },
+        {
+          "title": "I-05: credential_mismatch",
+          "file": "../integration/integration.faults.spec.ts",
+          "line": 70,
+          "column": 6,
+          "specs": [
+            {
+              "title": "session A's CSRF token with session B's cookie of the SAME account: 403 credential_mismatch, recorded durably, verified, cleared, tokens refreshed",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 329,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:08.496Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "e170c1fd09975c3156a4-9bc0e5ae542c41e94036",
+              "file": "../integration/integration.faults.spec.ts",
+              "line": 82,
+              "column": 3
+            },
+            {
+              "title": "session B belongs to ANOTHER account: the check adds drift, the display stays closed, the card names the different account without naming it",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 337,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:08.829Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "e170c1fd09975c3156a4-4d98812a91aa5e4523f3",
+              "file": "../integration/integration.faults.spec.ts",
+              "line": 127,
+              "column": 3
+            }
+          ]
+        },
+        {
+          "title": "I-08: password change",
+          "file": "../integration/integration.faults.spec.ts",
+          "line": 158,
+          "column": 6,
+          "specs": [
+            {
+              "title": "204 with no Set-Cookie; the O14 fence password_changed; the person is asked to reconnect",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 210,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:09.170Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "e170c1fd09975c3156a4-674fe02a900d432b2626",
+              "file": "../integration/integration.faults.spec.ts",
+              "line": 159,
+              "column": 3
+            },
+            {
+              "title": "a WRONG current password: the observed status is recorded for the backend team, and the client fails closed",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [
+                    {
+                      "type": "observed",
+                      "description": "POST /password with a wrong current password answered 401: "
+                    }
+                  ],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 306,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:09.384Z",
+                      "annotations": [
+                        {
+                          "type": "observed",
+                          "description": "POST /password with a wrong current password answered 401: "
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "e170c1fd09975c3156a4-97c76b43704fa4894fa5",
+              "file": "../integration/integration.faults.spec.ts",
+              "line": 217,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "../integration/integration.operations.spec.ts",
+      "file": "../integration/integration.operations.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "I-06: the logout ledger",
+          "file": "../integration/integration.operations.spec.ts",
+          "line": 58,
+          "column": 6,
+          "specs": [
+            {
+              "title": "DELETE /sessions/{id} with an Idempotency-Key answers confirmed_applied; the wipe runs; the envelope goes; settled is cleared; the same call under a second session replays the same outcome",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 317,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:09.698Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "0eec7917840ca893d6c0-c86fe28b52f9dbce514f",
+              "file": "../integration/integration.operations.spec.ts",
+              "line": 59,
+              "column": 3
+            },
+            {
+              "title": "a session removed by another route BEFORE the keyed call is superseded: no wipe, and an invalid_session('removed_elsewhere') fence for the recovery",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 552,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:10.019Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "0eec7917840ca893d6c0-e19f3773cf402c49345d",
+              "file": "../integration/integration.operations.spec.ts",
+              "line": 102,
+              "column": 3
+            }
+          ]
+        },
+        {
+          "title": "I-07: self-retirement of the current device",
+          "file": "../integration/integration.operations.spec.ts",
+          "line": 159,
+          "column": 6,
+          "specs": [
+            {
+              "title": "the approved state is unchanged: confirmed_applied, the sessions are revoked, the person is signed out, the wipe ran",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 328,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:10.575Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "0eec7917840ca893d6c0-2eaf6d09845cc1798fa9",
+              "file": "../integration/integration.operations.spec.ts",
+              "line": 177,
+              "column": 3
+            },
+            {
+              "title": "STALE: a new sign-in on the same device between the read and the delete: 409 operation_conflict, rejected_stale, nothing deleted, never retried",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 847,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:10.907Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "0eec7917840ca893d6c0-e2269c967df26a28f816",
+              "file": "../integration/integration.operations.spec.ts",
+              "line": 205,
+              "column": 3
+            },
+            {
+              "title": "LOST RESPONSE: the backend commits, the connection drops, the calling session is revoked; after re-authenticating on the same device the identical call replays confirmed_applied, the wipe runs, and the newer sign-in is kept",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 30000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "integration-chromium",
+                  "projectName": "integration-chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3104,
+                      "retry": 0,
+                      "startTime": "2026-10-15T14:09:11.758Z",
+                      "annotations": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "0eec7917840ca893d6c0-1c9c40aee2f4409cd02c",
+              "file": "../integration/integration.operations.spec.ts",
+              "line": 248,
+              "column": 3
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "../integration/integration.profile-sync.spec.ts",
+      "file": "../integration/integration.profile-sync.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "P-4: what the page does around ONE sync page, against the real backend",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                },
+                {
+                  "type": "skip",
+                  "description": "not run: measurements are taken by `pnpm profile:sync`",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 28,
+                    "column": 6
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "integration-chromium",
+              "projectName": "integration-chromium",
+              "results": [
+                {
+                  "workerIndex": -1,
+                  "parallelIndex": -1,
+                  "status": "skipped",
+                  "duration": 0,
+                  "retry": 0,
+                  "startTime": "2026-10-15T14:09:14.867Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    },
+                    {
+                      "type": "skip",
+                      "description": "not run: measurements are taken by `pnpm profile:sync`",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 28,
+                        "column": 6
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "e761956b33704497ab37-cf65bbf26190ae68f66e",
+          "file": "../integration/integration.profile-sync.spec.ts",
+          "line": 87,
+          "column": 1
+        },
+        {
+          "title": "P-4: what the page does around ONE draft submission, against the real backend",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                },
+                {
+                  "type": "skip",
+                  "description": "not run: measurements are taken by `pnpm profile:sync`",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 28,
+                    "column": 6
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "integration-chromium",
+              "projectName": "integration-chromium",
+              "results": [
+                {
+                  "workerIndex": -1,
+                  "parallelIndex": -1,
+                  "status": "skipped",
+                  "duration": 0,
+                  "retry": 0,
+                  "startTime": "2026-10-15T14:09:14.867Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    },
+                    {
+                      "type": "skip",
+                      "description": "not run: measurements are taken by `pnpm profile:sync`",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 28,
+                        "column": 6
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "e761956b33704497ab37-a0ec1c9e6de821552cfc",
+          "file": "../integration/integration.profile-sync.spec.ts",
+          "line": 154,
+          "column": 1
+        },
+        {
+          "title": "P-10: request durations under a throttled loopback (a proxy-injected 250 ms delay on /sync and /commands)",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                },
+                {
+                  "type": "skip",
+                  "description": "not run: measurements are taken by `pnpm profile:sync`",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 28,
+                    "column": 6
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "integration-chromium",
+              "projectName": "integration-chromium",
+              "results": [
+                {
+                  "workerIndex": -1,
+                  "parallelIndex": -1,
+                  "status": "skipped",
+                  "duration": 0,
+                  "retry": 0,
+                  "startTime": "2026-10-15T14:09:14.867Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    },
+                    {
+                      "type": "skip",
+                      "description": "not run: measurements are taken by `pnpm profile:sync`",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 28,
+                        "column": 6
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "e761956b33704497ab37-30dd07645d9e97c1385a",
+          "file": "../integration/integration.profile-sync.spec.ts",
+          "line": 247,
+          "column": 1
+        },
+        {
+          "title": "W2: what the released backend can actually produce (a feasibility probe, with the largest page captured from the real /sync)",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [
+                {
+                  "type": "serial",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 0,
+                    "column": 0
+                  }
+                },
+                {
+                  "type": "skip",
+                  "description": "not run: measurements are taken by `pnpm profile:sync`",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                    "line": 28,
+                    "column": 6
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "integration-chromium",
+              "projectName": "integration-chromium",
+              "results": [
+                {
+                  "workerIndex": -1,
+                  "parallelIndex": -1,
+                  "status": "skipped",
+                  "duration": 0,
+                  "retry": 0,
+                  "startTime": "2026-10-15T14:09:14.867Z",
+                  "annotations": [
+                    {
+                      "type": "serial",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 0,
+                        "column": 0
+                      }
+                    },
+                    {
+                      "type": "skip",
+                      "description": "not run: measurements are taken by `pnpm profile:sync`",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile-sync.spec.ts",
+                        "line": 28,
+                        "column": 6
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "e761956b33704497ab37-150aa9e3913dd871e95a",
+          "file": "../integration/integration.profile-sync.spec.ts",
+          "line": 298,
+          "column": 1
+        }
+      ]
+    },
+    {
+      "title": "../integration/integration.profile.spec.ts",
+      "file": "../integration/integration.profile.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [
+        {
+          "title": "P-3: an authenticated GET /sessions through the stamped path versus a bare fetch",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [
+                {
+                  "type": "skip",
+                  "description": "not run: measurements are taken by `pnpm profile:session`",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile.spec.ts",
+                    "line": 20,
+                    "column": 6
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "integration-chromium",
+              "projectName": "integration-chromium",
+              "results": [
+                {
+                  "workerIndex": -1,
+                  "parallelIndex": -1,
+                  "status": "skipped",
+                  "duration": 0,
+                  "retry": 0,
+                  "startTime": "2026-10-15T14:09:14.867Z",
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "description": "not run: measurements are taken by `pnpm profile:session`",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile.spec.ts",
+                        "line": 20,
+                        "column": 6
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "ade98cb5549079f835b8-c8990cbe7129a4bef5dc",
+          "file": "../integration/integration.profile.spec.ts",
+          "line": 45,
+          "column": 1
+        },
+        {
+          "title": "P-5: lock publication latency seed: a page's clean answer to another page's grant",
+          "ok": true,
+          "tags": [],
+          "tests": [
+            {
+              "timeout": 30000,
+              "annotations": [
+                {
+                  "type": "skip",
+                  "description": "not run: measurements are taken by `pnpm profile:session`",
+                  "location": {
+                    "file": "<root>/tests/integration/integration.profile.spec.ts",
+                    "line": 20,
+                    "column": 6
+                  }
+                }
+              ],
+              "expectedStatus": "skipped",
+              "projectId": "integration-chromium",
+              "projectName": "integration-chromium",
+              "results": [
+                {
+                  "workerIndex": -1,
+                  "parallelIndex": -1,
+                  "status": "skipped",
+                  "duration": 0,
+                  "retry": 0,
+                  "startTime": "2026-10-15T14:09:14.867Z",
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "description": "not run: measurements are taken by `pnpm profile:session`",
+                      "location": {
+                        "file": "<root>/tests/integration/integration.profile.spec.ts",
+                        "line": 20,
+                        "column": 6
+                      }
+                    }
+                  ]
+                }
+              ],
+              "status": "skipped"
+            }
+          ],
+          "id": "ade98cb5549079f835b8-e540ed52afb82a57e9a3",
+          "file": "../integration/integration.profile.spec.ts",
+          "line": 115,
+          "column": 1
+        }
+      ]
+    }
+  ],
+  "stats": {
+    "startTime": "2026-10-15T14:09:04.744Z",
+    "duration": 10166.177,
+    "expected": 19,
+    "skipped": 6,
+    "unexpected": 0,
+    "flaky": 0
+  },
+  "errors": []
+}

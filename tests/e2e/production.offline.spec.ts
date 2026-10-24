@@ -1,5 +1,20 @@
+import type { Page } from "@playwright/test";
 import { test as declared } from "./auth-helpers";
 import { expect, test } from "./helpers";
+
+/**
+ * WEB-08c (R15): the CURRENT document has finished booting before the test leaves it. `boot` awaits its deferred modules (the
+ * landing controller among them) before it renders `SessionRoot`, so the sign-in heading is the observable end of that barrier on
+ * these signed-out pages. A service-worker controller is not: the worker controls the page whatever its boot has reached, and
+ * navigating away while an import is pending aborts it, which the console guard reports. Readiness belongs to the page in front of
+ * the test now; a heading seen before a reload says nothing about the reloaded document.
+ */
+async function rootReady(page: Page) {
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Sign in to Atlas" }),
+  ).toBeVisible();
+  await expect(page.locator("#protected-root")).toHaveAttribute("inert", "");
+}
 
 /**
  * Layer B. The service worker is registered here by the test only: registration and update UX belong to WEB-14a.
@@ -27,6 +42,7 @@ test("a cached deep link opens offline, and backend paths never receive the shel
   });
   await page.reload();
   await page.waitForFunction(() => navigator.serviceWorker.controller !== null);
+  await rootReady(page);
   await context.setOffline(true);
   await page.goto("/tasks/example");
   await expect(
@@ -71,6 +87,7 @@ declared(
       "Playwright WebKit cannot emulate offline for service-worker navigations",
     );
     await page.goto("/");
+    await rootReady(page);
     await page.evaluate(async () => {
       await navigator.serviceWorker.register("/sw.js");
       await navigator.serviceWorker.ready;
@@ -79,6 +96,7 @@ declared(
     await page.waitForFunction(
       () => navigator.serviceWorker.controller !== null,
     );
+    await rootReady(page);
     await context.setOffline(true);
     const token = "d".repeat(64);
     await page.goto(`/join#t=${token}`);

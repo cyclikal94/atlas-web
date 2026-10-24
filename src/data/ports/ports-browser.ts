@@ -1,4 +1,6 @@
 import { createBroadcastSyncChannel } from "../engine/sync-channel";
+import { summariseWork } from "../plans/fence";
+import { readProfile } from "../plans/profile";
 import { createDexieOpener } from "../store/dexie-adapter";
 import type { DatabaseHost } from "../store/host";
 import { type ConnectionRegistry, createRegistry } from "../store/registry";
@@ -33,3 +35,10 @@ export function createBrowserPortsImpl(shared: {
     ids: { uuid: () => crypto.randomUUID() },
   });
 }
+
+/**
+ * For the switcher's retained-account listing (WEB-08c, `store/retained-accounts.ts`): the same lazily loaded opener, and its two
+ * read-only plans, so that the listing's chunk draws on this module rather than adding its own boundary through the data model.
+ */
+export { createDexieOpener };
+export const retainedAccountPlans = { readProfile, summariseWork };

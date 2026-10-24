@@ -281,6 +281,10 @@ for (const scheme of ["dark", "light"] as const) {
               fullPage: true,
             });
           }
+          // WEB-08c revision 2 (HF-10, campaign 2026-10-13T22-08-10.590Z-e65297e5, Firefox): the last check can start a web font's
+          // download (Geist Mono, 1 ms before the next width's `goto`), and Firefox reports a download cancelled by the navigation as a
+          // console error. Let the page's in-flight font loads finish before navigating again; every check above is unchanged.
+          await page.evaluate(() => document.fonts.ready.then(() => undefined));
         }
       });
     }
