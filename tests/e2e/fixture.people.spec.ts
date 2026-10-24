@@ -2910,11 +2910,23 @@ test.describe("E-P36: the field editor's target and its failed reads (review 9, 
     fieldP(G, P, "Second", { kind: "text", text: "Second saved" }),
   ];
   const field = (id: string) => `/people/${P}/fields/${id}`;
+  // Both fields' audiences are served (an unserved policy read is a 403, and that 403 remounts the protected tree while the value is
+  // typed: campaign 26 lost a fill to it in Firefox, revision-9/ep36-diag-firefox-2.log).
+  const policies = {
+    arrange: (s: { policies: Map<string, unknown> }) => {
+      s.policies.set(F, { version: 1, policy: PRIVATE });
+      s.policies.set(G, { version: 1, policy: PRIVATE });
+    },
+  };
   /** Types `text` into the field's editor, then leaves it by navigation (its input is kept, not discarded). */
   async function keep(page: Page, id: string, name: string, text: string) {
     await navigateInApp(page, field(id));
     const d = page.getByRole("dialog", { name: `Edit ${name}` });
-    await d.getByRole("textbox", { name: "Value", exact: true }).fill(text);
+    // The audience has answered (nothing more re-renders the editor while it is typed in).
+    await expect(d.getByRole("radio", { name: "Only you" })).toBeChecked();
+    const box = d.getByRole("textbox", { name: "Value", exact: true });
+    await box.fill(text);
+    await expect(box).toHaveValue(text);
     await navigateInApp(page, `/people/${P}`);
     await expect(d).toBeHidden();
   }
@@ -2932,7 +2944,12 @@ test.describe("E-P36: the field editor's target and its failed reads (review 9, 
       test(`${ending}, ${reached}: the failed read is said, and ${reached === "control" ? "the field shown" : "only the field shown"} ends its session`, async ({
         context,
       }, info) => {
-        const { page } = await setup(context, `/people/${P}`, resources());
+        const { page } = await setup(
+          context,
+          `/people/${P}`,
+          resources(),
+          policies,
+        );
         await expect(page.locator(`[data-field-row="${G}"]`)).toBeVisible();
         await keep(page, F, "First", "First kept");
         await keep(page, G, "Second", "Second kept");
@@ -2980,7 +2997,12 @@ test.describe("E-P36: the field editor's target and its failed reads (review 9, 
   test("Try again after the read is repaired: the editor, with the input kept (nothing is sent)", async ({
     context,
   }, info) => {
-    const { page, net } = await setup(context, `/people/${P}`, resources());
+    const { page, net } = await setup(
+      context,
+      `/people/${P}`,
+      resources(),
+      policies,
+    );
     await expect(page.locator(`[data-field-row="${G}"]`)).toBeVisible();
     await keep(page, G, "Second", "Second kept");
     await readsOfCacheRows(page, [G]);
