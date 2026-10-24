@@ -406,8 +406,9 @@ control goes straight to the sync screens; the protected tree remounted in place
 refresh, an explicit Save writing one revise), `task-visit.test.ts` (the visit's lifecycle) and `route-changes.test.ts` (the memory-history
 route record told as the document's); native E-T44 (another real tab removes and restores the task's details around the edit form; the
 Tasks link from the form or from the sync screens, then browser Back, starts afresh) in three engines; unit MU-2390…MU-2399 and real-engine
-MU-2400…MU-2401 (`scripts/mutation/catalogue-web10a-r22.mjs`); MU-2079, MU-2330…MU-2333, MU-2338, MU-2340, MU-2345, MU-2347,
-MU-2350…MU-2352, MU-2368…MU-2376, MU-2378 and MU-2381…MU-2387 re-anchored to the visit (same intent; MU-2389 through its shared helper).
+MU-2400…MU-2401 (`scripts/mutation/catalogue-web10a-r22.mjs`); MU-2063, MU-2079, MU-2330…MU-2334, MU-2338, MU-2340, MU-2342,
+MU-2345, MU-2347, MU-2350…MU-2352, MU-2368…MU-2376, MU-2378 and MU-2381…MU-2387 re-anchored to the visit (same intent; MU-2389 through
+its shared helper).
 `sync-visit-retention.test.tsx` "kept for its own task only" is adapted, labelled: another task's form from the sync screens is a
 departure, so the first task starts afresh.
 
