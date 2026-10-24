@@ -678,3 +678,99 @@ describe("DA11-04: a supersession is the real transition, not a logged call", ()
     expect(w.drafts.map((d) => d.command)).toEqual([updateBody(9, "mine")]);
   });
 });
+
+// ---- review 12 (R12.1; DA12-13): the double judges the reviewed predecessor and the newest-save rule where the real outbox does -------
+describe("DA12-13: the predecessor and the newest-save rule, at the double's write", () => {
+  /** The queued update on base 1 (record 2) and the snapshot an editor opened on it with: its id and the digest of its literal body. */
+  const named = () => ({
+    resourceId: F,
+    localId: "queued",
+    digest: digestOf(updateBody(1, "Original queued body")),
+  });
+
+  test("a successor naming the body as stored is written: base 2 on the wire, waits on it, record 3", async () => {
+    const { w, outbox } = queuedUpdate();
+    const out = await outbox.enqueue({
+      ...update("Successor C"),
+      expectPredecessor: named(),
+    });
+    expect(out.kind).toBe("queued");
+    const added = w.drafts[1] as DraftWithCommand;
+    expect(added.command).toEqual(updateBody(2, "Successor C"));
+    expect(added.depends_on).toEqual(["queued"]);
+    expect(w.versions.get(F)).toBe(3);
+  });
+
+  test("after the predecessor's body was edited (same id, status and bases), the successor is refused predecessor_changed and nothing is written", async () => {
+    const { w, outbox } = queuedUpdate();
+    expect(
+      (
+        await outbox.editQueued(
+          "queued",
+          update("Peer B", digestOf(updateBody(1, "Original queued body"))),
+        )
+      ).kind,
+    ).toBe("edited");
+    const before = stateOf(w);
+    expect(
+      await outbox.enqueue({
+        ...update("Successor C"),
+        expectPredecessor: named(),
+      }),
+    ).toEqual({ kind: "refused", reason: "predecessor_changed" });
+    expect(stateOf(w)).toEqual(before);
+  });
+
+  test("a predecessor that is gone, or a successor that would not follow it (another save between), is refused", async () => {
+    const { w, outbox } = queuedUpdate();
+    expect(
+      await outbox.enqueue({
+        ...update("Successor C"),
+        expectPredecessor: { ...named(), localId: "missing" },
+      }),
+    ).toEqual({ kind: "refused", reason: "predecessor_changed" });
+    expect((await outbox.enqueue(update("Between M"))).kind).toBe("queued");
+    const before = stateOf(w);
+    expect(
+      await outbox.enqueue({
+        ...update("Successor C"),
+        expectPredecessor: named(),
+      }),
+    ).toEqual({ kind: "refused", reason: "predecessor_changed" });
+    expect(stateOf(w)).toEqual(before);
+  });
+
+  test("an edit asking for the newest save is refused not_latest behind a later save of the field, written without one", async () => {
+    const { w, outbox } = queuedUpdate();
+    const reviewed = digestOf(updateBody(1, "Original queued body"));
+    expect((await outbox.enqueue(update("Later M"))).kind).toBe("queued");
+    const before = stateOf(w);
+    expect(
+      await outbox.editQueued("queued", {
+        ...update("Older editor", reviewed),
+        expectLatest: true,
+      }),
+    ).toEqual({ kind: "refused", reason: "not_latest" });
+    expect(stateOf(w)).toEqual(before);
+    // Without the rule (another caller), the double edits as before: the rule is the request's, not a new default.
+    expect(
+      (await outbox.editQueued("queued", update("Older editor", reviewed)))
+        .kind,
+    ).toBe("edited");
+  });
+
+  test("the request boundary refuses a predecessor on an edit and the newest-save rule on an enqueue (they would check nothing)", async () => {
+    const { w, outbox } = queuedUpdate();
+    const before = stateOf(w);
+    await expect(
+      outbox.editQueued("queued", {
+        ...update("x"),
+        expectPredecessor: named(),
+      }),
+    ).rejects.toBeInstanceOf(OutboxRequestError);
+    await expect(
+      outbox.enqueue({ ...update("x"), expectLatest: true }),
+    ).rejects.toBeInstanceOf(OutboxRequestError);
+    expect(stateOf(w)).toEqual(before);
+  });
+});

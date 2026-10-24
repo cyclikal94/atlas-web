@@ -8929,8 +8929,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    const request = snapshotRequest(given);\n    validateRequest(request);",
-        "    const request = given;\n    validateRequest(request);",
+        '    const request = snapshotRequest(given);\n    validateRequestFor(request, "enqueue");',
+        '    const request = given;\n    validateRequestFor(request, "enqueue");',
       ),
   },
   {
@@ -22581,11 +22581,17 @@ export const UNIT = [
     file: "src/features/people/field/FieldEditorDialog.tsx",
     tests: ["tests/features/people/editor-continuation.test.tsx"],
     expect: /DA11-03: .*field: .*while the outbox commits another edit of L/,
+    // Re-anchored in WEB-11a revision 12: the older form is now ALSO refused at the write unless it names the save it follows, so the
+    // R11 defect ("falls back to queuing the older form", unguarded) is the page's check bypassed AND no predecessor named.
     patch: (t) =>
       sub(
-        t,
-        "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
-        "      if (false as boolean) {",
+        sub(
+          t,
+          "      if (!successorFollows(refusal, bound, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(bound, base.fieldId),\n",
+        "",
       ),
   },
   {
@@ -22595,12 +22601,451 @@ export const UNIT = [
     file: "src/features/people/detail/IdentityHeader.tsx",
     tests: ["tests/features/people/editor-continuation.test.tsx"],
     expect: /DA11-03: .*rename: .*while the outbox commits another rename/,
+    // Re-anchored in WEB-11a revision 12: the older form is now ALSO refused at the write unless it names the save it follows, so the
+    // R11 defect ("falls back to queuing the older form", unguarded) is the page's check bypassed AND no predecessor named.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
+          "      if (false as boolean) {",
+        ),
+        "        ...followsOf(snapshot, person.id),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2387",
+    title:
+      "WEB-11a R12.1 (DA12-02): the predecessor's body digest is not compared at the write",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /R12\.1 \(field\).*peer edit: changed/,
+    patch: (t) =>
+      sub(t, "    stored.command_digest !== expected.digest ||\n", ""),
+  },
+  {
+    id: "MU-2388",
+    title:
+      "WEB-11a R12.1 (DA12-02): the predecessor's base is not related to the base the transaction resolved",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /another save came between|a published version moved the base/,
     patch: (t) =>
       sub(
         t,
-        "      if (!successorFollows(refusal, snapshot, draftsRef.current)) {",
-        "      if (false as boolean) {",
+        '  if (typeof base !== "number" || bases[expected.resourceId] !== base + 1)',
+        '  if (typeof base !== "number")',
       ),
+  },
+  {
+    id: "MU-2389",
+    title:
+      "WEB-11a R12.1 (DA12-02): an unsettled predecessor need not be the save the new draft waits on",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /not what the new draft waits on/,
+    patch: (t) =>
+      sub(
+        t,
+        '    stored.status === "acknowledged" || dependsOn.includes(stored.local_id)',
+        "    true",
+      ),
+  },
+  {
+    id: "MU-2390",
+    title:
+      "WEB-11a R12.1 (DA12-02): an acknowledged predecessor (its body answered and final) is refused because nothing waits on it",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /acknowledged, same body \(final\), not waited on: stands/,
+    patch: (t) =>
+      sub(
+        t,
+        '    stored.status === "acknowledged" || dependsOn.includes(stored.local_id)',
+        "    dependsOn.includes(stored.local_id)",
+      ),
+  },
+  {
+    id: "MU-2391",
+    title:
+      "WEB-11a R12.1 (DA12-01): the transaction comparison removed alone (the original R12.1 schedule)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/outbox-predecessor.test.ts",
+      "tests/features/people/editor-successor.test.tsx",
+    ],
+    expect:
+      /R12\.1 \((field|rename)\).*(peer edit: changed|edited elsewhere to B)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    request.expectPredecessor !== undefined &&\n    !predecessorStands(",
+        "    false &&\n    !predecessorStands(",
+      ),
+  },
+  {
+    id: "MU-2392",
+    title:
+      "WEB-11a R12.1 (DA12-03): the request boundary drops the predecessor (it never reaches the transaction)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /R12\.1 \((field|rename)\).*peer edit: changed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ...(request.expectPredecessor === undefined\n      ? {}\n      : {\n          expectPredecessor: {",
+        "    ...(true\n      ? {}\n      : {\n          expectPredecessor: {",
+      ),
+  },
+  {
+    id: "MU-2393",
+    title:
+      "WEB-11a R12.1 (DA12-03): the enqueue transaction does not read the predecessor by its key (absence taken)",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /R12\.1 \((field|rename)\).*peer edit: (none|identical)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      predecessor: reads.predecessor,",
+        "      predecessor: undefined,",
+      ),
+  },
+  {
+    id: "MU-2394",
+    title:
+      "WEB-11a review 12 (DA12-07): an edit in place ignores the newest-save rule",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /reverse schedule \((field|rename)\).*successor first/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (request.expectLatest === true) {",
+        "  if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-2395",
+    title:
+      "WEB-11a review 12 (DA12-07): any rebuild behind a later save counts as the audience's confirmation (content changes go on)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /content-changing rebuild/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return digestOf(before as JsonObject) === digestOf(after as JsonObject);",
+        "    return true;",
+      ),
+  },
+  {
+    id: "MU-2396",
+    title:
+      "WEB-11a review 12 (DA12-07): no rebuild counts as the audience's confirmation (the defaults review deadlocks behind a later save)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /confirmation \(the revision only\) is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return digestOf(before as JsonObject) === digestOf(after as JsonObject);",
+        "    return false;",
+      ),
+  },
+  {
+    id: "MU-2397",
+    title:
+      "WEB-11a review 12 (DA12-07): the edit transaction does not read the later saves of the draft's targets",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /reverse schedule \((field|rename)\).*successor first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (fold.latest !== undefined) later.push(fold.latest);",
+        "",
+      ),
+  },
+  {
+    id: "MU-2398",
+    title:
+      "WEB-11a review 12 (DA12-07): a settled later save still blocks an edit in place",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /later save that is settled/,
+    patch: (t) => sub(t, "              !isTerminal(other) &&\n", ""),
+  },
+  {
+    id: "MU-2399",
+    title:
+      "WEB-11a review 12 (DA12-07): a later save of an unrelated target blocks an edit in place",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /unrelated target: edited|another item does not block/,
+    patch: (t) =>
+      sub(
+        t,
+        "              other.index_targets.some((id) => primaries.includes(id)),",
+        "              true,",
+      ),
+  },
+  {
+    id: "MU-2400",
+    title:
+      "WEB-11a R12.1 (DA12-05): the field editor's successor names no predecessor",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(field\).*edited elsewhere to B/,
+    patch: (t) => sub(t, "        ...followsOf(bound, base.fieldId),\n", ""),
+  },
+  {
+    id: "MU-2401",
+    title:
+      "WEB-11a R12.1 (DA12-05): the unlinked rename's successor names no predecessor",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(rename\).*edited elsewhere to B/,
+    patch: (t) => sub(t, "        ...followsOf(snapshot, person.id),\n", ""),
+  },
+  {
+    id: "MU-2402",
+    title:
+      "WEB-11a review 12 (DA12-05): the field editor's in-place edit asks no newest-save rule",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(field\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        "          // Only while no later save of the field follows it (D-11a-15, review 12): that save was built over this body.\n          expectLatest: true,\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2403",
+    title:
+      "WEB-11a review 12 (DA12-05): the unlinked rename's in-place edit asks no newest-save rule",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(rename\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        "          // Only while no later rename of the person follows it (D-11a-15, review 12): that save was built over this body.\n          expectLatest: true,\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2404",
+    title:
+      "WEB-11a review 12 (DA12-05): the field editor reports not_latest as a failure instead of the review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(field\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        '          edited.reason !== "draft_changed" &&\n          edited.reason !== "not_latest"',
+        '          edited.reason !== "draft_changed"',
+      ),
+  },
+  {
+    id: "MU-2405",
+    title:
+      "WEB-11a review 12 (DA12-05): the unlinked rename reports not_latest as a failure instead of the review",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(rename\).*another save of the same item is queued after L/,
+    patch: (t) =>
+      sub(
+        t,
+        '          edited.reason !== "draft_changed" &&\n          edited.reason !== "not_latest"',
+        '          edited.reason !== "draft_changed"',
+      ),
+  },
+  {
+    id: "MU-2406",
+    title:
+      "WEB-11a R12.1 (DA12-05): the field editor reports predecessor_changed as a storage failure instead of the review",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(field\).*edited elsewhere to B/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (queued.kind === "refused" && queued.reason === "predecessor_changed")\n        reviewAgain = true;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2407",
+    title:
+      "WEB-11a R12.1 (DA12-05): the unlinked rename reports predecessor_changed as a storage failure instead of the review",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(rename\).*edited elsewhere to B/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (queued.kind === "refused" && queued.reason === "predecessor_changed")\n        reviewAgain = true;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2408",
+    title:
+      "WEB-11a review 12 (DA12-05): the rename re-binds after a refusal to the render that saved, not the latest read",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect: /R12\.1 \(rename\).*edited elsewhere to B/,
+    patch: (t) =>
+      sub(
+        t,
+        "        now.person,\n        draftsRef.current,\n        now.latest?.localId ?? null,",
+        "        person,\n        drafts,\n        shown.latest?.localId ?? null,",
+      ),
+  },
+  {
+    id: "MU-2409",
+    title:
+      "WEB-11a review 12 (chain record): the unsent create's edit asks no newest-save rule",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/editor-successor.test.tsx"],
+    expect:
+      /reverse schedule \(unsent create\).*a save of the same field is queued after it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            stored.command_digest === reviewed,\n          expectLatest: true,\n",
+        "            stored.command_digest === reviewed,\n",
+      ),
+  },
+  {
+    id: "MU-2410",
+    title:
+      "WEB-11a R12.1 (DA12-09): the held content step names no predecessor in its hand-off",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /review 12: .*is edited to B by another page/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ...(predecessor === null\n          ? {}",
+        "        ...(true\n          ? {}",
+      ),
+  },
+  {
+    id: "MU-2411",
+    title:
+      "WEB-11a R12.1 (DA12-08, v4 record): an unknown binding is not refused before the audience step",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /unknown: nothing is sent/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (copy.change.predecessor === "unknown") return fail("needs_review");\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2412",
+    title:
+      "WEB-11a R12.1 (DA12-09): a binding the page already sees changed still changes the audience",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /known to have changed already/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (copy.change.predecessor !== null && deps.follows?.() === "changed")',
+        "  if (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-2413",
+    title:
+      "WEB-11a R12.1 (DA12-09): a predecessor refusal at the hand-off is reported as not saved, not as changed content",
+    file: "src/features/people/field/held.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /is edited to B by another page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    guard.moved || predecessorChanged ? "content_changed" : "not_saved",',
+        '    guard.moved ? "content_changed" : "not_saved",',
+      ),
+  },
+  {
+    id: "MU-2414",
+    title:
+      "WEB-11a R12.1 (DA12-08, v4 record): a v 4 copy is read as bound to nothing (a binding guessed)",
+    file: "src/features/people/field/held-store.ts",
+    tests: ["tests/features/people/held-run.test.ts"],
+    expect: /v 4 copy never recorded it/,
+    patch: (t) =>
+      sub(
+        t,
+        '    raw.v === 5 ? parsePredecessor(raw.predecessor) : "unknown";',
+        "    raw.v === 5 ? parsePredecessor(raw.predecessor) : null;",
+      ),
+  },
+  {
+    id: "MU-2415",
+    title:
+      "WEB-11a R12.1 (v4 record): an unbound hold is listed as an ordinary hold (Send now offered)",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect: /review 12: .*no Send now or Try again/,
+    patch: (t) =>
+      sub(
+        t,
+        '            ) : held.change.predecessor === "unknown" ? (',
+        "            ) : (false as boolean) ? (",
+      ),
+  },
+  {
+    id: "MU-2416",
+    title: "WEB-11a R12.1 (DA12-08): 'Hold as draft' records no predecessor",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /Hold as draft' records the save its value was typed over: L queued/,
+    patch: (t) =>
+      sub(
+        t,
+        "          predecessor: heldPredecessorOf(bound, existing.id),",
+        "          predecessor: null,",
+      ),
+  },
+  {
+    id: "MU-2417",
+    title:
+      "WEB-11a R12.1 (DA12-02): the request boundary accepts a predecessor on an edit or a supersession (it would check nothing)",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /accepted on an enqueue only/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (op !== "enqueue" && request.expectPredecessor !== undefined)',
+        "  if (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-2418",
+    title:
+      "WEB-11a R12.1 (DA12-02): a predecessor of another resource than the request's version-checked target is accepted",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-predecessor.test.ts"],
+    expect: /one of another resource/,
+    patch: (t) => sub(t, "      !named ||\n", ""),
   },
 ];
 
@@ -26112,11 +26557,12 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P28:",
     expect: /E-P28:/,
+    // Re-anchored in WEB-11a revision 12 (the call is now inside a block that reads the refusal): the same defect, unchanged.
     patch: (t) =>
       sub(
-        t,
-        "      handOffOf(copy, head),\n    ),\n  );\n",
-        '    ),\n  );\n  if (saved.ok) await store.end(key, copy.digest, "transferred", copy.change.seq);\n',
+        sub(t, "      handOffOf(copy, head),\n    );\n", "    );\n"),
+        "    return queued;\n  });\n",
+        '    return queued;\n  });\n  if (saved.ok) await store.end(key, copy.digest, "transferred", copy.change.seq);\n',
       ),
   },
   {

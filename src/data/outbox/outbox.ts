@@ -24,7 +24,7 @@ import {
   type EnqueueRequest,
   estimateDraftBytes,
   snapshotRequest,
-  validateRequest,
+  validateRequestFor,
 } from "../model/outbox";
 import type { QueueSummary } from "../model/queue-summary";
 import { draftOperations, operationDraft } from "../model/retry";
@@ -83,7 +83,13 @@ export type RefusalReason =
    */
   | "changed"
   /** A hand-off's form copies are not as its caller read them, or a draft already has the id (`HandOff`): nothing was stored. */
-  | "source_changed";
+  | "source_changed"
+  /**
+   * The save the request follows (`EnqueueRequest.expectPredecessor`) is not stored as its caller reviewed it, or is no longer the save it
+   * would follow: nothing was stored (WEB-11a review 12). The caller keeps the person's input and has them review the current content;
+   * it is never resubmitted on their behalf.
+   */
+  | "predecessor_changed";
 
 /**
  * The form copy a save TAKES OVER (WEB-11a review 4, finding 1; `FormHandOff`): `source` (live, exactly as read) ends in the SAME
@@ -115,7 +121,9 @@ export type EditOutcome =
         | "not_queued"
         | "retargeted"
         /** The request's `expectDraft` refused the draft as it is stored now: nothing was written. */
-        | "draft_changed";
+        | "draft_changed"
+        /** The request's `expectLatest`: a later outstanding save of the same target was built over this body; nothing was written. */
+        | "not_latest";
     };
 
 export type DiscardOutcome =
@@ -183,7 +191,9 @@ export type ConfirmReviewOutcome =
         | "key_in_use"
         | "order_conflict"
         /** The draft is no longer the one the person reviewed (edited elsewhere, or its review changed): review it again. */
-        | "draft_changed";
+        | "draft_changed"
+        /** A later save of its target follows it and the rebuilt body would change more than the audience's revision (never, by construction). */
+        | "not_latest";
     };
 
 export interface Outbox {
@@ -1030,7 +1040,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
   ): Promise<EnqueueOutcome> {
     // The request is copied before anything is awaited: what is validated is what is stored (R39, revision 22).
     const request = snapshotRequest(given);
-    validateRequest(request);
+    validateRequestFor(request, "enqueue");
     const handOff = handOffOf(givenHandOff, deps.clock.iso());
     if (!service.live)
       return {
@@ -1096,7 +1106,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     given: EnqueueRequest,
   ): Promise<EditOutcome> {
     const next = snapshotRequest(given);
-    validateRequest(next);
+    validateRequestFor(next, "edit");
     if (!service.live)
       return {
         kind: "refused",
@@ -1185,7 +1195,7 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     given: EnqueueRequest,
   ): Promise<SupersedeOutcome> {
     const next = snapshotRequest(given);
-    validateRequest(next);
+    validateRequestFor(next, "supersede");
     if (!service.live)
       return {
         kind: "refused",
@@ -1292,7 +1302,12 @@ export function createOutbox(deps: OutboxDeps): Outbox {
     );
     try {
       if (path === "edit") {
-        const out = await editQueued(localId, request);
+        // The newest-save rule applies to the confirmation too (review 12): it goes on behind a later save of the same target only
+        // because it changes the audience's revision alone, which the writing transaction checks against the stored body.
+        const out = await editQueued(localId, {
+          ...request,
+          expectLatest: true,
+        });
         return out.kind === "edited"
           ? { kind: "confirmed", how: "edited", localId, paused: [] }
           : out;

@@ -87,6 +87,7 @@ const change = (over: Partial<HeldChange> = {}): HeldChange => ({
   sameKind: true,
   version: 4,
   expectedBase: 4,
+  predecessor: null,
   from: {
     version: 6,
     policy: {
@@ -298,8 +299,13 @@ describe("a held change is a durable form copy of the account (Q3, Q20)", () => 
         }),
       },
     });
-    // Adapted (review 4): an earlier shape is read as before, and marked LEGACY (never run).
-    expect(decodeHeld(first)).toEqual({ ...change(), legacy: true });
+    // Adapted (review 4): an earlier shape is read as before, and marked LEGACY (never run). Adapted again (review 12, R12.1): no shape
+    // before v 5 recorded the save its content was typed over, so that binding is `unknown` (never guessed), not "none".
+    expect(decodeHeld(first)).toEqual({
+      ...change(),
+      legacy: true,
+      predecessor: "unknown",
+    });
   });
 
   test("a copy that is not a held change this page can read is never decoded as one", () => {

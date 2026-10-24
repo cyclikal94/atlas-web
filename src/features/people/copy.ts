@@ -365,6 +365,13 @@ export const HELD_CHECKED_OTHER = (name: string) =>
 // Review 4 (the assessment's C9/C10): an earlier shape is never sent; an attempt that could not be looked up blocks a fresh one.
 export const HELD_LEGACY = (name: string) =>
   `A held change to who can see ${name} from an earlier version of Atlas is kept on this device. It can't be sent from here: discard it, or make the change again.`; // PROVISIONAL
+// Review 12 (R12.1; the decision of 24 October 2026): a hold that never recorded the save its value was typed over is reviewed, never sent.
+export const HELD_UNBOUND = (name: string) =>
+  `This held change to ${name} was kept before Atlas recorded what it was typed over, so it won't be sent. Edit the field to review it and save it again, or discard it.`; // PROVISIONAL
+export const HELD_UNBOUND_POLICY_MAYBE = (name: string) =>
+  `The change to who can see ${name} may already have been made.`; // PROVISIONAL
+export const HELD_UNBOUND_POLICY_DONE = (name: string) =>
+  `Who can see ${name} was already changed as asked.`; // PROVISIONAL
 export const HELD_ATTEMPT_UNKNOWN =
   "Couldn't check this device for an earlier try of this change. Try again."; // PROVISIONAL
 export const HELD_CHECK_FAILED = "Couldn't check it now. Try again."; // PROVISIONAL
@@ -378,6 +385,8 @@ export const HELD_FAILED: Record<string, string> = {
   forbidden: AUDIENCE_OWNER_ONLY,
   uncertain: UNCERTAIN,
   not_saved: "Couldn't save on this device. Try again.",
+  needs_review:
+    "This change can't be sent as it is. Edit the field to review it and save it again.",
 }; // PROVISIONAL
 export const DISCARD = "Discard";
 

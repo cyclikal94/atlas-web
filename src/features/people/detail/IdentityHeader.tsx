@@ -40,6 +40,7 @@ import { type LinkageState, renameRoute, unlinkOffer } from "../model/linkage";
 import type { ShownRow } from "../model/project";
 import {
   type EditSnapshot,
+  followsOf,
   reviewedDraft,
   snapshotOf,
   stillBound,
@@ -391,6 +392,9 @@ function RenameForm({
   // The outstanding saves as they are read NOW (a save decides on the latest read, not the one of the render that started it).
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
+  // The person and its newest outstanding change as shown NOW, for re-binding after a refusal (review 12: not the render that saved).
+  const shownRef = useRef({ person, latest: shown.latest });
+  shownRef.current = { person, latest: shown.latest };
   const [name, setName] = useState(initial.name);
   const [revision, setRevision] = useState(initial.revision ?? 0);
   const revisionRef = useRef(revision);
@@ -414,12 +418,22 @@ function RenameForm({
       snapshot,
     } satisfies RetainedRename);
   }, [env, retainedKey, session, name, revision, snapshot]);
-  /** The person changed since the form opened: nothing is sent; the form is re-bound to the person as shown now, for a deliberate re-save. */
-  const stale = () =>
+  /**
+   * The person changed since the form opened: nothing is sent; the form is re-bound to the person as shown now, for a deliberate re-save.
+   * "Now" is the page's latest read (review 12), not the render that started the refused save: that one still shows the body the refusal
+   * was about, and a re-save bound to it would only be refused again.
+   */
+  const stale = () => {
+    const now = shownRef.current;
     tell({
-      snapshot: snapshotOf(person, drafts, shown.latest?.localId ?? null),
+      snapshot: snapshotOf(
+        now.person,
+        draftsRef.current,
+        now.latest?.localId ?? null,
+      ),
       message: { text: copy.STALE_RENAME },
     });
+  };
   const close = () => {
     retired.current = true;
     retireSession(env.memory, retainedKey, session);
@@ -534,13 +548,16 @@ function RenameForm({
         const edited = await outbox.editQueued(latest.localId, {
           ...renameEditRequest(input),
           expectDraft: reviewedDraft(snapshot),
+          // Only while no later rename of the person follows it (D-11a-15, review 12): that save was built over this body.
+          expectLatest: true,
         });
         if (edited.kind === "edited") return edited;
         if (
           edited.reason !== "not_queued" &&
           edited.reason !== "not_found" &&
           edited.reason !== "retargeted" &&
-          edited.reason !== "draft_changed"
+          edited.reason !== "draft_changed" &&
+          edited.reason !== "not_latest"
         )
           return edited;
         refusal = edited.reason;
@@ -549,7 +566,15 @@ function RenameForm({
         reviewAgain = true;
         return { kind: "refused", reason: "draft_changed" } as const;
       }
-      return outbox.enqueue(renameEditRequest({ ...input, guard }));
+      // Judged again in the writing transaction (review 12, R12.1): the rename follows the save it was typed over only while that save is
+      // stored with the body the form read.
+      const queued = await outbox.enqueue({
+        ...renameEditRequest({ ...input, guard }),
+        ...followsOf(snapshot, person.id),
+      });
+      if (queued.kind === "refused" && queued.reason === "predecessor_changed")
+        reviewAgain = true;
+      return queued;
     });
     if (guard.moved || reviewAgain) return stale();
     if (!outcome.ok) {

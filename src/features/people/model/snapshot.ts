@@ -3,6 +3,7 @@ import type {
   DraftRow,
   DraftWithCommand,
   EditOutcome,
+  ExpectedPredecessor,
 } from "../../../data";
 import { type FieldValue, parseFieldValue } from "./values";
 
@@ -94,10 +95,14 @@ export const reviewedDraft =
 /**
  * Whether a NEW draft may follow the save the edit began on (review 2, finding 3): after an edit in place was refused (`refusal`), or
  * when none was asked (null: that save is held for the defaults review, or the audience was just changed). Only when the outstanding read
- * shows that save NOW with exactly the body the edit read: a body still queued may be edited by another page in the one transaction's
- * window before the new draft is written (as for a held change, docs/people.md), and a body that has left the queue is frozen. Never after
- * `draft_changed` (the stored body is not the one the edit read), `retargeted` or `not_found`, nor when the read does not show it: the
- * person reviews the field again. With nothing outstanding when the edit began, the base guard alone decides. PURE.
+ * shows that save NOW with exactly the body the edit read. Never after `draft_changed` (the stored body is not the one the edit read),
+ * `not_latest` (a later save follows it), `retargeted` or `not_found`, nor when the read does not show it: the person reviews the field
+ * again. With nothing outstanding when the edit began, the base guard alone decides. PURE.
+ *
+ * This is the page's EARLY answer only (review 12, R12.1). Between it and the writing transaction the save the edit began on can still
+ * change: a queued body can be edited by another page, and so can a claimed one, because a first claim that definitely did not send
+ * returns it to `queued`. The new draft therefore names that save (`predecessorOf`, `EnqueueRequest.expectPredecessor`), and the
+ * transaction writes it only while that save is stored with exactly the body the edit read.
  */
 export function successorFollows(
   refusal: Extract<EditOutcome, { kind: "refused" }>["reason"] | null,
@@ -113,6 +118,43 @@ export function successorFollows(
     draft.command_digest === snapshot.latestDigest
   );
 }
+
+/**
+ * The save a new draft of `resourceId` follows, as the edit read it (review 12, R12.1), for `EnqueueRequest.expectPredecessor`; undefined
+ * when nothing was outstanding when the edit began (the base guard alone decides). A save the edit saw without its body (`latestDigest`
+ * null) is named with no digest that any stored body can have, so it is refused, never taken as unchanged. PURE.
+ */
+export function predecessorOf(
+  snapshot: Pick<EditSnapshot, "latestLocalId" | "latestDigest">,
+  resourceId: string,
+): ExpectedPredecessor | undefined {
+  if (snapshot.latestLocalId === null) return undefined;
+  return {
+    resourceId,
+    localId: snapshot.latestLocalId,
+    digest: snapshot.latestDigest ?? UNKNOWN_DIGEST,
+  };
+}
+/** `predecessorOf` as the part of a request that states it (nothing when nothing was outstanding). PURE. */
+export const followsOf = (
+  snapshot: Pick<EditSnapshot, "latestLocalId" | "latestDigest">,
+  resourceId: string,
+): { expectPredecessor?: ExpectedPredecessor } => {
+  const predecessor = predecessorOf(snapshot, resourceId);
+  return predecessor === undefined ? {} : { expectPredecessor: predecessor };
+};
+/** `predecessorOf` as a held change keeps it (`HeldPredecessor`): the save's id and digest, or null when nothing was outstanding. PURE. */
+export function heldPredecessorOf(
+  snapshot: Pick<EditSnapshot, "latestLocalId" | "latestDigest">,
+  resourceId: string,
+): { localId: string; digest: string } | null {
+  const predecessor = predecessorOf(snapshot, resourceId);
+  return predecessor === undefined
+    ? null
+    : { localId: predecessor.localId, digest: predecessor.digest };
+}
+/** A digest no stored body has (a real one is hexadecimal): what a predecessor read without its body is compared with. */
+const UNKNOWN_DIGEST = "unknown:not-read";
 
 /** Whether the row as it is now is still the one the edit began on (content and policy versions). */
 export const stillBound = (

@@ -22,6 +22,7 @@ import {
 import {
   decodeHeld,
   decodeTombstone,
+  encodeHeld,
   type HeldChange,
   type HeldCopy,
   type HeldStore,
@@ -33,6 +34,7 @@ import {
   type HeldRun,
   peopleMemory,
 } from "../../../src/features/people/memory";
+import { putFieldUpdateRequest } from "../../../src/features/people/model/commands";
 import {
   expectedBaseOf,
   reviewedDraft,
@@ -74,6 +76,7 @@ const held = (over: Partial<HeldChange> = {}): HeldChange => ({
   sameKind: true,
   version: 4,
   expectedBase: 4,
+  predecessor: null,
   from: { version: 6, policy: HOME_VIEW },
   to: PRIVATE,
   attempt: null,
@@ -2009,4 +2012,171 @@ describe("review 4 (C10): legacy copies are never written back as runnable holds
       attempt: { key: "k-legacy" },
     });
   });
+});
+
+// ---- review 12 (R12.1; DA12-08/09): the held content follows the save it was typed over -------------------------------------------
+
+describe("review 12: a held change's content follows the save it was typed over, judged in the hand-off's transaction", () => {
+  test("the binding survives the stored shape: a known save, none, and unknown round-trip through v 5", () => {
+    for (const predecessor of [
+      { localId: "L", digest: "d-A" },
+      null,
+      "unknown" as const,
+    ]) {
+      const change = held({ predecessor });
+      const decoded = decodeHeld({
+        form_context: CONTEXT,
+        tab_instance_id: HOLD,
+        fields: encodeHeld(change),
+      } as never);
+      expect(decoded?.predecessor).toEqual(predecessor);
+      expect(JSON.parse(encodeHeld(change).held as string).v).toBe(5);
+    }
+  });
+
+  test("a v 4 copy never recorded it: read as unknown (never guessed, never 'none'); a damaged binding is not readable", () => {
+    const v4 = JSON.parse(encodeHeld(held()).held as string);
+    v4.v = 4;
+    delete v4.predecessor;
+    const row = (fields: Record<string, string>) =>
+      ({ form_context: CONTEXT, tab_instance_id: HOLD, fields }) as never;
+    const decoded = decodeHeld(row({ held: JSON.stringify(v4) }));
+    expect(decoded).toMatchObject({ predecessor: "unknown", legacy: false });
+    for (const bad of [{ localId: "", digest: "d" }, { localId: "L" }, 7])
+      expect(
+        decodeHeld(
+          row({
+            held: JSON.stringify({
+              ...JSON.parse(encodeHeld(held()).held as string),
+              predecessor: bad,
+            }),
+          }),
+        ),
+      ).toBeNull();
+  });
+
+  test("unknown: nothing is sent (no policy read or change, no content), it fails needs_review and stays unknown; Try again does the same", async () => {
+    const w = world();
+    const shown = await w.hold(held({ predecessor: "unknown" }));
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: HOME_VIEW }),
+      ok({ version: 7, policy: PRIVATE }),
+    );
+    expect(await runHeldChange(w.env, shown, w.run, w.deps)).toEqual({
+      kind: "failed",
+      reason: "needs_review",
+      kept: true,
+    });
+    expect(w.sharing.calls).toEqual([]);
+    expect(w.queued).toEqual([]);
+    expect(w.storedHeld()).toMatchObject({
+      predecessor: "unknown",
+      status: { kind: "failed", reason: "needs_review" },
+      value: { kind: "text", text: "Secret" },
+    });
+    // "Try again" writes it back as waiting; its next run refuses again (a missing binding is never consent).
+    const failed = await w.env.held.read(keyOfHeld());
+    if (failed.kind !== "live") throw new Error("not kept");
+    const waiting = await w.env.held.update(failed.copy, {
+      ...failed.copy.change,
+      status: { kind: "waiting" },
+    });
+    if (waiting.kind !== "saved") throw new Error("not written");
+    expect(
+      await runHeldChange(w.env, waiting.copy, { ...w.run }, w.deps),
+    ).toMatchObject({ kind: "failed", reason: "needs_review" });
+    expect(w.sharing.calls).toEqual([]);
+    expect(w.queued).toEqual([]);
+  });
+
+  test("known to have changed already (the page's early read): no audience is changed for content that would be refused", async () => {
+    const w = world();
+    const shown = await w.hold(
+      held({ predecessor: { localId: "L", digest: "d-A" }, expectedBase: 5 }),
+    );
+    w.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
+    const result = await runHeldChange(w.env, shown, w.run, {
+      ...w.deps,
+      follows: () => "changed",
+    });
+    expect(result).toMatchObject({ kind: "failed", reason: "content_changed" });
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.queued).toEqual([]);
+  });
+
+  for (const peer of [true, false])
+    test(`real port and outbox: L ${peer ? "is edited to B by another page after the audience was confirmed, before the hand-off: the content is refused in the hand-off's transaction, the hold is kept with its CONFIRMED audience, nothing is queued" : "is unchanged (control): the content follows L at base 5 and the hold ends transferred"}`, async () => {
+      const w = world();
+      const real = await realHeld(w);
+      const A = putFieldUpdateRequest({
+        fieldId: F,
+        personId: P,
+        label: "Note",
+        value: { kind: "text", text: "A" },
+        policyVersion: 6,
+        sameKind: true,
+      });
+      expect((await real.outbox.enqueue({ ...A, localId: "L" })).kind).toBe(
+        "queued",
+      );
+      const digestA = real.drafts()[0]?.command_digest as string;
+      const shown = await w.hold(
+        held({
+          predecessor: { localId: "L", digest: digestA },
+          expectedBase: 5,
+        }),
+      );
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      w.onBeforeWrite(async () => {
+        if (!peer) return;
+        const edited = await real.outbox.editQueued("L", {
+          ...putFieldUpdateRequest({
+            fieldId: F,
+            personId: P,
+            label: "Note",
+            value: { kind: "text", text: "Peer B" },
+            policyVersion: 6,
+            sameKind: true,
+          }),
+          expectDraft: (d) => d.command_digest === digestA,
+        });
+        expect(edited.kind).toBe("edited");
+      });
+      const result = await runHeldChange(w.env, shown, w.run, {
+        ...w.deps,
+        follows: () => "stands",
+      });
+      expect(w.sharing.sent).toHaveLength(1);
+      if (peer) {
+        expect(result).toMatchObject({
+          kind: "failed",
+          reason: "content_changed",
+          kept: true,
+        });
+        expect(real.drafts().map((d) => d.local_id)).toEqual(["L"]);
+        // The audience step that was confirmed is kept as done (never retried under a new key); the content and binding stay.
+        const kept = await w.env.held.read(keyOfHeld());
+        expect(kept.kind).toBe("live");
+        expect(kept.kind === "live" ? kept.copy.change : null).toMatchObject({
+          from: { version: 7, policy: PRIVATE },
+          to: PRIVATE,
+          attempt: null,
+          predecessor: { localId: "L", digest: digestA },
+          value: { kind: "text", text: "Secret" },
+        });
+      } else {
+        expect(result).toEqual({ kind: "done", ended: true });
+        const handed = real.drafts().find((d) => d.local_id === HOLD);
+        expect(handed?.depends_on).toEqual(["L"]);
+        expect(handed?.bases[F]).toBe(5);
+        const ended = await w.env.held.read(keyOfHeld());
+        expect(ended).toMatchObject({
+          kind: "ended",
+          tombstone: { cause: "transferred", localId: HOLD },
+        });
+      }
+    });
 });

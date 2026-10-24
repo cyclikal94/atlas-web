@@ -99,6 +99,12 @@ export interface HeldDeps {
   ): Promise<
     { ok: true; localId: string } | { ok: false; message: string | null }
   >;
+  /**
+   * What the page reads NOW of the save the content was typed over (review 12, R12.1): `stands` (stored with the body the hold names),
+   * `changed` (another body, or no longer stored) or `unknown` (not read). An EARLY answer only, so that a hold known to be stale changes
+   * no audience; the hand-off's own transaction decides (`expectPredecessor`). Absent: `unknown`.
+   */
+  follows?(): "stands" | "changed" | "unknown";
 }
 
 /**
@@ -432,6 +438,11 @@ export async function runHeldChange(
   if (!owns()) return stop();
   const before = bound();
   if (before !== null) return fail(before);
+  // The save the content was typed over is not known (a v 4 copy, review 12): nothing is sent, the field is reviewed. Never guessed.
+  if (copy.change.predecessor === "unknown") return fail("needs_review");
+  // Known to have changed already: no audience is changed for content that would be refused.
+  if (copy.change.predecessor !== null && deps.follows?.() === "changed")
+    return fail("content_changed");
 
   // Already confirmed by an earlier run whose content step was not saved: only the content step remains (still guarded by Q1).
   if (!samePolicy(copy.change.from.policy, copy.change.to)) {
@@ -519,11 +530,24 @@ export async function runHeldChange(
     guard,
   });
   let refusedByOwner = false;
-  const saved = await deps.enqueue((outbox) =>
-    outbox.enqueue(
+  let predecessorChanged = false;
+  const predecessor = held.predecessor;
+  if (predecessor === "unknown") return fail("needs_review");
+  const saved = await deps.enqueue(async (outbox) => {
+    const queued = await outbox.enqueue(
       {
         ...request,
         localId: held.holdId,
+        // The save the content was typed over, judged in the hand-off's own transaction (review 12, R12.1).
+        ...(predecessor === null
+          ? {}
+          : {
+              expectPredecessor: {
+                resourceId: held.fieldId,
+                localId: predecessor.localId,
+                digest: predecessor.digest,
+              },
+            }),
         build: (bases) => {
           // The last admission boundary, inside the writing transaction: a hold discarded or left here meanwhile queues nothing.
           if (!owns()) {
@@ -534,8 +558,11 @@ export async function runHeldChange(
         },
       },
       handOffOf(copy, head),
-    ),
-  );
+    );
+    if (queued.kind === "refused" && queued.reason === "predecessor_changed")
+      predecessorChanged = true;
+    return queued;
+  });
   if (saved.ok) return { kind: "done", ended: true };
   // Not queued, or its answer was lost: the copy's own state says which (a committed hand-off ended it as `transferred`).
   const now = await store.read(key);
@@ -544,7 +571,9 @@ export async function runHeldChange(
   refusal = differs(now);
   if (refusal !== null) return refused();
   if (refusedByOwner) return stop();
-  return fail(guard.moved ? "content_changed" : "not_saved");
+  return fail(
+    guard.moved || predecessorChanged ? "content_changed" : "not_saved",
+  );
 }
 
 /** `earlier` keeps an unresolved attempt of exactly the change from policy version `from` to `to` (its body included). PURE. */

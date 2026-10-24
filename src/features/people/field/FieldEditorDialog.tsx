@@ -73,6 +73,8 @@ import {
   draftFieldContent,
   type EditSnapshot,
   expectedBaseOf,
+  followsOf,
+  heldPredecessorOf,
   reviewedDraft,
   snapshotOf,
   stillBound,
@@ -792,13 +794,16 @@ function Editor({
         const edited = await outbox.editQueued(latest.localId, {
           ...putFieldUpdateRequest(base),
           expectDraft: reviewedDraft(bound),
+          // Only while no later save of the field follows it (D-11a-15, review 12): that save was built over this body.
+          expectLatest: true,
         });
         if (edited.kind === "edited") return edited;
         if (
           edited.reason !== "not_queued" &&
           edited.reason !== "not_found" &&
           edited.reason !== "retargeted" &&
-          edited.reason !== "draft_changed"
+          edited.reason !== "draft_changed" &&
+          edited.reason !== "not_latest"
         )
           return edited;
         refusal = edited.reason;
@@ -808,7 +813,15 @@ function Editor({
         reviewAgain = true;
         return { kind: "refused", reason: "draft_changed" } as const;
       }
-      return outbox.enqueue(putFieldUpdateRequest({ ...base, guard }));
+      // ... and that is judged again where it counts, in the writing transaction (review 12, R12.1): a claimed body can come back to the
+      // queue and be edited after the check above.
+      const queued = await outbox.enqueue({
+        ...putFieldUpdateRequest({ ...base, guard }),
+        ...followsOf(bound, base.fieldId),
+      });
+      if (queued.kind === "refused" && queued.reason === "predecessor_changed")
+        reviewAgain = true;
+      return queued;
     });
     return { outcome, moved: guard.moved || reviewAgain };
   };
@@ -917,13 +930,15 @@ function Editor({
             stored.local_id === draft.local_id &&
             stored.status === "queued" &&
             stored.command_digest === reviewed,
+          expectLatest: true,
         });
         if (edited.kind === "refused") refusal = edited.reason;
         return edited;
       });
       // Never a new create instead (review 10's design assessment, DA10-04): the input stays; a create being sent is published
       // eventually, and then the edit is reviewed on the field.
-      if (refusal === "draft_changed") return fail(copy.CREATE_CHANGED);
+      if (refusal === "draft_changed" || refusal === "not_latest")
+        return fail(copy.CREATE_CHANGED);
       if (refusal === "not_queued") return fail(copy.CREATE_SENDING);
       if (!outcome.ok) return fail(outcome.message ?? null);
       return succeeded(copy.SAVED_NOT_SENT, ticket);
@@ -996,6 +1011,8 @@ function Editor({
           sameKind,
           version: bound.version,
           expectedBase: bound.expectedBase,
+          // The save the value was typed over, as shown (review 12): its content step follows it only while it is stored so.
+          predecessor: heldPredecessorOf(bound, existing.id),
           from: { version: shownPolicy.version, policy: shownPolicy.policy },
           to: target,
           status: { kind: "waiting" },

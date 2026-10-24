@@ -61,6 +61,7 @@ import {
 } from "../../data/plans/fence";
 import { saveFormRecovery } from "../../data/plans/form-recovery";
 import {
+  editQueuedDraft,
   enqueueDraft,
   readLocalWriteStops,
   readQueueSummary,
@@ -548,6 +549,15 @@ export interface DataHarness {
     spec: HarnessEnqueue,
     options?: { held?: boolean },
   ): Promise<{ kind: string; reason?: string }>;
+  /**
+   * Straight to the edit plan (`editQueuedDraft`), bypassing the facade, as `enqueueDirect` is for the enqueue (WEB-11a review 12): two
+   * real pages' writes ordered by their own transactions over one database, with no dispatcher and no quota in between.
+   */
+  editQueuedDirect(
+    account: AccountId,
+    localId: string,
+    spec: HarnessEnqueue,
+  ): Promise<{ kind: string; reason?: string }>;
   /** Keeps a reference to the account's service store, as a late writer (an in-flight continuation) would hold one. */
   holdStore(account: AccountId): boolean;
   summary(account: AccountId): Promise<QueueSummary>;
@@ -636,6 +646,10 @@ export interface HarnessEnqueue {
   defaultsRevision?: string | null;
   /** `BuildResult.defaultsReview` (WEB-12a): a non-empty list stores the draft blocked on a defaults review. */
   defaultsReview?: string[];
+  /** `EnqueueRequest.expectPredecessor` (WEB-11a review 12): the reviewed save an enqueue follows. */
+  expectPredecessor?: { resourceId: string; localId: string; digest: string };
+  /** `EnqueueRequest.expectLatest` (WEB-11a review 12): an edit only of the newest outstanding save of its targets. */
+  expectLatest?: boolean;
 }
 
 export interface DatabaseDescription {
@@ -1091,6 +1105,12 @@ export const requestOf = (spec: HarnessEnqueue): EnqueueRequest => ({
   targets: spec.targets,
   ...(spec.localId === undefined ? {} : { localId: spec.localId }),
   ...(spec.dependsOn === undefined ? {} : { dependsOnExtra: spec.dependsOn }),
+  ...(spec.expectPredecessor === undefined
+    ? {}
+    : { expectPredecessor: spec.expectPredecessor }),
+  ...(spec.expectLatest === undefined
+    ? {}
+    : { expectLatest: spec.expectLatest }),
   build: (bases) => {
     if (spec.unsizeable === true) {
       const values = Object.values(bases);
@@ -1792,6 +1812,25 @@ const harness: DataHarness = {
         : { kind: out.kind };
     } catch (error) {
       // A store failure is a fixed cause (`closed` after a wipe), never a message.
+      return {
+        kind: "store_failure",
+        reason: (error as { cause?: string }).cause ?? "error",
+      };
+    }
+  },
+  async editQueuedDirect(account, localId, spec) {
+    const store = storeFor(account);
+    if (!store) throw new Error(`no open store for ${account}`);
+    try {
+      const out = await store.run(editQueuedDraft, {
+        incarnationId: store.incarnationId,
+        localId,
+        request: requestOf(spec),
+      });
+      return out.kind === "refused" || out.kind === "invalid"
+        ? { kind: out.kind, reason: out.reason }
+        : { kind: out.kind };
+    } catch (error) {
       return {
         kind: "store_failure",
         reason: (error as { cause?: string }).cause ?? "error",

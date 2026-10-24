@@ -6,6 +6,7 @@ import {
   type CacheRow,
   type FormCopyCursor,
   useCachedResource,
+  useDraftWithCommand,
   useFormCopies,
 } from "../../../data";
 import * as copy from "../copy";
@@ -30,6 +31,7 @@ import {
 } from "../field/held-store";
 import { type HeldRun, isCurrentMemory, useMemoryRevision } from "../memory";
 import { useOutboxSave } from "../parts";
+import { FieldValueView } from "./FieldValueView";
 
 /**
  * The audience changes held for this person's fields (D-11a-12), DURABLE in the account's database (`field/held-store.ts`, finding 6),
@@ -84,6 +86,8 @@ export function HeldChanges({ personId }: { personId: string }) {
               <RetiredHeld key={held.change.holdId} env={env} held={held} />
             ) : held.change.legacy ? (
               <LegacyHeld key={held.change.holdId} env={env} held={held} />
+            ) : held.change.predecessor === "unknown" ? (
+              <UnboundHeld key={held.change.holdId} env={env} held={held} />
             ) : (
               <HeldRow key={held.change.holdId} env={env} held={held} />
             );
@@ -190,6 +194,20 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
       : null;
   const currentRef = useRef(current);
   currentRef.current = current;
+  // The save the content was typed over, read live (review 12): an early answer, so a hold known to be stale changes no audience.
+  const predecessor =
+    typeof change.predecessor === "object" ? change.predecessor : null;
+  const predecessorBody = useDraftWithCommand(predecessor?.localId ?? null);
+  const follows = (): "stands" | "changed" | "unknown" =>
+    predecessor === null || predecessorBody.status !== "ready"
+      ? "unknown"
+      : predecessorBody.value !== null &&
+          predecessorBody.value.local_id === predecessor.localId &&
+          predecessorBody.value.command_digest === predecessor.digest
+        ? "stands"
+        : "changed";
+  const followsRef = useRef(follows);
+  followsRef.current = follows;
   // The state the row shows now: what a run or a discard starts from (the live list may move on meanwhile).
   const heldRef = useRef(held);
   heldRef.current = held;
@@ -214,7 +232,9 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
   const running = memory.heldRuns.size;
   const authorised = memory.heldAuthority.has(holdId);
   const failure = change.status.kind === "failed" ? change.status.reason : null;
-  const fieldSettled = field.status !== "loading";
+  const fieldSettled =
+    field.status !== "loading" &&
+    (predecessor === null || predecessorBody.status !== "loading");
 
   const finish = useCallback(
     (result: HeldResult | null, mine: HeldRun, shown: HeldCopy) => {
@@ -276,6 +296,7 @@ function HeldRow({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
             current: () => currentRef.current,
             mounted: () => mounted.current,
             enqueue: save,
+            follows: () => followsRef.current(),
           }),
         );
       } catch {
@@ -545,6 +566,76 @@ function RetiredHeld({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
           </Button>
         )}
       </div>
+    </li>
+  );
+}
+
+/**
+ * A hold whose content was typed over a save it never recorded (a v 4 copy; review 12, R12.1): whether that save still has the body the
+ * person saw cannot be known, so it is never sent from here, and "Send now" and "Try again" are not offered. Its value and the state of
+ * its audience step are shown so nothing is lost; the person edits the field to review it and saves again (a new hold replaces this one)
+ * or discards it (`delivery/handoffs/web11a-v4-held-review-before-send-20261024.md`).
+ */
+function UnboundHeld({ env, held }: { env: PeopleEnv; held: HeldCopy }) {
+  const memory = env.memory;
+  const change = held.change;
+  const announcer = useAnnouncer();
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const policy = progressOf(change).policy;
+  const discard = async () => {
+    memory.heldAuthority.delete(change.holdId);
+    setBusy(true);
+    setNote(null);
+    let end: HeldSettle;
+    try {
+      end = await discardHold(env.held, held);
+    } catch {
+      end = { kind: "failed" };
+    }
+    setBusy(false);
+    if (!isCurrentMemory(memory)) return;
+    if (isSettled(end)) {
+      if (end.kind !== "retired") memory.heldEnded.add(change.holdId);
+      announcer.announce(endedMessage(change), "polite");
+      memory.touch();
+    } else setNote(notCommitted(end.kind as "changed" | "refused" | "failed"));
+  };
+  if (memory.heldEnded.has(change.holdId)) return null;
+  return (
+    <li
+      data-held-change={change.holdId}
+      data-held-field={change.fieldId}
+      data-held-unbound=""
+      className="flex list-none flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+    >
+      <p className="text-[13px] text-ink-1">
+        {copy.HELD_UNBOUND(change.label)}
+      </p>
+      <div className="text-[13px] text-ink-2" data-held-value="">
+        <FieldValueView raw={change.value} />
+      </div>
+      {policy === "maybe" ? (
+        <p className="text-[12.5px] text-ink-2">
+          {copy.HELD_UNBOUND_POLICY_MAYBE(change.label)}
+        </p>
+      ) : policy === "done" ? (
+        <p className="text-[12.5px] text-ink-2">
+          {copy.HELD_UNBOUND_POLICY_DONE(change.label)}
+        </p>
+      ) : null}
+      {note !== null ? (
+        <p className="text-[12.5px] text-conflict-text">{note}</p>
+      ) : null}
+      {busy ? (
+        <Button variant="quiet" disabled reason={copy.SAVING}>
+          {copy.DISCARD}
+        </Button>
+      ) : (
+        <Button variant="quiet" onClick={() => void discard()}>
+          {copy.DISCARD}
+        </Button>
+      )}
     </li>
   );
 }

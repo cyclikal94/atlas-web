@@ -58,6 +58,14 @@ import { type FieldValue, parseFieldValue } from "../model/values";
  *  - Copies of the earlier shapes (v 1–3) are LEGACY: they were written before heads and tombstones, so whether they were already queued
  *    and discarded in Sync, or replaced by a hold that has since ended, cannot be known. They are kept, shown and discardable, never run,
  *    never written again and never retired automatically.
+ *
+ * THE SAVE ITS CONTENT WAS TYPED OVER (WEB-11a review 12, R12.1; v 5). The edit's content follows the field's newest outstanding save as
+ * the editor showed it, or nothing. A hold keeps that binding (`predecessor`), and its content step is queued only while that save is
+ * stored with exactly that body (`EnqueueRequest.expectPredecessor`, judged in the hand-off's own transaction). A v 4 copy never recorded
+ * it: its binding is `unknown`, which is never guessed from what is queued now and never taken as consent. Such a hold is kept and shown
+ * with its value and attempt, never sent (automatically, by "Send now" or by "Try again"), and the person reviews the field and saves it
+ * again (a new hold replaces it) or discards it (the decision of 24 October 2026,
+ * `delivery/handoffs/web11a-v4-held-review-before-send-20261024.md`).
  */
 export const HELD_FORM = "people-held:";
 /** The tab id of a field's head row (sorts after every hold id: hold ids are UUIDs). */
@@ -75,7 +83,18 @@ export type HeldFailure =
   | "uncertain"
   | "content_changed"
   | "gone"
-  | "not_saved";
+  | "not_saved"
+  /** The save the content was typed over is not known (a v 4 copy): it is reviewed, never sent (review 12). */
+  | "needs_review";
+
+/**
+ * The save a hold's content was typed over (review 12, R12.1): its local id and the digest of its body as the editor showed it; `null`
+ * when nothing was outstanding (the base guard alone decides); `unknown` for a copy that never recorded it (v 4).
+ */
+export type HeldPredecessor =
+  | { localId: string; digest: string }
+  | null
+  | "unknown";
 
 export interface HeldChange {
   /** The hold's id: its row's `tab_instance_id`, and the local id its content draft is queued under (never queued twice). */
@@ -89,6 +108,8 @@ export interface HeldChange {
   version: number;
   /** The outbox base the content step must resolve (`BaseGuard`). */
   expectedBase: number;
+  /** The save the content follows, as the editor showed it (`EnqueueRequest.expectPredecessor`); `unknown` is never sent. */
+  predecessor: HeldPredecessor;
   /** The policy shown when the edit began, with its version: the policy change is guarded by it. Once confirmed, it is `to`. */
   from: { version: number; policy: Policy };
   to: Policy;
@@ -188,7 +209,20 @@ const FAILURES: ReadonlySet<string> = new Set<HeldFailure>([
   "content_changed",
   "gone",
   "not_saved",
+  "needs_review",
 ]);
+
+/** A stored binding (v 5): `null`, `"unknown"` or the save's id and digest; anything else is not one (the copy is unreadable). PURE. */
+function parsePredecessor(raw: unknown): HeldPredecessor | undefined {
+  if (raw === null || raw === "unknown") return raw;
+  return isObject(raw) &&
+    typeof raw.localId === "string" &&
+    raw.localId !== "" &&
+    typeof raw.digest === "string" &&
+    raw.digest !== ""
+    ? { localId: raw.localId, digest: raw.digest }
+    : undefined;
+}
 
 type Obj = Record<string, unknown>;
 const isObject = (value: unknown): value is Obj =>
@@ -230,16 +264,21 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
   }
   if (
     !isObject(raw) ||
-    (raw.v !== 1 && raw.v !== 2 && raw.v !== 3 && raw.v !== 4)
+    (raw.v !== 1 && raw.v !== 2 && raw.v !== 3 && raw.v !== 4 && raw.v !== 5)
   )
     return null;
   // The first shape (v 1) had no state number and no content admission: it is read as state 0, not admitted. Neither it nor v 2 had a
-  // generation or a retirement: generation 0, live. v 4 has no content admission (a hand-off is one commit with its draft).
+  // generation or a retirement: generation 0, live. v 4 and v 5 have no content admission (a hand-off is one commit with its draft).
+  // Only v 5 records the save the content was typed over; before it, that is not known (never guessed).
+  const current = raw.v === 4 || raw.v === 5;
   const rev = raw.v === 1 ? 0 : raw.rev;
-  const queued = raw.v === 1 || raw.v === 4 ? false : raw.queued;
-  const seq = raw.v === 3 || raw.v === 4 ? raw.seq : 0;
-  const retired = raw.v === 3 || raw.v === 4 ? raw.retired : false;
+  const queued = raw.v === 1 || current ? false : raw.queued;
+  const seq = raw.v === 3 || current ? raw.seq : 0;
+  const retired = raw.v === 3 || current ? raw.retired : false;
+  const predecessor =
+    raw.v === 5 ? parsePredecessor(raw.predecessor) : "unknown";
   if (
+    predecessor === undefined ||
     !isVersion(rev) ||
     typeof queued !== "boolean" ||
     !isVersion(seq) ||
@@ -290,6 +329,7 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
     sameKind: raw.sameKind,
     version: raw.version,
     expectedBase: raw.expectedBase,
+    predecessor,
     from: { version: (fromRaw as Obj).version as number, policy: from },
     to,
     attempt,
@@ -302,7 +342,7 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
     queued,
     seq,
     retired,
-    legacy: raw.v !== 4,
+    legacy: !current,
   };
 }
 
@@ -310,7 +350,7 @@ export function decodeHeld(row: FormRecoveryRow): HeldChange | null {
 export function encodeHeld(change: HeldChange): Record<string, string> {
   return {
     held: JSON.stringify({
-      v: 4,
+      v: 5,
       rev: change.rev,
       seq: change.seq,
       retired: change.retired,
@@ -321,6 +361,7 @@ export function encodeHeld(change: HeldChange): Record<string, string> {
       sameKind: change.sameKind,
       version: change.version,
       expectedBase: change.expectedBase,
+      predecessor: change.predecessor,
       from: change.from,
       to: change.to,
       attempt: change.attempt,

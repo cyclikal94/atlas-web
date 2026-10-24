@@ -451,6 +451,7 @@ describe("updating a field", () => {
       sameKind: true,
       version: 4,
       expectedBase: 4,
+      predecessor: null,
       from: { version: 6, policy: HOME_VIEW },
       to: PRIVATE,
       attempt: null,

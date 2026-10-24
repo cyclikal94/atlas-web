@@ -23,7 +23,7 @@ import {
   planEdit,
   planEnqueue,
   snapshotRequest,
-  validateRequest,
+  validateRequestFor,
 } from "../../../src/data/model/outbox";
 import {
   OUTSTANDING,
@@ -90,8 +90,10 @@ import { ME } from "./records";
  *  - The data layer is the stub controller (`stubEnv`) with a store double that answers the three read plans the screens use
  *    (`data.readMerged`, `data.readResourceList`, `data.readOutstandingCreates`) from `cache` and `drafts`, live.
  *  - The outbox is a double whose writes are DECIDED by the real pure plans (review 11, R11.1): the request is snapshotted and checked at
- *    its boundary (`snapshotRequest`, `validateRequest`), then `planEnqueue`, `planEdit` and `decideSupersede` decide over what the real
- *    transaction would read (the targets' cached rows, the version records `versions`, the other drafts by `TargetFold`, `draft_seq`), and
+ *    its boundary (`snapshotRequest`, `validateRequestFor`), then `planEnqueue`, `planEdit` and `decideSupersede` decide over what the real
+ *    transaction would read (the targets' cached rows, the version records `versions`, the other drafts by `TargetFold`, `draft_seq`; the
+ *    draft an enqueue names as its reviewed predecessor, by its key; for an edit with the newest-save rule, the latest unsettled other
+ *    draft of each target and the stored body: review 12), and
  *    the world applies what they return as ONE state change before telling its readers: the whole header with its body, whose
  *    `command_digest` is the digest of the stored body; an edit rebuilds from the draft's OWN bases and moves no version record; a
  *    supersession deletes the old draft (from the conflict inbox too), rewrites its dependants and recomputes the records. A refusal writes
@@ -780,7 +782,7 @@ export function peopleWorld(
     enqueue: async (given: EnqueueRequest, handOff?: HandOff) => {
       // The facade's boundary: a private copy of the request, checked before anything is awaited (an invalid one throws).
       const request = snapshotRequest(given);
-      validateRequest(request);
+      validateRequestFor(request, "enqueue");
       const scripted = outcomes.shift();
       if (scripted !== undefined && scripted.kind === "refused")
         return scripted;
@@ -816,6 +818,13 @@ export function peopleWorld(
         versions: versionRows(ids),
         related: relatedTo(ids, new Set([localId])),
         existing: headers().find((d) => d.local_id === localId),
+        // The reviewed predecessor by its key, as `enqueueDraft` reads it (review 12, R12.1).
+        predecessor:
+          request.expectPredecessor === undefined
+            ? undefined
+            : headers().find(
+                (d) => d.local_id === request.expectPredecessor?.localId,
+              ),
         localId,
         accountId: ME,
         now: NOW,
@@ -855,17 +864,37 @@ export function peopleWorld(
     },
     editQueued: async (localId: string, given: EnqueueRequest) => {
       const request = snapshotRequest(given);
-      validateRequest(request);
+      validateRequestFor(request, "edit");
       const scripted = outcomes.shift();
       if (scripted !== undefined && scripted.kind === "refused")
         return scripted;
       estimateDraftBytes(request);
       // The edit plan (`planEdit`) over the draft as it is stored NOW: it rebuilds from the draft's OWN bases, refuses a draft that is gone,
       // sent, retargeted or no longer the one the request reviewed, and returns the whole header with the new body's digest.
+      const stored = headers().find((d) => d.local_id === localId);
+      // The newest-save rule's facts, as `editQueuedDraft` reads them (review 12): the latest unsettled other draft of each primary target
+      // (`TargetFold.latest`) and the stored body.
+      const later: DraftRow[] = [];
+      if (stored !== undefined && request.expectLatest === true)
+        for (const id of stored.target_resource_ids) {
+          const fold = new TargetFold(id);
+          for (const row of headers())
+            if (row.index_targets.includes(id) && row.local_id !== localId)
+              fold.add(row);
+          if (fold.latest !== undefined) later.push(fold.latest);
+        }
       const planned = planEdit(
         request,
-        headers().find((d) => d.local_id === localId),
+        stored,
         syncRow(),
+        stored === undefined || request.expectLatest !== true
+          ? undefined
+          : {
+              later,
+              command: drafts.find((d) => d.local_id === localId)?.command as
+                | JsonObject
+                | undefined,
+            },
       );
       if (planned.kind === "refused")
         return { kind: "refused", reason: planned.reason };
@@ -882,7 +911,7 @@ export function peopleWorld(
     },
     supersede: async (old: string, given: EnqueueRequest) => {
       const request = snapshotRequest(given);
-      validateRequest(request);
+      validateRequestFor(request, "supersede");
       const scripted = outcomes.shift();
       if (scripted !== undefined && scripted.kind === "refused")
         return scripted;

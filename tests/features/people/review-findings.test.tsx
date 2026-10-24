@@ -17,6 +17,7 @@ import {
   forgetAllPeopleMemory,
   peopleMemory,
 } from "../../../src/features/people/memory";
+import { putFieldUpdateRequest } from "../../../src/features/people/model/commands";
 import { toWirePolicy } from "../../../src/features/sharing";
 import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { nextAttempt } from "../../../src/features/sharing/model/submission";
@@ -790,6 +791,7 @@ const heldChange = (over: Partial<HeldChange> = {}): HeldChange => ({
   sameKind: true,
   version: 4,
   expectedBase: 4,
+  predecessor: null,
   from: { version: 6, policy: HOME_VIEW },
   to: PRIVATE,
   attempt: null,
@@ -1261,6 +1263,7 @@ describe("finding 6: a held change is durable for its account", () => {
         value: { kind: "text", text: "Inhaler" },
         version: 4,
         expectedBase: 4,
+        predecessor: null,
         from: { version: 6, policy: HOME_VIEW },
         to: PRIVATE,
         status: { kind: "waiting" },
@@ -2510,5 +2513,138 @@ describe("review 5, finding 1: a run that ends in ANY way lets the next authoris
     );
     await settle();
     expect(sentB(w)).toEqual([]);
+  });
+});
+
+// ---- review 12 (R12.1; web11a-v4-held-review-before-send-20261024): a hold that never recorded its predecessor is reviewed, never sent ----
+describe("review 12: a held change without a recorded predecessor (v 4) is shown for review and never sent", () => {
+  for (const authorised of [true, false])
+    test(`${authorised ? "made by this page" : "recovered from the database"}: its value and a review note are shown, there is no Send now or Try again, nothing is read or sent online, and Discard ends it`, async () => {
+      const w = heldWorld(heldChange({ predecessor: "unknown" }), {
+        authorised,
+      });
+      w.sharing.next.policy.push(
+        ok({ version: 6, policy: HOME_VIEW }),
+        ok({ version: 7, policy: PRIVATE }),
+      );
+      await w.mount(`/people/${P}`);
+      await waitFor(() => expect(heldRow()).not.toBeNull());
+      w.setOnline(true);
+      await settle();
+      const row = heldRow() as HTMLElement;
+      expect(row.hasAttribute("data-held-unbound")).toBe(true);
+      expect(row.textContent ?? "").toContain(
+        "This held change to Note was kept before Atlas recorded what it was typed over, so it won't be sent. Edit the field to review it and save it again, or discard it.",
+      );
+      expect(row.textContent ?? "").toContain("Secret held text");
+      expect(
+        within(row).queryByRole("button", { name: "Send now" }),
+      ).toBeNull();
+      expect(
+        within(row).queryByRole("button", { name: "Try again" }),
+      ).toBeNull();
+      expect(w.sharing.calls).toEqual([]);
+      expect(w.built).toEqual([]);
+      fireEvent.click(within(row).getByRole("button", { name: "Discard" }));
+      await waitFor(() => expect(w.held()).toEqual([]));
+      expect(w.built).toEqual([]);
+    });
+
+  for (const outstanding of [true, false])
+    test(`'Hold as draft' records the save its value was typed over: ${outstanding ? "L queued (its id and the digest of the body shown), the base after it" : "nothing outstanding (null), the cached base"}`, async () => {
+      const w = peopleWorld({ online: false });
+      w.setCache([
+        person({ id: P, label: "Ada" }),
+        fieldRow({
+          id: F,
+          parent_id: P,
+          label: "Note",
+          version: 4,
+          policy_version: 6,
+        }),
+      ]);
+      w.env.setDefaults(record());
+      if (outstanding) {
+        const queued = await w.env.outbox()?.enqueue({
+          ...putFieldUpdateRequest({
+            fieldId: F,
+            personId: P,
+            label: "Note",
+            value: { kind: "text", text: "Queued A" },
+            policyVersion: 6,
+            sameKind: true,
+          }),
+          localId: "L",
+        });
+        expect(queued?.kind).toBe("queued");
+      }
+      peopleMemory(w.people.identity).policies.set(F, {
+        version: 6,
+        policy: HOME_VIEW,
+        checkedAt: Date.now(),
+      });
+      await w.mount(`/people/${P}/fields/${F}`);
+      const d = await dialog();
+      fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+        target: { value: "Inhaler" },
+      });
+      fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      await within(d).findByText(
+        "You're offline, so the audience can't change yet",
+      );
+      fireEvent.click(within(d).getByRole("button", { name: "Hold as draft" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      const L = w.drafts.find((x) => x.local_id === "L");
+      expect(w.held()).toEqual([
+        expect.objectContaining({
+          value: { kind: "text", text: "Inhaler" },
+          expectedBase: outstanding ? 5 : 4,
+          predecessor: outstanding
+            ? { localId: "L", digest: L?.command_digest }
+            : null,
+        }),
+      ]);
+      if (outstanding)
+        expect(L?.command_digest).toBe(digestOf(L?.command as JsonObject));
+    });
+
+  test("control: the same hold with its binding recorded (nothing outstanding) waits for Send now as before", async () => {
+    const w = heldWorld(heldChange({ predecessor: null }), {
+      authorised: false,
+    });
+    await w.mount(`/people/${P}`);
+    await waitFor(() => expect(heldRow()).not.toBeNull());
+    const row = heldRow() as HTMLElement;
+    expect(row.hasAttribute("data-held-unbound")).toBe(false);
+    expect(within(row).getByRole("button", { name: "Send now" })).toBeTruthy();
+  });
+
+  test("an earlier policy attempt that may have been made is shown with it, and kept when it is discarded", async () => {
+    const w = heldWorld(
+      heldChange({
+        predecessor: "unknown",
+        attempt: { key: "k-1", body: "{}" },
+      }),
+      { authorised: false },
+    );
+    await w.mount(`/people/${P}`);
+    await waitFor(() => expect(heldRow()).not.toBeNull());
+    expect(heldRow()?.textContent ?? "").toContain(
+      "The change to who can see Note may already have been made.",
+    );
+    fireEvent.click(
+      within(heldRow() as HTMLElement).getByRole("button", { name: "Discard" }),
+    );
+    // Retired, never ended: the attempt that may have been made is kept as a reconciliation record (its content cleared).
+    await waitFor(() =>
+      expect(w.held()).toEqual([
+        expect.objectContaining({
+          retired: true,
+          attempt: { key: "k-1", body: "{}" },
+        }),
+      ]),
+    );
+    expect(w.built).toEqual([]);
   });
 });

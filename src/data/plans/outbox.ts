@@ -13,6 +13,7 @@ import {
   decideSupersede,
   draftWriteBytes,
   type EnqueueRequest,
+  type LatestFacts,
   planEdit,
   planEnqueue,
 } from "../model/outbox";
@@ -33,7 +34,7 @@ import {
   type QueueSummary,
   summaryFromCounts,
 } from "../model/queue-summary";
-import { OldestDrafts } from "../model/related";
+import { OldestDrafts, TargetFold } from "../model/related";
 import {
   draftOperations,
   failureVersion,
@@ -213,7 +214,14 @@ export type EnqueueResult =
    */
   | {
       kind: "refused";
-      reason: "fenced" | "closing" | "no_base" | "changed" | "source_changed";
+      reason:
+        | "fenced"
+        | "closing"
+        | "no_base"
+        | "changed"
+        | "source_changed"
+        /** The request's `expectPredecessor` is not the save stored now (`predecessorStands`); nothing was written. */
+        | "predecessor_changed";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -245,6 +253,8 @@ interface EnqueueReads {
   observed: string | null;
   /** A hand-off's rows as stored now, in the order of its `expect` (empty without a hand-off). */
   handed: Array<FormRecoveryRow | undefined>;
+  /** The draft under `expectPredecessor.localId`, read by key (undefined: none, or the request names none). */
+  predecessor: DraftRow | undefined;
 }
 
 /** The observation a request states, read again inside the writing transaction (WEB-13a revision 2), or null when it states none. */
@@ -301,6 +311,11 @@ const enqueueSpec = {
       ),
       observed: await observedNow(reader, input.incarnationId, input.request),
       handed,
+      // The reviewed predecessor by its key: not the `related` fold, which stands in for the population and need not hold it (R12.1).
+      predecessor:
+        input.request.expectPredecessor === undefined
+          ? undefined
+          : await reader.get("drafts", input.request.expectPredecessor.localId),
     };
   },
   decide: ({
@@ -340,6 +355,7 @@ const enqueueSpec = {
       versions: reads.touched.versions,
       related: reads.touched.others,
       existing: reads.existing,
+      predecessor: reads.predecessor,
       localId: input.localId,
       accountId: input.accountId,
       now: input.now,
@@ -434,10 +450,17 @@ export type EditResult =
         | "not_found"
         | "not_queued"
         | "retargeted"
-        | "draft_changed";
+        | "draft_changed"
+        | "not_latest";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
+
+interface EditReads {
+  draft: DraftRow | undefined;
+  /** Read only for a request with `expectLatest`: the later saves of the draft's targets and its stored body. */
+  latest?: LatestFacts;
+}
 
 export const editQueuedDraft = singletonPlan<
   {
@@ -448,18 +471,39 @@ export const editQueuedDraft = singletonPlan<
     maxBytes?: number;
     leaseLive?: () => boolean;
   },
-  DraftRow | undefined,
+  EditReads,
   EditResult
 >({
   name: "data.editQueuedDraft",
   meta: { writer: "W3", guards: ["INC", "FEN"], quota: "input" },
   scope: ["drafts", "draft_commands"],
   durability: "strict",
-  read: (reader, input) => reader.get("drafts", input.localId),
+  read: async (reader, input) => {
+    const draft = await reader.get("drafts", input.localId);
+    if (draft === undefined || input.request.expectLatest !== true)
+      return { draft };
+    // The newest-save rule (D-11a-15, review 12): the latest unsettled other draft of each primary target, by the target index.
+    const later: DraftRow[] = [];
+    for (const id of draft.target_resource_ids) {
+      const fold = new TargetFold(id);
+      await walkIndex(
+        reader,
+        "drafts",
+        "index_targets",
+        range.only(id),
+        (row) => {
+          if (row.local_id !== draft.local_id) fold.add(row);
+        },
+      );
+      if (fold.latest !== undefined) later.push(fold.latest);
+    }
+    const body = await reader.get("draft_commands", input.localId);
+    return { draft, latest: { later, command: body?.command } };
+  },
   decide: ({ sync, reads, input }) => {
     if (sync === undefined)
       return { result: { kind: "refused", reason: "not_found" } };
-    const planned = planEdit(input.request, reads, sync);
+    const planned = planEdit(input.request, reads.draft, sync, reads.latest);
     if (planned.kind !== "edited") return { result: planned };
     const over = overBound(input, {
       draft: planned.draft,

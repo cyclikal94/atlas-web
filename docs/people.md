@@ -192,6 +192,14 @@ reopens it with its draft), and `/settings/archived`.
     discarded in Sync or replaced by a hold that has since ended. They are shown ("A held change to who can see {name} from an earlier
     version of Atlas is kept on this device. It can't be sent from here: discard it, or make the change again."), never run, never written
     again (except retired by Discard, keeping an unresolved attempt) and never retired automatically. No action recreates their content.
+  - **The save a hold's value was typed over** (review 12, R12.1; v 5). A hold records it (`predecessor`: the save's id and the digest of
+    its body as the editor showed it, or null when nothing was outstanding), and its content step names it to the hand-off's transaction,
+    which refuses stale content (`content_changed`, the hold kept with its actual audience outcome). A page that already sees that save
+    changed changes no audience first. A v 4 copy never recorded it: it is shown with its value and any audience attempt ("This held
+    change to {name} was kept before Atlas recorded what it was typed over, so it won't be sent. Edit the field to review it and save it
+    again, or discard it."), never sent automatically, by Send now or by Try again, and never given a guessed binding; saving the field
+    again replaces it through the ordinary hold path, and Discard ends it or keeps an unresolved attempt as a reconciliation record
+    (`delivery/handoffs/web11a-v4-held-review-before-send-20261024.md`, SHA-256 `ac6bda2c…6c116f14`).
   - A row waiting while another row of the page runs looks again when that run ends (before, a second authorised hold never started).
     However the run ends (review 5 of 23 October 2026, finding 1; C13): after its outcome is applied, the runner removes its own entry and
     publishes the end to the SAME identity's memory, also when the run was only suspended (its row left the page: navigation, another page
@@ -345,9 +353,19 @@ archive is folded over its row. A projected row is never a base for a version-ch
 - A held change whose content was handed off is no longer a hold: its draft is an ordinary queued change, shown in Sync and discardable,
   and nothing on the person's page queues it again (D-11a-12c). A LEGACY copy (v 3) whose content admission was recorded may still have
   been queued; its Discard says so ("may already be queued. Check Sync").
-- A new draft that FOLLOWS a still-queued save the edit began on (held for the defaults review, or after the audience was just changed) is
-  allowed only while the outstanding read shows that save with the body the edit read; another page's edit of it in the one transaction's
-  window before the new draft is written is not detected (an edit in place is judged inside its own transaction, `reviewedDraft`).
+- A new draft that FOLLOWS the save the edit began on (that save in flight, held for the defaults review, or after the audience was just
+  changed) names it (`expectPredecessor`: its local id and the digest of the body the edit read), and the writing transaction writes the
+  new draft only while that save is stored with exactly that body, raised the item from the base the transaction resolves, and is the
+  save the new draft waits on (or was acknowledged). Otherwise nothing is written (`predecessor_changed`), the input is kept and the item
+  is reviewed (review 12, R12.1). A claimed body is not frozen: a first claim that definitely did not send returns it to `queued`, where
+  another page can edit it. The page's earlier check (`successorFollows`) is only an early answer.
+- An edit in place applies only to the item's NEWEST outstanding save (D-11a-15; review 12): it asks `expectLatest`, and the writing
+  transaction refuses it (`not_latest`) once a later save of the same item is queued after it, because that later save was built over
+  the body being edited. The input is kept and the item is reviewed. The defaults review's confirmation goes on behind a later save only
+  because it changes nothing but the top-level `defaults_revision` (the transaction compares the bodies); a content change never does
+  (`delivery/handoffs/web11a-chain-latest-only-20261024.md`, SHA-256 `33c1109a…e56e45`).
+- These guarantees hold at each writing transaction of one device's database. They are fixture/component and production-plan evidence
+  over the IndexedDB double; independent native pages, real aborts and crashes are qualified separately (see the execution report).
 - A field update that changes type patches only the label in the overlay (the overlay's value merge is shallow); the screens show the saved
   value from the draft body.
 - Rebuilds offered by the sync queue ("save as new") are built on the authorised current read's CONTENT version, under the policy version
@@ -389,6 +407,7 @@ the fixture spec named.
 | New field audiences "Use my defaults — {…}", "Only you", "{Home} · can view"; "Save it as Only you first; then choose who can see it…" | `/people/$id/fields/new` | E-P2, E-P3 |
 | PPL-6 notes ("{name} won't see this field unless you share it with them", "{name} is in {Home} and will be able to see it", "may be able to see it") | `/people/$id/fields/new` | component tests |
 | Held change copy "Kept on this device until then, even if you reload or switch accounts." and §9 row 2's caveat; "Waiting to change who can see {name}"; "Stopping the held change to {name}…"; the discard outcomes ("…was discarded. Nothing was sent.", "…had already changed…", "…may already have been made…"); "Couldn't keep this on the device." | `/people/$id/fields/$fid`, `/people/$id` | E-P6, E-P15, E-P16 |
+| A held change without a recorded predecessor (review 12; v 4): "This held change to {name} was kept before Atlas recorded what it was typed over, so it won't be sent. Edit the field to review it and save it again, or discard it."; "The change to who can see {name} may already have been made."; "Who can see {name} was already changed as asked."; its failure "This change can't be sent as it is. Edit the field to review it and save it again." | `/people/$id` | component tests (`review-findings.test.tsx`, review 12) |
 | Duplicates: "No similar names found so far. There are more people to check." with "Check more"; footer adjusted to page memory | `/people/$id/duplicates` | E-P9 |
 | Settings "Archived items" placement, empty state, archived-person banner copy | `/settings/archived` | E-P8 |
 | New person dialog (not drawn): name, "Who can see this person", "Add a first note" / "Don't add a note" | `/people` | E-P10 |
