@@ -233,6 +233,25 @@ export function useTaskScreenAt(): (address: string) => boolean {
           trimmed(router.history.location.pathname) === address)));
 }
 
+/**
+ * Told after the asking screen's router or the observed address has moved (revision 24, R36), for an editor that asks whether the person is
+ * at its address again (by its router, its history and the document: `useTaskScreenAt`). Neither change alone is the last: a browser
+ * history tells its listeners (the router moves `latestLocation` first) and writes the document's address a microtask later, while Back and
+ * Forward are recorded by the document first and told to the router after; the component tests' memory history is observed before the
+ * router hears it. So both are listened to, and the editor asks each time. Outside any router: the observed address's changes.
+ */
+export function useTaskRouteMoved(): (listener: () => void) => () => void {
+  const router = useScreenRouter();
+  return (listener) => {
+    const stopRoutes = routes().subscribe(() => listener());
+    const stopHistory = router?.history?.subscribe(() => listener());
+    return () => {
+      stopRoutes();
+      stopHistory?.();
+    };
+  };
+}
+
 /** Told after the observed address changed (the document's record, or the tests' memory history), with the new path. */
 export function onTaskRouteChange(
   listener: (pathname: string) => void,

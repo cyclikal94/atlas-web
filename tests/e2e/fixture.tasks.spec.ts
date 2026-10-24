@@ -2185,6 +2185,64 @@ async function commitDelta(
   await writer.evaluate(() => window.__atlasData?.nudgeSync());
 }
 
+/**
+ * Commits one delta page through `writer`'s fixture leader and waits until the account's cache satisfies `landed`, waking the writer again
+ * while it does not (a wake that arrives while a poll is in flight is absorbed by it, WEB-09a). Revision 24 (harness, labelled): the stub
+ * hands its scripted pages out in order, whatever cursor a poll asks from, so when two polls leave one cursor together and the leader keeps
+ * one answer, the page could go to the poll whose answer was discarded and never land (WebKit E-T43 in revision 24's run 1: polls 6 and 7
+ * both asked from `cursor-r4-2`, 7 took revision 3, and the leader went on from 6's `cursor-6`). A server answers from the client's
+ * cursor, so the same page is offered again once the leader has asked from a cursor that is neither the page's own nor the one the poll
+ * that took it asked from: never while that poll may still be committing it. `landed` is asserted exactly as before.
+ */
+async function commitDeltaLanded(
+  writer: Page,
+  net: SyncStub,
+  revision: number,
+  changes: unknown[],
+  landed: (ids: string[]) => boolean,
+): Promise<void> {
+  const own = `cursor-r4-${revision}`;
+  const body = JSON.stringify({
+    phase: "delta",
+    batches: [{ revision, changes }],
+    next_cursor: own,
+    has_more: false,
+  });
+  const taken: { by: { index: number; cursor: string | null } | null } = {
+    by: null,
+  };
+  const offer = () =>
+    net.script.push((url) => {
+      taken.by = {
+        index: net.requests.length,
+        cursor: url.searchParams.get("cursor"),
+      };
+      return { status: 200, body };
+    });
+  offer();
+  await writer.evaluate(() => window.__atlasData?.nudgeSync());
+  await expect
+    .poll(async () => {
+      const ids = (
+        (await rowsOf(writer, "cache")) as Array<{ id: string }>
+      ).map((row) => row.id);
+      if (landed(ids)) return true;
+      const by = taken.by;
+      if (by !== null) {
+        const later = net.requests
+          .slice(by.index)
+          .map((url) => url.searchParams.get("cursor"));
+        if (!later.includes(own) && later.some((c) => c !== by.cursor)) {
+          taken.by = null;
+          offer();
+        }
+      }
+      await writer.evaluate(() => window.__atlasData?.nudgeSync());
+      return false;
+    })
+    .toBe(true);
+}
+
 test.describe("E-T15: the open full history follows its stream's committed version (A8; R10 of revision 4, J1)", () => {
   for (const opened of [true, false])
     test(`opened=${opened}: a correction committed through sync is shown as the journal says (opened) or in the recent entries (control)`, async ({
@@ -5814,17 +5872,7 @@ test.describe("E-T42: the visit's day leaving after the person came back keeps i
     changes: unknown[],
     landed: (ids: string[]) => boolean,
   ) {
-    await commitDelta(writer, net, revision, changes);
-    await expect
-      .poll(async () => {
-        const ids = (
-          (await rowsOf(writer, "cache")) as Array<{ id: string }>
-        ).map((row) => row.id);
-        if (landed(ids)) return true;
-        await writer.evaluate(() => window.__atlasData?.nudgeSync());
-        return false;
-      })
-      .toBe(true);
+    await commitDeltaLanded(writer, net, revision, changes, landed);
   }
   /** Types the amount for day A, visits the queue by the visible sync control and comes back in the same document. */
   async function typeAndVisit(page: Page, task: BuiltTask) {
@@ -6036,17 +6084,7 @@ test.describe("E-T43: the logical visit owns its day and the input typed for it 
     changes: unknown[],
     landed: (ids: string[]) => boolean,
   ) {
-    await commitDelta(writer, net, revision, changes);
-    await expect
-      .poll(async () => {
-        const ids = (
-          (await rowsOf(writer, "cache")) as Array<{ id: string }>
-        ).map((row) => row.id);
-        if (landed(ids)) return true;
-        await writer.evaluate(() => window.__atlasData?.nudgeSync());
-        return false;
-      })
-      .toBe(true);
+    await commitDeltaLanded(writer, net, revision, changes, landed);
   }
 
   test("another tab's sync page removes the task's details: day A unavailable, nothing written; details back, the same 7.125 on A, and Record names A once", async ({
@@ -6178,17 +6216,13 @@ test.describe("E-T44: the edit visit owns the input typed on it (A10; R34 / DA22
       changes: unknown[],
       present: boolean,
     ) => {
-      await commitDelta(writer, net, revision, changes);
-      await expect
-        .poll(async () => {
-          const ids = (
-            (await rowsOf(writer, "cache")) as Array<{ id: string }>
-          ).map((row) => row.id);
-          if (ids.includes(task.executionId) === present) return true;
-          await writer.evaluate(() => window.__atlasData?.nudgeSync());
-          return false;
-        })
-        .toBe(true);
+      await commitDeltaLanded(
+        writer,
+        net,
+        revision,
+        changes,
+        (ids) => ids.includes(task.executionId) === present,
+      );
     };
     return {
       task,

@@ -449,6 +449,151 @@ describe("R35: away and back before React removed the form, then acknowledged (t
       });
 });
 
+/**
+ * Revision 24 (R36, design assessment after Review 24): the generic owner's same-instance continuation, beyond the consumed-before-return
+ * schedule above. The form React never removed is renewed on the person's return (attached anew, on the visit going on there, which owns
+ * the session it holds) for LATER explicit work only: a save acknowledged while the person was away starts it afresh once they are back;
+ * a refused save's kept input, saved again, closes it onto its task; input typed after a return to a new visit is that visit's to keep.
+ */
+describe("R36: the same form instance after a return (generic owner)", () => {
+  for (const mode of ["new", "edit"] as const)
+    for (const where of ["/tasks", "/sync"] as const)
+      test(`${mode} form, acknowledged at ${where} before the form was removed, then back: fresh, and the next Save writes the next input`, async () => {
+        const { t, task, path, key } = await openForm(mode);
+        const hold = holdAcknowledgement(t);
+        await saveCommitted(t, hold);
+        const first = savedOnce(t, mode, task);
+        (
+          document.querySelector("[data-task-form]") as HTMLElement
+        ).dataset.instance = "old";
+        const watch = watchSettlement(key);
+        await act(async () => {
+          void t.router.navigate(
+            (where === "/sync" ? SYNC : { to: "/tasks", search: {} }) as never,
+          );
+          expect(at(t)).toBe(where);
+          hold.release();
+          for (let i = 0; i < 50 && watch.seen.length === 0; i += 1)
+            await Promise.resolve();
+          expect(watch.seen, "settled while away, the form mounted").toEqual([
+            { kind: "consumed", formMounted: true },
+          ]);
+          expect(at(t)).toBe(where);
+          void t.router.navigate({ to: path, search: {} } as never);
+          expect(at(t)).toBe(path);
+        });
+        await t.settle();
+        watch.stop();
+        expect(
+          (document.querySelector("[data-task-form]") as HTMLElement | null)
+            ?.dataset.instance,
+          "the same form instance",
+        ).toBe("old");
+        expect(fieldset().disabled, "nothing pending").toBe(false);
+        if (mode === "new")
+          expect(name().value, "not the consumed input offered again").toBe("");
+        savedOnce(t, mode, task);
+        fireEvent.change(name(), { target: { value: "Second title" } });
+        fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+        await t.settle();
+        const all = commands(t);
+        if (mode === "edit")
+          expect(all).toEqual([
+            expect.objectContaining({
+              kind: "revise_task",
+              id: task.taskId,
+              title: "Second title",
+            }),
+          ]);
+        else
+          expect(all.map((c) => [c.kind, c.title]).sort()).toEqual([
+            ["create_task", "Second title"],
+            ["create_task", TYPED],
+          ]);
+        const last = String(
+          (mode === "edit"
+            ? all[0]
+            : all.find((c) => c.title === "Second title")
+          )?.id,
+        );
+        if (mode === "new") expect(last).not.toBe(first);
+        expect(at(t)).toBe(`/tasks/${last}`);
+      });
+
+  for (const mode of ["new", "edit"] as const)
+    for (const outcome of ["refuse", "throws"] as const)
+      for (const where of ["/tasks", "/sync"] as const)
+        test(`${mode} form, ${outcome === "refuse" ? "refused" : "the store threw"}, ${where} and back before the form was removed: the title kept; Save again writes it once and closes the form onto its task`, async () => {
+          const { t, task, path, key } = await openForm(mode);
+          const outbox = t.data.outbox() as NonNullable<
+            ReturnType<Mounted["data"]["outbox"]>
+          >;
+          const ordinary = outbox.enqueue;
+          const hold = holdAcknowledgement(t, "enqueue", outcome);
+          fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+          await t.until(() => hold.state.asked);
+          (
+            document.querySelector("[data-task-form]") as HTMLElement
+          ).dataset.instance = "old";
+          const watch = watchSettlement(key);
+          await act(async () => {
+            void t.router.navigate(
+              (where === "/sync"
+                ? SYNC
+                : { to: "/tasks", search: {} }) as never,
+            );
+            expect(at(t)).toBe(where);
+            expect(formShown()).toBe(true);
+            void t.router.navigate({ to: path, search: {} } as never);
+            expect(at(t)).toBe(path);
+            hold.release();
+          });
+          await t.settle();
+          watch.stop();
+          expect(watch.seen).toEqual([{ kind: "settled", formMounted: true }]);
+          expect(
+            (document.querySelector("[data-task-form]") as HTMLElement | null)
+              ?.dataset.instance,
+          ).toBe("old");
+          expect(t.bodies()).toEqual([]);
+          expect(name().value, "the refused input is kept").toBe(TYPED);
+          expect(fieldset().disabled).toBe(false);
+          // The retry is ordinary: the outbox writes it at once.
+          outbox.enqueue = ordinary;
+          fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+          await t.settle();
+          const id = savedOnce(t, mode, task);
+          expect(at(t), "the retried save closes the form onto its task").toBe(
+            `/tasks/${id}`,
+          );
+        });
+
+  test("edit form, the task list and back before it was removed (a new visit), typed again, the sync screens and Back: the input typed is kept", async () => {
+    const { t, path } = await openForm("edit");
+    (
+      document.querySelector("[data-task-form]") as HTMLElement
+    ).dataset.instance = "old";
+    await act(async () => {
+      void t.router.navigate({ to: "/tasks", search: {} } as never);
+      expect(formShown()).toBe(true);
+      void t.router.navigate({ to: path, search: {} } as never);
+    });
+    await t.settle();
+    expect(
+      (document.querySelector("[data-task-form]") as HTMLElement | null)
+        ?.dataset.instance,
+    ).toBe("old");
+    expect(name().value).toBe(TYPED);
+    fireEvent.change(name(), { target: { value: "Kept title" } });
+    await to(t, "/sync", SYNC.search);
+    expect(formShown()).toBe(false);
+    await back(t, path);
+    await t.until(formShown);
+    expect(name().value, "the input typed after the return").toBe("Kept title");
+    expect(t.bodies()).toEqual([]);
+  });
+});
+
 describe("R35: an occurrence correction acknowledged after the person left", () => {
   test("the sync screens before the old dialog is removed: the person stays, one correction, Back shows the day without the dialog", async () => {
     const task = await seededTask({

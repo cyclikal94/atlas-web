@@ -14,8 +14,15 @@ import {
 } from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import type { RowModel } from "../view";
-import { type TaskAttachment, useTaskAttachment, useTaskVisit } from "../visit";
 import {
+  type TaskAttachment,
+  useTaskAttachment,
+  useTaskRouteMoved,
+  useTaskScreenAt,
+  useTaskVisit,
+} from "../visit";
+import {
+  adoptCorrection,
   completeCorrection,
   correctionKey,
   discardCorrection,
@@ -116,33 +123,89 @@ export function CorrectionDialog({
   const visitOf = useTaskVisit();
   // Closing on a consumed save acts on the screen: only a dialog the person is still at does (revision 23, R35; `visit.ts`).
   const attachTo = useTaskAttachment();
+  const shownAt = useTaskScreenAt();
+  const onRouteMoved = useTaskRouteMoved();
   const attachment = useRef<TaskAttachment | null>(null);
+  // The attachment that may close the dialog on the pending save's success: the one it had when it took (or resumed) that save. A newer
+  // attachment (the person came back) is for later work only, never leave for an older save to act (revision 24, R36).
+  const acting = useRef<TaskAttachment | null>(null);
+  // Its save consumed while the person was elsewhere, the dialog still mounted: it holds no session until it starts afresh at its address.
+  const [dormant, setDormant] = useState(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: the editor opened for this key and identity leaves the screen
-  useLayoutEffect(() => () => attachment.current?.detach(), [key, identity]);
+  useLayoutEffect(
+    () => () => {
+      attachment.current?.detach();
+      attachment.current = null;
+    },
+    [key, identity],
+  );
   // biome-ignore lint/correctness/useExhaustiveDependencies: the key and identity are the reason; the visit is asked for as the dialog opens
   useEffect(() => {
-    const owner = visitOf(identity);
-    const here = attachTo(owner);
+    let owner = visitOf(identity);
+    let here = attachTo(owner);
     attachment.current = here;
-    const opened = openCorrection(
-      key,
-      identity,
-      () => correctionFrom(latest.current.row.data),
-      owner,
-    );
-    session.current = opened.session;
-    setState(opened.state);
-    setBusy(opened.submitting !== null);
+    let spent = false;
+    const open = () => {
+      const opened = openCorrection(
+        key,
+        identity,
+        () => correctionFrom(latest.current.row.data),
+        owner,
+      );
+      session.current = opened.session;
+      acting.current = here;
+      setState(opened.state);
+      setErrors({});
+      setBusy(opened.submitting !== null);
+      setDormant(false);
+    };
+    open();
+    // The person is at the dialog's address again and React never removed it (revision 24, R36): it is the editor they are at, so it is
+    // attached anew (on the visit going on there, which now owns the session it holds), and a dialog whose save was consumed meanwhile
+    // starts afresh from what the day shows now, as a new dialog there would: never the consumed input, never a Save that does nothing.
+    const renew = () => {
+      if (owner === null || attachment.current !== here) return;
+      if (here === null || !here.presents()) {
+        if (!shownAt(owner.address)) return;
+        const next = visitOf(identity);
+        const again = attachTo(next);
+        if (next === null || again === null || !again.presents()) {
+          again?.detach();
+          return;
+        }
+        here?.detach();
+        here = again;
+        attachment.current = again;
+        if (next !== owner && session.current !== null)
+          adoptCorrection(key, session.current, next);
+        owner = next;
+      }
+      if (spent) {
+        spent = false;
+        open();
+      }
+    };
+    const unheard = onRouteMoved(renew);
     const stop = subscribeCorrection(key, (event) => {
-      if (event.session !== opened.session) return;
+      if (event.session !== session.current) return;
       setBusy(false);
-      if (event.kind === "consumed" && (here === null || here.presents()))
+      if (event.kind !== "consumed") return;
+      session.current = null;
+      // Asked now, immediately before acting: a dialog the person left since it took this save does not close (R35).
+      const by = acting.current;
+      if (by === null || by.presents()) {
         latest.current.onClose();
+        return;
+      }
+      spent = true;
+      setDormant(true);
+      renew();
     });
     return () => {
       here?.detach();
+      unheard();
       stop();
-      releaseCorrection(key, opened.session);
+      if (session.current !== null) releaseCorrection(key, session.current);
       session.current = null;
     };
   }, [key, identity]);
@@ -175,7 +238,7 @@ export function CorrectionDialog({
   // Whether a correction may be saved now, by this render's facts (R30): every route into a save is admitted here, not only by the
   // footer's state. A known denial of the occurrence (`can_edit: false` as this device last read it) keeps what was typed, unsaved; the
   // writing transaction checks the denial again (`requiresEdit`), so one committed after this render is honoured too.
-  const admitted = writable && row.canEdit && !busy;
+  const admitted = writable && row.canEdit && !busy && !dormant;
   const save = async () => {
     if (!admitted) return;
     const result = correctionResult(row.data, state);
@@ -186,6 +249,7 @@ export function CorrectionDialog({
     const ticket =
       session.current === null ? null : submitCorrection(key, session.current);
     if (ticket === null) return;
+    acting.current = attachment.current;
     setBusy(true);
     let ok = false;
     try {
@@ -252,6 +316,10 @@ export function CorrectionDialog({
               </Button>
             ) : busy ? (
               <Button disabled reason={copy.SAVING}>
+                {CORRECTION_COPY.save}
+              </Button>
+            ) : dormant ? (
+              <Button disabled reason={CORRECTION_COPY.saved}>
                 {CORRECTION_COPY.save}
               </Button>
             ) : (

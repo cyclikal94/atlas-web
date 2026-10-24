@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   forgetTaskVisits,
-  onTaskRouteChange,
   onTaskVisitEnded,
   type TaskAttachment,
   type TaskVisit,
   useTaskAttachment,
+  useTaskRouteMoved,
   useTaskScreenAt,
   useTaskVisit,
 } from "./visit";
@@ -37,9 +37,12 @@ import {
  * form closing onto the task, a fresh amount) only if it still PRESENTS (`visit.ts`, `TaskAttachment`), that is, the person has not
  * gone elsewhere, the sync screens included, since it opened. An editor the person left, still mounted while React removes it, just lets
  * go of the settled session: no navigation, no new session. A later return finds what the settlement left (a consumed save is not offered
- * again, newer input is still there). An editor React never removed (the person went away and came back before it re-rendered) starts
- * afresh once the person is at its address again, as a new mount there would: a new session and attachment, from what the screen shows
- * now, never the consumed input to save twice and never an editor whose Save does nothing.
+ * again, newer input is still there). An editor React never removed (the person went away and came back before it re-rendered) is the
+ * editor the person is at again (revision 24, R36): once its router is at its address it is attached anew, on the visit going on there,
+ * which now owns the session it holds (`adoptKept`), so a later explicit save acts on the screen and a later visit to the sync screens
+ * keeps its input. That new attachment is for later work only: a save taken before the departure acts, if at all, by the attachment it
+ * was taken with. An editor whose session was consumed meanwhile starts afresh there, as a new mount would: a new session, from what the
+ * screen shows now, never the consumed input to save twice and never an editor whose Save does nothing.
  */
 export interface KeptEntry<T> {
   readonly session: number;
@@ -138,6 +141,21 @@ export function openKept<T>(
   };
   entries.set(key, created);
   return { ...created } as KeptEntry<T>;
+}
+
+/**
+ * The editor holding `session` is at its address again without having been removed (revision 24, R36): the visit going on there owns that
+ * session from now on. Only that exact session, and only while an editor holds it (a session no editor holds is its own visit's).
+ */
+export function adoptKept(
+  key: string,
+  session: number,
+  owner: TaskVisit,
+): void {
+  const held = entries.get(key);
+  if (held === undefined || held.session !== session || held.holders === 0)
+    return;
+  held.owner = owner;
 }
 
 /** The editor unmounts: once nothing holds the session, it stays only while its visit keeps it (see above). */
@@ -266,10 +284,19 @@ export function useKeptInput<T>(
   const visitOf = useTaskVisit();
   const attachTo = useTaskAttachment();
   const shownAt = useTaskScreenAt();
+  const onRouteMoved = useTaskRouteMoved();
   const attachment = useRef<TaskAttachment | null>(null);
+  // The attachment that may act on the pending save's consumption: the one the editor had when it took (or resumed) that save (R36).
+  const acting = useRef<TaskAttachment | null>(null);
   // Leaving the screen revokes the attachment as React removes the editor, before any passive cleanup (R35).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the editor opened for this key and identity leaves the screen
-  useLayoutEffect(() => () => attachment.current?.detach(), [key, identity]);
+  useLayoutEffect(
+    () => () => {
+      attachment.current?.detach();
+      attachment.current = null;
+    },
+    [key, identity],
+  );
   const peek = (): {
     key: string;
     value: T;
@@ -304,6 +331,7 @@ export function useKeptInput<T>(
         latest.current.options.unedited === true,
       );
       session.current = entry.session;
+      acting.current = here;
       setShown({
         key,
         value: entry.value,
@@ -312,23 +340,31 @@ export function useKeptInput<T>(
       });
     };
     open(() => latest.current.initial());
-    // The person is at the orphaned editor's address again (it was never removed): it starts afresh on the visit going on there.
+    // The person is at the editor's address again and it was never removed: attached anew on the visit going on there (which owns the
+    // session it holds from now on); an orphaned editor starts afresh there.
     const revive = () => {
-      if (!orphaned || owner === null || !shownAt(owner.address)) return;
-      const next = visitOf(identity);
-      const again = attachTo(next);
-      if (again === null || !again.presents()) {
-        again?.detach();
-        return;
+      if (owner === null || attachment.current !== here) return;
+      if (here === null || !here.presents()) {
+        if (!shownAt(owner.address)) return;
+        const next = visitOf(identity);
+        const again = attachTo(next);
+        if (next === null || again === null || !again.presents()) {
+          again?.detach();
+          return;
+        }
+        here?.detach();
+        here = again;
+        attachment.current = again;
+        if (next !== owner && session.current !== null)
+          adoptKept(key, session.current, next);
+        owner = next;
       }
-      orphaned = false;
-      here?.detach();
-      owner = next;
-      here = again;
-      attachment.current = again;
-      open(() => latest.current.initial());
+      if (orphaned) {
+        orphaned = false;
+        open(() => latest.current.initial());
+      }
     };
-    const unheard = onTaskRouteChange(revive);
+    const unheard = onRouteMoved(revive);
     const stop = subscribeKept(key, (event) => {
       if (event.session !== session.current) return;
       if (event.kind === "settled") {
@@ -337,8 +373,9 @@ export function useKeptInput<T>(
         return;
       }
       session.current = null;
-      // Asked now, immediately before acting: an editor the person has left is told nothing to act on (R35).
-      if (here !== null && !here.presents()) {
+      // Asked now, immediately before acting: an editor the person has left since it took this save is told nothing to act on (R35).
+      const by = acting.current;
+      if (by !== null && !by.presents()) {
         orphaned = true;
         setShown((s) => ({ ...s, busy: false }));
         revive();
@@ -377,7 +414,10 @@ export function useKeptInput<T>(
     submit() {
       const ticket =
         session.current === null ? null : submitKept(key, session.current);
-      if (ticket !== null) setShown((s) => ({ ...s, busy: true }));
+      if (ticket !== null) {
+        acting.current = attachment.current;
+        setShown((s) => ({ ...s, busy: true }));
+      }
       return ticket;
     },
   };

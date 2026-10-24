@@ -422,6 +422,18 @@ written; revoked for good by a departure to the sync screens; a change of only t
 only its IndexedDB `complete` handler held by the test; the Tasks link or the visible sync control, the old form still mounted, and the
 release in one task of the page; the staying controls) in three engines; unit MU-2402…MU-2407, MU-2409 and real-engine MU-2408
 (`scripts/mutation/catalogue-web10a-r23.mjs`); MU-2063 re-anchored (same intent).
+Revision 24 (Review 24 R36 and the design assessment after it; decision 50): `correction-return.test.tsx` (the same correction dialog
+instance, away to the task list or the sync screens and back before React removed it: acknowledged after the return, or while away
+before the return; three explicit saves across two returns; a refused and a thrown save, and 15 typed while 12 was pending, kept and
+saved again, closing the dialog; input typed after a return through the task list kept by the in-dialog sync control; Cancel and a
+departure after a fresh start; controls: staying, and the dialog removed at the sync screens and reopened), `save-presentation.test.tsx`
+(the same for the new and edit forms: acknowledged while away then back; refused or thrown then saved again; input typed after a return
+through the task list kept at the sync screens), `task-route-moved.test.tsx` (a real router over a browser history in jsdom: the editor
+is told at a moment its router, history and document are all at its address, after a push and after Back) and
+`session-adoption.test.ts` (exact held session only); unit MU-2410…MU-2423 (`scripts/mutation/catalogue-web10a-r24.mjs`); MU-2402,
+MU-2407, MU-2409 and real-engine MU-2408 re-anchored (same intent). Same-instance away-and-back is component evidence only: no real-engine
+schedule reliably keeps the old instance across two navigations without a product hook, so native evidence is E-T45 and the correction
+controls, not this ordering.
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -603,6 +615,20 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     address again, as a new mount would: a new session and attachment from what the screen shows now, so its next Save writes the next
     input (the edit coalescing into the queued revision) and the new form never re-offers the consumed input. Nothing about writes, the
     queue or retention changes.
+50. **An editor React never removed is the person's again once they are back (R36, revision 24).** Decision 49's fresh start was the
+    generic editors' only (the correction dialog kept its consumed session and offered a Save that wrote nothing), it was asked only
+    when the observed address changed (before the router had caught up, so a save answered while the person was away never started
+    afresh), and an editor whose input outlived the departure (a refused save, newer input) kept its revoked attachment and its ended
+    visit. Now every editor (`useKeptInput` and `CorrectionDialog`) is told whenever its router's history or the observed address moves
+    (`useTaskRouteMoved`: a browser push tells the router before it writes the document's address, Back is recorded by the document
+    before the router hears it) and, once its router, history and document are all at its address and it was not removed, is attached
+    anew on the visit going on there, which takes over the exact session it holds (`adoptKept`, `adoptCorrection`; only that session,
+    and only while an editor holds it). That attachment is for later work: a save taken before the departure acts, if at all, by the
+    attachment it was taken with (a save's side effect is asked of the attachment it was submitted from, or the one that resumed it). A
+    consumed session's editor then starts afresh from what the screen shows (a correction from the day as now read, its queued correction
+    included), and while it holds no session its Save is unavailable ("Correction saved on this device"). Refused or newer input stays
+    as typed and is saved by the next explicit Save, which closes the form or dialog. Nothing is written, retried or resubmitted by a
+    return; settlement is unchanged.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -708,8 +734,9 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
   update recovery is WEB-14a's). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
   other than to the sync screens, including leaving the sync screens for anywhere but that address (revision 22 reverses decision 44 on
   this point, per Review 22 and DA22-I3).
-- **A save answered while the person is away closes nothing (decision 49, revision 23).** Coming back to the form after it settled shows
-  what the settlement left (the new task's picker, or the edit form afresh); the saved task is in the list and the queue.
+- **A save answered while the person is away closes nothing (decisions 49 and 50, revisions 23 and 24).** Coming back to the form after
+  it settled shows what the settlement left (the new task's picker, or the edit form afresh; the same correction dialog afresh); the saved
+  task is in the list and the queue.
 
 ## Not claimed
 

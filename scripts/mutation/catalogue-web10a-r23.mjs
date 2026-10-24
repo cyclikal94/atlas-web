@@ -9,11 +9,14 @@ const ATTACHMENTS = "tests/features/tasks/task-attachment.test.tsx";
 const KEPT = "src/features/tasks/kept-input.ts";
 const VISIT = "src/features/tasks/visit.ts";
 
-/** A consumed save's editor acts whether or not the person is still at its screen (revision 22's behaviour: R35). */
+/**
+ * A consumed save's editor acts whether or not the person is still at its screen (revision 22's behaviour: R35). Re-anchored in revision 24
+ * (same intent): the attachment asked is the one the save was taken with (`by`, R36).
+ */
 const ungated = (t) =>
   sub(
     t,
-    "      if (here !== null && !here.presents()) {\n",
+    "      if (by !== null && !by.presents()) {\n",
     "      if (false) {\n",
   );
 /** The visit's own router never revokes an attachment (only the document's later record would). */
@@ -114,11 +117,11 @@ export const UNIT_R23 = [
             "  const session = useRef<number | null>(null);\n",
             "  const session = useRef<number | null>(null);\n  const submittedHere = useRef(false);\n",
           ),
-          "      if (here !== null && !here.presents()) {\n",
-          "      if ((here !== null && !here.presents()) || !submittedHere.current) {\n",
+          "      if (by !== null && !by.presents()) {\n",
+          "      if ((by !== null && !by.presents()) || !submittedHere.current) {\n",
         ),
-        "      if (ticket !== null) setShown((s) => ({ ...s, busy: true }));\n",
-        "      if (ticket !== null) {\n        submittedHere.current = true;\n        setShown((s) => ({ ...s, busy: true }));\n      }\n",
+        "        acting.current = attachment.current;\n",
+        "        acting.current = attachment.current;\n        submittedHere.current = true;\n",
       ),
   },
 
@@ -129,12 +132,8 @@ export const UNIT_R23 = [
     file: KEPT,
     tests: [SAVES],
     expect: /away and back before React removed the form/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!orphaned || owner === null || !shownAt(owner.address)) return;\n",
-        "      return;\n",
-      ),
+    // Re-anchored in revision 24 (same intent): the return attaches the editor anew; only its fresh start is withheld.
+    patch: (t) => sub(t, "      if (orphaned) {\n", "      if (false) {\n"),
   },
 ];
 

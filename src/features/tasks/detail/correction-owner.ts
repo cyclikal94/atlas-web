@@ -161,6 +161,22 @@ export function disownCorrection(key: string): void {
   else entries.set(key, { ...held, retained: false, owner: null });
 }
 
+/**
+ * A dialog React never removed is at its address again after the person left it (revision 24, R36): the visit going on there now owns the
+ * session it still holds, so it is kept for that visit as a newly opened one would be. Only that exact session, and only while a dialog
+ * holds it: a session no dialog holds belongs to the visit it was left on, ended or not.
+ */
+export function adoptCorrection(
+  key: string,
+  session: number,
+  owner: TaskVisit,
+): void {
+  const held = entries.get(key);
+  if (held === undefined || held.session !== session || held.holders === 0)
+    return;
+  entries.set(key, { ...held, owner });
+}
+
 export function editCorrection(
   key: string,
   session: number,
