@@ -167,6 +167,8 @@ describe("the smoke scripts' browser runs need no build they do not have", () =>
   );
   const invocations = scripts.flatMap((file) =>
     readFileSync(resolve(ROOT, "scripts", file), "utf8")
+      // A command continued over several lines (a `\` at the end) is ONE command: its environment can be on the line before.
+      .replace(/\\\n/g, " ")
       .split("\n")
       .filter((line) => /playwright test/.test(line))
       .map((line) => ({ file, line })),

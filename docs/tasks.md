@@ -442,6 +442,16 @@ screens, with newer input, refused, or acknowledged on the surviving history; a 
 or before the departure, and its Cancel and ordinary-departure controls; the detail's shown day let go after the return, and a day parked
 after it, each with its full-unmount control); unit MU-2430, MU-2432…MU-2435 (`scripts/mutation/catalogue-web10a-r25.mjs`; MU-2431
 withdrawn as equivalent); MU-2392 re-anchored (same intent). Component evidence only, as for revision 24.
+Revision 26 (Review 26 R38, a maintained-test ordering defect; no product change): the calendar S13 test in
+`tests/features/calendars/manage-revision-2.test.tsx` counted a retry the production loop may make 50 ms after a `not_sent`, before its
+asynchronous setup had queued the waiting change, as an admission after that change. The attempt being answered is now held until the
+change is committed and Manage shows Remove waiting for it; only then is `not_sent` released, with the real delays and the full 500 ms
+observation. A second case allows one retry before the change and requires no further one after it; the no-waiting-change control still
+requires more than two attempts; all attempts are the same Remove body under one key. Unit MU-1378 (Manage's admission ignored, existing)
+and new MU-2436 (`not_sent` never retried; the control fails) in `scripts/mutation/catalogue-web10a-r26.mjs`. The whole unit suite then
+showed a second inherited maintained-test defect, from the merged pool tooling: `tests/static/playwright-servers.test.ts` read each
+physical line, so `smoke-image.sh`'s Playwright runs continued over several lines (their `ATLAS_PRODUCTION_URL` on the line before)
+looked as if they supplied no server. It now reads a `\`-continued command as one; the script is unchanged.
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
