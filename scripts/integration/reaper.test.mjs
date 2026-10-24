@@ -67,6 +67,7 @@ for (const step of ${JSON.stringify(script)}) {
   else if (what === "escapee") { const c = sleeper(); c.unref(); pids.escapees.push(c.pid); }
   else if (what === "register") tell({ type: "group", pgid: Number(arg) });
   else if (what === "docker") tell({ type: "docker", stack: arg });
+  else if (what === "dir") tell({ type: "dir", path: arg });
   else if (what === "raw") reaper.stdin.write(arg + "\\n");
   else if (what === "release") { tell({ type: "release" }); reaper.stdin.end(); }
   else if (what === "kill") { writeFileSync(${JSON.stringify(join(dir, "pids.json"))}, JSON.stringify(pids)); await new Promise((r) => setTimeout(r, 300)); process.kill(process.pid, "SIGKILL"); }
@@ -187,6 +188,53 @@ test("a killed runner's registered Docker stack is disposed of by its label (a r
       new RegExp(`label=atlas.it.stack=${label}`),
     );
   }
+});
+
+test("a killed runner's registered disposable directory is removed; a released reaper leaves it; a directory outside the runner's naming is refused", async (t) => {
+  for (const [release, ok] of [
+    [false, true],
+    [true, true],
+  ]) {
+    const dir = fresh();
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const disposable = mkdtempSync(join(dir, "atlas-integration-"));
+    writeFileSync(join(disposable, "atlas.sqlite"), "x");
+    const child = runner(dir, [
+      `dir ${disposable}`,
+      release ? "release" : "kill",
+    ]);
+    await exited(child);
+    if (release) {
+      const pids = pidsOf(dir);
+      await until(() => !alive(pids.reaper), 5_000, "the reaper to exit");
+      assert.equal(existsSync(disposable), true);
+      assert.equal(existsSync(join(dir, "reaper.json")), false);
+    } else {
+      await until(
+        () => existsSync(join(dir, "reaper.json")),
+        15_000,
+        "the reaper's record",
+      );
+      const record = JSON.parse(readFileSync(join(dir, "reaper.json"), "utf8"));
+      assert.equal(record.ok, ok, JSON.stringify(record));
+      assert.deepEqual(record.dirs, [{ path: disposable, removed: true }]);
+      assert.equal(existsSync(disposable), false);
+    }
+  }
+  const dir = fresh();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const other = mkdtempSync(join(dir, "user-data-"));
+  const child = runner(dir, [`dir ${other}`, "release"]);
+  await exited(child);
+  await until(
+    () => existsSync(join(dir, "reaper.json")),
+    10_000,
+    "the reaper's record",
+  );
+  const record = JSON.parse(readFileSync(join(dir, "reaper.json"), "utf8"));
+  assert.equal(record.ok, false);
+  assert.match(record.errors.join(" "), /unknown message/);
+  assert.equal(existsSync(other), true);
 });
 
 test("a malformed message is never a clean release", async (t) => {

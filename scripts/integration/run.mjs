@@ -398,6 +398,7 @@ async function stackRun(browser, stack) {
   ];
   const invitations = [];
   tmp = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "atlas-integration-"));
+  tellReaper({ type: "dir", path: tmp });
   // R17: the specs' sign-in ledger and account rotation live as long as THIS stack (removed with it), never keyed by a reusable port.
   const state = join(tmp, "state");
   mkdirSync(state);
