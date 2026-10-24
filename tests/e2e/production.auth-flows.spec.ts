@@ -53,14 +53,33 @@ const addressLog = (page: Page) =>
         .__at,
   );
 
-const signInForm = (page: Page, username: string, password: string) =>
-  page
-    .getByLabel("Username")
-    .fill(username)
-    .then(async () => {
-      await page.getByLabel("Password").fill(password);
-      await page.getByRole("button", { name: "Sign in" }).click();
-    });
+/**
+ * INT-N1 (review-integration-fresh-20261024): `PublicCard` focuses its heading in an effect AFTER the form is on screen. A fill
+ * that starts before that effect can be focused away between its focus and its insertion, so the field stays empty and the
+ * submission is refused locally. Entry therefore waits until THIS document's public heading holds focus (the initial focus action
+ * of the current surface is over), types each field once, checks the exact values and only then lets the caller submit once.
+ * Not for a retry after a refusal: there focus is on the field the message belongs to, not on the heading.
+ */
+async function publicEntryReady(page: Page) {
+  await expect(page.locator("main[data-public-surface] h1")).toBeFocused();
+}
+async function enterCredentials(
+  page: Page,
+  username: string,
+  password: string,
+) {
+  await publicEntryReady(page);
+  const user = page.getByLabel("Username");
+  const secret = page.getByLabel("Password");
+  await user.fill(username);
+  await secret.fill(password);
+  await expect(user).toHaveValue(username);
+  await expect(secret).toHaveValue(password);
+}
+const signInForm = async (page: Page, username: string, password: string) => {
+  await enterCredentials(page, username, password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+};
 
 /** Accepted WEB-08c journey: one Settings click must land; no setup retry hides a lifecycle regression. */
 async function shownAs(page: Page, username: string | RegExp) {
@@ -229,8 +248,7 @@ test.describe("password sign-in, registration and OIDC in a real engine", () => 
     const stub = await newStub(context);
     const token = stub.addInvitation();
     await page.goto(`/join#t=${token}`);
-    await page.getByLabel("Username").fill("newbie");
-    await page.getByLabel("Password").fill(PASSWORD);
+    await enterCredentials(page, "newbie", PASSWORD);
     await page.getByRole("button", { name: "Create account" }).click();
     await expect
       .poll(() => new URL(page.url()).pathname, { timeout: 20_000 })
@@ -253,8 +271,7 @@ test.describe("password sign-in, registration and OIDC in a real engine", () => 
     const token = stub.addInvitation();
     stub.answerNext(({ path }) => path === "/browser-registration", "abort");
     await page.goto(`/join#t=${token}`);
-    await page.getByLabel("Username").fill("newbie");
-    await page.getByLabel("Password").fill(PASSWORD);
+    await enterCredentials(page, "newbie", PASSWORD);
     await page.getByRole("button", { name: "Create account" }).click();
     await expect(page.getByText(/lost the confirmation/)).toBeVisible();
     expect(
@@ -262,8 +279,11 @@ test.describe("password sign-in, registration and OIDC in a real engine", () => 
     ).toBe(true);
     expect(stub.count("POST", "/browser-registration")).toBe(1);
     await page.getByRole("button", { name: "Sign in" }).click();
+    // A new sign-in surface, prefilled: its own initial focus comes first (INT-N1).
+    await publicEntryReady(page);
     await expect(page.getByLabel("Username")).toHaveValue("newbie");
     await page.getByLabel("Password").fill(PASSWORD);
+    await expect(page.getByLabel("Password")).toHaveValue(PASSWORD);
     await page.getByRole("button", { name: "Sign in" }).click();
     await expect(page.locator("#protected-root")).not.toBeEmpty({
       timeout: 20_000,
@@ -280,8 +300,7 @@ test.describe("password sign-in, registration and OIDC in a real engine", () => 
     const stub = await newStub(context);
     const token = stub.addInvitation();
     await page.goto(`/join#t=${token}`);
-    await page.getByLabel("Username").fill("kieran");
-    await page.getByLabel("Password").fill(PASSWORD);
+    await enterCredentials(page, "kieran", PASSWORD);
     await page.getByRole("button", { name: "Create account" }).click();
     await expect(
       page.getByText("That username is taken. Choose another."),
@@ -394,8 +413,7 @@ test.describe("an outcome that arrives after the neutral gate (review R1, R2)", 
     stub.answerNext(isActivate, CAPACITY);
     const hold = stub.hold(isActivate, 1);
     await page.goto(`/join#t=${token}`);
-    await page.getByLabel("Username").fill("newbie");
-    await page.getByLabel("Password").fill(PASSWORD);
+    await enterCredentials(page, "newbie", PASSWORD);
     await page.getByRole("button", { name: "Create account" }).click();
     await expect(gate(page)).toBeVisible();
     hold.release();
@@ -443,8 +461,7 @@ test.describe("an outcome that arrives after the neutral gate (review R1, R2)", 
     const held = stub.hold((r) => r.path === "/browser-registration", 1);
     const a = await context.newPage();
     await a.goto(`/join#t=${token}`);
-    await a.getByLabel("Username").fill("newbie");
-    await a.getByLabel("Password").fill(PASSWORD);
+    await enterCredentials(a, "newbie", PASSWORD);
     await a.getByRole("button", { name: "Create account" }).click();
     await expect
       .poll(() => stub.count("POST", "/browser-registration"))
@@ -499,8 +516,7 @@ test.describe("a different invitation opened while a registration is outstanding
     });
     const held = stub.hold((r) => r.path === "/browser-registration", 1);
     await page.goto(`/join#t=${first}`);
-    await page.getByLabel("Username").fill(firstUsername);
-    await page.getByLabel("Password").fill(PASSWORD);
+    await enterCredentials(page, firstUsername, PASSWORD);
     await page.getByRole("button", { name: FIRST_SUBMIT, exact: true }).click();
     await expect
       .poll(() => stub.count("POST", "/browser-registration"))
@@ -515,8 +531,7 @@ test.describe("a different invitation opened while a registration is outstanding
     ).toBeVisible();
     // The token was stripped from the address bar as it was captured.
     expect(page.url()).not.toContain(second);
-    await page.getByLabel("Username").fill("secondperson");
-    await page.getByLabel("Password").fill(SECOND_PASSWORD);
+    await enterCredentials(page, "secondperson", SECOND_PASSWORD);
     return { first, second, held };
   }
 
@@ -591,8 +606,11 @@ test.describe("a different invitation opened while a registration is outstanding
       .locator("[data-earlier-registration]")
       .getByRole("button", { name: "Sign in" })
       .click();
+    // A new sign-in surface, prefilled: its own initial focus comes first (INT-N1).
+    await publicEntryReady(page);
     await expect(page.getByLabel("Username")).toHaveValue("firstperson");
     await page.getByLabel("Password").fill(PASSWORD);
+    await expect(page.getByLabel("Password")).toHaveValue(PASSWORD);
     await page.getByRole("button", { name: "Sign in" }).click();
     await expect(page.locator("#protected-root")).not.toBeEmpty({
       timeout: 20_000,
@@ -712,6 +730,9 @@ test.describe("ordering traces in a real engine (two pages, held answers)", () =
     await b.goto("/");
     await a.getByLabel("Username").waitFor();
     await b.getByLabel("Username").waitFor();
+    // Both initial entries are ready BEFORE any race begins (INT-N1); the races below stay concurrent.
+    await publicEntryReady(a);
+    await publicEntryReady(b);
     return [a, b] as const;
   }
   const settled = (stub: AuthStub) => stub.sessions.size;
@@ -1371,5 +1392,253 @@ test.describe("R5 / HF-1: a Settings click delivered while the protected tree is
     // D3's bound, written out: the helper may never click more than three times.
     expect(await settingsClicks(b)).toBe(3);
     await expect(b).toHaveURL(/\/today$/);
+  });
+});
+
+test.describe("INT-N1 qualification: public entry waits for the surface's own initial focus", () => {
+  /**
+   * The intervention of the review's forced-order probe (review-integration-fresh-20261024/probe-source/focus.spec.ts), kept in
+   * the maintained file: the FIRST heading focus that `PublicCard` asks for is held (the application's own call, nothing else is
+   * focused for it) until the test releases it; every focus and input event is recorded in page order. Nothing clears a value.
+   * `armed` releases the held focus in a microtask queued by the username field's `focusin`: Playwright's `fill` focuses the field
+   * (twice) in one evaluation and inserts the text in a later protocol command, so the microtask lands the heading's focus after the
+   * field's last focus and before the insertion, the order that lost the review's input. (The review's probe used `setTimeout(0)`,
+   * which reached that order in WebKit but not in Chromium; a synchronous release is undone by `fill`'s second focus.)
+   */
+  type EntryEvent = { type: string; tag: string; name: string; value: string };
+  type EntryWatch = {
+    __entry: {
+      events: EntryEvent[];
+      held: boolean;
+      armed: boolean;
+      release: (() => void) | null;
+    };
+  };
+  async function watchEntry(page: Page, hold: boolean) {
+    await page.addInitScript((hold) => {
+      const w = window as unknown as EntryWatch;
+      w.__entry = { events: [], held: false, armed: false, release: null };
+      const record = (type: string, el: Element) =>
+        w.__entry.events.push({
+          type,
+          tag: el.tagName,
+          name: (el as HTMLInputElement).name ?? "",
+          value: (el as HTMLInputElement).value ?? "",
+        });
+      if (hold) {
+        const native = HTMLElement.prototype.focus;
+        HTMLElement.prototype.focus = function (
+          this: HTMLElement,
+          ...args: Parameters<HTMLElement["focus"]>
+        ) {
+          if (
+            !w.__entry.held &&
+            this.tagName === "H1" &&
+            this.closest("main[data-public-surface]") !== null
+          ) {
+            w.__entry.held = true;
+            record("heading-focus-held", this);
+            w.__entry.release = () => {
+              w.__entry.release = null;
+              native.apply(this, args);
+            };
+            return;
+          }
+          return native.apply(this, args);
+        };
+      }
+      for (const kind of ["focusin", "input"])
+        document.addEventListener(
+          kind,
+          (event) => {
+            const el = event.target as Element;
+            record(kind, el);
+            if (
+              kind === "focusin" &&
+              w.__entry.armed &&
+              (el as HTMLInputElement).name === "username"
+            ) {
+              w.__entry.armed = false;
+              queueMicrotask(() => w.__entry.release?.());
+            }
+          },
+          true,
+        );
+    }, hold);
+  }
+  const entryEvents = (page: Page) =>
+    page.evaluate(() => (window as unknown as EntryWatch).__entry.events);
+  const headingHeld = (page: Page) =>
+    page.waitForFunction(
+      () => (window as unknown as EntryWatch).__entry.release !== null,
+    );
+  const release = (page: Page) =>
+    page.evaluate(() => (window as unknown as EntryWatch).__entry.release?.());
+  const firstIndex = (events: EntryEvent[], type: string, tagOrName: string) =>
+    events.findIndex(
+      (e) => e.type === type && (e.tag === tagOrName || e.name === tagOrName),
+    );
+  const settingsLinkOf = (page: Page) =>
+    page
+      .getByRole("navigation")
+      .getByRole("link", { name: "Settings" })
+      .first();
+  /** How long the adverse schedule keeps the heading's focus pending while the corrected entry is already running. */
+  const PENDING_MS = 1_000;
+
+  test("INT-N1 adverse control (diagnostic, expected outcome): with the heading's initial focus landing between the former fill's focus and its insertion, Firefox and WebKit lose the username; Chromium inserts at the field's selection", async ({
+    page,
+    context,
+  }) => {
+    const stub = await newStub(context);
+    const engine = page.context().browser()?.browserType().name();
+    await watchEntry(page, true);
+    await page.goto("/");
+    await headingHeld(page);
+    await page.evaluate(() => {
+      (window as unknown as EntryWatch).__entry.armed = true;
+    });
+    // The FORMER `signInForm`, kept here only as this labelled control: fill, fill, submit, with no entry boundary.
+    await page.getByLabel("Username").fill("sam");
+    await page.getByLabel("Password").fill("pw2");
+    await page.getByRole("button", { name: "Sign in" }).click();
+    const events = await entryEvents(page);
+    await test.info().attach("entry-events", {
+      body: JSON.stringify(events, null, 1),
+      contentType: "application/json",
+    });
+    // The intervention took effect in every engine: the username was focused, THEN the heading's held focus landed, and no
+    // username input came before it.
+    const userFocus = firstIndex(events, "focusin", "username");
+    const headingFocus = firstIndex(events, "focusin", "H1");
+    const userInput = firstIndex(events, "input", "username");
+    expect(userFocus).toBeGreaterThanOrEqual(0);
+    expect(headingFocus).toBeGreaterThan(userFocus);
+    if (engine === "chromium") {
+      // Chromium's insertion follows the selection `fill` left in the field, not the focused heading, so the text still lands
+      // there (revision-31 diagnostic d5); the review's lost input is a Firefox/WebKit outcome of the same order.
+      expect(userInput).toBeGreaterThan(headingFocus);
+      await expect(settingsLinkOf(page)).toBeVisible({ timeout: 20_000 });
+      expect(stub.count("POST", API_EXCHANGE)).toBe(1);
+    } else {
+      // The review's symptom: no username input at all, the local refusal, and nothing sent.
+      expect(userInput).toBe(-1);
+      await expect(
+        page.getByText("Enter your username.", { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByLabel("Username")).toHaveValue("");
+      expect(stub.count("POST", API_EXCHANGE)).toBe(0);
+    }
+  });
+
+  test("INT-N1 corrected sign-in: started while the heading's initial focus is pending, entry types nothing until it lands, then signs in ONCE as the typed account", async ({
+    page,
+    context,
+  }) => {
+    const stub = await newStub(context);
+    await watchEntry(page, true);
+    await page.goto("/");
+    await headingHeld(page);
+    const entry = signInForm(page, "sam", "pw2");
+    // The adversary's window: the heading's focus stays pending while the entry runs. Nothing may be typed or sent in it.
+    await page.waitForTimeout(PENDING_MS);
+    const pending = await entryEvents(page);
+    expect(pending.filter((e) => e.tag === "INPUT")).toEqual([]);
+    expect(stub.count("POST", API_EXCHANGE)).toBe(0);
+    await release(page);
+    await entry;
+    await expect(settingsLinkOf(page)).toBeVisible({ timeout: 20_000 });
+    const events = await entryEvents(page);
+    const headingFocus = firstIndex(events, "focusin", "H1");
+    expect(headingFocus).toBeGreaterThanOrEqual(0);
+    expect(firstIndex(events, "focusin", "username")).toBeGreaterThan(
+      headingFocus,
+    );
+    const userInputs = events.filter(
+      (e) => e.type === "input" && e.name === "username",
+    );
+    expect(userInputs.at(-1)?.value).toBe("sam");
+    expect(
+      events.filter((e) => e.type === "input" && e.name === "password").at(-1)
+        ?.value,
+    ).toBe("pw2");
+    const exchanges = stub.recordsFor(API_EXCHANGE, "POST");
+    expect(exchanges).toHaveLength(1);
+    expect(
+      (exchanges[0]?.body as { username?: string } | undefined)?.username,
+    ).toBe("sam");
+    await shownAs(page, "sam");
+  });
+
+  test("INT-N1 corrected join: on a ready invitation whose heading focus is pending, entry waits for it and the registration is sent ONCE with the typed name", async ({
+    page,
+    context,
+  }) => {
+    const stub = await newStub(context);
+    const token = stub.addInvitation();
+    await watchEntry(page, true);
+    await page.goto(`/join#t=${token}`);
+    // The loading skeleton never asks for focus; the first held request is the READY heading's.
+    await headingHeld(page);
+    await expect(page.getByLabel("Username")).toBeVisible();
+    const entry = enterCredentials(page, "newbie", PASSWORD);
+    await page.waitForTimeout(PENDING_MS);
+    expect((await entryEvents(page)).filter((e) => e.tag === "INPUT")).toEqual(
+      [],
+    );
+    await release(page);
+    await entry;
+    await page.getByRole("button", { name: "Create account" }).click();
+    await expect
+      .poll(() => new URL(page.url()).pathname, { timeout: 20_000 })
+      .toBe("/today");
+    const registrations = stub.recordsFor("/browser-registration", "POST");
+    expect(registrations).toHaveLength(1);
+    expect(
+      (registrations[0]?.body as { username?: string } | undefined)?.username,
+    ).toBe("newbie");
+    await shownAs(page, "newbie");
+  });
+
+  test("INT-N1 bound: a heading focus that never lands fails entry within the expect deadline, and nothing is typed or sent", async ({
+    page,
+    context,
+  }) => {
+    const stub = await newStub(context);
+    await watchEntry(page, true);
+    await page.goto("/");
+    await headingHeld(page);
+    await expect(signInForm(page, "sam", "pw2")).rejects.toThrow(/toBeFocused/);
+    expect((await entryEvents(page)).filter((e) => e.tag === "INPUT")).toEqual(
+      [],
+    );
+    expect(stub.count("POST", API_EXCHANGE)).toBe(0);
+    await release(page);
+  });
+
+  test("INT-N1 healthy control: with the heading's focus left alone, it lands before the username's first focus and input, and one exchange signs in the typed account", async ({
+    page,
+    context,
+  }) => {
+    const stub = await newStub(context);
+    await watchEntry(page, false);
+    await page.goto("/");
+    await signInForm(page, "sam", "pw2");
+    await expect(settingsLinkOf(page)).toBeVisible({ timeout: 20_000 });
+    const events = await entryEvents(page);
+    const headingFocus = firstIndex(events, "focusin", "H1");
+    expect(headingFocus).toBeGreaterThanOrEqual(0);
+    expect(firstIndex(events, "focusin", "username")).toBeGreaterThan(
+      headingFocus,
+    );
+    expect(firstIndex(events, "input", "username")).toBeGreaterThan(
+      headingFocus,
+    );
+    const exchanges = stub.recordsFor(API_EXCHANGE, "POST");
+    expect(exchanges).toHaveLength(1);
+    expect(
+      (exchanges[0]?.body as { username?: string } | undefined)?.username,
+    ).toBe("sam");
+    await shownAs(page, "sam");
   });
 });
