@@ -29,6 +29,7 @@ const provenance = {
   api_types_version: pin.version,
   api_types_tarball_sha256: pin.tarball_sha256,
   frontend_ref: { tag: git.tag, commit: git.commit, dirty: git.dirty },
+  ...(git.source_sha256 ? { source_snapshot_sha256: git.source_sha256 } : {}),
   ci_run_id:
     process.env.GITHUB_RUN_ID ?? process.env.ATLAS_CI_RUN_ID ?? "local",
   generation_inputs: {
