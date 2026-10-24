@@ -82,7 +82,8 @@ pre-paint theme script is an external file, for the same reason.
 
 Tests: the browser suite runs every fixture page, dialog and tooltip under this exact policy read from
 `deploy/nginx/security-headers.conf` (`tests/e2e/fixture.csp.spec.ts`, `production.csp.spec.ts`) and any violation fails the run; the
-image smoke test (`scripts/smoke-image.sh`) then repeats the production suite against the real container.
+image smoke test (`scripts/smoke-image.sh`) then repeats the production suite against the real container, behind the reference proxy
+with a stub backend answering the boot-time `GET /health` (the image alone answers it with a 404, as it must).
 
 ## A reverse proxy example
 
