@@ -1,7 +1,18 @@
-import type { DraftRow, DraftStatus, DraftWithCommand } from "../model/types";
-import { range } from "../store/port";
+import { DATA_CONFIG } from "../model/config";
+import { applyOverlay, type Overlay } from "../model/overlay";
+import type {
+  CacheRow,
+  DraftRow,
+  DraftStatus,
+  DraftWithCommand,
+  ResourceId,
+  ResourceKind,
+} from "../model/types";
+import { type Reader, range } from "../store/port";
 import { bulkGetWindowed, WINDOW } from "./bounded-reads";
 import { readPlan } from "./builders";
+import { listPageSize, type ResourcePage } from "./outbox";
+import { readOverlays } from "./overlay-windows";
 
 /**
  * This device's OUTSTANDING saves of some command kinds, with their bodies (WEB-10a/WEB-11a §3.1): what a feature screen needs to show a
@@ -45,7 +56,16 @@ export const readOutstandingCreates = readPlan<
 >({
   name: "data.readOutstandingCreates",
   scope: ["drafts", "draft_commands", "pending_effects"],
-  read: async (reader, input) => {
+  read: (reader, input) => readOutstandingWindow(reader, input),
+  decide: ({ reads }) => reads,
+});
+
+/** One window of `readOutstandingCreates`, inside the caller's read transaction. */
+async function readOutstandingWindow(
+  reader: Reader,
+  input: Omit<OutstandingCreatesInput, "incarnationId">,
+): Promise<OutstandingCreatesPage> {
+  {
     const kinds = new Set(input.kinds);
     const after = input.after ?? 0;
     // The oldest `WINDOW + 1` of every status together: the one more says whether another window follows.
@@ -105,6 +125,110 @@ export const readOutstandingCreates = readPlan<
       }),
       next: more && last !== undefined ? last.created_seq : null,
     };
+  }
+}
+
+/** The most pages and windows one `readInventory` reads: a list step's bound (20 pages) and the outstanding chain's (10 windows). */
+const INVENTORY_PAGES = 20;
+const INVENTORY_WINDOWS = 10;
+
+/**
+ * The cache AND this device's outstanding saves, read in ONE transaction (WEB-11a review 7's design assessment, C15.5): what a screen
+ * needs before it may say that something is NOT there. The separate live reads of the cache (`readResourceList`) and of the outstanding
+ * saves (`readOutstandingCreates`) are each consistent, but they are delivered separately: when one commit moves a new resource from the
+ * queue to the cache (its receipt published), the read of the queue can answer first, and for that moment neither shows it. A screen
+ * shows what the separate reads give, and claims an ABSENCE ("No one here yet", "No fields yet", "isn't on this device") only when this
+ * read, made after them, agrees. It reads either one resource by id, or the step of a list (of `kind`, under `parentId`, from `after`)
+ * up to `pages` pages of `listPage` rows with their overlays, and the outstanding saves of `kinds` up to `windows` windows: the same
+ * bounds as the reads it confirms (at most 20 pages and 10 windows), and it stops at the last page and window.
+ */
+export interface InventoryInput {
+  incarnationId: string;
+  /** One resource (its cached row), instead of a step of a list. */
+  id?: ResourceId;
+  kind?: ResourceKind;
+  parentId?: string;
+  after?: ResourceId | null;
+  pages?: number;
+  kinds: readonly string[];
+  windows?: number;
+}
+
+export interface Inventory {
+  /** The resource asked for by id, as cached (null: not cached); null too for a step. */
+  resource: CacheRow | null;
+  /** The pages of the step read, in order, each with the cursor it was read after. */
+  pages: Array<{ after: ResourceId | null; page: ResourcePage }>;
+  /** The windows of outstanding saves read, in order, each with the cursor it was read after. */
+  outstanding: Array<{ after: number | null; page: OutstandingCreatesPage }>;
+}
+
+export const readInventory = readPlan<InventoryInput, Inventory, Inventory>({
+  name: "data.readInventory",
+  scope: ["cache", "pending_effects", "drafts", "draft_commands"],
+  read: async (reader, input) => {
+    const resource =
+      input.id === undefined
+        ? null
+        : ((await reader.get("cache", input.id)) ?? null);
+    const pages: Inventory["pages"] = [];
+    if (input.id === undefined && input.kind !== undefined) {
+      const index = input.parentId === undefined ? "kind" : "parent_id";
+      const key = input.parentId === undefined ? input.kind : input.parentId;
+      const match =
+        input.parentId === undefined ? {} : { match: { kind: input.kind } };
+      const limit = listPageSize();
+      let after = input.after ?? null;
+      const most = Math.min(input.pages ?? INVENTORY_PAGES, INVENTORY_PAGES);
+      for (let n = 0; n < most; n += 1) {
+        // A page as `readResourceList` reads it, one row more to know whether another follows.
+        const rows = await reader.pageByKey("cache", index, key, {
+          ...(after === null ? {} : { after }),
+          ...match,
+          limit: limit + 1,
+        });
+        const page = rows.slice(0, limit);
+        const overlays = await readOverlays(
+          reader,
+          page.map((row) => row.id),
+          DATA_CONFIG.queueWorkingSet,
+        );
+        const last = page[page.length - 1];
+        const next = rows.length > limit && last !== undefined ? last.id : null;
+        pages.push({
+          after,
+          page: {
+            rows: page.map((base) => {
+              const overlay = overlays.get(base.id) as Overlay;
+              return {
+                base,
+                merged: applyOverlay(base, overlay),
+                pending: overlay.pending,
+              };
+            }),
+            next,
+          },
+        });
+        if (next === null) break;
+        after = next;
+      }
+    }
+    const outstanding: Inventory["outstanding"] = [];
+    let after: number | null = null;
+    const most = Math.min(
+      input.windows ?? INVENTORY_WINDOWS,
+      INVENTORY_WINDOWS,
+    );
+    for (let n = 0; n < most; n += 1) {
+      const page = await readOutstandingWindow(reader, {
+        kinds: input.kinds,
+        after,
+      });
+      outstanding.push({ after, page });
+      if (page.next === null) break;
+      after = page.next;
+    }
+    return { resource, pages, outstanding };
   },
   decide: ({ reads }) => reads,
 });

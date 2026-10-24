@@ -1,5 +1,8 @@
 import {
+  type Inventory,
+  type InventoryInput,
   type OutstandingCreatesPage,
+  readInventory,
   readOutstandingCreates,
 } from "../plans/outstanding-reads";
 import type { Loadable } from "../store/port";
@@ -33,5 +36,27 @@ export function useOutstandingCreates(
         : null;
     },
     [key, after],
+  );
+}
+
+/**
+ * The cache and this device's outstanding saves of `kinds` read in ONE transaction (`readInventory`): what a screen asks, after its
+ * separate reads, before it says something is NOT there. `query` null reads nothing (loading).
+ */
+export function useInventory(
+  query: Omit<InventoryInput, "incarnationId"> | null,
+): Loadable<Inventory> {
+  const key = query === null ? null : JSON.stringify(query);
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service && key !== null
+        ? service.store.watch(readInventory, {
+            incarnationId: service.incarnationId,
+            ...(JSON.parse(key) as Omit<InventoryInput, "incarnationId">),
+          })
+        : null;
+    },
+    [key],
   );
 }

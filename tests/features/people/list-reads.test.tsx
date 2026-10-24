@@ -12,6 +12,7 @@ import {
   EDITOR_CHANGES_UNREAD,
   EMPTY,
   EMPTY_ARCHIVED,
+  NO_FIELDS,
   OUTSTANDING_CAPPED,
 } from "../../../src/features/people/copy";
 import { forgetAllPeopleMemory } from "../../../src/features/people/memory";
@@ -21,6 +22,7 @@ import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import { record } from "../../support/people/records";
 import {
+  fieldRow,
   type PeopleWorld,
   peopleWorld,
   person,
@@ -335,4 +337,187 @@ describe("review 7's design assessment: a closed database is not an absent one",
     expect(statusOf({ status: "loading" })).toBe("loading");
     expect(statusOf({ status: "ready", value: 1 })).toBe("ready");
   });
+});
+
+/**
+ * Review 7's design assessment, DA7-12: ONE commit moves a new person (or field) from this device's queue to the cache (its receipt
+ * published), and the two live reads deliver it separately. `freezeReads` keeps one plan's existing watches on what they last answered
+ * while the other answers the commit: the queue's read first (the cache's not yet), then the other way round. Every DOM commit is
+ * observed: the absence is never claimed in between, and the person is never listed twice. The control discards the only queued person
+ * (genuinely nobody): then the absence IS claimed.
+ */
+describe("review 7's design assessment (DA7-12): a hand-off from the queue to the cache never claims absence in between", () => {
+  /** Records, at every DOM commit inside `root()`, whether `claim` is shown and how many `row`s are. */
+  function observe(root: () => Element, claim: string, row: string) {
+    const seen: Array<{ claimed: boolean; rows: number }> = [];
+    const observer = new MutationObserver(() =>
+      seen.push({
+        claimed: root().querySelector(claim) !== null,
+        rows: root().querySelectorAll(row).length,
+      }),
+    );
+    observer.observe(root(), {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+    });
+    return { seen, stop: () => observer.disconnect() };
+  }
+  const settle = () => act(async () => undefined);
+
+  for (const first of ["the queue's read", "the cache's read"] as const)
+    test(`the People list: ${first} delivers first`, async () => {
+      const w = world();
+      w.setCache([]);
+      w.setDrafts([createOf(1, ADA, "Ada")]);
+      await w.mount("/people");
+      await waitFor(() => expect(screen.queryByText("Ada")).not.toBeNull());
+      const watch = observe(
+        list,
+        '[data-people-state="empty"]',
+        "[data-person-row]",
+      );
+      w.freezeReads(
+        first === "the queue's read" ? "data.readResourceList" : OUTSTANDING,
+      );
+      w.handOff([person({ id: ADA, label: "Ada" })], []);
+      await settle();
+      w.thawReads();
+      await settle();
+      watch.stop();
+      await waitFor(() => expect(screen.queryByText("Ada")).not.toBeNull());
+      expect(
+        watch.seen.filter((s) => s.claimed),
+        "never 'No one here yet' while Ada moves from the queue to the cache",
+      ).toEqual([]);
+      expect(watch.seen.every((s) => s.rows <= 1)).toBe(true);
+      expect(state("empty")).toBeNull();
+    });
+
+  test("control: the only queued person discarded (genuinely nobody): 'No one here yet' is said", async () => {
+    const w = world();
+    w.setCache([]);
+    w.setDrafts([createOf(1, ADA, "Ada")]);
+    await w.mount("/people");
+    await waitFor(() => expect(screen.queryByText("Ada")).not.toBeNull());
+    w.setDrafts([]);
+    await waitFor(() => expect(state("empty")).not.toBeNull());
+  });
+
+  for (const first of ["the queue's read", "the person's read"] as const)
+    test(`the person's detail: ${first} delivers first; never "isn't on this device"`, async () => {
+      const w = world();
+      w.setCache([]);
+      w.setDrafts([createOf(1, ADA, "Ada")]);
+      await w.mount(`/people/${ADA}`);
+      const root = () => document.querySelector("main") as Element;
+      await waitFor(() =>
+        expect(
+          document.querySelector(`[data-person-detail="${ADA}"]`),
+        ).not.toBeNull(),
+      );
+      const watch = observe(
+        root,
+        '[data-people-state="not-on-device"]',
+        `[data-person-detail="${ADA}"]`,
+      );
+      w.freezeReads(
+        first === "the queue's read" ? "data.readMerged" : OUTSTANDING,
+      );
+      w.handOff([person({ id: ADA, label: "Ada" })], []);
+      await settle();
+      w.thawReads();
+      await settle();
+      watch.stop();
+      await waitFor(() =>
+        expect(
+          document.querySelector(`[data-person-detail="${ADA}"]`),
+        ).not.toBeNull(),
+      );
+      expect(watch.seen.filter((s) => s.claimed)).toEqual([]);
+    });
+
+  test("control: the person's only queued create discarded: \"isn't on this device\" is said", async () => {
+    const w = world();
+    w.setCache([]);
+    w.setDrafts([createOf(1, ADA, "Ada")]);
+    await w.mount(`/people/${ADA}`);
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-person-detail="${ADA}"]`),
+      ).not.toBeNull(),
+    );
+    w.setDrafts([]);
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-people-state="not-on-device"]'),
+      ).not.toBeNull(),
+    );
+  });
+
+  for (const first of ["the queue's read", "the fields' read"] as const)
+    test(`a person's fields: ${first} delivers first; never "No fields yet."`, async () => {
+      const w = world();
+      w.setCache([person({ id: ADA, label: "Ada" })]);
+      const F = "66666666-6666-4666-8666-666666666666";
+      w.setDrafts([
+        draftRow({
+          local_id: "f1",
+          created_seq: 1,
+          endpoint: "/task-commands",
+          command: {
+            command: {
+              kind: "put_field",
+              id: F,
+              parent_id: ADA,
+              label: "Note",
+              value: { kind: "text", text: "Queued note" },
+            },
+          },
+        }),
+      ]);
+      await w.mount(`/people/${ADA}`);
+      await waitFor(() =>
+        expect(screen.queryByText("Queued note")).not.toBeNull(),
+      );
+      const root = () =>
+        document.querySelector(`[data-person-detail="${ADA}"]`) as Element;
+      const seen: boolean[] = [];
+      const observer = new MutationObserver(() =>
+        seen.push(
+          within(root() as HTMLElement).queryByText(NO_FIELDS) !== null,
+        ),
+      );
+      observer.observe(root(), {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+      w.freezeReads(
+        first === "the queue's read" ? "data.readResourceList" : OUTSTANDING,
+      );
+      w.handOff(
+        [
+          fieldRow({
+            id: F,
+            parent_id: ADA,
+            label: "Note",
+            value: { kind: "text", text: "Queued note" },
+          }),
+        ],
+        [],
+      );
+      await settle();
+      w.thawReads();
+      await settle();
+      observer.disconnect();
+      await waitFor(() =>
+        expect(screen.queryByText("Queued note")).not.toBeNull(),
+      );
+      expect(
+        seen.filter(Boolean),
+        "never 'No fields yet.' while the note moves to the cache",
+      ).toEqual([]);
+    });
 });

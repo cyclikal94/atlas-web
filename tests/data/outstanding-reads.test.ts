@@ -2,10 +2,13 @@
 import { describe, expect, test } from "vitest";
 import { DATA_CONFIG } from "../../src/data/model/config";
 import type { DraftRow, DraftWithCommand } from "../../src/data/model/types";
-import { readOutstandingCreates } from "../../src/data/plans/outstanding-reads";
+import {
+  readInventory,
+  readOutstandingCreates,
+} from "../../src/data/plans/outstanding-reads";
 import { listReadPlans } from "../../src/data/plans/registry";
 import { pageWorld } from "../support/data/page-world";
-import { draftRow, effectRow } from "../support/data/rows";
+import { cacheRow, draftRow, effectRow } from "../support/data/rows";
 
 /**
  * `readOutstandingCreates` (WEB-11a §3.1 item 2; the same name, signature and semantics as WEB-10a's plan): the outstanding drafts of the
@@ -143,5 +146,84 @@ describe("readOutstandingCreates", () => {
     const w = await pageWorld();
     seed(w, [putField(1)]);
     expect((await read(w, [])).drafts).toEqual([]);
+  });
+});
+
+/**
+ * `readInventory` (WEB-11a review 7's design assessment, DA7-12): the cache and the outstanding drafts in ONE read transaction, for a screen
+ * to confirm an absence the separate reads suggest. Its step is read as `readResourceList` reads pages (bounded, with cursors), its
+ * outstanding saves as `readOutstandingCreates` reads windows; one resource can be read by id instead. Fixture evidence over the double.
+ */
+describe("readInventory", () => {
+  const inventory = (w: World, input: Record<string, unknown>) =>
+    w.service.store.run(readInventory, {
+      incarnationId: w.service.incarnationId,
+      kinds: ["put_field"],
+      ...input,
+    });
+  const person = (n: number) =>
+    cacheRow({ id: `p${String(n).padStart(4, "0")}`, kind: "person" });
+
+  test("is a registered READ plan over the cache and the drafts", () => {
+    const entry = listReadPlans().find(
+      (plan) => plan.name === "data.readInventory",
+    );
+    expect(entry?.mode).toBe("readonly");
+    expect(entry?.scope).toEqual(
+      expect.arrayContaining([
+        "cache",
+        "pending_effects",
+        "drafts",
+        "draft_commands",
+      ]),
+    );
+  });
+
+  test("a step: the pages of the kind from the cursor, each with the cursor it was read after, up to the pages asked; and every window of outstanding drafts", async () => {
+    const w = await pageWorld();
+    w.put(
+      "cache",
+      Array.from({ length: 250 }, (_, i) => person(i)),
+    );
+    seed(
+      w,
+      Array.from({ length: WINDOW + 3 }, (_, i) => putField(i + 1)),
+    );
+    const all = await inventory(w, { kind: "person", pages: 20 });
+    expect(all.resource).toBeNull();
+    expect(all.pages.map((entry) => entry.after)).toEqual([
+      null,
+      "p0099",
+      "p0199",
+    ]);
+    expect(all.pages.map((entry) => entry.page.rows.length)).toEqual([
+      100, 100, 50,
+    ]);
+    expect(all.pages.at(-1)?.page.next).toBeNull();
+    expect(all.outstanding.map((entry) => entry.page.drafts.length)).toEqual([
+      WINDOW,
+      3,
+    ]);
+    expect(all.outstanding[1]?.after).toBe(WINDOW);
+    // Bounded: no more pages than asked (and never more than 20), from the cursor given.
+    const one = await inventory(w, {
+      kind: "person",
+      pages: 1,
+      after: "p0049",
+    });
+    expect(one.pages.map((entry) => entry.after)).toEqual(["p0049"]);
+    expect(one.pages[0]?.page.rows[0]?.base.id).toBe("p0050");
+    expect(one.pages[0]?.page.next).toBe("p0149");
+    const capped = await inventory(w, { kind: "person", pages: 99 });
+    expect(capped.pages.length).toBe(3);
+  });
+
+  test("one resource by id: its cached row (null when not cached), no step", async () => {
+    const w = await pageWorld();
+    w.put("cache", [person(1)]);
+    expect((await inventory(w, { id: "p0001" })).resource?.id).toBe("p0001");
+    const missing = await inventory(w, { id: "p0002" });
+    expect(missing.resource).toBeNull();
+    expect(missing.pages).toEqual([]);
   });
 });

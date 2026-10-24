@@ -44,7 +44,12 @@ import {
   summaryCurrentFor,
 } from "../model/summary";
 import { Banner, PendingBadge, useOutboxSave } from "../parts";
-import { OutstandingChain, ResourceScan, type ScanResult } from "../reads";
+import {
+  ConfirmedAbsence,
+  OutstandingChain,
+  ResourceScan,
+  type ScanResult,
+} from "../reads";
 import {
   type SummaryView,
   shownOf,
@@ -163,7 +168,34 @@ function PersonRead({
               <ReadFailed message={copy.PERSON_UNCONFIRMED} onRetry={retry} />
             );
           if (!changesKnown) return <DetailSkeleton />;
-          return <NotOnDevice />;
+          // Said only once ONE read of the cache and the unsent changes together agrees (DA7-12: the queue's read can answer before the
+          // cache's when the person is published).
+          return (
+            <ConfirmedAbsence
+              id={personId}
+              limit={1}
+              pages={1}
+              absent={({ resource, drafts }) =>
+                (resource === null || resource.kind !== "person") &&
+                foldRows([], changesOfAll(drafts), "person").every(
+                  (row) => row.row.id !== personId,
+                )
+              }
+            >
+              {(confirmation) =>
+                confirmation === "absent" ? (
+                  <NotOnDevice />
+                ) : confirmation === "failed" ? (
+                  <ReadFailed
+                    message={copy.PERSON_READ_FAILED}
+                    onRetry={retry}
+                  />
+                ) : (
+                  <DetailSkeleton />
+                )
+              }
+            </ConfirmedAbsence>
+          );
         }
         return (
           <div
@@ -487,6 +519,7 @@ function AudiencedRows({
   return (
     <FieldRows
       rows={rows}
+      start={start}
       person={person}
       settled={settled}
       audiences={key === null ? null : view}
@@ -501,11 +534,14 @@ const FIELD_COLUMNS = {
 
 function FieldRows({
   rows,
+  start,
   person,
   settled,
   audiences,
 }: {
   rows: ShownRow[];
+  /** Where the step began (null: the first). */
+  start: string | null;
   person: ShownRow;
   /** The step's walk is over: only then does "no fields" mean anything (finding 5). */
   settled: boolean;
@@ -514,7 +550,36 @@ function FieldRows({
 }) {
   if (rows.length === 0)
     return settled ? (
-      <p className="text-[13px] text-ink-2">{copy.NO_FIELDS}</p>
+      // Said only once ONE read of the person's fields and the unsent changes together agrees (DA7-12).
+      <ConfirmedAbsence
+        kind="field"
+        parentId={person.row.id}
+        start={start}
+        limit={FIELD_STEP}
+        pages={FIELD_STEP_PAGES}
+        absent={({ step: found, drafts }) => {
+          if (found === null) return false;
+          const changes = changesOfAll(drafts);
+          const by = changesById(changes);
+          return [
+            ...found.rows.map((row) => foldOne(row, by)),
+            ...(start === null
+              ? projectedRows(
+                  new Set(found.rows.map((row) => row.id)),
+                  changes,
+                  "field",
+                  person.row.id,
+                )
+              : []),
+          ].every((row) => row.row.archived);
+        }}
+      >
+        {(confirmation) =>
+          confirmation === "absent" ? (
+            <p className="text-[13px] text-ink-2">{copy.NO_FIELDS}</p>
+          ) : null
+        }
+      </ConfirmedAbsence>
     ) : null;
   const read =
     audiences === null ? null : (shownOf(audiences)?.value.read ?? null);

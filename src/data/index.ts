@@ -122,7 +122,10 @@ export type {
   QueuePage,
   ResourcePage,
 } from "./plans/outbox";
-export type { OutstandingCreatesPage } from "./plans/outstanding-reads";
+export type {
+  Inventory,
+  OutstandingCreatesPage,
+} from "./plans/outstanding-reads";
 export type {
   Outstanding,
   PendingCreatesPage,
@@ -155,7 +158,7 @@ export {
   type DataEnvDeps,
 } from "./ui/env";
 export { useFormCopies } from "./ui/form-copies";
-export { useOutstandingCreates } from "./ui/outstanding";
+export { useInventory, useOutstandingCreates } from "./ui/outstanding";
 export {
   type ConflictRow,
   DataEnvProvider,

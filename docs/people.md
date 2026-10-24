@@ -303,7 +303,12 @@ reopens it with its draft), and `/settings/archived`.
   afresh (new watches) and asks the data layer to retry an unavailable database. In In Home / Shared with me / Not linked, who is listed
   is the server's; a search there matches the names SHOWN (this device's unsent renames over the server's), and its "No one matches" also
   needs the unsent changes read. The field editor opens only on a complete read of the unsent changes: a failed or capped one says the
-  field can't be edited yet, with "Try again", and any kept input stays kept.
+  field can't be edited yet, with "Try again", and any kept input stays kept. The separate live reads of the cache and of the unsent
+  changes are delivered separately, so when ONE commit moves a new person (or field) from the queue to the cache, the queue's read can
+  answer first and, for that moment, neither shows it (the design assessment's DA7-12, reproduced). So an absence the separate reads
+  suggest ("No one here yet", "Nobody is archived.", "No one matches", "This person isn't on this device", "No fields yet.") is said
+  only when one read of both in a single transaction (`data.readInventory`, bounded like the reads it confirms: the step's pages and 10
+  windows) agrees (`reads.tsx` `ConfirmedAbsence`); meanwhile the screen shows its loading state.
 - **D-11a-29** (review 7, finding 3) The pressed ACTION keeps its place and size (`detail/steady.ts`). A fixed outer box is not enough: in
   the narrow layout a field row stacks its audience and reach above Edit and Archive, which then move inside the row (22 px in the
   review), and on wider layouts the row recentres. So while a pointer is down on an enabled action inside the detail, the People list or

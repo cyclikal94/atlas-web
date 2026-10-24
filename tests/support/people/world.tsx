@@ -391,6 +391,14 @@ export interface PeopleWorld {
   ): void;
   /** The held watches answer (and the next new ones are not held). */
   releaseReads(): void;
+  /**
+   * The EXISTING watches of `plan` keep answering what they last answered, until `thawReads` (DA7-12): a commit that plan's live query has
+   * not delivered yet, while every other read (and every new watch) sees it.
+   */
+  freezeReads(plan: string): void;
+  thawReads(): void;
+  /** ONE commit: `rows` are cached and the outstanding drafts become `drafts` (a receipt published, as `commitPage` does). */
+  handOff(rows: CacheRow[], drafts: DraftWithCommand[]): void;
   readonly gated: Record<string, unknown>[];
   /** The sync engine applied a page of changes (`sync_state.applied_revision` moves): the summaries' invalidation signal. */
   advanceRevision(): void;
@@ -428,6 +436,8 @@ export function peopleWorld(
   }> = [];
   let holding = 0;
   const gated: Record<string, unknown>[] = [];
+  /** Plans whose EXISTING watches answer what they last answered (`freezeReads`): a commit their live query has not delivered yet. */
+  const frozen = new Set<string>();
   const faults: Array<{
     plan: string;
     match: (input: Record<string, unknown>) => boolean;
@@ -506,6 +516,46 @@ export function peopleWorld(
             : { ...listed, command: body },
       };
     },
+    // One transaction over the cache and the outstanding drafts (review 7's design assessment, DA7-12): the same pages and windows as the
+    // two separate reads, computed from ONE state of the world.
+    "data.readInventory": (input) => {
+      const resource =
+        input.id === undefined ? null : (cache.get(input.id as string) ?? null);
+      const pages: Array<{ after: string | null; page: unknown }> = [];
+      if (input.id === undefined && input.kind !== undefined) {
+        let after = (input.after as string | null | undefined) ?? null;
+        for (
+          let n = 0;
+          n < Math.min((input.pages as number) ?? 20, 20);
+          n += 1
+        ) {
+          const read = plans["data.readResourceList"]?.({
+            kind: input.kind,
+            ...(input.parentId === undefined
+              ? {}
+              : { parentId: input.parentId }),
+            after,
+          }) as Loadable<{ next: string | null }>;
+          if (read.status !== "ready") return read;
+          pages.push({ after, page: read.value });
+          if (read.value.next === null) break;
+          after = read.value.next;
+        }
+      }
+      const outstanding: Array<{ after: number | null; page: unknown }> = [];
+      let after: number | null = null;
+      for (let n = 0; n < 10; n += 1) {
+        const read = plans["data.readOutstandingCreates"]?.({
+          kinds: input.kinds,
+          after,
+        }) as Loadable<{ next: number | null }>;
+        if (read.status !== "ready") return read;
+        outstanding.push({ after, page: read.value });
+        if (read.value.next === null) break;
+        after = read.value.next;
+      }
+      return { status: "ready", value: { resource, pages, outstanding } };
+    },
     "data.readOutstandingCreates": (input) => {
       const kinds = input.kinds as string[];
       const after = (input.after as number | undefined) ?? 0;
@@ -545,10 +595,12 @@ export function peopleWorld(
           ? holding
           : null;
         let seen = false;
+        let last: Loadable<unknown> | undefined;
         return {
           get: () => {
             if (compute === undefined)
               return { status: "loading" } as Loadable<unknown>;
+            if (frozen.has(plan.name) && last !== undefined) return last;
             if (gate !== null && gate === holding) {
               if (!seen) gated.push(input);
               seen = true;
@@ -563,7 +615,8 @@ export function peopleWorld(
               ended = true;
               return FAILED;
             }
-            return answer(key, () => compute(input));
+            last = answer(key, () => compute(input));
+            return last;
           },
           subscribe: (listener: Listener) => {
             listeners.add(listener);
@@ -1083,6 +1136,18 @@ export function peopleWorld(
     releaseReads() {
       holds.length = 0;
       holding += 1;
+      act(() => notify());
+    },
+    freezeReads(plan) {
+      frozen.add(plan);
+    },
+    thawReads() {
+      frozen.clear();
+      act(() => notify());
+    },
+    handOff(rows, next) {
+      for (const row of rows) cache.set(row.id, row);
+      drafts = next;
       act(() => notify());
     },
     gated,

@@ -21054,6 +21054,83 @@ export const UNIT = [
         "      if (pointer === null) return;\n",
       ),
   },
+  {
+    id: "MU-2336",
+    title:
+      "WEB-11a R7 DA7-12: an absence is confirmed without the composed read (a hand-off from the queue to the cache claims it in between)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect:
+      /the People list: the queue's read delivers first|the person's detail: the queue's read delivers first|a person's fields: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (read.status === "loading") return children("unknown");\n',
+        '  return children("absent");\n',
+      ),
+  },
+  {
+    id: "MU-2337",
+    title:
+      "WEB-11a R7 DA7-12: the composed read stops after the step's first page",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /a step: the pages of the kind from the cursor/,
+    patch: (t) =>
+      sub(t, "        if (next === null) break;\n", "        break;\n"),
+  },
+  {
+    id: "MU-2338",
+    title:
+      "WEB-11a R7 DA7-12: the composed read stops after the first window of outstanding saves",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /a step: the pages of the kind from the cursor/,
+    patch: (t) =>
+      sub(t, "      if (page.next === null) break;\n", "      break;\n"),
+  },
+  {
+    id: "MU-2339",
+    title:
+      "WEB-11a R7 DA7-12: the list says 'No one here yet' from its separate reads alone",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the People list: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {neverSynced ? panel : confirmed(panel)}\n",
+        "        {panel}\n",
+      ),
+  },
+  {
+    id: "MU-2340",
+    title:
+      "WEB-11a R7 DA7-12: the detail confirms 'isn't on this device' whatever the composed read found",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /the person's detail: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        '                (resource === null || resource.kind !== "person") &&\n',
+        "                true ||\n",
+      ),
+  },
+  {
+    id: "MU-2341",
+    title:
+      "WEB-11a R7 DA7-12: the detail confirms 'No fields yet.' whatever the composed read found",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/list-reads.test.tsx"],
+    expect: /a person's fields: the queue's read delivers first/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ].every((row) => row.row.archived);\n",
+        "          ].every(() => true);\n",
+      ),
+  },
 ];
 
 /**

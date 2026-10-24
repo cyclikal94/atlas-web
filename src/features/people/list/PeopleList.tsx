@@ -40,6 +40,7 @@ import {
 import { Avatar, Banner, PendingBadge } from "../parts";
 import {
   type ChainResult,
+  ConfirmedAbsence,
   OutstandingChain,
   ResourceScan,
   type ScanResult,
@@ -255,6 +256,7 @@ function PeopleSteps({
                 ).filter((row) => shows(row.row))
               : []),
           ].sort(byName)}
+          shows={shows}
           outstanding={outstanding}
           onRetry={onRetry}
           query={query}
@@ -344,6 +346,7 @@ function CachedRows({
   start,
   archived,
   shown,
+  shows,
   outstanding,
   onRetry,
   query,
@@ -358,6 +361,8 @@ function CachedRows({
   start: string | null;
   archived: boolean;
   shown: ShownRow[];
+  /** Whether a person (as shown, unsent changes folded) belongs to this view and search. */
+  shows(row: CacheRow): boolean;
   outstanding: ChainResult<DraftWithCommand>;
   onRetry(): void;
   query: string;
@@ -385,6 +390,44 @@ function CachedRows({
       />
     ) : null;
   const notice = <ChangesNotice outstanding={outstanding} onRetry={onRetry} />;
+  /**
+   * An absence the separate reads suggest is said only once ONE read of the cache and the unsent changes together agrees (DA7-12: the
+   * queue's read can answer before the cache's when a new person is published); meanwhile the list is loading.
+   */
+  const confirmed = (claim: ReactNode) => (
+    <ConfirmedAbsence
+      kind="person"
+      start={start}
+      limit={PEOPLE_STEP}
+      pages={PEOPLE_STEP_PAGES}
+      keepWith={(drafts) => {
+        const by = changesById(changesOfAll(drafts));
+        return (row) => shows(foldOne(row, by).row);
+      }}
+      absent={({ step: found, drafts }) =>
+        found !== null &&
+        (!step.end || found.end) &&
+        found.rows.length === 0 &&
+        (start !== null ||
+          projectedRows(new Set(), changesOfAll(drafts), "person").every(
+            (row) => !shows(row.row),
+          ))
+      }
+    >
+      {(confirmation) =>
+        confirmation === "absent" ? (
+          claim
+        ) : confirmation === "failed" ? (
+          <Banner
+            message={copy.LOAD_FAILED}
+            action={<Button onClick={onRetry}>{copy.TRY_AGAIN}</Button>}
+          />
+        ) : (
+          <Skeleton />
+        )
+      }
+    </ConfirmedAbsence>
+  );
   if (
     (status === "loading" ||
       (!step.settled && status !== "failed") ||
@@ -412,25 +455,29 @@ function CachedRows({
     wanted === "" &&
     view === "all" &&
     known;
-  if (nobody || (neverSynced && shown.length === 0))
+  if (nobody || (neverSynced && shown.length === 0)) {
+    const panel = (
+      <div
+        data-people-state={neverSynced ? "offline-first-visit" : "empty"}
+        className="flex flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+      >
+        <p className="text-[13.5px] leading-[1.55] text-ink-1">
+          {neverSynced
+            ? inputs.online
+              ? copy.NOT_SYNCED_YET
+              : copy.OFFLINE_FIRST_VISIT
+            : copy.EMPTY}
+        </p>
+        <Button onClick={onNew}>{copy.NEW_PERSON}</Button>
+      </div>
+    );
     return (
       <div className="flex flex-col gap-2">
         {notice}
-        <div
-          data-people-state={neverSynced ? "offline-first-visit" : "empty"}
-          className="flex flex-col items-start gap-3 rounded-row border border-hairline-strong bg-panel p-4"
-        >
-          <p className="text-[13.5px] leading-[1.55] text-ink-1">
-            {neverSynced
-              ? inputs.online
-                ? copy.NOT_SYNCED_YET
-                : copy.OFFLINE_FIRST_VISIT
-              : copy.EMPTY}
-          </p>
-          <Button onClick={onNew}>{copy.NEW_PERSON}</Button>
-        </div>
+        {neverSynced ? panel : confirmed(panel)}
       </div>
     );
+  }
   // The step stopped at its page bound before it found a full step: more people may match further on.
   const partial = step.settled && !step.end && shown.length < PEOPLE_STEP;
   // A summary is shown beside a cached person only when it is not older than what this device shows.
@@ -453,15 +500,17 @@ function CachedRows({
       {shown.length === 0 ? (
         // Nobody (matching) is claimed only from complete inventories; otherwise the notices above say what could not be read.
         known && status !== "failed" ? (
-          <p data-people-state="no-match" className="text-[13px] text-ink-2">
-            {wanted !== ""
-              ? step.end
-                ? copy.NO_MATCH(query.trim())
-                : copy.NO_MATCH_YET(query.trim())
-              : view === "archived"
-                ? copy.EMPTY_ARCHIVED
-                : copy.EMPTY}
-          </p>
+          confirmed(
+            <p data-people-state="no-match" className="text-[13px] text-ink-2">
+              {wanted !== ""
+                ? step.end
+                  ? copy.NO_MATCH(query.trim())
+                  : copy.NO_MATCH_YET(query.trim())
+                : view === "archived"
+                  ? copy.EMPTY_ARCHIVED
+                  : copy.EMPTY}
+            </p>,
+          )
         ) : null
       ) : (
         <List className="flex flex-col gap-1">

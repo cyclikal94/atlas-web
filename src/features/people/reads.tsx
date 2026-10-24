@@ -12,6 +12,7 @@ import {
   type OutstandingCreatesPage,
   type ResourceKind,
   type ResourcePage,
+  useInventory,
   useOutstandingCreates,
   useResourceList,
 } from "../../data";
@@ -349,6 +350,112 @@ export function OutstandingChain({
       />
       {children(result)}
     </>
+  );
+}
+
+// ---- confirming an absence (review 7's design assessment, DA7-12) -------------------------------------------------------------------
+/**
+ * What ONE read of the cache and of this device's unsent changes, together (`readInventory`), says of an absence the separate reads
+ * suggest: `absent` (confirmed), `present` (something is there after all: the separate reads have not caught up), `unknown` (still
+ * reading, or more unsent changes than are read: never confirmed) or `failed`. The separate live reads of the cache and of the unsent
+ * changes are delivered separately: when one commit moves a new person (or field) from the queue to the cache, the queue's read can
+ * answer first, and for that moment neither shows it. A screen says "No one here yet", "No fields yet" or "isn't on this device" only on
+ * `absent`; it shows what the separate reads give in every other case.
+ */
+export type Confirmation = "absent" | "present" | "unknown" | "failed";
+
+/** What a confirming read found: the step it read again (a list) or the resource (by id), and every unsent change of the kinds asked. */
+export interface Found {
+  step: ScanResult | null;
+  resource: CacheRow | null;
+  drafts: readonly DraftWithCommand[];
+}
+
+export function ConfirmedAbsence({
+  kind,
+  parentId,
+  id,
+  start = null,
+  limit,
+  pages,
+  kinds = PEOPLE_KINDS,
+  keepWith,
+  absent,
+  children,
+}: {
+  kind?: ResourceKind;
+  parentId?: string;
+  id?: string;
+  start?: string | null;
+  limit: number;
+  pages: number;
+  kinds?: readonly string[];
+  /** What the step keeps, given the unsent changes read with it. */
+  keepWith?(drafts: readonly DraftWithCommand[]): (row: CacheRow) => boolean;
+  absent(found: Found): boolean;
+  children(confirmation: Confirmation): ReactNode;
+}) {
+  const read = useInventory({
+    ...(id === undefined
+      ? {
+          kind,
+          ...(parentId === undefined ? {} : { parentId }),
+          after: start,
+          pages,
+        }
+      : { id }),
+    kinds,
+  });
+  if (read.status === "loading") return children("unknown");
+  // An absent database holds nothing; a closed or failed one is not evidence of anything.
+  if (read.status === "unavailable")
+    return children(read.reason === "absent" ? "absent" : "failed");
+  const inventory = read.value;
+  const chain = chainResult(
+    new Map(
+      inventory.outstanding.map((window, index) => [
+        index,
+        {
+          after: window.after,
+          report: {
+            status: "ready" as const,
+            rows: window.page.drafts,
+            next: window.page.next,
+          },
+        },
+      ]),
+    ),
+    10,
+  );
+  if (!chain.complete) return children("unknown");
+  let step: ScanResult | null = null;
+  if (id === undefined) {
+    const { depth: _depth, ...walked } = scanStep(
+      new Map(
+        inventory.pages.map((entry, index) => [
+          index,
+          {
+            after: entry.after,
+            report: {
+              status: "ready" as const,
+              rows: entry.page.rows.map((row) => row.merged),
+              next: entry.page.next,
+            },
+          },
+        ]),
+      ),
+      start,
+      keepWith ? keepWith(chain.rows) : () => true,
+      limit,
+      pages,
+    );
+    if (!walked.settled) return children("unknown");
+    step = walked;
+  }
+  return children(
+    absent({ step, resource: inventory.resource, drafts: chain.rows })
+      ? "absent"
+      : "present",
   );
 }
 
