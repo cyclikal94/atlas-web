@@ -14,6 +14,7 @@ import {
 } from "../model/correction";
 import { resolveWallTime } from "../model/time";
 import type { RowModel } from "../view";
+import { useTaskVisit } from "../visit";
 import {
   completeCorrection,
   correctionKey,
@@ -111,9 +112,15 @@ export function CorrectionDialog({
   const session = useRef<number | null>(null);
   const latest = useRef({ onClose, row });
   latest.current = { onClose, row };
+  // The session is the visit's (revision 22, `visit.ts`): asked for when the dialog opens, not when it renders.
+  const visitOf = useTaskVisit();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the key and identity are the reason; the visit is asked for as the dialog opens
   useEffect(() => {
-    const opened = openCorrection(key, identity, () =>
-      correctionFrom(latest.current.row.data),
+    const opened = openCorrection(
+      key,
+      identity,
+      () => correctionFrom(latest.current.row.data),
+      visitOf(identity),
     );
     session.current = opened.session;
     setState(opened.state);

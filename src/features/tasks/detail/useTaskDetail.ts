@@ -16,16 +16,7 @@ import {
 } from "../../../data";
 import { useBoundaryClock } from "../clock";
 import { useTasksEnv } from "../env";
-import {
-  atSync,
-  holdKept,
-  keepVisit,
-  keptEntry,
-  keptKey,
-  resumeVisit,
-  useKeptInput,
-  useLatestPath,
-} from "../kept-input";
+import { disownKept, keptEntry, keptKey, useKeptInput } from "../kept-input";
 import { useScopedRead } from "../local-read";
 import { type JointAnswer, jointOf } from "../memory";
 import { QUEUED_KINDS } from "../model/commands";
@@ -48,8 +39,9 @@ import {
   patched,
   type RowModel,
 } from "../view";
-import { correctionKey, holdCorrection, resumable } from "./correction-owner";
-import { hasKeptFix, holdKeptFix } from "./EntryHistory";
+import { type TaskVisit, useTaskVisit } from "../visit";
+import { correctionKey, disownCorrection, resumable } from "./correction-owner";
+import { forgetKeptFix, hasKeptFix } from "./EntryHistory";
 
 /**
  * Everything the task detail shows (WF-TASK-01), from the cache and the outstanding drafts (a task created offline shows at once, projected,
@@ -76,15 +68,16 @@ import { hasKeptFix, holdKeptFix } from "./EntryHistory";
  * (revision 20, DA20-I1): only the person does ("Show this task's days", `chooseAgain`), or the next visit. The DISPLAYED day's own window is
  * followed by the clock (`now`); the next visit, or the day picker, chooses again.
  *
- * The visit OWNS the input typed for its day (revision 20, DA20-I1; ia.md §1.3.3): while it shows a day, available or not, it holds that
- * day's amount, fix and correction sessions (`holdKept`, `holdKeptFix`, `holdCorrection`), so an editor the data hides keeps its raw input
- * and its pending save, and shows them again when the day is back. Ending the visit lets go as any departure does (kept at the sync
- * screens); choosing another day in place keeps the input with its own day. The input is never moved to another day.
+ * The visit OWNS the input typed for its day (revision 20, DA20-I1; ia.md §1.3.3): while it shows a day, available or not, that day's
+ * amount, fix and correction sessions are its own, so an editor the data hides keeps its raw input and its pending save, and shows them
+ * again when the day is back. Ending the visit lets go as any departure does (it goes on at the sync screens); showing another day in place
+ * lets go of the day shown before unless it was parked. The input is never moved to another day.
  *
- * The LOGICAL visit (revision 21, DA21-I1/I2): its own day is its target before anything says whether the task's details can be read
- * (missing or unreadable details show it unavailable and keep its input held), and it owns every day it holds, parked ones and those it
- * took back from the sync screens included, whether or not their editors mount again; its ordinary end (anywhere but the sync screens and
- * this task's own detail, or another identity) drops them all (`endVisit`).
+ * The LOGICAL visit (revision 21, DA21-I1/I2; revision 22, R34 / DA22-I1..I3): its own day is its target before anything says whether the
+ * task's details can be read (missing or unreadable details show it unavailable and keep its input), and it owns every day's input typed
+ * on it, parked ones and those kept through the sync screens included, whether or not their editors mount again. The visit is the
+ * screen's address, not this hook's mount (`visit.ts`): a remount at the same address (the cache gate, the protected tree) goes on with the
+ * same day and input, and its ordinary end (anywhere but the sync screens and this address, or another identity) drops them all.
  *
  * A visit to the sync screens is part of the visit when it holds the person's input (revision 19, DA19-I1; ia.md §1.3.3): the day chosen
  * is kept with the screen (`kept-input.ts`), and coming back shows THAT day again when an amount, a fix or a correction typed for it is
@@ -452,90 +445,50 @@ async function readDetail(
   };
 }
 
-/** One day the logical visit holds: its amount, fix and correction sessions (the three owners), let go together. */
-interface DayHold {
-  progress: string;
-  release(keep: boolean): void;
-}
-
-/** The logical visit of a task's detail by one identity: every day it holds, and which of them it shows (the rest are parked). */
-interface Visit {
-  identity: string;
-  days: Map<string, DayHold>;
+/** The day a logical visit of a task's detail shows (null: none yet): the input typed for it is let go when it shows another in place. */
+interface DayShown {
   target: string | null;
+  progress: string | null;
 }
 
-const visitKey = (identity: string, taskId: string) =>
-  keptKey(identity, `detail-visit:${taskId}`);
+/** What each visit's detail of a task shows, between its mounts (page memory, as the visit is). */
+const shownDays = new WeakMap<TaskVisit, Map<string, DayShown>>();
 
-function holdDay(
-  identity: string,
-  occurrence: string,
-  progress: string,
-): DayHold {
-  const release = [
-    holdKept(keptKey(identity, `record:${progress}`)),
-    holdKeptFix(`${identity}\u0000${progress}`),
-    holdCorrection(correctionKey(identity, occurrence)),
-  ];
-  return {
-    progress,
-    release: (keep) => {
-      for (const letGo of release) letGo(keep);
-    },
-  };
+function shownBy(visit: TaskVisit, taskId: string): DayShown {
+  let tasks = shownDays.get(visit);
+  if (tasks === undefined) {
+    tasks = new Map();
+    shownDays.set(visit, tasks);
+  }
+  let shown = tasks.get(taskId);
+  if (shown === undefined) {
+    shown = { target: null, progress: null };
+    tasks.set(taskId, shown);
+  }
+  return shown;
 }
 
 /**
- * The visit shows `target` (null: none yet, or a read of another scope). A day shown before is let go as any departure lets go of it
- * (dropped once nothing holds it), unless the visit parked it; a parked day shown again is the shown one again.
+ * The visit shows `target`. The day shown before is let go as a departure lets go of it (its amount, fix and correction are dropped once
+ * nothing holds them), unless the visit parked it ("Show this task's days": it stays the visit's until the visit ends); a parked day shown
+ * again is the shown one again.
  */
 function show(
-  visit: Visit,
+  shown: DayShown,
+  identity: string,
   target: string | null,
   progress: string | null,
 ): void {
-  const before = visit.target;
+  const before = shown.target;
   if (before !== null && before !== target) {
-    visit.days.get(before)?.release(false);
-    visit.days.delete(before);
+    if (shown.progress !== null) {
+      disownKept(keptKey(identity, `record:${shown.progress}`));
+      forgetKeptFix(`${identity}\u0000${shown.progress}`);
+    }
+    disownCorrection(correctionKey(identity, before));
   }
-  visit.target = target;
-  if (target !== null && progress !== null && !visit.days.has(target))
-    visit.days.set(target, holdDay(visit.identity, target, progress));
-}
-
-/**
- * How a mount of the detail ends: at the sync screens (`sync`: the visit goes on there), at this task's own detail again (`stays`: the day
- * picker's address, or a remount in place), or anywhere else, or another identity (`ended`: the visit is over).
- */
-function endsAt(pathname: string, taskId: string): "sync" | "stays" | "ended" {
-  if (atSync(pathname)) return "sync";
-  return pathname.replace(/\/+$/, "") === `/tasks/${taskId}`
-    ? "stays"
-    : "ended";
-}
-
-/**
- * A mount of the detail ends (DA21-I2). `sync`: every day it holds keeps its input for the visit's next mount, which takes them back
- * (`resumeVisit`) even if none of their editors can mount there. `stays`: the shown day is let go as before (the address now names
- * another day, or none), the parked days stay the visit's. `ended`: everything the visit holds, the parked days included, is let go
- * as any departure lets go, so no later visit resumes it.
- */
-function endVisit(
-  visit: Visit,
-  key: string,
-  how: "sync" | "stays" | "ended",
-): void {
-  const kept: Array<readonly [string, string]> = [];
-  for (const [occurrence, hold] of visit.days) {
-    const keep =
-      how === "sync" || (how === "stays" && occurrence !== visit.target);
-    hold.release(keep);
-    if (keep) kept.push([occurrence, hold.progress]);
-  }
-  visit.days.clear();
-  keepVisit(key, kept);
+  shown.target = target;
+  shown.progress = progress;
 }
 
 export function useTaskDetail(
@@ -612,40 +565,33 @@ export function useTaskDetail(
       if (dayRef.current.value !== chosen) dayRef.current.edit(() => chosen);
     }
   }, [inputs, occurrenceParam, scope]);
-  // The visit holds the input typed for its day, shown or unavailable (revision 20, DA20-I1): an editor the data hides keeps its session.
-  // The LOGICAL visit (revision 21, DA21-I2) owns every day it holds: its target, and the days it parked ("Show this task's days") or
-  // took back from the sync screens, whether or not their editors ever mount again. How this mount ends decides for all of them.
+  // The visit owns the input typed for its day, shown or unavailable (revision 20, DA20-I1), and every day it parked or kept through the
+  // sync screens (DA21-I2): owned by the screen's visit, not this mount (revision 22, `visit.ts`), so a remount at the same address goes on
+  // with them and only the visit's end lets go of them. What it shows is the visit's too: a later mount lets go of the day a COMPLETE read
+  // no longer shows, never of one merely not read yet.
+  const visitOf = useTaskVisit();
+  const visit = useRef<TaskVisit | null>(null);
+  const alone = useRef<DayShown>({ target: null, progress: null });
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for when the screen opens for an identity and task
+  useEffect(() => {
+    visit.current = visitOf(env.identity);
+    alone.current = { target: null, progress: null };
+  }, [env.identity, taskId]);
+  const complete = inputs !== null;
   const target = inputs?.target ?? null;
   const targetProgress = inputs?.targetProgress ?? null;
-  const path = useLatestPath();
-  const pathRef = useRef(path);
-  pathRef.current = path;
-  const identityRef = useRef(env.identity);
-  identityRef.current = env.identity;
-  const visit = useRef<Visit | null>(null);
   useEffect(() => {
-    const key = visitKey(env.identity, taskId);
-    const days = new Map<string, DayHold>();
-    for (const [occurrence, progress] of resumeVisit(key, env.identity))
-      days.set(occurrence, holdDay(env.identity, occurrence, progress));
-    const mine: Visit = { identity: env.identity, days, target: null };
-    visit.current = mine;
-    return () => {
-      if (visit.current === mine) visit.current = null;
-      endVisit(
-        mine,
-        key,
-        identityRef.current !== mine.identity
-          ? "ended"
-          : endsAt(pathRef.current(), taskId),
-      );
-    };
-  }, [env.identity, taskId]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the visit the effect above makes for an identity and task shows the target too
-  useEffect(() => {
+    if (!complete) return;
     const mine = visit.current;
-    if (mine !== null) show(mine, target, targetProgress);
-  }, [target, targetProgress, env.identity, taskId]);
+    show(
+      mine === null || mine.identity !== env.identity
+        ? alone.current
+        : shownBy(mine, taskId),
+      env.identity,
+      target,
+      targetProgress,
+    );
+  }, [complete, target, targetProgress, env.identity, taskId]);
   const readError: TaskDetailView["readError"] =
     read.latest === "failed" || read.latest === "unstable" ? read.latest : null;
 
@@ -790,8 +736,11 @@ export function useTaskDetail(
     selection: inputs === null ? "loading" : inputs.selection,
     lost: inputs?.lost ?? false,
     chooseAgain: () => {
-      // The input stays with its own day (DA20-I1): the visit keeps holding that day, parked, until it ends (DA21-I2).
-      if (visit.current !== null) visit.current.target = null;
+      // The input stays with its own day (DA20-I1): the visit keeps owning that day, parked, until it ends (DA21-I2).
+      const mine = visit.current;
+      if (mine !== null && mine.identity === env.identity)
+        shownBy(mine, taskId).target = null;
+      alone.current.target = null;
       pinned.current = null;
       day.edit(() => null);
       setAttempt((n) => n + 1);

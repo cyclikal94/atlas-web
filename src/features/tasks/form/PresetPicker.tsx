@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import * as copy from "../copy";
@@ -54,7 +54,9 @@ export function describeDefinition(definition: TaskDefinition): string {
  * "Start from scratch" stays available. A preset is submitted as an ordinary `create_task` (TASK-29).
  *
  * The person's choice of preset is an editing session (`keptAs`, revision 18, R33): the in-dialog sync control keeps it, and the picker
- * opened again shows it (while that preset is still offered). Escape and the close icon leave for the task list, which discards it.
+ * opened again shows it (while that preset is still offered). Escape and the close icon leave for the task list, which discards it. The
+ * in-dialog sync control goes to the sync screens STRAIGHT from the picker (revision 22, `visit.ts`): passing through the task list first
+ * would be a departure that ends the visit owning the choice, and Back from the queue would not find the picker.
  */
 export function PresetPicker({
   zone,
@@ -79,6 +81,8 @@ export function PresetPicker({
   const choice = useKeptInput<string>(keptAs, env.identity, () => "", {
     consumed: () => null,
   });
+  // Set by the in-dialog sync control just before it closes the dialog and opens the sync screens: that close is not leaving for the list.
+  const toSync = useRef(false);
   useEffect(() => {
     if (!env.online) {
       setState({ kind: "offline" });
@@ -124,7 +128,13 @@ export function PresetPicker({
   return (
     <Dialog
       open
-      onClose={onClose}
+      onClose={() => {
+        if (toSync.current) toSync.current = false;
+        else onClose();
+      }}
+      onRetainDraft={() => {
+        toSync.current = true;
+      }}
       title={PRESET_COPY.title}
       description={PRESET_COPY.description}
       footer={

@@ -11,6 +11,7 @@ import { ENGINE_R18, UNIT_R18 } from "./catalogue-web10a-r18.mjs";
 import { ENGINE_R19, UNIT_R19 } from "./catalogue-web10a-r19.mjs";
 import { ENGINE_R20, UNIT_R20 } from "./catalogue-web10a-r20.mjs";
 import { ENGINE_R21, UNIT_R21 } from "./catalogue-web10a-r21.mjs";
+import { ENGINE_R22, UNIT_R22 } from "./catalogue-web10a-r22.mjs";
 
 export class PatchError extends Error {}
 
@@ -19410,10 +19411,11 @@ export const UNIT = [
     tests: ["tests/features/tasks/correction-ownership.test.tsx"],
     expect: /development remount/,
     patch: (t) =>
+      // Re-anchored in WEB-10a revision 22 (same intent): the release now marks the session releasing with its visit's keeping decided.
       sub(
         t,
-        "  held.releasing = true;",
-        "  entries.delete(key);\n  held.releasing = true;",
+        "  entries.set(key, { ...held, retained: false, releasing: true });\n  dropReleasing(key, session);\n",
+        "  entries.delete(key);\n",
       ),
   },
 
@@ -21808,6 +21810,7 @@ export const UNIT = [
   ...UNIT_R19,
   ...UNIT_R20,
   ...UNIT_R21,
+  ...UNIT_R22,
 ];
 
 /**
@@ -24838,12 +24841,19 @@ export const ENGINE = [
     spec: "tests/e2e/fixture.tasks.spec.ts",
     grep: "E-T7c:",
     expect: /E-T7c:/,
-    // Re-expressed in revision 2 (same intent): retention is now the correction owner's `retainCorrection`.
+    // Re-expressed in revision 2 (same intent): retention is now the correction owner's `retainCorrection`. Re-anchored in WEB-10a revision
+    // 22 (same intent): the visit the dialog opens its session on keeps a correction holding input through the sync screens too, so the
+    // explicit retain alone is a redundant layer for an edited correction (Run 6: MU-2063 survived in all three engines). The mutant takes
+    // both of the dialog's keepers away: its session belongs to no visit and its sync control retains nothing.
     patch: (t) =>
       sub(
-        t,
-        "        if (session.current !== null) retainCorrection(key, session.current);",
-        "        if (session.current !== null) void 0;",
+        sub(
+          t,
+          "        if (session.current !== null) retainCorrection(key, session.current);",
+          "        if (session.current !== null) void 0;",
+        ),
+        "      visitOf(identity),\n",
+        "      null,\n",
       ),
   },
 
@@ -25260,4 +25270,5 @@ export const ENGINE = [
   ...ENGINE_R19,
   ...ENGINE_R20,
   ...ENGINE_R21,
+  ...ENGINE_R22,
 ];

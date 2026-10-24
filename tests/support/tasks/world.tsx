@@ -43,6 +43,8 @@ import {
   todayIn,
   windows,
 } from "../../../src/features/tasks/model/time";
+import { observeTaskRoutes } from "../../../src/features/tasks/visit";
+import { createHistoryRouteChanges } from "../../../src/lib/route-changes";
 import type { Identity, Store } from "../../../src/session";
 import { DataTestWorld } from "../data/env";
 import { cacheRow } from "../data/rows";
@@ -428,6 +430,9 @@ export async function mountTasks(options: {
   const api = options.api ?? fakeApi();
   const sharing = options.sharing ?? fakeSharingApi();
   const router = createAppRouter({ initialPath: options.path });
+  // Revision 22 (R34): the task screens' logical visits end on a departure the DOCUMENT records (`visit.ts`); this router's memory
+  // history never moves the document, so the visits observe it instead, with the same semantics (`createHistoryRouteChanges`).
+  observeTaskRoutes(createHistoryRouteChanges(router.history));
   let generation = 0;
   let shown = tasksEnv(api, options.env);
   const tree = (env: TasksEnv) => (

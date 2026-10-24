@@ -10,6 +10,8 @@ const DETAIL = "src/features/tasks/detail/useTaskDetail.ts";
 const HISTORY = "src/features/tasks/detail/EntryHistory.tsx";
 const KEPT = "src/features/tasks/kept-input.ts";
 const CORRECTION = "src/features/tasks/detail/correction-owner.ts";
+const VISIT = "src/features/tasks/visit.ts";
+const ROUTES = "src/lib/route-changes.ts";
 
 /** Restores revision 20's guard: the visit's own day is resolved only while the task's details can be read (else no target, no hold). */
 const targetNeedsDetails = (t) =>
@@ -18,9 +20,25 @@ const targetNeedsDetails = (t) =>
     "    if (input.pinned !== null) {\n      // The visit's day, resolved",
     "    if (input.pinned !== null && definition !== null && executionId !== null) {\n      // The visit's day, resolved",
   );
-/** Holding a key no longer adopts a session kept through a sync visit (revision 20: its `kept` mark outlives the visit). */
+/**
+ * Holding a key no longer adopts a session kept through a sync visit (revision 20: its `kept` mark outlives the visit). Re-anchored in
+ * revision 22 (same intent): the visit's end does not drop the sessions it owns, and the next visit resumes them (the end's drop and both
+ * open-time checks of an ended owner removed).
+ */
 const noAdoption = (t) =>
-  sub(t, "  if (found !== undefined) found.kept = false;\n", "");
+  sub(
+    sub(
+      sub(
+        t,
+        "    if (held.owner === visit && held.holders === 0) entries.delete(key);\n",
+        "    void [key, held, visit];\n",
+      ),
+      "    held !== undefined &&\n    !(held.owner !== null && held.owner !== owner && held.owner.ended())\n  ) {",
+      "    held !== undefined\n  ) {",
+    ),
+    "  if (held === undefined || held.owner?.ended()) return null;\n",
+    "  if (held === undefined) return null;\n",
+  );
 
 /** Unit mutants (layer L1b: the app's router over the production data controller and the IndexedDB double), MU-2379..MU-2387. */
 export const UNIT_R21 = [
@@ -69,11 +87,16 @@ export const UNIT_R21 = [
     tests: [RETURN],
     expect:
       /a correction kept by the dialog's sync control and never reopened ends|a correction kept through the sync screens while day A left/,
+    // Re-anchored in revision 22 (same intent): the visit's end does not drop the corrections it owns, and the next dialog resumes one (the end's drop and the open-time check of an ended owner removed).
     patch: (t) =>
       sub(
-        t,
-        "  if (found !== undefined && adopted !== null)\n    entries.set(key, { ...found, retained: false, releasing: true });\n",
-        "",
+        sub(
+          t,
+          "    if (held.owner === visit && held.holders === 0) entries.delete(key);\n",
+          "    void [key, held, visit];\n",
+        ),
+        "    !(held.owner !== null && held.owner !== owner && held.owner.ended())\n",
+        "    true\n",
       ),
   },
 
@@ -84,15 +107,16 @@ export const UNIT_R21 = [
     file: HISTORY,
     tests: [RETURN],
     expect: /a fix save answered after the visit ended/,
+    // Re-anchored in revision 22 (same intent): the visit's end spares a kept fix whose save is pending, so its answer leaves it for the next visit (and the open-time visit check removed).
     patch: (t) =>
       sub(
         sub(
           t,
-          "    const keeps = fixKeeps.get(owner) ?? 0;\n",
-          "    const keeps = fixKeeps.get(owner) ?? 0;\n    const kept = keptFixes.get(owner);\n",
+          "    if (kept.visit === visit) keptFixes.delete(owner);\n",
+          "    if (kept.visit === visit && kept.open?.draft.saving == null)\n      keptFixes.delete(owner);\n",
         ),
-        "      if (!fixVisits.has(owner) && (fixKeeps.get(owner) ?? 0) === keeps)\n",
-        "      if (\n        !fixVisits.has(owner) &&\n        (fixKeeps.get(owner) ?? 0) === keeps &&\n        keptFixes.get(owner) === kept\n      )\n",
+        "    if (kept !== undefined && kept.visit === visit) {\n",
+        "    if (kept !== undefined) {\n",
       ),
   },
 
@@ -100,15 +124,20 @@ export const UNIT_R21 = [
     id: "MU-2384",
     title:
       "WEB-10a rev 21 (DA21-I2): an ordinary end of the visit keeps the days it parked (choosing again leaves their input for a later visit)",
-    file: DETAIL,
+    file: HISTORY,
     tests: [RETURN],
     expect:
       /choosing again parks day A's|a parked correction is the identity's/,
+    // Re-anchored in revision 22 (same intent): the visit's ordinary end does not drop the fixes it owns, parked ones included (the end's drop and the open-time visit check removed).
     patch: (t) =>
       sub(
-        t,
-        '      how === "sync" || (how === "stays" && occurrence !== visit.target);\n',
-        '      how === "sync" || occurrence !== visit.target;\n',
+        sub(
+          t,
+          "    if (kept.visit === visit) keptFixes.delete(owner);\n",
+          "    void [owner, kept, visit];\n",
+        ),
+        "    if (kept !== undefined && kept.visit === visit) {\n",
+        "    if (kept !== undefined) {\n",
       ),
   },
 
@@ -116,14 +145,21 @@ export const UNIT_R21 = [
     id: "MU-2385",
     title:
       "WEB-10a rev 21 (DA21-I2): a mount does not take back the days its visit held at the sync screens (a day parked before the visit outlives it)",
-    file: DETAIL,
+    file: VISIT,
     tests: [RETURN],
     expect: /a day parked before a sync visit is still the visit's after Back/,
+    // Re-anchored in revision 22 (same intent): a mount coming back from the sync screens neither takes over the visit going on nor ends it
+    // (`visitHere`), so the days that visit owned (a parked one) are owned by an orphaned visit no departure ends, and outlive it (Run 3:
+    // the first re-anchoring, never resuming, made them lost instead, which the targeted test does not distinguish).
     patch: (t) =>
       sub(
-        t,
-        "    for (const [occurrence, progress] of resumeVisit(key, env.identity))\n",
-        "    for (const [occurrence, progress] of resumeVisit(key, env.identity).slice(0, 0))\n",
+        sub(
+          t,
+          "  if (\n    going !== null &&\n    going.identity === identity &&\n    (going.address === at || atSync(at))\n  )\n    return going;\n",
+          "",
+        ),
+        "  if (going !== null) end(going);\n",
+        "",
       ),
   },
 
@@ -131,30 +167,27 @@ export const UNIT_R21 = [
     id: "MU-2386",
     title:
       "WEB-10a rev 21 (DA21-I2): another identity at the same address does not end the visit (its parked correction is kept for the old identity)",
-    file: DETAIL,
+    file: VISIT,
     tests: [RETURN],
     expect: /a parked correction is the identity's/,
-    patch: (t) =>
-      sub(
-        t,
-        '        identityRef.current !== mine.identity\n          ? "ended"\n          : endsAt(pathRef.current(), taskId),\n',
-        "        endsAt(pathRef.current(), taskId),\n",
-      ),
+    // Re-anchored in revision 22 (same intent): another identity at the same address ends the visit (`visitHere` compares the identity).
+    patch: (t) => sub(t, "    going.identity === identity &&\n", ""),
   },
 
   {
     id: "MU-2387",
     title:
       "WEB-10a rev 21 (DA21-I2): the day picker's address within the task ends the visit (the days it parked are dropped)",
-    file: DETAIL,
+    file: ROUTES,
     tests: [RETURN],
     expect:
       /picked again within the visit|picked again after Back once it is back|picking day A once it is back shows it/,
+    // Re-anchored in revision 22 (same intent): a change of only the query (the day picker's address) is not told as a change of path, so it never ends the visit.
     patch: (t) =>
       sub(
         t,
-        '    ? "stays"\n    : "ended";\n',
-        '    ? "ended"\n    : "ended";\n',
+        "  let last = history.location.pathname;\n  history.subscribe(() => {\n    const now = history.location.pathname;\n",
+        '  const where = () =>\n    history.location.pathname +\n    ((history.location as { search?: string }).search ?? "");\n  let last = where();\n  history.subscribe(() => {\n    const now = where();\n',
       ),
   },
 ];

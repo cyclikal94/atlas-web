@@ -10,6 +10,7 @@ const DETAIL = "src/features/tasks/detail/useTaskDetail.ts";
 const HISTORY = "src/features/tasks/detail/EntryHistory.tsx";
 const KEPT = "src/features/tasks/kept-input.ts";
 const CORRECTION = "src/features/tasks/detail/correction-owner.ts";
+const VISIT = "src/features/tasks/visit.ts";
 
 /** Restores revision 19's fallback: the visit's day, gone, is replaced by the default day (another day shown in its place). */
 const fallback = (t) =>
@@ -18,9 +19,16 @@ const fallback = (t) =>
     `        chosen = input.pinned;\n        chosenRow = kept.value;\n      } else {\n        selection = "unavailable";\n        lost = true;\n      }\n`,
     `        chosen = input.pinned;\n        chosenRow = kept.value;\n      }\n`,
   );
-/** The visit does not hold the day's progress amount (revision 19: the card's unmount drops it). Re-anchored in revision 21 (`holdDay`). */
+/**
+ * The visit does not hold the day's progress amount (revision 19: the card's unmount drops it). Re-anchored in revision 21 (`holdDay`) and
+ * revision 22 (same intent): a session is the mount's, not the visit's (its last editor letting go disowns it).
+ */
 const noAmountHold = (t) =>
-  sub(t, `    holdKept(keptKey(identity, \`record:\${progress}\`)),\n`, "");
+  sub(
+    t,
+    "  held.holders = Math.max(0, held.holders - 1);\n  dropUnheld(key, held);\n",
+    "  held.holders = Math.max(0, held.holders - 1);\n  if (held.holders === 0) held.owner = null;\n  dropUnheld(key, held);\n",
+  );
 
 /** Unit mutants (layer L1b: the app's router over the production data controller and the IndexedDB double), MU-2367..MU-2376. */
 export const UNIT_R20 = [
@@ -39,7 +47,7 @@ export const UNIT_R20 = [
     id: "MU-2368",
     title:
       "WEB-10a rev 20 (DA20-I1): the visit does not hold its day's progress amount (the record card the data hides drops it)",
-    file: DETAIL,
+    file: KEPT,
     tests: [RETURN],
     expect:
       /day A leaves, the view says so|not only after a visit|a day named in the address: the amount survives|a record pending when day A leaves/,
@@ -50,16 +58,16 @@ export const UNIT_R20 = [
     id: "MU-2369",
     title:
       "WEB-10a rev 20 (DA20-I1): the visit does not hold its day's fix input (the history the data hides drops the open fix)",
-    file: DETAIL,
+    file: HISTORY,
     tests: [RETURN],
     expect:
       /the fix open again after the visit keeps its value|a fix pending when day A leaves/,
+    // Re-anchored in revision 22 (same intent): the visit going on keeps the fix of a history the data hides (its unmount), there being no per-day hold any more.
     patch: (t) =>
       sub(
         t,
-        // Re-anchored in revision 21 (same intent): the visit's holds are made by `holdDay`.
-        `    holdKeptFix(\`\${identity}\\u0000\${progress}\`),\n`,
-        "",
+        "      if (visit === null || visit.ended()) return;\n",
+        "      return;\n",
       ),
   },
 
@@ -67,14 +75,14 @@ export const UNIT_R20 = [
     id: "MU-2370",
     title:
       "WEB-10a rev 20 (DA20-I1): the visit does not hold its day's correction (the reopened dialog the data hides drops it)",
-    file: DETAIL,
+    file: CORRECTION,
     tests: [RETURN],
     expect: /the correction reopened after the visit keeps its value/,
+    // Re-anchored in revision 22 (same intent): a dialog the data hides keeps its session while the visit goes on (`releaseCorrection`).
     patch: (t) =>
       sub(
         t,
-        // Re-anchored in revision 21 (same intent): the visit's holds are made by `holdDay`.
-        "    holdCorrection(correctionKey(identity, occurrence)),\n",
+        "  if (live && (held.revision > 0 || held.submitting !== null)) {\n    entries.set(key, { ...held, retained: true });\n    return;\n  }\n",
         "",
       ),
   },
@@ -87,15 +95,16 @@ export const UNIT_R20 = [
     tests: [RETURN],
     expect:
       /day A leaves, the view says so|not only after a visit|a day named in the address: the amount survives|a record pending when day A leaves/,
+    // Re-anchored in revision 22 (same intent): the drop after an editor unmounts ignores the visit's keeping (`retained`, both checks).
     patch: (t) =>
       sub(
         sub(
           t,
-          "  if (held.holders > 0 || held.kept || visits.has(key)) return;\n",
-          "  if (held.holders > 0 || held.kept) return;\n",
+          "  if (held.holders > 0 || retained(held)) return;\n",
+          "  if (held.holders > 0) return;\n",
         ),
-        "      !held.kept &&\n      !visits.has(key)\n",
-        "      !held.kept\n",
+        "    if (entries.get(key) === held && held.holders === 0 && !retained(held))\n",
+        "    if (entries.get(key) === held && held.holders === 0)\n",
       ),
   },
 
@@ -107,11 +116,12 @@ export const UNIT_R20 = [
     tests: [RETURN],
     expect:
       /the fix open again after the visit keeps its value|a fix pending when day A leaves/,
+    // Re-anchored in revision 22 (same intent): the history's unmount keeps the fix only for a visit that goes on (inverted: kept only once it ended).
     patch: (t) =>
       sub(
         t,
-        "      if (!leftForSync() && !fixVisits.has(owner)) return;\n",
-        "      if (!leftForSync()) return;\n",
+        "      if (visit === null || visit.ended()) return;\n",
+        "      if (visit === null || !visit.ended()) return;\n",
       ),
   },
 
@@ -122,15 +132,12 @@ export const UNIT_R20 = [
     file: CORRECTION,
     tests: [RETURN],
     expect: /the correction reopened after the visit keeps its value/,
+    // Re-anchored in revision 22 (same intent): the correction owner treats the visit as ended when a dialog lets go (a retained or edited session is dropped).
     patch: (t) =>
       sub(
-        sub(
-          t,
-          "  if (visits.has(key)) return;\n  setTimeout(",
-          "  setTimeout(",
-        ),
-        "      !now.retained &&\n      !visits.has(key)\n",
-        "      !now.retained\n",
+        t,
+        "  const live = held.owner !== null && !held.owner.ended();\n",
+        "  const live = false as boolean;\n",
       ),
   },
 
@@ -138,16 +145,16 @@ export const UNIT_R20 = [
     id: "MU-2374",
     title:
       "WEB-10a rev 20 (DA20-I1): the visit letting go for the sync screens does not keep a hidden editor's input (dropped as by any departure)",
-    file: KEPT,
+    file: VISIT,
     tests: [RETURN],
     expect:
       /leaving for the sync screens while day A is gone keeps its amount|choosing again keeps day A's amount with day A/,
+    // Re-anchored in revision 22 (same intent): the visit going to the sync screens keeps a hidden editor's input; ended there, it is dropped as by any departure.
     patch: (t) =>
       sub(
         t,
-        // Re-anchored in revision 21 (same intent): the condition also keeps a session the visit adopted.
-        "    if (\n      keep &&\n      (held.revision > 0 ||\n        held.submitting !== null ||\n        held.session === adopted)\n    ) {\n      held.kept = true;\n      return;\n    }\n    dropUnheld(key, held);\n",
-        "    dropUnheld(key, held);\n",
+        "  if (at !== visit.address && !atSync(at)) end(visit);\n",
+        "  if (at !== visit.address) end(visit);\n",
       ),
   },
 
@@ -159,10 +166,11 @@ export const UNIT_R20 = [
     tests: [RETURN],
     expect: /choosing again keeps day A's amount with day A/,
     // Re-anchored in revision 21 (same intent): choosing again parks the day in the visit instead of marking it kept on release.
+    // Re-anchored in revision 22 (same intent): choosing again parks the shown day in the visit (`shownBy(...).target = null`).
     patch: (t) =>
       sub(
         t,
-        "      if (visit.current !== null) visit.current.target = null;\n",
+        "      if (mine !== null && mine.identity === env.identity)\n        shownBy(mine, taskId).target = null;\n",
         "",
       ),
   },
@@ -175,12 +183,12 @@ export const UNIT_R20 = [
     tests: [RETURN],
     expect:
       /the visit's day leaving is said too|choosing again after day A left|choosing again keeps day A's amount/,
+    // Re-anchored in revision 22 (same intent): choosing again also clears the mount's pin.
     patch: (t) =>
       sub(
         t,
-        // Re-anchored in revision 21 (same intent).
-        "      if (visit.current !== null) visit.current.target = null;\n      pinned.current = null;\n",
-        "      if (visit.current !== null) visit.current.target = null;\n",
+        "      alone.current.target = null;\n      pinned.current = null;\n",
+        "      alone.current.target = null;\n",
       ),
   },
 ];
@@ -202,7 +210,7 @@ export const ENGINE_R20 = [
     id: "MU-2378",
     title:
       "WEB-10a N-T42: (REAL ENGINE) the visit does not hold its day's amount (day A back after another tab removed it shows none)",
-    file: DETAIL,
+    file: KEPT,
     spec: "tests/e2e/fixture.tasks.spec.ts",
     grep: "E-T42: .*another tab's sync page removes day A",
     expect: /E-T42:/,

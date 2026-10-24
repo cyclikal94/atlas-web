@@ -1125,6 +1125,19 @@ describe("DA21: the logical visit owns its day and the input typed for it", () =
     };
   }
   const nothingWritten = (t: Mounted) => expect(t.bodies()).toEqual([]);
+  /**
+   * Back with day A gone: waits until the detail has settled on SOME day state (unavailable, or a record card), then asserts the
+   * precondition (revision 22: a mutant showing another day fails here by assertion at once, instead of spending the whole wait and timing
+   * out, which left an act scope open for every later test of the file: Run 3's MU-2385).
+   */
+  async function untilUnavailable(t: Mounted) {
+    await t.until(
+      () => detailShown() && (unavailable() || recordCard() !== null),
+    );
+    expect(unavailable(), "precondition: day A is shown unavailable").toBe(
+      true,
+    );
+  }
 
   // ---- Q2, DA21-I1: the visit's target does not depend on its parent being readable -------------------------------------------------
 
@@ -1244,7 +1257,7 @@ describe("DA21: the logical visit owns its day and the input typed for it", () =
     await toSync(t);
     await removeA();
     await back(t, path);
-    await t.until(() => detailShown() && unavailable());
+    await untilUnavailable(t);
     await to(t, "/tasks");
     await restoreA();
     await revisit();
@@ -1258,7 +1271,7 @@ describe("DA21: the logical visit owns its day and the input typed for it", () =
     await toSync(t);
     await removeA();
     await back(t, path);
-    await t.until(() => detailShown() && unavailable());
+    await untilUnavailable(t);
     await restoreA();
     await t.until(() => recordCard() !== null);
     expect(daySelect()?.value).toBe(task.occurrenceId);
@@ -1298,7 +1311,7 @@ describe("DA21: the logical visit owns its day and the input typed for it", () =
     await retainCorrection();
     await removeA();
     await back(t, path);
-    await t.until(() => detailShown() && unavailable());
+    await untilUnavailable(t);
     await to(t, "/tasks");
     await restoreA();
     await revisit();
@@ -1315,7 +1328,7 @@ describe("DA21: the logical visit owns its day and the input typed for it", () =
     await toSync(t);
     await removeA();
     await back(t, path);
-    await t.until(() => detailShown() && unavailable());
+    await untilUnavailable(t);
     await to(t, "/tasks");
     await restoreA();
     await revisit();
@@ -1333,7 +1346,7 @@ describe("DA21: the logical visit owns its day and the input typed for it", () =
     await toSync(t);
     await removeA();
     await back(t, path);
-    await t.until(() => detailShown() && unavailable());
+    await untilUnavailable(t);
     // The ordinary departure and the refused save's answer land in the same turn, before the visit's drop runs.
     await act(async () => {
       await t.router.navigate({ to: "/tasks", search: {} } as never);

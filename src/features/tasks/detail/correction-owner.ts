@@ -1,4 +1,5 @@
 import type { CorrectionState } from "../model/correction";
+import { onTaskVisitEnded, type TaskVisit } from "../visit";
 
 /**
  * The owner of an occurrence correction being edited (R3, revision 2; design assessment C4). It lives in page memory, never in storage, and
@@ -11,6 +12,11 @@ import type { CorrectionState } from "../model/correction";
  * mounted, that its submitted draft was consumed, and that editor closes itself. A failed save only clears the pending mark.
  *
  * What was submitted is not kept here: the queued operation carries it durably (the conflict choices read it from there, C5).
+ *
+ * The session belongs to the logical visit of the screen it was opened on (revision 22, R34 / DA22-I1..I3; `visit.ts`): a dialog that
+ * unmounts without being discarded or consumed (the data hid its day, the cache gate hid the screen, the in-dialog sync control) while that
+ * visit goes on keeps a session holding input, for the next dialog of the day; the visit's end drops every session it owns that no dialog
+ * holds, and the task detail lets go of a day it stops showing in place (`disownCorrection`).
  */
 export interface CorrectionEntry {
   readonly session: number;
@@ -35,13 +41,19 @@ export type CorrectionEvent =
 interface Held extends CorrectionEntry {
   holders: number;
   releasing: boolean;
+  /** The visit whose input it is (null: a dialog outside any router). */
+  owner: TaskVisit | null;
 }
 
 const entries = new Map<string, Held>();
 const listeners = new Map<string, Set<(event: CorrectionEvent) => void>>();
 let sessions = 0;
-/** Days held by an open visit of the task detail showing them (`holdCorrection`), by count. */
-const visits = new Map<string, number>();
+
+// A visit that ends drops every session it owns that no dialog holds (one still held is dropped when its dialog lets go).
+onTaskVisitEnded((visit) => {
+  for (const [key, held] of [...entries])
+    if (held.owner === visit && held.holders === 0) entries.delete(key);
+});
 
 export const correctionKey = (identity: string, occurrenceId: string) =>
   `${identity}\u0000${occurrenceId}`;
@@ -64,24 +76,27 @@ export function resumable(key: string): CorrectionState | null {
 }
 
 /**
- * A dialog for `key` mounts: it resumes a retained session (or the one a remount of the same dialog just let go of), else starts a new
- * session with `initial`. Sessions of any other identity are dropped (only the displayed identity's edits are kept).
+ * A dialog for `key` mounts, on `owner`'s visit: it resumes a retained session (or the one a remount of the same dialog just let go of),
+ * else starts a new session with `initial`. Sessions of any other identity are dropped (only the displayed identity's edits are kept), and
+ * a session left by a visit that has ended is never resumed by another.
  */
 export function openCorrection(
   key: string,
   identity: string,
   initial: () => CorrectionState,
+  owner: TaskVisit | null = null,
 ): CorrectionEntry {
   for (const other of [...entries.keys()])
     if (!other.startsWith(`${identity}\u0000`)) entries.delete(other);
   const held = entries.get(key);
   if (
     held !== undefined &&
-    (held.retained || held.releasing || held.holders > 0)
+    (held.retained || held.releasing || held.holders > 0) &&
+    !(held.owner !== null && held.owner !== owner && held.owner.ended())
   ) {
     held.holders += 1;
     held.releasing = false;
-    const resumed: Held = { ...held, retained: false };
+    const resumed: Held = { ...held, retained: false, owner };
     entries.set(key, resumed);
     return resumed;
   }
@@ -94,27 +109,34 @@ export function openCorrection(
     submitting: null,
     holders: 1,
     releasing: false,
+    owner,
   };
   entries.set(key, created);
   return created;
 }
 
 /**
- * The dialog unmounts. An unretained session is dropped once nothing holds it (after the current turn, so React's development remount of
- * the same dialog resumes it rather than losing its input).
+ * The dialog unmounts without a discard or a consumed save. While its visit goes on, a session holding input (an edit, a pending save, or
+ * one the in-dialog sync control retained) is retained for the next dialog of the day. Otherwise it is dropped once nothing holds it
+ * (after the current turn, so React's development remount of the same dialog resumes it rather than losing its input).
  */
 export function releaseCorrection(key: string, session: number): void {
   const held = entries.get(key);
   if (held === undefined || held.session !== session) return;
   held.holders = Math.max(0, held.holders - 1);
-  if (held.holders > 0 || held.retained) return;
-  held.releasing = true;
+  if (held.holders > 0) return;
+  const live = held.owner !== null && !held.owner.ended();
+  if (held.retained && (held.owner === null || live)) return;
+  if (live && (held.revision > 0 || held.submitting !== null)) {
+    entries.set(key, { ...held, retained: true });
+    return;
+  }
+  entries.set(key, { ...held, retained: false, releasing: true });
   dropReleasing(key, session);
 }
 
-/** Drops a released session after the current turn if by then no dialog, sync control or visit of its day holds it. */
+/** Drops a released session after the current turn if by then no dialog holds it and nothing retained it. */
 function dropReleasing(key: string, session: number): void {
-  if (visits.has(key)) return;
   setTimeout(() => {
     const now = entries.get(key);
     if (
@@ -122,47 +144,21 @@ function dropReleasing(key: string, session: number): void {
       now.session === session &&
       now.holders === 0 &&
       now.releasing &&
-      !now.retained &&
-      !visits.has(key)
+      !now.retained
     )
       entries.delete(key);
   }, 0);
 }
 
 /**
- * The task detail's visit of a day holds that day's correction (revision 20, DA20-I1): a dialog that unmounts because the day left this
- * device keeps its session, still resumable by the next dialog for the day. Holding ADOPTS a session the in-dialog sync control retained
- * (revision 21, DA21-I2): it is the visit's from then on (still resumable), whether or not the dialog is opened again, so the visit's end
- * ends it. Letting go: `keep` (the visit went to the sync screens, or keeps the day parked) retains a session holding input (or the one it
- * adopted) as the in-dialog sync control does; otherwise an unheld session is dropped.
+ * The visit lets go of a day's correction without ending (revision 22): the task detail showing another day in place lets go of the day it
+ * showed, as a departure would. A session no dialog holds is dropped; a held one is dropped when its dialog lets go.
  */
-export function holdCorrection(key: string): (keep: boolean) => void {
-  visits.set(key, (visits.get(key) ?? 0) + 1);
-  const found = entries.get(key);
-  const adopted =
-    found?.retained === true && found.holders === 0 ? found.session : null;
-  if (found !== undefined && adopted !== null)
-    entries.set(key, { ...found, retained: false, releasing: true });
-  let holding = true;
-  return (keep) => {
-    if (!holding) return;
-    holding = false;
-    const left = (visits.get(key) ?? 1) - 1;
-    if (left > 0) visits.set(key, left);
-    else visits.delete(key);
-    const held = entries.get(key);
-    if (held === undefined || held.holders > 0 || held.retained) return;
-    if (
-      keep &&
-      (held.revision > 0 ||
-        held.submitting !== null ||
-        held.session === adopted)
-    ) {
-      entries.set(key, { ...held, retained: true });
-      return;
-    }
-    if (held.releasing) dropReleasing(key, held.session);
-  };
+export function disownCorrection(key: string): void {
+  const held = entries.get(key);
+  if (held === undefined) return;
+  if (held.holders === 0) entries.delete(key);
+  else entries.set(key, { ...held, retained: false, owner: null });
 }
 
 export function editCorrection(
@@ -238,5 +234,4 @@ export function subscribeCorrection(
 /** For tests and identity changes: forget every editing session (numbers are still never reused). */
 export function forgetCorrectionSessions(): void {
   entries.clear();
-  visits.clear();
 }

@@ -6,7 +6,6 @@ import type { TasksResult } from "../api";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { momentLabel } from "../format";
-import { useLeftForSync } from "../kept-input";
 import { forgetRefusal, noteIfRefused } from "../memory";
 import { pendingEvidenceOf } from "../model/commands";
 import type {
@@ -18,6 +17,7 @@ import type {
 import { parseDecimalInput } from "../model/decimal";
 import { MESSAGES } from "../model/form";
 import type { RowModel } from "../view";
+import { onTaskVisitEnded, type TaskVisit, useTaskVisit } from "../visit";
 
 export const HISTORY_COPY = {
   heading: "Recent entries",
@@ -176,10 +176,16 @@ interface OpenFix {
  * history of the same owner takes it: the open fix opens again as it was (same session and draft) when its entry is still a recent one
  * this device may fix, otherwise its draft is parked for the entry's next Fix, as Back to recent parks it (D6-1). Other identities' are
  * forgotten. Session and draft numbers are the page's, never reused, so a late save's answer can only ever match its own draft.
+ *
+ * It is kept for the logical visit of the screen the history was on (revision 22, R34 / DA22-I1..I3; `visit.ts`): a history that unmounts
+ * while that visit goes on (the sync screens, the data hiding its day, the cache gate hiding the screen) keeps it; the visit's end drops
+ * it, whether or not a history of the owner was shown again, and the task detail lets go of a day it stops showing in place
+ * (`forgetKeptFix`).
  */
 interface KeptFix {
   open: { entry: Shown; session: number; draft: Draft } | null;
   parked: Draft | null;
+  visit: TaskVisit;
 }
 
 /** A save's answer, for the draft and revision it submitted (D6-2). */
@@ -222,7 +228,7 @@ function settleFix(owner: string, answer: Settlement): void {
               }
           : { ...open, draft: { ...open.draft, saving: null } };
     if (open === null && parked === null) keptFixes.delete(owner);
-    else keptFixes.set(owner, { open, parked });
+    else keptFixes.set(owner, { ...kept, open, parked });
   }
   for (const listener of [...fixSettled]) listener(answer);
 }
@@ -230,41 +236,20 @@ function settleFix(owner: string, answer: Settlement): void {
 /** Whether a fix input of this owner `(identity, progress id)` is kept through a visit to the sync screens (the detail's return day). */
 export const hasKeptFix = (owner: string): boolean => keptFixes.has(owner);
 
-/** Owners held by an open visit of the task detail showing their day (`holdKeptFix`), by count. */
-const fixVisits = new Map<string, number>();
-/** How many times a history has kept its owner's input (`keptFixes.set` at its unmount): a settlement's rewrite of the entry is not one. */
-const fixKeeps = new Map<string, number>();
+// A visit that ends drops every fix input kept for it.
+onTaskVisitEnded((visit) => {
+  for (const [owner, kept] of [...keptFixes])
+    if (kept.visit === visit) keptFixes.delete(owner);
+});
 
-/**
- * The task detail's visit of a day holds that day's fix input (revision 20, DA20-I1): a history that unmounts because the day left this
- * device keeps its open fix and parked draft as a sync visit does, for the owner's next history. Letting go without `keep` (an ordinary
- * departure) drops it after the current turn unless a visit holds it again, or a history kept it anew, by then (revision 21, DA21-I2: a
- * save's answer rewriting the kept entry meanwhile does not save it from the drop); `keep` (the sync screens, or the day kept parked)
- * leaves it kept.
- */
-export function holdKeptFix(owner: string): (keep: boolean) => void {
-  fixVisits.set(owner, (fixVisits.get(owner) ?? 0) + 1);
-  let holding = true;
-  return (keep) => {
-    if (!holding) return;
-    holding = false;
-    const left = (fixVisits.get(owner) ?? 1) - 1;
-    if (left > 0) fixVisits.set(owner, left);
-    else fixVisits.delete(owner);
-    if (keep) return;
-    const keeps = fixKeeps.get(owner) ?? 0;
-    setTimeout(() => {
-      if (!fixVisits.has(owner) && (fixKeeps.get(owner) ?? 0) === keeps)
-        keptFixes.delete(owner);
-    }, 0);
-  };
+/** The visit lets go of an owner's kept fix input without ending (revision 22): the task detail showing another day in place. */
+export function forgetKeptFix(owner: string): void {
+  keptFixes.delete(owner);
 }
 
 /** For tests: forget every kept fix (numbers are still never reused). */
 export function forgetKeptFixes(): void {
   keptFixes.clear();
-  fixVisits.clear();
-  fixKeeps.clear();
 }
 
 /**
@@ -373,7 +358,7 @@ export function EntryHistory({
   current?: boolean;
 }) {
   const env = useTasksEnv();
-  const leftForSync = useLeftForSync();
+  const visitOf = useTaskVisit();
   const heading = useId();
   const goal = row.data.definition.goal;
   const owner = `${env.identity}\u0000${row.progressId}`;
@@ -1006,16 +991,19 @@ export function EntryHistory({
    * A visit to the sync screens keeps the fix input (R33): taken back by this owner's next history, given to it when the person leaves for
    * the sync screens. Any other departure drops it, as before. Taking it back is not leave to save it (revision 19, DA19-N1): the editor
    * opens again, readable, and its Save is the one decision above, so an entry corrected meanwhile (committed, or queued by another tab)
-   * blocks it as it would a mounted editor; the input is never moved to the correction. A history the data hides while the detail's visit
-   * holds its day (revision 20, DA20-I1: the day left this device) keeps it the same way, for the history shown when the day comes back.
+   * blocks it as it would a mounted editor; the input is never moved to the correction. Every unmount while the screen's visit goes on keeps
+   * it the same way (revision 22, `visit.ts`): the data hiding the day (DA20-I1), the cache gate hiding the screen (DA22-I2); the visit's
+   * end drops it (DA22-I3), so no history of a later visit is given it.
    */
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the owner (which names the identity) is the reason; the rest is read through refs
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the owner (which names the identity) is the reason; the rest is read through refs, the visit is asked for as the history opens
   useEffect(() => {
+    const visit = visitOf(env.identity);
     for (const other of [...keptFixes.keys()])
       if (!other.startsWith(`${env.identity}\u0000`)) keptFixes.delete(other);
+    // Only this visit's own kept fix is taken (a fix kept for a visit that has ended is never given to another).
     const kept = keptFixes.get(owner);
     keptFixes.delete(owner);
-    if (kept !== undefined) {
+    if (kept !== undefined && kept.visit === visit) {
       parked.current = kept.parked;
       const back = kept.open;
       if (
@@ -1034,17 +1022,15 @@ export function EntryHistory({
         parked.current = back.draft;
     }
     return () => {
-      if (!leftForSync() && !fixVisits.has(owner)) return;
+      if (visit === null || visit.ended()) return;
       const held = fixRef.current;
       const open =
         held !== null && (held.draft.unsaved || held.draft.saving !== null)
           ? { entry: held.entry, session: held.session, draft: held.draft }
           : null;
       const parkedNow = parked.current?.owner === owner ? parked.current : null;
-      if (open !== null || parkedNow !== null) {
-        keptFixes.set(owner, { open, parked: parkedNow });
-        fixKeeps.set(owner, (fixKeeps.get(owner) ?? 0) + 1);
-      }
+      if (open !== null || parkedNow !== null)
+        keptFixes.set(owner, { open, parked: parkedNow, visit });
     };
   }, [owner]);
   const fixForm =

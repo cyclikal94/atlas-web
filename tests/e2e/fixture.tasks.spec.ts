@@ -967,6 +967,9 @@ test.describe("E-T8b: keyboard only, forms and dialogs (A10, A14, A19; R7 of rev
       `/tasks/${a.taskId}?occurrence=${a.occurrenceId}`,
       [a],
     );
+    // Revision 22 (harness readiness, the revision-17 E-T39 remedy): the session's late boot reads (/sessions, /defaults/snapshot) remount the
+    // protected tree after setup returns, replacing a programmatically focused control (Run 5, WebKit: Enter met no button). Act once quiet.
+    await untilTreeSettled(page);
     await goOfflineAtBoundary(page);
     const opener = page.getByRole("button", { name: "Correct this day" });
     await opener.focus();
@@ -1004,6 +1007,9 @@ test.describe("E-T8b: keyboard only, forms and dialogs (A10, A14, A19; R7 of rev
     context,
   }) => {
     const { page } = await setup(context, "/tasks/new", []);
+    // Revision 22 (harness readiness, the revision-17 E-T39 remedy): the session's late boot reads (/sessions, /defaults/snapshot) remount the
+    // protected tree after setup returns, replacing a programmatically focused control (Run 5, WebKit: Enter met no button). Act once quiet.
+    await untilTreeSettled(page);
     await goOfflineAtBoundary(page);
     await page
       .getByRole("button", { name: "Start from scratch instead" })
@@ -4247,7 +4253,7 @@ test.describe("E-T22: the other tab's hint arrives late and twice (A8, A18; R18 
 
 test.describe("E-T23: a refusal that remounts the protected tree, and a hard reload, end the journal's transient state; the queued correction stays (A8, A13, A14; R18 of revision 6, Q14)", () => {
   for (const how of ["not_found", "forbidden", "reload"] as const)
-    test(`${how === "not_found" ? "a 404 on Refresh (mounted retention control): the same history; Fix 5 reopens on the parked 987" : how === "forbidden" ? "a 403 on Refresh remounts the protected tree: a new history, no editor; Fix 5 opens on its own value" : "a hard reload: a new history, no editor; Fix 5 opens on its own value"}; the queued fix of entry 6 keeps its id and body and nothing more is queued`, async ({
+    test(`${how === "not_found" ? "a 404 on Refresh (mounted retention control): the same history; Fix 5 reopens on the parked 987" : how === "forbidden" ? "a 403 on Refresh remounts the protected tree: a new history, no editor; Fix 5 reopens on the parked 987 (the same visit)" : "a hard reload: a new history, no editor; Fix 5 opens on its own value"}; the queued fix of entry 6 keeps its id and body and nothing more is queued`, async ({
       context,
     }) => {
       const task = buildTask({
@@ -4344,7 +4350,13 @@ test.describe("E-T23: a refusal that remounts the protected tree, and a hard rel
       await full.click();
       await expect(history).toHaveAttribute("data-journal-version", "1");
       await li(5).getByRole("button", FIX).click();
-      await expect(input).toHaveValue(how === "not_found" ? "987" : "5");
+      // REVISION 22 ADAPTATION (Review 22 R34 / design assessment DA22-I2, invariant 5: a remount at the same address continues the
+      // logical visit, which owns the person's unsaved input). Until revision 21 the 403 case asserted "5": the protected tree's remount
+      // dropped the parked draft. Its intent (R18 / Q12-Q13: the remount discards transient journal AUTHORITY, keeps durable queued work
+      // and submits nothing) is asserted above: a new history node, no editor open, Recent entries, the walk begun afresh by an explicit
+      // Full history, the queued fix of entry 6 unchanged. The raw 987 is now kept as the mounted 404 control keeps it; a reload (a new
+      // document, no page memory) still opens on "5". Original: .agtx/evidence/web10a-revision-22/adaptations/E-T23-before-revision-22.
+      await expect(input).toHaveValue(how === "reload" ? "5" : "987");
       expect(await recordsOf(page)).toEqual(queued);
     });
 });
@@ -6117,4 +6129,179 @@ test.describe("E-T43: the logical visit owns its day and the input typed for it 
       await expect(amount(page)).toHaveValue(leave ? "" : "7.125");
       expect(await draftsOf(writer)).toEqual([]);
     });
+});
+
+test.describe("E-T44: the edit visit owns the input typed on it (A10; R34 / DA22-I1, DA22-I3 of revision 22)", () => {
+  // Review 22's R34 and the design assessment's DA22-I1/I3 in real engines over the real IndexedDB, with a second real tab of the same
+  // account holding the fixture leader (E-T42's arrangement). The visit is observed from the DOCUMENT's own history here (production's
+  // route record), not a memory history. The other tab commits a page removing the task's DETAILS (its execution row) and later restoring
+  // them; the person's edit form is unavailable meanwhile, at the same address and in the same document (a marker set before typing must
+  // survive: no reload). Staying in the edit visit keeps the raw title through that absence, before or after a sync visit; an ordinary
+  // departure (the Tasks link, from the form or from the sync screens) ends it, so browser Back to the edit form is a new visit with the
+  // task's own title. Every case reads the account's drafts through the writer: retention never writes; only the explicit Save does.
+  const ORIGINAL = "Original title";
+  const TYPED = "Unfinished personal title";
+  type Upsert = { kind: string; resource: Record<string, unknown> };
+  const syncControl = (page: Page) =>
+    page.locator("[data-sync-tone]:visible").first();
+  const name = (page: Page) => page.getByLabel("Name", { exact: true });
+  async function editBesideWriter(context: BrowserContext, n: number) {
+    const net = await stubNetwork(context);
+    await serveIdentityReads(context);
+    await serveTaskReads(context);
+    await seedSettled(context);
+    const task = buildTask({ n, title: ORIGINAL });
+    const details = (task.upserts as Upsert[]).filter(
+      (u) => u.resource.kind === "execution",
+    );
+    expect(details, "exactly one execution").toHaveLength(1);
+    const writer = await bootAt(context, "/tasks");
+    await cacheTasks(writer, net, [task]);
+    const path = `/tasks/${task.taskId}/edit`;
+    const page = await bootAt(context, path);
+    await expect(name(page)).toHaveValue(ORIGINAL);
+    await untilTreeSettled(page);
+    await untilTreeSettled(writer);
+    await startLeader(writer);
+    await waitForState(writer, "idle");
+    await page.evaluate(() => {
+      (
+        window as unknown as { __editVisitDocument?: string }
+      ).__editVisitDocument = "same-document";
+    });
+    await name(page).fill(TYPED);
+    await expect(name(page)).toHaveValue(TYPED);
+    expect(await draftsOf(writer)).toEqual([]);
+    /** The writer's leader commits the page; the test waits until the account's cache holds it (E-T42's `commitOnWriter`). */
+    const commit = async (
+      revision: number,
+      changes: unknown[],
+      present: boolean,
+    ) => {
+      await commitDelta(writer, net, revision, changes);
+      await expect
+        .poll(async () => {
+          const ids = (
+            (await rowsOf(writer, "cache")) as Array<{ id: string }>
+          ).map((row) => row.id);
+          if (ids.includes(task.executionId) === present) return true;
+          await writer.evaluate(() => window.__atlasData?.nudgeSync());
+          return false;
+        })
+        .toBe(true);
+    };
+    return {
+      task,
+      path,
+      writer,
+      page,
+      remove: () =>
+        commit(2, [{ kind: "remove", id: task.executionId }], false),
+      restore: () => commit(3, details, true),
+      sameDocument: async () =>
+        expect(
+          await page.evaluate(
+            () =>
+              (window as unknown as { __editVisitDocument?: string })
+                .__editVisitDocument,
+          ),
+        ).toBe("same-document"),
+    };
+  }
+
+  test("control: details removed while the person is in the sync screens, Back to the unavailable form and staying: details back, the typed title, nothing written", async ({
+    context,
+  }) => {
+    const { path, writer, page, remove, restore, sameDocument } =
+      await editBesideWriter(context, 151);
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await remove();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(page.locator("[data-task-form]")).toHaveCount(0);
+    expect(await draftsOf(writer)).toEqual([]);
+    await restore();
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(TYPED);
+    expect(await draftsOf(writer)).toEqual([]);
+  });
+
+  test("R34: sync and Back keep the typed title; the details then leave and come back in the same visit: the typed title, and Save writes one revise of it", async ({
+    context,
+  }) => {
+    const { task, path, writer, page, remove, restore, sameDocument } =
+      await editBesideWriter(context, 152);
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(name(page)).toHaveValue(TYPED);
+    await remove();
+    await expect(page.locator("[data-task-form]")).toHaveCount(0);
+    expect(await draftsOf(writer)).toEqual([]);
+    await restore();
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(TYPED);
+    expect(await draftsOf(writer)).toEqual([]);
+    await page.getByRole("button", { name: "Save", exact: true }).click();
+    await expect
+      .poll(async () =>
+        (await draftsOf(writer)).filter((d) => d.kind === "revise_task"),
+      )
+      .toHaveLength(1);
+    const bodies = (await bodiesOf(writer)).map((b) => b.command.command);
+    expect(bodies).toEqual([
+      expect.objectContaining({
+        kind: "revise_task",
+        id: task.taskId,
+        title: TYPED,
+      }),
+    ]);
+  });
+
+  test("R34: details removed while in the sync screens, Back (unavailable), then the Tasks link: details back, Back to the edit is a new visit with the task's own title", async ({
+    context,
+  }) => {
+    const { path, writer, page, remove, restore, sameDocument } =
+      await editBesideWriter(context, 153);
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await remove();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(page.locator("[data-task-form]")).toHaveCount(0);
+    await page.getByRole("link", { name: "Tasks", exact: true }).click();
+    await expect(page).toHaveURL(/\/tasks$/);
+    await restore();
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(ORIGINAL);
+    expect(await draftsOf(writer)).toEqual([]);
+  });
+
+  test("DA22-I3: the sync control, then the Tasks link from the sync screens; browser Back twice to the edit: a new visit with the task's own title", async ({
+    context,
+  }) => {
+    const { path, writer, page, sameDocument } = await editBesideWriter(
+      context,
+      154,
+    );
+    await syncControl(page).click();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.getByRole("link", { name: "Tasks", exact: true }).click();
+    await expect(page).toHaveURL(/\/tasks$/);
+    await page.goBack();
+    await expect(page).toHaveURL(/\/sync(\?|$)/);
+    await page.goBack();
+    await expect(page).toHaveURL(new RegExp(`${path}$`));
+    await expect(name(page)).toBeVisible();
+    await sameDocument();
+    await expect(name(page)).toHaveValue(ORIGINAL);
+    expect(await draftsOf(writer)).toEqual([]);
+  });
 });

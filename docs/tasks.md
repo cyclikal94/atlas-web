@@ -398,6 +398,18 @@ fix's own drop, picking the parked day again within the visit or after a sync vi
 the details; a sync visit with day A removed meanwhile, Back, then "‹ Tasks" ends it, with the staying control) in three engines; unit
 MU-2379…MU-2387 and real-engine MU-2388…MU-2389 (`scripts/mutation/catalogue-web10a-r21.mjs`; MU-2340, MU-2352, MU-2368…MU-2370 and
 MU-2374…MU-2376 re-anchored, same intent).
+Revision 22 (Review 22 R34 and its design assessment: DA22-I1, DA22-I2, DA22-I3; decision 48): `task-visit-ownership.test.tsx` (the
+edit form the data hides, before and after a sync visit, with a save pending and refused while hidden, after leaving, and another identity;
+the cache gate hiding and showing the edit form, the new form and the detail's amount, fix and correction, and a departure while hidden;
+leaving the sync screens for the task list ends the edit, the new form, the amount, the fix and a retained correction; the picker's sync
+control goes straight to the sync screens; the protected tree remounted in place; controls: staying, Back, the queue's way back, a readable
+refresh, an explicit Save writing one revise), `task-visit.test.ts` (the visit's lifecycle) and `route-changes.test.ts` (the memory-history
+route record told as the document's); native E-T44 (another real tab removes and restores the task's details around the edit form; the
+Tasks link from the form or from the sync screens, then browser Back, starts afresh) in three engines; unit MU-2390…MU-2399 and real-engine
+MU-2400…MU-2401 (`scripts/mutation/catalogue-web10a-r22.mjs`); MU-2079, MU-2330…MU-2333, MU-2338, MU-2340, MU-2345, MU-2347,
+MU-2350…MU-2352, MU-2368…MU-2376, MU-2378 and MU-2381…MU-2387 re-anchored to the visit (same intent; MU-2389 through its shared helper).
+`sync-visit-retention.test.tsx` "kept for its own task only" is adapted, labelled: another task's form from the sync screens is a
+departure, so the first task starts afresh.
 
 **Decided: enrolment after a full reload or crash (RECOVERY-NAVIGATION-ENROLMENT-20261014 D4, Kieran, 14 October 2026).** A15 does not
 require a persistent same-key attempt across a full reload or crash. On reopening, the authorised enrolment is read again; the old
@@ -542,6 +554,26 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     ends the visit and drops everything it holds, the parked days included, so no later visit resumes it. A save's answer arriving after
     that end cannot keep a dropped fix (the drop no longer compares the kept entry's object). Before this, the details leaving dropped
     the input, and input taken back from the sync screens or parked outlived an ordinary departure until some later editor resumed it.
+48. **Unsaved input belongs to the logical visit of its screen, observed from the route (R34, DA22-I1..I3, revision 22).** Decisions 44,
+    46 and 47 still let the component that could render decide: the edit form the data hid lost its title (its session had no visit to
+    hold it), input kept through the sync screens outlived a departure made while its editor could not mount, the cache gate hiding the
+    whole screen let the shown day go, and leaving the sync screens for anywhere else kept everything. Now `visit.ts` owns it: a visit
+    is one screen address (`location.pathname`; the query and the fragment are not a change) for one displayed identity. It begins when a
+    task screen first asks for it there, goes on at the sync screens and back at its own address (Back, the queue's way back, a push),
+    and ends on any other address, from the screen or from the sync screens, observed by the document's own record of its address
+    (`route-changes.ts`, installed before any router), so a departure while the cache gate shows, while the protected tree is closed or
+    while the person is still at the sync screens ends it too; another identity asking ends it as well. Every editor's session (task
+    forms, the picker's choice, the amount, the entry fix, the occurrence correction) is owned by the visit it was opened on: while the
+    visit goes on, a session holding the person's input survives its editor unmounting for any reason (the data hiding it, the gate, a
+    remount, the sync screens) and the next editor resumes it raw; when the visit ends, every session it owns is dropped, mounted again or
+    not, and an ended visit's session is never resumed by another (both checked). A session holding nothing of the person's is still
+    dropped once no editor holds it, so a definition synced meanwhile is shown. The detail lets go of a day it stops showing in place,
+    unless parked by "Show this task's days"; what it shows is the visit's, so a remount in place keeps the shown day's input. The preset
+    picker's in-dialog sync control now goes to the sync screens straight from the picker (no longer through the task list, which is a
+    departure), so Back finds the picker. Retention never writes, enqueues, edits or supersedes a queued operation and never navigates; a
+    save's answer still settles only its own session and revision. Page memory only: a reload, another tab or another identity sees
+    nothing. The component tests' routers use a memory history, which never moves the document: their harness gives the visits that
+    history's changes (`createHistoryRouteChanges`), with the document record's semantics.
 ## Personal results offline (ARCH §3.3c, TASK-31)
 
 In order: covered (and I am listed) → incomplete, then missed when closed; my stream excluded and the task allows it → excluded; my stream
@@ -641,11 +673,12 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 - **Device time-zone data** can differ from the server's bundled data; server values win wherever they exist.
 - **Two `/daily` reads per view**, not profiled here (WEB-09c owns measurements).
 - **A `403` re-check of the session** closes and reopens the display: a screen remounts, by design of the session.
-- **Unfinished input is kept for a sync visit only (decision 44, revision 18).** ia.md §1.3.3 requires it for checking sync state; a
-  `403` re-check's remount at the same address, a reload, a crash or another tab keep nothing new here (the enrolment draft and the
-  correction keep their own owners; Q4 update recovery is WEB-14a's). A kept session lasts until its editor opens again, a save consumes
-  it, the detail visit that took it back from the sync screens (or parked it) ends (decision 47), another identity opens an editor or the
-  page is reloaded. Leaving the sync screens for anywhere but the screen it was typed on still keeps it, as decision 44 decided.
+- **Unfinished input lasts for its screen's logical visit only (decisions 44 and 48, revisions 18 and 22).** ia.md §1.3.3 requires it
+  for checking sync state; the same visit also keeps it through the data hiding an editor, the cache gate and a `403` re-check's remount
+  at the same address. A reload, a crash, another tab or another identity keep nothing (the enrolment draft keeps its own owner; Q4
+  update recovery is WEB-14a's). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
+  other than to the sync screens, including leaving the sync screens for anywhere but that address (revision 22 reverses decision 44 on
+  this point, per Review 22 and DA22-I3).
 
 ## Not claimed
 

@@ -268,6 +268,8 @@ describe("the new-task form (R33)", () => {
     expect(t.drafts()).toEqual([]);
   });
 
+  // Revision 22: its readiness waits accept either stage of New task (the assertions below decide), so a mutant that brings the form back
+  // fails by assertion, not by spending the whole wait (Run 2: MU-2334's timeout under contention).
   test("another identity never sees it, and coming back to the first identity it is gone", async () => {
     const t = await scratchForm();
     typeUnfinished();
@@ -275,13 +277,13 @@ describe("the new-task form (R33)", () => {
     t.rerender(tasksEnv(t.api, { online: false, identity: `${OTHER}:1` }));
     await t.settle();
     await back(t, "/tasks/new");
-    await t.until(pickerShown);
+    await t.until(() => pickerShown() || formShown());
     expect(formShown()).toBe(false);
     await to(t, "/tasks");
     t.rerender(tasksEnv(t.api, { online: false }));
     await t.settle();
     await to(t, "/tasks/new");
-    await t.until(pickerShown);
+    await t.until(() => pickerShown() || formShown());
     expect(formShown()).toBe(false);
   });
 });
@@ -381,7 +383,7 @@ describe("the edit form (R33)", () => {
     expect(field(FORM_COPY.name).value).toBe("Original title");
   });
 
-  test("kept for its own task only: another task's form starts from that task", async () => {
+  test("kept for its own task only: another task's form starts from that task, and going there ends the first task's edit", async () => {
     const { t, task } = await editForm();
     const other = await seededTask({ title: "Other task" });
     t.world.idb.seed("atlas-" + ME, "cache", other.rows);
@@ -392,7 +394,12 @@ describe("the edit form (R33)", () => {
     expect(field(FORM_COPY.name).value).toBe("Other task");
     await to(t, `/tasks/${task.taskId}/edit`);
     await t.until(formShown);
-    expect(field(FORM_COPY.name).value).toBe("Typed for the first task");
+    // REVISION 22 ADAPTATION (Review 22 R34 / design assessment DA22-I3, the ordinary-departure rule): leaving the sync screens for
+    // another task's form is an ordinary departure from the first task's edit, so its unsaved title is retired, never resurrected on a
+    // later visit. Until revision 21 this asserted "Typed for the first task". The original intent, input kept for its own editor only, is
+    // the assertion on the other task's form above; sync and Back to the SAME form keeping it is the first test of this group.
+    expect(field(FORM_COPY.name).value).toBe("Original title");
+    expect(t.drafts()).toEqual([]);
   });
 });
 

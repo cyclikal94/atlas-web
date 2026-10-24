@@ -8,6 +8,7 @@ const RETENTION = "tests/features/tasks/sync-visit-retention.test.tsx";
 const ACK = "tests/features/tasks/save-acknowledgement.test.tsx";
 const OWNERSHIP = "tests/features/tasks/correction-ownership.test.tsx";
 const KEPT = "src/features/tasks/kept-input.ts";
+const VISIT = "src/features/tasks/visit.ts";
 const FORM = "src/features/tasks/form/TaskFormPage.tsx";
 const HISTORY = "src/features/tasks/detail/EntryHistory.tsx";
 
@@ -21,11 +22,12 @@ export const UNIT_R18 = [
     tests: [RETENTION],
     expect:
       /left for the sync queue and back|stage chosen and nothing typed|raw \(here invalid, empty\) name|amount being typed \(raw\)|record mode is kept/,
+    // Re-anchored in revision 22 (same intent): a session is kept only while its visit goes on (`retained`); never kept, every editor's input is dropped at the sync screens.
     patch: (t) =>
       sub(
         t,
-        `  if (toSync && (unedited || held.revision > 0 || held.submitting !== null)) {`,
-        `  if (false as boolean) {`,
+        "  held.owner !== null && !held.owner.ended() && holdsInput(held);\n",
+        "  false as boolean;\n",
       ),
   },
 
@@ -33,16 +35,13 @@ export const UNIT_R18 = [
     id: "MU-2331",
     title:
       "WEB-10a rev 18 (R33): every departure keeps the input, not only a visit to the sync screens",
-    file: KEPT,
+    file: VISIT,
     tests: [RETENTION],
     expect:
       /control: left for the task list instead|control: left for the task's detail instead|control: left for Today instead/,
+    // Re-anchored in revision 22 (same intent): departures end the logical visit (`heard`); a visit no departure ends keeps the input wherever the person goes.
     patch: (t) =>
-      sub(
-        t,
-        `  if (toSync && (unedited || held.revision > 0 || held.submitting !== null)) {`,
-        `  if (unedited || held.revision > 0 || held.submitting !== null) {`,
-      ),
+      sub(t, "  if (at !== visit.address && !atSync(at)) end(visit);\n", ""),
   },
 
   {
@@ -52,11 +51,12 @@ export const UNIT_R18 = [
     file: KEPT,
     tests: [RETENTION],
     expect: /an unedited form holds nothing of the person's/,
+    // Re-anchored in revision 22 (same intent): the visit keeps only sessions holding input (`holdsInput`); an unedited one kept hides a definition synced meanwhile.
     patch: (t) =>
       sub(
         t,
-        `  if (toSync && (unedited || held.revision > 0 || held.submitting !== null)) {`,
-        `  if (toSync) {`,
+        "  held.revision > 0 || held.submitting !== null || held.unedited;\n",
+        "  true as boolean;\n",
       ),
   },
 
@@ -67,11 +67,12 @@ export const UNIT_R18 = [
     file: KEPT,
     tests: [RETENTION],
     expect: /stage chosen and nothing typed yet is kept/,
+    // Re-anchored in revision 22 (same intent): the chosen creation stage counts as input through `unedited`.
     patch: (t) =>
       sub(
         t,
-        `  if (toSync && (unedited || held.revision > 0 || held.submitting !== null)) {`,
-        `  if (toSync && (held.revision > 0 || held.submitting !== null)) {`,
+        "  held.revision > 0 || held.submitting !== null || held.unedited;\n",
+        "  held.revision > 0 || held.submitting !== null;\n",
       ),
   },
 
@@ -82,11 +83,27 @@ export const UNIT_R18 = [
     file: KEPT,
     tests: [RETENTION],
     expect: /another identity never sees it/,
+    // Re-anchored in revision 22 (same intent): another identity's visit now ends the first identity's (`visit.ts`), whose end drops its
+    // sessions and whose ended sessions are never resumed, so the open-time forgetting alone is a redundant layer (Run 1 of revision 22:
+    // MU-2334 survived). The mutant removes every layer of the store's identity forgetting: the open-time prune, the end's drop and the
+    // ended-owner checks at open and read.
     patch: (t) =>
       sub(
-        t,
-        `    if (!other.startsWith(\`\${identity}\\u0000\`)) entries.delete(other);\n`,
-        "    if (false as boolean) entries.delete(other);\n",
+        sub(
+          sub(
+            sub(
+              t,
+              `    if (!other.startsWith(\`\${identity}\\u0000\`)) entries.delete(other);\n`,
+              "    if (false as boolean) entries.delete(other);\n",
+            ),
+            "    if (held.owner === visit && held.holders === 0) entries.delete(key);\n",
+            "    void [key, held, visit];\n",
+          ),
+          "    held !== undefined &&\n    !(held.owner !== null && held.owner !== owner && held.owner.ended())\n  ) {",
+          "    held !== undefined\n  ) {",
+        ),
+        "  if (held === undefined || held.owner?.ended()) return null;\n",
+        "  if (held === undefined) return null;\n",
       ),
   },
 
@@ -141,11 +158,20 @@ export const UNIT_R18 = [
     file: KEPT,
     tests: [RETENTION],
     expect: /after coming back, leaving for anywhere else drops it/,
+    // Re-anchored in revision 22 (same intent): a session resumed after the sync screens stays kept for good: retention ignores the visit's end, and the next visit resumes it (both the drop and the open-time checks of the ended owner removed).
     patch: (t) =>
       sub(
-        t,
-        `    held.holders += 1;\n    held.kept = false;\n`,
-        `    held.holders += 1;\n`,
+        sub(
+          sub(
+            t,
+            "  held.owner !== null && !held.owner.ended() && holdsInput(held);\n",
+            "  held.owner !== null && holdsInput(held);\n",
+          ),
+          "    held !== undefined &&\n    !(held.owner !== null && held.owner !== owner && held.owner.ended())\n  ) {",
+          "    held !== undefined\n  ) {",
+        ),
+        "  if (held === undefined || held.owner?.ended()) return null;\n",
+        "  if (held === undefined) return null;\n",
       ),
   },
 
@@ -168,16 +194,16 @@ export const UNIT_R18 = [
     id: "MU-2340",
     title:
       "WEB-10a rev 18 (R33): the editor's unmount never reads where the router went (the sync screens look like any departure)",
-    file: KEPT,
+    file: VISIT,
     tests: [RETENTION],
     expect:
       /left for the sync queue and back|amount being typed \(raw\)|raw \(here invalid, empty\) name/,
+    // Re-anchored in revision 22 (same intent): the visit goes on at the sync screens (`heard`); the sync screens treated as any departure.
     patch: (t) =>
       sub(
         t,
-        // Re-anchored in revision 21 (same intent): the router's path is read through \`useLatestPath\`.
-        "  return () => atSync(path());",
-        `  return () => atSync("");`,
+        "  if (at !== visit.address && !atSync(at)) end(visit);\n",
+        "  if (at !== visit.address) end(visit);\n",
       ),
   },
 
@@ -204,11 +230,22 @@ export const UNIT_R18 = [
     file: HISTORY,
     tests: [RETENTION],
     expect: /a kept fix is the displayed identity's/,
+    // Re-anchored in revision 22 (same intent): another identity's visit now ends the first identity's, whose end drops its kept fixes and
+    // whose kept fix no other visit takes, so the open-time forgetting alone is a redundant layer (Run 1 of revision 22: MU-2342 survived).
+    // The mutant removes every layer of the kept fixes' identity forgetting: the open-time prune, the end's drop and the take's visit check.
     patch: (t) =>
       sub(
-        t,
-        `      if (!other.startsWith(\`\${env.identity}\\u0000\`)) keptFixes.delete(other);\n`,
-        "      if (false as boolean) keptFixes.delete(other);\n",
+        sub(
+          sub(
+            t,
+            `      if (!other.startsWith(\`\${env.identity}\\u0000\`)) keptFixes.delete(other);\n`,
+            "      if (false as boolean) keptFixes.delete(other);\n",
+          ),
+          "    if (kept.visit === visit) keptFixes.delete(owner);\n",
+          "    void [owner, kept, visit];\n",
+        ),
+        "    if (kept !== undefined && kept.visit === visit) {\n",
+        "    if (kept !== undefined) {\n",
       ),
   },
 
@@ -247,12 +284,12 @@ export const UNIT_R18 = [
     file: HISTORY,
     tests: [RETENTION],
     expect: /an open fix is open again|success closes it unless a newer value/,
+    // Re-anchored in revision 22 (same intent): the history's unmount keeps the fix for the visit going on.
     patch: (t) =>
-      // Re-anchored in revision 20 (same intent): the cleanup also keeps the fix for the detail's visit of its day (DA20-I1).
       sub(
         t,
-        `      if (!leftForSync() && !fixVisits.has(owner)) return;\n`,
-        `      return;\n`,
+        "      if (visit === null || visit.ended()) return;\n",
+        "      return;\n",
       ),
   },
 
@@ -278,11 +315,12 @@ export const UNIT_R18 = [
     file: HISTORY,
     tests: [RETENTION],
     expect: /success closes it unless a newer value was typed/,
+    // Re-anchored in revision 22 (same intent): the kept fix is rewritten by a save's answer (visit preserved).
     patch: (t) =>
       sub(
         t,
-        `    if (open === null && parked === null) keptFixes.delete(owner);\n    else keptFixes.set(owner, { open, parked });\n`,
-        ``,
+        "    if (open === null && parked === null) keptFixes.delete(owner);\n    else keptFixes.set(owner, { ...kept, open, parked });\n",
+        "",
       ),
   },
 
@@ -328,11 +366,12 @@ export const ENGINE_R18 = [
     spec: "tests/e2e/fixture.tasks.spec.ts",
     grep: "E-T40: .*(new task|edit task|progress amount): the",
     expect: /E-T40:/,
+    // Re-anchored in revision 22 (same intent): as MU-2330.
     patch: (t) =>
       sub(
         t,
-        `  if (toSync && (unedited || held.revision > 0 || held.submitting !== null)) {`,
-        `  if (false as boolean) {`,
+        "  held.owner !== null && !held.owner.ended() && holdsInput(held);\n",
+        "  false as boolean;\n",
       ),
   },
 
@@ -344,12 +383,12 @@ export const ENGINE_R18 = [
     spec: "tests/e2e/fixture.tasks.spec.ts",
     grep: "E-T40: .*entry fix: the open fix",
     expect: /E-T40:/,
+    // Re-anchored in revision 22 (same intent): as MU-2345.
     patch: (t) =>
-      // Re-anchored in revision 20 (same intent): the cleanup also keeps the fix for the detail's visit of its day (DA20-I1).
       sub(
         t,
-        `      if (!leftForSync() && !fixVisits.has(owner)) return;\n`,
-        `      return;\n`,
+        "      if (visit === null || visit.ended()) return;\n",
+        "      return;\n",
       ),
   },
 
@@ -357,16 +396,16 @@ export const ENGINE_R18 = [
     id: "MU-2352",
     title:
       "WEB-10a N-T40: (REAL ENGINE) the editor's unmount never reads where the router went (the real sync control looks like any departure)",
-    file: KEPT,
+    file: VISIT,
     spec: "tests/e2e/fixture.tasks.spec.ts",
     grep: "E-T40: .*(new task|edit task|progress amount): the",
     expect: /E-T40:/,
+    // Re-anchored in revision 22 (same intent): as MU-2340: the real sync control ends the visit like any departure.
     patch: (t) =>
       sub(
         t,
-        // Re-anchored in revision 21 (same intent): the router's path is read through \`useLatestPath\`.
-        "  return () => atSync(path());",
-        `  return () => atSync("");`,
+        "  if (at !== visit.address && !atSync(at)) end(visit);\n",
+        "  if (at !== visit.address) end(visit);\n",
       ),
   },
 ];
