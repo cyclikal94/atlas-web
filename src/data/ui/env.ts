@@ -88,10 +88,12 @@ export interface DataActions {
    * when the person explicitly continued without it), and SUPERSEDES the draft (a new operation id). Never rebuilt on the cache.
    * `not_rebuildable`: nothing is registered, or the rebuild declined; nothing was changed. `reviewed`: the `command_digest` of the body the
    * dialog showed (a kind that registered `review`): the draft is superseded only while it is stored with exactly that body.
+   * `related`: the other rows that authorised read returned, for the rebuild's checks.
    */
   saveAsNew(
     localId: LocalId,
     current: CacheRow | null,
+    related?: readonly CacheRow[],
     reviewed?: string,
   ): Promise<SaveAsNewOutcome>;
   /** The next window of the queue replaces the one shown. */
@@ -1049,7 +1051,10 @@ export function createDataEnv(
       const facade = leader.outbox ?? outbox;
       if (facade === null)
         return { kind: "refused", reason: "closed" } as ConfirmReviewOutcome;
-      return facade.confirmDefaultsReview(localId, confirmation);
+      // What the draft's commands need of the person's access, from the slices' registry (WEB-10a DA17-N2).
+      return facade.confirmDefaultsReview(localId, confirmation, (draft) =>
+        commands.admission(draft),
+      );
     },
     discard: async (localId) => {
       const facade = outbox;
@@ -1135,7 +1140,7 @@ export function createDataEnv(
         currentReads.delete(read);
       }
     },
-    saveAsNew: async (localId, base, reviewed) => {
+    saveAsNew: async (localId, base, related, reviewed) => {
       const bound = current;
       const facade = leader.outbox ?? outbox;
       if (bound === null || facade === null || !bound.service.live)
@@ -1148,7 +1153,7 @@ export function createDataEnv(
       if (draft === null || !commands.canRebuild(draft))
         return { kind: "refused", reason: "not_rebuildable" };
       // R7: rebuilt on the value of the authorised current read the person reviewed, never on the cache.
-      const next = commands.rebuild(draft, base);
+      const next = commands.rebuild(draft, base, related);
       if (next === null) return { kind: "refused", reason: "not_rebuildable" };
       // Bound to the body the person saw (WEB-11a review 2): one changed since by another page is not replaced (`draft_changed`).
       if (reviewed === undefined) return facade.supersede(localId, next);

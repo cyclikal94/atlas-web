@@ -1,6 +1,7 @@
 import type {
   CacheRow,
   CommandRegistry,
+  CommandSpec,
   CurrentRead,
   CurrentReadIo,
   DraftWithCommand,
@@ -18,7 +19,8 @@ import type {
  *   `null` for a target that is not of its kind (a `404` from a person read is not proof the target is gone: it may be a task or a field).
  *   When none recognises it, the current state is `indeterminate`: the dialog says it could not load it, and the row's own conflict UI
  *   (the slice's screen) covers it.
- * - `rebuild`: the same `archived` choice on the version the current read returned (never the cache), or nothing without one.
+ * - `rebuild`: the same `archived` choice on the version the current read returned (never the cache), or nothing without one. A slice
+ *   can register its own rebuilder by resource kind, retaining its reviewed-base, permission and captured-defaults rules.
  */
 export type ArchiveReader = (
   id: string,
@@ -26,6 +28,18 @@ export type ArchiveReader = (
 ) => Promise<CurrentRead | null>;
 
 const readers: ArchiveReader[] = [];
+const rebuilders = new Map<
+  CacheRow["kind"],
+  NonNullable<CommandSpec["rebuild"]>
+>();
+
+/** A slice can retain its version, permission and captured-defaults rules for its resource kind. */
+export function registerArchiveRebuilder(
+  kind: CacheRow["kind"],
+  rebuild: NonNullable<CommandSpec["rebuild"]>,
+): void {
+  rebuilders.set(kind, rebuild);
+}
 
 /** Adds a per-kind reader (idempotent for the same function). */
 export function registerArchiveReader(reader: ArchiveReader): void {
@@ -68,10 +82,13 @@ export async function readArchiveTarget(
 export function rebuildArchive(
   draft: DraftWithCommand,
   current: CacheRow | null,
+  related?: readonly CacheRow[],
 ): EnqueueRequest | null {
   const target = archiveOf(draft);
   if (target === null || current === null || current.id !== target.id)
     return null;
+  const rebuild = rebuilders.get(current.kind);
+  if (rebuild !== undefined) return rebuild(draft, current, related);
   return {
     endpoint: "/task-commands",
     targets: [
@@ -105,11 +122,16 @@ export function registerArchiveKind(registry: CommandRegistry): void {
     describe: () => "Archive or restore",
     readCurrent: readArchiveTarget,
     rebuild: rebuildArchive,
+    admission: (draft) => {
+      const target = archiveOf(draft);
+      return target === null ? {} : { [target.id]: { requiresEdit: true } };
+    },
   });
   registered.add(registry);
 }
 
-/** For tests: forget the readers. */
+/** For tests: forget the readers and slice rebuilders. */
 export function forgetArchiveReaders(): void {
   readers.length = 0;
+  rebuilders.clear();
 }

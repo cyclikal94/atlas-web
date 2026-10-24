@@ -398,7 +398,7 @@ describe("DA12-07: planEdit's newest-save rule (pure)", () => {
   ];
   for (const [name, request, others, kind] of cases)
     test(`${name}: ${kind}`, () => {
-      const planned = planEdit(request, L, sync, {
+      const planned = planEdit(request, L, sync, undefined, undefined, {
         later: others,
         command: stored,
       });
@@ -412,7 +412,7 @@ describe("DA12-07: planEdit's newest-save rule (pure)", () => {
       reason: "not_latest",
     });
     expect(
-      planEdit(edit("A", "rev-2"), L, sync, {
+      planEdit(edit("A", "rev-2"), L, sync, undefined, undefined, {
         later: [later()],
         command: undefined,
       }),

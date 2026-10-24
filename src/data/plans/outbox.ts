@@ -221,7 +221,8 @@ export type EnqueueResult =
         | "changed"
         | "source_changed"
         /** The request's `expectPredecessor` is not the save stored now (`predecessorStands`); nothing was written. */
-        | "predecessor_changed";
+        | "predecessor_changed"
+        | "denied";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -451,7 +452,8 @@ export type EditResult =
         | "not_queued"
         | "retargeted"
         | "draft_changed"
-        | "not_latest";
+        | "not_latest"
+        | "denied";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -460,6 +462,13 @@ interface EditReads {
   draft: DraftRow | undefined;
   /** Read only for a request with `expectLatest`: the later saves of the draft's targets and its stored body. */
   latest?: LatestFacts;
+  /**
+   * The cached rows of the targets the request needs to write (`requiresEdit`), and of the participations it would create
+   * (`joinRequiresEdit`) and the resources they name, read in this transaction.
+   */
+  cache: Map<ResourceId, CacheRow>;
+  /** The other unsettled drafts that write such a participation (`TargetFold` stand-ins; never the edited draft). */
+  others: DraftRow[];
 }
 
 export const editQueuedDraft = singletonPlan<
@@ -476,34 +485,75 @@ export const editQueuedDraft = singletonPlan<
 >({
   name: "data.editQueuedDraft",
   meta: { writer: "W3", guards: ["INC", "FEN"], quota: "input" },
-  scope: ["drafts", "draft_commands"],
+  scope: ["drafts", "draft_commands", "cache"],
   durability: "strict",
   read: async (reader, input) => {
     const draft = await reader.get("drafts", input.localId);
-    if (draft === undefined || input.request.expectLatest !== true)
-      return { draft };
-    // The newest-save rule (D-11a-15, review 12): the latest unsettled other draft of each primary target, by the target index.
-    const later: DraftRow[] = [];
-    for (const id of draft.target_resource_ids) {
-      const fold = new TargetFold(id);
+    // The permission an edit needs is read in the SAME transaction that writes it (R30): a denial committed before it is honoured.
+    // (A request's target ids are distinct: `validateRequest`.)
+    // A participation the edit would create is known from the cache or another unsettled draft that writes it (DA17-N2), read here too.
+    const joins = input.request.targets.filter(
+      (target) => target.joinRequiresEdit !== undefined,
+    );
+    const ids = input.request.targets.flatMap((target) =>
+      target.joinRequiresEdit !== undefined
+        ? [target.resourceId, target.joinRequiresEdit]
+        : target.requiresEdit
+          ? [target.resourceId]
+          : [],
+    );
+    const rows = await bulkGetWindowed(reader, "cache", ids);
+    const cache = new Map<ResourceId, CacheRow>();
+    for (const row of rows) if (row) cache.set(row.id, row);
+    const others = new Map<LocalId, DraftRow>();
+    for (const target of joins) {
+      const fold = new TargetFold(target.resourceId);
       await walkIndex(
         reader,
         "drafts",
         "index_targets",
-        range.only(id),
+        range.only(target.resourceId),
+        // Only a draft OLDER than the edited one is evidence: a later one that writes the stream stands on the edited draft (it depends on
+        // it), and the edited draft is not its own evidence (left in as the latest, either would also hide an older one from the fold).
         (row) => {
-          if (row.local_id !== draft.local_id) fold.add(row);
+          if (draft !== undefined && row.created_seq < draft.created_seq)
+            fold.add(row);
         },
       );
-      if (fold.latest !== undefined) later.push(fold.latest);
+      for (const row of fold.rows()) others.set(row.local_id, row);
     }
-    const body = await reader.get("draft_commands", input.localId);
-    return { draft, latest: { later, command: body?.command } };
+    let latest: LatestFacts | undefined;
+    if (draft !== undefined && input.request.expectLatest === true) {
+      const later: DraftRow[] = [];
+      for (const id of draft.target_resource_ids) {
+        const fold = new TargetFold(id);
+        await walkIndex(
+          reader,
+          "drafts",
+          "index_targets",
+          range.only(id),
+          (row) => {
+            if (row.local_id !== draft.local_id) fold.add(row);
+          },
+        );
+        if (fold.latest !== undefined) later.push(fold.latest);
+      }
+      const body = await reader.get("draft_commands", input.localId);
+      latest = { later, command: body?.command };
+    }
+    return { draft, cache, others: [...others.values()], latest };
   },
   decide: ({ sync, reads, input }) => {
     if (sync === undefined)
       return { result: { kind: "refused", reason: "not_found" } };
-    const planned = planEdit(input.request, reads.draft, sync, reads.latest);
+    const planned = planEdit(
+      input.request,
+      reads.draft,
+      sync,
+      reads.cache,
+      reads.others,
+      reads.latest,
+    );
     if (planned.kind !== "edited") return { result: planned };
     const over = overBound(input, {
       draft: planned.draft,
@@ -675,6 +725,8 @@ export type SupersedeResult =
         | "not_supersedable"
         | "key_in_use"
         | "no_base"
+        /** As `EnqueueResult`'s `denied`. */
+        | "denied"
         /** The request's `expectDraft` refused the old draft as it is stored now; nothing was written. */
         | "draft_changed"
         /** No order of the queue lets the replacement and the drafts around it all be sent (R45, revision 25); nothing was written. */

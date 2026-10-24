@@ -887,6 +887,8 @@ export function peopleWorld(
         request,
         stored,
         syncRow(),
+        undefined,
+        undefined,
         stored === undefined || request.expectLatest !== true
           ? undefined
           : {

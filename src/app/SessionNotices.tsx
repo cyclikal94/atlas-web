@@ -1,5 +1,5 @@
-import { useEffect, useSyncExternalStore } from "react";
-import { useAnnouncer } from "../components/ui/announcer";
+import { useEffect, useRef, useSyncExternalStore } from "react";
+import { type Announcement, useAnnouncer } from "../components/ui/announcer";
 import { Button } from "../components/ui/button";
 import { authFeedback } from "../features/authentication/feedback";
 import { MessageText } from "../features/authentication/MessageText";
@@ -33,25 +33,50 @@ export function SessionNotices() {
     authFeedback.get,
     authFeedback.get,
   );
-  const first = notices[0]?.id;
-  const latest = feedback[feedback.length - 1];
-  // biome-ignore lint/correctness/useExhaustiveDependencies: announce once per notice, not per announcer identity
+  /**
+   * Every notice OBSERVED in this presentation (by id, never by text or list position), with what it announced if it
+   * announced anything (WEB-10a revision 8, review 8 R20). One reconciliation of the whole lists: a removed notice retracts its own
+   * announcement (Kieran's decision of 15 October 2026: a later announcement is never erased), and only a notice not seen before
+   * is announced: one per source, the first new session notice and the latest new sign-in fact, as before. A removal alone
+   * therefore announces nothing, so dismissing one notice can never replay a survivor over a later message (`Progress saved`)
+   * or cancel that message's frame, whether the survivor had announced or was observed in the same render as another arrival.
+   * Removed ids are forgotten, so the record is bounded by what is shown.
+   */
+  const observed = useRef(new Map<string | number, Announcement | null>());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reconcile per change of the lists, not per announcer identity
   useEffect(() => {
-    if (first) announcer.announce(REMAINED_SIGNED_IN);
-  }, [first]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: announce once per fact, not per announcer identity
-  useEffect(() => {
-    if (!latest) return;
-    announcer.announce(
-      latest.kind === "superseded"
-        ? SUPERSEDED_BANNER.message
-        : latest.kind === "lock_wait"
-          ? LOCK_WAIT_BANNER.heading
-          : latest.kind === "ended"
-            ? ENDED_IN_TREE.heading
-            : textOf(latest.message),
-    );
-  }, [latest?.id]);
+    const seen = observed.current;
+    // A session notice's id is a string and a sign-in fact's a number, so the two never meet in one map.
+    const shown = [...notices, ...feedback].map((item) => item.id);
+    for (const [id, announcement] of seen)
+      if (!shown.includes(id)) {
+        seen.delete(id);
+        announcement?.retract();
+      }
+    const notice = notices.find((item) => !seen.has(item.id));
+    const fact = feedback.filter((item) => !seen.has(item.id)).pop();
+    for (const id of shown) if (!seen.has(id)) seen.set(id, null);
+    if (notice) seen.set(notice.id, announcer.announce(REMAINED_SIGNED_IN));
+    if (fact)
+      seen.set(
+        fact.id,
+        announcer.announce(
+          fact.kind === "superseded"
+            ? SUPERSEDED_BANNER.message
+            : fact.kind === "lock_wait"
+              ? LOCK_WAIT_BANNER.heading
+              : fact.kind === "ended"
+                ? ENDED_IN_TREE.heading
+                : textOf(fact.message),
+        ),
+      );
+  }, [notices, feedback]);
+  /**
+   * The presentation ends with this component (and the provider it lives in, which cancels pending frames): nothing observed is kept,
+   * so a protected tree that mounts again presents the surviving page-memory notices afresh, and StrictMode's rehearsal of an unmount
+   * announces them again rather than losing them.
+   */
+  useEffect(() => () => observed.current.clear(), []);
   if (notices.length === 0 && feedback.length === 0) return null;
   return (
     <section

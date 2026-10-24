@@ -23,7 +23,13 @@ export function mutantRedirect(root, mutantDirectory) {
       if (!resolved || resolved.external) return resolved;
       const path = resolved.id.split("?")[0] ?? resolved.id;
       const rel = relative(root, path);
-      if (rel.startsWith("src/") && existsSync(join(mutant, rel)))
+      // Source files and catalogue counts (R24: MU-2235), plus the exact inventory guard qualified by the accepted-base merge (MU-2425).
+      if (
+        (rel.startsWith("src/") ||
+          rel.startsWith("scripts/mutation/") ||
+          rel === "scripts/lib/mutation-inventory.mjs") &&
+        existsSync(join(mutant, rel))
+      )
         return join(mutant, rel);
       return resolved;
     },

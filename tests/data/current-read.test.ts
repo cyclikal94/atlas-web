@@ -42,11 +42,13 @@ async function controller(
   ]);
   const requests: Array<{ account: string; epoch: number; url: string }> = [];
   const rebuilt: unknown[] = [];
+  const relatedSeen: unknown[] = [];
   const commands = createCommandRegistry();
   commands.register("edit", {
     describe: () => "Feed cat",
-    rebuild: (_draft, current) => {
+    rebuild: (_draft, current, related) => {
       rebuilt.push(current);
+      relatedSeen.push(related);
       return options.rebuilds
         ? {
             endpoint: "/commands",
@@ -160,6 +162,7 @@ async function controller(
     ui,
     requests,
     rebuilt,
+    relatedSeen,
     setAnswer: (next: Response) => {
       answer = next;
     },
@@ -232,6 +235,7 @@ describe("R7: the authorised current-state read of WF-QUEUE-02", () => {
       const out = await ui.actions.saveAsNew(
         LOCAL,
         read.value,
+        undefined,
         shown === "stored" ? stored?.command_digest : "a-body-changed-since",
       );
       if (shown === "stored") expect(out.kind).toBe("superseded");
@@ -239,6 +243,17 @@ describe("R7: the authorised current-state read of WF-QUEUE-02", () => {
         expect(out).toMatchObject({ kind: "refused", reason: "draft_changed" });
       ui.dispose();
     }
+  });
+
+  test("WEB-10a revision 16 (DA-A1): the other rows the read returned reach the rebuild with the reviewed value; none when none were", async () => {
+    const { ui, relatedSeen } = await controller();
+    const read = await ui.actions.readCurrent(LOCAL);
+    if (read.kind !== "loaded") throw new Error("setup: not loaded");
+    const details = cacheRow({ id: "r2", can_edit: false });
+    await ui.actions.saveAsNew(LOCAL, read.value, [details]);
+    await ui.actions.saveAsNew(LOCAL, read.value);
+    expect(relatedSeen).toEqual([[details], undefined]);
+    ui.dispose();
   });
 
   test("'save as new' is rebuilt on the value the person reviewed, or on nothing; never on the cache", async () => {

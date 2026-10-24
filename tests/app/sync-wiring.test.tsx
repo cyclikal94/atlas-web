@@ -162,7 +162,8 @@ describe("the /sync route", () => {
     const env = stubEnv({
       inputs: { engine: { kind: "stopped", cause: "local_storage" } },
     });
-    mountRoute(env, "/today");
+    // Adapted (WEB-10a): any screen but /sync; `/today` now needs the session (the Today view), `/people` is still a placeholder.
+    mountRoute(env, "/people");
     expect(
       await screen.findByRole("heading", { name: copy.PAGE_NOT_SAVED_TITLE }),
     ).toBeInTheDocument();
@@ -178,7 +179,8 @@ describe("the /sync route", () => {
     const many = Array.from({ length: 214 }, (_, i) =>
       draftRow({ local_id: `n${i}`, created_seq: i + 1, status: "queued" }),
     );
-    mountRoute(stubEnv({ drafts: many }), "/today");
+    // Adapted (WEB-10a): any screen but /sync; `/today` now needs the session (the Today view), `/people` is still a placeholder.
+    mountRoute(stubEnv({ drafts: many }), "/people");
     await screen.findByRole("main", { hidden: true });
     expect(
       screen.queryByRole("heading", { name: copy.QUEUE_WARNING_TITLE }),
@@ -212,7 +214,8 @@ describe("the /sync route", () => {
 
   test("a notice that appears while a screen is open is announced through the existing live regions, not a new one", async () => {
     const env = stubEnv();
-    mountRoute(env, "/today");
+    // Adapted (WEB-10a): any screen but /sync; `/today` now needs the session (the Today view), `/people` is still a placeholder.
+    mountRoute(env, "/people");
     await screen.findByRole("main", { hidden: true });
     await act(async () => {
       env.set({ engine: { kind: "stopped", cause: "local_storage" } });

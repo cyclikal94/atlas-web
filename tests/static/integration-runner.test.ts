@@ -441,8 +441,10 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
+        // WEB-10a revision 27 (R39): I-T12's supersession case is the 22nd task case.
+        tasks: 22,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(216);
+      expect(inBrowser(whole, browser)).toHaveLength(238);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -451,7 +453,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       ).toBe(s.name === "sharing" || s.name === "snapshot");
   }, 120_000);
 
-  test("compared with the schedule review 14 ran, sharing, snapshot, pages, password-path and People cases move from base to their own fresh stacks", async () => {
+  test("compared with the schedule review 14 ran, sharing, snapshot, pages, password-path, People and task cases have their own fresh stacks", async () => {
     // The stacks of candidate b003cff (review 14), verbatim (scripts/integration/run.mjs STACKS).
     const OLD: Array<[string, string[]]> = [
       [
@@ -502,6 +504,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       pages: 39,
       "password-path": 24,
       people: 48,
+      tasks: 66,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
@@ -630,8 +633,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 216,
-        passed: 210,
+        planned_cases: 238,
+        passed: 232,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -1249,6 +1252,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-lifecycle-restart",
     "-sharing",
     "-snapshot",
+    "-tasks",
   ]);
   expect(DEFAULT_STACKS.filter((s) => s.oidc).map((s) => s.name)).toEqual([
     "oidc",

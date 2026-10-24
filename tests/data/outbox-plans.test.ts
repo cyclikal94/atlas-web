@@ -94,8 +94,10 @@ describe("F-O1: enqueue is one atomic read-increment-write", () => {
 
   test("a failure at any write leaves NOTHING: no draft, no increment, no sequence number used", async () => {
     const { w } = await setup();
-    // A one-target enqueue writes the draft, its body, the version record and the singleton: four writes, then it commits.
-    for (const n of [1, 2, 3, 4, 5]) {
+    // A one-target enqueue writes the draft, its body, the version record and the singleton, then (WEB-10a revision 3) the store advances
+    // the local composition generation in the same transaction: five writes, then it commits. Adapted (labelled): the loop covered four
+    // writes; a failure at the fifth (the generation's own write) must leave nothing too.
+    for (const n of [1, 2, 3, 4, 5, 6]) {
       const remove = w.env.idb.inject({
         match: (tx) => tx.label === "data.enqueueDraft",
         mode: { kind: "throw_on_write", n, as: "error" },
@@ -103,7 +105,7 @@ describe("F-O1: enqueue is one atomic read-increment-write", () => {
       });
       const out = await w.outbox.enqueue(edit("r"));
       remove();
-      if (n === 5) {
+      if (n === 6) {
         expect(out.kind).toBe("queued");
         break;
       }
@@ -113,6 +115,7 @@ describe("F-O1: enqueue is one atomic read-increment-write", () => {
       expect(w.rows("draft_commands")).toEqual([]);
       expect(w.versions()).toEqual([]);
       expect(w.sync().draft_seq).toBe(0);
+      expect(w.sync().composition_seq ?? 0).toBe(0);
     }
   });
 

@@ -30,6 +30,7 @@ export type {
   BuildResult,
   EnqueueRequest,
   ExpectedPredecessor,
+  TargetNeeds,
   TargetSpec,
 } from "./model/outbox";
 export { OutboxRequestError } from "./model/outbox";
@@ -123,9 +124,16 @@ export type {
   QueuePage,
   ResourcePage,
 } from "./plans/outbox";
+// ---- outstanding work, reads by id and the whole-kind walk (WEB-10a) ------------------------------------------------------------------
 export type {
+  CachePosition,
   Inventory,
+  LocalBasis,
+  OutstandingByKindPage,
   OutstandingCreatesPage,
+  OutstandingCursor,
+  OutstandingForResource,
+  OutstandingPage,
 } from "./plans/outstanding-reads";
 export type {
   Outstanding,
@@ -165,7 +173,16 @@ export {
   type DataEnvDeps,
 } from "./ui/env";
 export { useFormCopies } from "./ui/form-copies";
-export { useInventory, useOutstandingCreates } from "./ui/outstanding";
+export {
+  useAllOutstanding,
+  useAllOutstandingByKind,
+  useCachedResources,
+  useCachePosition,
+  useInventory,
+  useOutstanding as useOutstandingResources,
+  useOutstandingByKind,
+  useOutstandingCreates,
+} from "./ui/outstanding";
 export {
   type ConflictRow,
   DataEnvProvider,
@@ -189,3 +206,16 @@ export {
   useStatusInputs,
   useSyncStatusModel,
 } from "./ui/react";
+export {
+  type LocalRead,
+  readAllOutstandingByKindNow,
+  readAllOutstandingNow,
+  readCacheRevisionNow,
+  readCoherently,
+  readLocalBasisNow,
+  readResourcePageNow,
+  readResourcesNow,
+  type ScanEnd,
+  type Stage,
+  scanResources,
+} from "./ui/scan";

@@ -163,9 +163,15 @@ export function ItemDetailDialog({
   const saveAsNew = async (): Promise<void> => {
     setBusy(true);
     setFailed(null);
-    // Rebuilt on the value the person reviewed (null when they explicitly continued without it), never on the cache.
+    // Rebuilt on the value the person reviewed (null when they explicitly continued without it), never on the cache, with the other rows
+    // that read returned for the rebuild's checks.
     const out = await actions
-      .saveAsNew(draft.local_id, base, shownBody?.command_digest)
+      .saveAsNew(
+        draft.local_id,
+        base,
+        current?.kind === "loaded" ? current.related : undefined,
+        shownBody?.command_digest,
+      )
       .catch(() => null);
     setBusy(false);
     if (out !== null && out.kind === "superseded") {

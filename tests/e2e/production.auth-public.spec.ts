@@ -1,16 +1,20 @@
-import { mkdirSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { test } from "./auth-helpers";
+import { provokedIdbWarnings, test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
 import { expect, pressTab, runAxe } from "./helpers";
-import { expectPaintedContrast } from "./surface-checks";
+import {
+  expectPaintedContrast,
+  recordPaintedContrast,
+  surfaceScreenshot,
+} from "./surface-checks";
 
 /**
  * WEB-08b, A2 / A3 / A4 (Layer A, rendered): the PUBLIC surfaces (sign-in, join) in the production build, in a real engine, with
  * a stubbed network, at 320, 390, 768 and 1280 px in dark and light: no horizontal scroll, axe clean INCLUDING colour contrast in
- * real layout, 44 px targets, a visible focus ring, the heading as the focus target. Screenshots (Chromium) go to
- * .agtx/evidence/WEB-08b/design/. This is design and accessibility evidence only: it is not Kieran's visual or copy sign-off,
- * not assistive-technology evidence and not integration evidence.
+ * real layout, 44 px targets, a visible focus ring, the heading as the focus target. Screenshots (Chromium) and the painted-contrast
+ * records belong to this invocation and test (`surfaceScreenshot`, `recordPaintedContrast`: review 14's R27); the historical
+ * `.agtx/evidence/WEB-08b/design/` folder is no longer written. This is design and accessibility evidence only: it is not Kieran's
+ * visual or copy sign-off, not assistive-technology evidence and not integration evidence.
  */
 const WIDTHS: Array<[number, number]> = [
   [320, 640],
@@ -18,7 +22,6 @@ const WIDTHS: Array<[number, number]> = [
   [768, 1024],
   [1280, 800],
 ];
-const EVIDENCE = ".agtx/evidence/WEB-08b/design";
 const PASSWORD = "correct-horse-battery-9271";
 
 interface Surface {
@@ -320,19 +323,150 @@ for (const scheme of ["dark", "light"] as const) {
               ).toBeTruthy();
             }
 
-            if (engine === "chromium") {
-              mkdirSync(`${EVIDENCE}/chromium`, { recursive: true });
-              await page.screenshot({
-                path: `${EVIDENCE}/chromium/${surface.name}-${width}-${scheme}.png`,
-                fullPage: true,
+            if (engine === "chromium")
+              await surfaceScreenshot(page, testInfo, {
+                name: surface.name,
+                width,
+                scheme,
               });
-            }
           }
         },
       );
     }
   });
 }
+
+/**
+ * WEB-10a revision 7 (review 7's retained Firefox join-offline warning; Kieran's decision of 15 October 2026): the interruption the
+ * width loop used to cause by accident, made deliberate and deterministic. On `online` the join page re-checks the sign-in record
+ * (`evaluate` → `readRecords`, a `readwrite` transaction of `atlas-auth` that writes nothing). Here that transaction is HELD OPEN (the
+ * test keeps issuing `count()` reads on it) and the page is left at once: the transaction is aborted by the navigation, it made no write
+ * request (so, IndexedDB being atomic, nothing durable changed), and the next page boots and shows the form. Firefox's console warning
+ * for exactly that abort is declared as provoked; any other warning still fails.
+ */
+test.describe("join-offline: going online and leaving at once", () => {
+  test("the interrupted online re-check is a read: no write request, and the next page boots normally", async ({
+    page,
+    context,
+    provokes,
+  }, info) => {
+    provokes("idb-navigation-abort");
+    // Reported as they happen (a binding called during `pagehide` is lost in Chromium): created, each write request, completed/aborted.
+    const reports: Array<{ kind: string; id: number; held?: boolean }> = [];
+    await context.exposeBinding("__authTxReport", (_source, report) => {
+      reports.push(report);
+    });
+    await context.addInitScript(() => {
+      const w = window as unknown as {
+        __authTxReport?: (report: object) => void;
+        __holdNextAuthTx?: boolean;
+      };
+      const ids = new Map<IDBTransaction, number>();
+      let next = 0;
+      const transaction = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (
+        this: IDBDatabase,
+        ...args: Parameters<typeof transaction>
+      ) {
+        const tx = transaction.apply(this, args);
+        if (this.name !== "atlas-auth") return tx;
+        const held = w.__holdNextAuthTx === true;
+        if (held) w.__holdNextAuthTx = false;
+        next += 1;
+        const id = next;
+        ids.set(tx, id);
+        const done = () => w.__authTxReport?.({ kind: "done", id });
+        tx.addEventListener("complete", done);
+        tx.addEventListener("abort", done);
+        if (held) {
+          // Kept active by reads of its own: the test's hold, not the application's.
+          const store = tx.objectStore(tx.objectStoreNames[0] as string);
+          const spin = () => {
+            store.count().onsuccess = spin;
+          };
+          spin();
+        }
+        w.__authTxReport?.({ kind: "created", id, held });
+        return tx;
+      } as typeof transaction;
+      for (const name of ["put", "add", "delete", "clear"] as const) {
+        const original = IDBObjectStore.prototype[name] as (
+          ...a: unknown[]
+        ) => IDBRequest;
+        (IDBObjectStore.prototype as unknown as Record<string, unknown>)[name] =
+          function (this: IDBObjectStore, ...a: unknown[]) {
+            const id = ids.get(this.transaction);
+            if (id !== undefined) w.__authTxReport?.({ kind: "write", id });
+            return original.apply(this, a);
+          };
+      }
+    });
+    const stub = new AuthStub();
+    await stub.install(context);
+    await readyJoin(page, stub, null);
+    const offlineReason = page.getByText(
+      "Creating an account needs a connection.",
+    );
+    await context.setOffline(true);
+    await offlineReason.waitFor();
+    // Ordinary going online (no navigation; the positive control the hand-off keeps): the explanation goes, the form can be sent again,
+    // and every sign-in-record transaction the page made since completes with no write request.
+    const sinceOnline = reports.length;
+    await context.setOffline(false);
+    await expect(offlineReason).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Create account" }),
+    ).toBeEnabled();
+    await expect
+      .poll(() => {
+        const made = reports
+          .slice(sinceOnline)
+          .filter((r) => r.kind === "created");
+        return (
+          made.length > 0 &&
+          made.every((c) =>
+            reports.some((r) => r.kind === "done" && r.id === c.id),
+          )
+        );
+      })
+      .toBe(true);
+    expect(
+      reports.slice(sinceOnline).filter((r) => r.kind === "write"),
+    ).toEqual([]);
+    await context.setOffline(true);
+    await offlineReason.waitFor();
+    await page.evaluate(() => {
+      (window as unknown as { __holdNextAuthTx?: boolean }).__holdNextAuthTx =
+        true;
+    });
+    await context.setOffline(false);
+    // Barrier: the online re-check's transaction exists and is held open.
+    await expect
+      .poll(() => reports.some((r) => r.kind === "created" && r.held))
+      .toBe(true);
+    const held = reports.find((r) => r.kind === "created" && r.held)
+      ?.id as number;
+    const before = reports.length;
+    await page.goto("about:blank");
+    const atLeave = reports.slice(0, before);
+    const open = atLeave
+      .filter((r) => r.kind === "created")
+      .map((r) => r.id)
+      .filter((id) => !atLeave.some((r) => r.kind === "done" && r.id === id));
+    // The held transaction was still open when the page was left, and no transaction open then had made a write request.
+    expect(open).toContain(held);
+    expect(
+      reports.filter((r) => r.kind === "write" && open.includes(r.id)),
+    ).toEqual([]);
+    // The next page boots and works: the form, and offline the same explanation.
+    await readyJoin(page, stub, null);
+    await context.setOffline(true);
+    await page.getByText("Creating an account needs a connection.").waitFor();
+    await context.setOffline(false);
+    if (info.project.name === "production-firefox")
+      expect(provokedIdbWarnings(info.testId)).toBeGreaterThan(0);
+  });
+});
 
 test.describe("modes the design pass checks beyond width and theme", () => {
   test("forced colours and reduced motion keep the sign-in and join surfaces usable", async ({
@@ -435,7 +569,7 @@ for (const scheme of ["dark", "light"] as const) {
     test("sign-in and join: the input border is field-edge at 3:1 or better, and the primary action text is 4.5:1 or better", async ({
       page,
       context,
-    }) => {
+    }, info) => {
       const stub = new AuthStub();
       await stub.install(context);
       await page.goto("/");
@@ -453,12 +587,11 @@ for (const scheme of ["dark", "light"] as const) {
         scheme,
         `join (${scheme})`,
       );
-      mkdirSync(EVIDENCE, { recursive: true });
-      const { appendFileSync } = await import("node:fs");
-      appendFileSync(
-        `${EVIDENCE}/painted-contrast.jsonl`,
-        `${JSON.stringify({ scheme, engine: test.info().project.name, signIn, join })}\n`,
-      );
+      recordPaintedContrast(info, scheme, {
+        engine: info.project.name,
+        signIn,
+        join,
+      });
     });
   });
 }

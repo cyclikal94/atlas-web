@@ -147,13 +147,15 @@ export function stubEnv(
       const answer = env.currentRead;
       return typeof answer === "function" ? answer(localId) : answer;
     },
-    saveAsNew: async (localId, current, reviewed) => {
+    saveAsNew: async (localId, current, related, reviewed) => {
       calls.push({
         action: "saveAsNew",
         args:
-          reviewed === undefined
-            ? [localId, current]
-            : [localId, current, reviewed],
+          reviewed !== undefined
+            ? [localId, current, related, reviewed]
+            : related === undefined || related.length === 0
+              ? [localId, current]
+              : [localId, current, related],
       });
       return { kind: "refused", reason: "not_rebuildable" };
     },
