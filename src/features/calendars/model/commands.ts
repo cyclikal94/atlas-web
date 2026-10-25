@@ -147,6 +147,8 @@ export function configureSourceRequest(
  * The import draft of WEB-13b (case 2, the dynamic-routing extension): addressed to `/calendar-sources/{id}/import` through
  * `targetId`, with the source as an UNVERSIONED primary target, so a pending create of that source is a dependency (`depends_on`) and
  * the import is never sent before the source exists. The body is `{ics, from, through}` exactly, so a resend is byte-identical.
+ * Importing needs edit access to the source (WEB-13b): a cached `can_edit: false` refuses the save as `denied`; a source this device has
+ * not received yet (its own pending create) is no known denial.
  */
 export function importRequest(input: {
   sourceId: ResourceId;
@@ -166,6 +168,7 @@ export function importRequest(input: {
         basis: "resource",
         versionChecked: false,
         seedIfUntracked: 1,
+        requiresEdit: true,
       },
     ],
     build: () => ({ command: { ics, from, through } }),

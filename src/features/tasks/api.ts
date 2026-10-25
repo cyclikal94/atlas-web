@@ -1,5 +1,6 @@
 import type { Policy } from "../../data";
 import { recogniseAtlasError } from "../../lib/api-client/problem";
+import type { components } from "../../lib/api-types";
 import { type Session, StampedRequestError } from "../../session";
 import {
   type Enrolment,
@@ -59,6 +60,47 @@ export interface EnrolCommand {
   initial_policy: Policy;
 }
 
+/** WEB-13b: a task's calendar binding (`GET /tasks/{id}/anchor`), as the server shows it to this account. */
+export type CalendarBinding = NonNullable<
+  components["schemas"]["CalendarBinding"]["binding"]
+>;
+
+/**
+ * The binding answer read strictly (`{binding: {anchor, version ≥ 1, active} | null}`): the anchor must be an object whose reference and
+ * offset name a kind; anything else is not the contract's answer (`uncertain`). `null` is "not anchored" (also when its reference is not
+ * visible to this account: never "deleted").
+ */
+export function parseBinding(
+  body: unknown,
+): { binding: CalendarBinding | null } | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body))
+    return null;
+  const { binding } = body as { binding?: unknown };
+  if (binding === null) return { binding: null };
+  if (
+    typeof binding !== "object" ||
+    binding === undefined ||
+    Array.isArray(binding)
+  )
+    return null;
+  const { anchor, version, active } = binding as Record<string, unknown>;
+  const kind = (v: unknown) =>
+    typeof v === "object" &&
+    v !== null &&
+    typeof (v as { kind?: unknown }).kind === "string";
+  if (
+    typeof anchor !== "object" ||
+    anchor === null ||
+    !kind((anchor as { reference?: unknown }).reference) ||
+    !kind((anchor as { offset?: unknown }).offset) ||
+    !Number.isSafeInteger(version) ||
+    (version as number) < 1 ||
+    typeof active !== "boolean"
+  )
+    return null;
+  return { binding: binding as CalendarBinding };
+}
+
 export interface TasksApi {
   readDaily(query: DailyQuery): Promise<TasksResult<OccurrencePage>>;
   readPresets(query: {
@@ -71,6 +113,10 @@ export interface TasksApi {
     progressId: string,
     after: number,
   ): Promise<TasksResult<ProgressJournal>>;
+  /** WEB-13b: the task's calendar binding, online only (case 3: offline says so; nothing is cached). */
+  readAnchor(
+    taskId: string,
+  ): Promise<TasksResult<{ binding: CalendarBinding | null }>>;
   /** `POST /task-access-commands` with the caller's key and the canonical body of one attempt. */
   enrol(
     command: EnrolCommand,
@@ -236,6 +282,8 @@ export function createTasksApi(
     readTask: (id) => get("/tasks/{id}", { path: { id } }, parseTaskDetail),
     readEnrolment: (taskId) =>
       get("/tasks/{id}/enrolment", { path: { id: taskId } }, parseEnrolment),
+    readAnchor: (taskId) =>
+      get("/tasks/{id}/anchor", { path: { id: taskId } }, parseBinding),
     readJournal: (progressId, after) =>
       get(
         "/progress/{id}/entries",

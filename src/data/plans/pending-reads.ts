@@ -123,14 +123,74 @@ export const readPendingCreates = readPlan<
   decide: ({ reads }) => reads,
 });
 
+/** One window of this device's unsettled drafts of one kind, oldest first, as HEADERS. */
+export interface DraftHeadersPage {
+  /** At most `queueWorkingSet` headers after the cursor, oldest first by `created_seq`: never a body. */
+  drafts: DraftRow[];
+  /** The exact number of such drafts, wherever they are. */
+  total: number;
+  /** The `created_seq` to pass back as `after` for the next window, or null when this is the last. */
+  next: number | null;
+}
+
+/**
+ * The unsettled drafts of one kind as headers (WEB-13b: the Imports list). An import's body can be 1 MiB, and a list shows what the
+ * header says (status, attempts, the last error, the target), so `draft_commands` is never read. It walks `created_seq` a window of
+ * headers at a time (the store has no index by kind), keeps the oldest window after the cursor and counts the rest.
+ */
+export const readDraftHeaders = readPlan<
+  { incarnationId: string; kind: string; after?: number | null },
+  DraftHeadersPage,
+  DraftHeadersPage
+>({
+  name: "data.readDraftHeaders",
+  scope: ["drafts"],
+  read: async (reader, input) => {
+    const after = input.after ?? null;
+    const kept: DraftRow[] = [];
+    let total = 0;
+    let later = 0;
+    let cursor: number | null = null;
+    for (;;) {
+      const rows: DraftRow[] = await reader.byIndex(
+        "drafts",
+        "created_seq",
+        cursor === null ? range.all() : range.atLeast(cursor, true),
+        WINDOW,
+      );
+      for (const row of rows) {
+        if (row.kind !== input.kind || !unsettled(row)) continue;
+        total += 1;
+        if (after !== null && row.created_seq <= after) continue;
+        later += 1;
+        if (kept.length < WINDOW) kept.push(row);
+      }
+      const tail = rows[rows.length - 1];
+      if (rows.length < WINDOW || tail === undefined) break;
+      cursor = tail.created_seq;
+    }
+    const last = kept[kept.length - 1];
+    return {
+      drafts: kept,
+      total,
+      next: later > kept.length && last !== undefined ? last.created_seq : null,
+    };
+  },
+  decide: ({ reads }) => reads,
+});
+
 /** The unsettled drafts that target one resource. */
 export interface Outstanding {
   /** Every unsettled draft whose `index_targets` names the resource (a primary target or a side effect). */
   total: number;
   /** The same drafts, counted by status: exact. */
   byStatus: Partial<Record<DraftStatus, number>>;
-  /** The NEWEST of them (the largest `created_seq`), with its body, or null when there is none. */
-  latest: DraftWithCommand | null;
+  /**
+   * The NEWEST of them (the largest `created_seq`), or null when there is none: with its body, unless a kind was asked for and the newest
+   * is of another kind, when it is the HEADER alone (WEB-13b: a row that asks for its settings change never loads a newer import's body,
+   * which can be 1 MiB, to say that something is waiting).
+   */
+  latest: DraftWithCommand | (DraftRow & { command?: never }) | null;
   /**
    * The newest of them of the kind asked for (`OutstandingInput.kind`) that is still expected to APPLY (queued, in flight or
    * acknowledged; never a conflict, a rejection or a blocked one), whose first primary target is the resource, with its body; null when
@@ -238,7 +298,10 @@ export const readOutstanding = readPlan<
   decide: ({ reads }) => reads,
 });
 
-/** The fold as an `Outstanding`, reading the bodies of its newest draft and of the newest applicable draft of `kind` (at most two). */
+/**
+ * The fold as an `Outstanding`, reading the bodies of its newest draft (only when no kind was asked for or it is of that kind) and of the
+ * newest applicable draft of `kind` (at most two).
+ */
 async function outstandingOf(
   reader: Reader,
   fold: OutstandingFold,
@@ -246,8 +309,11 @@ async function outstandingOf(
   more: readonly DraftRow[] = [],
 ): Promise<Outstanding & { bodies: Map<string, DraftWithCommand> }> {
   const ofKind = kind === undefined ? undefined : fold.applicableOf.get(kind);
+  const newest = fold.newest;
+  const headerOnly =
+    newest !== null && kind !== undefined && newest.kind !== kind;
   const bodies = await withBodies(reader, [
-    ...(fold.newest === null ? [] : [fold.newest]),
+    ...(newest === null || headerOnly ? [] : [newest]),
     ...(ofKind === undefined ? [] : [ofKind]),
     ...more,
   ]);
@@ -255,7 +321,11 @@ async function outstandingOf(
     total: fold.total,
     byStatus: fold.byStatus,
     latest:
-      fold.newest === null ? null : (bodies.get(fold.newest.local_id) ?? null),
+      newest === null
+        ? null
+        : headerOnly
+          ? newest
+          : (bodies.get(newest.local_id) ?? null),
     latestOfKind:
       ofKind === undefined ? null : (bodies.get(ofKind.local_id) ?? null),
     bodies,

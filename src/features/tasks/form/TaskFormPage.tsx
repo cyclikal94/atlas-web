@@ -11,6 +11,21 @@ import {
   useDataEnv,
   useSharingDefaults,
 } from "../../../data";
+import {
+  AnchorDialog,
+  type AnchorDraft,
+  type AnchorNames,
+  type CalendarAnchor,
+  describeAnchor,
+  EMPTY_ANCHOR,
+} from "../../calendars/anchors";
+import {
+  FORM_ANCHOR,
+  FORM_CHANGE,
+  FORM_NONE,
+  FORM_REMOVE,
+  FORM_SECTION,
+} from "../../calendars/copy-anchor";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { DETAIL_COPY } from "../detail/TaskDetail";
@@ -225,11 +240,35 @@ type FormMode =
       editable: boolean;
     };
 
+/**
+ * WEB-13b: the new task's calendar anchor as the anchor panel last saved it: the panel's whole state (every field, so it opens again as
+ * it was left), the anchor it validated to, and the names its summary shows.
+ */
+interface FormAnchor {
+  draft: AnchorDraft;
+  anchor: CalendarAnchor;
+  names: AnchorNames;
+}
+
 /** A form's editing session (R33): the values it began from (a locked choice is judged against them) and what is typed now. */
 interface FormInput {
   initial: TaskFormState;
   state: TaskFormState;
+  /**
+   * WEB-13b, new tasks only: the anchor, kept while "Repeats" hides its section (PRODUCT-DECISIONS-20261011: it comes back with its value);
+   * a save of a repeating task sends none and says nothing about it.
+   */
+  anchor?: FormAnchor | null;
 }
+
+/** The anchor a save sends: the new form's, only while the task does not repeat (the section is shown); else none. */
+export const anchorToSend = (
+  input: Pick<FormInput, "anchor" | "state">,
+  mode: { kind: "new" | "edit" },
+): CalendarAnchor | null =>
+  mode.kind === "new" && input.state.repeat === "none"
+    ? (input.anchor?.anchor ?? null)
+    : null;
 
 const select =
   "min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 text-[14px] text-ink-1";
@@ -429,7 +468,19 @@ function TaskForm({
           original !== null && typeof original.execution_id === "string"
             ? original.execution_id
             : env.newId();
-        const slot = firstSlot(result.definition, env.now());
+        // WEB-13b (R15): an anchored create makes no first occurrence from its schedule (the reference supplies them). The anchor of a
+        // queued create being edited stays with it while the task still does not repeat.
+        const originalAnchor =
+          original !== null &&
+          typeof original.anchor === "object" &&
+          original.anchor !== null &&
+          result.definition.schedule.repeat === null
+            ? (original.anchor as unknown as CalendarAnchor)
+            : null;
+        const anchor =
+          mode.kind === "new" ? anchorToSend(kept.value, mode) : originalAnchor;
+        const slot =
+          anchor === null ? firstSlot(result.definition, env.now()) : null;
         const occurrence =
           slot === null ? null : await occurrenceId(taskId, slot.key);
         const progress =
@@ -449,6 +500,7 @@ function TaskForm({
           definition: result.definition,
           sharing: mode.kind === "new" ? state.sharing : sharing,
           defaults: defaults.record,
+          ...(anchor === null ? {} : { anchor }),
         });
       } else {
         taskId = mode.taskId;
@@ -665,6 +717,12 @@ function TaskForm({
             />
           </Field>
         </div>
+        {mode.kind === "new" && state.repeat === "none" ? (
+          <AnchorSection
+            anchor={kept.value.anchor ?? null}
+            onSave={(anchor) => kept.edit((input) => ({ ...input, anchor }))}
+          />
+        ) : null}
         <fieldset className="flex flex-col gap-2">
           <legend className="text-[13px] font-medium text-ink-1">
             {FORM_COPY.done}
@@ -942,5 +1000,58 @@ function TaskForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+/**
+ * WEB-13b: the new-task form's "Anchor to a calendar event" (shown only while the task does not repeat). The panel's Save keeps the anchor
+ * in the form (nothing is queued until the task is saved); Remove takes it away.
+ */
+function AnchorSection({
+  anchor,
+  onSave,
+}: {
+  anchor: FormAnchor | null;
+  onSave(anchor: FormAnchor | null): void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section
+      aria-labelledby="task-form-anchor"
+      data-task-form-anchor={anchor === null ? "none" : "set"}
+      className="flex flex-col gap-2"
+    >
+      <h2 id="task-form-anchor" className="text-[13px] font-medium text-ink-1">
+        {FORM_SECTION}
+      </h2>
+      <p className="text-[13px] text-ink-2">
+        {anchor === null
+          ? FORM_NONE
+          : describeAnchor(anchor.anchor, anchor.names)}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={() => setOpen(true)}>
+          {anchor === null ? FORM_ANCHOR : FORM_CHANGE}
+        </Button>
+        {anchor !== null ? (
+          <Button variant="quiet" onClick={() => onSave(null)}>
+            {FORM_REMOVE}
+          </Button>
+        ) : null}
+      </div>
+      {open ? (
+        <AnchorDialog
+          initial={anchor?.draft ?? EMPTY_ANCHOR}
+          initialNames={anchor?.names ?? {}}
+          repeats={false}
+          onSave={async (next, names, draft) => {
+            // The panel's state is kept whole with the anchor, so it opens again as it was left.
+            onSave({ draft, anchor: next, names });
+            return null;
+          }}
+          onClose={() => setOpen(false)}
+        />
+      ) : null}
+    </section>
   );
 }

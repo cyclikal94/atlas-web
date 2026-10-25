@@ -130,6 +130,7 @@ export type {
   OutstandingPage,
 } from "./plans/outstanding-reads";
 export type {
+  DraftHeadersPage,
   Outstanding,
   PendingCreatesPage,
   ResourceView,
@@ -156,6 +157,7 @@ export {
   useAllOutstandingByKind,
   useCachedResources,
   useCachePosition,
+  useDraftHeaders,
   useDraftWithCommand,
   useOutstanding as useOutstandingResources,
   useOutstandingByKind,

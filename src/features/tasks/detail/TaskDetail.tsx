@@ -1,5 +1,5 @@
-import { Link, useNavigate } from "@tanstack/react-router";
-import { useId, useState } from "react";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
+import { useEffect, useId, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -18,10 +18,12 @@ import {
   type SubmittedCorrection,
   submittedCorrection,
 } from "../model/correction";
+import { type MoveSeed, parseMove } from "../model/move";
 import { resolveWallTime } from "../model/time";
 import { editable } from "../reasons";
 import { pillTone } from "../today/TodayRow";
 import type { RowModel } from "../view";
+import { AnchorSection } from "./AnchorSection";
 import { ArchiveControl, ClosureControls, Participation } from "./Controls";
 import { CORRECTION_COPY, CorrectionDialog } from "./CorrectionDialog";
 import { EntryHistory } from "./EntryHistory";
@@ -112,6 +114,45 @@ export function TaskDetail({
       ? view.row.attention.local_id
       : null;
   const conflictDraft = useDraftWithCommand(conflictId);
+  // WEB-13b: "Review this move…" from a calendar review (`?move=`, read strictly here, never in the entry route): it opens the one-day
+  // correction of the day the address names, with the proposed date and time as the initial values of a NEW session, once; then the value
+  // leaves the address (replace), so Back, a reload or a later visit neither reopens nor refills it.
+  const rawMove = useRouterState({
+    select: (state) =>
+      (state.location.search as Record<string, unknown> | undefined)?.move,
+  });
+  const [seed, setSeed] = useState<MoveSeed | null>(null);
+  const day = view.row;
+  useEffect(() => {
+    if (rawMove === undefined) return;
+    if (view.status === "loading" || view.selection === "loading") return;
+    const move = parseMove(rawMove);
+    if (
+      move !== null &&
+      day !== null &&
+      occurrence === day.id &&
+      day.canEdit &&
+      env.writable
+    ) {
+      setSeed(move);
+      setCorrecting(day.id);
+    }
+    void navigate({
+      to: "/tasks/$taskId",
+      params: { taskId },
+      search: occurrence === undefined ? {} : { occurrence },
+      replace: true,
+    });
+  }, [
+    rawMove,
+    view.status,
+    view.selection,
+    day,
+    occurrence,
+    env.writable,
+    navigate,
+    taskId,
+  ]);
   if (view.status === "loading")
     return (
       <p aria-busy="true" className="text-[13px] text-ink-2">
@@ -234,7 +275,12 @@ export function TaskDetail({
             </Link>
           )}
           {row === null ? null : row.canEdit ? (
-            <Button onClick={() => setCorrecting(row.id)}>
+            <Button
+              onClick={() => {
+                setSeed(null);
+                setCorrecting(row.id);
+              }}
+            >
               {CORRECTION_COPY.open}
             </Button>
           ) : (
@@ -264,6 +310,14 @@ export function TaskDetail({
       </div>
       {view.readError !== null ? (
         <ReadError error={view.readError} stale retry={view.retry} />
+      ) : null}
+      {view.definition !== null ? (
+        // WEB-13b: the task's calendar anchor (a task that repeats on its own schedule has none).
+        <AnchorSection
+          task={task}
+          repeats={view.definition.schedule.repeat !== null}
+          canEdit={editable(task, view.execution)}
+        />
       ) : null}
       {view.occurrences.length > 1 ||
       view.days.more ||
@@ -422,10 +476,14 @@ export function TaskDetail({
               row={row}
               identity={env.identity}
               open
-              onClose={() => setCorrecting(null)}
+              onClose={() => {
+                setCorrecting(null);
+                setSeed(null);
+              }}
               actions={actions}
               progressIds={progressIds}
               writable={env.writable}
+              seed={seed}
             />
           ) : null}
         </>

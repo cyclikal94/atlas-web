@@ -319,8 +319,11 @@ describe("the values a Save restates come from ONE read and are checked in its t
         through: "2026-12-31",
       }),
     );
-    const row = (await screen.findByText("Family calendar")).closest(
-      "li",
+    // WEB-13b adaptation (labelled): the queued import is now ALSO listed by WEB-13b's Imports panel under the source's label, so the
+    // label alone no longer names one element. The intent is unchanged: the SOURCE'S ROW shows the waiting change's values.
+    await screen.findAllByText("Family calendar");
+    const row = document.querySelector(
+      `[data-source-row="${SOURCE}"]`,
     ) as HTMLElement;
     expect(row).toHaveTextContent("Asia/Tokyo");
     const dialog = await openManage(w);

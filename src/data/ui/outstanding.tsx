@@ -13,6 +13,10 @@ import {
   readOutstandingByKind,
   readResourcesById,
 } from "../plans/outstanding-reads";
+import {
+  type DraftHeadersPage,
+  readDraftHeaders,
+} from "../plans/pending-reads";
 import type { Loadable, Watchable } from "../store/port";
 import { useWatch } from "./react";
 
@@ -42,6 +46,29 @@ export function useOutstanding(
         : null;
     },
     [key],
+  );
+}
+
+/**
+ * This device's unsettled drafts of one kind, oldest first, a window (100) at a time, as HEADERS only (WEB-13b, `readDraftHeaders`): for a
+ * list of drafts whose bodies may be large (an import carries up to 1 MiB). Live: it follows the queue.
+ */
+export function useDraftHeaders(
+  kind: string,
+  after?: number | null,
+): Loadable<DraftHeadersPage> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readDraftHeaders, {
+            incarnationId: service.incarnationId,
+            kind,
+            ...(after === undefined || after === null ? {} : { after }),
+          })
+        : null;
+    },
+    [kind, after],
   );
 }
 

@@ -87,6 +87,7 @@ import { createRegistry, getPageRegistry } from "../../data/store/registry";
 import { createDataEnv, type DataEnv } from "../../data/ui/env";
 import { readDefaultsSnapshotThrough } from "../../data/ui/identity-reads";
 import { createProductionQuota } from "../../data/ui/production-quota";
+import { registerImportAnswers } from "../../features/calendars/answers";
 import { NOT_SENT_DELAYS_MS } from "../../features/settings/sessions-devices/until-sent";
 import { apiUrl } from "../../lib/api-client/wire";
 import type { FormRecoveryPort } from "../../lib/form-recovery/port";
@@ -1420,6 +1421,13 @@ const noteRefusal = (
   if (refusals.length > 16) refusals.shift();
 };
 
+/** A conflict registry for one harness dispatcher, with the import's terminal answers registered (WEB-13b). */
+const importAnswers = () => {
+  const conflicts = createConflictHandlerRegistry();
+  registerImportAnswers(conflicts);
+  return conflicts;
+};
+
 const harness: DataHarness = {
   tabId: registry.tabId,
   outboxTrace,
@@ -1470,7 +1478,8 @@ const harness: DataHarness = {
         clearTimeout: (handle) => window.clearTimeout(handle as number),
       },
       yield: yieldToEventLoop,
-      conflicts: createConflictHandlerRegistry(),
+      // The import's terminal answers, as the page host registers them (WEB-13b, `src/app/commands.ts`).
+      conflicts: importAnswers(),
       // A recorded receipt makes the sync engine look soon (the post-receipt poll), when one is running on this page.
       receipt: () => engine?.nudge("receipt"),
       channel,

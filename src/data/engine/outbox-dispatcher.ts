@@ -983,11 +983,23 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
           recorded: { kind: "capacity" },
           error: { status, code: "slice_capacity", stage: "capacity" },
         };
-      default:
+      default: {
+        // An Atlas-coded answer the generic rule retries (a `502 fetch_failed` of an import, WEB-13b): a handler of its code may say that
+        // resending the same body cannot succeed. Only `rejected` is honoured here; anything else keeps the retry.
+        const handled =
+          outcome.code === null
+            ? null
+            : deps.conflicts.decide({ draft, status, code: outcome.code });
+        if (handled?.kind === "reclassify" && handled.as === "rejected")
+          return {
+            recorded: { kind: "rejected" },
+            error: { status, ...code(outcome.code), stage: "rejected" },
+          };
         return {
           recorded: { kind: "retry" },
           error: { status, ...code(outcome.code), stage: "unavailable" },
         };
+      }
     }
   }
 

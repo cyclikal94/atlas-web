@@ -267,6 +267,10 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
       count("readEnrolment");
       return { ok: false, kind: "uncertain" };
     },
+    readAnchor: async () => {
+      count("readAnchor");
+      return { ok: true, value: { binding: null } };
+    },
     readJournal: async () => {
       count("readJournal");
       return { ok: true, value: { entries: [], next_after: null } };
@@ -363,6 +367,8 @@ export async function mountTasks(options: {
   rows?: CacheRow[];
   /** Drafts seeded before the screens mount (a draft carrying `command` is split into its header and body, as the enqueue writes them). */
   drafts?: object[];
+  /** WEB-13b: `pending_effects` rows seeded with the drafts (a receipted draft's effect, as its receipt leaves it). */
+  effects?: object[];
   api?: FakeApi;
   env?: Partial<TasksEnv>;
   database?: boolean;
@@ -386,6 +392,8 @@ export async function mountTasks(options: {
     if (options.rows?.length) world.idb.seed(NAME, "cache", options.rows);
     if (options.drafts?.length)
       world.idb.seed(NAME, "drafts", options.drafts as never);
+    if (options.effects?.length)
+      world.idb.seed(NAME, "pending_effects", options.effects as never);
     if (options.cacheStatus !== undefined) {
       const sync = world.idb.peek(NAME, "sync_state", "singleton") as
         | SyncStateRow

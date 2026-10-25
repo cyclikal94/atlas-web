@@ -157,6 +157,9 @@ describe("queued commands (create_source, configure_source)", () => {
         basis: "resource",
         versionChecked: false,
         seedIfUntracked: 1,
+        // WEB-13b (§4.2 of its plan, labelled adaptation): importing needs edit access to the source; a known `can_edit: false` refuses
+        // the save as `denied`. The recipe is otherwise unchanged.
+        requiresEdit: true,
       },
     ]);
     expect(Object.keys(request.build({}).command)).toEqual([

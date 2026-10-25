@@ -4,6 +4,7 @@ import { DATA_CONFIG } from "../../src/data/model/config";
 import type { DraftWithCommand } from "../../src/data/model/types";
 import {
   type PendingCreatesPage,
+  readDraftHeaders,
   readOutstanding,
   readPendingCreates,
 } from "../../src/data/plans/pending-reads";
@@ -246,6 +247,51 @@ describe("readOutstanding", () => {
     expect(rows(w, "draft_commands")).toBe(1);
   });
 
+  test("WEB-13b (E6): asked for a kind, a NEWER draft of another kind (an import) is returned as its header; its body is never read", async () => {
+    const w = await pageWorld();
+    const big = "X".repeat(4096);
+    w.put("drafts", [
+      against(1),
+      draftRow({
+        local_id: "import",
+        created_seq: 2,
+        endpoint: "/calendar-sources/{id}/import",
+        kind: "/calendar-sources/{id}/import",
+        target_id: target,
+        command: { ics: big, from: "2026-01-01", through: "2026-12-31" },
+        target_resource_ids: [target],
+        index_targets: [target],
+      }),
+    ]);
+    w.env.idb.reads.reset();
+    const out = await w.service.store.run(readOutstanding, {
+      incarnationId: w.service.incarnationId,
+      id: target,
+      kind: "configure_source",
+    });
+    expect(out.total).toBe(2);
+    expect(out.latest?.local_id).toBe("import");
+    expect(out.latest?.command).toBeUndefined();
+    expect(out.latestOfKind?.local_id).toBe("o1");
+    expect(out.latestOfKind?.command).toEqual(against(1).command);
+    // The settings change's body only.
+    expect(rows(w, "draft_commands")).toBe(1);
+  });
+
+  test("control (E6): asked for a kind whose draft IS the newest, its body is read once and returned with it", async () => {
+    const w = await pageWorld();
+    w.put("drafts", [against(1), against(2)]);
+    w.env.idb.reads.reset();
+    const out = await w.service.store.run(readOutstanding, {
+      incarnationId: w.service.incarnationId,
+      id: target,
+      kind: "configure_source",
+    });
+    expect(out.latest?.command).toEqual(against(2).command);
+    expect(out.latestOfKind?.local_id).toBe("o2");
+    expect(rows(w, "draft_commands")).toBe(1);
+  });
+
   test("control: nothing against the resource", async () => {
     const w = await pageWorld();
     const out = await outstanding(w, target);
@@ -256,5 +302,66 @@ describe("readOutstanding", () => {
       latest: null,
       latestOfKind: null,
     });
+  });
+});
+
+describe("readDraftHeaders (WEB-13b: the Imports list)", () => {
+  const KIND = "/calendar-sources/{id}/import";
+  const imported = (n: number, over: Partial<DraftWithCommand> = {}) =>
+    draftRow({
+      local_id: `i${n}`,
+      created_seq: n,
+      endpoint: KIND,
+      kind: KIND,
+      target_id: uuid(5),
+      command: {
+        ics: "X".repeat(2048),
+        from: "2026-01-01",
+        through: "2026-12-31",
+      },
+      target_resource_ids: [uuid(5)],
+      index_targets: [uuid(5)],
+      ...over,
+    });
+  const headers = (w: World, after?: number | null) =>
+    w.service.store.run(readDraftHeaders, {
+      incarnationId: w.service.incarnationId,
+      kind: KIND,
+      ...(after === undefined ? {} : { after }),
+    });
+
+  test("lists the unsettled drafts of the kind, oldest first, as headers; never reads a body", async () => {
+    const w = await pageWorld();
+    w.put("drafts", [
+      imported(1),
+      create(2),
+      imported(3, { status: "superseded" }),
+      imported(4, { status: "rejected" }),
+      imported(5, { status: "acknowledged" }),
+    ]);
+    w.env.idb.reads.reset();
+    const out = await headers(w);
+    expect(out.drafts.map((d) => d.local_id)).toEqual(["i1", "i4", "i5"]);
+    expect(out.total).toBe(3);
+    expect(out.next).toBeNull();
+    expect(out.drafts.every((d) => !("command" in d))).toBe(true);
+    expect(rows(w, "draft_commands")).toBe(0);
+  });
+
+  test("501 drafts: one window at a time, an exact total, the cursor continues after the window's last one", async () => {
+    const w = await pageWorld();
+    w.put(
+      "drafts",
+      Array.from({ length: WINDOW + 1 }, (_, i) => imported(i + 1)),
+    );
+    w.env.idb.reads.reset();
+    const first = await headers(w);
+    expect(first.drafts).toHaveLength(WINDOW);
+    expect(first.total).toBe(WINDOW + 1);
+    expect(peak(w, "drafts")).toBeLessThanOrEqual(WINDOW);
+    const second = await headers(w, first.next);
+    expect(second.drafts.map((d) => d.local_id)).toEqual([`i${WINDOW + 1}`]);
+    expect(second.next).toBeNull();
+    expect(rows(w, "draft_commands")).toBe(0);
   });
 });

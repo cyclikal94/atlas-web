@@ -148,6 +148,78 @@ describe("F-O7: 409", () => {
   });
 });
 
+describe("WEB-13b seam: an Atlas-coded answer the generic rule retries", () => {
+  test("a handler of its code may make it terminal (`rejected`, stage `rejected`); dependants are rejected with it", async () => {
+    const w = await started();
+    w.conflicts.register("fetch_failed", () => ({
+      kind: "reclassify",
+      as: "rejected",
+    }));
+    w.script.push(w.error(502, "fetch_failed"));
+    const a = await enqueue(w, create("a"));
+    const dep = await enqueue(w, edit("a", 1));
+    await w.settle();
+    await w.advance(10 * 60_000);
+    expect(w.sent).toHaveLength(1);
+    expect(w.drafts().find((d) => d.local_id === a)).toMatchObject({
+      status: "rejected",
+      last_error: { status: 502, code: "fetch_failed", stage: "rejected" },
+    });
+    expect(status(w, dep)).toBe("rejected");
+  });
+
+  test.each([
+    ["`retry`", () => ({ kind: "reclassify", as: "retry" }) as const],
+    [
+      "`version_conflict`",
+      () => ({ kind: "reclassify", as: "version_conflict" }) as const,
+    ],
+    ["`default`", () => ({ kind: "default" }) as const],
+    [
+      "a throwing handler",
+      () => {
+        throw new Error("handler bug");
+      },
+    ],
+  ])(
+    "%s keeps the generic retry: in_flight, the same key",
+    async (_, handler) => {
+      const w = await started();
+      w.conflicts.register("temporarily_unavailable", handler);
+      w.script.push(w.error(503, "temporarily_unavailable"));
+      const a = await enqueue(w, create("a"));
+      await w.settle();
+      expect(status(w, a)).toBe("in_flight");
+      expect(
+        w.drafts().find((d) => d.local_id === a)?.last_error,
+      ).toMatchObject({
+        status: 503,
+        code: "temporarily_unavailable",
+        stage: "unavailable",
+      });
+      await w.advance(2_000);
+      expect(w.sent.map((s) => s.key)).toEqual([a, a]);
+      expect(status(w, a)).toBe("acknowledged");
+    },
+  );
+
+  test("an answer with no Atlas code never consults a handler: a gateway 502 is retried", async () => {
+    const w = await started();
+    const asked: string[] = [];
+    w.conflicts.register("fetch_failed", ({ code }) => {
+      asked.push(code);
+      return { kind: "reclassify", as: "rejected" };
+    });
+    w.script.push(new Response("bad gateway", { status: 502 }));
+    const a = await enqueue(w, create("a"));
+    await w.settle();
+    expect(status(w, a)).toBe("in_flight");
+    await w.advance(2_000);
+    expect(status(w, a)).toBe("acknowledged");
+    expect(asked).toEqual([]);
+  });
+});
+
 describe("F-O8: a refusal, and slice capacity", () => {
   test.each([
     [403, "forbidden"],

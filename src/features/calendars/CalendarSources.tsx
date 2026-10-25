@@ -14,6 +14,7 @@ import {
   type CacheRow,
   type DraftWithCommand,
   type ListedResource,
+  useCacheGate,
   useDataActions,
   useOptionalDataEnv,
   usePendingCreates,
@@ -41,6 +42,10 @@ import {
   SHOW_PREVIOUS,
   WAITING_GROUP,
 } from "./copy";
+import { ImportDialog } from "./ImportDialog";
+import { ImportDropZone } from "./ImportDropZone";
+import { ImportsPanel } from "./ImportsPanel";
+import { ImportOpenerContext, type OpenImport } from "./import-opener";
 import { LinkCalendarDialog } from "./LinkCalendarDialog";
 import { ManageSourceDialog } from "./ManageSourceDialog";
 import { identityMemory } from "./memory";
@@ -49,11 +54,13 @@ import type {
   ObserverAttachment,
   SourceObserver,
 } from "./observation-controller";
+import { ReviewPanel } from "./ReviewPanel";
 import {
   createRefreshController,
   type RefreshController,
 } from "./refresh-controller";
 import { projectSourceCreate } from "./register";
+import { registerCalendarExtensions } from "./register-13b";
 import { PendingRow, SourceRow } from "./SourceRow";
 import { type CalendarVisit, documentVisitBoundary, enterVisit } from "./visit";
 
@@ -99,6 +106,8 @@ export function CalendarSources() {
 export type Dialog =
   | { kind: "add" }
   | { kind: "link" }
+  /** WEB-13b: an import into `sourceId` (null: chosen in the dialog), with a file already chosen or dropped. */
+  | { kind: "import"; sourceId: string | null; file?: File }
   | {
       kind: "manage";
       row: CacheRow;
@@ -198,6 +207,8 @@ const NO_LISTENER = () => () => undefined;
 
 function Sources() {
   const env = useOptionalDataEnv();
+  // Idempotent per registry: a test's or the fixture's own registry describes WEB-13b's queued kinds too.
+  if (env !== null) registerCalendarExtensions(env.commands);
   const inputs = useStatusInputs();
   const compat = useCompat();
   const api = useCalendarApi();
@@ -258,6 +269,15 @@ function Sources() {
   const markAwaiting = useCallback((id: string, version: number) => {
     setAwaiting((previous) => new Map(previous).set(id, version));
   }, []);
+  const openImport = useCallback<OpenImport>(
+    (sourceId, file) =>
+      setDialog(
+        file === undefined
+          ? { kind: "import", sourceId }
+          : { kind: "import", sourceId, file },
+      ),
+    [],
+  );
 
   return (
     <>
@@ -321,7 +341,7 @@ function Sources() {
             {NO_DATABASE}
           </p>
         ) : (
-          <>
+          <ImportOpenerContext.Provider value={openImport}>
             <CacheGate>
               <CachedSources
                 environment={environment}
@@ -333,11 +353,23 @@ function Sources() {
               />
             </CacheGate>
             <PendingSources environment={environment} onDialog={setDialog} />
-          </>
+            <WhileCacheOpen>
+              <ImportDropZone />
+              <ImportsPanel />
+              <ReviewPanel />
+            </WhileCacheOpen>
+          </ImportOpenerContext.Provider>
         )}
       </section>
       {dialog?.kind === "add" ? (
         <AddSourceDialog online={online} onClose={() => setDialog(null)} />
+      ) : null}
+      {dialog?.kind === "import" ? (
+        <ImportDialog
+          sourceId={dialog.sourceId}
+          {...(dialog.file === undefined ? {} : { file: dialog.file })}
+          onClose={() => setDialog(null)}
+        />
       ) : null}
       {dialog?.kind === "link" && api !== null ? (
         <LinkCalendarDialog
@@ -358,6 +390,14 @@ function Sources() {
       ) : null}
     </>
   );
+}
+
+/**
+ * WEB-13b: the import entry and the Imports list show only while the cache gate is open (E9), and say nothing while it is closed (the list
+ * above carries the gate's one message).
+ */
+function WhileCacheOpen({ children }: { children: React.ReactNode }) {
+  return useCacheGate() === "open" ? children : null;
 }
 
 function EntryPoint({

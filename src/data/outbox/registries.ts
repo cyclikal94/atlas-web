@@ -176,7 +176,10 @@ export type ConflictDecision =
 export interface ConflictContext {
   /** The draft with its body: the dispatcher holds it from the claim, so a handler may inspect the command it sent. */
   draft: DraftWithCommand;
-  /** The HTTP status (a `409`) and the error `code`. */
+  /**
+   * The HTTP status and the error `code`: a `409`, or an Atlas-coded answer the generic rule would retry (a `5xx`, a `429`), for which
+   * only `reclassify` as `rejected` is honoured (WEB-13b: an import's `502 fetch_failed` cannot succeed when resent unchanged).
+   */
   status: number;
   code: string;
 }

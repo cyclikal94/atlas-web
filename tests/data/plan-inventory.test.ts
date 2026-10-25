@@ -217,6 +217,15 @@ describe("F-S7: the writer inventory", () => {
       expect(writers.has(read.name), read.name).toBe(false);
     }
   });
+  test("WEB-13b's header-only read of a kind's drafts never reads a body (`draft_commands` is out of its scope)", () => {
+    const read = listReadPlans().find(
+      (plan) => plan.name === "data.readDraftHeaders",
+    );
+    expect(read).toMatchObject({ mode: "readonly" });
+    expect([...(read?.scope ?? [])].sort()).toEqual(
+      ["drafts", "sync_state"].sort(),
+    );
+  });
   test("the feature reads of WEB-13a (D-13a-4) are registered READ plans over exactly the stores they read", () => {
     const by = (name: string) =>
       listReadPlans().find((read) => read.name === name);
