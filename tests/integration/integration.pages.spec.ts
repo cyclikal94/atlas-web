@@ -23,6 +23,12 @@ import {
   watchLift,
   withStaleSharedConfirmation,
 } from "./helpers";
+import {
+  judgeTypedCall,
+  judgeVerificationPremise,
+  type KernelEvent,
+  type VerificationPremiseInput,
+} from "./verification-premise";
 
 /**
  * I-09, I-10 and I-12 to I-15 (plan 14.3), required on Chromium and run on the other engines where the engine allows. Two pages of
@@ -636,18 +642,49 @@ test.describe("I-14d: the release does not wait for the completion of the check 
  * placement is deterministic, not a measured delay): the call is refused `not_sent` and nothing reaches the proxy (the failure's
  * signature, reproduced), and, retried as the other cases do, it is sent once and held once.
  */
-async function callAtVerificationAnswer(
+/**
+ * Revision 33 (review 34 R34-N1, family `i14d-post-navigation-lease-premise`): the new document is no longer made by NAVIGATING
+ * the signed-in page. A navigation abandons that document's ordinary requests still outstanding (the `/today` page's
+ * `/defaults/snapshot` and two `/daily` reads, made as it displays); their leases stay in the record, and the new document must
+ * verify them BEFORE it may display (the protection of src/session/kernel/expose.ts). Revision 11 held that verification and then
+ * waited for a display that needed its answer: review 34's Chromium failure. The signed-in page (the seed) now stays alive and the
+ * target is a SEPARATE document of the same context, so the seed's requests finish and retire normally (a target meeting a live one
+ * waits for it, as I-09 shows). Before anything is released the setup's premise is JUDGED (verification-premise.ts): distinct
+ * boots, the aged confirmation unchanged, the target exposed and then made exactly one verification with an empty captured set,
+ * whose lease is the target's and whose answer is the one the proxy holds, the only identity read in the context. The typed call is
+ * judged too: made by the hook as that answer is delivered, before the answer's detection hold ended, every attempt accounted for.
+ * The premise controls below force both other schedules in the real engine: a live seed's held request (deferred, then accepted)
+ * and a navigation that abandons one (rejected for its own reasons, then recovered).
+ */
+interface PremiseWindow {
+  __onCurrent?: () => void;
+  __currentIssued?: number;
+  __hookRuns?: number;
+  __hookAt?: number;
+  __premiseToken?: string;
+  /** A path whose requests this document makes but never sees settle (answered, failed or aborted): its continuation never runs. */
+  __freeze?: string;
+}
+
+/**
+ * Count each document's identity reads as they are made, and run a one-shot hook as an identity answer is delivered. With `__freeze`
+ * set, a matching request is made and its outcome withheld from the document for good (TEST INSTRUMENTATION): a navigation then
+ * destroys its owner before the owner can retire its lease, in every engine. Without it, whether a navigation leaves the lease is the
+ * engine's: Chromium destroyed the document first (review 34), Firefox let the aborted request's continuation retire it (diagnostic
+ * d2 of revision 33).
+ */
+async function instrumentIdentityReads(
   context: import("@playwright/test").BrowserContext,
-  retry: boolean,
 ) {
   await context.addInitScript(() => {
     const original = window.fetch.bind(window);
     window.fetch = async (...args: Parameters<typeof fetch>) => {
       const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-      const w = window as unknown as {
-        __onCurrent?: () => void;
-        __currentIssued?: number;
-      };
+      const w = window as unknown as PremiseWindow;
+      if (w.__freeze && new URL(url, location.href).pathname === w.__freeze)
+        return new Promise<Response>(() => {
+          void original(...args).catch(() => undefined);
+        });
       // R16: this document's identity reads, counted as they are made (the setup proves its read was issued and held).
       if (url.includes("/browser-sessions/current"))
         w.__currentIssued = (w.__currentIssued ?? 0) + 1;
@@ -655,73 +692,272 @@ async function callAtVerificationAnswer(
       if (url.includes("/browser-sessions/current") && w.__onCurrent) {
         const hook = w.__onCurrent;
         w.__onCurrent = undefined;
+        // Revision 33: when the hook ran, by the kernel's own trace (the answer reaches the kernel after this returns).
+        w.__hookRuns = (w.__hookRuns ?? 0) + 1;
+        w.__hookAt ??= window.__atlasFixture?.session?.trace.length ?? -1;
         hook();
       }
       return response;
     };
   });
-  const page = await bootHarness(context);
-  expect((await signIn(page, "alice")).kind).toBe("settled");
-  await untilView(page, "displaying");
+}
+
+/** Mark a booted document, so records read later can be shown to come from it (a later document of the same page has no mark). */
+const markDocument = (page: Page) =>
+  page.evaluate(() => {
+    const token = crypto.randomUUID();
+    (window as unknown as PremiseWindow).__premiseToken = token;
+    return token;
+  });
+
+/** Sign the seed in, let it display, and age the shared confirmation; returns the identity and the `confirmed_at` written. */
+async function seedWithStaleConfirmation(
+  context: import("@playwright/test").BrowserContext,
+) {
+  const seed = await bootHarness(context);
+  expect((await signIn(seed, "alice")).kind).toBe("settled");
+  await untilView(seed, "displaying");
   // WEB-08c revision 14 (review 14 R16): since HF1-SHARED-CONFIRMATION-20261013 the settlement's shared confirmation spares the
   // settled page its post-display verification (the accepted behaviour; control: no identity read reached the proxy). The
   // verification these cases place a call against is the one a NEW document makes when the record's confirmation is older than the
   // interval: the token is still adopted (no CSRF read), so it is the document's only identity read, exactly as every display made it
-  // when revision 10 failed. Made eligible explicitly, then proven issued (by this document, once) and held.
+  // when revision 10 failed. Made eligible explicitly, then proven issued (by the target, once) and held.
   expect(await identityReadsAtProxy()).toEqual([]);
-  const a = (await records(page)).auth_state.settled as SettledLike;
-  expect(await withStaleSharedConfirmation(page, a)).toMatchObject({
+  const a = (await records(seed)).auth_state.settled as SettledLike;
+  expect(await withStaleSharedConfirmation(seed, a)).toMatchObject({
     aged: true,
     settlement_matched: true,
     confirmation_matched: true,
     written_age_ms: 120_000,
   });
-  const verification = await proxy.addRule({
+  const aged = (
+    (await records(seed)).auth_state as unknown as {
+      confirmation: { confirmed_at: string } | null;
+    }
+  ).confirmation?.confirmed_at;
+  if (!aged) throw new Error("setup: the aged confirmation was not read back");
+  return { seed, a, aged };
+}
+
+/** The records the premise witness reads, collected while the identity answer is held. */
+async function premiseRecords(
+  seed: { boot: string; page: Page | null },
+  target: Page,
+  token: string,
+  a: SettledLike,
+  aged: string,
+  verificationRule: string,
+): Promise<VerificationPremiseInput> {
+  const collected = await target.evaluate(async () => {
+    const w = window as unknown as PremiseWindow;
+    const recordsNow =
+      (await window.__atlasFixture?.session?.readRecords()) as {
+        auth_state: VerificationPremiseInput["record"];
+      };
+    return {
+      boot: window.__s.bootId,
+      token: w.__premiseToken ?? null,
+      reads: w.__currentIssued ?? 0,
+      trace: (window.__atlasFixture?.session?.trace ?? []) as KernelEvent[],
+      record: {
+        settled: recordsNow.auth_state.settled,
+        confirmation: recordsNow.auth_state.confirmation,
+        leases: recordsNow.auth_state.leases,
+      },
+    };
+  });
+  const seedReads = seed.page
+    ? await seed.page.evaluate(
+        () => (window as unknown as PremiseWindow).__currentIssued ?? 0,
+      )
+    : 0;
+  return {
+    identity: { account: a.account_id, epoch: a.epoch, session: a.session_id },
+    seed: { boot: seed.boot },
+    target: {
+      boot: collected.boot,
+      token: { atBoot: token, atJudgement: collected.token },
+    },
+    trace: collected.trace,
+    record: collected.record,
+    agedConfirmedAt: aged,
+    identityReads: {
+      seed: seedReads,
+      target: collected.reads,
+      wire: (await identityReadsAtProxy()).length,
+      held: (await proxy.held())[verificationRule] ?? 0,
+    },
+  };
+}
+
+const verificationRule = () =>
+  proxy.addRule({
     method: "GET",
     path: "/^\\/api\\/experimental\\/v1\\/browser-sessions\\/current$/",
     action: "hold",
     ordinal: 1,
   });
-  await freshHarnessDocument(page, a);
-  await untilView(page, "displaying");
-  // The new document's own verification of the displayed account is outstanding at the proxy.
+
+const sessionsAtProxy = async () =>
+  (await proxy.log()).filter(
+    (entry) => entry.method === "GET" && /\/sessions$/.test(entry.path),
+  ).length;
+
+/** The typed call's records, judged by `judgeTypedCall`. */
+async function typedCallVerdict(
+  page: Page,
+  a: SettledLike,
+  verification: { n: number; lease: string; issued: number },
+  retry: boolean,
+) {
+  const collected = await page.evaluate(() => {
+    const w = window as unknown as PremiseWindow;
+    return {
+      trace: (window.__atlasFixture?.session?.trace ?? []) as KernelEvent[],
+      runs: w.__hookRuns ?? 0,
+      at: w.__hookAt ?? null,
+      attempts: [
+        ...((window.__t.attempts as
+          | Array<{ n: number | null; outcome: string | null }>
+          | undefined) ?? []),
+      ],
+    };
+  });
+  return judgeTypedCall({
+    identity: { account: a.account_id, epoch: a.epoch },
+    trace: collected.trace,
+    verification,
+    hook: { runs: collected.runs, at: collected.at },
+    attempts: collected.attempts,
+    retry,
+    wireSessions: await sessionsAtProxy(),
+  });
+}
+
+/** Until the call's first attempt has finished or been issued (and, with `issued`, until one of its attempts was issued). */
+const untilAttempt = (page: Page, issued: boolean) =>
+  page.waitForFunction((needIssued) => {
+    const trace = window.__atlasFixture?.session?.trace ?? [];
+    const attempts =
+      (window.__t.attempts as
+        | Array<{ n: number | null; outcome: string | null }>
+        | undefined) ?? [];
+    const sent = (n: number | null) =>
+      n !== null &&
+      trace.some((e) => e.event === "request.issued" && e.data?.n === n);
+    const first = attempts[0];
+    return needIssued
+      ? attempts.some((attempt) => sent(attempt.n)) ||
+          window.__t.lateValue !== undefined
+      : first !== undefined && (first.outcome !== null || sent(first.n));
+  }, issued);
+
+async function callAtVerificationAnswer(
+  context: import("@playwright/test").BrowserContext,
+  retry: boolean,
+) {
+  await instrumentIdentityReads(context);
+  const { seed, a, aged } = await seedWithStaleConfirmation(context);
+  const seedBoot = await seed.evaluate(() => window.__s.bootId);
+  const verification = await verificationRule();
+  // The target: a separate document of the same context, booted while the seed stays alive (the seed is never navigated).
+  const page = await bootHarness(context);
+  const token = await markDocument(page);
+  // The target's own verification of the displayed account is outstanding at the proxy; its premise is judged before anything else.
   await untilHeld(verification.id);
+  const premise = judgeVerificationPremise(
+    await premiseRecords(
+      { boot: seedBoot, page: seed },
+      page,
+      token,
+      a,
+      aged,
+      verification.id,
+    ),
+  );
+  expect(
+    premise.problems,
+    "the I-14d premise (verification-premise.ts)",
+  ).toEqual([]);
+  const checked = premise.verification as NonNullable<
+    typeof premise.verification
+  >;
+  await untilView(page, "displaying");
   expect(
     await page.evaluate(
-      () => (window as unknown as { __currentIssued?: number }).__currentIssued,
+      () => (window as unknown as PremiseWindow).__currentIssued,
     ),
   ).toBe(1);
   expect(await identityReadsAtProxy()).toHaveLength(1);
   const sessions = await proxy.addRule(sessionsRule("hold"));
   await page.evaluate(
     (arg) => {
-      const once = () =>
-        window.__s.api
+      const attempts: Array<{ n: number | null; outcome: string | null }> = [];
+      window.__t.attempts = attempts;
+      // Each attempt names the kernel activity it creates: the typed client's send() creates it synchronously inside the call.
+      const once = () => {
+        const trace = window.__atlasFixture?.session?.trace ?? [];
+        const from = trace.length;
+        const pending = window.__s.api
           .client("ordinary", arg.account, arg.epoch)
-          .GET("/sessions")
+          .GET("/sessions");
+        const created = trace
+          .slice(from)
+          .find((e) => e.event === "activity.create");
+        const attempt: { n: number | null; outcome: string | null } = {
+          n: typeof created?.data?.n === "number" ? created.data.n : null,
+          outcome: null,
+        };
+        attempts.push(attempt);
+        return pending
           .then(
             () => "returned",
             (error: unknown) => (error as { kind?: string }).kind ?? "threw",
-          );
+          )
+          .then((outcome) => {
+            attempt.outcome = outcome;
+            return outcome;
+          });
+      };
       window.__t.late = new Promise<string>((resolve) => {
-        (window as unknown as { __onCurrent?: () => void }).__onCurrent =
-          () => {
-            void (arg.retry ? window.__retryTyped(once) : once()).then(resolve);
-          };
+        (window as unknown as PremiseWindow).__onCurrent = () => {
+          void (arg.retry ? window.__retryTyped(once) : once()).then(
+            (outcome) => {
+              window.__t.lateValue = outcome;
+              resolve(outcome);
+            },
+          );
+        };
       });
     },
     { account: a?.account_id ?? "", epoch: a?.epoch ?? 0, retry },
   );
+  // The hook is armed in the target before the answer is let through.
+  expect(
+    await page.evaluate(
+      () => typeof (window as unknown as PremiseWindow).__onCurrent,
+    ),
+  ).toBe("function");
   // The answer is delivered now: the call is made in the same task.
   await proxy.release(verification.id);
-  return { page, sessions };
+  // Judged as soon as the first attempt has finished or been sent: made before the detection hold ended, never issued.
+  await untilAttempt(page, false);
+  if (retry) await untilAttempt(page, true);
+  const early = await typedCallVerdict(page, a, checked, retry);
+  expect(early.problems, "the typed call (verification-premise.ts)").toEqual(
+    [],
+  );
+  return { page, sessions, a, checked };
 }
 
 test.describe("I-14d (revision 11): a typed call made as the page's own verification is answered", () => {
   test("it is refused `not_sent` (no attempt, nothing sent), which is what revision 10's WebKit failure was", async ({
     context,
   }) => {
-    const { page, sessions } = await callAtVerificationAnswer(context, false);
+    const { page, sessions, a, checked } = await callAtVerificationAnswer(
+      context,
+      false,
+    );
     expect(await page.evaluate(() => window.__t.late)).toBe("not_sent");
     // Nothing reached the proxy, however long it is waited for: zero held, and no `GET /sessions` in its log.
     await page.waitForTimeout(1_500);
@@ -730,6 +966,10 @@ test.describe("I-14d (revision 11): a typed call made as the page's own verifica
       (entry) => entry.method === "GET" && /\/sessions$/.test(entry.path),
     );
     expect(requests).toEqual([]);
+    expect(
+      (await typedCallVerdict(page, a, checked, false)).problems,
+      "the typed call after the window",
+    ).toEqual([]);
     // The page itself is healthy: its identity is displayed and a call made now is sent.
     expect((await view(page)).kind).toBe("displaying");
   });
@@ -737,12 +977,177 @@ test.describe("I-14d (revision 11): a typed call made as the page's own verifica
   test("retried as every other case does, it is sent once, held once, and returned when released", async ({
     context,
   }) => {
-    const { page, sessions } = await callAtVerificationAnswer(context, true);
+    const { page, sessions, a, checked } = await callAtVerificationAnswer(
+      context,
+      true,
+    );
     await untilHeld(sessions.id);
     await page.waitForTimeout(500);
     expect((await proxy.held())[sessions.id]).toBe(1);
     await proxy.release(sessions.id);
     expect(await page.evaluate(() => window.__t.late)).toBe("returned");
+    expect(
+      (await typedCallVerdict(page, a, checked, true)).problems,
+      "the typed call once returned",
+    ).toEqual([]);
+  });
+});
+
+test.describe("I-14d (revision 11), premise controls (revision 33): the schedules its setup must tell apart, forced in the real engine", () => {
+  test("a live seed's held request defers the target's display; answered, the seed retires it, and the target's optional verification is accepted", async ({
+    context,
+  }) => {
+    await instrumentIdentityReads(context);
+    const { seed, a, aged } = await seedWithStaleConfirmation(context);
+    const seedBoot = await seed.evaluate(() => window.__s.bootId);
+    const held = await proxy.addRule(sessionsRule("hold"));
+    await seed.evaluate(
+      (arg) => {
+        window.__t.seedCall = window.__retryTyped(() =>
+          window.__s.api
+            .client("ordinary", arg.account, arg.epoch)
+            .GET("/sessions")
+            .then(
+              () => "returned",
+              (error: unknown) => (error as { kind?: string }).kind ?? "threw",
+            ),
+        );
+      },
+      { account: a.account_id, epoch: a.epoch },
+    );
+    await untilHeld(held.id);
+    const live = Object.entries((await records(seed)).auth_state.leases).filter(
+      ([, lease]) =>
+        (lease as { boot_id?: string }).boot_id === seedBoot &&
+        lease.class === "ordinary",
+    );
+    expect(live.length).toBeGreaterThanOrEqual(1);
+    const verification = await verificationRule();
+    const target = await bootHarness(context);
+    const token = await markDocument(target);
+    // DEFERRED on the seed's live lease: the waiting card, no exposure, no verification, no identity read.
+    await untilView(target, "neutral", "1e.waiting");
+    const waiting = await target.evaluate(
+      () => (window.__atlasFixture?.session?.trace ?? []) as KernelEvent[],
+    );
+    expect(waiting.some((e) => e.event === "act.begin")).toBe(false);
+    expect(
+      waiting.some(
+        (e) =>
+          e.event === "activity.create" && e.data?.klass === "verification",
+      ),
+    ).toBe(false);
+    expect(await identityReadsAtProxy()).toEqual([]);
+    // Answered: the seed's call returns, it retires its lease, and the target displays, then verifies with nothing captured.
+    await proxy.release(held.id);
+    expect(await seed.evaluate(() => window.__t.seedCall)).toBe("returned");
+    await untilHeld(verification.id);
+    const premise = judgeVerificationPremise(
+      await premiseRecords(
+        { boot: seedBoot, page: seed },
+        target,
+        token,
+        a,
+        aged,
+        verification.id,
+      ),
+    );
+    expect(premise.problems).toEqual([]);
+    await untilView(target, "displaying");
+    await proxy.release(verification.id);
+    await untilRecord(
+      target,
+      (state) => Object.keys(state.leases).length === 0,
+      "every lease is retired",
+    );
+    expect((await view(target)).kind).toBe("displaying");
+  });
+
+  test("a navigation that abandons the seed's held request leaves its lease for the next document, whose verification gates display: rejected as the premise, then recovered", async ({
+    context,
+  }) => {
+    await instrumentIdentityReads(context);
+    const { seed, a, aged } = await seedWithStaleConfirmation(context);
+    const seedBoot = await seed.evaluate(() => window.__s.bootId);
+    const held = await proxy.addRule(sessionsRule("hold"));
+    await seed.evaluate(
+      (arg) => {
+        // The one named request whose continuation the old document never runs (see `instrumentIdentityReads`).
+        (window as unknown as PremiseWindow).__freeze =
+          "/api/experimental/v1/sessions";
+        void window.__retryTyped(() =>
+          window.__s.api
+            .client("ordinary", arg.account, arg.epoch)
+            .GET("/sessions")
+            .then(
+              () => "returned",
+              (error: unknown) => (error as { kind?: string }).kind ?? "threw",
+            ),
+        );
+      },
+      { account: a.account_id, epoch: a.epoch },
+    );
+    await untilHeld(held.id);
+    // The held request's lease is the seed's only one once its own display reads have been answered.
+    await untilRecord(
+      seed,
+      (state) => Object.keys(state.leases).length === 1,
+      "only the held request's lease remains",
+    );
+    const [orphan] = Object.keys((await records(seed)).auth_state.leases);
+    const verification = await verificationRule();
+    // The navigation of revision 11: the same page, a new document. The old document's request is abandoned before its owner could
+    // retire it (frozen), as review 34's Chromium navigation abandoned the display reads.
+    await freshHarnessDocument(seed, a);
+    const token = await markDocument(seed);
+    await untilHeld(verification.id);
+    const state = (await records(seed)).auth_state;
+    expect(
+      (state.leases[orphan as string] as { boot_id?: string } | undefined)
+        ?.boot_id,
+    ).toBe(seedBoot);
+    // Its owner is gone: the lease's lock is no longer held by anyone.
+    const heldLocks = await seed.evaluate(async () =>
+      ((await navigator.locks.query()).held ?? []).map((lock) => lock.name),
+    );
+    expect(heldLocks).not.toContain(`atlas-lease-${orphan}`);
+    const trace = await seed.evaluate(
+      () => (window.__atlasFixture?.session?.trace ?? []) as KernelEvent[],
+    );
+    const captured = trace.find(
+      (e) => e.event === "cover.committed" && e.data?.klass === "verification",
+    );
+    expect(captured?.data?.unresolved).toEqual([orphan]);
+    expect(trace.some((e) => e.event === "act.begin")).toBe(false);
+    expect((await view(seed)).kind).toBe("neutral");
+    const premise = judgeVerificationPremise(
+      await premiseRecords(
+        { boot: seedBoot, page: null },
+        seed,
+        token,
+        a,
+        aged,
+        verification.id,
+      ),
+    );
+    expect(premise.problems).toEqual(
+      expect.arrayContaining([
+        `a verification captured unresolved leases ${JSON.stringify([orphan])}: it verifies abandoned requests, it is not the optional check`,
+        "the target never exposed the identity (no act.begin/act.end)",
+      ]),
+    );
+    // Released: the same session's answer resolves the abandoned lease, and the same session displays.
+    await proxy.release(verification.id);
+    await untilView(seed, "displaying");
+    await untilRecord(
+      seed,
+      (s) => s.leases[orphan as string] === undefined,
+      "the abandoned lease is resolved",
+    );
+    const after = (await records(seed)).auth_state;
+    expect(after.fences).toEqual({});
+    expect(after.settled?.session_id).toBe(a.session_id);
+    await proxy.release(held.id);
   });
 });
 
