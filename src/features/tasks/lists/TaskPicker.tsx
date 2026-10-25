@@ -14,7 +14,7 @@ import { useTasksEnv } from "../env";
 import { completeKept, disownKept, keptKey, useKeptInput } from "../kept-input";
 import { type ComposedList, roomFor } from "../model/list-view";
 import { listItem } from "../model/lists";
-import { useListActions } from "./actions";
+import { type Evidence, type Issued, useListActions } from "./actions";
 import { PICKER } from "./copy";
 import { ReadNotice } from "./ReadNotice";
 import { usePickerPage } from "./reads";
@@ -24,25 +24,34 @@ export const pickerEditor = (listId: string) => `list-picker:${listId}`;
 /**
  * One selection of a task: an INTENTION to add it, whose add is named by the local id chosen when it was selected (R2, revision 2). The
  * task identifies the member, not the add: a task deselected and selected again is a new selection, a new add under a new id, never
- * deduplicated against an earlier one, whatever became of that one. A retry of the same selection after an answer that was lost sends the
- * same add again (`duplicate`, never a second add).
+ * deduplicated against an earlier one, whatever became of that one.
  */
 interface Choice {
   task: string;
   localId: string;
   /** The outstanding create of a task not sent yet, as it was when selected: the add waits for it (D-10b-11). */
   after: string | null;
-  /** Sent, and the answer did not say whether it was stored (`SaveOutcome.uncertain`); it stays so after a later definite refusal. */
-  issued: boolean;
+}
+
+/**
+ * An add that was sent and whose answer did not say whether it was stored (`SaveOutcome.uncertain`; D1, revision 3): its exact request,
+ * id and database, kept APART from the selection, so that deselecting or choosing the task again, the list's membership, the search or a
+ * page hiding it can never drop it. `uncertain`: not looked up yet; `unknown`/`changed`: as the dialogs' attempts (`dialogs.tsx`).
+ */
+interface Unresolved extends Issued {
+  task: string;
+  state: "uncertain" | Exclude<Evidence, "stored">;
 }
 
 interface PickerInput {
   query: string;
   /** In the order selected. A selection the search hides stays selected and counted (PRODUCT-DECISIONS-20261011). */
   selected: Choice[];
+  /** Earlier adds not settled yet, selected now or not. */
+  unresolved: Unresolved[];
 }
 
-const empty = (): PickerInput => ({ query: "", selected: [] });
+const empty = (): PickerInput => ({ query: "", selected: [], unresolved: [] });
 
 /**
  * "Add task to list" (plan §4.6, D-10b-10..12): the tasks this device can offer (its cached tasks and the ones it created and has not
@@ -50,10 +59,14 @@ const empty = (): PickerInput => ({ query: "", selected: [] });
  * checks that room again against the LATEST composition, then saves one `list_item` per task, in the order selected. A partial save keeps
  * the rest selected. The session is the screen visit's (`kept-input.ts`).
  *
- * A selection whose add was sent and its answer lost is settled by what is STORED, not by the list's membership (R2, revision 2): Add
- * selected first asks whether a draft is stored under its id; if so that selection is done (it leaves the selection, and the person is
- * told: if the task is not in the list now, choosing it again is a new add), else the same add is sent again. Membership is never taken as
- * proof of which add made it, and no add is made that the person did not choose.
+ * An add whose answer was lost is settled by what is STORED, not by the list's membership (R2), and is never sent again (D1, revision 3;
+ * approved 25 October 2026): Add selected first looks up every earlier add not settled yet (read only, `ListActions.reconcile`), whether
+ * its task is selected, hidden or a member now. One found as it was sent is done (it leaves the selection, and the person is told: if the
+ * task is not in the list now, choosing it again is a new add). While any other remains, Add selected writes NOTHING: what is selected and
+ * searched stays, and the picker explains that the earlier outcome is unknown. Only the separate decision ("Add as new adds") then adds
+ * what is selected now, each a new add under a new id (one selected under an earlier add's id gets a new one), neither cancelling nor
+ * proving the earlier add; earlier adds whose task is not selected are not made again. Membership is never proof of which add made it,
+ * and no add is made that the person did not choose.
  */
 export function TaskPicker({
   list,
@@ -84,6 +97,7 @@ export function TaskPicker({
   const [note, setNote] = useState<string | null>(null);
   const search = useId();
   const caption = useId();
+  const decision = useId();
   const query = useDeferredValue(kept.value.query);
   const members = new Set(list.members ?? []);
   const page = usePickerPage({
@@ -104,6 +118,7 @@ export function TaskPicker({
   }, [items, more, page.reading, announcer]);
   const toggle = (task: string, after: string | null) =>
     kept.edit((value) => {
+      // Deselecting leaves an earlier add that is not settled where it is (`unresolved`, D1).
       if (value.selected.some((c) => c.task === task))
         return {
           ...value,
@@ -114,18 +129,20 @@ export function TaskPicker({
         task,
         localId: env.newId(),
         after,
-        issued: false,
       };
       return { ...value, selected: [...value.selected, choice] };
     });
   const discard = () => disownKept(key);
-  const save = async () => {
+  /** `again`: the person's decision to add what is selected now as new adds, after earlier adds this device could not settle (D1). */
+  const save = async (again = false) => {
     if (kept.busy) return;
     const now = latest.current;
+    const { unresolved } = kept.value;
     const chosen = kept.value.selected.filter(
       (c) => !(now.members ?? []).includes(c.task),
     );
     if (chosen.length === 0) return;
+    if (again && !unresolved.some((u) => u.state !== "uncertain")) return;
     if (!now.row.can_edit) {
       setNote(actions.denied().message);
       return;
@@ -139,53 +156,99 @@ export function TaskPicker({
     setNote(null);
     const ticket = kept.submit();
     if (ticket === null) return;
+    // The decision is on the earlier adds it explained; one not looked up yet is looked up first, as on any Save.
+    const looking = again
+      ? unresolved.filter((u) => u.state === "uncertain")
+      : unresolved;
+    // A selection under an earlier add's id is a new add under a new id once the person has decided (never the predecessor's id).
+    const renamed = new Map<string, string>();
+    if (again)
+      for (const c of chosen)
+        if (unresolved.some((u) => u.localId === c.localId))
+          renamed.set(c.localId, env.newId());
     // By local id (the selection), never by task: a later selection of the same task is another add.
     const queued = new Set<string>();
-    const earlier = new Set<string>();
-    const uncertain = new Set<string>();
+    const found = new Set<string>();
+    const unsettled = new Map<string, Exclude<Evidence, "stored">>();
+    const issued: Unresolved[] = [];
     let refused = false;
     let reason: string | null = null;
     try {
-      for (const choice of chosen) {
-        // An add whose answer was lost and that is stored after all: this selection is done, not made again (R2). Not found, or no
-        // answer: the same add is sent again (the outbox recognises it if it is stored).
-        if (choice.issued && (await actions.stored(choice.localId)) === true) {
-          earlier.add(choice.localId);
-          continue;
-        }
-        const outcome = await actions.enqueue(
-          listItem({
+      for (const earlier of looking) {
+        const evidence = await actions.reconcile(earlier);
+        if (evidence === "stored") found.add(earlier.localId);
+        else unsettled.set(earlier.localId, evidence);
+      }
+      // An earlier add not settled holds every add back until the person decides: nothing is written.
+      if (unsettled.size === 0)
+        for (const choice of chosen) {
+          // An add whose answer was lost and that is stored after all: this selection is done, not made again (R2).
+          if (found.has(choice.localId)) continue;
+          const localId = renamed.get(choice.localId) ?? choice.localId;
+          const request = listItem({
             listId,
             taskId: choice.task,
             included: true,
             after: choice.after,
-            localId: choice.localId,
-          }),
-          "",
-        );
-        if (outcome.ok) queued.add(choice.localId);
-        else {
-          if (outcome.uncertain === true) uncertain.add(choice.localId);
-          refused = true;
-          reason = outcome.message ?? copy.refusalMessage("storage");
-          break;
+            localId,
+          });
+          const scope = actions.scope();
+          const outcome = await actions.enqueue(request, "");
+          if (outcome.ok) queued.add(choice.localId);
+          else {
+            if (outcome.uncertain === true)
+              issued.push({
+                task: choice.task,
+                localId,
+                request,
+                scope,
+                state: "uncertain",
+              });
+            refused = true;
+            reason = outcome.message ?? copy.refusalMessage("storage");
+            break;
+          }
         }
-      }
     } finally {
-      // ONE settlement of the session (`kept-input.ts`): the selections done leave, the ones that may have been stored are marked so;
-      // what was typed meanwhile (the search) stays. Never added twice, never lost.
+      // The decision is spent once something was sent on it: the earlier adds it was about are let go (a refusal before any write keeps
+      // them, and the selection's ids, as they were).
+      const decided = again && (queued.size > 0 || issued.length > 0);
+      // ONE settlement of the session (`kept-input.ts`): the selections done leave; earlier adds found leave, the others keep what was
+      // found; one that may have been stored now joins them; what was typed meanwhile (the search) stays. Never added twice, never lost.
       const leave = (value: PickerInput): PickerInput => ({
         ...value,
         selected: value.selected
-          .filter((c) => !queued.has(c.localId) && !earlier.has(c.localId))
-          .map((c) => (uncertain.has(c.localId) ? { ...c, issued: true } : c)),
+          .filter((c) => !queued.has(c.localId) && !found.has(c.localId))
+          .map((c) =>
+            decided && renamed.has(c.localId)
+              ? { ...c, localId: renamed.get(c.localId) as string }
+              : c,
+          ),
+        unresolved: [
+          ...(decided ? [] : value.unresolved)
+            .filter((u) => !found.has(u.localId))
+            .map((u) => {
+              const state = unsettled.get(u.localId);
+              return state === undefined ? u : { ...u, state };
+            }),
+          ...issued,
+        ],
       });
+      const earlier = chosen.filter((c) => found.has(c.localId)).length;
+      const outstanding = [...unsettled.values()];
       const notes = [
+        outstanding.length > 0
+          ? outstanding.includes("unknown")
+            ? PICKER.unknown(outstanding.length)
+            : PICKER.changed(outstanding.length)
+          : null,
         refused && queued.size > 0
           ? PICKER.partial(queued.size, chosen.length, reason ?? "")
           : reason,
-        earlier.size > 0 ? PICKER.earlier(earlier.size) : null,
+        earlier > 0 ? PICKER.earlier(earlier) : null,
       ].filter((n): n is string => n !== null && n !== "");
+      if (outstanding.length > 0)
+        announcer.announce(notes[0] as string, "assertive");
       if (!refused && queued.size > 0)
         announcer.announce(PICKER.added(queued.size, now.row.label), "polite");
       completeKept<PickerInput>(ticket, queued.size === chosen.length, {
@@ -195,6 +258,7 @@ export function TaskPicker({
       });
     }
   };
+  const undecided = kept.value.unresolved.some((u) => u.state !== "uncertain");
   const shownNote = note ?? kept.note;
   return (
     <Dialog
@@ -334,6 +398,31 @@ export function TaskPicker({
           <p className="text-[12.5px] text-ink-2" data-list-note="">
             {shownNote}
           </p>
+        ) : null}
+        {undecided ? (
+          <div
+            className="flex flex-col items-start gap-2"
+            data-list-decision=""
+          >
+            <p id={decision} className="text-[12.5px] text-ink-2">
+              {PICKER.againNote}
+            </p>
+            {selected.length === 0 || !env.writable ? (
+              <Button
+                disabled
+                reason={!env.writable ? copy.NOT_WRITABLE : PICKER.chooseFirst}
+              >
+                {PICKER.again}
+              </Button>
+            ) : (
+              <Button
+                aria-describedby={decision}
+                onClick={() => void save(true)}
+              >
+                {PICKER.again}
+              </Button>
+            )}
+          </div>
         ) : null}
       </div>
     </Dialog>

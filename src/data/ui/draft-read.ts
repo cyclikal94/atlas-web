@@ -1,26 +1,30 @@
-import type { DraftRow } from "../model/types";
-import { readDraftHeader } from "../plans/draft-header";
+import type { EnqueueRequest } from "../model/outbox";
+import { type DraftEvidence, readDraftEvidence } from "../plans/draft-header";
 import type { DataEnv } from "./env";
 import type { Stage } from "./scan";
 
+export type { DraftEvidence };
+
 /**
- * The draft stored under `localId` NOW (its header), or null when none is (WEB-10b revision 2, R2): exact evidence that a save made under
- * that id was stored, for a caller whose answer was lost. Null is not proof that none ever was (see `readDraftHeader`); a failed read, or
- * a database that changed under it, is no answer at all.
+ * What is stored now under a save whose answer was lost (WEB-10b revision 3, D1; `readDraftEvidence`), read in the database the save was
+ * issued to (`scope`, its incarnation): evidence from any other database (the account's data wiped and recreated, another service) is no
+ * evidence, and neither is a read that failed or whose service changed under it. Read only: whatever it answers, nothing is written.
  */
-export async function readDraftNow(
+export async function readSaveEvidence(
   env: Pick<DataEnv, "service">,
-  localId: string,
-): Promise<Stage<DraftRow | null>> {
+  save: { localId: string; request: EnqueueRequest; scope: string | null },
+): Promise<Stage<DraftEvidence>> {
   const service = env.service();
-  if (service === null) return { ok: false, why: "closed" };
+  if (service === null || service.incarnationId !== save.scope)
+    return { ok: false, why: "closed" };
   try {
-    const draft = await service.store.run(readDraftHeader, {
+    const evidence = await service.store.run(readDraftEvidence, {
       incarnationId: service.incarnationId,
-      localId,
+      localId: save.localId,
+      request: save.request,
     });
     if (env.service() !== service) return { ok: false, why: "closed" };
-    return { ok: true, value: draft };
+    return { ok: true, value: evidence };
   } catch {
     return { ok: false, why: env.service() === service ? "failed" : "closed" };
   }

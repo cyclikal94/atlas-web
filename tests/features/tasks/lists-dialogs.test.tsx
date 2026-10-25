@@ -168,7 +168,9 @@ describe("L6: create", () => {
     expect(t.drafts()).toEqual([]);
   });
 
-  test("a save whose answer was lost is retried with the SAME list id and local id: one list", async () => {
+  // D1 (revision 3): the earlier oracle expected the held request to be SENT again (`asked` 2, the outbox recognising it); the approved
+  // contract never sends it again. The same schedule now asserts the read-only look-up and the same outcome: one list, the dialog closes.
+  test("a save whose answer was lost is looked up, never sent again: found as sent, one list, the dialog closes", async () => {
     const t = await mountTasks({
       path: "/tasks/lists",
       env: { online: false },
@@ -192,9 +194,10 @@ describe("L6: create", () => {
     expect(dialog()).not.toBeNull();
     press(CREATE.submit, dialog() as HTMLElement);
     await t.until(() => dialog() === null);
-    expect(asked).toHaveLength(2);
-    expect(asked[1]?.localId).toBe(asked[0]?.localId);
+    expect(dialog(), "found as sent: the dialog closes").toBeNull();
+    expect(asked, "nothing sent again").toHaveLength(1);
     expect(bodies(t, "create_list")).toHaveLength(1);
+    expect(bodies(t, "create_list")[0]?.draft.local_id).toBe(asked[0]?.localId);
   });
 
   test("kept through the in-dialog sync control and Back (raw); Escape discards; a reload-like forget drops it", async () => {

@@ -6,14 +6,21 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
-import type { EnqueueRequest } from "../../../src/data";
+import { type EnqueueRequest, readSaveEvidence } from "../../../src/data";
+import { accountDatabaseName } from "../../../src/data/model/schema";
+import type { DraftRow } from "../../../src/data/model/types";
+import { admitReceipt, markInFlight } from "../../../src/data/plans/outbox";
 import {
   CREATE,
   DETAIL,
   PICKER,
   RENAME,
 } from "../../../src/features/tasks/lists/copy";
-import { createList, listItem } from "../../../src/features/tasks/model/lists";
+import {
+  createList,
+  editList,
+  listItem,
+} from "../../../src/features/tasks/model/lists";
 import { installMatchMedia } from "../../helpers/match-media";
 import {
   forgetLists,
@@ -22,17 +29,24 @@ import {
   taskId,
   taskRow,
 } from "../../support/tasks/lists";
-import { mountTasks } from "../../support/tasks/world";
+import { ME, mountTasks, tasksEnv } from "../../support/tasks/world";
 
 /**
- * WEB-10b review R1/R2 (revision 1): a save's local id stays bound to the ONE request it was sent with. In the app's router over the
- * PRODUCTION data controller, outbox and the IndexedDB double; a lost answer is placed by wrapping the outbox's enqueue (the commit made,
- * or not, then a throw), a controlled simulation rather than an observed storage failure. FIXTURE evidence.
+ * WEB-10b review R1/R2 (revision 1), D1 (revision 3): a save's local id stays bound to the ONE request it was sent with. In the app's router
+ * over the PRODUCTION data controller, outbox and the IndexedDB double; a lost answer is placed by wrapping the outbox's enqueue (the
+ * commit made, or not, then a throw), a controlled simulation rather than an observed storage failure. FIXTURE evidence.
  *
- * R1 (create, and rename of a cached list): an answer that may hide a stored save binds the session to that request; every later Save
- * sends it again unchanged (same key, body and captured defaults) until it is saved, and only then is newer input saved, under new ids.
- * Newer input is never consumed by the earlier request's success, and no second list or rename comes of one attempt. A definite refusal
- * binds nothing. R2 (the picker): a saved add retires its id, so the same task chosen again later is a new add; ids of adds not saved stay.
+ * R1 (create, and rename of a cached list): an answer that may hide a stored save binds the session to that request as its attempt.
+ * Since revision 3 (D1, approved 25 October 2026: `.agtx/execute.md` pins the supplement) a later Save NEVER sends it again: it looks it up,
+ * read only. Found as it was sent, it is settled, and only then is newer input saved, under new ids; newer input is never consumed by the
+ * earlier request's success. Not found (or a failed read, or a draft changed since), NOTHING is written and the person is told the earlier
+ * outcome is unknown; only the separate decision starts a new change, under new ids. A definite refusal binds nothing. R2 (the picker): a
+ * saved add retires its id, so the same task chosen again later is a new add; ids of adds not saved stay.
+ *
+ * Oracle reconciliation (revision 3): the schedules of revisions 1-2 are kept. Where they asserted that the held request was SENT again
+ * (`asked[1]` being `asked[0]`, the outbox recognising a stored one), the look-up replaces that internal call and the outcome is asserted
+ * instead (one list or rename, no second write); where they asserted that a request NOT found was sent again under its old id (lost before
+ * the commit, a failed read), they now assert no write, the input kept, and the new change only after the explicit decision, under new ids.
  */
 installMatchMedia({ width: 1440 });
 afterEach(() => {
@@ -40,6 +54,7 @@ afterEach(() => {
   forgetLists();
 });
 type Mounted = Awaited<ReturnType<typeof mountTasks>>;
+const DB = accountDatabaseName(ME);
 
 const commands = (t: Mounted, kind: string) =>
   t
@@ -164,37 +179,112 @@ const sameIds = (a?: EnqueueRequest, b?: EnqueueRequest) =>
   a.localId === b.localId &&
   a.targets[0]?.resourceId === b.targets[0]?.resourceId;
 
-describe("R1: create, an answer that may hide a stored save", () => {
-  for (const lost of ["lost-after-commit", "lost-before-commit"] as const)
-    test(`${lost}, unchanged retry: the same request again, one list, the dialog goes to it`, async () => {
-      const t = await openCreate();
-      const { asked } = answers(t, { 1: lost });
-      await createFirst(t, "Original name");
-      expect(dialog(), "the uncertain save keeps the dialog").not.toBeNull();
-      press(CREATE.submit, dialog() as HTMLElement);
-      await t.until(() => dialog() === null);
-      expect(asked).toHaveLength(2);
-      expect(asked[1], "the request sent first, unchanged").toBe(asked[0]);
-      expect(names(t, "create_list")).toEqual(["Original name"]);
-      const id = commands(t, "create_list")[0]?.id as string;
-      expect(t.router.state.location.pathname).toBe(`/tasks/lists/${id}`);
-    });
+/** Waits for the dialog to close, and ASSERTS that it did (`t.until` stops waiting silently). */
+async function closed(t: Mounted) {
+  await t.until(() => dialog() === null);
+  expect(dialog(), "the dialog closed").toBeNull();
+}
 
-  for (const lost of [
-    "lost-after-commit",
-    "lost-before-commit",
-    "storage-after-commit",
-  ] as const)
-    test(`${lost}, edited retry: the earlier request is settled as sent; the newer name stays, then is a list of its own`, async () => {
+/** The exact look-up of an attempt (`readDraftEvidence`, read only), observed at the store. */
+const LOOKUP = "data.readDraftEvidence";
+/**
+ * The store's runs of the look-up, counted with their answers. `hold`: each waits for it before reading; `fail`: each throws (a read
+ * that failed); `after`: runs once the real read has answered and before the screen hears it (a writer placed between the look and
+ * anything after it).
+ */
+function lookups(
+  t: Mounted,
+  options: {
+    hold?: Promise<void>;
+    fail?: boolean;
+    after?: () => Promise<void>;
+  } = {},
+) {
+  const service = t.data.service();
+  if (service === null) throw new Error("no service");
+  const run = service.store.run.bind(service.store);
+  const seen = { count: 0, answers: [] as unknown[] };
+  service.store.run = (async (plan: { name: string }, ...rest: unknown[]) => {
+    const real = () => (run as (...args: unknown[]) => unknown)(plan, ...rest);
+    if (plan.name !== LOOKUP) return real();
+    seen.count += 1;
+    if (options.hold) await options.hold;
+    if (options.fail) throw new Error("the read failed");
+    const answer = await real();
+    seen.answers.push(answer);
+    if (options.after) await options.after();
+    return answer;
+  }) as typeof service.store.run;
+  return seen;
+}
+/** The separate decision's control (D1), or null. */
+const decision = (label: string) =>
+  dialog() === null
+    ? null
+    : (within(dialog() as HTMLElement).queryByRole("button", {
+        name: label,
+      }) as HTMLButtonElement | null);
+const noted = (text: string) =>
+  dialog() !== null &&
+  within(dialog() as HTMLElement).queryByText(text, { exact: false }) !== null;
+
+describe("R1: create, an answer that may hide a stored save", () => {
+  test("lost-after-commit, unchanged retry: looked up, found as sent; one list, nothing sent again, the dialog goes to it", async () => {
+    const t = await openCreate();
+    const { asked } = answers(t, { 1: "lost-after-commit" });
+    await createFirst(t, "Original name");
+    expect(dialog(), "the uncertain save keeps the dialog").not.toBeNull();
+    const looked = lookups(t);
+    press(CREATE.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(looked.answers).toEqual(["stored"]);
+    expect(asked, "nothing sent again").toHaveLength(1);
+    expect(names(t, "create_list")).toEqual(["Original name"]);
+    const id = commands(t, "create_list")[0]?.id as string;
+    expect(t.router.state.location.pathname).toBe(`/tasks/lists/${id}`);
+  });
+
+  test("lost-before-commit, unchanged retry: nothing found; Save writes nothing and says the outcome is unknown; only the separate decision creates the list, under new ids", async () => {
+    const t = await openCreate();
+    const { asked } = answers(t, { 1: "lost-before-commit" });
+    await createFirst(t, "Original name");
+    const looked = lookups(t);
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(looked.answers).toEqual(["absent"]);
+    expect(t.drafts(), "no write").toEqual([]);
+    expect(asked).toHaveLength(1);
+    expect(dialog(), "not closed as if saved").not.toBeNull();
+    expect(t.router.state.location.pathname).toBe("/tasks/lists");
+    expect(nameField().value).toBe("Original name");
+    expect(noted(CREATE.unknown("Original name"))).toBe(true);
+    expect(noted(CREATE.againNote)).toBe(true);
+    // Enter in the form is an ordinary Save: looked up again, still nothing written.
+    fireEvent.submit(nameField().form as HTMLFormElement);
+    await t.settle();
+    expect(looked.count).toBe(2);
+    expect(t.drafts()).toEqual([]);
+    expect(asked).toHaveLength(1);
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    await closed(t);
+    expect(asked).toHaveLength(2);
+    expect(sameIds(asked[1], asked[0]), "new list id and local id").toBe(false);
+    expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
+    expect(names(t, "create_list")).toEqual(["Original name"]);
+    const id = commands(t, "create_list")[0]?.id as string;
+    expect(asked[1]?.targets[0]?.resourceId).toBe(id);
+    expect(t.router.state.location.pathname).toBe(`/tasks/lists/${id}`);
+  });
+
+  for (const lost of ["lost-after-commit", "storage-after-commit"] as const)
+    test(`${lost}, edited retry: the earlier request is found and settled as sent; the newer name stays, then is a list of its own`, async () => {
       const t = await openCreate();
       const { asked } = answers(t, { 1: lost });
       await createFirst(t, "Original name");
       typeName("Newer name");
       press(CREATE.submit, dialog() as HTMLElement);
       await t.settle();
-      expect(asked[1], "the earlier request, not the edited one").toBe(
-        asked[0],
-      );
+      expect(asked, "the earlier request is not sent again").toHaveLength(1);
       expect(names(t, "create_list")).toEqual(["Original name"]);
       expect(dialog(), "the newer input is not consumed").not.toBeNull();
       expect(nameField().value).toBe("Newer name");
@@ -206,11 +296,28 @@ describe("R1: create, an answer that may hide a stored save", () => {
       expect(t.router.state.location.pathname).toBe("/tasks/lists");
       // The next Save is the newer name under NEW ids: a list of its own, never a duplicate of the first.
       press(CREATE.submit, dialog() as HTMLElement);
-      await t.until(() => dialog() === null);
+      await closed(t);
       expect(names(t, "create_list")).toEqual(["Original name", "Newer name"]);
-      expect(sameIds(asked[2], asked[0])).toBe(false);
-      expect(asked[2]?.localId).not.toBe(asked[0]?.localId);
+      expect(sameIds(asked[1], asked[0])).toBe(false);
+      expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
     });
+
+  test("lost-before-commit, edited retry: nothing found, nothing written, the newer name stays; the decision creates the newer name alone, under new ids", async () => {
+    const t = await openCreate();
+    const { asked } = answers(t, { 1: "lost-before-commit" });
+    await createFirst(t, "Original name");
+    typeName("Newer name");
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(t.drafts()).toEqual([]);
+    expect(asked).toHaveLength(1);
+    expect(nameField().value).toBe("Newer name");
+    expect(noted(CREATE.unknown("Original name"))).toBe(true);
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    await closed(t);
+    expect(names(t, "create_list")).toEqual(["Newer name"]);
+    expect(sameIds(asked[1], asked[0])).toBe(false);
+  });
 
   test("a definite refusal binds nothing: the edited retry sends the newer name under the same ids", async () => {
     const t = await openCreate();
@@ -220,7 +327,7 @@ describe("R1: create, an answer that may hide a stored save", () => {
     expect(t.drafts()).toEqual([]);
     typeName("Newer name");
     press(CREATE.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(sameIds(asked[1], asked[0])).toBe(true);
     expect(names(t, "create_list")).toEqual(["Newer name"]);
   });
@@ -256,10 +363,10 @@ describe("R1: create, an answer that may hide a stored save", () => {
     expect(sameIds(asked[1], asked[0])).toBe(false);
     expect(names(t, "create_list")).toEqual(["One", "One more"]);
     expect(nameField().value, "the newest input stays").toBe("One more again");
-    // Save sends the bound request again (stored: recognised, nothing added), and the newest input still stays.
+    // Save looks the bound request up (found as sent: nothing added, nothing sent), and the newest input still stays.
     press(CREATE.submit, dialog() as HTMLElement);
     await t.settle();
-    expect(asked[2]).toBe(asked[1]);
+    expect(asked).toHaveLength(2);
     expect(names(t, "create_list")).toEqual(["One", "One more"]);
     expect(nameField().value).toBe("One more again");
     expect(
@@ -288,27 +395,45 @@ describe("R1: rename of a cached list, an answer that may hide a stored save", (
     return { t, asked };
   }
 
-  test("lost after commit, unchanged retry: Save stays available, sends the same request, one rename, the dialog closes", async () => {
+  test("lost after commit, unchanged retry: Save stays available, looks the rename up (found as sent), one rename, the dialog closes", async () => {
     const { t, asked } = await renameFirst(
       "lost-after-commit",
       "Original rename",
     );
     expect(dialog()).not.toBeNull();
-    // The queued rename already shows as the list's name; the unsettled save can still be confirmed.
+    // The queued rename already shows as the list's name; the unsettled save can still be looked up.
     expect(saveButton(RENAME.submit).disabled).toBe(false);
     press(RENAME.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
-    expect(asked[1]).toBe(asked[0]);
+    await closed(t);
+    expect(asked, "nothing sent again").toHaveLength(1);
     expect(names(t, "edit_list")).toEqual(["Original rename"]);
   });
 
-  for (const lost of ["lost-after-commit", "lost-before-commit"] as const)
-    test(`${lost}, edited retry: the earlier rename is settled as sent; the newer name stays, then is saved as its own rename`, async () => {
+  test("lost before commit, edited retry: nothing found, nothing written; the decision renames to the newer name under a new local id", async () => {
+    const { t, asked } = await renameFirst(
+      "lost-before-commit",
+      "Original rename",
+    );
+    typeName("Newer rename");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(t.drafts()).toEqual([]);
+    expect(asked).toHaveLength(1);
+    expect(nameField().value).toBe("Newer rename");
+    expect(noted(RENAME.unknown("Original rename"))).toBe(true);
+    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    await closed(t);
+    expect(names(t, "edit_list")).toEqual(["Newer rename"]);
+    expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
+  });
+
+  for (const lost of ["lost-after-commit"] as const)
+    test(`${lost}, edited retry: the earlier rename is found and settled as sent; the newer name stays, then is saved as its own rename`, async () => {
       const { t, asked } = await renameFirst(lost, "Original rename");
       typeName("Newer rename");
       press(RENAME.submit, dialog() as HTMLElement);
       await t.settle();
-      expect(asked[1]).toBe(asked[0]);
+      expect(asked).toHaveLength(1);
       expect(names(t, "edit_list")).toEqual(["Original rename"]);
       expect(dialog()).not.toBeNull();
       expect(nameField().value).toBe("Newer rename");
@@ -318,12 +443,12 @@ describe("R1: rename of a cached list, an answer that may hide a stored save", (
         ),
       ).not.toBeNull();
       press(RENAME.submit, dialog() as HTMLElement);
-      await t.until(() => dialog() === null);
+      await closed(t);
       expect(names(t, "edit_list")).toEqual([
         "Original rename",
         "Newer rename",
       ]);
-      expect(asked[2]?.localId).not.toBe(asked[0]?.localId);
+      expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
     });
 
   test("a definite refusal binds nothing: the edited retry sends the newer name under the same local id", async () => {
@@ -331,7 +456,7 @@ describe("R1: rename of a cached list, an answer that may hide a stored save", (
     expect(t.drafts()).toEqual([]);
     typeName("Newer rename");
     press(RENAME.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(asked[1]?.localId).toBe(asked[0]?.localId);
     expect(names(t, "edit_list")).toEqual(["Newer rename"]);
   });
@@ -374,7 +499,7 @@ describe("R2: the picker retires a saved add's id", () => {
     await t.until(() => box(a) !== null);
     fireEvent.click(box(a) as HTMLInputElement);
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
     const ofA = asked.filter((r) => taskOf(r) === a);
     expect(ofA).toHaveLength(2);
@@ -388,7 +513,7 @@ describe("R2: the picker retires a saved add's id", () => {
   test("control: without the remove, the retry adds only the task not saved, with its id", async () => {
     const { t, a, b } = await partialSave();
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
   });
 
@@ -412,7 +537,7 @@ describe("R2: the picker retires a saved add's id", () => {
     await t.until(() => dialog() !== null && box(a) !== null);
     fireEvent.click(box(a) as HTMLInputElement);
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(
       adds(t).filter((x) => x === `+${a}`),
       "two separate adds of A around its remove",
@@ -420,7 +545,7 @@ describe("R2: the picker retires a saved add's id", () => {
   });
 
   for (const lost of ["lost-after-commit", "lost-before-commit"] as const)
-    test(`${lost}: the add is retried under its id, or seen as made; one add`, async () => {
+    test(`${lost}: the add is seen as made, or (not found) nothing is sent until the decision adds it anew; one add`, async () => {
       const id = listId();
       const a = taskId(7);
       const t = await mountTasks({
@@ -446,9 +571,15 @@ describe("R2: the picker retires a saved add's id", () => {
       } else {
         expect(box(a)?.checked, "still selected").toBe(true);
         press(PICKER.submit, dialog() as HTMLElement);
-        await t.until(() => dialog() === null);
+        await t.settle();
+        expect(adds(t), "nothing written").toEqual([]);
+        expect(asked).toHaveLength(1);
+        expect(noted(PICKER.unknown(1))).toBe(true);
+        expect(box(a)?.checked, "the selection is kept").toBe(true);
+        fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+        await closed(t);
         expect(dialog()).toBeNull();
-        expect(asked[1]?.localId).toBe(asked[0]?.localId);
+        expect(asked[1]?.localId, "a new add").not.toBe(asked[0]?.localId);
       }
       expect(adds(t)).toEqual([`+${a}`]);
     });
@@ -483,23 +614,22 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
         : document.querySelector(`[data-list-detail="${id}"]`) !== null,
     );
     const gate = held();
-    const { asked } = answers(t, {
-      1: "lost-after-commit",
-      2: { hold: gate.promise },
-    });
+    const { asked } = answers(t, { 1: "lost-after-commit" });
     press(kind === "create" ? "+ New list" : DETAIL.rename);
     await t.settle();
     typeName("Original");
     press(label(kind), dialog() as HTMLElement);
     await t.settle();
     expect(stored(t, kind)).toEqual(["Original"]);
+    // The next Save looks the earlier request up (D1: never sends it again); the look is held.
+    const looked = lookups(t, { hold: gate.promise });
     typeName("Newer");
     press(label(kind), dialog() as HTMLElement);
     await t.settle();
-    expect(asked, "the retry of the earlier request is pending").toHaveLength(
-      2,
+    expect(looked.count, "the look-up of the earlier request is pending").toBe(
+      1,
     );
-    expect(asked[1]).toBe(asked[0]);
+    expect(asked).toHaveLength(1);
     return { t, id, gate, asked };
   }
 
@@ -537,18 +667,18 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
         ).not.toBeNull();
         expect(saveButton(label(kind)).disabled).toBe(false);
         press(label(kind), dialog() as HTMLElement);
-        await t.until(() => dialog() === null);
+        await closed(t);
         expect(stored(t, kind)).toEqual(["Original", "Newer"]);
-        expect(asked, "no Save that does nothing").toHaveLength(3);
+        expect(asked, "no Save that does nothing").toHaveLength(2);
         expect(
-          asked[2]?.localId,
+          asked[1]?.localId,
           "the newer name under a new local id",
         ).not.toBe(asked[0]?.localId);
         if (kind === "create") {
-          expect(sameIds(asked[2], asked[0])).toBe(false);
+          expect(sameIds(asked[1], asked[0])).toBe(false);
           const id = commands(t, "create_list")[1]?.id as string;
           expect(t.router.state.location.pathname).toBe(`/tasks/lists/${id}`);
-          expect(asked[2]?.targets[0]?.resourceId).toBe(id);
+          expect(asked[1]?.targets[0]?.resourceId).toBe(id);
         }
       });
 
@@ -578,10 +708,10 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
       ).toBeNull();
       typeName("Third");
       press(label(kind), dialog() as HTMLElement);
-      await t.until(() => dialog() === null);
+      await closed(t);
       expect(stored(t, kind)).toEqual(["Original", "Third"]);
-      expect(asked).toHaveLength(3);
-      expect(asked[2]?.localId).not.toBe(asked[0]?.localId);
+      expect(asked).toHaveLength(2);
+      expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
     });
 
   test("rename of a list whose create is queued, its in-place edit's answer lost after it was written: never shown as saved, the input kept; the digest still guards a later edit (no edit_list)", async () => {
@@ -635,7 +765,7 @@ describe("R1 (review 2): the earlier request's settlement reaches the editor hol
     expect(names(t, "create_list")).toEqual(["Renamed"]);
     expect(nameField().value).toBe("Again");
     press(RENAME.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(names(t, "create_list")).toEqual(["Again"]);
     expect(commands(t, "edit_list")).toEqual([]);
     expect(edits).toBe(2);
@@ -694,7 +824,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     expect((box(a) as HTMLInputElement).checked).toBe(false);
     fireEvent.click(box(a) as HTMLInputElement);
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
     const ofA = requested(asked, a);
     expect(ofA).toHaveLength(2);
@@ -725,7 +855,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     expect(requested(asked, a), "nothing sent again for A").toHaveLength(1);
     fireEvent.click(box(a) as HTMLInputElement);
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
     const ofA = requested(asked, a);
     expect(ofA[1]?.localId).not.toBe(ofA[0]?.localId);
@@ -741,7 +871,7 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
       fireEvent.click(box(a) as HTMLInputElement);
     fireEvent.click(box(a) as HTMLInputElement);
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
     const ofA = requested(asked, a);
     expect(ofA[1]?.localId).not.toBe(ofA[0]?.localId);
@@ -751,12 +881,12 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     const { t, a, b, asked } = await lostThenSeen();
     await t.until(() => box(a) === null);
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
     expect(requested(asked, a)).toHaveLength(1);
   });
 
-  test("another actor adds and removes A while this add was NOT stored: membership settles nothing; Add sends the same add again", async () => {
+  test("another actor adds and removes A while this add was NOT stored: membership settles nothing; Add sends nothing until the decision adds A anew", async () => {
     const { t, id, a, b, asked, real } = await lostThenSeen({
       1: "lost-before-commit",
     });
@@ -773,16 +903,26 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
       true,
     );
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await t.settle();
+    expect(adds(t), "nothing written by the picker").toEqual([
+      `+${a}`,
+      `-${a}`,
+    ]);
+    expect(requested(asked, a)).toHaveLength(1);
+    expect(noted(PICKER.unknown(1))).toBe(true);
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${a}`, `+${b}`]);
     const ofA = requested(asked, a);
     expect(ofA).toHaveLength(2);
-    expect(ofA[1]?.localId, "the same add, sent again").toBe(ofA[0]?.localId);
+    expect(ofA[1]?.localId, "a new add, never the old id").not.toBe(
+      ofA[0]?.localId,
+    );
     const stored = t.drafts().map((d) => d.local_id);
-    expect(stored).toContain(ofA[0]?.localId);
+    expect(stored).not.toContain(ofA[0]?.localId);
   });
 
-  test("a partial save settled on the picker mounted again on Back: A done, B kept (its add retried under its id), the search typed meanwhile kept", async () => {
+  test("a partial save settled on the picker mounted again on Back: A done, B kept (not sent again: only the decision adds it, anew), the search typed meanwhile kept", async () => {
     const id = listId();
     const [a, b] = [taskId(1), taskId(2)];
     const t = await mountTasks({
@@ -824,13 +964,15 @@ describe("R2 (review 2): a lost add, then a remove, then the task chosen again",
     expect(screen.queryByText(PICKER.selected(1))).not.toBeNull();
     expect(screen.queryByText(/Added 1 of 2\./)).not.toBeNull();
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await t.settle();
+    expect(adds(t), "B's lost add is not sent again").toEqual([`+${a}`]);
+    expect(noted(PICKER.unknown(1))).toBe(true);
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
     const ofB = requested(asked, b);
     expect(ofB).toHaveLength(2);
-    expect(ofB[1]?.localId, "B's add retried under its id").toBe(
-      ofB[0]?.localId,
-    );
+    expect(ofB[1]?.localId, "B added anew").not.toBe(ofB[0]?.localId);
   });
 
   test("every add saved while the search changed, settled on the picker mounted again on Back: the search and the note stay, nothing is selected", async () => {
@@ -899,7 +1041,7 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     return { t, id, ids: tasks.map((x) => x.id) };
   }
 
-  test("a partial save settled while the picker is at the sync screens: on Back, A is done and B kept with its add's id", async () => {
+  test("a partial save settled while the picker is at the sync screens: on Back, A is done and B kept, its lost add not sent again", async () => {
     const { t, ids } = await pickerOf(["First", "Second"]);
     const [a, b] = ids as [string, string];
     const gate = held();
@@ -926,10 +1068,13 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     expect(screen.queryByText(PICKER.selected(1))).not.toBeNull();
     expect(screen.queryByText(/Added 1 of 2\./)).not.toBeNull();
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
+    await t.settle();
+    expect(adds(t)).toEqual([`+${a}`]);
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
     const ofB = asked.filter((r) => taskOf(r) === b);
-    expect(ofB[1]?.localId).toBe(ofB[0]?.localId);
+    expect(ofB[1]?.localId).not.toBe(ofB[0]?.localId);
   });
 
   test("abandoned (Escape) while its save is pending: the settlement opens nothing, and the picker opened again starts afresh", async () => {
@@ -961,7 +1106,7 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     ).toBeNull();
   });
 
-  test("the exact read of a lost add's draft fails: no answer is taken as neither stored nor absent; the same add is sent again", async () => {
+  test("the exact read of a lost add's draft fails: no answer is evidence of nothing; nothing is sent until the decision adds it anew", async () => {
     const { t, ids } = await pickerOf(["First"]);
     const [a] = ids as [string];
     const { asked } = answers(t, { 1: "lost-before-commit" });
@@ -971,22 +1116,655 @@ describe("R2 (review 2): the picker's other settlement and evidence paths", () =
     press(PICKER.submit, dialog() as HTMLElement);
     await t.settle();
     expect(dialog()).not.toBeNull();
-    const service = t.data.service();
-    if (service === null) throw new Error("no service");
-    const run = service.store.run.bind(service.store);
-    let failedReads = 0;
-    service.store.run = (async (plan: { name: string }, ...rest: unknown[]) => {
-      if (plan.name === "data.readDraftHeader") {
-        failedReads += 1;
-        throw new Error("the read failed");
-      }
-      return (run as (...args: unknown[]) => unknown)(plan, ...rest);
-    }) as typeof service.store.run;
+    const looked = lookups(t, { fail: true });
     expect((box(a) as HTMLInputElement).checked).toBe(true);
     press(PICKER.submit, dialog() as HTMLElement);
-    await t.until(() => dialog() === null);
-    expect(failedReads, "the read was asked, and failed").toBe(1);
+    await t.settle();
+    expect(looked.count, "the read was asked, and failed").toBe(1);
+    expect(adds(t), "no write").toEqual([]);
+    expect(asked).toHaveLength(1);
+    expect(noted(PICKER.unknown(1))).toBe(true);
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await closed(t);
     expect(adds(t)).toEqual([`+${a}`]);
-    expect(asked[1]?.localId, "the same add again").toBe(asked[0]?.localId);
+    expect(asked[1]?.localId, "a new add").not.toBe(asked[0]?.localId);
+  });
+});
+
+/**
+ * D1 (revision 3; approved supplement pinned in `.agtx/execute.md`): an earlier save whose exact outcome this device cannot establish,
+ * after the draft that recorded it was retired by a PRODUCTION writer (Sync's discard, a replacement, an in-place edit elsewhere, a
+ * receipt's cleanup) or after an inconclusive read. Ordinary Save writes nothing and explains; only the separate decision starts a new
+ * change, under new ids and the admission of now. Each schedule is paired with its retained-record control, and the look-up's placement
+ * against a writer is made exact by intercepting the store at the look-up (`lookups`). FIXTURE evidence over the production outbox.
+ */
+describe("D1 (revision 3): create, an earlier outcome this device cannot establish", () => {
+  async function lostCreate() {
+    const t = await openCreate();
+    const { asked } = answers(t, { 1: "lost-after-commit" });
+    await createFirst(t, "Original");
+    expect(names(t, "create_list")).toEqual(["Original"]);
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    return { t, asked, outbox, old: asked[0]?.localId as string };
+  }
+
+  test("Sync's discard retires the stored create: Save writes nothing and says the outcome is unknown; the decision creates a separate list under new ids", async () => {
+    const { t, asked, outbox, old } = await lostCreate();
+    await act(async () => {
+      expect(await outbox.discard(old)).toMatchObject({
+        kind: "discarded",
+        outcome: "removed",
+      });
+    });
+    expect(t.drafts(), "retired").toEqual([]);
+    const looked = lookups(t);
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(looked.answers).toEqual(["absent"]);
+    expect(t.drafts(), "no write").toEqual([]);
+    expect(asked).toHaveLength(1);
+    expect(nameField().value).toBe("Original");
+    expect(noted(CREATE.unknown("Original"))).toBe(true);
+    expect(t.router.state.location.pathname).toBe("/tasks/lists");
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    await closed(t);
+    const [made] = t.drafts();
+    expect(t.drafts()).toHaveLength(1);
+    expect(made?.local_id).not.toBe(old);
+    expect(sameIds(asked[1], asked[0])).toBe(false);
+    expect(names(t, "create_list")).toEqual(["Original"]);
+  });
+
+  test("control: the create still stored: Save finds it as sent and closes onto it; nothing is written", async () => {
+    const { t, asked, old } = await lostCreate();
+    press(CREATE.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(asked).toHaveLength(1);
+    expect(t.drafts().map((d) => d.local_id)).toEqual([old]);
+  });
+
+  test("edited in place elsewhere (another tab renamed the queued create): changed, nothing written, the other edit intact; the decision offered", async () => {
+    const { t, asked, outbox, old } = await lostCreate();
+    const list = asked[0]?.targets[0]?.resourceId as string;
+    await act(async () => {
+      expect(
+        await outbox.editQueued(
+          old,
+          createList({ listId: list, name: "Theirs", defaults: null }),
+        ),
+      ).toMatchObject({ kind: "edited" });
+    });
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(names(t, "create_list"), "their edit, nothing else").toEqual([
+      "Theirs",
+    ]);
+    expect(t.drafts()).toHaveLength(1);
+    expect(noted(CREATE.changed("Original"))).toBe(true);
+    expect(decision(CREATE.again)).not.toBeNull();
+    expect(asked).toHaveLength(1);
+  });
+
+  test("a conflict discarded in Sync stays as rejected: known, not as sent; nothing written", async () => {
+    const { t, asked, old } = await lostCreate();
+    const row = t.drafts()[0] as DraftRow;
+    t.world.idb.seed(DB, "drafts", [
+      { ...row, status: "rejected", last_error: { stage: "discarded" } },
+    ] as never);
+    const looked = lookups(t);
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(looked.answers).toEqual(["refused"]);
+    expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
+      [old, "rejected"],
+    ]);
+    expect(noted(CREATE.changed("Original"))).toBe(true);
+    expect(asked).toHaveLength(1);
+  });
+
+  test("a race: the stored create is discarded right AFTER the look-up read it: the dialog settles on what that read found, and nothing is written after it", async () => {
+    const { t, asked, outbox, old } = await lostCreate();
+    const order: string[] = [];
+    const looked = lookups(t, {
+      after: async () => {
+        order.push("looked");
+        const out = await outbox.discard(old);
+        order.push(out.kind);
+      },
+    });
+    press(CREATE.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(order).toEqual(["looked", "discarded"]);
+    expect(looked.answers).toEqual(["stored"]);
+    expect(t.drafts(), "the discard stands; no write after the look").toEqual(
+      [],
+    );
+    expect(asked).toHaveLength(1);
+  });
+
+  test("the decision declined: Cancel writes nothing, and the dialog opened again starts afresh", async () => {
+    const t = await openCreate();
+    const { asked } = answers(t, { 1: "lost-before-commit" });
+    await createFirst(t, "Original");
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(decision(CREATE.again)).not.toBeNull();
+    press(CREATE.cancel, dialog() as HTMLElement);
+    await t.settle();
+    expect(dialog()).toBeNull();
+    expect(t.drafts()).toEqual([]);
+    press("+ New list");
+    await t.settle();
+    expect(nameField().value).toBe("");
+    expect(decision(CREATE.again)).toBeNull();
+    expect(asked).toHaveLength(1);
+  });
+
+  test("the decision pressed twice: one new list (one flight)", async () => {
+    const t = await openCreate();
+    const gate = held();
+    const { asked } = answers(t, {
+      1: "lost-before-commit",
+      2: { hold: gate.promise },
+    });
+    await createFirst(t, "Original");
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    await act(async () => {
+      gate.resolve();
+    });
+    await closed(t);
+    expect(asked).toHaveLength(2);
+    expect(names(t, "create_list")).toEqual(["Original"]);
+  });
+
+  test("the decision's own answer lost: it is an attempt of its own; the next Save finds it and closes, never a third write", async () => {
+    const t = await openCreate();
+    const { asked } = answers(t, {
+      1: "lost-before-commit",
+      2: "lost-after-commit",
+    });
+    await createFirst(t, "Original");
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    await t.settle();
+    expect(names(t, "create_list")).toEqual(["Original"]);
+    expect(dialog()).not.toBeNull();
+    expect(decision(CREATE.again), "not decided yet: looked up first").toBe(
+      null,
+    );
+    const looked = lookups(t);
+    press(CREATE.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(looked.answers).toEqual(["stored"]);
+    expect(asked).toHaveLength(2);
+    expect(t.drafts().map((d) => d.local_id)).toEqual([asked[1]?.localId]);
+    const id = commands(t, "create_list")[0]?.id as string;
+    expect(t.router.state.location.pathname).toBe(`/tasks/lists/${id}`);
+  });
+
+  test("the decision refused definitely (quota): nothing written, the earlier outcome still unknown and the decision still offered", async () => {
+    const t = await openCreate();
+    const { asked } = answers(t, { 1: "lost-before-commit", 2: "refused" });
+    await createFirst(t, "Original");
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    await t.settle();
+    expect(t.drafts()).toEqual([]);
+    expect(decision(CREATE.again)).not.toBeNull();
+    const looked = lookups(t);
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(looked.count, "still the earlier attempt that is looked up").toBe(1);
+    expect(t.drafts()).toEqual([]);
+    expect(asked).toHaveLength(2);
+  });
+
+  test("kept through the sync screens and Back: still unknown, Save still writes nothing; the decision then creates the list", async () => {
+    const t = await openCreate();
+    const { asked } = answers(t, { 1: "lost-before-commit" });
+    await createFirst(t, "Original");
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    await toSync(t);
+    await back(t);
+    expect(nameField().value).toBe("Original");
+    expect(noted(CREATE.unknown("Original"))).toBe(true);
+    expect(decision(CREATE.again)).not.toBeNull();
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(t.drafts()).toEqual([]);
+    fireEvent.click(decision(CREATE.again) as HTMLButtonElement);
+    await closed(t);
+    expect(names(t, "create_list")).toEqual(["Original"]);
+    expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
+  });
+
+  test("another identity of the account (a new epoch) never sees the attempt: no decision, nothing written", async () => {
+    const t = await openCreate();
+    answers(t, { 1: "lost-before-commit" });
+    await createFirst(t, "Original");
+    press(CREATE.submit, dialog() as HTMLElement);
+    await t.settle();
+    await toSync(t);
+    t.rerender(tasksEnv(t.api, { identity: `${ME}:2`, online: false }));
+    await act(async () => {
+      t.router.history.back();
+    });
+    await t.settle();
+    expect(dialog()).toBeNull();
+    press("+ New list");
+    await t.settle();
+    expect(nameField().value).toBe("");
+    expect(decision(CREATE.again)).toBeNull();
+    expect(t.drafts()).toEqual([]);
+  });
+});
+
+describe("D1 (revision 3): rename of a cached list", () => {
+  async function renameLost(answer: Lost) {
+    const id = listId();
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [listRow(id, "Initial", [])],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const { asked } = answers(t, { 1: answer });
+    press(DETAIL.rename);
+    await t.settle();
+    typeName("Original");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    return { t, id, asked, outbox };
+  }
+  const bodyOf = (t: Mounted, localId: string) =>
+    t.bodies().find((b) => b.local_id === localId)?.command.command;
+
+  test("a rename held in conflict and replaced in Sync (the production supersede): unknown; the replacement intact; the decision renames under a new id on the policy version of now", async () => {
+    const { t, id, asked, outbox } = await renameLost("lost-after-commit");
+    const old = asked[0]?.localId as string;
+    const row = t.drafts()[0] as DraftRow;
+    t.world.idb.seed(DB, "drafts", [
+      { ...row, status: "version_conflict" },
+    ] as never);
+    const replacement = crypto.randomUUID();
+    await act(async () => {
+      expect(
+        await outbox.supersede(
+          old,
+          editList({
+            listId: id,
+            name: "Replaced",
+            policyVersion: 1,
+            localId: replacement,
+          }),
+        ),
+      ).toMatchObject({ kind: "superseded", localId: replacement });
+    });
+    await t.commitSync([
+      listRow(id, "Initial", [], { policy_version: 2, version: 3 }),
+    ]);
+    typeName("Mine");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(t.drafts().map((d) => d.local_id)).toEqual([replacement]);
+    expect(noted(RENAME.unknown("Original"))).toBe(true);
+    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    await closed(t);
+    const made = t.drafts().find((d) => d.local_id !== replacement);
+    expect(made?.local_id).not.toBe(old);
+    expect(bodyOf(t, made?.local_id as string)).toMatchObject({
+      kind: "edit_list",
+      name: "Mine",
+      expected_policy_version: 2,
+    });
+    expect(bodyOf(t, replacement)).toMatchObject({ name: "Replaced" });
+  });
+
+  test("control: the rename still stored: found as sent; the newer name then saved as its own rename", async () => {
+    const { t, asked } = await renameLost("lost-after-commit");
+    typeName("Mine");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(noted(RENAME.earlier("Original"))).toBe(true);
+    press(RENAME.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(names(t, "edit_list")).toEqual(["Original", "Mine"]);
+    expect(asked).toHaveLength(2);
+  });
+
+  test("while the list is read-only the decision is not offered and nothing is written; the attempt is kept, and offered again once it is editable", async () => {
+    const { t, id } = await renameLost("lost-before-commit");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(decision(RENAME.again)).not.toBeNull();
+    await t.commitSync([
+      listRow(id, "Initial", [], { can_edit: false, version: 3 }),
+    ]);
+    expect(decision(RENAME.again)).toBeNull();
+    expect(t.drafts()).toEqual([]);
+    await t.commitSync([listRow(id, "Initial", [], { version: 4 })]);
+    expect(nameField().value).toBe("Original");
+    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    await closed(t);
+    expect(names(t, "edit_list")).toEqual(["Original"]);
+  });
+
+  test("the decision with the name the list already has: nothing to rename, nothing written", async () => {
+    const { t } = await renameLost("lost-before-commit");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    typeName("Initial");
+    fireEvent.click(decision(RENAME.again) as HTMLButtonElement);
+    await t.settle();
+    expect(noted(RENAME.unchanged)).toBe(true);
+    expect(t.drafts()).toEqual([]);
+  });
+});
+
+describe("D1 (revision 3): the picker, earlier adds kept apart from the selection", () => {
+  async function pickerLost(answer: Record<number, Answer>) {
+    const id = listId();
+    const [a, b] = [taskId(1), taskId(2)];
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [
+        listRow(id, "Errands", []),
+        taskRow(a, "First"),
+        taskRow(b, "Second"),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const { asked, real } = answers(t, answer);
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(dialog()).not.toBeNull();
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    return { t, id, a, b, asked, real, outbox };
+  }
+  const ofTask = (asked: EnqueueRequest[], task: string) =>
+    asked.filter((r) => taskOf(r) === task);
+
+  test("A unknown, then deselected and B chosen: Add writes nothing (deselecting is not deciding); the decision adds B alone, A is not restored", async () => {
+    const { t, a, b, asked } = await pickerLost({ 1: "lost-before-commit" });
+    fireEvent.click(box(a) as HTMLInputElement);
+    fireEvent.click(box(b) as HTMLInputElement);
+    const looked = lookups(t);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(looked.answers, "the deselected A is looked up").toEqual(["absent"]);
+    expect(adds(t)).toEqual([]);
+    expect(ofTask(asked, b)).toHaveLength(0);
+    expect(noted(PICKER.unknown(1))).toBe(true);
+    expect((box(b) as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await closed(t);
+    expect(adds(t)).toEqual([`+${b}`]);
+    expect(ofTask(asked, a)).toHaveLength(1);
+  });
+
+  test("A unknown, deselected and selected again: still nothing written (reselection is not the decision); the decision adds A anew", async () => {
+    const { t, a, asked } = await pickerLost({ 1: "lost-before-commit" });
+    fireEvent.click(box(a) as HTMLInputElement);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(adds(t)).toEqual([]);
+    expect(asked).toHaveLength(1);
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await closed(t);
+    expect(adds(t)).toEqual([`+${a}`]);
+    expect(asked[1]?.localId).not.toBe(asked[0]?.localId);
+  });
+
+  test("control: A's add stored; deselected and selected again with B: A found (not added again), then the new A and B are added", async () => {
+    const { t, id, a, b, asked, real } = await pickerLost({
+      1: "lost-after-commit",
+    });
+    // Stored: A is a member now, no longer offered; another tab removes it, then A is offered again.
+    await t.until(() => box(a) === null);
+    await act(async () => {
+      await real(listItem({ listId: id, taskId: a, included: false }));
+    });
+    await t.until(() => box(a) !== null && box(b) !== null);
+    if ((box(a) as HTMLInputElement).checked)
+      fireEvent.click(box(a) as HTMLInputElement);
+    fireEvent.click(box(b) as HTMLInputElement);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
+    expect(ofTask(asked, a)).toHaveLength(2);
+    expect(ofTask(asked, a)[1]?.localId).not.toBe(asked[0]?.localId);
+  });
+
+  test("A unknown and then added by another actor (a member, hidden from the picker): B is held back; the decision adds B", async () => {
+    const { t, id, a, b, real } = await pickerLost({
+      1: "lost-before-commit",
+    });
+    await act(async () => {
+      await real(listItem({ listId: id, taskId: a, included: true }));
+    });
+    await t.until(() => box(a) === null && box(b) !== null);
+    fireEvent.click(box(b) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(adds(t), "only the other actor's add").toEqual([`+${a}`]);
+    expect(noted(PICKER.unknown(1))).toBe(true);
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await closed(t);
+    expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
+  });
+
+  test("A's stored add sent and acknowledged (the production claim and receipt), then cleaned up by the page that shows it (the production commitPage): unknown, nothing written; paired with the acknowledged draft retained before that page: found", async () => {
+    for (const cleaned of [true, false]) {
+      const { t, id, a, b, asked } = await pickerLost({
+        1: "lost-after-commit",
+      });
+      const service = t.data.service();
+      if (service === null) throw new Error("no service");
+      const old = asked[0]?.localId as string;
+      await act(async () => {
+        expect(
+          await service.commit(markInFlight, {
+            captured: service.capture(1),
+            localId: old,
+          }),
+        ).toMatchObject({ kind: "applied" });
+        expect(
+          await service.commit(admitReceipt, {
+            captured: service.capture(1),
+            localId: old,
+            revision: 5,
+          }),
+        ).toMatchObject({ kind: "applied" });
+      });
+      expect(
+        t.drafts().find((d) => d.local_id === old)?.status,
+        "acknowledged, retained until a page shows the list",
+      ).toBe("acknowledged");
+      if (cleaned)
+        await t.commitSync([listRow(id, "Errands", [a], { version: 3 })]);
+      expect(
+        t.drafts().find((d) => d.local_id === old)?.status,
+        "the precondition of each case",
+      ).toBe(cleaned ? undefined : "acknowledged");
+      await t.until(() => box(b) !== null);
+      fireEvent.click(box(b) as HTMLInputElement);
+      const looked = lookups(t);
+      press(PICKER.submit, dialog() as HTMLElement);
+      await t.settle();
+      expect(looked.answers).toEqual([cleaned ? "absent" : "stored"]);
+      expect(ofTask(asked, a), "A never sent again").toHaveLength(1);
+      if (cleaned) {
+        expect(ofTask(asked, b), "B held back").toHaveLength(0);
+        expect(noted(PICKER.unknown(1))).toBe(true);
+      } else {
+        await closed(t);
+        expect(ofTask(asked, b)).toHaveLength(1);
+      }
+      cleanup();
+      forgetLists();
+    }
+  });
+
+  test("a race: A's stored add discarded right AFTER the look-up read it: A settled on what was read, B added, nothing writes A again", async () => {
+    const { t, a, b, asked, outbox } = await pickerLost({
+      1: "lost-after-commit",
+    });
+    const old = asked[0]?.localId as string;
+    const order: string[] = [];
+    lookups(t, {
+      after: async () => {
+        order.push("looked");
+        order.push((await outbox.discard(old)).kind);
+      },
+    });
+    await t.until(() => box(b) !== null);
+    fireEvent.click(box(b) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(order).toEqual(["looked", "discarded"]);
+    expect(adds(t)).toEqual([`+${b}`]);
+    expect(ofTask(asked, a)).toHaveLength(1);
+  });
+
+  test("kept through the sync screens and Back: the unknown note and the decision survive; Add still writes nothing", async () => {
+    const { t, a } = await pickerLost({ 1: "lost-before-commit" });
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    await toSync(t);
+    await back(t);
+    await t.until(() => box(a) !== null);
+    expect(noted(PICKER.unknown(1))).toBe(true);
+    expect(decision(PICKER.again)).not.toBeNull();
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(adds(t)).toEqual([]);
+  });
+
+  test("the decision acted on while a newer search is typed: the picker stays with it, and a later Add of another task is not held back again", async () => {
+    const id = listId();
+    const [a, c] = [taskId(1), taskId(3)];
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [
+        listRow(id, "Errands", []),
+        taskRow(a, "First"),
+        taskRow(c, "Third"),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const gate = held();
+    const { asked } = answers(t, {
+      1: "lost-before-commit",
+      2: { hold: gate.promise },
+    });
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    fireEvent.click(decision(PICKER.again) as HTMLButtonElement);
+    await t.until(() => asked.length === 2);
+    fireEvent.change(screen.getByLabelText(PICKER.searchLabel), {
+      target: { value: "Thi" },
+    });
+    await act(async () => {
+      gate.resolve();
+    });
+    await t.settle();
+    expect(dialog(), "newer input keeps the picker").not.toBeNull();
+    expect(adds(t)).toEqual([`+${a}`]);
+    expect(decision(PICKER.again), "the decision was acted on").toBeNull();
+    await t.until(() => box(c) !== null);
+    fireEvent.click(box(c) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await closed(t);
+    expect(adds(t)).toEqual([`+${a}`, `+${c}`]);
+  });
+
+  test("the decision declined: Cancel writes nothing", async () => {
+    const { t } = await pickerLost({ 1: "lost-before-commit" });
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    press(PICKER.cancel, dialog() as HTMLElement);
+    await t.settle();
+    expect(dialog()).toBeNull();
+    expect(adds(t)).toEqual([]);
+  });
+});
+
+describe("D1 (revision 3): the exact look-up's evidence (readSaveEvidence over the production plan)", () => {
+  test("stored, changed, refused and absent; another database and a failed read are no evidence", async () => {
+    const id = listId();
+    const t = await mountTasks({
+      path: "/tasks/lists",
+      env: { online: false },
+    });
+    const outbox = t.data.outbox();
+    const service = t.data.service();
+    if (outbox === null || service === null) throw new Error("setup");
+    const localId = crypto.randomUUID();
+    const request = createList({
+      listId: id,
+      name: "Kept",
+      defaults: null,
+      localId,
+    });
+    await act(async () => {
+      await outbox.enqueue(request);
+    });
+    const save = { localId, request, scope: service.incarnationId };
+    const read = () => readSaveEvidence(t.data, save);
+    expect(await read()).toEqual({ ok: true, value: "stored" });
+    expect(
+      await readSaveEvidence(t.data, { ...save, scope: "another-database" }),
+      "evidence from another database is none",
+    ).toEqual({ ok: false, why: "closed" });
+    expect(
+      await readSaveEvidence(t.data, {
+        ...save,
+        request: createList({
+          listId: id,
+          name: "Other",
+          defaults: null,
+          localId,
+        }),
+      }),
+      "another request under the id",
+    ).toEqual({ ok: true, value: "changed" });
+    const row = t.drafts()[0] as DraftRow;
+    t.world.idb.seed(DB, "drafts", [{ ...row, status: "rejected" }] as never);
+    expect(await read()).toEqual({ ok: true, value: "refused" });
+    t.world.idb.seed(DB, "drafts", [row] as never);
+    await act(async () => {
+      await outbox.discard(localId);
+    });
+    expect(await read()).toEqual({ ok: true, value: "absent" });
+    lookups(t, { fail: true });
+    expect(await read()).toEqual({ ok: false, why: "failed" });
   });
 });

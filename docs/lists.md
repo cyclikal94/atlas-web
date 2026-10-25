@@ -91,7 +91,8 @@ queued add while it is shown. The pane's counts, the detail's rows, the capacity
 13. **D-10b-12** The picker: this device's cached tasks (not archived, not already members) and its unsent creates, with this device's queued
     renames and archives applied; a case- and accent-insensitive substring search (NFD, combining marks removed, lower case); exactly 100
     cached matches a page ("More tasks" resumes at the next match), each page a certified read. A selection the search hides stays selected
-    and counted. Each selected task's add has its own local id, chosen when it is selected, so a retry after a lost answer is a `duplicate`.
+    and counted. Each selected task's add has its own local id, chosen when it is selected; an add whose answer was lost is looked up,
+    never sent again (D1, below).
 14. **D-10b-13** No online reads on mount: the Lists screens read only this device; the sharing editor keeps its own `403` memo.
 
 ## Registrations (`register.ts`)
@@ -121,20 +122,21 @@ the jsdom `tests/features/tasks/lists-*.test.tsx`.
 | The drawn row checkbox not implemented (E-10b-1) | `/tasks/lists/<id>` (E-LS1) |
 | Caption corrected (D-10b-9) | `/tasks/lists/<id>` (E-LS1) |
 | The refused-capacity notice, corrected (D-10b-10) | `/tasks/lists/<id>` after a `503 slice_capacity` (E-LS5) |
-| Added: "Choose a list to see its tasks.", "No lists here.", "No archived lists.", "No tasks in this list yet.", "This list isn't on this device.", "This list can't be shown on this device.", "This list is archived.", "You can't change this list", "You can rename this list once it has synced.", "Change the name to save it.", "You can share this list once it has synced.", the create caption, "Only tasks you can already see are shown.", "No tasks to add.", "No tasks match your search.", "Choose the tasks to add first.", "{n} selected", "This list can take {n} more.", "This list can now take only {n} more. Choose fewer tasks.", "Added {k} of {n}. The others weren't saved: {reason}", "A change to your lists needs your attention in Sync." / "A change to this list needs your attention in Sync." with "Open Sync", "This list's unsent change was edited somewhere else. …", "This list isn't on this device any more. What you typed is kept here.", "Saved. Your newer changes are still here.", "Your earlier save created “{name}”. What you typed since is still here: saving it creates another list.", "Your earlier save renamed this list “{name}”. What you typed since is still here: save again to use it." (revision 1, R1), "One task you chose had already been added by an earlier save, so it wasn't added again. If it isn't in the list now, choose it again to add it." / "{n} tasks you chose …" (revision 2, R2), the announcements ("List created. Not sent yet.", "List renamed. Not sent yet.", "Removed “{title}” from {list}. Not sent yet.", "Added {n} tasks to {list}. Not sent yet.", "Archived. Not sent yet.", "Restored. Not sent yet."), "Remove {title}" / "Remove this task", the queue descriptions "New list" / "List name change" / "List change" | E-LS1–E-LS9; `lists-*.test.tsx` |
+| Added: "Choose a list to see its tasks.", "No lists here.", "No archived lists.", "No tasks in this list yet.", "This list isn't on this device.", "This list can't be shown on this device.", "This list is archived.", "You can't change this list", "You can rename this list once it has synced.", "Change the name to save it.", "You can share this list once it has synced.", the create caption, "Only tasks you can already see are shown.", "No tasks to add.", "No tasks match your search.", "Choose the tasks to add first.", "{n} selected", "This list can take {n} more.", "This list can now take only {n} more. Choose fewer tasks.", "Added {k} of {n}. The others weren't saved: {reason}", "A change to your lists needs your attention in Sync." / "A change to this list needs your attention in Sync." with "Open Sync", "This list's unsent change was edited somewhere else. …", "This list isn't on this device any more. What you typed is kept here.", "Saved. Your newer changes are still here.", "Your earlier save created “{name}”. What you typed since is still here: saving it creates another list.", "Your earlier save renamed this list “{name}”. What you typed since is still here: save again to use it." (revision 1, R1), "One task you chose had already been added by an earlier save, so it wasn't added again. If it isn't in the list now, choose it again to add it." / "{n} tasks you chose …" (revision 2, R2), the D1 notes and decisions of revision 3 ("This device can't tell whether your earlier save created “{name}”: it may already have. Create list won't send it again.", "… renamed this list “{name}” …", "This device can't tell whether an earlier add to this list was made …" / "{n} earlier adds …", "Your earlier save of “{name}” was changed, refused or discarded since (see Sync), so it wasn't sent again." and their rename/picker forms, "Create as a new list", "Rename as a new change", "Add as new adds" and their explanations), the announcements ("List created. Not sent yet.", "List renamed. Not sent yet.", "Removed “{title}” from {list}. Not sent yet.", "Added {n} tasks to {list}. Not sent yet.", "Archived. Not sent yet.", "Restored. Not sent yet."), "Remove {title}" / "Remove this task", the queue descriptions "New list" / "List name change" / "List change" | E-LS1–E-LS9; `lists-*.test.tsx` |
 | Name order within a page; pages by id ("More lists") | `/tasks/lists` with over 100 lists (`lists-screens.test.tsx`) |
 | No "Only me" at creation (defaults apply; Sharing afterwards) | `/tasks/lists` → "+ New list" (E-LS2) |
 | An archived list's page stays editable | `/tasks/lists/<archived id>` (E-LS6) |
 
 ## Budgets
 
-Measured on this candidate (revision 2; no ceiling changed): production initial JS 109,420 B gzip (ceiling 109,795), production CSS
-7,343 B (ceiling 7,378; **byte-identical CSS**: the screens use only classes the baseline already had), fixture initial JS 272,579 B
-(one-off ceiling 272,600 from WEB-10a revision 25). The route declarations cost 96 B of the fixture's first load after the trim that lets
+Measured on this candidate (revision 3, author builds; the managed figures are in `.agtx/execute.md`; no ceiling changed): production
+initial JS 109,421 B gzip (ceiling 109,795), production CSS 7,343 B (ceiling 7,378; **byte-identical CSS**: the screens use only classes
+the baseline already had), fixture initial JS 272,572 B (one-off ceiling 272,600 from WEB-10a revision 25). The route declarations cost 96 B of the fixture's first load after the trim that lets
 the lazy layout draw the list; revision 1 (R1-R4) costs 28 B more, chiefly the heading while a child page's lazy screen loads (R4).
 Revision 2 is 4 B smaller (managed build of this candidate); its exact draft read has modules of its own
 (`ui/draft-read.ts`, `plans/draft-header.ts`) because a first version in the shared `ui/scan.ts` put the fixture 18 B over its ceiling.
-21 B of headroom remain for the next slice; WEB-09c owns the reasoned successor budget.
+Revision 3 (D1) adds only lazy Lists code and one export of the shared outbox model (`isSameSave`): production +1 B, fixture -7 B.
+28 B of fixture headroom remain for the next slice; WEB-09c owns the reasoned successor budget.
 
 ## Limits
 
@@ -144,29 +146,46 @@ Revision 2 is 4 B smaller (managed build of this candidate); its exact draft rea
 - **The picker walks the cached tasks** a window (100) at a time until a page of matches; every keystroke reads again (deferred). Not
   profiled here (WEB-09c owns measurements; WEB-10a's F-1 cost of `pageByKey` applies).
 - **A save whose outcome is not known** (a store that failed or threw after the write may have committed, or a service that ended during
-  it: `SaveOutcome.uncertain`) binds the dialog's local id to that exact request (revision 1, R1). Every later Save sends it again,
-  unchanged (key, body and captured defaults), until it is saved; only then is what the person typed since saved, by a new Save under
-  new ids, and the dialog says so ("Your earlier save created/renamed …"). For a new list that newer name is a list of its own: the
-  earlier request is resolved as it was sent, never edited into another body under its key. A definite refusal binds nothing. A
-  rename of a list whose create is still queued edits that create in place, so it needs no binding: if that edit's answer is lost after
-  it was written, the dialog never says it saved, keeps what was typed, and its digest (`seen`) still guards a later edit, which is asked
-  to be checked first ("edited somewhere else"); the refusal stays visible (design assessment P2).
-- **A save's settlement is one transition of its editing session** (revision 2, review 2 R1): what it leaves (the request bound, or new
-  ids) is set in the session together with its note and the end of the save, before any editor is told, and the editor holding the
+  it: `SaveOutcome.uncertain`) stays with the dialog's session as its ATTEMPT: its exact request, ids and the database it was issued to
+  (revision 1, R1). It is never sent again (revision 3, D1, below). A definite refusal leaves no attempt. A rename of a list whose create
+  is still queued edits that create in place, so it leaves no attempt: if that edit's answer is lost after it was written, the dialog never
+  says it saved, keeps what was typed, and its digest (`seen`) still guards a later edit, which is asked to be checked first ("edited
+  somewhere else"); the refusal stays visible (design assessment P2).
+- **A save's settlement is one transition of its editing session** (revision 2, review 2 R1): what it leaves (an attempt, its finding, or
+  new ids) is set in the session together with its note and the end of the save, before any editor is told, and the editor holding the
   session WHEN it settles shows exactly that, whether it is the dialog that took the save, the one mounted again on Back from the sync
-  screens while the save was pending, or one opened later. The next Save therefore acts on what the person sees: no request sent twice,
-  no Save that does nothing. A session has one save pending at a time; a completion that is not that save's settles nothing.
-- **A picker selection, not the task, names an add** (revision 2, review 2 R2; replaces revision 1's "a saved add retires its id", which
-  missed an add stored but answered as lost): each selection gets its own local id, so a task deselected and chosen again is a new add,
-  after whatever happened to the list meanwhile. A selection whose answer was lost is marked; its next Add selected first reads whether a
-  draft is stored under its id (`readDraftNow`): found, that selection is done and not made again (the picker stays open and says so: "…
-  had already been added by an earlier save …"); not found, or the read failed, the same add is sent again (the outbox recognises one that
-  is stored). The list's membership is never taken as proof of which add made it, and nothing is added that the person did not choose.
-- **Open boundary (design assessment DA-N1, decision D1; not closed by revision 2).** "Not found" is not proof that an add was never
-  stored: an acknowledged draft is removed once its effect is applied, and Sync's discard or replacement removes one. A lost-answer
-  selection whose draft has gone that way is sent again under its old id, a new local write. Neither of the assessment's two options
-  (retained outcome lineage in the data layer, or an explicit "outcome unknown" decision in the editor/Sync flow) is chosen here; both
-  change scope or user flow and await the product/scope decision owner. The same horizon applies to a dialog's bound request.
+  screens while the save was pending, or one opened later. A session has one save pending at a time; a completion that is not that
+  save's settles nothing.
+- **A picker selection, not the task, names an add** (revision 2, review 2 R2): each selection gets its own local id, so a task deselected
+  and chosen again is a new add, after whatever happened to the list meanwhile. An add whose answer was lost is kept APART from the
+  selection (revision 3), so deselecting or choosing the task again, the list's membership, the search or a page hiding it never drops
+  it. The list's membership is never taken as proof of which add made it, and nothing is added that the person did not choose.
+- **D1: an earlier outcome this device cannot establish** (revision 3; Kieran's approval of 25 October 2026,
+  `atlas-orchestrator/delivery/handoffs/web10b-d1-recovery-approved-20261025.md`). A held local id is no lifetime guarantee: the outbox
+  recognises a repeat only while a draft is stored under it, and an acknowledged draft is removed once its effect is applied, Sync's
+  discard or replacement removes one, and a draft can be edited in place elsewhere. So an ordinary Save (or Enter, or Add selected) of a
+  session holding an attempt only LOOKS IT UP, read only (`readSaveEvidence` / `readDraftEvidence`: the draft under its id in the
+  database it was issued to, compared with the request as sent, `isSameSave`; it cannot insert, so a writer acting just after the look
+  cannot turn it into a write):
+  - **stored** (that save as sent, in any state but a refusal): settled as the earlier request's success, as before; it says what this
+    device recorded, not that the server applied it. A picker add found so is done ("… had already been added by an earlier save …").
+  - **changed, refused or discarded** (edited since, `rejected`, a discarded conflict, `superseded`), or **unknown** (nothing under its
+    id, a read that failed, another database: wiped and recreated, or another service): NOTHING is written; what was typed, selected and
+    searched stays; the dialog says the earlier outcome is unknown (or changed) and may already have happened, and offers a separate,
+    explained control: "Create as a new list", "Rename as a new change", "Add as new adds". In the picker one earlier add not settled holds
+    every add back, whether its task is selected, deselected, hidden by the search or already a member.
+  - **The decision** is the only way to a new change: new ids (a new list id and local id; a new local id for a rename or for each add,
+    never the predecessor's), and the defaults, policy version, access and room of NOW (the ordinary admission of a first save). It
+    neither cancels nor proves the earlier save, and says so. The picker's decision adds only what is selected now; earlier adds whose task
+    is not selected are let go, never made again. Dismissing it (Cancel, Escape, the close icon) sends nothing. A decision whose save is
+    refused definitely leaves the earlier attempt as it was; one whose own answer is lost is an attempt of its own, looked up next.
+  - **Boundaries recorded, not guessed.** (1) A Sync discard or replacement made in THIS document is not handed to the editor: after one
+    that removes the draft, the editor reports the outcome as unknown (its note names a discard in Sync as one possibility) and the
+    decision is still required; nothing is sent again, so the known discard stands. (2) The attempt lives in page memory with the rest of
+    the session (L16): a reload, a crash or another tab keeps no attempt, no warning and no decision; the durable queue goes on
+    independently (WEB-14a owns Q4 app-update recovery). A predecessor-specific decision across a reload or tab would need persistent
+    attempt history, which the approval excludes. (3) A race the other way (a draft discarded just after the look found it) settles on
+    what the look found: the dialog closes as saved on this device and nothing is written afterwards.
 - **A capacity-refused add holds the list's later changes on this device** until it is retried or discarded in Sync (the data layer's queue
   order); the notice says so.
 - **Native ordering is by transaction creation** (revision 1, R5; replaces the earlier claim that no real engine can place a commit
@@ -186,13 +205,14 @@ Revision 2 is 4 B smaller (managed build of this candidate); its exact draft rea
 - Unit and component (jsdom, production data controller over the IndexedDB double): `lists-model`, `list-view`, `lists-register`,
   `lists-screens`, `lists-dialogs`, `lists-reads`, `lists-routes`, `lists-recovery`, `lists-attempts`, and the shared session's
   `kept-settlement` (`tests/features/tasks/`).
-- Native (Chromium, Firefox, WebKit; real IndexedDB, fixture leader, stubbed network): `tests/e2e/fixture.lists.spec.ts` E-LS1–E-LS11 and
-  E-LS7b, 36 cases per engine (revision 1: E-LS8 (a)/(b) real-engine ordering with their controls, E-LS10 the detail's heading and
+- Native (Chromium, Firefox, WebKit; real IndexedDB, fixture leader, stubbed network): `tests/e2e/fixture.lists.spec.ts` E-LS1–E-LS12 and
+  E-LS7b, 40 cases per engine (revision 1: E-LS8 (a)/(b) real-engine ordering with their controls, E-LS10 the detail's heading and
   focus; revision 2: E-LS11, review 2's R1 and R2 schedules with their controls, over a labelled TEST-ONLY fault in which a committed
-  draft write's answer is lost: the write is real, Dexie is told it aborted). Viewports and themes are browser emulation, not devices; no screen-reader pass is claimed.
+  draft write's answer is lost: the write is real, Dexie is told it aborted; revision 3: E-LS12, D1 with the lost answer's draft discarded
+  by another tab's production discard, create and picker, each with its retained control). Viewports and themes are browser emulation, not devices; no screen-reader pass is claimed.
 - Focused real backend (released `v0.29.0-rc.1`, disposable SQLite, delaying proxy, the fixture leader; the `lists` stack):
   `tests/integration/integration.lists.spec.ts` I-LS1–I-LS8. Not integration acceptance.
-- Mutants: `scripts/mutation/catalogue-web10b.mjs` (54 unit, 7 real-engine), each with the test written for it.
+- Mutants: `scripts/mutation/catalogue-web10b.mjs` (67 unit, 9 real-engine), each with the test written for it.
 
 ## Headings (revision 1, R4)
 

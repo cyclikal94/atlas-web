@@ -79,6 +79,17 @@ export const CREATE = {
   /** An earlier save whose outcome was not known is now saved as it was sent; what was typed since stays (R1). */
   earlier: (name: string) =>
     `Your earlier save created “${name}”. What you typed since is still here: saving it creates another list.`,
+  /**
+   * D1 (revision 3; approved 25 October 2026): an earlier save whose outcome this device cannot establish. Create list never sends it
+   * again; only the separate decision below starts a new change. Provisional wording (STAGED-ACCEPTANCE-20261011).
+   */
+  unknown: (name: string) =>
+    `This device can't tell whether your earlier save created “${name}”: it may already have. Create list won't send it again.`,
+  changed: (name: string) =>
+    `Your earlier save of “${name}” was changed, refused or discarded since (see Sync), so it wasn't sent again.`,
+  again: "Create as a new list",
+  againNote:
+    "This creates a separate list from what's typed here. It doesn't cancel or undo your earlier save if that was made.",
 } as const;
 
 export const RENAME = {
@@ -95,6 +106,14 @@ export const RENAME = {
   gone: "This list isn't on this device any more. What you typed is kept here.",
   earlier: (name: string) =>
     `Your earlier save renamed this list “${name}”. What you typed since is still here: save again to use it.`,
+  /** D1 (revision 3), as `CREATE.unknown`. */
+  unknown: (name: string) =>
+    `This device can't tell whether your earlier save renamed this list “${name}”: it may already have. Save won't send it again.`,
+  changed: (name: string) =>
+    `Your earlier rename to “${name}” was changed, refused or discarded since (see Sync), so it wasn't sent again.`,
+  again: "Rename as a new change",
+  againNote:
+    "This sends a new rename with the name typed here. It doesn't cancel or undo your earlier rename if that was made.",
 } as const;
 
 export const NAME_PROBLEM = {
@@ -134,4 +153,19 @@ export const PICKER = {
     n === 1
       ? "One task you chose had already been added by an earlier save, so it wasn't added again. If it isn't in the list now, choose it again to add it."
       : `${n} tasks you chose had already been added by an earlier save, so they weren't added again. If one isn't in the list now, choose it again to add it.`,
+  /**
+   * D1 (revision 3), as `CREATE.unknown`: earlier adds whose outcome this device cannot establish, chosen now or not. Add selected sends
+   * nothing while one is unsettled; only the separate decision below adds what is chosen now, as new adds.
+   */
+  unknown: (n: number) =>
+    n === 1
+      ? "This device can't tell whether an earlier add to this list was made: it may already have been. Add selected won't send it again, or anything else, until you decide."
+      : `This device can't tell whether ${n} earlier adds to this list were made: they may already have been. Add selected won't send them again, or anything else, until you decide.`,
+  changed: (n: number) =>
+    n === 1
+      ? "An earlier add to this list was changed, refused or discarded since (see Sync), so it wasn't sent again. Add selected sends nothing until you decide."
+      : `${n} earlier adds to this list were changed, refused or discarded since (see Sync), so they weren't sent again. Add selected sends nothing until you decide.`,
+  again: "Add as new adds",
+  againNote:
+    "This adds the tasks selected now, as new adds. It doesn't cancel or undo an earlier add if that was made, and it adds nothing you haven't selected.",
 } as const;

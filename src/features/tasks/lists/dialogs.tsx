@@ -1,8 +1,9 @@
 import { useNavigate } from "@tanstack/react-router";
 import { type RefObject, useId, useRef, useState } from "react";
+import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
-import { type EnqueueRequest, useSharingDefaults } from "../../../data";
+import { useSharingDefaults } from "../../../data";
 import type { SaveOutcome } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -22,7 +23,7 @@ import {
   listNameProblem,
   renameQueuedCreate,
 } from "../model/lists";
-import { useListActions } from "./actions";
+import { type Evidence, type Issued, useListActions } from "./actions";
 import { CREATE, DETAIL, NAME_PROBLEM, RENAME } from "./copy";
 
 /**
@@ -31,11 +32,15 @@ import { CREATE, DETAIL, NAME_PROBLEM, RENAME } from "./copy";
  * person returns; Escape, Cancel and the close icon discard it. Every save takes a ticket: its completion consumes the session only at the
  * revision it submitted (newer input stays, with a note), and closes or navigates only while the dialog still presents.
  *
- * A save whose outcome is not known (`SaveOutcome.uncertain`: it may have been stored) binds the session's local id to that exact request
- * (R1): every later Save sends it again, unchanged, until it is saved (the outbox recognises a stored one: never a second list or rename).
- * Only then is what the person typed since saved, by a new Save under new ids; it is never consumed by the earlier request's success.
- * What a save leaves in the session (its request bound, or new ids) is part of its settlement (`completeKept`'s one transition, revision
- * 2): the dialog mounted when it settles shows it, whichever mount took the save, so the next Save acts on what the person sees.
+ * A save whose outcome is not known (`SaveOutcome.uncertain`: it may have been stored) stays with the session as an unsettled ATTEMPT (R1,
+ * D1): its exact request, ids and database. It is never sent again (revision 3, D1, approved 25 October 2026: a held id is no lifetime
+ * guarantee, the draft that would recognise it can be discarded, replaced or cleaned up). Every later Save only LOOKS IT UP, read only
+ * (`ListActions.reconcile`): found as it was sent, it is settled as the earlier request's success, and what was typed since stays, under
+ * new ids, never consumed by it; otherwise (nothing under its id, a read that failed, another database, or a draft changed, refused or
+ * discarded since) nothing is written, what was typed stays, and the dialog explains that the earlier outcome is unknown. Only a separate,
+ * explicit decision ("Create as a new list", "Rename as a new change") starts a new change: new ids, and the defaults, policy version and
+ * admission of now. It neither cancels nor proves the earlier save. What a save leaves in the session is part of its settlement
+ * (`completeKept`'s one transition, revision 2): the dialog mounted when it settles shows it, whichever mount took the save.
  */
 export const CREATE_EDITOR = "list-create";
 
@@ -46,48 +51,117 @@ export const holdsInput = (key: string): boolean => {
 };
 export const renameEditor = (listId: string) => `list-rename:${listId}`;
 
-/** A save of the session whose outcome is not known: the name it saved and its exact request, sent again as it is. */
-interface Unsettled {
+/**
+ * An issued save of the session whose outcome is not known (D1): the name it saved and its exact request as sent (to recognise it, never
+ * to send it again), its ids and the database it was issued to. `uncertain`: its answer was lost and it has not been looked up yet;
+ * `unknown`: the last look found no exact evidence; `changed`: a draft under its id is not it as sent (edited, refused, discarded or
+ * replaced). Ordinary Save only looks it up again; the person's separate decision (`again`) is the only way to a new change.
+ */
+interface Attempt extends Issued {
   name: string;
-  request: EnqueueRequest;
   announce: string;
+  state: "uncertain" | Exclude<Evidence, "stored">;
 }
+
+/** Whether the session holds an earlier save this device could not settle: the person decides what happens next (D1). */
+const undecided = (attempt: Attempt | null): attempt is Attempt =>
+  attempt !== null && attempt.state !== "uncertain";
 
 interface CreateInput {
   name: string;
-  /** Chosen when the session opens: a retry after an uncertain save reuses them (`duplicate`, never a second list). */
+  /** Chosen when the session opens, and anew after each save that may have been stored has been settled. */
   listId: string;
   localId: string;
-  unsettled: Unsettled | null;
+  attempt: Attempt | null;
 }
 
 /**
- * What a save leaves in its session (R1), settled in ONE transition of the session (`completeKept`). A success of what the session shows
- * consumes it at the submitted revision; a success of an earlier, unsettled request settles that request and keeps what was typed since,
- * under new ids (`fresh`, allocated once: the next save is a new list or rename, not a duplicate). A save that may have been stored binds
- * the session to its request; a definite refusal leaves the session as it was.
+ * What a save leaves in its session (R1), settled in ONE transition of the session (`completeKept`). Its success consumes the session at
+ * the submitted revision (`detail`: the list a create made), else keeps what was typed since under new ids (`fresh`, allocated once: the
+ * next save is a new list or rename). A save that may have been stored becomes the session's attempt, with the ids it used (`bind`); a
+ * definite refusal leaves the session as it was (an earlier attempt stays as it is).
  */
-function settleSave<T extends { unsettled: Unsettled | null }>(
+function settleSave<T extends { attempt: Attempt | null }>(
   ticket: KeptTicket,
-  sent: Unsettled,
-  current: boolean,
+  sent: Attempt,
   outcome: SaveOutcome,
-  notes: { newer: string; earlier: string },
   fresh: (value: T) => T,
+  bind: (value: T) => T,
+  detail: string | null = null,
 ): void {
   if (outcome.ok) {
-    completeKept<T>(ticket, current, {
-      note: current ? notes.newer : notes.earlier,
-      change: (value) => ({ ...fresh(value), unsettled: null }),
+    completeKept<T>(ticket, true, {
+      note: RENAME.newer,
+      detail,
+      change: (value) => ({ ...fresh(value), attempt: null }),
     });
     return;
   }
   const uncertain = outcome.uncertain === true;
   completeKept<T>(ticket, false, {
     note: outcome.message,
-    change: (value) =>
-      uncertain ? { ...value, unsettled: value.unsettled ?? sent } : value,
+    change: (value) => (uncertain ? { ...bind(value), attempt: sent } : value),
   });
+}
+
+/**
+ * An ordinary Save of a session holding an attempt only looks it up (D1): found as it was sent, it is settled as the earlier request's
+ * success (`current`: it saved what the session shows, which is then consumed), and what was typed since stays, under new ids; otherwise
+ * the session stays as it is, with the look's finding recorded on its attempt and explained. Nothing is ever sent.
+ */
+function settleLookup<T extends { attempt: Attempt | null }>(
+  ticket: KeptTicket,
+  attempt: Attempt,
+  evidence: Evidence,
+  current: boolean,
+  notes: { newer: string; earlier: string; unknown: string; changed: string },
+  fresh: (value: T) => T,
+): void {
+  if (evidence === "stored") {
+    completeKept<T>(ticket, current, {
+      note: current ? notes.newer : notes.earlier,
+      change: (value) => ({ ...fresh(value), attempt: null }),
+    });
+    return;
+  }
+  completeKept<T>(ticket, false, {
+    note: evidence === "unknown" ? notes.unknown : notes.changed,
+    change: (value) =>
+      value.attempt === attempt
+        ? { ...value, attempt: { ...attempt, state: evidence } }
+        : value,
+  });
+}
+
+/** The person's decision on an earlier save this device could not settle (D1): a separate control, explained beside it. */
+function Decision({
+  label,
+  note,
+  writable,
+  onDecide,
+}: {
+  label: string;
+  note: string;
+  writable: boolean;
+  onDecide(): void;
+}) {
+  const explained = useId();
+  return (
+    <div className="flex flex-col items-start gap-2" data-list-decision="">
+      <p id={explained} className="text-[12.5px] text-ink-2">
+        {note}
+      </p>
+      {writable ? (
+        <Button aria-describedby={explained} onClick={onDecide}>
+          {label}
+        </Button>
+      ) : (
+        <Button disabled reason={copy.NOT_WRITABLE}>
+          {label}
+        </Button>
+      )}
+    </div>
+  );
 }
 
 function NameField({
@@ -138,6 +212,7 @@ export function CreateListDialog({
 }) {
   const env = useTasksEnv();
   const actions = useListActions();
+  const announcer = useAnnouncer();
   // Mounting starts the defaults' read: the `list` defaults are captured at the act (D-10b-3).
   const defaults = useSharingDefaults();
   const navigate = useNavigate();
@@ -151,15 +226,15 @@ export function CreateListDialog({
       name: "",
       listId: env.newId(),
       localId: env.newId(),
-      unsettled: null,
+      attempt: null,
     }),
     {
       // Told only while the dialog presents: it closes onto the new list, shown projected ("Not sent yet").
-      consumed: (value) => {
+      consumed: (value, made) => {
         close.current();
         void navigate({
           to: "/tasks/lists/$listId",
-          params: { listId: value.listId },
+          params: { listId: made ?? value.listId },
         });
         return null;
       },
@@ -168,19 +243,63 @@ export function CreateListDialog({
   const [problem, setProblem] = useState<ListNameProblem | null>(null);
   const field = useId();
   const discard = () => disownKept(key);
-  const save = async () => {
+  /** `again`: the person's decision to start a new change after an earlier save this device could not settle (D1). */
+  const save = async (again = false) => {
     if (kept.busy) return;
-    const { name, listId, localId, unsettled } = kept.value;
+    const { name, listId, localId, attempt } = kept.value;
     const found = listNameProblem(name);
     setProblem(found);
     if (found !== null) return;
+    if (again && !undecided(attempt)) return;
     const ticket = kept.submit();
     if (ticket === null) return;
-    // An unsettled save goes again exactly as it was sent (its key, body and captured defaults), whatever is typed now.
-    const sent: Unsettled = unsettled ?? {
+    if (attempt !== null && !again) {
+      // Looked up, never sent again (D1).
+      let evidence: Evidence = "unknown";
+      try {
+        evidence = await actions.reconcile(attempt);
+      } finally {
+        const notes = {
+          newer: RENAME.newer,
+          earlier: CREATE.earlier(attempt.name),
+          unknown: CREATE.unknown(attempt.name),
+          changed: CREATE.changed(attempt.name),
+        };
+        announcer.announce(
+          evidence === "stored"
+            ? attempt.announce
+            : evidence === "unknown"
+              ? notes.unknown
+              : notes.changed,
+          evidence === "stored" ? "polite" : "assertive",
+        );
+        settleLookup<CreateInput>(
+          ticket,
+          attempt,
+          evidence,
+          attempt.name === name,
+          notes,
+          (value) => ({ ...value, listId: env.newId(), localId: env.newId() }),
+        );
+      }
+      return;
+    }
+    // A new change has new ids and the defaults of now (D-10b-3), never the earlier save's.
+    const ids = again
+      ? { listId: env.newId(), localId: env.newId() }
+      : { listId, localId };
+    const sent: Attempt = {
       name,
-      request: createList({ listId, name, defaults: defaults.record, localId }),
+      localId: ids.localId,
+      request: createList({
+        listId: ids.listId,
+        name,
+        defaults: defaults.record,
+        localId: ids.localId,
+      }),
+      scope: actions.scope(),
       announce: defaults.record === null ? CREATE.reviewNeeded : CREATE.saved,
+      state: "uncertain",
     };
     let outcome: SaveOutcome = { ok: false, message: null };
     try {
@@ -189,13 +308,14 @@ export function CreateListDialog({
       settleSave<CreateInput>(
         ticket,
         sent,
-        sent.name === name,
         outcome,
-        { newer: RENAME.newer, earlier: CREATE.earlier(sent.name) },
         (value) => ({ ...value, listId: env.newId(), localId: env.newId() }),
+        (value) => ({ ...value, ...ids }),
+        ids.listId,
       );
     }
   };
+  const attempt = kept.value.attempt;
   return (
     <Dialog
       open
@@ -245,6 +365,14 @@ export function CreateListDialog({
             {kept.note}
           </p>
         ) : null}
+        {undecided(attempt) ? (
+          <Decision
+            label={CREATE.again}
+            note={CREATE.againNote}
+            writable={env.writable}
+            onDecide={() => void save(true)}
+          />
+        ) : null}
       </form>
     </Dialog>
   );
@@ -253,8 +381,8 @@ export function CreateListDialog({
 interface RenameInput {
   name: string;
   localId: string;
-  /** A rename of the cached list whose outcome is not known (R1). */
-  unsettled: Unsettled | null;
+  /** A rename of the cached list whose outcome is not known (R1, D1). */
+  attempt: Attempt | null;
   /**
    * The list's queued create as the person first saw it (its digest), kept with the session through a sync visit: a rename edits that
    * create only while it is still that one, so another tab's newer edit is never overwritten from this dialog, even after a re-read.
@@ -281,6 +409,7 @@ export function RenameListDialog({
 }) {
   const env = useTasksEnv();
   const actions = useListActions();
+  const announcer = useAnnouncer();
   const key = keptKey(env.identity, renameEditor(listId));
   const close = useRef(onClose);
   close.current = onClose;
@@ -294,7 +423,7 @@ export function RenameListDialog({
       localId: env.newId(),
       seen:
         list?.create?.status === "queued" ? list.create.command_digest : null,
-      unsettled: null,
+      attempt: null,
     }),
     {
       consumed: () => {
@@ -320,15 +449,16 @@ export function RenameListDialog({
             ? "edit"
             : "wait";
   const nameProblem = listNameProblem(kept.value.name);
-  // An unsettled rename can always be saved again (it may show already, as the list's queued name).
+  // An unsettled rename can always be looked up again (it may show already, as the list's queued name).
   const changed =
     list !== null &&
-    (kept.value.name !== list.row.label || kept.value.unsettled !== null);
-  const save = async () => {
+    (kept.value.name !== list.row.label || kept.value.attempt !== null);
+  /** `again`: the person's decision to start a new change after an earlier rename this device could not settle (D1). */
+  const save = async (again = false) => {
     if (kept.busy) return;
     // Every route into a save is admitted by the LATEST read, not only by the button's state.
     const now = latest.current;
-    const { name, localId, unsettled } = kept.value;
+    const { name, localId, attempt } = kept.value;
     if (now === null) {
       setRefusal(RENAME.gone);
       return;
@@ -336,6 +466,41 @@ export function RenameListDialog({
     const found = listNameProblem(name);
     setProblem(found);
     if (found !== null) return;
+    if (again && !undecided(attempt)) return;
+    if (attempt !== null && !again) {
+      // Looked up, never sent again (D1).
+      setRefusal(null);
+      const ticket = kept.submit();
+      if (ticket === null) return;
+      let evidence: Evidence = "unknown";
+      try {
+        evidence = await actions.reconcile(attempt);
+      } finally {
+        const notes = {
+          newer: RENAME.newer,
+          earlier: RENAME.earlier(attempt.name),
+          unknown: RENAME.unknown(attempt.name),
+          changed: RENAME.changed(attempt.name),
+        };
+        announcer.announce(
+          evidence === "stored"
+            ? attempt.announce
+            : evidence === "unknown"
+              ? notes.unknown
+              : notes.changed,
+          evidence === "stored" ? "polite" : "assertive",
+        );
+        settleLookup<RenameInput>(
+          ticket,
+          attempt,
+          evidence,
+          attempt.name === name,
+          notes,
+          (value) => ({ ...value, localId: env.newId(), seen: null }),
+        );
+      }
+      return;
+    }
     if (!now.row.can_edit) {
       setRefusal(actions.denied().message);
       return;
@@ -352,16 +517,19 @@ export function RenameListDialog({
       setRefusal(RENAME.changedElsewhere);
       return;
     }
+    if (again && name === now.row.label) {
+      setRefusal(RENAME.unchanged);
+      return;
+    }
+    // A new change has a new id and the policy version of now (Q1), never the earlier rename's.
+    const id = again ? env.newId() : localId;
     const version = now.projected ? undefined : now.row.policy_version;
-    // An unsettled rename goes again exactly as it was sent (its key and policy version), whatever is typed now.
     const request =
-      unsettled !== null
-        ? unsettled.request
-        : create !== null
-          ? renameQueuedCreate(create, name)
-          : version !== undefined
-            ? editList({ listId, name, policyVersion: version, localId })
-            : null;
+      create !== null
+        ? renameQueuedCreate(create, name)
+        : version !== undefined
+          ? editList({ listId, name, policyVersion: version, localId: id })
+          : null;
     if (request === null) {
       setRefusal(RENAME.waitSync);
       return;
@@ -369,26 +537,28 @@ export function RenameListDialog({
     setRefusal(null);
     const ticket = kept.submit();
     if (ticket === null) return;
-    const sent: Unsettled = unsettled ?? {
+    const sent: Attempt = {
       name,
+      localId: id,
       request,
+      scope: actions.scope(),
       announce: RENAME.saved,
+      state: "uncertain",
     };
     let outcome: SaveOutcome = { ok: false, message: null };
     try {
       // An in-place edit of the queued create writes the whole name again and is never `uncertain` here: a retry of it is built anew.
       outcome =
-        unsettled === null && create !== null
+        create !== null
           ? await actions.editQueued(create.local_id, request, RENAME.saved)
           : await actions.enqueue(request, sent.announce);
     } finally {
       settleSave<RenameInput>(
         ticket,
         sent,
-        sent.name === name,
         outcome,
-        { newer: RENAME.newer, earlier: RENAME.earlier(sent.name) },
         (value) => ({ ...value, localId: env.newId(), seen: null }),
+        (value) => ({ ...value, localId: id }),
       );
     }
   };
@@ -466,6 +636,14 @@ export function RenameListDialog({
           <p className="text-[12.5px] text-ink-2" data-list-note="">
             {refusal ?? kept.note}
           </p>
+        ) : null}
+        {undecided(kept.value.attempt) && blocked === null ? (
+          <Decision
+            label={RENAME.again}
+            note={RENAME.againNote}
+            writable={env.writable}
+            onDecide={() => void save(true)}
+          />
         ) : null}
       </form>
     </Dialog>

@@ -12,7 +12,10 @@
 // MU-2526 and MU-2534 against the save settlement that replaced their anchors (R1), and added MU-2539..MU-2546, MU-2549 and MU-2550
 // for R1-R4. Revision 2 (review 2 R1/R2, design assessment Q5) re-anchors MU-2515..MU-2517, MU-2526, MU-2534, MU-2539..MU-2541 and
 // MU-2544 (same intents) on the one-transition settlement and the picker's selections, and adds MU-2551..MU-2559 and MU-2562 for their mechanisms and
-// the real-engine MU-2560 (MU-2551's patch) and MU-2561 (MU-2544's).
+// the real-engine MU-2560 (MU-2551's patch) and MU-2561 (MU-2544's). Revision 3 (D1, the approved earlier-outcome-unknown flow) re-anchors
+// MU-2516..MU-2518, MU-2526, MU-2539, MU-2557..MU-2559 and MU-2562 on the read-only look-up and the attempts kept apart from the input (same
+// intents, MU-2518 and MU-2557..MU-2559/MU-2562 re-expressed where the retry they named is now a look-up), and adds MU-2563..MU-2575 for
+// the D1 guards and the real-engine MU-2576 (an ordinary Save sends a create's attempt again) and MU-2577 (MU-2563's patch) over E-LS12.
 import { sub } from "./data-catalogue.mjs";
 
 const LISTS = "src/features/tasks/model/lists.ts";
@@ -23,6 +26,8 @@ const DIALOGS = "src/features/tasks/lists/dialogs.tsx";
 const PICKER = "src/features/tasks/lists/TaskPicker.tsx";
 const KEPT = "src/features/tasks/kept-input.ts";
 const DRAFT_READ = "src/data/ui/draft-read.ts";
+const DRAFT_HEADER = "src/data/plans/draft-header.ts";
+const LIST_ACTIONS = "src/features/tasks/lists/actions.ts";
 const DETAIL = "src/features/tasks/lists/ListDetail.tsx";
 const LAYOUT = "src/features/tasks/lists/ListsLayout.tsx";
 const T = (name) => `tests/features/tasks/${name}`;
@@ -285,7 +290,7 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "          .filter((c) => !queued.has(c.localId) && !earlier.has(c.localId))",
+        "          .filter((c) => !queued.has(c.localId) && !found.has(c.localId))",
         "          .filter(() => false)",
       ),
   },
@@ -299,23 +304,24 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "            localId: choice.localId,",
-        "            localId: crypto.randomUUID(),",
+        "          const localId = renamed.get(choice.localId) ?? choice.localId;",
+        "          const localId = crypto.randomUUID();",
       ),
   },
   {
     id: "MU-2518",
     title:
-      "WEB-10b L6: the create's retry uses a new list id and local id (a lost completion makes two lists)",
+      "WEB-10b L6/D1: a create's attempt is kept under another id than the request it sent (its stored list is never recognised)",
     file: DIALOGS,
     tests: [DIALOGS_TEST],
-    expect: /retried with the SAME list id and local id/,
-    // Re-expressed in revision 1: a retry now sends the bound request, so the mutant also rebuilds every save (new ids each time).
+    expect: /looked up, never sent again: found as sent/,
+    // Re-expressed in revision 1 (a retry sent the bound request) and in revision 3 (D1: the retry is a look-up by the attempt's id, so
+    // the defect left is an attempt that does not name the id its request was sent under).
     patch: (t) =>
       sub(
         t,
-        "    const sent: Unsettled = unsettled ?? {\n      name,\n      request: createList({ listId, name, defaults: defaults.record, localId }),",
-        "    const sent: Unsettled = {\n      name,\n      request: createList({ listId: env.newId(), name, defaults: defaults.record, localId: env.newId() }),",
+        "    const sent: Attempt = {\n      name,\n      localId: ids.localId,\n      request: createList({",
+        "    const sent: Attempt = {\n      name,\n      localId: env.newId(),\n      request: createList({",
       ),
   },
   {
@@ -418,12 +424,13 @@ export const UNIT_WEB10B = [
     file: DIALOGS,
     tests: [DIALOGS_TEST, ATTEMPTS_TEST],
     expect: /ticket acknowledgement|edits while the save is pending/,
-    // Re-expressed in revision 1 against `settleSave`, which both dialogs now settle through; re-anchored in revision 2 (one transition).
+    // Re-expressed in revision 1 against `settleSave`, which both dialogs now settle through; re-anchored in revision 2 (one transition)
+    // and in revision 3 on `settleSave`'s success (the earlier request's success is `settleLookup`'s, MU-2540).
     patch: (t) =>
       sub(
         t,
-        "    completeKept<T>(ticket, current, {",
-        "    completeKept<T>({ ...ticket, revision: keptEntry<T>(ticket.key)?.revision ?? ticket.revision }, current, {",
+        "    completeKept<T>(ticket, true, {",
+        "    completeKept<T>({ ...ticket, revision: keptEntry<T>(ticket.key)?.revision ?? ticket.revision }, true, {",
       ),
   },
   {
@@ -540,8 +547,8 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "      uncertain ? { ...value, unsettled: value.unsettled ?? sent } : value,",
-        "      value,",
+        "    change: (value) => (uncertain ? { ...bind(value), attempt: sent } : value),",
+        "    change: (value) => value,",
       ),
   },
   {
@@ -747,54 +754,252 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "          .map((c) => (uncertain.has(c.localId) ? { ...c, issued: true } : c)),",
-        "          .map((c) => c),",
+        "            if (outcome.uncertain === true)\n              issued.push({",
+        "            if (false as boolean)\n              issued.push({",
       ),
   },
   {
     id: "MU-2558",
     title:
-      "WEB-10b R2 (review 2): an add whose answer was lost is taken as saved without asking what is stored (one never stored is never sent)",
+      "WEB-10b R2 (review 2), D1: an add whose answer was lost is taken as saved without asking what is stored (one never stored is never sent)",
     file: PICKER,
     tests: [ATTEMPTS_TEST],
     expect:
-      /NOT stored: membership settles nothing|lost-before-commit: the add is retried/,
+      /NOT stored: membership settles nothing|lost-before-commit: the add is seen as made/,
+    // Re-anchored in revision 3 on the look-up of every earlier add.
     patch: (t) =>
       sub(
         t,
-        "        if (choice.issued && (await actions.stored(choice.localId)) === true) {",
-        "        if (choice.issued) {",
+        "        const evidence = await actions.reconcile(earlier);",
+        '        const evidence: Evidence = "stored";',
       ),
   },
   {
     id: "MU-2562",
     title:
-      "WEB-10b R2 (review 2): an exact read of a lost add's draft that failed is taken as finding it stored (the add is never sent)",
-    file: PICKER,
+      "WEB-10b R2 (review 2), D1: an exact read of a lost add's draft that failed is taken as finding it stored (the add is never sent)",
+    file: LIST_ACTIONS,
     tests: [ATTEMPTS_TEST],
     expect: /the exact read of a lost add's draft fails/,
+    // Re-anchored in revision 3 on the Lists' reading of the evidence.
     patch: (t) =>
       sub(
         t,
-        "        if (choice.issued && (await actions.stored(choice.localId)) === true) {",
-        "        if (choice.issued && (await actions.stored(choice.localId)) !== false) {",
+        '        if (!read.ok || read.value === "absent") return "unknown";',
+        '        if (!read.ok) return "stored";\n        if (read.value === "absent") return "unknown";',
       ),
   },
   {
     id: "MU-2559",
     title:
-      "WEB-10b R2 (review 2): the exact read of a stored draft answers that none is stored",
-    file: DRAFT_READ,
+      "WEB-10b R2 (review 2), D1: the exact read of a stored draft answers that none is stored",
+    file: DRAFT_HEADER,
     tests: [ATTEMPTS_TEST],
     expect: /the earlier selection shown again and Add pressed/,
+    // Re-anchored in revision 3 on the typed evidence plan.
     patch: (t) =>
       sub(
         t,
-        "    return { ok: true, value: draft };",
-        "    return { ok: true, value: null };",
+        '    if (draft === undefined) return "absent";',
+        '    if (draft !== null) return "absent";',
+      ),
+  },
+  {
+    id: "MU-2563",
+    title:
+      "WEB-10b D1: an earlier add not settled does not hold Add selected back (its task selected under the old id is sent again, a hidden one is passed over)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect:
+      /nothing is sent until the decision adds it anew|deselecting is not deciding|B is held back/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (unsettled.size === 0)\n",
+        "      if (true as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2564",
+    title:
+      "WEB-10b D1: deselecting a task drops its earlier add not settled (a selection change bypasses the decision)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect: /deselecting is not deciding/,
+    patch: (t) =>
+      sub(
+        t,
+        "          selected: value.selected.filter((c) => c.task !== task),\n",
+        "          selected: value.selected.filter((c) => c.task !== task),\n          unresolved: value.unresolved.filter((u) => u.task !== task),\n",
+      ),
+  },
+  {
+    id: "MU-2565",
+    title:
+      "WEB-10b D1: only the earlier adds of tasks chosen now are looked up (one deselected or hidden by membership is passed over)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect: /deselecting is not deciding|B is held back/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : unresolved;\n",
+        "      : unresolved.filter((u) => chosen.some((c) => c.localId === u.localId));\n",
+      ),
+  },
+  {
+    id: "MU-2566",
+    title:
+      "WEB-10b D1: the picker's decision adds a task under its earlier add's id (the predecessor's id reused)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect:
+      /nothing is sent until the decision adds it anew|reselection is not the decision|exact read of a lost add's draft fails/,
+    patch: (t) =>
+      sub(
+        t,
+        "          renamed.set(c.localId, env.newId());",
+        "          renamed.set(c.localId, c.localId);",
+      ),
+  },
+  {
+    id: "MU-2567",
+    title:
+      "WEB-10b D1: a look-up that finds no exact evidence drops the attempt (the next ordinary Save is taken as the decision, under the old ids)",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect: /Save writes nothing and says the outcome is unknown|still unknown/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ? { ...value, attempt: { ...attempt, state: evidence } }",
+        "        ? { ...value, attempt: null }",
+      ),
+  },
+  {
+    id: "MU-2568",
+    title:
+      "WEB-10b D1: the create's decision reuses the earlier save's list id and local id",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect:
+      /only the separate decision creates the list, under new ids|creates a separate list under new ids/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? { listId: env.newId(), localId: env.newId() }\n      : { listId, localId };",
+        "      ? { listId, localId }\n      : { listId, localId };",
+      ),
+  },
+  {
+    id: "MU-2569",
+    title:
+      "WEB-10b D1: the rename's decision sends the earlier rename's request (its id and policy version) instead of a new one",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect: /the policy version of now/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const request =\n      create !== null\n        ? renameQueuedCreate(create, name)",
+        "    const request =\n      again && attempt !== null\n        ? attempt.request\n        : create !== null\n        ? renameQueuedCreate(create, name)",
+      ),
+  },
+  {
+    id: "MU-2570",
+    title:
+      "WEB-10b D1: a draft changed since under the save's id is taken as that save as sent",
+    file: DRAFT_HEADER,
+    tests: [ATTEMPTS_TEST],
+    expect: /edited in place elsewhere|stored, changed, refused and absent/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return isSameSave(input.request, draft) ? "stored" : "changed";',
+        '    return "stored";',
+      ),
+  },
+  {
+    id: "MU-2571",
+    title:
+      "WEB-10b D1: a refused or discarded draft under the save's id is taken as that save stored",
+    file: DRAFT_HEADER,
+    tests: [ATTEMPTS_TEST],
+    expect: /stays as rejected|stored, changed, refused and absent/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (draft.status === "rejected" || draft.status === "superseded")\n      return "refused";\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2572",
+    title:
+      "WEB-10b D1: evidence read in another database than the one the save was issued to is accepted",
+    file: DRAFT_READ,
+    tests: [ATTEMPTS_TEST],
+    expect: /stored, changed, refused and absent/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (service === null || service.incarnationId !== save.scope)",
+        "  if (service === null)",
+      ),
+  },
+  {
+    id: "MU-2573",
+    title:
+      "WEB-10b D1: the decision is offered before the earlier save has been looked up",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect: /not decided yet: looked up first|the decision's own answer lost/,
+    patch: (t) =>
+      sub(
+        t,
+        '  attempt !== null && attempt.state !== "uncertain";',
+        "  attempt !== null;",
+      ),
+  },
+  {
+    id: "MU-2574",
+    title:
+      "WEB-10b D1: a create's attempt found stored is sent again after the look-up (a check, then an unconditional insertion)",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect: /discarded right AFTER the look-up read it/,
+    patch: (t) =>
+      sub(
+        t,
+        "        evidence = await actions.reconcile(attempt);\n      } finally {\n        const notes = {\n          newer: RENAME.newer,\n          earlier: CREATE.earlier(attempt.name),",
+        '        evidence = await actions.reconcile(attempt);\n        if (evidence === "stored") await actions.enqueue(attempt.request);\n      } finally {\n        const notes = {\n          newer: RENAME.newer,\n          earlier: CREATE.earlier(attempt.name),',
+      ),
+  },
+  {
+    id: "MU-2575",
+    title:
+      "WEB-10b D1: an earlier add the picker's decision was about is kept after the decision was acted on (the next Add is held back again)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect: /a later Add of another task is not held back again/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ...(decided ? [] : value.unresolved)",
+        "          ...value.unresolved",
       ),
   },
 ];
+
+/** D1: an ordinary Save of a create holding an attempt makes a new save of it under the attempt's ids (the revision-2 retry, unlooked-up). */
+const createSendsAttemptAgain = (t) =>
+  sub(
+    t,
+    "    const ticket = kept.submit();\n    if (ticket === null) return;\n    if (attempt !== null && !again) {",
+    "    const ticket = kept.submit();\n    if (ticket === null) return;\n    if (false as boolean) {",
+  );
+const pickerUnsettledNotHeld = (t) =>
+  sub(t, "      if (unsettled.size === 0)\n", "      if (true as boolean)\n");
 
 const SPEC = "tests/e2e/fixture.lists.spec.ts";
 export const ENGINE_WEB10B = [
@@ -876,5 +1081,25 @@ export const ENGINE_WEB10B = [
     grep: "E-LS11: .* picker: A's add written but its answer lost",
     expect: /E-LS11:/,
     patch: idPerTask,
+  },
+  {
+    id: "MU-2576",
+    title:
+      "WEB-10b D1: (REAL ENGINE) an ordinary Save sends a create's lost-answer attempt again under its old ids after another tab discarded it",
+    file: DIALOGS,
+    spec: SPEC,
+    grep: "E-LS12: .* create: the stored create of a lost answer discarded in another tab",
+    expect: /E-LS12:/,
+    patch: createSendsAttemptAgain,
+  },
+  {
+    id: "MU-2577",
+    title:
+      "WEB-10b D1: (REAL ENGINE) an earlier add not settled does not hold Add selected back: A is sent again under its old id after another tab discarded it",
+    file: PICKER,
+    spec: SPEC,
+    grep: "E-LS12: .* picker: A's lost add discarded in another tab",
+    expect: /E-LS12:/,
+    patch: pickerUnsettledNotHeld,
   },
 ];

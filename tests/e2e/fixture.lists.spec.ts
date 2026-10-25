@@ -46,8 +46,10 @@ import {
  * synced list), read-only controls; E-LS5 capacity (Add disabled at 100, the picker capped, a 503 slice_capacity refused); E-LS6 archive
  * and restore offline; E-LS7 input kept through the in-dialog sync control, Escape, reload, and a save answered while away; E-LS8 two tabs
  * (a denial committed after the screen was drawn, the queued create edited in the other tab, both adding); E-LS9 keyboard only; E-LS10
- * the detail's heading; E-LS11 an answer lost after the write (a labelled test-only fault): the retry settled on the dialog Back mounted
- * again, and an add re-chosen after another tab's remove (review 2 R1, R2), each with its control.
+ * the detail's heading; E-LS11 an answer lost after the write (a labelled test-only fault): the earlier request's look-up settled on the
+ * dialog Back mounted again, and an add re-chosen after another tab's remove (review 2 R1, R2), each with its control; E-LS12 (revision 3,
+ * D1) the stored draft of a lost answer discarded by ANOTHER TAB's production discard: Save writes nothing, only the separate decision
+ * makes the change anew (create and picker), each with its retained-draft control.
  */
 const LISTS_ROUTE = "/tasks/lists";
 const detailRoute = (id: string) => `/tasks/lists/${id}`;
@@ -1507,7 +1509,8 @@ test.describe("E-LS11: an answer lost after the write (review 2 R1, R2)", () => 
         (await queued(page, "create_list")).map((x) => x.body.command.name),
       ).toEqual(["Original"]);
       await dialog(page).getByLabel("Name").fill("Newer");
-      // The retry of the earlier request (the dialog's next Save) is held at its write.
+      // The look-up of the earlier request (the dialog's next Save; revision 3, D1: never sent again) is held: a read-only transaction over
+      // `drafts` waits behind the read-write one the hold keeps alive.
       const release = await holdDraftWrites(page);
       await dialog(page).getByRole("button", { name: "Create list" }).click();
       await expect(dialog(page).getByLabel("Name")).toBeDisabled();
@@ -1599,5 +1602,135 @@ test.describe("E-LS11: an answer lost after the write (review 2 R1, R2)", () => 
         (x) => x.body.command.task_id === a.taskId && x.body.command.included,
       );
       expect(new Set(addsOfA.map((x) => x.draft.local_id)).size).toBe(2);
+    });
+});
+
+/** Another tab of the context, at `route`, with an outbox of its own (not dispatching): its production writers act on the same database. */
+async function otherTab(context: BrowserContext, route: string): Promise<Page> {
+  const other = await context.newPage();
+  await other.goto(`/__session?route=${encodeURIComponent(route)}`);
+  await other.waitForFunction(() => window.__atlasData !== undefined);
+  await untilTreeSettled(other);
+  await goOfflineAtBoundary(other);
+  await startOutbox(other, ACCOUNT, { start: false });
+  return other;
+}
+const discardIn = (other: Page, localId: string) =>
+  other.evaluate(
+    (id) => window.__atlasData?.discardDraft(id),
+    localId,
+  ) as Promise<{ kind: string }>;
+
+test.describe("E-LS12: an earlier outcome this device cannot establish (revision 3, D1)", () => {
+  for (const discarded of [true, false])
+    test(`create: the stored create of a lost answer ${discarded ? "discarded in another tab: Save writes nothing and says so; the decision creates a separate list" : "still stored (control): Save finds it and closes onto it"}`, async ({
+      context,
+    }) => {
+      await loseCommittedAnswers(context);
+      const { page } = await setup(context, LISTS_ROUTE, [], []);
+      await goOfflineAtBoundary(page);
+      await page.getByRole("button", { name: "+ New list" }).click();
+      await dialog(page).getByLabel("Name").fill("Original");
+      await loseNextAnswer(page);
+      await dialog(page).getByRole("button", { name: "Create list" }).click();
+      await expect(dialog(page)).toContainText(STORAGE_REFUSED);
+      expect(await answersLost(page)).toBe(1);
+      const [first] = await queued(page, "create_list");
+      const old = first?.draft.local_id as string;
+      const oldList = first?.body.command.id as string;
+      if (discarded) {
+        const other = await otherTab(context, LISTS_ROUTE);
+        expect(await discardIn(other, old)).toMatchObject({
+          kind: "discarded",
+        });
+        await expect.poll(async () => (await queued(page)).length).toBe(0);
+      }
+      await dialog(page).getByRole("button", { name: "Create list" }).click();
+      if (!discarded) {
+        await expect(dialog(page)).toHaveCount(0);
+        await expect(page).toHaveURL(new RegExp(`/tasks/lists/${oldList}$`));
+        expect(
+          (await queued(page)).map((x) => x.draft.local_id),
+          "nothing written",
+        ).toEqual([old]);
+        return;
+      }
+      await expect(dialog(page)).toContainText(
+        "This device can't tell whether your earlier save created “Original”",
+      );
+      expect(await queued(page), "nothing written").toEqual([]);
+      await expect(dialog(page).getByLabel("Name")).toHaveValue("Original");
+      await expect(page).toHaveURL(/\/tasks\/lists$/);
+      await dialog(page)
+        .getByRole("button", { name: "Create as a new list" })
+        .click();
+      await expect(dialog(page)).toHaveCount(0);
+      const made = await queued(page, "create_list");
+      expect(made).toHaveLength(1);
+      expect(made[0]?.draft.local_id).not.toBe(old);
+      expect(made[0]?.body.command.id).not.toBe(oldList);
+      expect(made[0]?.body.command.name).toBe("Original");
+      await expect(page).toHaveURL(
+        new RegExp(`/tasks/lists/${made[0]?.body.command.id as string}$`),
+      );
+    });
+
+  for (const discarded of [true, false])
+    test(`picker: A's lost add ${discarded ? "discarded in another tab: Add writes nothing, B held back too; the decision adds A anew and B" : "still stored (control): A found, B added"}`, async ({
+      context,
+    }) => {
+      await loseCommittedAnswers(context);
+      const a = buildTask({ n: 41, title: "First" });
+      const b = buildTask({ n: 42, title: "Second" });
+      const list = listUpsert(41, "Errands", []);
+      const { page } = await setup(
+        context,
+        detailRoute(list.id),
+        [a, b],
+        [list],
+      );
+      await goOfflineAtBoundary(page);
+      const box = (t: BuiltTask) =>
+        dialog(page).locator(`[data-picker-task="${t.taskId}"] input`);
+      await page.getByRole("button", { name: "Add task to list" }).click();
+      await box(a).check();
+      await box(b).check();
+      await loseNextAnswer(page);
+      await dialog(page).getByRole("button", { name: "Add selected" }).click();
+      await expect(dialog(page)).toContainText(STORAGE_REFUSED);
+      expect(await answersLost(page)).toBe(1);
+      const [lostAdd] = await queued(page, "list_item");
+      const old = lostAdd?.draft.local_id as string;
+      if (discarded) {
+        const other = await otherTab(context, detailRoute(list.id));
+        expect(await discardIn(other, old)).toMatchObject({
+          kind: "discarded",
+        });
+        await expect.poll(async () => (await queued(page)).length).toBe(0);
+      }
+      await dialog(page).getByRole("button", { name: "Add selected" }).click();
+      const ops = async () =>
+        bySeq(await queued(page, "list_item")).map(
+          (x) =>
+            `${x.body.command.included ? "+" : "-"}${x.body.command.task_id as string}`,
+        );
+      if (!discarded) {
+        await expect(dialog(page)).toHaveCount(0);
+        expect(await ops()).toEqual([`+${a.taskId}`, `+${b.taskId}`]);
+        return;
+      }
+      await expect(dialog(page)).toContainText(
+        "This device can't tell whether an earlier add to this list was made",
+      );
+      expect(await queued(page), "nothing written").toEqual([]);
+      await expect(box(a)).toBeChecked();
+      await expect(box(b)).toBeChecked();
+      await dialog(page)
+        .getByRole("button", { name: "Add as new adds" })
+        .click();
+      await expect(dialog(page)).toHaveCount(0);
+      expect(await ops()).toEqual([`+${a.taskId}`, `+${b.taskId}`]);
+      const items = await queued(page, "list_item");
+      expect(items.map((x) => x.draft.local_id)).not.toContain(old);
     });
 });

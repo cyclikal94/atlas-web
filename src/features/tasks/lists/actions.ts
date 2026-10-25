@@ -1,6 +1,10 @@
 import { useMemo } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
-import { type EnqueueRequest, readDraftNow, useDataEnv } from "../../../data";
+import {
+  type EnqueueRequest,
+  readSaveEvidence,
+  useDataEnv,
+} from "../../../data";
 import { type SaveOutcome, useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -22,12 +26,25 @@ export interface ListActions {
     request: EnqueueRequest,
     announce: string,
   ): Promise<SaveOutcome>;
+  /** The database (its incarnation) a save issued now is written to: what an answer that is lost is later looked up in. */
+  scope(): string | null;
   /**
-   * Whether a save made under `localId` is stored now (R2, revision 2): `true` (found, whatever its state), `false` (nothing is under that
-   * id now, which is not proof that nothing ever was), `null` (no answer: no database, or the read failed).
+   * What became of an issued save whose answer was lost (WEB-10b revision 3, D1), read only, never by sending it again: `stored` (a draft
+   * under its id is that save as it was sent: recorded on this device, not proof the server applied it), `changed` (a draft under its id
+   * is not that save as sent, or was refused, discarded or replaced) or `unknown` (nothing under its id now, the read failed, or the
+   * database is not the one it was issued to: no evidence either way).
    */
-  stored(localId: string): Promise<boolean | null>;
+  reconcile(save: Issued): Promise<Evidence>;
 }
+
+/** An issued save whose answer was lost: its local id, its exact request as sent, and the database it was issued to. */
+export interface Issued {
+  localId: string;
+  request: EnqueueRequest;
+  scope: string | null;
+}
+
+export type Evidence = "stored" | "changed" | "unknown";
 
 export function useListActions(): ListActions {
   const env = useTasksEnv();
@@ -66,9 +83,11 @@ export function useListActions(): ListActions {
               : copy.refusalMessage(edited.reason),
         );
       },
-      async stored(localId) {
-        const read = await readDraftNow(data, localId);
-        return read.ok ? read.value !== null : null;
+      scope: () => data.service()?.incarnationId ?? null,
+      async reconcile(save) {
+        const read = await readSaveEvidence(data, save);
+        if (!read.ok || read.value === "absent") return "unknown";
+        return read.value === "stored" ? "stored" : "changed";
       },
     };
   }, [env.writable, data, announcer, actions]);
