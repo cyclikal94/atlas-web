@@ -292,6 +292,48 @@ describe("L8: the detail", () => {
     ).toBe(false);
   });
 
+  test("R3: a cached task's id at a Lists address is no list: not on this device, no list action, nothing queued", async () => {
+    const id = taskId(90);
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [taskRow(id, "A task, not a list")],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector('[data-list-detail="absent"]') !== null,
+    );
+    expect(
+      screen.queryByText(DETAIL.absent),
+      "not on this device",
+    ).not.toBeNull();
+    expect(screen.queryByText("A task, not a list")).toBeNull();
+    for (const name of [
+      DETAIL.rename,
+      DETAIL.sharing,
+      DETAIL.archive,
+      DETAIL.restore,
+      DETAIL.add,
+    ])
+      expect(screen.queryByRole("button", { name }), name).toBeNull();
+    expect(h1(), "the page heading names no resource").toEqual(["Lists"]);
+    expect(t.drafts()).toEqual([]);
+  });
+
+  test("R3 control: a list at the same kind of address archives itself", async () => {
+    const id = listId();
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [listRow(id, "Real list", [])],
+      env: { online: false },
+    });
+    await t.until(detailReady(id));
+    fireEvent.click(screen.getByRole("button", { name: DETAIL.archive }));
+    await t.settle();
+    expect(bodyOf(t, "archive")).toEqual([
+      { kind: "archive", id, expected_version: 2, archived: true },
+    ]);
+  });
+
   test("L10: 100 composed (99 cached + a queued add) disables Add with the drawn copy", async () => {
     const id = listId();
     const ids = Array.from({ length: 99 }, (_, i) => taskId(1000 + i));

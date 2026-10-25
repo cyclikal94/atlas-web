@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import {
   type EnqueueRequest,
+  OutboxRequestError,
   useDataEnv,
   useSharingDefaults,
 } from "../../data";
@@ -18,7 +19,18 @@ import type { RowModel } from "./view";
  */
 export type SaveOutcome =
   | { ok: true; localId: string }
-  | { ok: false; message: string | null };
+  /**
+   * `uncertain`: the save may have been stored all the same (a store that failed or threw, a service that ended during it): a retry under
+   * the same local id must send the same request (WEB-10b R1). Otherwise nothing was stored.
+   */
+  | { ok: false; message: string | null; uncertain?: boolean };
+
+/** Refusals after which the writing transaction may nonetheless have committed (its answer was lost with the store or the service). */
+const UNCERTAIN: ReadonlySet<string> = new Set([
+  "storage",
+  "closed",
+  "identity_changed",
+]);
 
 export interface TaskActions {
   enqueue(request: EnqueueRequest, announce?: string): Promise<SaveOutcome>;
@@ -56,11 +68,18 @@ export function useTaskActions(): TaskActions {
       let outcome: Awaited<ReturnType<typeof outbox.enqueue>>;
       try {
         outcome = await outbox.enqueue(request);
-      } catch {
-        // A request this slice built wrongly (`OutboxRequestError`) or a store that threw: nothing was saved.
+      } catch (error) {
+        // A request this slice built wrongly (`OutboxRequestError`, or one JSON cannot carry) stored nothing; anything else that threw
+        // may have thrown after the write committed.
         const message = copy.refusalMessage("storage");
         if (message) announcer.announce(message, "assertive");
-        return { ok: false, message };
+        return {
+          ok: false,
+          message,
+          uncertain: !(
+            error instanceof OutboxRequestError || error instanceof TypeError
+          ),
+        };
       }
       if (outcome.kind === "queued") {
         announcer.announce(announce, "polite");
@@ -68,7 +87,7 @@ export function useTaskActions(): TaskActions {
       }
       const message = copy.refusalMessage(outcome.reason);
       if (message) announcer.announce(message, "assertive");
-      return { ok: false, message };
+      return { ok: false, message, uncertain: UNCERTAIN.has(outcome.reason) };
     };
     /**
      * A known denial already on screen admits nothing (DA17-N1/N2): the outbox is not asked. The writing transaction is what decides a

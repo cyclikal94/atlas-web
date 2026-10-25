@@ -121,17 +121,18 @@ the jsdom `tests/features/tasks/lists-*.test.tsx`.
 | The drawn row checkbox not implemented (E-10b-1) | `/tasks/lists/<id>` (E-LS1) |
 | Caption corrected (D-10b-9) | `/tasks/lists/<id>` (E-LS1) |
 | The refused-capacity notice, corrected (D-10b-10) | `/tasks/lists/<id>` after a `503 slice_capacity` (E-LS5) |
-| Added: "Choose a list to see its tasks.", "No lists here.", "No archived lists.", "No tasks in this list yet.", "This list isn't on this device.", "This list can't be shown on this device.", "This list is archived.", "You can't change this list", "You can rename this list once it has synced.", "Change the name to save it.", "You can share this list once it has synced.", the create caption, "Only tasks you can already see are shown.", "No tasks to add.", "No tasks match your search.", "Choose the tasks to add first.", "{n} selected", "This list can take {n} more.", "This list can now take only {n} more. Choose fewer tasks.", "Added {k} of {n}. The others weren't saved: {reason}", "A change to your lists needs your attention in Sync." / "A change to this list needs your attention in Sync." with "Open Sync", "This list's unsent change was edited somewhere else. …", "This list isn't on this device any more. What you typed is kept here.", "Saved. Your newer changes are still here.", the announcements ("List created. Not sent yet.", "List renamed. Not sent yet.", "Removed “{title}” from {list}. Not sent yet.", "Added {n} tasks to {list}. Not sent yet.", "Archived. Not sent yet.", "Restored. Not sent yet."), "Remove {title}" / "Remove this task", the queue descriptions "New list" / "List name change" / "List change" | E-LS1–E-LS9; `lists-*.test.tsx` |
+| Added: "Choose a list to see its tasks.", "No lists here.", "No archived lists.", "No tasks in this list yet.", "This list isn't on this device.", "This list can't be shown on this device.", "This list is archived.", "You can't change this list", "You can rename this list once it has synced.", "Change the name to save it.", "You can share this list once it has synced.", the create caption, "Only tasks you can already see are shown.", "No tasks to add.", "No tasks match your search.", "Choose the tasks to add first.", "{n} selected", "This list can take {n} more.", "This list can now take only {n} more. Choose fewer tasks.", "Added {k} of {n}. The others weren't saved: {reason}", "A change to your lists needs your attention in Sync." / "A change to this list needs your attention in Sync." with "Open Sync", "This list's unsent change was edited somewhere else. …", "This list isn't on this device any more. What you typed is kept here.", "Saved. Your newer changes are still here.", "Your earlier save created “{name}”. What you typed since is still here: saving it creates another list.", "Your earlier save renamed this list “{name}”. What you typed since is still here: save again to use it." (revision 1, R1), the announcements ("List created. Not sent yet.", "List renamed. Not sent yet.", "Removed “{title}” from {list}. Not sent yet.", "Added {n} tasks to {list}. Not sent yet.", "Archived. Not sent yet.", "Restored. Not sent yet."), "Remove {title}" / "Remove this task", the queue descriptions "New list" / "List name change" / "List change" | E-LS1–E-LS9; `lists-*.test.tsx` |
 | Name order within a page; pages by id ("More lists") | `/tasks/lists` with over 100 lists (`lists-screens.test.tsx`) |
 | No "Only me" at creation (defaults apply; Sharing afterwards) | `/tasks/lists` → "+ New list" (E-LS2) |
 | An archived list's page stays editable | `/tasks/lists/<archived id>` (E-LS6) |
 
 ## Budgets
 
-Measured on this candidate (no ceiling changed): production initial JS 109,418 B gzip (ceiling 109,795), production CSS 7,343 B (ceiling
-7,378; **byte-identical CSS**: the screens use only classes the baseline already had), fixture initial JS 272,555 B (one-off ceiling
-272,600 from WEB-10a revision 25). The route declarations cost 96 B of the fixture's first load after the trim that lets the lazy layout
-draw the list. This is little headroom for the next slice; WEB-09c owns the reasoned successor budget.
+Measured on this candidate (revision 1; no ceiling changed): production initial JS 109,421 B gzip (ceiling 109,795), production CSS
+7,343 B (ceiling 7,378; **byte-identical CSS**: the screens use only classes the baseline already had), fixture initial JS 272,583 B
+(one-off ceiling 272,600 from WEB-10a revision 25). The route declarations cost 96 B of the fixture's first load after the trim that lets
+the lazy layout draw the list; revision 1 (R1-R4) costs 28 B more, chiefly the heading while a child page's lazy screen loads (R4).
+17 B of headroom remain for the next slice; WEB-09c owns the reasoned successor budget.
 
 ## Limits
 
@@ -140,23 +141,46 @@ draw the list. This is little headroom for the next slice; WEB-09c owns the reas
 - **The pane pages by id and sorts within a page.** A name order across pages would need an index the cache does not have (D-10a-2).
 - **The picker walks the cached tasks** a window (100) at a time until a page of matches; every keystroke reads again (deferred). Not
   profiled here (WEB-09c owns measurements; WEB-10a's F-1 cost of `pageByKey` applies).
-- **A save whose answer was lost, then edited and retried,** is recognised by its local id as the first save (`duplicate`): the edit is not
-  applied by that retry (WEB-10a's model, unchanged).
+- **A save whose outcome is not known** (a store that failed or threw after the write may have committed, or a service that ended during
+  it: `SaveOutcome.uncertain`) binds the dialog's local id to that exact request (revision 1, R1). Every later Save sends it again,
+  unchanged (key, body and captured defaults), until it is saved; only then is what the person typed since saved, by a new Save under
+  new ids, and the dialog says so ("Your earlier save created/renamed …"). For a new list that newer name is a list of its own: the
+  earlier request is resolved as it was sent, never edited into another body under its key. A definite refusal binds nothing. A
+  rename of a list whose create is still queued edits that create in place, so it needs no binding.
+- **A saved picker add retires its id** (revision 1, R2): the same task chosen again later in the same session (after a remove made
+  elsewhere) is a new add. An add whose outcome is not known keeps its id and is retried under it.
 - **A capacity-refused add holds the list's later changes on this device** until it is retried or discarded in Sync (the data layer's queue
   order); the notice says so.
-- **Native certificate interleaving is not possible:** no real engine lets a spec place a commit between two stages of one read, so the
-  certificate is proved over the production composition and the IndexedDB double (`lists-reads.test.tsx`, MU-2535) and exercised natively
-  only end to end.
+- **Native ordering is by transaction creation** (revision 1, R5; replaces the earlier claim that no real engine can place a commit
+  between two stages of one read). IndexedDB starts a transaction only after every overlapping one created before it, and every plan's
+  scope includes `sync_state`, so E-LS8 (a) stops the fixture leader at its quota read (`holdQuota`; nothing reaches the account database
+  between that read and the commit), holds the queue store with a transaction of the spec's own, opens the detail (its work stage waits),
+  and lets the leader create its commit behind that stage: the detail's list stage runs before the commit and its task stages after it.
+  E-LS8 (b) creates a hold right behind the leader's commit of a denial, so the screen's re-read waits while Remove is admitted from the
+  earlier read; the writing transaction then refuses it. A wrapper of `IDBDatabase.prototype.transaction`, installed before the page opens
+  its database, only RECORDS creation. Both have healthy controls and real-engine mutants (N-LS1 MU-2547, N-LS2 MU-2548); the unit proofs
+  (`lists-reads.test.tsx` MU-2535, the outbox tests MU-2506/MU-2536) remain.
+- **A Lists address names a list only** (revision 1, R3): a cached resource of another kind at that id composes no list ("This list isn't
+  on this device"), so no list action can name it; a cached list whose value does not parse is still a list.
 
 ## Evidence (fixture unless stated)
 
 - Unit and component (jsdom, production data controller over the IndexedDB double): `lists-model`, `list-view`, `lists-register`,
-  `lists-screens`, `lists-dialogs`, `lists-reads`, `lists-routes`, `lists-recovery` (`tests/features/tasks/`).
-- Native (Chromium, Firefox, WebKit; real IndexedDB, fixture leader, stubbed network): `tests/e2e/fixture.lists.spec.ts` E-LS1–E-LS9 and
-  E-LS7b. Viewports and themes are browser emulation, not devices.
+  `lists-screens`, `lists-dialogs`, `lists-reads`, `lists-routes`, `lists-recovery`, `lists-attempts` (`tests/features/tasks/`).
+- Native (Chromium, Firefox, WebKit; real IndexedDB, fixture leader, stubbed network): `tests/e2e/fixture.lists.spec.ts` E-LS1–E-LS10 and
+  E-LS7b, 32 cases per engine (revision 1: E-LS8 (a)/(b) real-engine ordering with their controls, E-LS10 the detail's heading and
+  focus). Viewports and themes are browser emulation, not devices; no screen-reader pass is claimed.
 - Focused real backend (released `v0.29.0-rc.1`, disposable SQLite, delaying proxy, the fixture leader; the `lists` stack):
   `tests/integration/integration.lists.spec.ts` I-LS1–I-LS8. Not integration acceptance.
-- Mutants: `scripts/mutation/catalogue-web10b.mjs` (34 unit, 3 real-engine), each with the test written for it.
+- Mutants: `scripts/mutation/catalogue-web10b.mjs` (44 unit, 5 real-engine), each with the test written for it.
+
+## Headings (revision 1, R4)
+
+Every state of a list's page has one level-one heading: the list's name once it is read, otherwise the destination's ("Lists", nothing of
+the list) while it loads, after a failed first read, when this device does not hold it, and while the lazy screen loads. Loading, failed,
+absent and read states draw it as the same element, so the focus an in-app navigation gives it stays when the name arrives (E-LS10).
+While loading, the frame carries `data-list-loading`, never `data-list-detail` (which names a read list, or `absent`/`error`): a reader of
+the list's id never takes a state for it (a pool run of revision 1 caught exactly that, see `.agtx/execute.md`).
 
 ## Not claimed
 

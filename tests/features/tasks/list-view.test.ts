@@ -228,6 +228,25 @@ describe("L3: the row", () => {
   test("neither cached nor created here: nothing", () => {
     expect(composeList(LIST, null, out([item(t(1), true)]))).toBeNull();
   });
+
+  test("R3: a cached resource of another kind at the id is no list, whatever names it; a malformed list still is one", () => {
+    for (const kind of ["task", "person", "field"] as const)
+      expect(
+        composeList(
+          LIST,
+          cached([], { kind, value: { task_ids: [] } }),
+          out([item(t(1), true)]),
+        ),
+        kind,
+      ).toBeNull();
+    const malformed = composeList(
+      LIST,
+      cached([], { value: { task_ids: "x" } as never }),
+      out([]),
+    );
+    expect(malformed?.row.kind).toBe("list");
+    expect(malformed?.members).toBeNull();
+  });
 });
 
 describe("L3: capacity counts pending adds, not refused ones", () => {

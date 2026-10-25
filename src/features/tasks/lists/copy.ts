@@ -76,6 +76,9 @@ export const CREATE = {
   saved: "List created. Not sent yet.",
   reviewNeeded:
     "List saved on this device. Check who it's shared with in Sync before it's sent.",
+  /** An earlier save whose outcome was not known is now saved as it was sent; what was typed since stays (R1). */
+  earlier: (name: string) =>
+    `Your earlier save created “${name}”. What you typed since is still here: saving it creates another list.`,
 } as const;
 
 export const RENAME = {
@@ -90,6 +93,8 @@ export const RENAME = {
   waitSync: "You can rename this list once it has synced.",
   unchanged: "Change the name to save it.",
   gone: "This list isn't on this device any more. What you typed is kept here.",
+  earlier: (name: string) =>
+    `Your earlier save renamed this list “${name}”. What you typed since is still here: save again to use it.`,
 } as const;
 
 export const NAME_PROBLEM = {

@@ -58,8 +58,8 @@ function TasksLayout() {
 
 /**
  * A destination's layout behind the cache gate. The list's heading is the route's, outside the cache gate and the lazy screens (revision 2),
- * so it exists at once and in every gate state; a child page (a task, a list) has its own heading, and while the gate hides it the gate
- * shows the list's.
+ * so it exists at once and in every gate state; a child page (a task, a list) has its own heading, and while the gate hides it, or its lazy
+ * screen is still loading (WEB-10b R4), the list's is shown instead.
  */
 function Gated({
   title,
@@ -76,7 +76,7 @@ function Gated({
     <>
       {child ? null : heading}
       <CacheGate heading={child ? heading : null}>
-        <Suspense fallback={null}>{children}</Suspense>
+        <Suspense fallback={child ? heading : null}>{children}</Suspense>
       </CacheGate>
     </>
   );

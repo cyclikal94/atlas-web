@@ -4,10 +4,12 @@
 //
 // Departures from the plan's table, recorded in .agtx/execute.md and docs/lists.md: MU-2523 is re-expressed (an `archive` of a task now
 // delegates to `archiveResource`, so "the task builder for a list row" is an equivalent mutant; the defect that remains possible is a
-// rebuild that refuses a list row); N-LS1 (the certificate) is the UNIT mutant MU-2535, caught by a deterministic interleaving over the
-// production composition, because no real engine lets a spec place a commit between two stages of one read; N-LS2 (list_item without
-// `requiresEdit`) is caught by the unit tests of the production outbox (MU-2506, and MU-2536 for `edit_list`): a real engine shows a denial
-// committed BEFORE the act, which the screen's own check already refuses. The real-engine mutants are MU-2534 (N-LS3), MU-2537 and MU-2538.
+// rebuild that refuses a list row). N-LS1 (the certificate) and N-LS2 (list_item without `requiresEdit`) are unit mutants (MU-2535; MU-2506
+// and MU-2536 for `edit_list`) AND, since revision 1 (review R5), real-engine mutants (MU-2547, MU-2548) caught by E-LS8 (a)/(b), which
+// order a real commit of the fixture leader between two stages of one read, and behind a stale admission, by transaction creation order.
+// The real-engine mutants are MU-2534 (N-LS3), MU-2537, MU-2538, MU-2547 (N-LS1) and MU-2548 (N-LS2). Revision 1 re-expressed MU-2518,
+// MU-2526 and MU-2534 against the save settlement that replaced their anchors (R1), and added MU-2539..MU-2546, MU-2549 and MU-2550
+// for R1-R4.
 import { sub } from "./data-catalogue.mjs";
 
 const LISTS = "src/features/tasks/model/lists.ts";
@@ -25,6 +27,9 @@ const REGISTER_TEST = T("lists-register.test.ts");
 const SCREENS_TEST = T("lists-screens.test.tsx");
 const DIALOGS_TEST = T("lists-dialogs.test.tsx");
 const READS_TEST = T("lists-reads.test.tsx");
+const ATTEMPTS_TEST = T("lists-attempts.test.tsx");
+const ROUTES_TEST = T("lists-routes.test.tsx");
+const ACTIONS = "src/features/tasks/actions.ts";
 const LIST_ITEM_TARGETS =
   "    targets: [primary(input.listId)],\n    ...(input.after ? { dependsOnExtra: [input.after] } : {}),\n";
 const EDIT_LIST_TARGETS =
@@ -52,8 +57,8 @@ const pickerOffersMembers = (t) =>
 const createNavigatesUngated = (t) =>
   sub(
     t,
-    '        note: ok ? RENAME.newer : note,\n      });\n      if (ok && settled === "kept")\n        renew<CreateInput>(',
-    '        note: ok ? RENAME.newer : note,\n      });\n      if (ok) void navigate({ to: "/tasks/lists/$listId", params: { listId } });\n      if (ok && settled === "kept")\n        renew<CreateInput>(',
+    "      settleSave<CreateInput>(\n        key,\n        ticket,",
+    '      if (outcome.ok) void navigate({ to: "/tasks/lists/$listId", params: { listId } });\n      settleSave<CreateInput>(\n        key,\n        ticket,',
   );
 
 export const UNIT_WEB10B = [
@@ -285,11 +290,12 @@ export const UNIT_WEB10B = [
     file: DIALOGS,
     tests: [DIALOGS_TEST],
     expect: /retried with the SAME list id and local id/,
+    // Re-expressed in revision 1: a retry now sends the bound request, so the mutant also rebuilds every save (new ids each time).
     patch: (t) =>
       sub(
         t,
-        "        createList({ listId, name, defaults: defaults.record, localId }),",
-        "        createList({ listId: env.newId(), name, defaults: defaults.record, localId: env.newId() }),",
+        "    const sent: Unsettled = unsettled ?? {\n      name,\n      request: createList({ listId, name, defaults: defaults.record, localId }),",
+        "    const sent: Unsettled = {\n      name,\n      request: createList({ listId: env.newId(), name, defaults: defaults.record, localId: env.newId() }),",
       ),
   },
   {
@@ -390,13 +396,14 @@ export const UNIT_WEB10B = [
     id: "MU-2526",
     title: "WEB-10b L7: a rename's settlement consumes input typed after Save",
     file: DIALOGS,
-    tests: [DIALOGS_TEST],
-    expect: /ticket acknowledgement/,
+    tests: [DIALOGS_TEST, ATTEMPTS_TEST],
+    expect: /ticket acknowledgement|edits while the save is pending/,
+    // Re-expressed in revision 1 against `settleSave`, which both dialogs now settle through.
     patch: (t) =>
       sub(
         t,
-        '      const settled = completeKept(ticket, ok, {\n        note: ok ? RENAME.newer : note,\n      });\n      if (ok && settled === "kept")\n        renew<RenameInput>(',
-        '      const settled = completeKept(\n        { ...ticket, revision: keptEntry<RenameInput>(key)?.revision ?? ticket.revision },\n        ok,\n        { note: ok ? RENAME.newer : note },\n      );\n      if (ok && settled === "kept")\n        renew<RenameInput>(',
+        "    const settled = completeKept(ticket, current, {",
+        "    const settled = completeKept({ ...ticket, revision: keptEntry<T>(key)?.revision ?? ticket.revision }, current, {",
       ),
   },
   {
@@ -503,6 +510,145 @@ export const UNIT_WEB10B = [
         '    targets: [{ ...primary(input.listId), requiresEdit: false }],\n    ...(input.localId === undefined ? {} : { localId: input.localId }),\n    build: (bases: Bases) => ({\n      command: {\n        command: {\n          kind: "edit_list",',
       ),
   },
+  {
+    id: "MU-2539",
+    title:
+      "WEB-10b R1: a save that may have been stored does not bind the session to its request (a retry sends what is typed now)",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect: /edited retry|edits while the save is pending/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (value) => ({ ...value, unsettled: value.unsettled ?? sent }),",
+        "      (value) => value,",
+      ),
+  },
+  {
+    id: "MU-2540",
+    title:
+      "WEB-10b R1: an earlier request's success consumes what was typed since (the dialog closes on the newer input)",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect: /edited retry|edits while the save is pending/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const settled = completeKept(ticket, current, {",
+        "    const settled = completeKept(ticket, true, {",
+      ),
+  },
+  {
+    id: "MU-2541",
+    title:
+      "WEB-10b R1: a definite refusal binds the session too (the newer name is never sent under the unused ids)",
+    file: DIALOGS,
+    tests: [ATTEMPTS_TEST],
+    expect: /a definite refusal binds nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (settled === "kept" && outcome.uncertain === true)',
+        '  if (settled === "kept")',
+      ),
+  },
+  {
+    id: "MU-2542",
+    title: "WEB-10b R1: a save that threw is reported as certainly not stored",
+    file: ACTIONS,
+    tests: [ATTEMPTS_TEST],
+    expect: /lost-after-commit|lost-before-commit/,
+    patch: (t) =>
+      sub(
+        t,
+        "          uncertain: !(\n            error instanceof OutboxRequestError || error instanceof TypeError\n          ),",
+        "          uncertain: false,",
+      ),
+  },
+  {
+    id: "MU-2543",
+    title:
+      "WEB-10b R1: the outbox's `storage` refusal (a store that failed after the write) is reported as certainly not stored",
+    file: ACTIONS,
+    tests: [ATTEMPTS_TEST],
+    expect: /storage-after-commit/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { ok: false, message, uncertain: UNCERTAIN.has(outcome.reason) };",
+        "      return { ok: false, message, uncertain: false };",
+      ),
+  },
+  {
+    id: "MU-2544",
+    title:
+      "WEB-10b R2: a saved add keeps its id in the picker's session (a later add of the same task is deduplicated against it)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect: /R2: .*(chosen again|retires it too)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        attempts: without(value.attempts, queued),",
+        "        attempts: value.attempts,",
+      ),
+  },
+  {
+    id: "MU-2545",
+    title:
+      "WEB-10b R3: a cached resource of another kind at a list's id is composed as a list (its Archive archives a task)",
+    file: VIEW,
+    tests: [VIEW_TEST, SCREENS_TEST],
+    expect: /R3: a cached/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (cached !== null && cached.kind !== "list") return null;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2546",
+    title:
+      "WEB-10b R4: the detail's heading is drawn only once the list is read (none while loading, failed or absent)",
+    file: DETAIL,
+    tests: [ROUTES_TEST, SCREENS_TEST],
+    expect: /R4: one h1|R3: a cached task's id/,
+    patch: (t) =>
+      sub(
+        t,
+        "        <PageHeading>{heading}</PageHeading>",
+        "        {heading === LISTS_TITLE ? null : <PageHeading>{heading}</PageHeading>}",
+      ),
+  },
+  {
+    id: "MU-2549",
+    title:
+      "WEB-10b R4: the loading detail's heading is another element than the read list's (a focus given to it is lost)",
+    file: DETAIL,
+    tests: [ROUTES_TEST],
+    expect: /R4: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        '      <Frame state="loading">',
+        '      <Frame key="loading" state="loading">',
+      ),
+  },
+  {
+    id: "MU-2550",
+    title:
+      'WEB-10b R4: the loading detail names itself `data-list-detail="loading"` (a reader of the list\'s id takes "loading")',
+    file: DETAIL,
+    tests: [ROUTES_TEST],
+    expect: /R4: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        '      data-list-detail={state === "loading" ? undefined : state}',
+        "      data-list-detail={state}",
+      ),
+  },
 ];
 
 const SPEC = "tests/e2e/fixture.lists.spec.ts";
@@ -535,5 +681,35 @@ export const ENGINE_WEB10B = [
     grep: "E-LS1: .* counts, a withheld row",
     expect: /E-LS1:/,
     patch: pickerOffersMembers,
+  },
+  {
+    id: "MU-2547",
+    title:
+      "WEB-10b N-LS1: (REAL ENGINE) the Lists' reads are not certified: a commit between the detail's stages is shown mixed",
+    file: READS,
+    spec: SPEC,
+    grep: "E-LS8 \\(a\\), \\(b\\): .* \\(a\\) a commit placed",
+    expect: /E-LS8 \(a\), \(b\):/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (signal) => readCoherently(data, () => run(data, signal), { signal }),",
+        '    (signal) =>\n      run(data, signal).then((stage) =>\n        stage.ok ? { kind: "complete" as const, value: stage.value, basis: null as never } : { kind: stage.why },\n      ),',
+      ),
+  },
+  {
+    id: "MU-2548",
+    title:
+      "WEB-10b N-LS2: (REAL ENGINE) list_item drops requiresEdit: a denial committed after the screen's last read does not refuse a remove",
+    file: LISTS,
+    spec: SPEC,
+    grep: "E-LS8 \\(a\\), \\(b\\): .* \\(b\\) a denial committed",
+    expect: /E-LS8 \(a\), \(b\):/,
+    patch: (t) =>
+      sub(
+        t,
+        LIST_ITEM_TARGETS,
+        "    targets: [{ ...primary(input.listId), requiresEdit: false }],\n    ...(input.after ? { dependsOnExtra: [input.after] } : {}),\n",
+      ),
   },
 ];

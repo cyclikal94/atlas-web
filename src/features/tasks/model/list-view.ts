@@ -72,6 +72,11 @@ export function listItemOf(
   return { taskId: command.task_id, included: command.included };
 }
 
+/**
+ * Null when this device holds no list `listId`: neither a cached row nor an outstanding create, or a cached resource of ANOTHER kind (a
+ * task's id in a Lists address, R3: nothing of it is composed, so no list action can name it). A cached list whose value does not parse
+ * is still a list (`members: null`).
+ */
 export function composeList(
   listId: string,
   cached: CacheRow | null,
@@ -80,6 +85,7 @@ export function composeList(
     attention: readonly DraftRow[];
   },
 ): ComposedList | null {
+  if (cached !== null && cached.kind !== "list") return null;
   const naming = outstanding.drafts
     .filter((d) => d.index_targets.includes(listId))
     .sort((a, b) => a.created_seq - b.created_seq);

@@ -11,18 +11,12 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import {
-  completeKept,
-  disownKept,
-  editKept,
-  keptEntry,
-  keptKey,
-  useKeptInput,
-} from "../kept-input";
+import { completeKept, disownKept, keptKey, useKeptInput } from "../kept-input";
 import { type ComposedList, roomFor } from "../model/list-view";
 import { listItem } from "../model/lists";
 import { useListActions } from "./actions";
 import { PICKER } from "./copy";
+import { editSession } from "./dialogs";
 import { ReadNotice } from "./ReadNotice";
 import { usePickerPage } from "./reads";
 
@@ -34,11 +28,15 @@ interface PickerInput {
   selected: string[];
   /**
    * The local id of each selected task's add, chosen when it is selected: a retry after an uncertain save reuses it (`duplicate`, never a
-   * second add). With the outstanding create of a task not sent yet, the add waits for it (D-10b-11).
+   * second add). With the outstanding create of a task not sent yet, the add waits for it (D-10b-11). A saved add retires its id (R2):
+   * choosing that task again later is a new add, never deduplicated against the saved one.
    */
   attempts: Record<string, string>;
   after: Record<string, string>;
 }
+
+const without = (record: Record<string, string>, gone: ReadonlySet<string>) =>
+  Object.fromEntries(Object.entries(record).filter(([id]) => !gone.has(id)));
 
 const empty = (): PickerInput => ({
   query: "",
@@ -46,19 +44,6 @@ const empty = (): PickerInput => ({
   attempts: {},
   after: {},
 });
-
-/** Applies `change` to the session `session` of `key`, wherever its editor is (mounted or not), and to the mounted editor's view. */
-function editSession(
-  key: string,
-  session: number,
-  change: (value: PickerInput) => PickerInput,
-  edit: (change: (value: PickerInput) => PickerInput) => void,
-): void {
-  const entry = keptEntry<PickerInput>(key);
-  if (entry !== null && entry.session === session)
-    editKept(key, session, change(entry.value));
-  edit(change);
-}
 
 /**
  * "Add task to list" (plan §4.6, D-10b-10..12): the tasks this device can offer (its cached tasks and the ones it created and has not
@@ -174,10 +159,12 @@ export function TaskPicker({
       }
     } finally {
       const all = queued.size === chosen.length;
-      // The tasks saved leave the selection (newer edits stay): never added twice, never lost.
+      // The tasks saved leave the selection and retire their adds' ids (newer edits stay): never added twice, never lost.
       const leave = (value: PickerInput): PickerInput => ({
         ...value,
         selected: value.selected.filter((id) => !queued.has(id)),
+        attempts: without(value.attempts, queued),
+        after: without(value.after, queued),
       });
       if (all) {
         announcer.announce(PICKER.added(queued.size, now.row.label), "polite");

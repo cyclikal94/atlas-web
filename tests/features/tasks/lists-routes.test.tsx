@@ -1,5 +1,7 @@
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { afterEach, describe, expect, test } from "vitest";
+import { StoreFailure } from "../../../src/data/store/port";
+import * as copy from "../../../src/features/tasks/copy";
 import { DETAIL } from "../../../src/features/tasks/lists/copy";
 import { installMatchMedia } from "../../helpers/match-media";
 import { forgetLists, listId, listRow } from "../../support/tasks/lists";
@@ -81,6 +83,86 @@ describe("D-10b-1: the Lists routes", () => {
       () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
     );
     expect(h1()).toEqual(["Groceries"]);
+  });
+
+  test("R4: one h1 in the detail's absent, loading and failed states; the same element once the list is read", async () => {
+    const absent = await mountTasks({
+      path: `/tasks/lists/${listId()}`,
+      rows: [],
+    });
+    await absent.until(
+      () => document.querySelector('[data-list-detail="absent"]') !== null,
+    );
+    expect(h1()).toEqual(["Lists"]);
+    absent.unmount();
+    forgetLists();
+
+    const id = listId();
+    const t = await mountTasks({
+      path: "/tasks/lists",
+      rows: [listRow(id, "Groceries", [])],
+    });
+    await t.until(() => document.querySelector("[data-lists-pane]") !== null);
+    // The detail's first read is held (loading), then failed until Try again (error), then let through.
+    let mode: "hold" | "fail" | "pass" = "hold";
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store = t.data.service()?.store as {
+      run: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = store.run.bind(store);
+    store.run = async (...args: unknown[]) => {
+      const [plan, input] = args as [
+        { name: string },
+        { ids?: string[] } | undefined,
+      ];
+      if (
+        plan.name === "data.readResourcesById" &&
+        (input?.ids ?? []).includes(id)
+      ) {
+        if (mode === "hold") await gate;
+        if (mode === "fail") throw new StoreFailure("error");
+      }
+      return original(...args);
+    };
+    await act(async () => {
+      await t.router.navigate({ to: `/tasks/lists/${id}` } as never);
+    });
+    await t.until(() => document.querySelector("[data-list-loading]") !== null);
+    expect(h1()).toEqual(["Lists"]);
+    expect(
+      document.querySelector("[data-list-detail]"),
+      "no list id while loading",
+    ).toBeNull();
+    const loading = document.querySelector("h1[data-page-heading]");
+    mode = "fail";
+    await act(async () => {
+      release();
+    });
+    await t.until(
+      () => document.querySelector('[data-list-detail="error"]') !== null,
+    );
+    expect(h1()).toEqual(["Lists"]);
+    expect(
+      document.querySelector("h1[data-page-heading]"),
+      "the same heading element",
+    ).toBe(loading);
+    mode = "pass";
+    fireEvent.click(
+      screen
+        .getAllByRole("button", { name: copy.TRY_AGAIN })
+        .at(-1) as HTMLElement,
+    );
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    expect(h1()).toEqual(["Groceries"]);
+    expect(
+      document.querySelector("h1[data-page-heading]"),
+      "still the same element: a focus given to it stays",
+    ).toBe(loading);
   });
 
   test("the document title and destination stay Tasks", async () => {
