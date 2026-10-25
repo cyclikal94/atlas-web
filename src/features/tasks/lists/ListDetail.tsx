@@ -79,7 +79,21 @@ export function ListDetail({ listId }: { listId: string }) {
       </p>
     );
   }
-  if (list === null) return <Absent />;
+  // A list gone while its rename is open keeps the dialog and what was typed in it; Save says why it cannot (§4.5).
+  if (list === null)
+    return (
+      <>
+        <Absent />
+        {dialog === "rename" ? (
+          <RenameListDialog
+            listId={listId}
+            list={null}
+            onClose={() => setDialog(null)}
+            returnFocusRef={opener}
+          />
+        ) : null}
+      </>
+    );
 
   const { row } = list;
   const editable = row.can_edit && env.writable;

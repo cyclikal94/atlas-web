@@ -248,3 +248,64 @@ export function projectCreateList(
     kind_date: null,
   };
 }
+
+// ---- form recovery readiness (Q4; WEB-14a supplies the app-update event that captures them) ---------------------------------------
+/**
+ * The Lists' recoverable forms, PURE, as WEB-10a's (`recovery.ts`): the raw input as canonical JSON keyed by a form context, no secrets.
+ * Restoring NEVER submits: the values are shown again and saving stays the person's act. A value that does not parse restores nothing.
+ * Ids and attempt keys are not recovered: a restored form is a new save.
+ */
+export const newListFormContext = (formId: string) => `list-form:new:${formId}`;
+export const listFormContext = (listId: string) => `list-form:${listId}`;
+export const listPickerContext = (listId: string) => `list-picker:${listId}`;
+
+export const listFormRecoveryValues = (
+  name: string,
+): Record<string, string> => ({
+  list: JSON.stringify({ name }),
+});
+
+export function restoreListForm(
+  values: Readonly<Record<string, string>>,
+): { name: string } | null {
+  try {
+    const raw = JSON.parse(values.list ?? "null") as unknown;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+      return null;
+    const keys = Object.keys(raw);
+    const name = (raw as { name?: unknown }).name;
+    return keys.length === 1 && typeof name === "string" ? { name } : null;
+  } catch {
+    return null;
+  }
+}
+
+export const pickerRecoveryValues = (input: {
+  query: string;
+  selected: readonly string[];
+}): Record<string, string> => ({
+  picker: JSON.stringify({ query: input.query, selected: [...input.selected] }),
+});
+
+export function restorePicker(
+  values: Readonly<Record<string, string>>,
+): { query: string; selected: string[] } | null {
+  try {
+    const raw = JSON.parse(values.picker ?? "null") as unknown;
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+      return null;
+    const { query, selected } = raw as { query?: unknown; selected?: unknown };
+    if (
+      Object.keys(raw).length !== 2 ||
+      typeof query !== "string" ||
+      !Array.isArray(selected) ||
+      selected.length > LIST_CAPACITY ||
+      !selected.every((id) => isUuid(id)) ||
+      new Set(selected).size !== selected.length
+    )
+      return null;
+    return { query, selected: [...selected] };
+  } catch {
+    return null;
+  }
+}
