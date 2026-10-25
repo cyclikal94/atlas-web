@@ -168,4 +168,17 @@ export const PICKER = {
   again: "Add as new adds",
   againNote:
     "This adds the tasks selected now, as new adds. It doesn't cancel or undo an earlier add if that was made, and it adds nothing you haven't selected.",
+  /**
+   * Revision 4 (D1 / DA-N1): an add is admitted on what this device holds of its task when it is made. Nothing was written in any of
+   * these; the selection stays.
+   */
+  gone: "A task you chose isn't on this device any more (its unsent task may have been discarded or refused in Sync), so it wasn't added.",
+  unread:
+    "Couldn't read a task you chose on this device, so it wasn't added. Try again.",
+  taskChanged:
+    "A task you chose changed on this device while it was being added (for example, it was sent or replaced in Sync), so it wasn't added. Add selected again to add it as it is now.",
+  missing: (title: string) =>
+    `“${title}” isn't on this device any more, so it can't be added.`,
+  deselect: (title: string) => `Deselect “${title}”`,
+  deselectShort: "Deselect",
 } as const;

@@ -145,7 +145,11 @@ export {
   type RetainedAccount,
   type RetainedListing,
 } from "./store/retained-accounts";
-export { type DraftEvidence, readSaveEvidence } from "./ui/draft-read";
+export {
+  type DraftEvidence,
+  readResourceViewNow,
+  readSaveEvidence,
+} from "./ui/draft-read";
 export {
   createDataEnv,
   type DataActions,

@@ -1,5 +1,7 @@
 import type { EnqueueRequest } from "../model/outbox";
+import type { ResourceId } from "../model/types";
 import { type DraftEvidence, readDraftEvidence } from "../plans/draft-header";
+import { type ResourceView, readResourceView } from "../plans/pending-reads";
 import type { DataEnv } from "./env";
 import type { Stage } from "./scan";
 
@@ -25,6 +27,32 @@ export async function readSaveEvidence(
     });
     if (env.service() !== service) return { ok: false, why: "closed" };
     return { ok: true, value: evidence };
+  } catch {
+    return { ok: false, why: env.service() === service ? "failed" : "closed" };
+  }
+}
+
+/**
+ * One resource as ONE read transaction of this page's database sees it NOW (`readResourceView`), with the incarnation it was read in
+ * (WEB-10b revision 4, D1 / DA-N1): what a save that depends on the resource is admitted on. The view's `observation` goes with that save
+ * (`EnqueueRequest.observed`), so the transaction that writes it refuses (`changed`) when anything it covers moved after this read. A read
+ * that failed, or whose service changed under it, is no answer.
+ */
+export async function readResourceViewNow(
+  env: Pick<DataEnv, "service">,
+  id: ResourceId,
+  kinds: { create?: string } = {},
+): Promise<Stage<{ view: ResourceView; scope: string }>> {
+  const service = env.service();
+  if (service === null) return { ok: false, why: "closed" };
+  try {
+    const view = await service.store.run(readResourceView, {
+      incarnationId: service.incarnationId,
+      id,
+      ...(kinds.create === undefined ? {} : { createKind: kinds.create }),
+    });
+    if (env.service() !== service) return { ok: false, why: "closed" };
+    return { ok: true, value: { view, scope: service.incarnationId } };
   } catch {
     return { ok: false, why: env.service() === service ? "failed" : "closed" };
   }

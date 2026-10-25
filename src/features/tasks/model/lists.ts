@@ -8,6 +8,7 @@ import {
   isUuid,
   type JsonObject,
   type LocalId,
+  type Observation,
 } from "../../../data";
 import { commandOf, TASK_ENDPOINT } from "./commands";
 
@@ -193,6 +194,11 @@ export interface ListItemInput {
   /** The outstanding `create_task` of a task this device has not sent yet (D-10b-11): this change is sent after it, or not at all. */
   after?: LocalId | null;
   localId?: string;
+  /**
+   * What the read that chose `after` saw of the TASK (`readResourceView`'s observation; revision 4, D1 / DA-N1): the add is written only
+   * if its transaction reads the same facts of the task, so a create replaced, discarded or published after that read is never named.
+   */
+  observed?: Observation;
 }
 
 /**
@@ -206,6 +212,7 @@ export function listItem(input: ListItemInput): EnqueueRequest {
     targets: [primary(input.listId)],
     ...(input.after ? { dependsOnExtra: [input.after] } : {}),
     ...(input.localId === undefined ? {} : { localId: input.localId }),
+    ...(input.observed === undefined ? {} : { observed: input.observed }),
     build: (bases: Bases) => ({
       command: {
         command: {

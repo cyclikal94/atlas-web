@@ -602,7 +602,9 @@ function rebuildEditList(
 
 /**
  * A membership change rebuilt on the reviewed list: the same task and direction, on the reviewed version, with write access. No
- * `dependsOnExtra`: a task the original waited for was sent, or rejected with it, before the original could conflict.
+ * `dependsOnExtra`: the original was sent, so every create it waited for had been sent or refused before it could conflict; and the
+ * supersession keeps the original's own dependency edges in any case (`decideSupersede` joins them to the replacement's), so a create
+ * still standing is waited for (revision 4).
  */
 function rebuildListItem(
   draft: DraftWithCommand,

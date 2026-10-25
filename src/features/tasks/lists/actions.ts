@@ -1,13 +1,18 @@
 import { useMemo } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import {
+  type CacheRow,
+  type DraftWithCommand,
   type EnqueueRequest,
+  readResourceViewNow,
   readSaveEvidence,
   useDataEnv,
 } from "../../../data";
 import { type SaveOutcome, useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
+import { listItem } from "../model/lists";
+import { projectCreateTask } from "../register";
 import { RENAME } from "./copy";
 
 /**
@@ -35,6 +40,53 @@ export interface ListActions {
    * database is not the one it was issued to: no evidence either way).
    */
   reconcile(save: Issued): Promise<Evidence>;
+  /**
+   * The add of a task to a list, admitted on what this device holds of the TASK now (revision 4, D1 / DA-N1), never on what a selection
+   * remembered: one read (`readResourceViewNow`) finds the task cached (the add needs no create) or the create that will make it (the add
+   * waits for THAT create), and the request states what the read saw (`observed`), so the transaction that writes it refuses (`changed`)
+   * if the task's create was replaced, discarded, sent or published after the read. `gone`: nothing on this device makes the task now;
+   * `unread`: the read failed or its database changed. Neither wrote anything. Nothing is enqueued here.
+   */
+  prepareAdd(input: {
+    listId: string;
+    taskId: string;
+    localId: string;
+  }): Promise<PreparedAdd>;
+}
+
+export type PreparedAdd =
+  | { kind: "ready"; request: EnqueueRequest; scope: string }
+  | { kind: "gone" | "unread" };
+
+/** The statuses of a task's create that still make the task: waiting, being sent, waiting for the person (`blocked`), or accepted. */
+const MAKING: ReadonlySet<string> = new Set([
+  "queued",
+  "in_flight",
+  "blocked",
+  "acknowledged",
+]);
+
+/**
+ * What an add of `taskId` waits for, from one read of the task (revision 4): the task cached (as a task) needs nothing; otherwise its
+ * newest create, if that create still makes it and projects it as a task, is waited for; anything else (no row and no create, a create
+ * refused, discarded in conflict or replaced, another kind at the id) is `gone`. Absence is never read as "already sent".
+ */
+export function admitTask(
+  view: { merged: CacheRow | null; create: DraftWithCommand | null },
+  taskId: string,
+): { kind: "ready"; after: string | null } | { kind: "gone" } {
+  if (view.merged !== null)
+    return view.merged.kind === "task"
+      ? { kind: "ready", after: null }
+      : { kind: "gone" };
+  const create = view.create;
+  if (
+    create !== null &&
+    MAKING.has(create.status) &&
+    projectCreateTask(create, taskId)?.kind === "task"
+  )
+    return { kind: "ready", after: create.local_id };
+  return { kind: "gone" };
 }
 
 /** An issued save whose answer was lost: its local id, its exact request as sent, and the database it was issued to. */
@@ -88,6 +140,26 @@ export function useListActions(): ListActions {
         const read = await readSaveEvidence(data, save);
         if (!read.ok || read.value === "absent") return "unknown";
         return read.value === "stored" ? "stored" : "changed";
+      },
+      async prepareAdd({ listId, taskId, localId }) {
+        const read = await readResourceViewNow(data, taskId, {
+          create: "create_task",
+        });
+        if (!read.ok) return { kind: "unread" };
+        const admitted = admitTask(read.value.view, taskId);
+        if (admitted.kind === "gone") return admitted;
+        return {
+          kind: "ready",
+          scope: read.value.scope,
+          request: listItem({
+            listId,
+            taskId,
+            included: true,
+            after: admitted.after,
+            localId,
+            observed: read.value.view.observation,
+          }),
+        };
       },
     };
   }, [env.writable, data, announcer, actions]);

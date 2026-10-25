@@ -16,6 +16,9 @@
 // MU-2516..MU-2518, MU-2526, MU-2539, MU-2557..MU-2559 and MU-2562 on the read-only look-up and the attempts kept apart from the input (same
 // intents, MU-2518 and MU-2557..MU-2559/MU-2562 re-expressed where the retry they named is now a look-up), and adds MU-2563..MU-2575 for
 // the D1 guards and the real-engine MU-2576 (an ordinary Save sends a create's attempt again) and MU-2577 (MU-2563's patch) over E-LS12.
+// Revision 4 (review 4, D1 / DA-N1: an add waits for the task's CURRENT create) re-anchors MU-2515 (on `ListActions.prepareAdd`) and
+// MU-2543 (the refusal now carries its reason), and adds MU-2578..MU-2583 for the admission read and its observation, and the
+// real-engine MU-2584 (MU-2578's patch) and MU-2585 (MU-2579's) over E-LS13.
 import { sub } from "./data-catalogue.mjs";
 
 const LISTS = "src/features/tasks/model/lists.ts";
@@ -40,6 +43,7 @@ const READS_TEST = T("lists-reads.test.tsx");
 const ATTEMPTS_TEST = T("lists-attempts.test.tsx");
 const ROUTES_TEST = T("lists-routes.test.tsx");
 const SETTLEMENT_TEST = T("kept-settlement.test.tsx");
+const ADMISSION_TEST = T("lists-admission.test.tsx");
 const ACTIONS = "src/features/tasks/actions.ts";
 const LIST_ITEM_TARGETS =
   "    targets: [primary(input.listId)],\n    ...(input.after ? { dependsOnExtra: [input.after] } : {}),\n";
@@ -88,6 +92,17 @@ const createNavigatesUngated = (t) =>
     t,
     "      settleSave<CreateInput>(\n        ticket,",
     '      if (outcome.ok) void navigate({ to: "/tasks/lists/$listId", params: { listId } });\n      settleSave<CreateInput>(\n        ticket,',
+  );
+
+/** Revision 4: the add states nothing of what its read saw of the task (MU-2578's patch). */
+const addUnobserved = (t) =>
+  sub(t, "            observed: read.value.view.observation,\n", "");
+/** Revision 4: a task nothing on this device makes is taken as already sent (MU-2579's patch). */
+const goneTakenAsSent = (t) =>
+  sub(
+    t,
+    '  return { kind: "gone" };\n}',
+    '  return { kind: "ready", after: null };\n}',
   );
 
 export const UNIT_WEB10B = [
@@ -274,11 +289,12 @@ export const UNIT_WEB10B = [
     id: "MU-2515",
     title:
       "WEB-10b L9/D-10b-11: an add of a task not sent yet does not wait for its create",
-    file: PICKER,
     tests: [DIALOGS_TEST],
     expect: /waits for its create/,
+    // Re-anchored in revision 4 (same intent): what an add waits for is read when it is made (`ListActions.prepareAdd`).
+    file: LIST_ACTIONS,
     patch: (t) =>
-      sub(t, "            after: choice.after,", "            after: null,"),
+      sub(t, "            after: admitted.after,", "            after: null,"),
   },
   {
     id: "MU-2516",
@@ -602,8 +618,8 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "      return { ok: false, message, uncertain: UNCERTAIN.has(outcome.reason) };",
-        "      return { ok: false, message, uncertain: false };",
+        "        uncertain: UNCERTAIN.has(outcome.reason),\n        reason: outcome.reason,",
+        "        uncertain: false,\n        reason: outcome.reason,",
       ),
   },
   {
@@ -989,6 +1005,81 @@ export const UNIT_WEB10B = [
         "          ...value.unresolved",
       ),
   },
+  // Revision 4 (review 4, D1 / DA-N1): an add waits for the task's CURRENT create, read when the add is made.
+  {
+    id: "MU-2578",
+    title:
+      "WEB-10b D1/DA-N1: an add does not state what its admission read saw of the task (a create replaced or discarded after the read is still named)",
+    file: LIST_ACTIONS,
+    tests: [ADMISSION_TEST],
+    expect: /BETWEEN the admission read and the write: refused/,
+    patch: addUnobserved,
+  },
+  {
+    id: "MU-2579",
+    title:
+      "WEB-10b D1/DA-N1: a task nothing on this device makes is taken as already sent (the add is written with no create to wait for)",
+    file: LIST_ACTIONS,
+    tests: [ADMISSION_TEST],
+    expect: /before Add: nothing written|nothing makes the task/,
+    patch: goneTakenAsSent,
+  },
+  {
+    id: "MU-2580",
+    title:
+      "WEB-10b D1/DA-N1: a refused (rejected) create is taken as still making its task (the add waits for a create that never goes)",
+    file: LIST_ACTIONS,
+    tests: [ADMISSION_TEST],
+    expect: /rejected before Add/,
+    patch: (t) =>
+      sub(
+        t,
+        "    MAKING.has(create.status) &&\n",
+        "    (true as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2581",
+    title:
+      "WEB-10b D1/DA-N1: a selection whose task is gone is kept but not shown (it cannot be deselected, and blocks the others)",
+    file: PICKER,
+    tests: [ADMISSION_TEST],
+    expect: /before Add: nothing written, the selection kept and shown/,
+    patch: (t) =>
+      sub(
+        t,
+        '            if (prepared.kind === "gone") missing = choice.localId;',
+        "            if (false as boolean) missing = choice.localId;",
+      ),
+  },
+  {
+    id: "MU-2582",
+    title:
+      "WEB-10b D1/DA-N1: a refusal because the task changed after its read is reported as a storage failure (the person is not told why)",
+    file: PICKER,
+    tests: [ADMISSION_TEST],
+    expect: /BETWEEN the admission read and the write: refused/,
+    patch: (t) =>
+      sub(
+        t,
+        '              outcome.reason === "changed"\n',
+        "              (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2583",
+    title:
+      "WEB-10b D1/DA-N1: an add not admitted (task gone, or its read failed) is dropped from the selection as if it had been added",
+    file: PICKER,
+    tests: [ADMISSION_TEST],
+    expect: /failed admission read|before Add: nothing written/,
+    patch: (t) =>
+      sub(
+        t,
+        '            refused = true;\n            reason = prepared.kind === "gone" ? PICKER.gone : PICKER.unread;',
+        '            queued.add(choice.localId);\n            refused = true;\n            reason = prepared.kind === "gone" ? PICKER.gone : PICKER.unread;',
+      ),
+  },
 ];
 
 /** D1: an ordinary Save of a create holding an attempt makes a new save of it under the attempt's ids (the revision-2 retry, unlooked-up). */
@@ -1101,5 +1192,25 @@ export const ENGINE_WEB10B = [
     grep: "E-LS12: .* picker: A's lost add discarded in another tab",
     expect: /E-LS12:/,
     patch: pickerUnsettledNotHeld,
+  },
+  {
+    id: "MU-2584",
+    title:
+      "WEB-10b D1/DA-N1: (REAL ENGINE) an add does not state what its read of the task saw: a create discarded in another tab between that read and the write is still named",
+    file: LIST_ACTIONS,
+    spec: SPEC,
+    grep: "E-LS13: .* the create discarded in another tab BETWEEN",
+    expect: /E-LS13:/,
+    patch: addUnobserved,
+  },
+  {
+    id: "MU-2585",
+    title:
+      "WEB-10b D1/DA-N1: (REAL ENGINE) a task whose create another tab discarded is taken as already sent: the add is written",
+    file: LIST_ACTIONS,
+    spec: SPEC,
+    grep: "E-LS13: .* the create discarded in another tab BEFORE Add",
+    expect: /E-LS13:/,
+    patch: goneTakenAsSent,
   },
 ];

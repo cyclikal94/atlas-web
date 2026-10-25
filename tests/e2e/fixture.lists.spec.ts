@@ -49,7 +49,9 @@ import {
  * the detail's heading; E-LS11 an answer lost after the write (a labelled test-only fault): the earlier request's look-up settled on the
  * dialog Back mounted again, and an add re-chosen after another tab's remove (review 2 R1, R2), each with its control; E-LS12 (revision 3,
  * D1) the stored draft of a lost answer discarded by ANOTHER TAB's production discard: Save writes nothing, only the separate decision
- * makes the change anew (create and picker), each with its retained-draft control.
+ * makes the change anew (create and picker), each with its retained-draft control; E-LS13 (revision 4, D1 / DA-N1) an add waits for its
+ * task's CURRENT create, read when the add is made: the create discarded by another tab before Add, and between the add's read of the
+ * task and its write (placed by real transaction order), with the retained-create control.
  */
 const LISTS_ROUTE = "/tasks/lists";
 const detailRoute = (id: string) => `/tasks/lists/${id}`;
@@ -1732,5 +1734,197 @@ test.describe("E-LS12: an earlier outcome this device cannot establish (revision
       expect(await ops()).toEqual([`+${a.taskId}`, `+${b.taskId}`]);
       const items = await queued(page, "list_item");
       expect(items.map((x) => x.draft.local_id)).not.toContain(old);
+    });
+});
+
+/**
+ * Revision 4 (review 4, D1 / DA-N1): a task this device created offline (its `create_task` queued), chosen in the picker; another tab's
+ * PRODUCTION discard removes that create before Add, or BETWEEN the add's read of the task and its write. The placement is by real
+ * transaction order: the add's read of the task (`data.readResourceView`, the one read-only transaction over `resource_versions` and
+ * `draft_commands`) is observed as it is created, and in that same turn the spec creates a read-write transaction of its own on the quota
+ * ledger, which the add's quota reservation must wait for before its writing transaction can be created. The other tab's discard commits
+ * while the add waits; the ledger is then released. No plan, read or write of the app is altered.
+ */
+async function unsentTask(page: Page, title: string): Promise<string> {
+  await page
+    .getByRole("button", { name: "Start from scratch instead" })
+    .click();
+  await expect(
+    page.getByRole("radio", { name: "Use my defaults (only you)" }),
+  ).toBeVisible();
+  await goOfflineAtBoundary(page);
+  await page.getByLabel("Name", { exact: true }).fill(title);
+  await page.getByRole("radio", { name: "Only me" }).check();
+  await page.getByRole("button", { name: "Save" }).click();
+  await expect(page.locator("[data-task-detail]")).toBeVisible();
+  const [create] = await queued(page, "create_task");
+  expect(create, "the task's create is queued").toBeDefined();
+  return create?.draft.local_id as string;
+}
+/** Arms the ledger hold behind the add's read of the task (see above); the spec's own connection to the ledger is opened now. */
+async function holdLedgerBehindTaskRead(page: Page): Promise<void> {
+  await page.evaluate(async () => {
+    type Entry = { n: number; mode: string; stores: string[] };
+    const hooks = (
+      window as unknown as {
+        __orderHooks: { created: ((entry: Entry) => void) | null };
+      }
+    ).__orderHooks;
+    const ledger = await new Promise<IDBDatabase>((ok, fail) => {
+      const open = indexedDB.open("atlas-quota-ledger");
+      open.onsuccess = () => ok(open.result);
+      open.onerror = () => fail(open.error);
+    });
+    const state = {
+      fired: null as number | null,
+      started: false,
+      release: false,
+      done: null as Promise<string> | null,
+    };
+    (window as unknown as { __ledgerHold: typeof state }).__ledgerHold = state;
+    const previous = hooks.created;
+    hooks.created = (entry) => {
+      previous?.(entry);
+      if (
+        state.fired !== null ||
+        entry.mode !== "readonly" ||
+        !["resource_versions", "draft_commands", "cache"].every((s) =>
+          entry.stores.includes(s),
+        )
+      )
+        return;
+      state.fired = entry.n;
+      const tx = ledger.transaction(["ledger"], "readwrite");
+      const store = tx.objectStore("ledger");
+      state.done = new Promise<string>((done) => {
+        tx.oncomplete = () => done("complete");
+        tx.onabort = () => done("abort");
+      });
+      const ask = () => {
+        store.get("__ordering_hold__").onsuccess = () => {
+          state.started = true;
+          if (!state.release) ask();
+        };
+      };
+      ask();
+    };
+  });
+}
+const ledgerHold = (page: Page) =>
+  page.evaluate(() => {
+    const h = (
+      window as unknown as {
+        __ledgerHold: { fired: number | null; started: boolean };
+      }
+    ).__ledgerHold;
+    return { fired: h.fired, started: h.started };
+  });
+const releaseLedger = (page: Page) =>
+  page.evaluate(() => {
+    const h = (
+      window as unknown as {
+        __ledgerHold: { release: boolean; done: Promise<string> | null };
+      }
+    ).__ledgerHold;
+    h.release = true;
+    return h.done;
+  });
+const GONE = "A task you chose isn't on this device any more";
+const CHANGED =
+  "A task you chose changed on this device while it was being added";
+
+test.describe("E-LS13: an add waits for its task's current create (revision 4, D1 / DA-N1)", () => {
+  test("the create discarded in another tab BEFORE Add: nothing written, the selection kept and shown; Deselect", async ({
+    context,
+  }) => {
+    const list = listUpsert(51, "Errands", []);
+    const { page } = await setup(context, "/tasks/new", [], [list]);
+    const create = await unsentTask(page, "Brand new task");
+    const [made] = await queued(page, "create_task");
+    const task = made?.body.command.id as string;
+    await navigateInApp(page, detailRoute(list.id));
+    await page.getByRole("button", { name: "Add task to list" }).click();
+    await dialog(page).locator(`[data-picker-task="${task}"] input`).check();
+    const other = await otherTab(context, detailRoute(list.id));
+    expect(await discardIn(other, create)).toMatchObject({
+      kind: "discarded",
+    });
+    await expect.poll(async () => (await queued(page)).length).toBe(0);
+    await dialog(page).getByRole("button", { name: "Add selected" }).click();
+    await expect(dialog(page)).toContainText(GONE);
+    expect(await queued(page), "nothing written").toEqual([]);
+    await expect(dialog(page)).toContainText("1 selected");
+    const missing = dialog(page).locator(`[data-picker-missing="${task}"]`);
+    await expect(missing).toContainText(
+      "“Brand new task” isn't on this device any more",
+    );
+    await dialog(page)
+      .getByRole("button", { name: "Deselect “Brand new task”" })
+      .click();
+    await expect(missing).toHaveCount(0);
+    await expect(dialog(page)).toContainText("0 selected");
+  });
+
+  for (const discarded of [true, false])
+    test(`${discarded ? "the create discarded in another tab BETWEEN the add's read of the task and its write: refused, nothing written; Add again finds the task gone" : "control: the same placement, the create kept: the add is written and waits for it"}`, async ({
+      context,
+    }, info) => {
+      await observeTransactions(context);
+      const list = listUpsert(52, "Errands", []);
+      const { page } = await setup(context, "/tasks/new", [], [list]);
+      const create = await unsentTask(page, "Brand new task");
+      const [made] = await queued(page, "create_task");
+      const task = made?.body.command.id as string;
+      await navigateInApp(page, detailRoute(list.id));
+      await page.getByRole("button", { name: "Add task to list" }).click();
+      await dialog(page).locator(`[data-picker-task="${task}"] input`).check();
+      const other = await otherTab(context, detailRoute(list.id));
+      await installOrdering(page);
+      await holdLedgerBehindTaskRead(page);
+      const start = (await logOf(page)).length;
+      await dialog(page).getByRole("button", { name: "Add selected" }).click();
+      await expect
+        .poll(async () => (await ledgerHold(page)).started)
+        .toBe(true);
+      const read = (await ledgerHold(page)).fired as number;
+      // The add waits at the ledger: its read of the task is made, its writing transaction is not created yet.
+      expect(
+        (await logOf(page)).slice(start).some(isEnqueue),
+        "no write created while the ledger is held",
+      ).toBe(false);
+      if (discarded)
+        expect(await discardIn(other, create)).toMatchObject({
+          kind: "discarded",
+        });
+      expect(await releaseLedger(page)).toBe("complete");
+      const outcome = discarded ? CHANGED : null;
+      if (outcome === null) await expect(dialog(page)).toHaveCount(0);
+      else await expect(dialog(page)).toContainText(outcome);
+      const log = (await logOf(page)).slice(start);
+      const write = log.find(isEnqueue);
+      recordEvidence(info, `e-ls13-${discarded ? "between" : "control"}`, {
+        read,
+        log,
+      });
+      expect(write, "the add's write was created").toBeDefined();
+      expect((write as Created).n, "after the read").toBeGreaterThan(read);
+      const items = await queued(page, "list_item");
+      if (!discarded) {
+        expect(items).toHaveLength(1);
+        const rows = (await page.evaluate(
+          (acct) => window.__atlasData?.rows(acct, "drafts"),
+          ACCOUNT,
+        )) as Array<{ local_id: string; depends_on: string[] }>;
+        expect(
+          rows.find((r) => r.local_id === items[0]?.draft.local_id)?.depends_on,
+          "the add waits for the create it read",
+        ).toContain(create);
+        return;
+      }
+      expect(items, "nothing written").toEqual([]);
+      await expect(dialog(page)).toContainText("1 selected");
+      await dialog(page).getByRole("button", { name: "Add selected" }).click();
+      await expect(dialog(page)).toContainText(GONE);
+      expect(await queued(page, "list_item"), "still nothing").toEqual([]);
     });
 });

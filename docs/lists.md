@@ -53,6 +53,9 @@ queued add while it is shown. The pane's counts, the detail's rows, the capacity
 - Build list commands with these builders, or follow the same targets: every list command names only the LIST as its target
   (`requiresEdit`, version-checked; `create_list` seeded at 1). A `list_item` for a task this device has not sent yet names that task's
   `create_task` in `dependsOnExtra` (D-10b-11); the task is otherwise not a target, so a list change never waits behind an unrelated task.
+  Name the create that makes the task WHEN the add is made, never one remembered from an earlier read, and state that read's observation
+  (`ListActions.prepareAdd`: `readResourceViewNow` + `observed`, revision 4), so the writing transaction refuses an add whose create was
+  replaced, discarded or sent after the read.
 - The cap is the server's and counts tasks the reader cannot see: the client's at-limit state is a pre-check, never a promise. Handle a
   refusal (`blocked`, `slice_capacity`) as this slice does.
 - A reader never receives another person's task through a list: `task_ids` holds only the ids the reader can see (`service.rs`
@@ -87,7 +90,8 @@ queued add while it is shown. The pane's counts, the detail's rows, the capacity
     `selectCandidate`), so a removal queued after it waits behind it. The notice now reads "Couldn't add “{title}”: this list is full. It may
     also hold tasks you can't see. Your other changes to this list wait until you retry or discard this one in Sync." with "Open Sync",
     which opens the "Needs a decision" tab where the refused change is.
-12. **D-10b-11** A task known only through an outstanding `create_task` is offered ("Not sent yet") and its add depends on that create.
+12. **D-10b-11** A task known only through an outstanding `create_task` is offered ("Not sent yet") and its add depends on that create:
+    the CURRENT one, read when the add is made (revision 4, review 4 D1 / DA-N1; Limits).
 13. **D-10b-12** The picker: this device's cached tasks (not archived, not already members) and its unsent creates, with this device's queued
     renames and archives applied; a case- and accent-insensitive substring search (NFD, combining marks removed, lower case); exactly 100
     cached matches a page ("More tasks" resumes at the next match), each page a certified read. A selection the search hides stays selected
@@ -122,7 +126,7 @@ the jsdom `tests/features/tasks/lists-*.test.tsx`.
 | The drawn row checkbox not implemented (E-10b-1) | `/tasks/lists/<id>` (E-LS1) |
 | Caption corrected (D-10b-9) | `/tasks/lists/<id>` (E-LS1) |
 | The refused-capacity notice, corrected (D-10b-10) | `/tasks/lists/<id>` after a `503 slice_capacity` (E-LS5) |
-| Added: "Choose a list to see its tasks.", "No lists here.", "No archived lists.", "No tasks in this list yet.", "This list isn't on this device.", "This list can't be shown on this device.", "This list is archived.", "You can't change this list", "You can rename this list once it has synced.", "Change the name to save it.", "You can share this list once it has synced.", the create caption, "Only tasks you can already see are shown.", "No tasks to add.", "No tasks match your search.", "Choose the tasks to add first.", "{n} selected", "This list can take {n} more.", "This list can now take only {n} more. Choose fewer tasks.", "Added {k} of {n}. The others weren't saved: {reason}", "A change to your lists needs your attention in Sync." / "A change to this list needs your attention in Sync." with "Open Sync", "This list's unsent change was edited somewhere else. …", "This list isn't on this device any more. What you typed is kept here.", "Saved. Your newer changes are still here.", "Your earlier save created “{name}”. What you typed since is still here: saving it creates another list.", "Your earlier save renamed this list “{name}”. What you typed since is still here: save again to use it." (revision 1, R1), "One task you chose had already been added by an earlier save, so it wasn't added again. If it isn't in the list now, choose it again to add it." / "{n} tasks you chose …" (revision 2, R2), the D1 notes and decisions of revision 3 ("This device can't tell whether your earlier save created “{name}”: it may already have. Create list won't send it again.", "… renamed this list “{name}” …", "This device can't tell whether an earlier add to this list was made …" / "{n} earlier adds …", "Your earlier save of “{name}” was changed, refused or discarded since (see Sync), so it wasn't sent again." and their rename/picker forms, "Create as a new list", "Rename as a new change", "Add as new adds" and their explanations), the announcements ("List created. Not sent yet.", "List renamed. Not sent yet.", "Removed “{title}” from {list}. Not sent yet.", "Added {n} tasks to {list}. Not sent yet.", "Archived. Not sent yet.", "Restored. Not sent yet."), "Remove {title}" / "Remove this task", the queue descriptions "New list" / "List name change" / "List change" | E-LS1–E-LS9; `lists-*.test.tsx` |
+| Added: "Choose a list to see its tasks.", "No lists here.", "No archived lists.", "No tasks in this list yet.", "This list isn't on this device.", "This list can't be shown on this device.", "This list is archived.", "You can't change this list", "You can rename this list once it has synced.", "Change the name to save it.", "You can share this list once it has synced.", the create caption, "Only tasks you can already see are shown.", "No tasks to add.", "No tasks match your search.", "Choose the tasks to add first.", "{n} selected", "This list can take {n} more.", "This list can now take only {n} more. Choose fewer tasks.", "Added {k} of {n}. The others weren't saved: {reason}", "A change to your lists needs your attention in Sync." / "A change to this list needs your attention in Sync." with "Open Sync", "This list's unsent change was edited somewhere else. …", "This list isn't on this device any more. What you typed is kept here.", "Saved. Your newer changes are still here.", "Your earlier save created “{name}”. What you typed since is still here: saving it creates another list.", "Your earlier save renamed this list “{name}”. What you typed since is still here: save again to use it." (revision 1, R1), "One task you chose had already been added by an earlier save, so it wasn't added again. If it isn't in the list now, choose it again to add it." / "{n} tasks you chose …" (revision 2, R2), the D1 notes and decisions of revision 3 ("This device can't tell whether your earlier save created “{name}”: it may already have. Create list won't send it again.", "… renamed this list “{name}” …", "This device can't tell whether an earlier add to this list was made …" / "{n} earlier adds …", "Your earlier save of “{name}” was changed, refused or discarded since (see Sync), so it wasn't sent again." and their rename/picker forms, "Create as a new list", "Rename as a new change", "Add as new adds" and their explanations), the picker's admission notes of revision 4 ("A task you chose isn't on this device any more (its unsent task may have been discarded or refused in Sync), so it wasn't added.", "Couldn't read a task you chose on this device, so it wasn't added. Try again.", "A task you chose changed on this device while it was being added (for example, it was sent or replaced in Sync), so it wasn't added. Add selected again to add it as it is now.", "“{title}” isn't on this device any more, so it can't be added." with "Deselect" / "Deselect “{title}”"), the announcements ("List created. Not sent yet.", "List renamed. Not sent yet.", "Removed “{title}” from {list}. Not sent yet.", "Added {n} tasks to {list}. Not sent yet.", "Archived. Not sent yet.", "Restored. Not sent yet."), "Remove {title}" / "Remove this task", the queue descriptions "New list" / "List name change" / "List change" | E-LS1–E-LS9; `lists-*.test.tsx` |
 | Name order within a page; pages by id ("More lists") | `/tasks/lists` with over 100 lists (`lists-screens.test.tsx`) |
 | No "Only me" at creation (defaults apply; Sharing afterwards) | `/tasks/lists` → "+ New list" (E-LS2) |
 | An archived list's page stays editable | `/tasks/lists/<archived id>` (E-LS6) |
@@ -136,7 +140,12 @@ the lazy layout draw the list; revision 1 (R1-R4) costs 28 B more, chiefly the h
 Revision 2 is 4 B smaller (managed build of this candidate); its exact draft read has modules of its own
 (`ui/draft-read.ts`, `plans/draft-header.ts`) because a first version in the shared `ui/scan.ts` put the fixture 18 B over its ceiling.
 Revision 3 (D1) adds only lazy Lists code and one export of the shared outbox model (`isSameSave`): production +1 B, fixture -7 B.
-28 B of fixture headroom remain for the next slice; WEB-09c owns the reasoned successor budget.
+Revision 4 (an add waits for its task's current create) adds lazy Lists code, one lazy data reader (`readResourceViewNow`, in
+`ui/draft-read.ts`) and the outbox's refusal reason on the shared `SaveOutcome`. Author builds: production initial JS 109,417 B gzip (-4 B), CSS 7,343 B (unchanged, byte-identical class set: the
+new missing-task row uses classes already in the baseline), fixture initial JS 272,260 B (-312 B: the bundler's partition changed, the initial
+script set lost its separate `identity-reads` chunk, 28 to 27 scripts; a side effect of the module graph, not a designed saving, and
+not to be counted on). 340 B of fixture headroom on this measurement.
+WEB-09c owns the reasoned successor budget.
 
 ## Limits
 
@@ -186,6 +195,22 @@ Revision 3 (D1) adds only lazy Lists code and one export of the shared outbox mo
     independently (WEB-14a owns Q4 app-update recovery). A predecessor-specific decision across a reload or tab would need persistent
     attempt history, which the approval excludes. (3) A race the other way (a draft discarded just after the look found it) settles on
     what the look found: the dialog closes as saved on this device and nothing is written afterwards.
+- **An add waits for its task's CURRENT create** (revision 4; review 4 D1 / DA-N1, `incomplete_fix` of revision 3). A selection holds
+  no authority over the task's create: a defaults confirmation can replace that create under a new id, Sync can discard it, the leader
+  can send it and a page can publish the task, all while the picker is open, at the sync screens or hidden by a search. So every add,
+  the first ordinary Add and the explicit "Add as new adds" alike, is admitted by `ListActions.prepareAdd`: ONE read of the task
+  (`readResourceViewNow`, the shared `readResourceView` plan) finds it cached as a task (the add waits for nothing) or the create that
+  makes it now (queued, being sent, waiting for the person, or receipted, and projecting a task: the add waits for THAT create); and
+  the add states that read's observation (`EnqueueRequest.observed`), so the transaction that writes it refuses (`changed`) if anything
+  of the task changed after the read: a replacement, a discard, a send or a publication. Nothing is written then; the selection stays,
+  the picker says the task changed, and Add selected reads it again. A task nothing on this device makes (its create discarded or
+  refused, the task removed, another kind at its id) is never taken as already sent: nothing is written, the batch stops there in
+  order, and the selection stays, shown below the note with a Deselect control (a search can no longer show it). A failed read writes
+  nothing and is not an uncertain add. An add stored BEFORE its create is replaced or discarded is retargeted or refused with it by the
+  outbox's existing supersession and cascade. Trade-offs recorded: the observation is conservative (the leader claiming the create in
+  the instant between the read and the write refuses the add; a second press admits it); the task's archived state is not judged
+  again at the add (as before); a receipted create the cache does not show yet counts as making the task (the server accepted it, and
+  the add waits for nothing); the read is not repeated automatically.
 - **A capacity-refused add holds the list's later changes on this device** until it is retried or discarded in Sync (the data layer's queue
   order); the notice says so.
 - **Native ordering is by transaction creation** (revision 1, R5; replaces the earlier claim that no real engine can place a commit
@@ -203,16 +228,20 @@ Revision 3 (D1) adds only lazy Lists code and one export of the shared outbox mo
 ## Evidence (fixture unless stated)
 
 - Unit and component (jsdom, production data controller over the IndexedDB double): `lists-model`, `list-view`, `lists-register`,
-  `lists-screens`, `lists-dialogs`, `lists-reads`, `lists-routes`, `lists-recovery`, `lists-attempts`, and the shared session's
+  `lists-screens`, `lists-dialogs`, `lists-reads`, `lists-routes`, `lists-recovery`, `lists-attempts`, `lists-admission` (revision 4:
+  review 4's reproduction kept with its controls, the production defaults confirmation, discard, receipt and dispatch window), and the
+  shared session's
   `kept-settlement` (`tests/features/tasks/`).
-- Native (Chromium, Firefox, WebKit; real IndexedDB, fixture leader, stubbed network): `tests/e2e/fixture.lists.spec.ts` E-LS1–E-LS12 and
-  E-LS7b, 40 cases per engine (revision 1: E-LS8 (a)/(b) real-engine ordering with their controls, E-LS10 the detail's heading and
+- Native (Chromium, Firefox, WebKit; real IndexedDB, fixture leader, stubbed network): `tests/e2e/fixture.lists.spec.ts` E-LS1–E-LS13 and
+  E-LS7b, 43 cases per engine (revision 1: E-LS8 (a)/(b) real-engine ordering with their controls, E-LS10 the detail's heading and
   focus; revision 2: E-LS11, review 2's R1 and R2 schedules with their controls, over a labelled TEST-ONLY fault in which a committed
   draft write's answer is lost: the write is real, Dexie is told it aborted; revision 3: E-LS12, D1 with the lost answer's draft discarded
-  by another tab's production discard, create and picker, each with its retained control). Viewports and themes are browser emulation, not devices; no screen-reader pass is claimed.
+  by another tab's production discard, create and picker, each with its retained control; revision 4: E-LS13, the task's create
+  discarded by another tab before Add and between the add's read of the task and its write, placed by transaction order behind a hold
+  of the quota ledger, with the retained control). Viewports and themes are browser emulation, not devices; no screen-reader pass is claimed.
 - Focused real backend (released `v0.29.0-rc.1`, disposable SQLite, delaying proxy, the fixture leader; the `lists` stack):
   `tests/integration/integration.lists.spec.ts` I-LS1–I-LS8. Not integration acceptance.
-- Mutants: `scripts/mutation/catalogue-web10b.mjs` (67 unit, 9 real-engine), each with the test written for it.
+- Mutants: `scripts/mutation/catalogue-web10b.mjs` (73 unit, 11 real-engine), each with the test written for it.
 
 ## Headings (revision 1, R4)
 

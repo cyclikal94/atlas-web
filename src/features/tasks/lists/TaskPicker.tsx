@@ -13,7 +13,6 @@ import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { completeKept, disownKept, keptKey, useKeptInput } from "../kept-input";
 import { type ComposedList, roomFor } from "../model/list-view";
-import { listItem } from "../model/lists";
 import { type Evidence, type Issued, useListActions } from "./actions";
 import { PICKER } from "./copy";
 import { ReadNotice } from "./ReadNotice";
@@ -24,13 +23,16 @@ export const pickerEditor = (listId: string) => `list-picker:${listId}`;
 /**
  * One selection of a task: an INTENTION to add it, whose add is named by the local id chosen when it was selected (R2, revision 2). The
  * task identifies the member, not the add: a task deselected and selected again is a new selection, a new add under a new id, never
- * deduplicated against an earlier one, whatever became of that one.
+ * deduplicated against an earlier one, whatever became of that one. It holds no authority over the task's create (revision 4, D1 /
+ * DA-N1): which create an add waits for, if any, is read when the add is made (`ListActions.prepareAdd`), never remembered from the page.
  */
 interface Choice {
   task: string;
   localId: string;
-  /** The outstanding create of a task not sent yet, as it was when selected: the add waits for it (D-10b-11). */
-  after: string | null;
+  /** For display only: the task's title when it was selected. */
+  title: string;
+  /** The last Add found nothing on this device that makes the task (its unsent create discarded or refused, the task removed). */
+  missing?: true;
 }
 
 /**
@@ -116,7 +118,7 @@ export function TaskPicker({
     if (items === null || page.reading) return;
     announcer.announce(PICKER.results(items.length, more), "polite");
   }, [items, more, page.reading, announcer]);
-  const toggle = (task: string, after: string | null) =>
+  const toggle = (task: string, title: string) =>
     kept.edit((value) => {
       // Deselecting leaves an earlier add that is not settled where it is (`unresolved`, D1).
       if (value.selected.some((c) => c.task === task))
@@ -128,7 +130,7 @@ export function TaskPicker({
       const choice: Choice = {
         task,
         localId: env.newId(),
-        after,
+        title,
       };
       return { ...value, selected: [...value.selected, choice] };
     });
@@ -171,6 +173,8 @@ export function TaskPicker({
     const found = new Set<string>();
     const unsettled = new Map<string, Exclude<Evidence, "stored">>();
     const issued: Unresolved[] = [];
+    // A selection whose task nothing on this device makes now: kept selected, shown so that it can be deselected (revision 4).
+    let missing: string | null = null;
     let refused = false;
     let reason: string | null = null;
     try {
@@ -185,27 +189,36 @@ export function TaskPicker({
           // An add whose answer was lost and that is stored after all: this selection is done, not made again (R2).
           if (found.has(choice.localId)) continue;
           const localId = renamed.get(choice.localId) ?? choice.localId;
-          const request = listItem({
+          // What the add waits for is read NOW, from the task (revision 4): a create replaced since the selection is never named.
+          const prepared = await actions.prepareAdd({
             listId,
             taskId: choice.task,
-            included: true,
-            after: choice.after,
             localId,
           });
+          // Issued only to the database the task was read in (its incarnation); nothing was written otherwise.
           const scope = actions.scope();
-          const outcome = await actions.enqueue(request, "");
+          if (prepared.kind !== "ready" || prepared.scope !== scope) {
+            if (prepared.kind === "gone") missing = choice.localId;
+            refused = true;
+            reason = prepared.kind === "gone" ? PICKER.gone : PICKER.unread;
+            break;
+          }
+          const outcome = await actions.enqueue(prepared.request, "");
           if (outcome.ok) queued.add(choice.localId);
           else {
             if (outcome.uncertain === true)
               issued.push({
                 task: choice.task,
                 localId,
-                request,
+                request: prepared.request,
                 scope,
                 state: "uncertain",
               });
             refused = true;
-            reason = outcome.message ?? copy.refusalMessage("storage");
+            reason =
+              outcome.reason === "changed"
+                ? PICKER.taskChanged
+                : (outcome.message ?? copy.refusalMessage("storage"));
             break;
           }
         }
@@ -219,11 +232,13 @@ export function TaskPicker({
         ...value,
         selected: value.selected
           .filter((c) => !queued.has(c.localId) && !found.has(c.localId))
-          .map((c) =>
-            decided && renamed.has(c.localId)
-              ? { ...c, localId: renamed.get(c.localId) as string }
-              : c,
-          ),
+          .map(({ missing: _, ...c }) => ({
+            ...c,
+            ...(decided && renamed.has(c.localId)
+              ? { localId: renamed.get(c.localId) as string }
+              : {}),
+            ...(c.localId === missing ? { missing: true as const } : {}),
+          })),
         unresolved: [
           ...(decided ? [] : value.unresolved)
             .filter((u) => !found.has(u.localId))
@@ -259,6 +274,7 @@ export function TaskPicker({
     }
   };
   const undecided = kept.value.unresolved.some((u) => u.state !== "uncertain");
+  const gone = selected.filter((c) => c.missing === true);
   const shownNote = note ?? kept.note;
   return (
     <Dialog
@@ -361,7 +377,7 @@ export function TaskPicker({
                     type="checkbox"
                     checked={checked}
                     disabled={!checked && full}
-                    onChange={() => toggle(item.id, item.createLocalId)}
+                    onChange={() => toggle(item.id, item.title)}
                     className="size-[15px]"
                   />
                   <span className="min-w-0 flex-1 break-words">
@@ -399,6 +415,24 @@ export function TaskPicker({
             {shownNote}
           </p>
         ) : null}
+        {gone.map((c) => (
+          <p
+            key={c.localId}
+            className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2"
+            data-picker-missing={c.task}
+          >
+            <span className="min-w-0 flex-1 break-words">
+              {PICKER.missing(c.title)}
+            </span>
+            <Button
+              variant="quiet"
+              aria-label={PICKER.deselect(c.title)}
+              onClick={() => toggle(c.task, c.title)}
+            >
+              {PICKER.deselectShort}
+            </Button>
+          </p>
+        ))}
         {undecided ? (
           <div
             className="flex flex-col items-start gap-2"

@@ -23,7 +23,13 @@ export type SaveOutcome =
    * `uncertain`: the save may have been stored all the same (a store that failed or threw, a service that ended during it): a retry under
    * the same local id must send the same request (WEB-10b R1). Otherwise nothing was stored.
    */
-  | { ok: false; message: string | null; uncertain?: boolean };
+  | {
+      ok: false;
+      message: string | null;
+      uncertain?: boolean;
+      /** The outbox's reason, when it refused (`changed`: what the save was made from moved before it was written). */
+      reason?: string;
+    };
 
 /** Refusals after which the writing transaction may nonetheless have committed (its answer was lost with the store or the service). */
 const UNCERTAIN: ReadonlySet<string> = new Set([
@@ -87,7 +93,12 @@ export function useTaskActions(): TaskActions {
       }
       const message = copy.refusalMessage(outcome.reason);
       if (message) announcer.announce(message, "assertive");
-      return { ok: false, message, uncertain: UNCERTAIN.has(outcome.reason) };
+      return {
+        ok: false,
+        message,
+        uncertain: UNCERTAIN.has(outcome.reason),
+        reason: outcome.reason,
+      };
     };
     /**
      * A known denial already on screen admits nothing (DA17-N1/N2): the outbox is not asked. The writing transaction is what decides a
