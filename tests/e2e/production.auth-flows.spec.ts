@@ -20,6 +20,13 @@ import { AuthStub, type Hold } from "./auth-stub";
 import { expect } from "./helpers";
 import { test } from "./intercepted-auth";
 import { gateLog, recordGateTransitions } from "./lifecycle-browser";
+import {
+  ageSharedConfirmation,
+  type ConfirmationAgeing,
+  type SettledIdentity,
+  settledIdentityOf,
+  sharedConfirmationAge,
+} from "./shared-confirmation";
 
 /**
  * WEB-14a revision 19, labelled HARNESS ADAPTATION (Kieran, 15 October 2026): the production build registers the app's service worker
@@ -136,6 +143,97 @@ async function shownAsDirectly(page: Page, username: string | RegExp) {
   await nav.click();
   await expect(page.locator("[data-account-card]")).toContainText(username, {
     timeout: 20_000,
+  });
+}
+
+/** Every identity read (`GET /browser-sessions/current`) the stub has received, optionally only `page`'s. */
+const identityReads = (stub: AuthStub, page?: Page) =>
+  stub.deliveries.filter(
+    (d) =>
+      d.method === "GET" &&
+      d.path === "/browser-sessions/current" &&
+      (page === undefined || d.page === page),
+  );
+
+interface EligibleVerification {
+  settled: SettledIdentity;
+  receipt: ConfirmationAgeing;
+  /** The document being replaced, the stub's cookie revision and `page`'s identity reads so far. */
+  doc: string;
+  cookieRevision: number;
+  reads: number;
+}
+
+/**
+ * WEB-14a revision 35 (review R38, family `production-auth-settlement-observation-ordering`, classification `regression` of the
+ * maintained premise; design assessment C3/C4). Since HF1-SHARED-CONFIRMATION-20261013 a settlement's shared confirmation spares every
+ * page's resume verification for 30 s, and a reload within that time makes NO `/browser-sessions/current` read (the accepted
+ * behaviour, which the R38 failures assumed away). A case that needs the read of `page`'s NEXT document prepares it here, after its
+ * authentication work has finished: it reads the settled triple (which must be the stub's cookie session), ages ONLY the confirmation's
+ * time (tests/e2e/shared-confirmation.ts: checked transaction, token and every other field kept) and checks no other writer refreshed it.
+ * Both reads use their own connection in `page`'s CURRENT document, which the caller then replaces (`page.reload()`) before it is
+ * observed again (the observer constraint in shared-confirmation.ts). A new document has no earlier verification of its own, so its
+ * display's verification is eligible; `expectNewDocument` proves the replacement kept the same settlement.
+ */
+async function prepareEligibleVerification(
+  stub: AuthStub,
+  page: Page,
+): Promise<EligibleVerification> {
+  const settled = await settledIdentityOf(page);
+  expect(
+    settled.session_id,
+    "setup: the record settles the stub's cookie session",
+  ).toBe(stub.cookie);
+  const receipt = await ageSharedConfirmation(page, settled);
+  expect(
+    (await sharedConfirmationAge(page, settled)).eligible,
+    "setup: no other writer refreshed the confirmation after it was aged",
+  ).toBe(true);
+  return {
+    settled,
+    receipt,
+    doc: (await workOf(page)).doc,
+    cookieRevision: stub.cookieHistory.length,
+    reads: identityReads(stub, page).length,
+  };
+}
+
+/** After `page.reload()`: a new document, with the same settlement (no activation since, the same cookie, the same settled epoch). */
+async function expectNewDocument(
+  stub: AuthStub,
+  page: Page,
+  prepared: EligibleVerification,
+) {
+  await expect
+    .poll(
+      async () => {
+        const work = await workOf(page, { durable: true });
+        return {
+          replaced: work.doc !== prepared.doc,
+          readable: work.durable?.readable ?? false,
+          settledEpoch: work.durable?.settledEpoch ?? null,
+        };
+      },
+      {
+        message:
+          "setup (R38): a new document, reading a record that settles the same epoch",
+        timeout: 20_000,
+      },
+    )
+    .toEqual({
+      replaced: true,
+      readable: true,
+      settledEpoch: prepared.settled.epoch,
+    });
+  expect(
+    {
+      cookieRevision: stub.cookieHistory.length,
+      cookie: stub.cookie,
+    },
+    "setup: no activation changed the session across the reload",
+  ).toEqual({
+    cookieRevision: prepared.cookieRevision,
+    cookie: prepared.settled.session_id,
   });
 }
 
@@ -1277,8 +1375,17 @@ test.describe("revision 22, R28: the Settings navigation across the initial redi
    * lease still in the record, so tab `b` must not display until its own verification has resolved it; that read is held too. The
    * returned release lets it go. (Closing, not navigating: a Firefox document that navigates away mid-request was observed NOT to leave
    * its lease unresolved, so only a close is the same schedule in all three engines.)
+   *
+   * Revision 35 (R38, C4): tab `a`'s reloaded document verifies only because the caller made that verification eligible first
+   * (`prepareEligibleVerification`, before its own decisive window: a fresh shared confirmation spares the reload's read). Here the
+   * new document, the same settlement and exactly ONE held verification of `a` are proven before `b`'s hold and the close.
    */
-  async function closeByPeerVerification(stub: AuthStub, a: Page, b: Page) {
+  async function closeByPeerVerification(
+    stub: AuthStub,
+    a: Page,
+    b: Page,
+    prepared: EligibleVerification,
+  ) {
     const current =
       (page: Page) =>
       (r: { method: string; path: string; page: Page | null }) =>
@@ -1287,13 +1394,24 @@ test.describe("revision 22, R28: the Settings navigation across the initial redi
         r.page === page;
     const heldA = stub.hold(current(a));
     await a.reload();
+    await expectNewDocument(stub, a, prepared);
     await expect
       .poll(
         () =>
           stub.deliveries.some((d) => d.hold === heldA && d.state === "held"),
-        { timeout: 20_000 },
+        {
+          message:
+            "setup (R38): the reloaded document's eligible verification is asked and held",
+          timeout: 20_000,
+        },
       )
       .toBe(true);
+    expect(
+      identityReads(stub, a)
+        .slice(prepared.reads)
+        .map((d) => d.state),
+      "exactly one verification of the new document, still held",
+    ).toEqual(["held"]);
     const heldB = stub.hold(current(b));
     await a.close();
     await expect
@@ -1345,7 +1463,8 @@ test.describe("revision 22, R28: the Settings navigation across the initial redi
     await signInForm(b, "sam", "pw2");
     await shownAs(stub, b, "sam");
     const writes = (await navOf(b)).writes.length;
-    const held = await closeByPeerVerification(stub, a, b);
+    const prepared = await prepareEligibleVerification(stub, a);
+    const held = await closeByPeerVerification(stub, a, b, prepared);
     held.release();
     await settleAuth(stub, [b]);
     expect((await workOf(b)).dom).toBe("displaying");
@@ -1370,6 +1489,8 @@ test.describe("revision 22, R28: the Settings navigation across the initial redi
     await signInForm(b, "sam", "pw2");
     await settleAuth(stub, [a, b]);
     expect(new URL(b.url()).pathname).toBe("/today");
+    // Revision 35 (R38): prepared before the press, so nothing between the mouse-down and the closure is setup.
+    const prepared = await prepareEligibleVerification(stub, a);
     const link = b
       .getByRole("navigation")
       .getByRole("link", { name: "Settings" })
@@ -1379,7 +1500,7 @@ test.describe("revision 22, R28: the Settings navigation across the initial redi
     const writes = (await navOf(b)).writes.length;
     await b.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await b.mouse.down();
-    const held = await closeByPeerVerification(stub, a, b);
+    const held = await closeByPeerVerification(stub, a, b, prepared);
     await b.mouse.up();
     expect(
       (await navOf(b)).writes.slice(writes),
@@ -1543,6 +1664,55 @@ test.describe("revision 23, R28: the boundary covers response consumption and th
         (window as unknown as { __r23arm: (arm: Arm) => void }).__r23arm(a),
       value,
     );
+  /** Arms the NEXT document of this tab: the init script reads (and removes) it from sessionStorage before any application script. */
+  const armNextDocument = (page: Page, value: Arm) =>
+    page.evaluate((a) => {
+      sessionStorage.setItem("r23-arm", JSON.stringify(a));
+    }, value);
+  /** The arm the CURRENT document's hook took from sessionStorage (the hook was installed and armed before the application ran). */
+  const armedPath = (page: Page) =>
+    page.evaluate(
+      () =>
+        (window as unknown as { __r23: { arm: Arm | null } }).__r23.arm?.path ??
+        null,
+    );
+  /**
+   * Revision 35 (R38, C3): the identity decode B1/B4/B5 hold is the eligible verification of `page`'s next document (the settlement's
+   * fresh confirmation spares every read before it). After the caller's authentication work has finished: prepare it, arm that
+   * document's hook, reload, and prove a new document with the same settlement and an armed hook.
+   */
+  async function reloadForHeldIdentityDecode(
+    stub: AuthStub,
+    page: Page,
+    value: Arm,
+  ) {
+    const prepared = await prepareEligibleVerification(stub, page);
+    await armNextDocument(page, value);
+    await page.reload();
+    await expectNewDocument(stub, page, prepared);
+    expect(
+      await armedPath(page),
+      "setup: the new document's hook is armed",
+    ).toBe(value.path);
+    await expect
+      .poll(() => identityReads(stub, page).length - prepared.reads, {
+        message:
+          "setup (R38): the new document made its identity read (none: the premise of the held decode is absent)",
+        timeout: 20_000,
+      })
+      .toBeGreaterThanOrEqual(1);
+    return prepared;
+  }
+  /** After `entered`: the decode is the new document's ONE identity read. */
+  const expectOneVerification = (
+    stub: AuthStub,
+    page: Page,
+    prepared: EligibleVerification,
+  ) =>
+    expect(
+      identityReads(stub, page).length - prepared.reads,
+      "the new document made exactly one identity read: the one whose decode is held",
+    ).toBe(1);
   const entered = (page: Page) =>
     expect
       .poll(
@@ -1596,14 +1766,22 @@ test.describe("revision 23, R28: the boundary covers response consumption and th
     }) => {
       const { stub, page } = await signedIn(context);
       const sam = [...stub.accounts.values()].find((a) => a.username === "sam");
-      await arm(page, {
+      await signInForm(page, "kieran", "pw");
+      await settleAuth(stub, pagesOf(page));
+      // Revision 35 (R38): the settlement made no identity read (its fresh shared confirmation); the held decode is that of the read
+      // a new document makes once the confirmation is older than the interval.
+      expect(
+        identityReads(stub),
+        "the settlement made no identity read",
+      ).toEqual([]);
+      const prepared = await reloadForHeldIdentityDecode(stub, page, {
         method: "json",
         path: "/browser-sessions/current",
         hold: true,
         substitute: consequential ? sam?.id : undefined,
       });
-      await signInForm(page, "kieran", "pw");
       await entered(page);
+      expectOneVerification(stub, page, prepared);
       const boundary = settleAuth(stub, pagesOf(page));
       expect(
         await within(boundary),
@@ -1636,13 +1814,18 @@ test.describe("revision 23, R28: the boundary covers response consumption and th
     context,
   }) => {
     const { stub, page } = await signedIn(context);
-    await arm(page, {
+    await signInForm(page, "kieran", "pw");
+    await settleAuth(stub, pagesOf(page));
+    expect(identityReads(stub), "the settlement made no identity read").toEqual(
+      [],
+    );
+    const prepared = await reloadForHeldIdentityDecode(stub, page, {
       method: "json",
       path: "/browser-sessions/current",
       hold: false,
     });
-    await signInForm(page, "kieran", "pw");
     await entered(page);
+    expectOneVerification(stub, page, prepared);
     const settled = await settleAuth(stub, pagesOf(page));
     expect(settled.pages[pagesOf(page).indexOf(page)]?.dom).toBe("displaying");
     await shownAs(stub, page, "kieran");
@@ -1739,21 +1922,56 @@ test.describe("revision 23, R28: the boundary covers response consumption and th
     const stub = await newStub(context);
     await holdBodies(context);
     const [a, b] = await twoTabs(context);
-    await arm(a, {
+    await signInForm(b, "sam", "pw2");
+    await settleAuth(stub, [a, b]);
+    // Revision 35 (R38): neither tab made an identity read after the settlement (HF-1). Only tab A's next document is made eligible.
+    expect(identityReads(stub), "the settlement made no identity read").toEqual(
+      [],
+    );
+    const peerReads = identityReads(stub, b).length;
+    const prepared = await reloadForHeldIdentityDecode(stub, a, {
       method: "json",
       path: "/browser-sessions/current",
       hold: true,
     });
-    await signInForm(b, "sam", "pw2");
     await entered(a);
+    expectOneVerification(stub, a, prepared);
+    // A's answer SURRENDERED its lease before the held decode, so B, watching that lock, may verify the lease and close and reopen
+    // its display meanwhile. Whatever B did, it is back on display with its own work finished, and A's decode is still held.
     await expect
-      .poll(async () => (await workOf(b)).dom, { timeout: 20_000 })
-      .toBe("displaying");
+      .poll(
+        async () => ({
+          dom: (await workOf(b)).dom,
+          peerReadsPending: identityReads(stub, b)
+            .slice(peerReads)
+            .filter(
+              (d) => !["fulfilled", "aborted", "failed"].includes(d.state),
+            ).length,
+        }),
+        { timeout: 20_000 },
+      )
+      .toEqual({ dom: "displaying", peerReadsPending: 0 });
+    const peerVerifications = identityReads(stub, b).slice(peerReads);
+    expect(
+      peerVerifications.map((d) => [d.state, d.status]),
+      "B's verifications of A's surrendered lease (if any) were answered cleanly",
+    ).toEqual(peerVerifications.map(() => ["fulfilled", 200]));
     const boundary = settleAuth(stub, [a, b]);
     expect(
       await within(boundary),
       "the other tab's undecoded identity answer is unfinished work",
     ).toBe("still-waiting");
+    const look = await lookAt(stub, [a, b]);
+    expect(
+      look.reasons[0],
+      "A's held decode alone keeps the boundary open",
+    ).toContain("reading response bodies: json /browser-sessions/current");
+    expect(
+      look.shared.some((r) => /unretired request leases: verification/.test(r)),
+      peerVerifications.length > 0
+        ? "B resolved A's surrendered lease: it is no longer in the record"
+        : "B did not verify: A's surrendered lease is still in the record",
+    ).toBe(peerVerifications.length === 0);
     await releaseBody(a);
     const settled = await boundary;
     expect(settled.pages.map((p) => p.dom)).toEqual([
@@ -1772,30 +1990,68 @@ test.describe("revision 23, R28: the boundary covers response consumption and th
     const [a, b] = await twoTabs(context);
     await signInForm(b, "sam", "pw2");
     await settleAuth(stub, [a, b]);
-    const verifications = () =>
-      stub.deliveries.filter(
-        (d) => d.page === b && d.path === "/browser-sessions/current",
-      ).length;
-    const before = verifications();
-    await a.evaluate(
-      (value) => {
-        sessionStorage.setItem("r23-arm", JSON.stringify(value));
-      },
-      {
-        method: "json",
-        path: "/browser-sessions/current",
-        hold: true,
-      } satisfies Arm,
+    // Revision 35 (R38): no identity read after the settlement (HF-1); tab A's reloaded document verifies because it is made eligible.
+    expect(identityReads(stub), "the settlement made no identity read").toEqual(
+      [],
     );
-    await a.reload();
+    const verifications = () => identityReads(stub, b).length;
+    const before = verifications();
+    // B's resolving read is held from BEFORE A's verification exists: A's answer surrenders its lease before the held decode, and B,
+    // watching that lock, would otherwise resolve it at once and finish the schedule unseen.
+    const heldB = stub.hold(
+      (r) =>
+        r.method === "GET" &&
+        r.path === "/browser-sessions/current" &&
+        r.page === b,
+    );
+    const prepared = await reloadForHeldIdentityDecode(stub, a, {
+      method: "json",
+      path: "/browser-sessions/current",
+      hold: true,
+    });
     await entered(a);
+    expectOneVerification(stub, a, prepared);
+    const ofA = identityReads(stub, a).at(-1);
+    // B's attributed unresolved work: its verification of A's surrendered lease, asked after A's and held.
+    await expect
+      .poll(
+        () =>
+          identityReads(stub, b)
+            .slice(before)
+            .map((d) => ({ held: d.hold === heldB, state: d.state })),
+        {
+          message:
+            "B's verification of A's surrendered lease is asked and held",
+          timeout: 20_000,
+        },
+      )
+      .toEqual([{ held: true, state: "held" }]);
+    expect(
+      (identityReads(stub, b).at(-1)?.n ?? 0) > (ofA?.n ?? Infinity),
+      "B's verification arrived after A's",
+    ).toBe(true);
     expect(
       await within(settleAuth(stub, [a, b])),
       "the reloaded tab's undecoded identity answer is unfinished work",
     ).toBe("still-waiting");
+    // B's held read keeps that boundary open too, so A's own decode is attributed directly.
+    expect(
+      (await lookAt(stub, [a, b])).reasons[0],
+      "the reloaded tab's held decode is its own unfinished work",
+    ).toContain("reading response bodies: json /browser-sessions/current");
     // The document goes with its pending decode: what it leaves is the record, which the other tab resolves.
     await a.close();
-    const settled = await settleAuth(stub, [b]);
+    const boundary = settleAuth(stub, [b]);
+    expect(
+      await within(boundary),
+      "the closed tab's lease, being resolved by B's held read, is unfinished work",
+    ).toBe("still-waiting");
+    expect(
+      (await lookAt(stub, [b])).shared.join("; "),
+      "the closed tab's surrendered lease is still in the record",
+    ).toMatch(/unretired request leases: verification/);
+    heldB.release();
+    const settled = await boundary;
     expect(
       settled.durable?.leases,
       "the closed tab's lease was resolved",
@@ -2022,5 +2278,62 @@ test.describe("revision 23, R28: the boundary covers response consumption and th
     ).rejects.toThrow(/never reached its completion boundary/);
     await other.close();
     await settleAuth(stub, [page]);
+  });
+});
+
+/**
+ * WEB-14a revision 35 (review R38, design assessment Q1/Q2 in a real engine): the premise the corrected schedules rest on, as one
+ * control pair on the same page. A reload within the interval makes NO identity read (the settlement's fresh shared confirmation: the
+ * accepted HF1-SHARED-CONFIRMATION-20261013 behaviour, so this half fails if the freshness guard is removed), and its token is adopted
+ * (the new document's stamped readers need no identity read for it). Once only the confirmation's time is aged, the same reload's new
+ * document makes exactly one identity read, its resume verification, and the account is shown.
+ */
+test.describe("revision 35, R38: a reload's verification and the shared confirmation's age", () => {
+  test("R38 [reload controls]: a reload within the interval makes no identity read; once only the confirmation's time is aged, the reloaded document makes exactly one, and the account is shown", async ({
+    page,
+    context,
+  }) => {
+    const stub = await newStub(context);
+    await page.goto("/");
+    await signInForm(page, "kieran", "pw");
+    await settleAuth(stub, pagesOf(page));
+    expect(identityReads(stub), "the settlement made no identity read").toEqual(
+      [],
+    );
+    // Fresh: a new document of the same settlement neither verifies nor reads an identity for its token.
+    const fresh = (await workOf(page)).doc;
+    await page.reload();
+    await expect
+      .poll(async () => (await workOf(page)).doc !== fresh, { timeout: 20_000 })
+      .toBe(true);
+    const freshBoundary = await settleAuth(stub, pagesOf(page));
+    expect(freshBoundary.pages[0]?.dom).toBe("displaying");
+    expect(
+      identityReads(stub),
+      "a reload within the interval makes no identity read",
+    ).toEqual([]);
+    // Aged: the same reload's document verifies once.
+    const prepared = await prepareEligibleVerification(stub, page);
+    expect(prepared.receipt).toMatchObject({
+      aged: true,
+      settlement_matched: true,
+      confirmation_matched: true,
+      other_fields_unchanged: true,
+    });
+    await page.reload();
+    await expectNewDocument(stub, page, prepared);
+    const agedBoundary = await settleAuth(stub, pagesOf(page));
+    expect(agedBoundary.pages[0]?.dom).toBe("displaying");
+    expect(
+      identityReads(stub).map((d) => [d.page === page, d.state, d.status]),
+      "the aged reload's document made exactly one identity read, answered cleanly",
+    ).toEqual([[true, "fulfilled", 200]]);
+    expect(
+      stub.requests
+        .filter((r) => r.csrf !== null)
+        .every((r) => r.csrf === `csrf.${stub.cookie}`),
+      "every stamped request carried the settled session's own token",
+    ).toBe(true);
+    await shownAs(stub, page, "kieran");
   });
 });

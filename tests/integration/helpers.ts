@@ -6,6 +6,12 @@ import {
   type TestInfo,
 } from "@playwright/test";
 import type { Session } from "../../src/session";
+import {
+  ageSharedConfirmation,
+  type ConfirmationAgeing,
+  type SettledIdentity,
+  STALE_CONFIRMATION_AGE_MS,
+} from "../e2e/shared-confirmation";
 
 /**
  * Part C (plan 14): helpers for the integration specs. They run the session module and its PRODUCTION adapters in a real engine
@@ -484,21 +490,8 @@ export const finishSignIn = (page: Page) =>
       window.__t.signin as Promise<{ kind: string; [key: string]: unknown }>,
   );
 
-export interface SettledLike {
-  account_id: string;
-  epoch: number;
-  session_id: string;
-}
-/** A redacted receipt of `withStaleSharedConfirmation`: booleans and ages, never the token, cookie or verifier. */
-export interface ConfirmationAgeing {
-  aged: true;
-  settlement_matched: true;
-  confirmation_matched: true;
-  /** The confirmation's age when it was found (the settlement's own: a few seconds at most). */
-  found_age_ms: number;
-  /** Its age as written, by the page's own clock (the clock the session compares it with). */
-  written_age_ms: number;
-}
+export type SettledLike = SettledIdentity;
+export type { ConfirmationAgeing };
 
 /**
  * WEB-08c revision 14 (review 14 R16, family `r43-premise-shared-confirmation`): makes the NEXT document's background identity read
@@ -508,115 +501,22 @@ export interface ConfirmationAgeing {
  * makes NO `GET /browser-sessions/current` (src/session/kernel/evaluate.ts, src/session/session.ts `confirmedRecently`): the
  * accepted behaviour, which a case that needs that read must not assume away.
  *
- * In ONE read-write transaction of this origin's `atlas-auth` record it checks that the record still settles exactly `expected`
- * (account, epoch, session) and holds a confirmation of exactly that session, and rewrites only that confirmation's `confirmed_at`
- * to `ageMs` before now (the page's clock); every other field, the token included, is kept, so the next document still adopts the
- * token (no extra CSRF read) and its only identity read is the verification, exactly as before the decision. Anything else (a
- * different or absent settlement, no confirmation, a confirmation of another session) is a SETUP failure: nothing is changed and
- * it throws. Resolves after the transaction committed.
+ * WEB-14a revision 35 (review R38, design assessment C1): the checked transaction is now tests/e2e/shared-confirmation.ts
+ * `ageSharedConfirmation`, shared with the production browser specs. It checks that the record still settles exactly `expected` and
+ * holds a confirmation of exactly that session, rewrites only `confirmed_at` to `ageMs` before now (the page's clock) and reads every
+ * other field, the token included, back unchanged, so the next document still adopts the token (no extra CSRF read) and its only
+ * identity read is the verification. Anything else is a SETUP failure with nothing changed. Resolves after the commit.
  *
- * It does not reach a live page's memory (its own last verification stays), so the read is eligible only in a NEW document
- * (`freshHarnessDocument`); and it does not stop another page from writing a new confirmation later (each caller here has one page).
+ * The contract here is the NEXT document's (`freshHarnessDocument`): the helper does not reach a live page's memory (its own last
+ * verification and last record read stay), and it does not stop another page from writing a new confirmation later (each caller of
+ * this name has one page). A same-document schedule (I-04) states its own eligibility premise and proves the request was issued.
  */
-export async function withStaleSharedConfirmation(
+export function withStaleSharedConfirmation(
   page: Page,
   expected: SettledLike,
-  ageMs = 120_000,
+  ageMs = STALE_CONFIRMATION_AGE_MS,
 ): Promise<ConfirmationAgeing> {
-  const outcome = await page.evaluate(
-    ({ want, ageMs }) =>
-      new Promise<
-        | { ok: true; foundAgeMs: number; writtenAgeMs: number }
-        | { ok: false; why: string }
-      >((resolve, reject) => {
-        const open = indexedDB.open("atlas-auth");
-        open.onerror = () => reject(open.error);
-        open.onsuccess = () => {
-          const db = open.result;
-          const write = db.transaction("records", "readwrite");
-          const store = write.objectStore("records");
-          const request = store.get("auth_state");
-          let verdict:
-            | { ok: true; foundAgeMs: number; writtenAgeMs: number }
-            | { ok: false; why: string } = {
-            ok: false,
-            why: "the record was not read",
-          };
-          const same = (
-            a: { account_id?: unknown; epoch?: unknown; session_id?: unknown },
-            b: typeof want,
-          ) =>
-            a.account_id === b.account_id &&
-            a.epoch === b.epoch &&
-            a.session_id === b.session_id;
-          request.onsuccess = () => {
-            const record = request.result as
-              | (Record<string, unknown> & {
-                  settled?: Record<string, unknown> | null;
-                  confirmation?: Record<string, unknown> | null;
-                })
-              | undefined;
-            if (!record?.settled || !same(record.settled, want)) {
-              verdict = {
-                ok: false,
-                why: "the record does not settle the expected session",
-              };
-              return;
-            }
-            if (!record.confirmation || !same(record.confirmation, want)) {
-              verdict = {
-                ok: false,
-                why: "the record has no confirmation of the expected session",
-              };
-              return;
-            }
-            const now = Date.now();
-            const found =
-              now - Date.parse(String(record.confirmation.confirmed_at));
-            const confirmedAt = new Date(now - ageMs).toISOString();
-            store.put(
-              {
-                ...record,
-                confirmation: {
-                  ...record.confirmation,
-                  confirmed_at: confirmedAt,
-                },
-              },
-              "auth_state",
-            );
-            verdict = {
-              ok: true,
-              foundAgeMs: found,
-              writtenAgeMs: now - Date.parse(confirmedAt),
-            };
-          };
-          write.oncomplete = () => {
-            db.close();
-            resolve(verdict);
-          };
-          write.onerror = () => {
-            db.close();
-            reject(write.error);
-          };
-          write.onabort = () => {
-            db.close();
-            reject(write.error ?? new Error("the transaction aborted"));
-          };
-        };
-      }),
-    { want: expected, ageMs },
-  );
-  if (!outcome.ok)
-    throw new Error(
-      `setup: the shared confirmation was not aged (${outcome.why}); nothing was changed`,
-    );
-  return {
-    aged: true,
-    settlement_matched: true,
-    confirmation_matched: true,
-    found_age_ms: outcome.foundAgeMs,
-    written_age_ms: outcome.writtenAgeMs,
-  };
+  return ageSharedConfirmation(page, expected, ageMs);
 }
 
 /**

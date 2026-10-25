@@ -1,5 +1,9 @@
 import type { BrowserContext, Page, TestInfo } from "@playwright/test";
 import {
+  ageSharedConfirmation,
+  sharedConfirmationAge,
+} from "../e2e/shared-confirmation";
+import {
   bootHarness,
   expect,
   finishSignIn,
@@ -8,6 +12,8 @@ import {
   raw,
   rawSignIn,
   records,
+  type SettledLike,
+  setVisibility,
   startSignIn,
   swapCookie,
   test,
@@ -26,11 +32,12 @@ const CURRENT = `${V1}/browser-sessions/current`;
 const ME = `${V1}/me`;
 const SESSIONS = `${V1}/sessions`;
 /**
- * Every endpoint a fresh I-04 page reaches (WEB-14a revision 18, review R25). After settlement the production composition reads
- * `/browser-sessions/current` (the resume verification) and `/me` (the profile source); nothing else in this boundary reads with the
- * new cookie: the device mirror needs an open account database (none exists in a fresh context), the sharing defaults are read on
- * demand, no settings screen is mounted, and the harness starts no production leader. A change that adds a reader fails the
- * inventory assertion instead of silently deciding which request sees the dead cookie first.
+ * Every endpoint a fresh I-04 page reaches (WEB-14a revision 18, review R25). After settlement the production composition reads `/me`
+ * (the profile source) and, once the schedule has made it eligible (revision 35, below), `/browser-sessions/current` (the resume
+ * verification); nothing else in this boundary reads with the new cookie: the device mirror needs an open account database (none
+ * exists in a fresh context), the sharing defaults are read on demand, no settings screen is mounted, and the harness starts no
+ * production leader. A change that adds a reader fails the inventory assertion instead of silently deciding which request sees the
+ * dead cookie first.
  */
 const I04_ENDPOINTS = new Set([
   "/health",
@@ -167,6 +174,21 @@ async function expectFreshBoundary(context: BrowserContext, page: Page) {
  * One schedule: the activation's answer is held after the backend created the session; when `revoked`, the attempt is cancelled
  * with its verifier (the backend revokes that session) before the late 200 delivers its cookie. Both background readers are gated
  * from before the cookie exists, so which one (or the explicit list) sees the server's answer first is the test's choice, `first`.
+ *
+ * WEB-14a revision 35 (review R38, family `integration-late-activation-observation-ordering`, classification `regression` of the
+ * maintained premise; design assessment C2): the settlement no longer starts the resume verification. Since
+ * HF1-SHARED-CONFIRMATION-20261013 it writes a shared confirmation of exactly the settled session, and while that is less than the
+ * interval (30 s) old a displaying page makes no `/browser-sessions/current` read (src/session/session.ts `confirmedRecently`: the
+ * accepted behaviour, kept). The schedule therefore establishes the read it gates, in the SAME document (a reload would orphan the held
+ * `/me` and load the app route without the harness bridge):
+ *  1. it observes the premise: the page displays, `/me` is held, the confirmation is fresh and no verification was issued;
+ *  2. it ages only the confirmation's time (tests/e2e/shared-confirmation.ts: checked transaction, token and every other field kept);
+ *  3. it re-checks that no other writer refreshed it, then hides and re-exposes the page (`setVisibility`: the labelled synthetic
+ *     visibility lifecycle of docs/browser-support.md). The lift's evaluation reads the aged record and the display's publication
+ *     asks for the verification. This premise holds only because this fresh document has never made or attempted a verification
+ *     (the fresh confirmation returned before `lastVerifiedAt` was set), which step 1 shows;
+ *  4. it waits for the real verification request, its lease and the proxy's held answer before any response is chosen.
+ * Each step that fails is a setup failure named as such; nothing is retried and no bound changed.
  */
 async function lateActivation(
   page: Page,
@@ -197,11 +219,80 @@ async function lateActivation(
   // The late answer arrives: a 200 whose cookie is for a session that is already dead when `revoked`.
   await proxy.release(activation.id);
   expect((await finishSignIn(page)).kind).toBe("settled");
-  const account = (await records(page)).auth_state.settled?.account_id;
+  const settled = (await records(page)).auth_state.settled as SettledLike;
+  const account = settled?.account_id;
   expect(account).toBeTruthy();
-  // Settlement starts both production readers. Each has asked, and the backend has answered, but neither answer has been delivered.
-  await untilHeld(gates.id(CURRENT));
+  // Revision 35 (R38), step 1: settlement starts the profile reader, whose answer is held; it does NOT start the resume verification.
   await untilHeld(gates.id(ME));
+  await untilView(page, "displaying");
+  const verificationsIssued = (events: TraceEvent[]) =>
+    events.filter(
+      (e) => e.event === "request.issued" && e.data?.klass === "verification",
+    );
+  expect(
+    await sharedConfirmationAge(page, settled),
+    "setup: the settlement's shared confirmation is fresh (the premise)",
+  ).toMatchObject({
+    settlement_matched: true,
+    confirmation_matched: true,
+    eligible: false,
+  });
+  expect(
+    verificationsIssued(await traceOf(page)),
+    "setup: this document has made no verification (the fresh confirmation spared it)",
+  ).toEqual([]);
+  expect(
+    (await proxy.log()).filter((e) => pathOf(e) === CURRENT),
+    "setup: no identity read reached the proxy",
+  ).toEqual([]);
+  // Step 2: only the confirmation's time is rewritten.
+  expect(await ageSharedConfirmation(page, settled)).toMatchObject({
+    aged: true,
+    other_fields_unchanged: true,
+  });
+  // Step 3: still aged (no other writer), then the display is gated and lifted in this same document.
+  expect(
+    (await sharedConfirmationAge(page, settled)).eligible,
+    "setup: no other writer refreshed the confirmation before the lift",
+  ).toBe(true);
+  const liftMark = (await traceOf(page)).length;
+  await setVisibility(page, "hidden");
+  await setVisibility(page, "visible");
+  // Step 4: the lift's own verification, issued once, leased, asked of the backend and held by the proxy.
+  await expect
+    .poll(
+      async () => {
+        const since = (await traceOf(page)).slice(liftMark);
+        return {
+          gated: since.some((e) => e.event === "gate.level0"),
+          evaluated: since.some(
+            (e) => e.event === "evaluate" && e.data?.reason === "visible",
+          ),
+          verifications: verificationsIssued(since).length,
+        };
+      },
+      {
+        message:
+          "setup (R38): the lift re-evaluates the aged record and issues one verification",
+        timeout: 15_000,
+      },
+    )
+    .toEqual({ gated: true, evaluated: true, verifications: 1 });
+  await untilHeld(gates.id(CURRENT));
+  expect(
+    Object.values((await records(page)).auth_state.leases).filter(
+      (lease) =>
+        lease.class === "verification" &&
+        lease.account_id === account &&
+        lease.epoch === settled.epoch,
+    ),
+    "the verification's own request lease is in the record",
+  ).toHaveLength(1);
+  expect(
+    (await proxy.log()).filter((e) => pathOf(e) === CURRENT),
+    "exactly one identity read reached the proxy",
+  ).toHaveLength(1);
+  // Each reader has asked, and the backend has answered, but neither answer has been delivered.
   const status = revoked ? 401 : 200;
   const background = (await proxy.log()).filter(
     (e) => [CURRENT, ME].includes(pathOf(e)) && e.status !== undefined,
