@@ -8,8 +8,12 @@ import {
 } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { DraftRow } from "../../../src/data";
+import type { CacheRow, DraftRow } from "../../../src/data";
 import * as copy from "../../../src/features/calendars/copy";
+import {
+  SHOW_NEXT_CALENDARS,
+  SHOW_PREVIOUS_CALENDARS,
+} from "../../../src/features/calendars/copy-anchor";
 import * as words from "../../../src/features/calendars/copy-import";
 import { IMPORT_ENDPOINT } from "../../../src/features/calendars/model/commands";
 import { installMatchMedia } from "../../helpers/match-media";
@@ -22,6 +26,11 @@ import { draftRow, headerOf } from "../../support/data/rows";
  * the native specs (E-IMP1..5) cover real engines, layout and the network.
  */
 installMatchMedia({ width: 1440 });
+/** The control asserted present (an assertion, not a query error, when it is missing), then returned to act on. */
+const present = (element: HTMLElement | null): HTMLElement => {
+  expect(element).not.toBeNull();
+  return element as HTMLElement;
+};
 afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
@@ -322,6 +331,301 @@ describe("the dialog", () => {
     expect(importButton).toBeDisabled();
     expect(reasonOf(importButton)).toBe(words.SOURCE_GONE);
     expect(drafts(w)).toEqual([]);
+  });
+});
+
+/** Holds a file's read until released, so a test can act while the dialog is still reading it (R1). */
+function heldFile(text: string, name: string) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const file = new File([text], name, { type: "text/calendar" });
+  const bytes = new TextEncoder().encode(text).buffer;
+  Object.defineProperty(file, "arrayBuffer", {
+    value: async () => {
+      await gate;
+      return bytes;
+    },
+  });
+  return { file, release };
+}
+
+/** Holds the delivery of the outbox's successful answer (the draft IS stored), so a test can edit the dialog before it settles (R3). */
+function holdEnqueue(w: World) {
+  const outbox = w.env.outbox();
+  if (outbox === null) throw new Error("no outbox");
+  const original = outbox.enqueue.bind(outbox);
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const spy = vi
+    .spyOn(outbox, "enqueue")
+    .mockImplementationOnce(async (request) => {
+      const outcome = await original(request);
+      await gate;
+      return outcome;
+    });
+  return { release, spy };
+}
+
+describe("revision 1: only the latest file, only what was submitted (R1, R3)", () => {
+  const REPLACEMENT = ICS.replace("Bin day", "Recycling");
+
+  test("R1: choosing another file forgets the previous one at once; while it is read, no press, Enter or direct submission stores anything", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, ICS, "old.ics");
+    const held = heldFile(REPLACEMENT, "new.ics");
+    const input = dialog.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [held.file] } });
+    });
+    // The old file is no longer shown or importable; Import says why it waits.
+    expect(within(dialog).getByText(words.READING)).toBeInTheDocument();
+    expect(dialog.querySelector("[data-import-file]")).toBeNull();
+    const importButton = within(dialog).getByRole("button", {
+      name: words.IMPORT,
+    });
+    expect(importButton).toBeDisabled();
+    expect(reasonOf(importButton)).toBe(words.WAIT_FOR_FILE);
+    const form = dialog.querySelector("form") as HTMLFormElement;
+    fireEvent.click(importButton);
+    act(() => {
+      form.requestSubmit();
+    });
+    fireEvent.submit(form);
+    await w.settle();
+    expect(drafts(w)).toEqual([]);
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    // Nothing is said to be missing either: the file is being read.
+    expect(within(dialog).queryByText(words.FILE_REQUIRED)).toBeNull();
+    // Once read, the NEW file is the one imported.
+    await act(async () => held.release());
+    await w.settle();
+    expect(dialog.querySelector("[data-import-file]")?.textContent).toMatch(
+      /new\.ics/,
+    );
+    press(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    expect(bodyOf(w, drafts(w)[0]?.local_id as string)).toMatchObject({
+      ics: REPLACEMENT,
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("R1 control: a replacement whose read completed is imported (and the earlier file is not)", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, ICS, "old.ics");
+    await choose(w, dialog, REPLACEMENT, "new.ics");
+    press(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    expect(bodyOf(w, drafts(w)[0]?.local_id as string)).toMatchObject({
+      ics: REPLACEMENT,
+    });
+  });
+
+  test("R3: a save that completes after the window was changed keeps the dialog with the newer window; the next Import is a new import of it", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, ICS);
+    const from = within(dialog).getByLabelText(words.FROM) as HTMLInputElement;
+    const through = within(dialog).getByLabelText(
+      words.THROUGH,
+    ) as HTMLInputElement;
+    fireEvent.change(from, { target: { value: "2026-11-01" } });
+    fireEvent.change(through, { target: { value: "2026-12-31" } });
+    const held = holdEnqueue(w);
+    press(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    fireEvent.change(from, { target: { value: "2026-11-03" } });
+    await act(async () => held.release());
+    await w.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    expect(from.value).toBe("2026-11-03");
+    expect(within(dialog).getByText(words.IMPORT_QUEUED_NEWER)).toBeVisible();
+    const first = drafts(w)[0] as DraftRow;
+    expect(bodyOf(w, first.local_id)).toMatchObject({ from: "2026-11-01" });
+    press(dialog, words.IMPORT);
+    await w.settle();
+    const stored = drafts(w);
+    expect(stored).toHaveLength(2);
+    const second = stored.find((d) => d.local_id !== first.local_id);
+    expect(bodyOf(w, second?.local_id as string)).toMatchObject({
+      from: "2026-11-03",
+      through: "2026-12-31",
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test("R3: changed and changed back while saving: still kept open, and Import again is a NEW import (a stored import's identity is spent)", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, ICS);
+    const from = within(dialog).getByLabelText(words.FROM) as HTMLInputElement;
+    const original = from.value;
+    const held = holdEnqueue(w);
+    press(dialog, words.IMPORT);
+    await w.settle();
+    fireEvent.change(from, { target: { value: "2026-11-03" } });
+    fireEvent.change(from, { target: { value: original } });
+    await act(async () => held.release());
+    await w.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    press(dialog, words.IMPORT);
+    await w.settle();
+    const stored = drafts(w);
+    expect(stored).toHaveLength(2);
+    expect(new Set(stored.map((d) => d.local_id)).size).toBe(2);
+    expect(bodyOf(w, stored[1]?.local_id as string)).toEqual(
+      bodyOf(w, stored[0]?.local_id as string),
+    );
+  });
+
+  test("R3: a file chosen while the save is being made is kept too (the dialog stays with it)", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, ICS, "old.ics");
+    const held = holdEnqueue(w);
+    press(dialog, words.IMPORT);
+    await w.settle();
+    await choose(w, dialog, REPLACEMENT, "new.ics");
+    await act(async () => held.release());
+    await w.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    expect(dialog.querySelector("[data-import-file]")?.textContent).toMatch(
+      /new\.ics/,
+    );
+    expect(drafts(w)).toHaveLength(1);
+    expect(bodyOf(w, drafts(w)[0]?.local_id as string)).toMatchObject({
+      ics: ICS,
+    });
+  });
+
+  test("R3 control: nothing changed while saving closes the dialog with the queued announcement", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, ICS);
+    const held = holdEnqueue(w);
+    press(dialog, words.IMPORT);
+    await w.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    await act(async () => held.release());
+    await w.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(announced()).toContain(words.IMPORT_QUEUED);
+  });
+});
+
+describe("revision 1: every source can be chosen from the drop zone (R4)", () => {
+  const many = (count: number, over: Partial<CacheRow> = {}) =>
+    Array.from({ length: count }, (_, i) =>
+      sourceRow({
+        id: `00000000-0000-4000-8000-${String(i + 1000).padStart(12, "0")}`,
+        label: `Calendar ${String(i).padStart(3, "0")}`,
+        ...over,
+      }),
+    );
+  async function dropped(w: World) {
+    await screen.findByText(words.DROP_PROMPT);
+    const zone = document.querySelector("[data-import-drop]") as HTMLElement;
+    const input = zone.querySelector('input[type="file"]') as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(input, {
+        target: { files: [new File([ICS], "drop.ics")] },
+      });
+    });
+    await w.settle();
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() =>
+      expect(dialog.querySelector("[data-import-file]")).not.toBeNull(),
+    );
+    return dialog;
+  }
+  const options = (dialog: HTMLElement) =>
+    [
+      ...(within(dialog).getByLabelText(words.SOURCE) as HTMLSelectElement)
+        .options,
+    ].map((o) => o.textContent);
+
+  test("101 sources: the 101st is reached with Show next calendars, chosen, and imported into; the choice survives paging back", async () => {
+    const rows = many(101);
+    const w = await calendarWorld({ cache: rows, online: false });
+    const dialog = await dropped(w);
+    expect(options(dialog)).toHaveLength(100);
+    expect(options(dialog)).not.toContain("Calendar 100");
+    fireEvent.click(
+      present(
+        within(dialog).queryByRole("button", { name: SHOW_NEXT_CALENDARS }),
+      ),
+    );
+    await w.settle();
+    // The chosen (first) source stays an option while page two is shown; paging alone changes nothing.
+    expect(options(dialog)).toEqual(["Calendar 000", "Calendar 100"]);
+    const select = within(dialog).getByLabelText(
+      words.SOURCE,
+    ) as HTMLSelectElement;
+    expect(select.value).toBe(rows[0]?.id);
+    fireEvent.change(select, { target: { value: rows[100]?.id } });
+    await w.settle();
+    fireEvent.click(
+      present(
+        within(dialog).queryByRole("button", { name: SHOW_PREVIOUS_CALENDARS }),
+      ),
+    );
+    await w.settle();
+    expect(select.value).toBe(rows[100]?.id);
+    expect(options(dialog)).toHaveLength(101);
+    press(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    expect(drafts(w)[0]).toMatchObject({ target_id: rows[100]?.id });
+  });
+
+  test("100 view-only sources and an editable 101st: the drop zone is available and its dialog reaches the editable one", async () => {
+    const rows = [
+      ...many(100, { can_edit: false }),
+      sourceRow({
+        id: "00000000-0000-4000-8000-000000009999",
+        label: "Zebra calendar",
+      }),
+    ];
+    const w = await calendarWorld({ cache: rows, online: false });
+    expect(
+      await screen.findByRole("button", { name: words.BROWSE }),
+    ).toBeEnabled();
+    const dialog = await dropped(w);
+    expect(
+      within(dialog).getByRole("button", { name: words.IMPORT }),
+    ).toBeDisabled();
+    fireEvent.click(
+      present(
+        within(dialog).queryByRole("button", { name: SHOW_NEXT_CALENDARS }),
+      ),
+    );
+    await w.settle();
+    expect(options(dialog)).toEqual(["Zebra calendar"]);
+    press(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)[0]).toMatchObject({
+      target_id: "00000000-0000-4000-8000-000000009999",
+    });
+  });
+
+  test("control: two sources need no paging", async () => {
+    const w = await calendarWorld({ cache: many(2), online: false });
+    const dialog = await dropped(w);
+    expect(options(dialog)).toEqual(["Calendar 000", "Calendar 001"]);
+    expect(
+      within(dialog).queryByRole("button", { name: SHOW_NEXT_CALENDARS }),
+    ).toBeNull();
   });
 });
 

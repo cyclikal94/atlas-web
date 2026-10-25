@@ -47,6 +47,7 @@ export const CANT_ACKNOWLEDGE = "You can't acknowledge this review.";
 export const ACKNOWLEDGE_REJECTED = "Couldn't acknowledge this review.";
 export const DISMISS_REVIEW = "Dismiss";
 export const SHOW_MORE_REVIEWS = "Show more reviews";
+export const SHOW_PREVIOUS_REVIEWS = "Show previous reviews";
 export const NOT_SAVED_REVIEW = "Couldn't save — try again.";
 /** Provisional: a calendar this device does not hold. */
 export const ITS_CALENDAR = "its calendar";

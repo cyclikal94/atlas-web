@@ -113,9 +113,14 @@ export interface TasksApi {
     progressId: string,
     after: number,
   ): Promise<TasksResult<ProgressJournal>>;
-  /** WEB-13b: the task's calendar binding, online only (case 3: offline says so; nothing is cached). */
+  /**
+   * WEB-13b: the task's calendar binding, online only (case 3: offline says so; nothing is cached). `live` (R6) is the caller's lifetime,
+   * asked before EVERY admission of the request, the first and each one after a `not_sent` wait: once it says no, nothing more is sent
+   * and the answer is `closed`; going offline meanwhile answers `offline`, also without sending.
+   */
   readAnchor(
     taskId: string,
+    live?: () => boolean,
   ): Promise<TasksResult<{ binding: CalendarBinding | null }>>;
   /** `POST /task-access-commands` with the caller's key and the canonical body of one attempt. */
   enrol(
@@ -217,6 +222,29 @@ export async function untilSent<T>(
   }
 }
 
+/**
+ * `untilSent` for a caller with a lifetime (WEB-13b R6, the WEB-13a calendar reads' rule): `live`, then the device's connectivity, are
+ * asked before EVERY admission of the request, the first included and each one after a `not_sent` wait. Once `live` says no nothing more
+ * is sent and the answer is `closed`; offline, nothing is sent and the answer is `offline`. An answer to a request that WAS sent is
+ * returned as it is, whatever became of the caller.
+ */
+export async function untilSentWhile<T>(
+  run: () => Promise<TasksResult<T>>,
+  live: () => boolean,
+  offline: () => TasksResult<never> | null,
+): Promise<TasksResult<T>> {
+  for (let attempt = 0; ; attempt += 1) {
+    if (!live()) return { ok: false, kind: "closed" };
+    const away = offline();
+    if (away !== null) return away;
+    const result = await run();
+    if (result.ok || result.kind !== "not_sent") return result;
+    const delay = NOT_SENT_DELAYS_MS[attempt];
+    if (delay === undefined) return result;
+    await new Promise<void>((resolve) => setTimeout(resolve, delay));
+  }
+}
+
 const parseReceipt = (body: unknown): { revision: number } | null =>
   typeof body === "object" &&
   body !== null &&
@@ -241,21 +269,23 @@ export function createTasksApi(
     path: string,
     params: Record<string, unknown>,
     parse: (body: unknown) => T | null,
-  ): Promise<TasksResult<T>> =>
-    Promise.resolve(
-      offline() ??
-        untilSent(() =>
-          call(
-            () =>
-              (
-                client() as unknown as {
-                  GET(p: string, o: unknown): Promise<Answered>;
-                }
-              ).GET(path, { params }),
-            parse,
-          ),
-        ),
-    );
+    live?: () => boolean,
+  ): Promise<TasksResult<T>> => {
+    const send = () =>
+      call(
+        () =>
+          (
+            client() as unknown as {
+              GET(p: string, o: unknown): Promise<Answered>;
+            }
+          ).GET(path, { params }),
+        parse,
+      );
+    // A read with a lifetime is admitted only while its caller is live (R6); the others keep the stamped-call contract as it was.
+    return live === undefined
+      ? Promise.resolve(offline() ?? untilSent(send))
+      : untilSentWhile(send, live, offline);
+  };
   return {
     readDaily: (q) =>
       get(
@@ -282,8 +312,8 @@ export function createTasksApi(
     readTask: (id) => get("/tasks/{id}", { path: { id } }, parseTaskDetail),
     readEnrolment: (taskId) =>
       get("/tasks/{id}/enrolment", { path: { id: taskId } }, parseEnrolment),
-    readAnchor: (taskId) =>
-      get("/tasks/{id}/anchor", { path: { id: taskId } }, parseBinding),
+    readAnchor: (taskId, live) =>
+      get("/tasks/{id}/anchor", { path: { id: taskId } }, parseBinding, live),
     readJournal: (progressId, after) =>
       get(
         "/progress/{id}/entries",

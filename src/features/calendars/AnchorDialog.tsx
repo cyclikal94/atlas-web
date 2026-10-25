@@ -3,6 +3,7 @@ import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
 import { CANCEL } from "./copy";
 import {
+  ANCHOR_SAVED_NEWER,
   ANCHOR_TITLE,
   CALENDAR_DAYS,
   CHANGE_EVENT,
@@ -53,7 +54,10 @@ import { EventPicker, FieldPicker } from "./pickers";
  * under their field, on an attempted save; nothing typed is cleared.
  *
  * What Save and Remove DO is the caller's (`onSave`/`onRemove`): the new-task form keeps the anchor for its create; a task's own section
- * queues `set_anchor`. Each returns null when done (the panel closes) or the words of why not (the panel stays, with everything kept).
+ * queues `set_anchor`. Each returns null when done or the words of why not (the panel stays, with everything kept). Done settles only what
+ * was submitted (R3, PRODUCT-DECISIONS-20261011): the panel closes when nothing was changed in it while the save was being made; otherwise
+ * it stays with the newer input (hidden fields' values included), says that the save was made as pressed, and tells the caller
+ * (`onKept`), whose next save is a new operation.
  */
 export function AnchorDialog({
   initial,
@@ -61,6 +65,7 @@ export function AnchorDialog({
   repeats,
   onSave,
   onRemove,
+  onKept,
   onClose,
 }: {
   initial: AnchorDraft;
@@ -74,6 +79,8 @@ export function AnchorDialog({
     draft: AnchorDraft,
   ): Promise<string | null>;
   onRemove?(): Promise<string | null>;
+  /** A save or removal was done while newer input was kept in the panel (it stays open). */
+  onKept?(): void;
   onClose(): void;
 }) {
   const formId = useId();
@@ -84,6 +91,8 @@ export function AnchorDialog({
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const acting = useRef(false);
+  // Every edit moves it (a pick, a weekday, a hidden field's value included): a done save closes the panel only at the revision it submitted.
+  const revision = useRef(0);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -91,19 +100,26 @@ export function AnchorDialog({
       mounted.current = false;
     };
   }, []);
-  const edit = (patch: Partial<AnchorDraft>) =>
+  const edit = (patch: Partial<AnchorDraft>) => {
+    revision.current += 1;
     setDraft((d) => ({ ...d, ...patch }));
+  };
 
   const act = async (run: () => Promise<string | null>) => {
     if (acting.current) return;
     acting.current = true;
+    const submitted = revision.current;
     setBusy(true);
     setMessage(null);
     try {
       const refused = await run();
       if (!mounted.current) return;
-      if (refused === null) onClose();
-      else setMessage(refused);
+      if (refused !== null) setMessage(refused);
+      else if (revision.current === submitted) onClose();
+      else {
+        setMessage(ANCHOR_SAVED_NEWER);
+        onKept?.();
+      }
     } finally {
       acting.current = false;
       if (mounted.current) setBusy(false);
@@ -300,10 +316,16 @@ export function AnchorDialog({
                   autoComplete="off"
                   value={draft.time}
                   error={errors.time}
-                  onChange={(event) => edit({ time: event.target.value })}
+                  // Editing the time ends the anchor's own exact time (R5): what is typed is what is sent.
+                  onChange={(event) =>
+                    edit({ time: event.target.value, keptTime: null })
+                  }
                 />
                 <span className="flex">
-                  <Button variant="quiet" onClick={() => edit({ time: "" })}>
+                  <Button
+                    variant="quiet"
+                    onClick={() => edit({ time: "", keptTime: null })}
+                  >
                     {CLEAR_TIME}
                   </Button>
                 </span>

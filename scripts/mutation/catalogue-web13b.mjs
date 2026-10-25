@@ -29,7 +29,13 @@ const staleRetried = (t) =>
     '  for (const code of ["fetch_failed"])\n',
   );
 /** The binding is read again on every mount (the visit's read is not kept). */
-const readEveryMount = (t) => sub(t, "  if (own.reads.has(key)) return;\n", "");
+// Re-anchored in revision 1 (R6 added the lifetime to the same guard, which is kept): the same defect.
+const readEveryMount = (t) =>
+  sub(
+    t,
+    "  if (own.reads.has(key) || !live()) return;\n",
+    "  if (!live()) return;\n",
+  );
 
 /** Unit mutants (layers L1a pure, L1b the production composition over the IndexedDB double), MU-2437..MU-2465 and MU-2470. */
 export const UNIT_13B = [
@@ -296,8 +302,9 @@ export const UNIT_13B = [
     patch: (t) =>
       sub(
         t,
-        '          : { kind: "calendar_days", days, time: `${time}:00` };\n',
-        '          : { kind: "calendar_days", days, time };\n',
+        // Re-anchored in revision 1 (R5 moved the minute's `:00` into `timeToSend`); the same defect.
+        "    : `${time}:00`;\n",
+        "    : time;\n",
       ),
   },
   {

@@ -7,7 +7,6 @@ import {
   useCacheGate,
   useOptionalDataEnv,
   usePendingCreates,
-  useResourceList,
   useResourceView,
 } from "../../data";
 import { refusalMessage } from "./AddSourceDialog";
@@ -24,6 +23,7 @@ import {
   IMPORT,
   IMPORT_CLOSED_REFRESHING,
   IMPORT_QUEUED,
+  IMPORT_QUEUED_NEWER,
   IMPORT_TITLE,
   NO_SOURCES_TO_IMPORT,
   READING,
@@ -31,6 +31,7 @@ import {
   SOURCE_GONE,
   THROUGH,
   VIEW_ONLY_IMPORT,
+  WAIT_FOR_FILE,
   WINDOW_FORMAT,
   WINDOW_RANGE,
   WINDOW_SPAN,
@@ -53,6 +54,7 @@ import {
 import { displayedRow } from "./model/status";
 import { createSubmission } from "./model/submission";
 import { projectSourceCreate } from "./register";
+import { type SourcePage, SourcePages, useSourcePage } from "./source-pages";
 
 const VIEW_KINDS = { create: CREATE_SOURCE, settings: CONFIGURE_SOURCE };
 /** The id a view is read for while no source is chosen: no resource has it. */
@@ -110,20 +112,22 @@ function useSourceState(id: string | null): {
       };
 }
 
-/** The sources this account can import into, for the drop zone's dialog: the first window of cached ones, then this device's pending ones. */
-export function useImportableSources(): CacheRow[] {
-  const cached = useResourceList({ kind: "calendar_source", limit: 100 });
+/**
+ * The sources this account can import into, for the drop zone and its dialog: those of ONE page of cached sources (`source-pages.tsx`,
+ * with "Show previous/next calendars", R4), then this device's pending ones. `page.partial`: other pages may hold more.
+ */
+export function useImportableSources(): { rows: CacheRow[]; page: SourcePage } {
+  const page = useSourcePage();
   const pending = usePendingCreates(CREATE_SOURCE);
-  const out: CacheRow[] = [];
-  if (cached.status === "ready")
-    for (const row of cached.value.rows)
-      if (row.merged.can_edit && !row.merged.archived) out.push(row.merged);
+  const rows: CacheRow[] = [];
+  for (const row of page.rows ?? [])
+    if (row.can_edit && !row.archived) rows.push(row);
   if (pending.status === "ready")
     for (const draft of pending.value.drafts) {
       const row = projectSourceCreate(draft);
-      if (row !== null) out.push(row);
+      if (row !== null) rows.push(row);
     }
-  return out;
+  return { rows, page };
 }
 
 interface ChosenFile {
@@ -141,7 +145,13 @@ interface ChosenFile {
  *
  * Explicit consent is the dialog itself: the file's name, size and event count, the source and the window are shown, and nothing is
  * stored until Import is pressed. A save the outbox refuses keeps the dialog open with what was chosen; pressing Import again for the
- * same file, source and window reuses the same save identity, so a save whose completion was lost is not made twice.
+ * same file, source and window reuses the same save identity, so a save whose completion was lost is not made twice. A queued import's
+ * identity is spent: a later Import is a new operation, whatever it holds.
+ *
+ * Only the file the person last chose can be imported (R1): choosing another forgets the previous file AT ONCE, and nothing can be
+ * imported (the button, Enter or any other submission) until the new one has been read and checked. A save settles only what it
+ * submitted (R3, PRODUCT-DECISIONS-20261011): when the file, source or window was changed while it was being stored, the dialog stays
+ * open with the newer choices and says that the import was queued as it was pressed.
  */
 export function ImportDialog({
   sourceId,
@@ -160,7 +170,7 @@ export function ImportDialog({
   const [chosen, setChosen] = useState<string | null>(sourceId);
   const importable = useImportableSources();
   // The drop zone's dialog starts on the first source it may import into.
-  const selected = sourceId ?? chosen ?? importable[0]?.id ?? null;
+  const selected = sourceId ?? chosen ?? importable.rows[0]?.id ?? null;
   const { state, refreshing } = useSourceState(selected);
   const [window_, setWindow] = useState(() => defaultWindow(deviceToday()));
   const [errors, setErrors] = useState<{
@@ -174,6 +184,11 @@ export function ImportDialog({
   const [reading, setReading] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
   const tokens = useRef(0);
+  // The file being read now (its token), or null: while set, nothing can be imported (R1). A ref, so a submission in the same turn as the
+  // choice is refused as well.
+  const pendingRead = useRef<number | null>(null);
+  // Every change of what would be imported (file, source, window) moves this: a save settles the dialog only at the revision it submitted.
+  const revision = useRef(0);
   const submission = useRef(
     createSubmission<{
       source: string;
@@ -196,11 +211,16 @@ export function ImportDialog({
     if (picked === undefined) return;
     tokens.current += 1;
     const token = tokens.current;
+    revision.current += 1;
+    pendingRead.current = token;
+    // The previous file is no longer the person's choice: it is forgotten now, not when the new one has been read.
+    setFile(null);
     setReading(true);
     setErrors((e) => ({ ...e, file: null }));
     const check = await readImportFile(picked);
     // A later choice wins; a read that finishes after the dialog closed shows nothing.
     if (!mounted.current || token !== tokens.current) return;
+    pendingRead.current = null;
     setReading(false);
     setFile({ name: picked.name, token, check });
   };
@@ -238,6 +258,8 @@ export function ImportDialog({
 
   const submit = async () => {
     if (saving.current || !enablement.enabled || source === null) return;
+    // While the latest choice is still being read nothing is imported (nor said to be missing), whatever submitted the form.
+    if (pendingRead.current !== null) return;
     const windowCheck = checkWindow(window_.from, window_.through);
     const windowError = windowCheck.ok
       ? null
@@ -285,6 +307,7 @@ export function ImportDialog({
       through: window_.through,
       file: file.token,
     });
+    const submitted = revision.current;
     setBusy(true);
     setMessage(null);
     saving.current = true;
@@ -299,9 +322,14 @@ export function ImportDialog({
         }),
       );
       if (outcome.kind === "queued") {
+        // Its identity is spent: pressing Import again, even for the same choices, is a new import.
+        submission.current.invalidate();
         announcer.announce(IMPORT_QUEUED);
-        // A save that finished after the dialog closed closes nothing: another dialog may be open by then.
-        if (mounted.current) onClose();
+        // A save that finished after the dialog closed closes nothing: another dialog may be open by then. One whose choices were changed
+        // meanwhile keeps them (nothing newer is lost) and says what was queued.
+        if (!mounted.current) return;
+        if (revision.current === submitted) onClose();
+        else setMessage(IMPORT_QUEUED_NEWER);
         return;
       }
       if (mounted.current)
@@ -330,6 +358,10 @@ export function ImportDialog({
             <Button variant="primary" disabled reason="Saving…">
               {IMPORT}
             </Button>
+          ) : reading ? (
+            <Button variant="primary" disabled reason={WAIT_FOR_FILE}>
+              {IMPORT}
+            </Button>
           ) : enablement.enabled ? (
             <Button variant="primary" type="submit" form={formId}>
               {IMPORT}
@@ -355,7 +387,8 @@ export function ImportDialog({
         }}
       >
         <div className="flex flex-col gap-1.5">
-          {sourceId === null && importable.length > 0 ? (
+          {sourceId === null &&
+          (importable.rows.length > 0 || importable.page.partial) ? (
             <>
               <label
                 htmlFor={`${formId}-source`}
@@ -367,15 +400,29 @@ export function ImportDialog({
                 id={`${formId}-source`}
                 data-field-edge=""
                 value={selected ?? ""}
-                onChange={(event) => setChosen(event.target.value)}
+                onChange={(event) => {
+                  revision.current += 1;
+                  setChosen(event.target.value);
+                }}
                 className="atlas-transition box-border min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 py-2.5 text-[14px] text-ink-1"
               >
-                {importable.map((row) => (
+                {/* The chosen source stays an option while another page of sources is shown. */}
+                {source !== null &&
+                !importable.rows.some((row) => row.id === source.id) ? (
+                  <option value={source.id}>{source.label}</option>
+                ) : null}
+                {importable.rows.map((row) => (
                   <option key={row.id} value={row.id}>
                     {row.label}
                   </option>
                 ))}
               </select>
+              <SourcePages
+                page={importable.page}
+                onPage={() => {
+                  if (chosen === null && selected !== null) setChosen(selected);
+                }}
+              />
             </>
           ) : (
             <>
@@ -444,9 +491,10 @@ export function ImportDialog({
           type="date"
           value={window_.from}
           error={errors.from}
-          onChange={(event) =>
-            setWindow((w) => ({ ...w, from: event.target.value }))
-          }
+          onChange={(event) => {
+            revision.current += 1;
+            setWindow((w) => ({ ...w, from: event.target.value }));
+          }}
         />
         <Field
           label={THROUGH}
@@ -454,9 +502,10 @@ export function ImportDialog({
           type="date"
           value={window_.through}
           error={errors.through}
-          onChange={(event) =>
-            setWindow((w) => ({ ...w, through: event.target.value }))
-          }
+          onChange={(event) => {
+            revision.current += 1;
+            setWindow((w) => ({ ...w, through: event.target.value }));
+          }}
         />
         <p className="text-[12.5px] leading-[1.6] text-ink-2">
           {DIALOG_BOUNDS}

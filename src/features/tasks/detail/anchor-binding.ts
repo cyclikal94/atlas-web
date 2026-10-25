@@ -7,6 +7,10 @@ import { forgetRefusal, noteIfRefused, refusalOf } from "../memory";
  * router made again, Strict Mode) finds the read already made, answered or under way, and asks nothing more. A refusal is recorded when
  * the ANSWER ARRIVES (`noteIfRefused`), whatever became of the screen that asked. A read that was never sent (offline, `not_sent`, closed
  * at its cover) leaves nothing, so a later mount may read. Only the displayed identity's reads, and only its newest visit's, are kept.
+ *
+ * A read is the visit's (R6): `live` (the visit going on) is asked before EVERY admission of the request, the first included and each
+ * one after a `not_sent` wait, so a read never sent while the person was on the task is never sent once they have left it. What was
+ * already sent is still answered and recorded (a refusal is the identity's, whatever became of the visit).
  */
 export type BindingRead =
   | { kind: "reading" }
@@ -61,10 +65,11 @@ export function readBinding(
   visit: string,
   taskId: string,
   api: Pick<TasksApi, "readAnchor">,
+  live: () => boolean,
 ): void {
   const own = memoryOf(identity);
   const key = `${visit}:${taskId}`;
-  if (own.reads.has(key)) return;
+  if (own.reads.has(key) || !live()) return;
   for (const held of [...own.reads.keys()])
     if (!held.startsWith(`${visit}:`)) own.reads.delete(held);
   if (refusalOf(identity, anchorReadKey(taskId)) !== null) {
@@ -76,7 +81,7 @@ export function readBinding(
   const token = tokens;
   own.reads.set(key, { read: { kind: "reading" }, token });
   notify();
-  void api.readAnchor(taskId).then((result) => {
+  void api.readAnchor(taskId, live).then((result) => {
     noteIfRefused(identity, anchorReadKey(taskId), result);
     const now = memory;
     if (now === null || now.identity !== identity) return;
@@ -104,10 +109,12 @@ export function readBindingAgain(
   visit: string,
   taskId: string,
   api: Pick<TasksApi, "readAnchor">,
+  live: () => boolean,
 ): void {
+  if (!live()) return;
   forgetRefusal(identity, anchorReadKey(taskId));
   memoryOf(identity).reads.delete(`${visit}:${taskId}`);
-  readBinding(identity, visit, taskId, api);
+  readBinding(identity, visit, taskId, api, live);
 }
 
 /** Whether a receipted `set_anchor` draft has caused its read again already; marks it when not. */

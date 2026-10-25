@@ -5,6 +5,7 @@ import {
   anchorDraftOf,
   anchorOfCommand,
   annualForced,
+  type CalendarAnchor,
   describeAnchor,
   EMPTY_ANCHOR,
   secondsAllowed,
@@ -190,6 +191,61 @@ describe("round trip, summary and the request", () => {
     });
     expect(validateAnchor(draft)).toEqual({ anchor });
     expect(anchorDraftOf(null)).toEqual(EMPTY_ANCHOR);
+  });
+
+  test("R5: an anchor's own time is kept exactly (seconds included) until the time field is edited or cleared", () => {
+    const exact = (time: string): CalendarAnchor => ({
+      reference: {
+        kind: "event_series",
+        source_id: SOURCE,
+        uid: "bin@example",
+      },
+      offset: { kind: "calendar_days", days: -1, time },
+      weekdays: [],
+    });
+    const draft = anchorDraftOf(exact("18:00:37"), { timed: true });
+    expect(draft).toMatchObject({ time: "18:00", keptTime: "18:00:37" });
+    // Untouched: sent exactly, whatever else changed (days, weekdays, a reference switched away and back).
+    expect(validateAnchor({ ...draft, days: "-2", weekdays: [3] })).toEqual({
+      anchor: {
+        ...exact("18:00:37"),
+        offset: { kind: "calendar_days", days: -2, time: "18:00:37" },
+        weekdays: [3],
+      },
+    });
+    expect(
+      validateAnchor({ ...draft, reference: "person_date" }),
+    ).toMatchObject({ errors: { reference: expect.any(String) } });
+    expect(validateAnchor({ ...draft })).toEqual({ anchor: exact("18:00:37") });
+    // Edited (the panel ends the kept time with the edit): sent as typed.
+    expect(validateAnchor({ ...draft, time: "19:15", keptTime: null })).toEqual(
+      { anchor: exact("19:15:00") },
+    );
+    // Even an edit back to the same minute is what was typed.
+    expect(validateAnchor({ ...draft, time: "18:00", keptTime: null })).toEqual(
+      { anchor: exact("18:00:00") },
+    );
+    // Cleared: no time.
+    expect(validateAnchor({ ...draft, time: "", keptTime: null })).toEqual({
+      anchor: {
+        ...exact("18:00:37"),
+        offset: { kind: "calendar_days", days: -1 },
+      },
+    });
+    // A kept time that the field no longer shows (or that is not HH:MM:SS) is never sent.
+    expect(validateAnchor({ ...draft, time: "07:30" })).toEqual({
+      anchor: exact("07:30:00"),
+    });
+    expect(validateAnchor({ ...draft, keptTime: "18:00" })).toEqual({
+      anchor: exact("18:00:00"),
+    });
+    // The seconds offset hides the time and keeps it: back on calendar days it is still exact.
+    const back = { ...draft, offset: "elapsed_seconds" as const };
+    expect(validateAnchor({ ...back, offset: "calendar_days" })).toEqual({
+      anchor: exact("18:00:37"),
+    });
+    expect(anchorDraftOf(null).keptTime).toBeNull();
+    expect(EMPTY_ANCHOR.keptTime).toBeNull();
   });
 
   test("the summary names what is known and invents nothing", () => {

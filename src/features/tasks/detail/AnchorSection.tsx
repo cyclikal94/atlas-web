@@ -49,7 +49,7 @@ import {
 } from "../../calendars/copy-anchor";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { useTaskVisit } from "../visit";
+import { useTaskScreenAt, useTaskVisit } from "../visit";
 import {
   type BindingRead,
   bindingOf,
@@ -102,15 +102,31 @@ export function AnchorSection({
   const announcer = useAnnouncer();
   const heading = useId();
   const visitOf = useTaskVisit();
+  const screenAt = useTaskScreenAt();
   const mountKey = useRef(`mount-${Math.random().toString(36).slice(2)}`);
   const [visit, setVisit] = useState<string | null>(null);
+  // Whether the read may still be SENT (R6): while the person is at this task's screen (by its router and the document), or, outside any
+  // router, while this mount is. Asked before every admission of the read, retries included. Not the first visit's own end: a section
+  // React kept mounted while the address went away and came back in one turn is the screen the person is at again (R36), and a remount
+  // (the session's re-check of a `403`) is at the same address.
+  const live = useRef<() => boolean>(() => false);
   const [, changed] = useReducer((n: number) => n + 1, 0);
   useEffect(() => subscribeBinding(changed), []);
   // The visit this section belongs to, asked once it is shown (a section outside any router keeps its read for its own mount only).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for the identity shown
   useEffect(() => {
     const going = visitOf(env.identity);
-    setVisit(going === null ? mountKey.current : `visit-${going.generation}`);
+    if (going === null) {
+      let mountedHere = true;
+      live.current = () => mountedHere;
+      setVisit(mountKey.current);
+      return () => {
+        mountedHere = false;
+      };
+    }
+    const { address } = going;
+    live.current = () => screenAt(address);
+    setVisit(`visit-${going.generation}`);
   }, [env.identity]);
   const read: BindingRead | undefined =
     visit === null ? undefined : bindingOf(env.identity, `${visit}:${task.id}`);
@@ -118,7 +134,7 @@ export function AnchorSection({
   useEffect(() => {
     if (visit === null || repeats || !synced || !env.online || !env.writable)
       return;
-    readBinding(env.identity, visit, task.id, env.api);
+    readBinding(env.identity, visit, task.id, env.api, live.current);
   }, [
     visit,
     repeats,
@@ -151,7 +167,7 @@ export function AnchorSection({
   useEffect(() => {
     if (receipted === undefined || visit === null || !env.online) return;
     if (firstReceipt(env.identity, receipted.local_id))
-      readBindingAgain(env.identity, visit, task.id, env.api);
+      readBindingAgain(env.identity, visit, task.id, env.api, live.current);
   }, [receipted, visit, env.online, env.identity, env.api, task.id]);
 
   // The read the panel's save is made from: the task and its drafts, checked again when the change is written.
@@ -185,14 +201,21 @@ export function AnchorSection({
     anchor: CalendarAnchor | null;
     supersede: string | null;
     observed: Observation | null;
+    /** A save from this panel was done while newer input stayed in it: the next save is checked against the task as it is NOW. */
+    renewed: boolean;
   } | null>(null);
+  // The identity of each change pressed and not yet stored, so the same change pressed again after a refusal (or a failure that may
+  // have stored it) is recognised; a STORED change's identity is retired (R2): pressing a change again later, even one equal to an earlier
+  // one (A, B, then A), is a new operation.
   const keys = useRef(new Map<string, string>());
   const open = (from: CalendarAnchor | null, supersede: string | null) =>
     setDialog({
       anchor: from,
       supersede,
       observed: view.status === "ready" ? view.value.observation : null,
+      renewed: false,
     });
+  const observedNow = view.status === "ready" ? view.value.observation : null;
 
   const save = async (next: CalendarAnchor | null): Promise<string | null> => {
     if (dialog === null) return null;
@@ -206,18 +229,15 @@ export function AnchorSection({
       key = env.newId();
       keys.current.set(what, key);
     }
-    const request = setAnchorRequest(
-      task,
-      next,
-      key,
-      dialog.observed ?? undefined,
-    );
+    const observed = dialog.renewed ? observedNow : dialog.observed;
+    const request = setAnchorRequest(task, next, key, observed ?? undefined);
     try {
       const outcome =
         dialog.supersede === null
           ? await outbox.enqueue(request)
           : await outbox.supersede(dialog.supersede, request);
       if (outcome.kind === "queued" || outcome.kind === "superseded") {
+        keys.current.delete(what);
         announcer.announce(next === null ? ANCHOR_REMOVED : ANCHOR_SAVED);
         return null;
       }
@@ -276,7 +296,13 @@ export function AnchorSection({
             variant="quiet"
             onClick={() =>
               visit !== null &&
-              readBindingAgain(env.identity, visit, task.id, env.api)
+              readBindingAgain(
+                env.identity,
+                visit,
+                task.id,
+                env.api,
+                live.current,
+              )
             }
           >
             {TRY_AGAIN}
@@ -363,6 +389,13 @@ export function AnchorSection({
           {...(dialog.anchor !== null || anchor !== null
             ? { onRemove: () => save(null) }
             : {})}
+          // The panel stayed open with newer input after a stored change: that change ended any conflict it superseded, so the next save
+          // is an ordinary one, after it in the queue, checked against the task as it is then.
+          onKept={() =>
+            setDialog((d) =>
+              d === null ? d : { ...d, supersede: null, renewed: true },
+            )
+          }
           onClose={() => setDialog(null)}
         />
       ) : null}

@@ -20,7 +20,9 @@ export function ImportDropZone() {
   const sources = useImportableSources();
   const input = useRef<HTMLInputElement | null>(null);
   const labelId = useId();
-  const available = open !== null && sources.length > 0;
+  // A later page of sources may hold one this account can import into (the dialog pages them, R4).
+  const available =
+    open !== null && (sources.rows.length > 0 || sources.page.partial);
   return (
     <div className="flex flex-col gap-1">
       <span

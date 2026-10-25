@@ -25,6 +25,11 @@ import { cacheRow } from "../../support/data/rows";
  * the PRODUCTION data controller over the IndexedDB double: FIXTURE evidence.
  */
 installMatchMedia({ width: 1440 });
+/** The control asserted present (an assertion, not a query error, when it is missing), then returned to act on. */
+const present = (element: HTMLElement | null): HTMLElement => {
+  expect(element).not.toBeNull();
+  return element as HTMLElement;
+};
 afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
@@ -426,5 +431,121 @@ describe("Acknowledge", () => {
       },
     });
     expect(document.querySelector(`[data-review="${REVIEW}"]`)).toBeNull();
+  });
+});
+
+describe("revision 1: every unresolved review stays reachable; a stored acknowledgement's identity is spent (R4, R2's rule)", () => {
+  const generic = (i: number, resolved = false) =>
+    review(
+      { reason: "context_unavailable", resolved, slot: null },
+      {
+        id: `00000000-0000-4000-8000-${String(i + 1000).padStart(12, "0")}`,
+        label: `Review ${String(i).padStart(3, "0")}`,
+      },
+    );
+  const shownIds = () =>
+    [...document.querySelectorAll("[data-review]")].map((el) =>
+      el.getAttribute("data-review"),
+    );
+  const more = () =>
+    fireEvent.click(
+      present(screen.queryByRole("button", { name: words.SHOW_MORE_REVIEWS })),
+    );
+
+  test("101 reviews: Show more through page one keeps its earlier cards, then the next page; Show previous reviews brings page one back whole", async () => {
+    const rows = Array.from({ length: 101 }, (_, i) => generic(i));
+    const w = await calendarWorld({ cache: [sourceRow(), ...rows] });
+    await screen.findByText(words.REVIEWS_HEADING);
+    await w.settle();
+    expect(shownIds()).toHaveLength(20);
+    const first = shownIds()[0];
+    // Control: within the page, Show more appends.
+    more();
+    await w.settle();
+    expect(shownIds()).toHaveLength(40);
+    expect(shownIds()[0]).toBe(first);
+    expect(
+      screen.queryByRole("button", { name: words.SHOW_PREVIOUS_REVIEWS }),
+    ).toBeNull();
+    for (let n = 0; n < 3; n += 1) {
+      more();
+      await w.settle();
+    }
+    expect(shownIds()).toHaveLength(100);
+    // Past the page's last card: the next page, with the way back.
+    more();
+    await w.settle();
+    expect(shownIds()).toHaveLength(1);
+    expect(shownIds()).not.toContain(first);
+    fireEvent.click(
+      present(
+        screen.queryByRole("button", { name: words.SHOW_PREVIOUS_REVIEWS }),
+      ),
+    );
+    await w.settle();
+    expect(shownIds()).toHaveLength(100);
+    expect(shownIds()[0]).toBe(first);
+    expect(
+      screen.queryByRole("button", { name: words.SHOW_PREVIOUS_REVIEWS }),
+    ).toBeNull();
+  });
+
+  test("a later page holding only resolved reviews keeps the panel and its way back", async () => {
+    const rows = [
+      ...Array.from({ length: 100 }, (_, i) => generic(i)),
+      ...Array.from({ length: 3 }, (_, i) => generic(100 + i, true)),
+    ];
+    const w = await calendarWorld({ cache: [sourceRow(), ...rows] });
+    await screen.findByText(words.REVIEWS_HEADING);
+    await w.settle();
+    for (let n = 0; n < 5; n += 1) {
+      more();
+      await w.settle();
+    }
+    expect(shownIds()).toEqual([]);
+    expect(screen.queryByText(words.REVIEWS_HEADING)).not.toBeNull();
+    fireEvent.click(
+      present(
+        screen.queryByRole("button", { name: words.SHOW_PREVIOUS_REVIEWS }),
+      ),
+    );
+    await w.settle();
+    expect(shownIds()).toHaveLength(100);
+  });
+
+  test("an acknowledgement stored then discarded: Acknowledge again on the same version is a NEW operation (its own identity)", async () => {
+    const w = await calendarWorld({
+      online: false,
+      cache: [
+        ...context,
+        review({ reason: "missing", resolved: false, slot: null }),
+      ],
+    });
+    const item = await card();
+    await w.settle();
+    const outbox = w.env.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const enqueue = vi.spyOn(outbox, "enqueue");
+    fireEvent.click(
+      within(item).getByRole("button", { name: words.ACKNOWLEDGE }),
+    );
+    await w.settle();
+    const [stored] = drafts(w).filter((d) => d.kind === "resolve_review");
+    expect(stored).toBeDefined();
+    await outbox.discard(stored?.local_id as string);
+    await w.settle();
+    const again = document.querySelector(
+      `[data-review="${REVIEW}"]`,
+    ) as HTMLElement;
+    fireEvent.click(
+      await within(again).findByRole("button", { name: words.ACKNOWLEDGE }),
+    );
+    await w.settle();
+    const keys = enqueue.mock.calls.map(([request]) => request.localId);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).not.toBe(keys[1]);
+    expect(drafts(w).filter((d) => d.kind === "resolve_review")).toHaveLength(
+      1,
+    );
   });
 });

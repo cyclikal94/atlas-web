@@ -745,7 +745,10 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 * **The task's "Calendar anchor"** (`detail/AnchorSection.tsx`, after the day, for a task that does not repeat): `TasksApi.readAnchor`
   (`GET /tasks/{id}/anchor`, strict `parseBinding`) once per visit and identity (`detail/anchor-binding.ts`: a remount reads nothing more,
   a refusal is noted on arrival, a read never sent leaves nothing, a receipted `set_anchor` reads once more); offline "Binding details need
-  a connection."; the queued `set_anchor` (`setAnchorRequest`, version-checked on the task, `requiresEdit`) with its states.
+  a connection."; the queued `set_anchor` (`setAnchorRequest`, version-checked on the task, `requiresEdit`) with its states. The read is
+  given the task screen's lifetime (`readAnchor(taskId, live)`: the person is at the task's address by its router and the document, `useTaskScreenAt`; WEB-13b R6): `untilSentWhile` asks it, then connectivity, before EVERY admission,
+  the first and each after a `not_sent` wait, and answers `closed` (or `offline`) without sending. `untilSent` and the other reads are
+  unchanged. A stored `set_anchor`'s identity is retired (R2); the panel settles only the revision it submitted (R3).
 * **`?move=` (`model/move.ts`).** "Review this move…" links to `/tasks/<id>?occurrence=<id>&move=<YYYY-MM-DD[THH:MM:SS]>`. The value is read
   strictly in the lazy detail screen (the entry route's search validation is unchanged, for the first-load budget), consumed ONCE per value,
   and opens the day's correction only when it is the displayed day and I may correct it; the seed fills only a NEW session (a resumed one

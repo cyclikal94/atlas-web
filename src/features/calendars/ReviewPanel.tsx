@@ -44,6 +44,7 @@ import {
   REVIEW_MOVE,
   REVIEWS_HEADING,
   SHOW_MORE_REVIEWS,
+  SHOW_PREVIOUS_REVIEWS,
   TASK_NOT_HERE,
   UNREADABLE,
   workStartedBody,
@@ -60,6 +61,8 @@ const RESOLVE_REVIEW = "resolve_review";
 const VIEW_KINDS = { settings: RESOLVE_REVIEW };
 /** How many unresolved reviews a step of "Show more reviews" adds. */
 const STEP = 20;
+/** How many cached reviews one page reads. */
+const PAGE = 100;
 
 /** A slot as the card says it: "Wed 9 Sep 2026 at 18:00", the time only when the slot has one. */
 function slotWords(slot: ReviewValue["slot"]): string {
@@ -90,7 +93,8 @@ function occurrenceFacts(
 /**
  * "Anchor review needed" (WEB-13b §4.5; the wireframe's review panel): this account's UNRESOLVED anchor reviews from the cache (they are
  * private to the binding's author, so the cache holds only the ones this account may see), a page (100) at a time, the first 20 of it
- * shown and "Show more reviews" for the rest. Each card offers Acknowledge (queued `resolve_review`, offline included) and, for a review
+ * shown and "Show more reviews" for the rest, then the next page; "Show previous reviews" goes back a page (R4), showing all of its
+ * unresolved reviews, so every one stays reachable in both directions. Each card offers Acknowledge (queued `resolve_review`, offline included) and, for a review
  * whose occurrence was NOT moved because work had started, "Review this move…", which opens the task's one-day correction with the
  * proposed date and time filled in (it never resolves the review).
  *
@@ -100,7 +104,7 @@ function occurrenceFacts(
 export function ReviewPanel() {
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const after = cursors[cursors.length - 1] ?? null;
-  const page = useResourceList({ kind: "review", after, limit: 100 });
+  const page = useResourceList({ kind: "review", after, limit: PAGE });
   const [shownCount, setShownCount] = useState(STEP);
   const rows: ListedResource[] = page.status === "ready" ? page.value.rows : [];
   const unresolved = useMemo(
@@ -136,7 +140,14 @@ export function ReviewPanel() {
   }, [rows, unresolved, after, page.status]);
   const shown = unresolved.slice(0, shownCount);
   const next = page.status === "ready" ? page.value.next : null;
-  if (shown.length === 0 && gone.length === 0 && next === null) return null;
+  // A later page is kept on screen even with nothing to show on it, so the way back is never lost.
+  if (
+    shown.length === 0 &&
+    gone.length === 0 &&
+    next === null &&
+    cursors.length === 1
+  )
+    return null;
   return (
     <section aria-labelledby="reviews-heading" className="flex flex-col gap-2">
       <h2 id="reviews-heading" className="text-[13.5px] font-medium text-ink-1">
@@ -164,6 +175,18 @@ export function ReviewPanel() {
       </List>
       {unresolved.length > shownCount || next !== null || cursors.length > 1 ? (
         <div className="flex flex-wrap gap-2">
+          {cursors.length > 1 ? (
+            <Button
+              variant="quiet"
+              onClick={() => {
+                setCursors((list) => list.slice(0, -1));
+                // The page left was shown in full before its next page was asked for.
+                setShownCount(PAGE);
+              }}
+            >
+              {SHOW_PREVIOUS_REVIEWS}
+            </Button>
+          ) : null}
           {unresolved.length > shownCount ? (
             <Button
               variant="quiet"
@@ -280,9 +303,11 @@ function ReviewCard({ row }: { row: ListedResource }) {
         supersede === null
           ? await outbox.enqueue(request)
           : await outbox.supersede(supersede, request);
-      if (outcome.kind === "queued" || outcome.kind === "superseded")
+      if (outcome.kind === "queued" || outcome.kind === "superseded") {
+        // A stored acknowledgement's identity is spent (R2's rule): pressing again later is a new operation.
+        keys.current.delete(what);
         announcer.announce(ACKNOWLEDGE_QUEUED);
-      else if (outcome.reason === "changed") setMessage(REVIEW_CHANGED);
+      } else if (outcome.reason === "changed") setMessage(REVIEW_CHANGED);
       else if (outcome.reason === "denied") setMessage(CANT_ACKNOWLEDGE);
       else setMessage(refusalMessage(outcome.reason));
     } catch {

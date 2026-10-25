@@ -27,10 +27,12 @@ import {
 } from "./copy-anchor";
 import { Field } from "./fields";
 import type { PickedEvent, PickedField } from "./model/anchor";
+import { SourcePages, useSourcePage } from "./source-pages";
 
 /**
  * The anchor panel's two pickers (WEB-13b §4.3): the cached events of a calendar source and the cached date fields of people. Both read
- * this device's cache only, a page (100) at a time, and both are filtered by a search over the page shown ("Show next" reads on). A
+ * this device's cache only, a page (100) at a time, and both are filtered by a search over the page shown ("Show next" reads on); the
+ * event picker's calendars are paged the same way (`source-pages.tsx`, R4), so every cached source and event can be reached. A
  * picker never invents a name or a date: an event shows its own title and start; a field shows its person's name only when the person
  * is cached here. People screens are WEB-11a's; nothing here edits a person or a field.
  */
@@ -138,11 +140,24 @@ export function EventPicker({
   onBack(): void;
 }) {
   const selectId = useId();
-  const sources = useResourceList({ kind: "calendar_source", limit: 100 });
-  const sourceRows: CacheRow[] =
-    sources.status === "ready" ? sources.value.rows.map((r) => r.merged) : [];
+  // A page of sources at a time, with its own "Show previous/next calendars" (R4): every cached source can be chosen.
+  const sourcePage = useSourcePage();
+  const pageRows: CacheRow[] = sourcePage.rows ?? [];
   const [chosen, setChosen] = useState<string | null>(initialSource);
-  const sourceId = chosen ?? sourceRows[0]?.id ?? null;
+  const sourceId = chosen ?? pageRows[0]?.id ?? null;
+  // The chosen source stays an option while another page is shown (its row read on its own), so the select never shows a source other
+  // than the one whose events are listed.
+  const offPage =
+    sourceId !== null && !pageRows.some((row) => row.id === sourceId);
+  const chosenRow = useCachedResources(
+    offPage && sourceId !== null ? [sourceId] : [],
+  );
+  const offPageRow =
+    offPage && sourceId !== null && chosenRow.status === "ready"
+      ? (chosenRow.value[sourceId]?.merged ?? null)
+      : null;
+  const sourceRows: CacheRow[] =
+    offPageRow === null ? pageRows : [offPageRow, ...pageRows];
   const sourceLabel =
     sourceRows.find((row) => row.id === sourceId)?.label ?? "";
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
@@ -195,6 +210,12 @@ export function EventPicker({
             </option>
           ))}
         </select>
+        <SourcePages
+          page={sourcePage}
+          onPage={() => {
+            if (chosen === null && sourceId !== null) setChosen(sourceId);
+          }}
+        />
       </div>
       <Field
         label={SEARCH_TITLES}

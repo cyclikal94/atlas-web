@@ -80,6 +80,8 @@ export const SHOW_NEXT_EVENTS = "Show next events";
 export const SHOW_PREVIOUS_EVENTS = "Show previous events";
 export const SHOW_NEXT_FIELDS = "Show next fields";
 export const SHOW_PREVIOUS_FIELDS = "Show previous fields";
+export const SHOW_NEXT_CALENDARS = "Show next calendars";
+export const SHOW_PREVIOUS_CALENDARS = "Show previous calendars";
 export const CHOOSE = "Choose";
 export const BACK = "Back";
 export const EVENT_CANCELLED = "Cancelled";
@@ -125,6 +127,9 @@ export const REVIEW_ANCHOR = "Review";
 export const DISMISS_ANCHOR = "Dismiss";
 export const ANCHOR_SAVED = "Anchor change saved.";
 export const ANCHOR_REMOVED = "Anchor removal saved.";
+/** Provisional: the panel's save (or removal) was queued as submitted; what was changed in the panel meanwhile is still there, not saved. */
+export const ANCHOR_SAVED_NEWER =
+  "Saved as it was when you pressed it. Your newer changes are still here.";
 export const ANCHOR_NOT_SAVED_CHANGED =
   "This task changed while you were editing — check the anchor and save again.";
 export const ANCHOR_NOT_SAVED_DENIED = "You can't change this task.";

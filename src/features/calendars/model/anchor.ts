@@ -30,7 +30,9 @@ import { CALENDAR_COMMANDS } from "./commands";
  *  - Weekdays: at most seven, each 1 (Monday) to 7 (Sunday); sorted and unique here.
  *  - Title contains: 1 to 100 BYTES; an empty one is omitted. Event series only (the panel hides it for a person date and keeps what was
  *    typed; it is never sent for one: PRODUCT-DECISIONS-20261011, hidden values omitted on save without a loss warning).
- *  - Calendar-day offset: whole days −366 to 366; the optional time is typed `HH:MM` and sent `HH:MM:SS`.
+ *  - Calendar-day offset: whole days −366 to 366; the optional time is typed `HH:MM` and sent `HH:MM:SS`. An anchor's own time, seconds
+ *    included, is kept until the person edits or clears the time field (`keptTime`, R5, the task correction's rule): a change of anything
+ *    else sends it unchanged.
  *  - Elapsed seconds: whole seconds ±31,622,400, and only for a TIMED event series (an all-day event or a person date fails at
  *    reconcile, so the whole command answers `422`).
  *  - Person date: a field whose value has no year must repeat annually (`annual: false` needs a year).
@@ -57,8 +59,14 @@ export interface AnchorDraft {
   annual: boolean;
   offset: "calendar_days" | "elapsed_seconds";
   days: string;
-  /** `HH:MM`, or empty for none. */
+  /** `HH:MM`, or empty for none: what the minute field shows and edits. */
   time: string;
+  /**
+   * The anchor's own time (`HH:MM:SS`) as the panel was opened with it, kept until the person edits or clears the time field, or null:
+   * while kept, a save of anything else sends it exactly as it was, seconds included. Kept with the rest of the panel's state when the
+   * calendar-day fields are hidden and shown again.
+   */
+  keptTime: string | null;
   seconds: string;
   weekdays: number[];
   titleContains: string;
@@ -76,6 +84,7 @@ export const EMPTY_ANCHOR: AnchorDraft = {
   offset: "calendar_days",
   days: "0",
   time: "",
+  keptTime: null,
   seconds: "0",
   weekdays: [],
   titleContains: "",
@@ -83,6 +92,13 @@ export const EMPTY_ANCHOR: AnchorDraft = {
 
 const WHOLE = /^[+-]?\d+$/;
 const CLOCK = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const CLOCK_SECONDS = /^([01]\d|2[0-3]):([0-5]\d):([0-5]\d)$/;
+
+/** The time to send for the minute field's `HH:MM`: the kept exact time while the field still shows it, else the minute itself. */
+const timeToSend = (time: string, kept: string | null): string =>
+  kept !== null && CLOCK_SECONDS.test(kept) && kept.slice(0, 5) === time
+    ? kept
+    : `${time}:00`;
 const LIMITS = { days: 366, seconds: 31_622_400, titleBytes: 100 } as const;
 
 /** Whether the seconds offset can be chosen: only for a timed event series. */
@@ -126,7 +142,11 @@ export function validateAnchor(
       offset =
         time === ""
           ? { kind: "calendar_days", days }
-          : { kind: "calendar_days", days, time: `${time}:00` };
+          : {
+              kind: "calendar_days",
+              days,
+              time: timeToSend(time, draft.keptTime),
+            };
   }
   const title = draft.titleContains;
   const sendTitle = eventSeries && title.trim() !== "";
@@ -186,6 +206,10 @@ export function anchorDraftOf(
       offset.kind === "calendar_days" && typeof offset.time === "string"
         ? offset.time.slice(0, 5)
         : "",
+    keptTime:
+      offset.kind === "calendar_days" && typeof offset.time === "string"
+        ? offset.time
+        : null,
     seconds: offset.kind === "elapsed_seconds" ? String(offset.seconds) : "0",
     weekdays: [...(anchor.weekdays ?? [])],
     titleContains: anchor.title_contains ?? "",

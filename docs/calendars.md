@@ -129,8 +129,13 @@ marked "provisional" in `copy-import.ts`, `copy-anchor.ts` and `copy-review.ts` 
 zone ("browse" is a real file control; dropping is an enhancement) opens the dialog: the file is read and checked **on this device**
 (UTF-8 bytes ≤ 1 MiB, Rust `str::lines` before unfolding ≤ 20,000, `VEVENT`s with overrides ≤ 256, a fatal UTF-8 decode, a
 `YYYY-MM-DD` window with years 1900–9999 and `0 ≤ through − from ≤ 730` days inclusive, the JSON body ≤ 2 MiB), and Import stores ONE
-draft (`importRequest`; offline included; a synchronous latch; the same press after a local refusal reuses its identity). The file's text
-lives in the dialog's memory only. The **Imports** panel lists this device's outstanding imports from draft HEADERS only
+draft (`importRequest`; offline included; a synchronous latch; the same press after a local refusal reuses its identity; a QUEUED
+import's identity is spent, so a later Import is a new operation). Only the latest file chosen can be imported: choosing another forgets
+the previous one at once, and nothing is admitted (the button, Enter, a direct submission) until it has been read (revision 1, R1). A save
+settles only what it submitted (R3): a file, source or window changed while it was being stored keeps the dialog open with the newer
+choices and "Import queued as it was when you pressed Import. Your newer changes are still here." The drop zone's dialog offers one page of
+cached sources (100) with "Show previous/next calendars" (`source-pages.tsx`, R4), the chosen one staying an option while another page is
+shown. The file's text lives in the dialog's memory only. The **Imports** panel lists this device's outstanding imports from draft HEADERS only
 (`useDraftHeaders` / `readDraftHeaders`; an import's body is never read for a list, and `readOutstanding` asked for a kind no longer
 loads a newer draft of another kind: E6): Queued, Sent (trying again), Sent — couldn't confirm yet (link to the queue), Import accepted,
 refused with its reason (Dismiss), or the capacity words (link to the queue). No count of imported events is ever claimed.
@@ -153,19 +158,27 @@ drafts (`dependency_rejected`), the foundation's chain rule; the panel says so a
 **Anchors** (`model/anchor.ts`, `AnchorDialog.tsx`, `pickers.tsx`; the surface for other slices is `anchors.ts`). The panel edits a
 reference (an event series chosen from the source's cached events, or a person's date field from the cache), an offset (whole days
 −366..366 at an optional `HH:MM` sent as `HH:MM:SS`, or ±31,622,400 seconds for a TIMED event series only), weekdays (1 = Monday) and, for
-an event series, a title filter (1–100 bytes). Every field keeps its value while hidden; Save sends only what applies; a year-less date
+an event series, a title filter (1–100 bytes). The event picker pages its calendars as it pages events (R4). An anchor's own time is sent
+EXACTLY (seconds included) until the person edits or clears the time field (`keptTime`, R5, the task correction's rule). A done save
+closes the panel only when nothing was edited in it meanwhile; otherwise the newer input stays (hidden fields included) with "Saved as it
+was when you pressed it…", and the next save is an ordinary, new change after it (R3). Every field keeps its value while hidden; Save sends only what applies; a year-less date
 field always repeats annually; a task that repeats on its own schedule cannot be anchored. A new task carries its anchor in `create_task`
 (no projected first occurrence: the server makes none from the schedule). An existing task's "Calendar anchor" section (task detail,
 after the day) reads the binding ONLINE once per visit and identity (`tasks/detail/anchor-binding.ts`; a refusal is kept when it arrives;
 offline it says "Binding details need a connection." and the rest of the task stays as the cache shows it) and queues `set_anchor` on the
-task's version (`anchor: null` removes it), with its waiting, saving, conflict ("Review" supersedes it) and refused states.
+task's version (`anchor: null` removes it), with its waiting, saving, conflict ("Review" supersedes it) and refused states. A change pressed
+again after a refusal (or a failure that may have stored it) keeps its identity; a STORED change's identity is retired, so A, B, then A
+again is three changes (R2). The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
+connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
 **Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the
 binding's author), read strictly (`{reason, resolved, slot}`; a slot only for `moved`, the previous slot, and `work_started`, the proposed
 one). Acknowledge queues `resolve_review` on the review's version with the observation of the card's one read (a review that changed
 between showing and pressing is refused as changed); "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
 which the task screen reads strictly and consumes once to fill a NEW correction session (it never resolves the review); a
-`context_unavailable` review shows no date, title or task; one that leaves the cache while shown is "no longer available".
+`context_unavailable` review shows no date, title or task; one that leaves the cache while shown is "no longer available". The panel
+reads a page (100) at a time; "Show more reviews" shows 20 more and then the next page, and "Show previous reviews" goes back a page,
+showing it whole (R4); a later page with nothing unresolved still shows the way back. A stored acknowledgement's identity is spent too.
 
 **Known finding (F-13b-1, pre-existing at `b9fd602`, not fixed here):** an ordinary `403` to ANY queued command sent by the production
 leader makes the session re-check the display; the leader stops and restarts its dispatcher, the answer is dropped and the draft is resent

@@ -44,9 +44,15 @@ export const fileSummary = (
 ): string =>
   `${name} · ${formatBytes(bytes)} · ${events === 1 ? "1 event" : `${events.toLocaleString("en-GB")} events`}`;
 export const READING = "Checking the file…";
+/** Provisional: why Import waits while the file just chosen is being read. */
+export const WAIT_FOR_FILE =
+  "Import is available once the file has been checked.";
 export const FILE_REQUIRED = "Choose an .ics file to import.";
 export const SOURCE_GONE = "This calendar source can no longer be shown.";
 export const IMPORT_QUEUED = "Import queued.";
+/** Provisional: an import was queued as it was submitted, and what was changed in the dialog meanwhile is still there, not saved. */
+export const IMPORT_QUEUED_NEWER =
+  "Import queued as it was when you pressed Import. Your newer changes are still here.";
 export const IMPORT_CLOSED_REFRESHING =
   "Import closed while your calendar sources are brought up to date.";
 export const NO_SOURCES_TO_IMPORT =

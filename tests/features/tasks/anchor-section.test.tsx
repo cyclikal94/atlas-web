@@ -5,14 +5,19 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { CacheRow } from "../../../src/data";
 import * as words from "../../../src/features/calendars/copy-anchor";
 import type { CalendarAnchor } from "../../../src/features/calendars/model/anchor";
-import type { TasksResult } from "../../../src/features/tasks/api";
+import {
+  createTasksApi,
+  type TasksResult,
+  untilSentWhile,
+} from "../../../src/features/tasks/api";
 import { forgetBindings } from "../../../src/features/tasks/detail/anchor-binding";
 import { forgetAllCorrections } from "../../../src/features/tasks/detail/CorrectionDialog";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
+import { StampedRequestError } from "../../../src/session";
 import { installMatchMedia } from "../../helpers/match-media";
 import { cacheRow, draftRow } from "../../support/data/rows";
 import {
@@ -29,8 +34,14 @@ import {
  * its refusal. In the app's router over the PRODUCTION data controller and the IndexedDB double: FIXTURE evidence.
  */
 installMatchMedia({ width: 1440 });
+/** The control asserted present (an assertion, not a query error, when it is missing), then returned to act on. */
+const present = (element: HTMLElement | null): HTMLElement => {
+  expect(element).not.toBeNull();
+  return element as HTMLElement;
+};
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   forgetTaskMemory();
   forgetAllCorrections();
   forgetBindings();
@@ -84,7 +95,8 @@ async function mounted(
   task: SeededTask,
   options: {
     online?: boolean;
-    binding?: () => Promise<
+    /** `live`: the section's lifetime, as the production API is given it (R6). */
+    binding?: (live?: () => boolean) => Promise<
       TasksResult<{
         binding: {
           anchor: CalendarAnchor;
@@ -101,9 +113,11 @@ async function mounted(
   const api = fakeApi(
     options.binding
       ? {
-          readAnchor: async () => {
+          readAnchor: async (_: string, live?: () => boolean) => {
             api.calls.readAnchor = (api.calls.readAnchor ?? 0) + 1;
-            return (options.binding as NonNullable<typeof options.binding>)();
+            return (options.binding as NonNullable<typeof options.binding>)(
+              live,
+            );
           },
         }
       : {},
@@ -509,5 +523,561 @@ describe("set_anchor (queued, offline included)", () => {
     });
     expect(action).toBeDisabled();
     expect(action).toHaveAccessibleDescription(words.ANCHOR_NOT_SAVED_DENIED);
+  });
+});
+
+describe("revision 1: each change is its own operation, settled as submitted (R2, R3, R5)", () => {
+  const read = (anchor: CalendarAnchor = ANCHOR) => ({
+    rows: [sourceRow],
+    binding: async () => ({
+      ok: true as const,
+      value: { binding: { anchor, version: 1, active: true } },
+    }),
+  });
+  async function openChange(t: Mounted) {
+    fireEvent.click(
+      within(section() as HTMLElement).getByRole("button", {
+        name: words.CHANGE_ANCHOR,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await t.settle();
+    return dialog;
+  }
+  async function saveDays(t: Mounted, days: string) {
+    const dialog = await openChange(t);
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: days },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  }
+  const offsets = (t: Mounted) =>
+    anchorDrafts(t).map(
+      (d) => (bodyOf(t, d.local_id)?.anchor as CalendarAnchor | null)?.offset,
+    );
+  /** Holds the delivery of the outbox's successful answer (the change IS stored) until released. */
+  function holdEnqueue(t: Mounted, method: "enqueue" | "supersede") {
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = (
+      outbox[method] as (...a: never[]) => Promise<unknown>
+    ).bind(outbox);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(outbox, method).mockImplementationOnce((async (
+      ...args: never[]
+    ) => {
+      const outcome = await original(...args);
+      await gate;
+      return outcome;
+    }) as never);
+    return release;
+  }
+
+  test("R2 control: two different changes queue two commands, in order", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read());
+    await saveDays(t, "-2");
+    await saveDays(t, "-3");
+    expect(offsets(t)).toEqual([
+      { kind: "calendar_days", days: -2, time: "18:00:00" },
+      { kind: "calendar_days", days: -3, time: "18:00:00" },
+    ]);
+  });
+
+  test("R2: A, B, then A again in one visit queues THREE changes, the last A after B (a stored change's identity is retired)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read());
+    await saveDays(t, "-2");
+    await saveDays(t, "-3");
+    await saveDays(t, "-2");
+    const all = anchorDrafts(t);
+    expect(new Set(all.map((d) => d.local_id)).size).toBe(3);
+    expect(offsets(t)).toEqual([
+      { kind: "calendar_days", days: -2, time: "18:00:00" },
+      { kind: "calendar_days", days: -3, time: "18:00:00" },
+      { kind: "calendar_days", days: -2, time: "18:00:00" },
+    ]);
+  });
+
+  test("R2: remove, then set the same anchor again, then remove again: three changes", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read());
+    const remove = async () => {
+      const dialog = await openChange(t);
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: words.REMOVE_ANCHOR }),
+      );
+      await t.settle();
+      expect(screen.queryByRole("dialog")).toBeNull();
+    };
+    await remove();
+    await saveDays(t, "-1");
+    await remove();
+    expect(
+      anchorDrafts(t).map((d) => bodyOf(t, d.local_id)?.anchor ?? null),
+    ).toEqual([null, ANCHOR, null]);
+  });
+
+  test("R2 retry: the SAME change pressed again after a failure that may have stored it keeps its identity (stored once)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read());
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = outbox.enqueue.bind(outbox);
+    const enqueue = vi
+      .spyOn(outbox, "enqueue")
+      .mockImplementationOnce(async (request) => {
+        await original(request);
+        throw new Error("the completion was lost");
+      });
+    const dialog = await openChange(t);
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-2" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    const keys = enqueue.mock.calls.map(([request]) => request.localId);
+    expect(keys[0]).toBe(keys[1]);
+    expect(anchorDrafts(t)).toHaveLength(1);
+  });
+
+  test("R3: a save that completes after a hidden field was edited keeps the panel, the newer input (hidden value included) and saves it next as a new change", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read());
+    const dialog = await openChange(t);
+    const release = holdEnqueue(t, "enqueue");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(anchorDrafts(t)).toHaveLength(1);
+    fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
+      target: { value: "newer filter" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+    );
+    expect(within(dialog).queryByLabelText(words.TITLE_CONTAINS)).toBeNull();
+    await act(async () => release());
+    await t.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    expect(within(dialog).getByText(words.ANCHOR_SAVED_NEWER)).toBeVisible();
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+    );
+    expect(within(dialog).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
+      "newer filter",
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    const all = anchorDrafts(t);
+    expect(all).toHaveLength(2);
+    expect(bodyOf(t, all[0]?.local_id as string)?.anchor).toEqual(ANCHOR);
+    expect(bodyOf(t, all[1]?.local_id as string)?.anchor).toEqual({
+      ...ANCHOR,
+      title_contains: "newer filter",
+    });
+  });
+
+  test("R3: after a superseding Review save that kept newer input, the next save is an ORDINARY change after it (not a second supersession)", async () => {
+    const task = await seededTask();
+    const conflicted = draftRow({
+      local_id: "00000000-0000-4000-8000-00000000c0f1",
+      endpoint: "/calendar-commands",
+      status: "version_conflict",
+      command: {
+        command: {
+          kind: "set_anchor",
+          id: task.taskId,
+          expected_version: 0,
+          anchor: ANCHOR,
+        },
+      } as never,
+      target_resource_ids: [task.taskId],
+      index_targets: [task.taskId],
+      bases: { [task.taskId]: 0 },
+      last_error: { status: 409, code: "conflict", stage: "conflict" },
+    });
+    const t = await mounted(task, {
+      online: false,
+      rows: [sourceRow, eventRow()],
+      drafts: [conflicted],
+    });
+    fireEvent.click(
+      within(section() as HTMLElement).getByRole("button", {
+        name: words.REVIEW_ANCHOR,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await t.settle();
+    const release = holdEnqueue(t, "supersede");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-4" },
+    });
+    await act(async () => release());
+    await t.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    // The same spy as the held one: only calls from here on count.
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const supersede = vi.spyOn(outbox, "supersede");
+    supersede.mockClear();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(supersede).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // Both are queued: the replacement and, after it, an ordinary change (the fixture's seeded draft shares the store's first sequence
+    // number, so queue order is not observable here; the outbox's own tests cover it).
+    const queued = anchorDrafts(t).filter((d) => d.status === "queued");
+    const sent = queued.map((d) =>
+      JSON.stringify(
+        (bodyOf(t, d.local_id)?.anchor as CalendarAnchor | undefined)?.offset,
+      ),
+    );
+    expect(sent.sort()).toEqual(
+      [
+        { kind: "calendar_days", days: -1, time: "18:00:00" },
+        { kind: "calendar_days", days: -4, time: "18:00:00" },
+      ]
+        .map((offset) => JSON.stringify(offset))
+        .sort(),
+    );
+  });
+
+  test("R3 control: nothing edited while saving closes the panel", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read());
+    const dialog = await openChange(t);
+    const release = holdEnqueue(t, "enqueue");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+    await act(async () => release());
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  test.each(["18:00:00", "18:00:37"])(
+    "R5: changing only the days keeps the anchor's own time %s exactly",
+    async (time) => {
+      const task = await seededTask();
+      const t = await mounted(
+        task,
+        read({ ...ANCHOR, offset: { kind: "calendar_days", days: -1, time } }),
+      );
+      await saveDays(t, "-2");
+      expect(offsets(t)).toEqual([{ kind: "calendar_days", days: -2, time }]);
+    },
+  );
+
+  test("R5: an edited time is sent as typed, a cleared one not at all, and a reference switched away and back keeps the exact time", async () => {
+    const task = await seededTask();
+    const t = await mounted(
+      task,
+      read({
+        ...ANCHOR,
+        offset: { kind: "calendar_days", days: -1, time: "18:00:37" },
+      }),
+    );
+    let dialog = await openChange(t);
+    fireEvent.change(within(dialog).getByLabelText(words.TIME_LABEL), {
+      target: { value: "19:15" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    dialog = await openChange(t);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.CLEAR_TIME }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    dialog = await openChange(t);
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+    );
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    // Edited away and back to the same minute, and cleared then typed again: what was typed (the kept time ended with the edit).
+    dialog = await openChange(t);
+    const time = () => within(dialog).getByLabelText(words.TIME_LABEL);
+    fireEvent.change(time(), { target: { value: "19:15" } });
+    fireEvent.change(time(), { target: { value: "18:00" } });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    dialog = await openChange(t);
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.CLEAR_TIME }),
+    );
+    fireEvent.change(time(), { target: { value: "18:00" } });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(offsets(t)).toEqual([
+      { kind: "calendar_days", days: -1, time: "19:15:00" },
+      { kind: "calendar_days", days: -1 },
+      { kind: "calendar_days", days: -1, time: "18:00:37" },
+      { kind: "calendar_days", days: -1, time: "18:00:00" },
+      { kind: "calendar_days", days: -1, time: "18:00:00" },
+    ]);
+  });
+});
+
+describe("revision 1: every cached calendar can be chosen in the event picker (R4)", () => {
+  const sources = (count: number) =>
+    Array.from({ length: count }, (_, i) => ({
+      ...sourceRow,
+      id: `00000000-0000-4000-8000-${String(i + 1000).padStart(12, "0")}`,
+      label: `Calendar ${String(i).padStart(3, "0")}`,
+    }));
+  async function picker(t: Mounted) {
+    fireEvent.click(
+      within(section() as HTMLElement).getByRole("button", {
+        name: words.ANCHOR_ACTION,
+      }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.CHANGE_EVENT }),
+    );
+    await t.settle();
+    return dialog;
+  }
+  const labels = (dialog: HTMLElement) =>
+    [
+      ...(within(dialog).getByRole("combobox") as HTMLSelectElement).options,
+    ].map((o) => o.textContent);
+
+  test("101 sources: Show next calendars reaches the 101st, its events are listed and one is anchored to; the choice stays while paging back", async () => {
+    const task = await seededTask();
+    const rows = sources(101);
+    const last = rows[100] as CacheRow;
+    const t = await mounted(task, {
+      online: false,
+      rows: [...rows, eventRow({ parent_id: last.id })],
+    });
+    const dialog = await picker(t);
+    expect(labels(dialog)).toHaveLength(100);
+    expect(labels(dialog)).not.toContain("Calendar 100");
+    fireEvent.click(
+      present(
+        within(dialog).queryByRole("button", {
+          name: words.SHOW_NEXT_CALENDARS,
+        }),
+      ),
+    );
+    await t.settle();
+    // Paging alone changes nothing: the first source stays chosen (and an option) until another is picked.
+    expect(labels(dialog)).toEqual(["Calendar 000", "Calendar 100"]);
+    const select = within(dialog).getByRole("combobox") as HTMLSelectElement;
+    expect(select.value).toBe(rows[0]?.id);
+    fireEvent.change(select, { target: { value: last.id } });
+    await t.settle();
+    fireEvent.click(
+      present(
+        within(dialog).queryByRole("button", {
+          name: words.SHOW_PREVIOUS_CALENDARS,
+        }),
+      ),
+    );
+    await t.settle();
+    expect(select.value).toBe(last.id);
+    expect(labels(dialog)).toHaveLength(101);
+    fireEvent.click(await within(dialog).findByText("Bin day"));
+    await t.settle();
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(
+      bodyOf(t, anchorDrafts(t)[0]?.local_id as string)?.anchor,
+    ).toMatchObject({
+      reference: {
+        kind: "event_series",
+        source_id: last.id,
+        uid: "bin@example",
+      },
+    });
+  });
+
+  test("control: two sources need no paging", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, { online: false, rows: sources(2) });
+    const dialog = await picker(t);
+    expect(labels(dialog)).toEqual(["Calendar 000", "Calendar 001"]);
+    expect(
+      within(dialog).queryByRole("button", { name: words.SHOW_NEXT_CALENDARS }),
+    ).toBeNull();
+  });
+});
+
+describe("revision 1: a binding read is the visit's; never sent after it ends (R6)", () => {
+  const ACCOUNT = "11111111-1111-4111-8111-111111111111";
+  /** The production task API over a stamped client double whose first GET is held, then refused before sending (`not_sent`). */
+  function heldApi() {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const counter = { calls: 0 };
+    const api = createTasksApi(
+      {
+        api: {
+          client: () => ({
+            GET: async () => {
+              counter.calls += 1;
+              if (counter.calls === 1) {
+                await gate;
+                throw new StampedRequestError("not_sent" as never);
+              }
+              return {
+                response: new Response('{"binding":null}', { status: 200 }),
+                data: { binding: null },
+              };
+            },
+          }),
+        },
+      } as never,
+      ACCOUNT as never,
+      1 as never,
+    );
+    return { api, release, counter };
+  }
+
+  test.each([
+    ["the person stays on the task (control)", false, 2],
+    ["the person leaves the task", true, 1],
+  ])(
+    "a held read answered not_sent while %s: admitted once more only while the visit goes on",
+    async (_, leave, admissions) => {
+      const task = await seededTask();
+      const held = heldApi();
+      const t = await mounted(task, {
+        binding: (live) => held.api.readAnchor(task.taskId, live),
+      });
+      expect(held.counter.calls).toBe(1);
+      if (leave) {
+        await act(async () => {
+          await t.router.navigate({ to: "/settings" });
+        });
+        await t.settle();
+        expect(section()).toBeNull();
+      }
+      // The API's own first not_sent wait (50 ms) is real: no timer is shortened.
+      await act(async () => {
+        held.release();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+      await t.settle();
+      expect(held.counter.calls).toBe(admissions);
+    },
+  );
+
+  test("away from the task and back in one turn (the section kept mounted): the person is at the task again, so Try again reads (I-CAL-ANC1 regression)", async () => {
+    const task = await seededTask();
+    let answers = 0;
+    const t = await mounted(task, {
+      binding: async () => {
+        answers += 1;
+        return answers === 1
+          ? { ok: false, kind: "forbidden" }
+          : { ok: true, value: { binding: null } };
+      },
+    });
+    expect(section()).toHaveTextContent(words.BINDING_FAILED);
+    const before = section();
+    await act(async () => {
+      t.router.history.push("/tasks");
+      t.router.history.push(`/tasks/${task.taskId}`);
+    });
+    await t.settle();
+    // The same section (React never removed it), now on the screen the person is at again.
+    expect(section()).toBe(before);
+    fireEvent.click(
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.TRY_AGAIN,
+        }),
+      ),
+    );
+    await t.settle();
+    expect(t.api.calls.readAnchor).toBe(2);
+    expect(section()).toHaveTextContent(words.NOT_ANCHORED);
+  });
+
+  test("untilSentWhile asks live and connectivity before EVERY admission, the first included; an answer to a sent request is returned as it is", async () => {
+    const notSent = { ok: false as const, kind: "not_sent" as const };
+    let calls = 0;
+    expect(
+      await untilSentWhile(
+        async () => {
+          calls += 1;
+          return notSent;
+        },
+        () => false,
+        () => null,
+      ),
+    ).toEqual({ ok: false, kind: "closed" });
+    expect(calls).toBe(0);
+    let offline = false;
+    const result = await untilSentWhile(
+      async () => {
+        calls += 1;
+        offline = true;
+        return notSent;
+      },
+      () => true,
+      () => (offline ? { ok: false, kind: "offline" } : null),
+    );
+    expect(result).toEqual({ ok: false, kind: "offline" });
+    expect(calls).toBe(1);
+    let alive = true;
+    const sent = await untilSentWhile(
+      async () => {
+        alive = false;
+        return { ok: true as const, value: 1 };
+      },
+      () => alive,
+      () => null,
+    );
+    expect(sent).toEqual({ ok: true, value: 1 });
   });
 });
