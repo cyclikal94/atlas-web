@@ -123,6 +123,7 @@ export type {
   ListedResource,
   QueuePage,
   ResourcePage,
+  VisibleChildren,
 } from "./plans/outbox";
 // ---- outstanding work, reads by id and the whole-kind walk (WEB-10a) ------------------------------------------------------------------
 export type {
@@ -205,6 +206,7 @@ export {
   useSharingDefaults,
   useStatusInputs,
   useSyncStatusModel,
+  useVisibleChildren,
 } from "./ui/react";
 export {
   type LocalRead,

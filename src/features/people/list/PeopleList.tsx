@@ -14,8 +14,8 @@ import {
   type CacheRow,
   type DraftWithCommand,
   useDataActions,
-  useResourceList,
   useStatusInputs,
+  useVisibleChildren,
 } from "../../../data";
 import { CacheGate } from "../../sync/CacheGate";
 import * as copy from "../copy";
@@ -834,16 +834,25 @@ function PersonRow({
   );
 }
 
-/** The cached, non-archived fields of one person, from one page (a person with more says "100+"). */
+/**
+ * The cached, non-archived fields of one person, from one page (a person with more says "100+"). Read with the person in ONE read
+ * (PPL-5, review 15 R15.1): the row comes from the list's own read, which can answer a commit later than this one, so a person a newer
+ * commit removed shows no count, never the fields that commit left or added.
+ */
 function FieldCount({ personId }: { personId: string }) {
-  const page = useResourceList({ kind: "field", parentId: personId });
-  if (page.status !== "ready") return null;
-  const count = page.value.rows.filter(
+  const read = useVisibleChildren({
+    parentId: personId,
+    parentKind: "person",
+    kind: "field",
+  });
+  if (read.status !== "ready" || read.value === null) return null;
+  const page = read.value;
+  const count = page.rows.filter(
     (row: { merged: CacheRow }) => !row.merged.archived,
   ).length;
   return (
     <span className="flex-none text-[12.5px] text-ink-2" data-field-count="">
-      {page.value.next === null
+      {page.next === null
         ? copy.FIELD_COUNT(count)
         : `${copy.FIELD_COUNT(count)}+`}
     </span>

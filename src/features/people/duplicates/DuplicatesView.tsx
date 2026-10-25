@@ -10,7 +10,7 @@ import {
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { PageHeading } from "../../../components/ui/page-heading";
-import { useCachedResource, useResourceList } from "../../../data";
+import { useCachedResource, useVisibleChildren } from "../../../data";
 import type { PeopleFailure } from "../api";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
@@ -207,14 +207,24 @@ export function DuplicatesView({
   );
 }
 
-/** The candidate's field count when the cache holds its fields (nothing is asked for). */
+/**
+ * The candidate's field count when the cache holds its fields (nothing is asked for), and only while the cache holds the candidate as a
+ * person (PPL-5, review 15 R15.1): a hint already returned stays listed after its person is removed, but nothing of that person's fields
+ * (their number included) does. The person and the fields are one read; loading, a failed read and a hidden person all show nothing.
+ */
 function HintFieldCount({ personId }: { personId: string }) {
-  const page = useResourceList({ kind: "field", parentId: personId });
-  if (page.status !== "ready" || page.value.rows.length === 0) return null;
-  const count = page.value.rows.filter((row) => !row.merged.archived).length;
+  const read = useVisibleChildren({
+    parentId: personId,
+    parentKind: "person",
+    kind: "field",
+  });
+  if (read.status !== "ready" || read.value === null) return null;
+  const page = read.value;
+  if (page.rows.length === 0) return null;
+  const count = page.rows.filter((row) => !row.merged.archived).length;
   return (
     <span>
-      {page.value.next === null
+      {page.next === null
         ? copy.FIELD_COUNT(count)
         : `${copy.FIELD_COUNT(count)}+`}
     </span>

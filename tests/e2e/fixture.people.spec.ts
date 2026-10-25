@@ -6,7 +6,12 @@ import {
   leaderPage,
   snapshotPage,
 } from "./data-leader-helpers";
-import { atlasError, startOutbox } from "./data-sync-helpers";
+import {
+  atlasError,
+  seedSettled,
+  startOutbox,
+  stubNetwork,
+} from "./data-sync-helpers";
 import { pressTab } from "./helpers";
 import {
   atlas,
@@ -22,6 +27,7 @@ import {
   OWNER_ONLY,
   personP,
   publish,
+  publishChanges,
   servePeople,
   setup,
 } from "./people-helpers";
@@ -46,6 +52,7 @@ import {
  * Review 7 (23 October 2026): E-P34 a field's actions and E-P35 a header action and a list row keep their place through an answer during
  * a press (finding 3). Review 9 (24 October 2026): E-P36 the field editor whose real IndexedDB read of its field fails says so, and the
  * overlay, the close icon and Escape end only the session of the field shown, reached through the same route (in-app or Back).
+ * Review 15 (25 October 2026): E-P39 a duplicate's field count follows its person across two real pages (R15.1, A14).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -744,6 +751,110 @@ test.describe("E-P9: duplicates (A13, PPL-3)", () => {
     recordEvidence(info, "e-p9", { log: served.log });
     expect(served.log.filter((l) => l.includes("/duplicates"))).toHaveLength(3);
   });
+});
+
+test.describe("E-P39: a duplicate's field count follows its person across two real pages (A14, PPL-5; review 15, R15.1)", () => {
+  const G = "67676767-6767-4676-8676-676767676767";
+  const phone = { kind: "text", text: "07700 900461" };
+  for (const schedule of ["removed", "removed-and-added", "control"] as const)
+    test(`${schedule === "removed" ? "the person is removed by a sync page in the leader page, their field kept: the other page's hint stays listed with no count" : schedule === "removed-and-added" ? "ONE sync page removes the person and adds a field of theirs: the other page never shows '2 fields', and no count" : "control: a field added under the visible person reaches the other page as '2 fields'"}`, async ({
+      context,
+    }, info) => {
+      // The leader page commits the sync pages (the production page commit over real IndexedDB); the observer is another page with its
+      // own memory and its own live reads, which learns of the commit only through the database.
+      const net = await stubNetwork(context);
+      const served = await servePeople(context);
+      const resources = [
+        personP(P, "Mo"),
+        personP(Q, "Mohammed A."),
+        fieldP(F, Q, "Phone", phone),
+      ];
+      for (const resource of resources)
+        if (resource.kind === "person")
+          served.people.set(resource.id, { person: resource, linked: null });
+      // The observer's first page (the leader shows the list, which reads no duplicates).
+      served.duplicates.push({
+        items: [personP(Q, "Mohammed A.")],
+        next_after: null,
+      });
+      await seedSettled(context);
+      const leader = await bootAt(context, "/people");
+      const observer = await bootAt(context, `/people/${P}/duplicates`);
+      const asked = () =>
+        served.log.filter((l) => l.includes("/duplicates")).length;
+      await publish(leader, net, resources);
+      const hint = observer.locator(`[data-duplicate-hint="${Q}"]`);
+      await expect(hint).toContainText("1 field");
+      const before = asked();
+      // Every DOM state of the hint from here on (MutationObserver: no paint or timer is involved).
+      await observer.evaluate((q) => {
+        const seen: string[] = [];
+        (window as unknown as { __ep39: string[] }).__ep39 = seen;
+        new MutationObserver(() => {
+          seen.push(
+            document.querySelector(`[data-duplicate-hint="${q}"]`)
+              ?.textContent ?? "(no hint)",
+          );
+        }).observe(document.body, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+        });
+      }, Q);
+      const added = fieldP(G, Q, "Mobile", phone);
+      await publishChanges(
+        leader,
+        net,
+        schedule === "removed"
+          ? [{ kind: "remove", id: Q }]
+          : schedule === "removed-and-added"
+            ? [
+                { kind: "remove", id: Q },
+                { kind: "upsert", resource: added },
+              ]
+            : [{ kind: "upsert", resource: added }],
+        // Harness precondition (author diagnostics in all three engines): the running leader takes the page, nudged until it does. A
+        // single nudge during the leader's own follow-up /sync started nothing, and a restarted leader lost the page to the old engine's
+        // follow-up. What the case asserts is unchanged.
+        { start: false, retake: true },
+      );
+      // The commit is in the ONE database both pages read (seen through the leader's handle): the field (or fields) of Q stay cached.
+      await expect
+        .poll(async () =>
+          (
+            (await leader.evaluate(
+              (a) => window.__atlasData?.rows(a, "cache"),
+              ME,
+            )) as Array<{ id: string }>
+          )
+            .map((row) => row.id)
+            .filter((id) => [Q, F, G].includes(id))
+            .sort(),
+        )
+        .toEqual(
+          (schedule === "removed"
+            ? [F]
+            : schedule === "removed-and-added"
+              ? [F, G]
+              : [F, G, Q]
+          ).sort(),
+        );
+      if (schedule === "control") await expect(hint).toContainText("2 fields");
+      else {
+        await expect(hint).toContainText("Mohammed A.");
+        await expect(hint).not.toContainText(/\d+ fields?/);
+      }
+      const seen = (await observer.evaluate(
+        () => (window as unknown as { __ep39: string[] }).__ep39,
+      )) as string[];
+      recordEvidence(info, "e-p39", { schedule, seen, log: served.log });
+      if (schedule === "removed-and-added")
+        expect(seen.filter((text) => text.includes("2 fields"))).toEqual([]);
+      // Nothing was asked of the server again: the count followed the database alone (one read, the observer's first page, at its boot).
+      expect(before).toBe(1);
+      expect(asked()).toBe(before);
+    });
 });
 
 test.describe("E-P10: a new person with a note, never-fetched defaults (A8 at the client, A16)", () => {

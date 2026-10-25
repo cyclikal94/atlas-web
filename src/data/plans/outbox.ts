@@ -2108,47 +2108,69 @@ export const readResourceList = readPlan<
     after?: ResourceId | null;
     limit?: number;
   },
-  { rows: CacheRow[]; more: boolean; overlays: Map<ResourceId, Overlay> },
+  ListReads,
   ResourcePage
 >({
   name: "data.readResourceList",
   scope: ["cache", "pending_effects"],
-  read: async (reader, input) => {
-    const limit = listPageSize(input.limit);
-    const index = input.parentId === undefined ? "kind" : "parent_id";
-    const key = input.parentId === undefined ? input.kind : input.parentId;
-    const match =
-      input.parentId === undefined ? {} : { match: { kind: input.kind } };
-    const rows = await reader.pageByKey("cache", index, key, {
-      ...(input.after === undefined || input.after === null
-        ? {}
-        : { after: input.after }),
-      ...match,
-      limit,
-    });
-    // Whether the page is the last: a full page asks for ONE row after it, so no read ever returns more than the page.
-    const last = rows[rows.length - 1];
-    const more =
-      last !== undefined &&
-      rows.length === limit &&
-      (
-        await reader.pageByKey("cache", index, key, {
-          after: last.id,
-          ...match,
-          limit: 1,
-        })
-      ).length > 0;
-    return {
-      rows,
-      more,
-      overlays: await readOverlays(
-        reader,
-        rows.map((row) => row.id),
-        DATA_CONFIG.queueWorkingSet,
-      ),
-    };
+  read: readListPage,
+  decide: ({ reads }) => decideListPage(reads),
+});
+
+/** What one page of a list read holds: the page's cached rows, whether another follows, and their overlays. */
+interface ListReads {
+  rows: CacheRow[];
+  more: boolean;
+  overlays: Map<ResourceId, Overlay>;
+}
+
+/** The page read of `readResourceList` (and of `readVisibleChildren`), inside the caller's transaction. */
+async function readListPage(
+  reader: Reader,
+  input: {
+    kind: ResourceKind;
+    parentId?: string;
+    after?: ResourceId | null;
+    limit?: number;
   },
-  decide: ({ reads }) => ({
+): Promise<ListReads> {
+  const limit = listPageSize(input.limit);
+  const index = input.parentId === undefined ? "kind" : "parent_id";
+  const key = input.parentId === undefined ? input.kind : input.parentId;
+  const match =
+    input.parentId === undefined ? {} : { match: { kind: input.kind } };
+  const rows = await reader.pageByKey("cache", index, key, {
+    ...(input.after === undefined || input.after === null
+      ? {}
+      : { after: input.after }),
+    ...match,
+    limit,
+  });
+  // Whether the page is the last: a full page asks for ONE row after it, so no read ever returns more than the page.
+  const last = rows[rows.length - 1];
+  const more =
+    last !== undefined &&
+    rows.length === limit &&
+    (
+      await reader.pageByKey("cache", index, key, {
+        after: last.id,
+        ...match,
+        limit: 1,
+      })
+    ).length > 0;
+  return {
+    rows,
+    more,
+    overlays: await readOverlays(
+      reader,
+      rows.map((row) => row.id),
+      DATA_CONFIG.queueWorkingSet,
+    ),
+  };
+}
+
+function decideListPage(reads: ListReads): ResourcePage {
+  return {
     rows: reads.rows.map((base) => {
       const overlay = reads.overlays.get(base.id) as Overlay;
       return {
@@ -2161,5 +2183,36 @@ export const readResourceList = readPlan<
       reads.more && reads.rows.length > 0
         ? (reads.rows[reads.rows.length - 1] as CacheRow).id
         : null,
-  }),
+  };
+}
+
+/**
+ * The children of one parent, said only while that parent is VISIBLE (PPL-5, WEB-11a review 15, R15.1): null when the cache holds no row
+ * `parentId` of kind `parentKind` (it was never synced here, or it was removed: a person who became invisible), else the FIRST page of the
+ * children exactly as `readResourceList` reads it (its bound, and `next` when more follow). ONE transaction reads the parent and then the
+ * page, so a result never pairs a parent of one committed state with children of another; and the parent is ALWAYS read, so a live query
+ * of this plan depends on its key whether or not it has children (a removal or a return of the parent alone answers again). Null says
+ * only that nothing of the children may be shown: not that there are none. Whether the parent is visible is the cached-person rule of the
+ * detail and the ledger (`readMerged`'s row, of that kind); archival and editability do not change it.
+ */
+export type VisibleChildren = ResourcePage | null;
+
+export const readVisibleChildren = readPlan<
+  {
+    incarnationId: string;
+    parentId: ResourceId;
+    parentKind: ResourceKind;
+    kind: ResourceKind;
+  },
+  ListReads | null,
+  VisibleChildren
+>({
+  name: "data.readVisibleChildren",
+  scope: ["cache", "pending_effects"],
+  // The page is read only for a visible parent, so it is what says so.
+  read: async (reader, input) =>
+    (await reader.get("cache", input.parentId))?.kind === input.parentKind
+      ? readListPage(reader, input)
+      : null,
+  decide: ({ reads }) => reads && decideListPage(reads),
 });

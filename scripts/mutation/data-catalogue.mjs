@@ -2215,7 +2215,8 @@ export const UNIT = [
     file: "src/data/plans/outbox.ts",
     tests: ["tests/data/resource-list.test.ts"],
     patch: (t) =>
-      sub(t, "      rows.length === limit &&\n", "      false &&\n"),
+      // Re-anchored in WEB-11a revision 16: the list read moved into `readListPage` (two spaces less indentation), same mutation.
+      sub(t, "    rows.length === limit &&\n", "    false &&\n"),
   },
   {
     id: "MU-169",
@@ -2226,7 +2227,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      ...(input.after === undefined || input.after === null\n        ? {}\n        : { after: input.after }),\n",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "    ...(input.after === undefined || input.after === null\n      ? {}\n      : { after: input.after }),\n",
         "",
       ),
   },
@@ -2239,8 +2241,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      input.parentId === undefined ? {} : { match: { kind: input.kind } };",
-        "      {};",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "    input.parentId === undefined ? {} : { match: { kind: input.kind } };",
+        "    {};",
       ),
   },
   {
@@ -2252,8 +2255,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      ...match,\n      limit,\n    });",
-        "      ...match,\n      limit: limit + 1,\n    });",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "    ...match,\n    limit,\n  });",
+        "    ...match,\n    limit: limit + 1,\n  });",
       ),
   },
   {
@@ -2265,8 +2269,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "        rows.map((row) => row.id),\n        DATA_CONFIG.queueWorkingSet,",
-        "        rows.map((row) => row.id),\n        Number.MAX_SAFE_INTEGER,",
+        // Re-anchored in WEB-11a revision 16 (`readListPage`), same mutation.
+        "      rows.map((row) => row.id),\n      DATA_CONFIG.queueWorkingSet,",
+        "      rows.map((row) => row.id),\n      Number.MAX_SAFE_INTEGER,",
       ),
   },
   {
@@ -2326,8 +2331,10 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "            ...(options.after === undefined ? {} : { after: options.after }),\n",
-        "",
+        // Re-anchored in WEB-11a revision 16: the list hooks share `useListRead`, which passes the caller's options whole; dropping the
+        // cursor from what is read is the same mutation.
+        "            ...options,\n          })",
+        "            ...options,\n            after: undefined,\n          })",
       ),
   },
   {
@@ -25701,6 +25708,86 @@ export const UNIT = [
     tests: ["tests/data/outbox-predecessor.test.ts"],
     expect: /one of another resource/,
     patch: (t) => sub(t, "      !named ||\n", ""),
+  },
+  // ---- WEB-11a revision 16 (review 15, R15.1; design assessment DA15-01..04): a duplicate's field count only under a visible person ----
+  {
+    id: "MU-2751",
+    title:
+      "WEB-11a R15.1 (DA15-04): the parent-and-children read lists the children whatever the parent (no person in the cache)",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/visible-children.test.ts"],
+    expect:
+      /no person in the cache: hidden, though its fields are still cached/,
+    patch: (t) =>
+      sub(
+        t,
+        '    (await reader.get("cache", input.parentId))?.kind === input.parentKind\n',
+        "    (true as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-2752",
+    title:
+      "WEB-11a R15.1 (DA15-02): any cached row of the parent's id counts as a visible person (the kind is not checked)",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/visible-children.test.ts"],
+    expect: /a row of that id that is not a person: hidden/,
+    patch: (t) =>
+      sub(
+        t,
+        '    (await reader.get("cache", input.parentId))?.kind === input.parentKind\n',
+        '    (await reader.get("cache", input.parentId)) !== undefined\n',
+      ),
+  },
+  {
+    id: "MU-2753",
+    title:
+      "WEB-11a R15.1 (DA15-01): a duplicate hint's count reads its person's fields alone again (the review's counterexample)",
+    file: "src/features/people/duplicates/DuplicatesView.tsx",
+    tests: ["tests/features/people/duplicate-visibility.test.tsx"],
+    expect: /the person is removed, its field kept: no count/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '  const read = useVisibleChildren({\n    parentId: personId,\n    parentKind: "person",\n    kind: "field",\n  });\n  if (read.status !== "ready" || read.value === null) return null;\n  const page = read.value;\n',
+          '  const read = useResourceList({ kind: "field", parentId: personId });\n  if (read.status !== "ready") return null;\n  const page = read.value;\n',
+        ),
+        'import { useCachedResource, useVisibleChildren } from "../../../data";',
+        'import { useCachedResource, useResourceList } from "../../../data";',
+      ),
+  },
+  {
+    id: "MU-2754",
+    title:
+      "WEB-11a R15.1 (DA15-03): the parent-and-children read is not renewed for a new parent, so it keeps the earlier parent's answer",
+    file: "src/data/ui/react.tsx",
+    tests: ["tests/data/hooks.test.tsx"],
+    expect: /another parent is a NEW read that starts loading/,
+    patch: (t) =>
+      sub(
+        t,
+        "      options.kind,\n      options.parentId,\n      options.parentKind,\n",
+        "      options.kind,\n      options.parentKind,\n",
+      ),
+  },
+  {
+    id: "MU-2755",
+    title:
+      "WEB-11a R15.1 (DA15-06): the people list's field count reads the fields alone again, so a row its list has not yet withdrawn counts a removed person's fields",
+    file: "src/features/people/list/PeopleList.tsx",
+    tests: ["tests/features/people/duplicate-visibility.test.tsx"],
+    expect: /the stale row shows no count/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '  const read = useVisibleChildren({\n    parentId: personId,\n    parentKind: "person",\n    kind: "field",\n  });\n  if (read.status !== "ready" || read.value === null) return null;\n  const page = read.value;\n',
+          '  const read = useResourceList({ kind: "field", parentId: personId });\n  if (read.status !== "ready") return null;\n  const page = read.value;\n',
+        ),
+        "  useStatusInputs,\n  useVisibleChildren,\n",
+        "  useStatusInputs,\n  useResourceList,\n",
+      ),
   },
 ];
 

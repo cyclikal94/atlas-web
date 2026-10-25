@@ -397,6 +397,16 @@ parent with interleaved kinds; a walk with rows added before and after the curso
 **C-18** (`pageByKey`) and **C-19** (the production plan) in the double and the real Dexie adapter in Chromium, Firefox and WebKit, mutants MU-167 to MU-177 and, in a real engine, MU-180 and MU-181. This is a read-size counter and the real adapters'
 results, not a heap or out-of-memory measurement and not a measurement of the cost of a deep page; no feature screen uses the list yet.
 
+**A parent's children only while the parent is visible (WEB-11a revision 16, review 15 R15.1).** `readVisibleChildren({parentId,
+parentKind, kind})` (`plans/outbox.ts`, a READ plan) reads the cached row `parentId` first and, only when it is a `parentKind`, the first
+page of its children exactly as `readResourceList` reads it (`readListPage`, shared: same bound, cursor and windowed overlays); otherwise
+it answers null without reading the children. Parent and page are one transaction, so an answer never pairs a parent of one committed state
+with children of another, and because the parent key is always read, a live query depends on it even when there are no children: a removal
+or a return of the parent alone answers again. Null means only that nothing of the children may be shown, not that there are none.
+`useVisibleChildren` is its hook; it and `useResourceList` share one internal `useListRead`, so a new plan, kind, parent or page is a new
+read that starts `loading`. People's duplicate and list counts use it (PPL-5). Tests: `tests/data/visible-children.test.ts` (the
+production plan and page commit over the double), `tests/data/hooks.test.tsx` (a new parent never keeps the earlier answer).
+
 The approved dense batch (800 changes of 100-item checklists) reproduces the design's figures exactly: each value is 7,402 bytes and 547 nodes, and the page is 455,214 nodes and
 5.83 MiB (`tests/profiling/workloads.test.ts`). It is applied as **one** request at the lowest rung in all three engines (`tests/e2e/fixture.data-sync.spec.ts`, E-C3).
 Whether that suffices on a real constrained device is exactly what the measurement handoff must show (`.agtx/evidence/WEB-09a/profiling/handoff/`), and it has not been run on one.

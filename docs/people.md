@@ -332,6 +332,14 @@ reopens it with its draft), and `/settings/archived`.
   moved under it). What is shown still changes at once. Everything is restored after the click is delivered, at once on cancel of that
   pointer, when the page is hidden, or when the action is removed or disabled (a withdrawn action is never kept for a click), and 500 ms
   after its pointer was released elsewhere; a second pointer starts nothing.
+- **D-11a-30** (review 15 of 25 October 2026, R15.1; PPL-5/A14) A field count is shown only under a person the cache holds now. A
+  duplicate hint the duplicates answer listed stays listed after its person is removed (the answer is not withdrawn, and no new answer is
+  needed), but its count is not: `useVisibleChildren` reads the person and the first page of their fields in ONE transaction
+  (`readVisibleChildren`) and answers null when the cache holds no person of that id, whatever fields are still cached. A removal of the
+  person alone answers again, so neither a retained count nor one of fields cached later is shown. Loading, a failed read and a hidden person
+  all show no count, never "0 fields". The People list's cached count uses the same read: its row comes from the list's own read, which
+  can answer a commit later than the count's. A read-only or archived person is still visible. The detail and the Settings ledger keep
+  their own parent gates. Tests: `duplicate-visibility.test.tsx`, `tests/data/visible-children.test.ts`, E-P39 (two real pages).
 
 What is shown of unsent changes: a queued draft has no overlay until it is claimed, so the screens fold the bodies of the outstanding drafts
 (`useOutstandingCreates`) over the cache (`model/project.ts`): a create is projected and marked "Not sent yet"; a later rename, field update or

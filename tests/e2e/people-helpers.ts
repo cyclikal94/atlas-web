@@ -448,12 +448,34 @@ export async function publish(
   resources: Projection[],
   options: { start?: boolean } = {},
 ): Promise<void> {
+  await publishChanges(
+    page,
+    net,
+    resources.map((resource) => ({ kind: "upsert", resource })),
+    options,
+  );
+}
+
+/** One `/sync` delta page of `changes` (upserts and removals, in order), applied as `publish` applies its page. */
+export async function publishChanges(
+  page: Page,
+  net: SyncStub,
+  changes: Array<
+    { kind: "upsert"; resource: Projection } | { kind: "remove"; id: string }
+  >,
+  /**
+   * `retake` (with `start: false`): nudge again until the page is taken. A single nudge that arrives while the leader's own follow-up
+   * /sync is running starts nothing, and the page then waits for the live-edge poll a minute away; the running engine commits it
+   * whichever of its requests takes it.
+   */
+  options: { start?: boolean; retake?: boolean } = {},
+): Promise<void> {
   publishedRevision += 1;
   const revision = publishedRevision;
   net.script.push(() => ({
     status: 200,
     body: pageText(
-      [resources.map((resource) => ({ kind: "upsert", resource }))],
+      [changes],
       `cursor-${net.requests.length + 1}`,
       false,
       revision,
@@ -461,6 +483,14 @@ export async function publish(
   }));
   if (options.start !== false) {
     await startLeader(page);
+    await waitForState(page, "idle");
+  } else if (options.retake) {
+    await expect
+      .poll(async () => {
+        await page.evaluate(() => window.__atlasData?.nudgeSync());
+        return net.script.length;
+      })
+      .toBe(0);
     await waitForState(page, "idle");
   } else {
     await page.evaluate(() => window.__atlasData?.nudgeSync());

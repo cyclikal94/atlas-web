@@ -6,6 +6,7 @@ import {
   DataEnvProvider,
   useCachedResource,
   useResourceList,
+  useVisibleChildren,
 } from "../../src/data";
 import { createQuotaGuard } from "../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../src/data/engine/sync-channel";
@@ -152,6 +153,30 @@ function List({ after, limit }: { after?: string | null; limit?: number }) {
     <p data-testid="list" data-next={out.value.next ?? ""}>
       {out.value.rows.map((m) => m.merged.label).join(",")}
     </p>
+  );
+}
+
+/** A person's fields only while the person is cached (PPL-5, review 15 R15.1); `parent` moves while the view stays mounted. */
+function Children() {
+  const [parent, setParent] = useState("q");
+  const out = useVisibleChildren({
+    parentId: parent,
+    parentKind: "person",
+    kind: "field",
+  });
+  return (
+    <>
+      <button type="button" data-testid="other" onClick={() => setParent("r")}>
+        other
+      </button>
+      <p data-testid="children">
+        {out.status !== "ready"
+          ? out.status
+          : out.value === null
+            ? "hidden"
+            : out.value.rows.map((m) => m.merged.label).join(",")}
+      </p>
+    </>
   );
 }
 
@@ -341,6 +366,36 @@ describe("with a database", () => {
     expect(rest).toHaveLength(30);
     expect(rest[0]).toBe("n100");
     expect(rest[29]).toBe("n129");
+  });
+
+  test("a person's fields (PPL-5): another parent is a NEW read that starts loading, never the earlier parent's answer", async () => {
+    const t = await mount({ database: true }, () => <Children />);
+    const name = accountDatabaseName(ACCOUNT);
+    t.world.idb.seed(name, "cache", [
+      cacheRow({ id: "q", kind: "person", label: "Q" }),
+      cacheRow({ id: "fq", kind: "field", parent_id: "q", label: "Q's" }),
+      cacheRow({ id: "fr", kind: "field", parent_id: "r", label: "R's" }),
+    ]);
+    await t.env.outbox()?.enqueue({
+      endpoint: "/commands",
+      targets: [],
+      build: () => ({ command: {} }),
+    });
+    await t.settle();
+    expect(screen.getByTestId("children")).toHaveTextContent("Q's");
+    // R's read is not delivered yet: the view must not keep Q's answer for R.
+    t.world.idb.autoDrive = false;
+    act(() => screen.getByTestId("other").click());
+    expect(screen.getByTestId("children")).toHaveTextContent("loading");
+    t.world.idb.autoDrive = true;
+    await t.settle();
+    // R is not cached as a person: its cached field is not shown.
+    expect(screen.getByTestId("children")).toHaveTextContent("hidden");
+  });
+
+  test("a person's fields with no database: unavailable, never a page", async () => {
+    await mount({ database: false }, () => <Children />);
+    expect(screen.getByTestId("children")).toHaveTextContent("unavailable");
   });
 
   test("a view never reads another account: when the identity leaves, it reads as unavailable", async () => {

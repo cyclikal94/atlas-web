@@ -424,9 +424,13 @@ export interface PeopleWorld {
   releaseReads(): void;
   /**
    * The EXISTING watches of `plan` keep answering what they last answered, until `thawReads` (DA7-12): a commit that plan's live query has
-   * not delivered yet, while every other read (and every new watch) sees it.
+   * not delivered yet, while every other read (and every new watch) sees it. With `match`, only the watches whose input it accepts (review
+   * 15, R15.1: the people list's own read of the people, but not each row's read of its fields).
    */
-  freezeReads(plan: string): void;
+  freezeReads(
+    plan: string,
+    match?: (input: Record<string, unknown>) => boolean,
+  ): void;
   thawReads(): void;
   /** ONE commit: `rows` are cached and the outstanding drafts become `drafts` (a receipt published, as `commitPage` does). */
   handOff(rows: CacheRow[], drafts: DraftWithCommand[]): void;
@@ -472,7 +476,10 @@ export function peopleWorld(
   const gated: Record<string, unknown>[] = [];
   const watches: Array<{ plan: string; input: Record<string, unknown> }> = [];
   /** Plans whose EXISTING watches answer what they last answered (`freezeReads`): a commit their live query has not delivered yet. */
-  const frozen = new Set<string>();
+  const frozen: Array<{
+    plan: string;
+    match: (input: Record<string, unknown>) => boolean;
+  }> = [];
   const faults: Array<{
     plan: string;
     match: (input: Record<string, unknown>) => boolean;
@@ -521,6 +528,18 @@ export function peopleWorld(
           next: rest.length > 100 ? (page.at(-1)?.id ?? null) : null,
         },
       };
+    },
+    // The parent and its children from ONE state of the world, as the production plan reads them in one transaction (review 15, R15.1):
+    // no row `parentId` of kind `parentKind` in the cache answers null, whatever children are still cached.
+    "data.readVisibleChildren": (input) => {
+      if (failing) return { status: "unavailable", reason: "error" };
+      const parent = cache.get(input.parentId as string);
+      if (parent === undefined || parent.kind !== input.parentKind)
+        return { status: "ready", value: null };
+      return plans["data.readResourceList"]?.({
+        kind: input.kind,
+        parentId: input.parentId,
+      }) as Loadable<unknown>;
     },
     "data.readAppliedRevision": () => ({
       status: "ready",
@@ -636,7 +655,13 @@ export function peopleWorld(
           get: () => {
             if (compute === undefined)
               return { status: "loading" } as Loadable<unknown>;
-            if (frozen.has(plan.name) && last !== undefined) return last;
+            if (
+              last !== undefined &&
+              frozen.some(
+                (freeze) => freeze.plan === plan.name && freeze.match(input),
+              )
+            )
+              return last;
             if (gate !== null && gate === holding) {
               if (!seen) gated.push(input);
               seen = true;
@@ -1360,11 +1385,11 @@ export function peopleWorld(
       holding += 1;
       act(() => notify());
     },
-    freezeReads(plan) {
-      frozen.add(plan);
+    freezeReads(plan, match = () => true) {
+      frozen.push({ plan, match });
     },
     thawReads() {
-      frozen.clear();
+      frozen.length = 0;
       act(() => notify());
     },
     handOff(rows, next) {
