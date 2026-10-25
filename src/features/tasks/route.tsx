@@ -3,11 +3,11 @@ import {
   createRoute,
   useMatchRoute,
 } from "@tanstack/react-router";
-import { lazy, Suspense } from "react";
+import { lazy, type ReactNode, Suspense } from "react";
 import { PageHeading } from "../../components/ui/page-heading";
 import { useOptionalDataEnv } from "../../data";
 import { CacheGate } from "../sync/CacheGate";
-import { TASKS_TITLE } from "./titles";
+import { LISTS_TITLE, TASKS_TITLE } from "./titles";
 
 const screens = () => import("./screens");
 const TasksLayoutScreen = lazy(() =>
@@ -21,6 +21,9 @@ const TaskNewScreen = lazy(() =>
 );
 const TaskEditScreen = lazy(() =>
   screens().then((m) => ({ default: m.TaskEditScreen })),
+);
+const ListsLayoutScreen = lazy(() =>
+  screens().then((m) => ({ default: m.ListsLayoutScreen })),
 );
 
 /** `/tasks/<id>?occurrence=<id>`: a task, optionally one of its days (the public path helper for WEB-10b/10c/14b). */
@@ -39,24 +42,56 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
  * `/tasks/$taskId/edit`. The screens are one lazy chunk (`screens.tsx`).
  */
 function TasksLayout() {
-  const env = useOptionalDataEnv();
   const matchRoute = useMatchRoute();
-  if (env === null) return <PageHeading>{TASKS_TITLE}</PageHeading>;
-  // The list's heading is the route's, outside the cache gate and the lazy screens (revision 2), so it exists at once and in every gate
-  // state; a task's own page has its own heading, and while the gate hides it the gate shows the list's.
-  const child =
-    matchRoute({ to: "/tasks/$taskId", fuzzy: true }) !== false ||
-    matchRoute({ to: "/tasks/new" }) !== false;
-  const heading = <PageHeading>{TASKS_TITLE}</PageHeading>;
+  return (
+    <Gated
+      title={TASKS_TITLE}
+      child={
+        matchRoute({ to: "/tasks/$taskId", fuzzy: true }) !== false ||
+        matchRoute({ to: "/tasks/new" }) !== false
+      }
+    >
+      <TasksLayoutScreen />
+    </Gated>
+  );
+}
+
+/**
+ * A destination's layout behind the cache gate. The list's heading is the route's, outside the cache gate and the lazy screens (revision 2),
+ * so it exists at once and in every gate state; a child page (a task, a list) has its own heading, and while the gate hides it the gate
+ * shows the list's.
+ */
+function Gated({
+  title,
+  child,
+  children,
+}: {
+  title: string;
+  child: boolean;
+  children: ReactNode;
+}) {
+  const heading = <PageHeading>{title}</PageHeading>;
+  if (useOptionalDataEnv() === null) return heading;
   return (
     <>
       {child ? null : heading}
       <CacheGate heading={child ? heading : null}>
-        <Suspense fallback={null}>
-          <TasksLayoutScreen />
-        </Suspense>
+        <Suspense fallback={null}>{children}</Suspense>
       </CacheGate>
     </>
+  );
+}
+
+/** WEB-10b's Lists (`/tasks/lists`, `/tasks/lists/$listId`): under the Tasks destination (D-10b-1), with a heading of its own. */
+function ListsLayout() {
+  const matchRoute = useMatchRoute();
+  return (
+    <Gated
+      title={LISTS_TITLE}
+      child={matchRoute({ to: "/tasks/lists/$listId" }) !== false}
+    >
+      <ListsLayoutScreen />
+    </Gated>
   );
 }
 
@@ -118,4 +153,20 @@ export const tasksRoute = (parent: AnyRoute) => {
     },
   });
   return tasks.addChildren([index, create, detail.addChildren([view, edit])]);
+};
+
+/**
+ * The Lists routes (WEB-10b, D-10b-1): a root-level branch whose path starts `tasks/lists`, so the Tasks destination stays highlighted and
+ * titled; its static segment outranks `/tasks/$taskId`. The screens are in the same lazy chunk as the task screens.
+ */
+export const listsRoute = (parent: AnyRoute) => {
+  const lists = createRoute({
+    getParentRoute: () => parent,
+    path: "tasks/lists",
+    component: ListsLayout,
+  });
+  // The detail is drawn by the lazy layout from the matched id (no second lazy screen in the routes' first load).
+  const index = createRoute({ getParentRoute: () => lists, path: "/" });
+  const detail = createRoute({ getParentRoute: () => lists, path: "$listId" });
+  return lists.addChildren([index, detail]);
 };

@@ -4,6 +4,7 @@ import { TaskDetail } from "./detail/TaskDetail";
 import { TaskList } from "./detail/TaskList";
 import { TasksBoundary } from "./env";
 import { TaskFormPage } from "./form/TaskFormPage";
+import { ListsLayout } from "./lists/ListsLayout";
 import { isKnownZone } from "./model/primitives";
 import { dayEnd, todayIn } from "./model/time";
 import { TodayPage } from "./today/TodayPage";
@@ -145,4 +146,13 @@ export function TaskNewScreen() {
 
 export function TaskEditScreen({ taskId }: { taskId: string }) {
   return <TaskFormPage key={taskId} mode={{ kind: "edit", taskId }} />;
+}
+
+/** WEB-10b: the Lists pane beside the list detail from 1280 px (D-10b-2). */
+export function ListsLayoutScreen() {
+  return (
+    <TasksBoundary>
+      <ListsLayout />
+    </TasksBoundary>
+  );
 }

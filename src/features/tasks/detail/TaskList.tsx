@@ -10,6 +10,7 @@ import { patched } from "../view";
 export const LIST_COPY = {
   heading: "Your tasks",
   newTask: "New task",
+  lists: "Lists",
   showArchived: "Archived",
   showActive: "Active",
   none: "No tasks here yet.",
@@ -65,12 +66,22 @@ export function TaskList({ selected }: { selected?: string }) {
         <h2 id={heading} className="text-[15px] font-medium text-ink-1">
           {LIST_COPY.heading}
         </h2>
-        <Link
-          to="/tasks/new"
-          className="atlas-transition inline-flex min-h-11 items-center rounded-control bg-action-fill px-4 text-[13.5px] font-medium text-action-on hover:bg-action-hover"
-        >
-          {LIST_COPY.newTask}
-        </Link>
+        <span className="flex gap-2">
+          {/* WEB-10b (D-10b-1): Lists live under the Tasks destination, reached from here (no rail or tab item of their own). */}
+          <Link
+            to="/tasks/lists"
+            data-lists-link=""
+            className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+          >
+            {LIST_COPY.lists}
+          </Link>
+          <Link
+            to="/tasks/new"
+            className="atlas-transition inline-flex min-h-11 items-center rounded-control bg-action-fill px-4 text-[13.5px] font-medium text-action-on hover:bg-action-hover"
+          >
+            {LIST_COPY.newTask}
+          </Link>
+        </span>
       </div>
       <label className="inline-flex min-h-11 items-center gap-2 text-[13px] text-ink-1">
         <input
