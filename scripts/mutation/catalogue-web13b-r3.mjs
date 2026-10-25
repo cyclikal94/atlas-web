@@ -10,6 +10,10 @@ const KEPT = "src/features/tasks/detail/anchor-kept.ts";
 const SECTION = "src/features/tasks/detail/AnchorSection.tsx";
 const T_KEPT = "tests/features/tasks/anchor-kept.test.ts";
 const T_SECTION = "tests/features/tasks/anchor-section.test.tsx";
+const DISPATCHER = "src/data/engine/outbox-dispatcher.ts";
+const T_FORBIDDEN = "tests/data/leader-forbidden.test.ts";
+const LATE =
+  /an ordinary 403 forbidden|a 422 answered under the same interruption|a receipt under the same interruption|while the display stays closed/;
 
 /**
  * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the owner alone), MU-2517, MU-2518 and
@@ -84,6 +88,37 @@ export const UNIT_13B_R3 = [
         t,
         "    live() && memory === own && own.reads.get(key)?.token === token;\n",
         "    live();\n",
+      ),
+  },
+  // F-13b-1 (handover `delivery/handoffs/web13b-foundation-403-approved-20261025.md`): the issued answer of a stopped run (L1b, production
+  // leadership over the deterministic world). Withdrawn as equivalent after an exploratory run, its id never reused: MU-2528 (the answer of
+  // an ENDED binding settled too: the commit's own guards, identity, epoch, incarnation and ownership, refuse it all the same, F-2).
+  {
+    id: "MU-2526",
+    title:
+      "WEB-13b F-13b-1: an issued command's answer is dropped with the run the display's interim hold stopped (resent at once, as found)",
+    file: DISPATCHER,
+    tests: [T_FORBIDDEN],
+    expect: LATE,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!settles(id, run)) return { when: "event" };\n    if (alive(id)) {\n',
+        '    if (!alive(id)) return { when: "event" };\n    if (alive(id)) {\n',
+      ),
+  },
+  {
+    id: "MU-2527",
+    title:
+      "WEB-13b F-13b-1: the decoded answer of a stopped run is dropped before it is recorded",
+    file: DISPATCHER,
+    tests: [T_FORBIDDEN],
+    expect: LATE,
+    patch: (t) =>
+      sub(
+        t,
+        '    deps.trace?.emit("data.outbox_answer", { kind: outcome.kind });\n    if (!settles(id, run)) return { when: "event" };\n',
+        '    deps.trace?.emit("data.outbox_answer", { kind: outcome.kind });\n    if (!alive(id)) return { when: "event" };\n',
       ),
   },
 ];

@@ -754,7 +754,15 @@ that runs) and the command and conflict registries feature slices register into 
 **The recovery job** (`src/data/engine/recovery-job.ts`) is the `RecoverySeam`. While it needs the cache (`exclusive`) the engine is stopped, so one `/sync` is in flight;
 it is started again with the same ownership when the job is done. The engine and the dispatcher run only while the bound account is DISPLAYED: while it is fenced or not
 yet exposed neither may send anything, and a request they tried would be refused by the session, whose re-evaluation would wake them again (a loop of refused requests that
-the first integration run of the production leader showed; `tests/data/leader.test.ts` L-10 holds it). The job is what reads while the account is fenced. It has two modes over one implementation:
+the first integration run of the production leader showed; `tests/data/leader.test.ts` L-10 holds it). The job is what reads while the account is fenced. **A request the
+dispatcher had already ISSUED is still answered into its draft while its run is stopped that way** (F-13b-1, WEB-13b revision 3; handover
+`delivery/handoffs/web13b-foundation-403-approved-20261025.md`): the session closes the display for a moment around every `403` (its interim hold, released when the
+refusal is an ordinary `forbidden`), and an answer dropped with the run it stopped left the draft `in_flight` and uncounted, so the next run sent the same refused command
+again at once (review 1 of WEB-13b saw seven identical `POST`s in 82 ms). The dispatcher now records such an answer (`settles`: the run that issued it still has its
+binding's ownership) under the commit's own guards (identity, epoch, incarnation, ownership) and changes nothing of the run that stands (R27); an ownership that ENDED
+(another identity, a lost lead, an ended service) still drops it for the next owner to send under the same key (F-2). Nothing new is sent while the display is closed.
+`tests/data/leader-forbidden.test.ts` (both orders of the reopening around the answer, a receipt, a closure that stands, an `auth_state` refusal and the ended binding as
+controls), E-F1 in `tests/e2e/fixture.data-forbidden.spec.ts` (the production session's own hold, three engines), mutants MU-2526 and MU-2527. It has two modes over one implementation:
 
 * ORDINARY (the account is displayed): a fresh database (`empty`), an invalidated cache (W18's `410`/`400`/`422` on a delta cursor) or an abandoned attempt is snapshotted
   with ordinary requests while the cache stays hidden through `cache_status`.

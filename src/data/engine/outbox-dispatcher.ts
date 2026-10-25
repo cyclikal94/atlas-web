@@ -305,6 +305,18 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
 
   const alive = (id: number): boolean =>
     id === generation && ownership !== null && !ownership.signal.aborted;
+  /**
+   * Whether an ISSUED request's answer is still settled although its run has ended (F-13b-1, WEB-13b revision 3; handover
+   * `delivery/handoffs/web13b-foundation-403-approved-20261025.md`). The answer is the draft's, not the run's: the leader stops the run while
+   * the account's display is closed and starts another when it opens, and the session closes it for a moment around every `403` (its
+   * interim hold, released when the refusal is an ordinary one). An answer dropped with that run left its draft `in_flight`, uncounted, for
+   * the next run to send again at once: the same refused command, one `POST` after another. So it is recorded while the ownership that
+   * issued it stands (`run`: its signal aborts only when its binding ends), under the commit's own guards (identity, epoch, incarnation,
+   * ownership), and nothing of the run that stands is touched (R27). An ownership that ended (another identity, a lost lead, an ended
+   * service) still drops it: the draft stays `in_flight` for the account's next owner, under the same key.
+   */
+  const settles = (id: number, run: SyncOwnership | null): boolean =>
+    alive(id) || (run !== null && !run.signal.aborted);
 
   const clearTimer = (): void => {
     if (timer !== null) deps.clock.clearTimeout(timer);
@@ -648,6 +660,8 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     epoch: number,
     pick: DraftRow,
   ): Promise<Next> {
+    // The ownership this attempt issues its request under (`settles`).
+    const run = ownership;
     const captured = service.capture(epoch);
     // (1) the claim: one transaction flips `queued` to `in_flight` and creates the candidate rows.
     const claim = await service.commit(markInFlight, {
@@ -719,13 +733,16 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     } catch (error) {
       return requestError(id, service, claimed, error);
     }
-    // An answer to a run that has ended resets nothing of the run that stands (R27, revision 12).
-    if (!alive(id)) return { when: "event" };
-    notSent = 0;
-    notCovered = 0;
-    staleRun = 0;
-    refusedRun = 0;
-    return answer(id, service, captured, claimed, response);
+    // An answer to a run that has ended resets nothing of the run that stands (R27, revision 12); it is still recorded while the ownership
+    // that issued it stands (`settles`, F-13b-1).
+    if (!settles(id, run)) return { when: "event" };
+    if (alive(id)) {
+      notSent = 0;
+      notCovered = 0;
+      staleRun = 0;
+      refusedRun = 0;
+    }
+    return answer(id, service, captured, claimed, response, run);
   }
 
   async function unclaim(
@@ -866,6 +883,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     captured: ReturnType<AccountService["capture"]>,
     claimed: Extract<ClaimResult, { kind: "claimed" }>,
     response: Response,
+    run: SyncOwnership | null,
   ): Promise<Next> {
     const draft: DraftWithCommand = {
       ...claimed.draft,
@@ -881,7 +899,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
           : undefined,
     });
     deps.trace?.emit("data.outbox_answer", { kind: outcome.kind });
-    if (!alive(id)) return { when: "event" };
+    if (!settles(id, run)) return { when: "event" };
 
     if (outcome.kind === "receipt") {
       const issued = issue(service, [draftOperations(draft.local_id)[1]]);

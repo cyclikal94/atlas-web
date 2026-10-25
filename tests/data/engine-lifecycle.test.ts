@@ -104,13 +104,22 @@ describe("the sync engine's restart while a request is outstanding (R8)", () => 
 });
 
 describe("the outbox dispatcher's restart while a send is outstanding (R8, audit)", () => {
-  test("stop and start with a command's answer held: the replacement runs when the old step unwinds, and the same key is resent once", async () => {
+  // ADAPTED in WEB-13b revision 3 (F-13b-1; handover `delivery/handoffs/web13b-foundation-403-approved-20261025.md`), for the reviewer to accept or
+  // reject. The original asserted `sent` keys `["d1", "d1"]`: the stopped run DISCARDED its issued answer and the replacement resent the draft
+  // under its key. That is the mechanism of F-13b-1 (a refused command resent for as long as the display's interim hold stopped the run), and
+  // the correction records the answer instead while the run's ownership stands. The original's intents are kept: the replacement waits for
+  // the old step (one request in flight) and runs when it unwinds, now shown by a second draft that only the replacement can send; and nothing
+  // is left queued or in flight. The original's failure on the corrected source is preserved (`.agtx/evidence/WEB-13b/revision-3/full-unit-2/`).
+  test("stop and start with a command's answer held: the replacement runs when the old step unwinds; the answer is recorded, not resent (adapted, F-13b-1)", async () => {
     const w = await outboxWorld();
     let release: (response: Response) => void = () => undefined;
     w.script.push(
       () => new Promise<Response>((resolve) => (release = resolve)),
     );
-    w.put("drafts", [draftRow({ local_id: "d1", created_seq: 1 })]);
+    w.put("drafts", [
+      draftRow({ local_id: "d1", created_seq: 1 }),
+      draftRow({ local_id: "d2", created_seq: 2 }),
+    ]);
     w.start();
     await w.settle();
     expect(w.sent).toHaveLength(1);
@@ -123,9 +132,9 @@ describe("the outbox dispatcher's restart while a send is outstanding (R8, audit
 
     release(w.receipt());
     await w.settle();
-    // The old answer was discarded by the dead generation, so the draft is still `in_flight` and is resent under its own key,
-    // which the server answers with the same receipt (an idempotent resend, never a second command).
-    expect(w.sent.map((s) => s.key)).toEqual(["d1", "d1"]);
+    // The answer is d1's whatever became of the run that issued it (its ownership stands): recorded, never sent again. The replacement ran
+    // when the old step unwound: it sent d2.
+    expect(w.sent.map((s) => s.key)).toEqual(["d1", "d2"]);
     expect(
       w
         .drafts()
