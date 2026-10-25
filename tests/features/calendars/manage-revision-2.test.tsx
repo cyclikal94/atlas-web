@@ -608,6 +608,68 @@ describe("a late answer belongs to the form that sent it (S10, S13)", () => {
     await waitFor(() => expect(polite()).toBe(copy.LINKED));
   });
 
+  /*
+   * S13 (WEB-10a review 26, R38): the property is that no attempt is admitted AFTER Manage shows the waiting change. A retry the
+   * production loop makes (50 ms after a `not_sent`) while no change is waiting yet is allowed, so the attempt being answered is HELD
+   * until the change is committed and Manage shows it; only then does its `not_sent` arrive. Production delays and the 500 ms
+   * observation are unchanged.
+   */
+  const pause = (ms: number) =>
+    act(() => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const notSent = () => ({ throws: new StampedRequestError("not_sent") });
+  /** `before` attempts answered `not_sent` at once, then one held until released (as `not_sent`), then `not_sent` again. */
+  const holdAttempt = (w: CalendarWorld, before: number) => {
+    let release: (reply: WireReply) => void = () => undefined;
+    w.replies.set("/calendar-commands", [
+      ...Array.from({ length: before }, notSent),
+      {
+        wait: new Promise<WireReply>((resolve) => {
+          release = resolve;
+        }),
+      },
+      ...Array.from({ length: 12 }, notSent),
+    ]);
+    return () => release(notSent());
+  };
+  const REMOVE_BODY = {
+    command: {
+      kind: "configure_source",
+      id: SOURCE,
+      expected_version: 3,
+      timezone: "Europe/Vienna",
+      enabled: true,
+      disconnect: true,
+    },
+  };
+  /** Every attempt is the same Remove, under one idempotency key. */
+  const sameRemove = (w: CalendarWorld) => {
+    const sent = commands(w);
+    for (const call of sent) expect(call.body).toEqual(REMOVE_BODY);
+    expect(new Set(sent.map((call) => call.key)).size).toBe(1);
+    expect(sent[0]?.key).toEqual(expect.any(String));
+  };
+  /** Queues a settings change of the source and waits until Manage shows it waiting: the boundary the property is stated from. */
+  async function changeWaiting(w: CalendarWorld, dialog: HTMLElement) {
+    const remove = () =>
+      reasonOf(within(dialog).getByRole("button", { name: copy.REMOVE }));
+    expect(configures(w)).toEqual([]);
+    expect(remove()).not.toBe(copy.WAITING_CHANGES_FIRST);
+    await enqueue(
+      w,
+      configureSourceRequest(sourceRow(), { timezone: "UTC", enabled: true }),
+    );
+    expect(configures(w).map((c) => c.command)).toEqual([
+      {
+        kind: "configure_source",
+        id: SOURCE,
+        expected_version: 3,
+        timezone: "UTC",
+        enabled: true,
+      },
+    ]);
+    await waitFor(() => expect(remove()).toBe(copy.WAITING_CHANGES_FIRST));
+  }
+
   /**
    * WEB-08d revision 20 (review r19 C1): the FIRST `not_sent` answer is held until the waiting change is durable and Manage shows its
    * guard, then released. Without that order the 50 ms retries ran while the change was still being written (legal admissions, before
@@ -689,6 +751,7 @@ describe("a late answer belongs to the form that sent it (S10, S13)", () => {
         expect(commands(w), schedule).toHaveLength(1);
         await act(async () => release(notSent()));
         await pause(500);
+        sameRemove(w);
         if (queued) {
           expect(commands(w), schedule).toHaveLength(1);
           // The released answer was consumed and the attempt ended: the control now gives the guard, not "Working…".
@@ -701,6 +764,25 @@ describe("a late answer belongs to the form that sent it (S10, S13)", () => {
         cleanup();
       }
     }
+  });
+
+  test("a Remove retried before the change is not admitted again once the source has a waiting change (S13): the earlier retry is allowed", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()] });
+    const dialog = await openManage(w);
+    const release = holdAttempt(w, 1);
+    press(dialog, copy.REMOVE);
+    press(dialog, copy.REMOVE_SUBMIT);
+    try {
+      // The first `not_sent` is answered at once; the production retry 50 ms later is admitted, as nothing is waiting yet.
+      await waitFor(() => expect(commands(w)).toHaveLength(2));
+      await changeWaiting(w, dialog);
+      expect(commands(w)).toHaveLength(2);
+    } finally {
+      await act(async () => release());
+    }
+    await pause(500);
+    expect(commands(w)).toHaveLength(2);
+    sameRemove(w);
   });
 });
 

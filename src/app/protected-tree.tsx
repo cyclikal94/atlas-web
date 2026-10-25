@@ -1,7 +1,12 @@
 import { RouterProvider } from "@tanstack/react-router";
 import { type ReactNode, useEffect, useMemo } from "react";
 import { SyncStatusProvider } from "../components/ui/sync-status";
-import { DataProvider, useAccountLabel, useSyncStatusModel } from "../data";
+import {
+  DataProvider,
+  getPageDataHost,
+  useAccountLabel,
+  useSyncStatusModel,
+} from "../data";
 import { invitationMemory } from "../features/authentication/handoff";
 import { isJoinPath } from "../features/authentication/public-route";
 import { SwitchHost } from "../features/switch/entry";
@@ -100,7 +105,14 @@ function normalisePublicPath(): void {
 
 /** `extra`: fixture-only recoverable form, mounted inside the shared data provider after the routed shell. */
 export function createProtectedTree(session: Session, extra?: () => ReactNode) {
-  // Record document departures before the router; calendar visits outlive protected-tree mounts.
+  // WEB-10a: the task kinds are registered once into the page's registry (the leader's dispatcher and the queue screens share it), so
+  // `/sync` describes and offers task drafts whichever screen is open first.
+  // Loaded as its own chunk (it is not needed to draw the shell, and the fixture's initial bundle has no room for it).
+  void import("../features/tasks/register").then(({ registerTaskCommands }) =>
+    registerTaskCommands(getPageDataHost().commands),
+  );
+  // Once per document, before the first router: the document's own record of where it is outlives every mount of the tree and every
+  // router, so a screen can tell that the person left it while the tree was unmounted (WEB-13a revision 6, `route-changes.ts`).
   documentRouteChanges();
   /** The account this page mounted a tree for last (page memory). */
   let lastMounted: string | null = null;

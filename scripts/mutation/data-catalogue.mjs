@@ -5,6 +5,19 @@
 // `patch(text)` returns the mutated text. `sub` refuses a patch whose anchor is missing or ambiguous, so a refactor that moves the
 // code a mutant targets fails LOUDLY here instead of silently turning the mutant into a no-op ("patch applied" is asserted).
 
+import { ENGINE_LIFECYCLE, UNIT_LIFECYCLE } from "./catalogue-web08c.mjs";
+import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
+import { ENGINE_R17, UNIT_R17 } from "./catalogue-web10a-r17.mjs";
+import { ENGINE_R18, UNIT_R18 } from "./catalogue-web10a-r18.mjs";
+import { ENGINE_R19, UNIT_R19 } from "./catalogue-web10a-r19.mjs";
+import { ENGINE_R20, UNIT_R20 } from "./catalogue-web10a-r20.mjs";
+import { ENGINE_R21, UNIT_R21 } from "./catalogue-web10a-r21.mjs";
+import { ENGINE_R22, UNIT_R22 } from "./catalogue-web10a-r22.mjs";
+import { ENGINE_R23, UNIT_R23 } from "./catalogue-web10a-r23.mjs";
+import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
+import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
+import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
+
 export class PatchError extends Error {}
 
 /** Replaces exactly ONE occurrence of `from` (a string or a RegExp with no `g` flag). Throws when there is none or more than one. */
@@ -58,8 +71,20 @@ const PORT_TESTS = [
   "tests/data/fence.test.ts",
 ];
 
+/** WEB-10a revision 13 (R26): the first Join as revision 13 renders it, and as revision 12 did (MU-2252, MU-2254). */
+const FIRST_JOIN_R13 =
+  "            // One path before and after the first choice (revision 13, R26): the choice that begins the draft keeps its form, and focus.\n            <FirstJoin\n              begun={current}\n              form={(seed) =>\n                joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)\n              }\n            />\n";
+const FIRST_JOIN_R12 =
+  "            current === null ? (\n              <FirstJoin\n                begun={null}\n                form={(seed) =>\n                  joinForm(enrolment, seed, CONTROLS_COPY.defaultAudience)\n                }\n              />\n            ) : (\n              joinForm(enrolment, current.policy, CONTROLS_COPY.defaultAudience)\n            )\n";
+
+/** WEB-10a revision 15 (R28): Today's participant words as they are, and as they were before (MU-2255, MU-2266: "You" unconditionally). */
+const TODAY_WHO_R15 = `          {participation === "personal" ? "" : \` · \${whoLabel(row, me)}\`}\n`;
+const TODAY_WHO_R14 = `          {participation === "personal"\n            ? ""\n            : \` · \${data.participants.filter((id) => id !== me).length === 0 ? "You" : \`You and \${data.participants.filter((id) => id !== me).length} other\${data.participants.filter((id) => id !== me).length === 1 ? "" : "s"}\`}\`}\n`;
+/** WEB-10a revision 15 (R29): the rule that a revision needs BOTH resources editable (MU-2259, MU-2260, MU-2267). */
+const EDITABLE_R15 =
+  "  return task.can_edit && execution?.can_edit !== false;\n";
+
 /** The mutants run by vitest over the production source in the fake world (layers L1a and L1b). */
-// WEB-14a main merge, 16 October 2026: former WEB-14a MU-1300..MU-1306 are now MU-2012..MU-2018; accepted WEB-13a owns the old IDs.
 export const UNIT = [
   // ---- the commit guard -----------------------------------------------------------------------------------------------------
   {
@@ -185,8 +210,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        'const refusal = fenceRefusal(facts.sync);\n  if (refusal !== null) return { kind: "refused", reason: refusal };\n  const resolved',
-        "const resolved",
+        'const refusal = fenceRefusal(facts.sync);\n  if (refusal !== null) return { kind: "refused", reason: refusal };\n  if (knownDenial(',
+        "if (knownDenial(",
       ),
   },
   {
@@ -14119,2848 +14144,6 @@ export const UNIT = [
         "w.outcomes === outcomes;",
       ),
   },
-
-  // ---- WEB-09b (10 October 2026): the production leader, the staged snapshot, the recovery job and its budgets ---------------------------
-  {
-    id: "MU-1201",
-    title:
-      "WEB-09b: a staged snapshot page is not admitted by the staging compare-and-set (W22 lists no STG)",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /S-2 to S-7|S-8 the same page requested again/,
-    patch: (t) =>
-      sub(
-        t,
-        '    guards: ["INC", "CLS", "STG", "GEN", "OWN", "EPO"],\n    quota: "cache",\n  },\n  scope: ["cache_staging"],',
-        '    guards: ["INC", "CLS", "GEN", "OWN", "EPO"],\n    quota: "cache",\n  },\n  scope: ["cache_staging"],',
-      ),
-  },
-  {
-    id: "MU-1202",
-    title:
-      "WEB-09b: the STG guard itself compares nothing (a page at another staged position is applied)",
-    file: "src/data/model/guards.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /S-2 to S-7|S-8 the same page requested again/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (sync.staging_position !== (captured.expectedPosition ?? null))\n      return "position";',
-        '    if (sync.staging_position !== (captured.expectedPosition ?? null) && (false as boolean))\n      return "position";',
-      ),
-  },
-  {
-    id: "MU-1203",
-    title:
-      "WEB-09b: the activation swaps in the staged rows of ANOTHER generation, not those of the attempt it activates",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /S-9 the final page and the swap|S-11 adopted rows/,
-    patch: (t) =>
-      sub(
-        t,
-        '        "recovery_generation",\n        generation,\n',
-        '        "recovery_generation",\n        generation - 1,\n',
-      ),
-  },
-  {
-    id: "MU-1204",
-    title:
-      "WEB-09b: the activation does not clear the old cache before the swap",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /S-9 the final page and the swap/,
-    patch: (t) => sub(t, 'writes: [w.clear("cache")],', "writes: [],"),
-  },
-  {
-    id: "MU-1205",
-    title:
-      "WEB-09b: the activation releases receipts NEWER than the snapshot's boundary (content that predates the change)",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /S-12 unsent work is byte-identical/,
-    patch: (t) =>
-      sub(t, "row.receipt_revision <= boundary,", "row.receipt_revision >= 0,"),
-  },
-  {
-    id: "MU-1206",
-    title:
-      "WEB-09b (P-7): the activation's receipt bookkeeping writes the effect rows of UNSENT work too",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /S-12 unsent work is byte-identical/,
-    // Re-anchored in review cycle 1 (R8): the selection is the same; the `deletes` option it sat beside is gone (the receipt bookkeeping
-    // is no longer made in recovery mode at all). Its tests are the ordinary activation and W26 (S-12), where it now applies.
-    patch: (t) =>
-      sub(t, "        select: acknowledgedOnly,\n      });", "      });"),
-  },
-  {
-    id: "MU-1208",
-    title:
-      "WEB-09b (Q7): an attempt is adopted up to the whole lifetime, without the margin",
-    file: "src/data/model/recovery.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /O-2 at \(and after\) the lifetime/,
-    patch: (t) =>
-      sub(
-        t,
-        "config.snapshotCursorLifetimeMs - config.snapshotAdoptMarginMs",
-        "config.snapshotCursorLifetimeMs",
-      ),
-  },
-  {
-    id: "MU-1209",
-    title:
-      "WEB-09b (case (c)): a restart under a new generation leaves the old generation's staged rows",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /O-2 at \(and after\) the lifetime/,
-    patch: (t) =>
-      sub(
-        t,
-        '        writes: [w.clear("cache_staging")],\n        sync: {\n          ...sync,\n          ...withoutAttemptStreaks(sync),\n          owner,',
-        "        writes: [],\n        sync: {\n          ...sync,\n          ...withoutAttemptStreaks(sync),\n          owner,",
-      ),
-  },
-  {
-    id: "MU-1210",
-    title:
-      "WEB-09b (trace 5): a page's success resets the whole-attempt counter (a healthy page one keeps the loop going for ever)",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /trace 5/,
-    patch: (t) =>
-      sub(
-        t,
-        "    delta_error_streak: 0,\n    ...(cursorless ? { sync_error_streak: 0 } : {}),\n  };",
-        "    delta_error_streak: 0,\n    recovery_attempt_streak: 0,\n    ...(cursorless ? { sync_error_streak: 0 } : {}),\n  };",
-      ),
-  },
-  {
-    id: "MU-1211",
-    title:
-      "WEB-09b (trace 6): a blocked budget still captures an automatic request",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: [
-      "tests/data/recovery-job.test.ts",
-      "tests/data/snapshot-plans.test.ts",
-    ],
-    expect: /trace 6|a blocked budget sends nothing|permits ONE attempt/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (blocked !== null && input.allowBlocked !== true)",
-        "if (blocked !== null && input.allowBlocked !== true && (false as boolean))",
-      ),
-  },
-  {
-    id: "MU-1212",
-    title:
-      "WEB-09b: three unrecognised answers on a cursor count the attempt but do not abandon the cursor",
-    file: "src/data/model/recovery.ts",
-    tests: [
-      "tests/data/snapshot-plans.test.ts",
-      "tests/data/recovery-job.test.ts",
-    ],
-    expect: /R-1 the reducer|trace 5/,
-    patch: (t) =>
-      sub(
-        t,
-        "      return {\n        ...base,\n        delta_error_streak: 0,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        attemptCounted: true,\n        abandon: true,\n      };\n    }",
-        "      return {\n        ...base,\n        delta_error_streak: 0,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        attemptCounted: true,\n        abandon: false,\n      };\n    }",
-      ),
-  },
-  {
-    id: "MU-1213",
-    title:
-      "WEB-09b: a server-instructed restart (410, 409 access_changed) is counted against the whole-attempt budget",
-    file: "src/data/model/recovery.ts",
-    tests: [
-      "tests/data/snapshot-plans.test.ts",
-      "tests/data/recovery-job.test.ts",
-    ],
-    expect: /R-1 the reducer|restarts cursor-less, counting nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        '    case "server_restart":\n      return {\n        ...base,\n        delta_error_streak: 0,',
-        '    case "server_restart":\n      return {\n        ...base,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        delta_error_streak: 0,',
-      ),
-  },
-  {
-    id: "MU-1214",
-    title:
-      "WEB-09b (matrix 3.7.3): a recovery that has made its data commit never asks `finish` (the fence never clears)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /T24 A|T24 F/,
-    patch: (t) =>
-      sub(
-        t,
-        'if (issued.mode === "ordinary") return idle();\n    return finish(b, issued.handle);',
-        'if (issued.mode === "ordinary") return idle();\n    return idle();',
-      ),
-  },
-  {
-    id: "MU-1215",
-    title:
-      "WEB-09b (T24 H): an ineligible `begin` is ignored and the recovery reads anyway",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /T24 H/,
-    patch: (t) =>
-      sub(
-        t,
-        // Re-anchored in review cycle 2 (R3): `ineligible` now also takes the binding and the epoch of its admission wait.
-        'if (begun.kind === "ineligible")\n          return ineligible(',
-        'if (begun.kind === "ineligible" && (false as boolean))\n          return ineligible(',
-      ),
-  },
-  {
-    id: "MU-1216",
-    title:
-      "WEB-09b (matrix 3.7.3): recovery reads use the ORDINARY request class",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /T24 A|T24 B/,
-    patch: (t) =>
-      sub(t, 'mode === "recovery" ? "recovery" : "ordinary",', '"ordinary",'),
-  },
-  {
-    id: "MU-1217",
-    title:
-      "WEB-09b (row 6 case 5): the leader gives the lock up on an account transition",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/leader.test.ts"],
-    expect: /L-3 the lock is never released/,
-    patch: (t) =>
-      sub(
-        t,
-        "    b.controller.abort();",
-        "    b.controller.abort();\n    deps.election.dispose();",
-      ),
-  },
-  {
-    id: "MU-1218",
-    title: "WEB-09b: a follower page binds and runs the writers as if it led",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/leader.test.ts"],
-    expect: /L-1\/L-2|F-1 variant 1|F-2 variant 2/,
-    patch: (t) =>
-      sub(
-        t,
-        "const leading = (): boolean =>",
-        "const leading = (): boolean => true || ",
-      ),
-  },
-  {
-    id: "MU-1219",
-    title:
-      "WEB-09b (P-8): the engine keeps running while the recovery job has the cache to itself",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/leader.test.ts"],
-    expect: /L-6 the engine is stopped while the job has the cache/,
-    patch: (t) =>
-      sub(
-        t,
-        "const wanted = live && !job.exclusive.get();",
-        "const wanted = live;",
-      ),
-  },
-  {
-    id: "MU-1220",
-    title:
-      "WEB-09b: the engine and the dispatcher run while the account is fenced (a loop of refused requests)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/leader.test.ts"],
-    expect: /L-10/,
-    patch: (t) =>
-      sub(
-        t,
-        "displayed(b.account);",
-        "(displayed(b.account) || (true as boolean));",
-      ),
-  },
-  {
-    id: "MU-1221",
-    title:
-      "WEB-09b: the leader reopens the account by itself when its service ends (a wipe's latch is lifted)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/leader.test.ts"],
-    expect: /L-9b/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (bound === b) unbind();",
-        "if (bound === b) {\n          unbind();\n          follow();\n        }",
-      ),
-  },
-  {
-    id: "MU-1222",
-    title:
-      "WEB-09b (row 3): the leader opens the account while a logout or retirement is pending",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/leader.test.ts"],
-    expect: /L-9/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (deps.operationPending(identity.account_id)) return;",
-        "if (deps.operationPending(identity.account_id) && (false as boolean)) return;",
-      ),
-  },
-  {
-    id: "MU-1223",
-    title:
-      "WEB-09b (E-B14): a staged page's local-write identity carries the generation (a reload forgets three failures)",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /survives a reload/,
-    patch: (t) =>
-      sub(
-        t,
-        "? snapshotPageOperation(position)",
-        // A template literal is the patched TEXT here, so its placeholders are built, not interpolated.
-        [
-          "? `",
-          "$",
-          "{snapshotPageOperation(position)}#",
-          "$",
-          "{sync.recovery_generation}`",
-        ].join(""),
-      ),
-  },
-  {
-    id: "MU-1224",
-    title:
-      "WEB-09b (P-7): a catch-up page in recovery mode is reconciled like an ordinary page (unsent work written, receipts deleted)",
-    file: "src/data/plans/commit-page.ts",
-    tests: ["tests/data/commit-page-recovery.test.ts"],
-    // Review cycle 1 (R8): the case was renamed when the recovery stopped writing acknowledged work too.
-    expect: /NOTHING of the queue is written/,
-    patch: (t) =>
-      sub(t, '...(input.mode === "recovery" ? { recovery: true } : {}),', ""),
-  },
-  {
-    id: "MU-1225",
-    title:
-      "WEB-09b: an abandoned catch-up cursor leaves the cache shown as valid",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /R-2 an abandonment/,
-    patch: (t) =>
-      sub(
-        t,
-        '        ...(sync.cache_status === "valid"\n          ? { cache_status: "invalid" as const, cursor: null }\n          : {}),',
-        "",
-      ),
-  },
-  {
-    id: "MU-1226",
-    title:
-      "WEB-09b: Try again resets a whole-attempt failure it did not see (the reset is not versioned)",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /R-4 Try again/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (fields.recovery_budget_version !== input.expect)",
-        "if (fields.recovery_budget_version !== input.expect && (false as boolean))",
-      ),
-  },
-  {
-    id: "MU-1227",
-    title:
-      "WEB-09b (P-3): with a production leader on the page the provider still builds and disposes a runtime of its own",
-    file: "src/data/ui/react.tsx",
-    tests: ["tests/data/follower-status.test.tsx"],
-    expect: /waits for and uses the PAGE's runtime/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (leaderStarted() || host.runtime.get() !== null) {",
-        "if ((leaderStarted() || host.runtime.get() !== null) && (false as boolean)) {",
-      ),
-  },
-  {
-    id: "MU-1228",
-    title:
-      "WEB-09b (P-11): a follower page reads 'Updates stopped' merely because another page leads",
-    file: "src/data/model/status.ts",
-    tests: ["tests/data/follower-status.test.tsx"],
-    expect: /FS-1|FS-2/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (inputs.follower === true) {",
-        "if (inputs.follower === true && (false as boolean)) {",
-      ),
-  },
-  {
-    id: "MU-1229",
-    title:
-      "WEB-09b: a page of another boundary revision is staged into the attempt",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /a delta page, a revision mismatch and a lapsed hold/,
-    patch: (t) =>
-      sub(
-        t,
-        "revision !== staged",
-        "revision !== staged && (false as boolean)",
-      ),
-  },
-  {
-    id: "MU-1230",
-    title:
-      "WEB-09b (R28): a staged page is written after the hold it was admitted under ended",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /a delta page, a revision mismatch and a lapsed hold/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (input.leaseLive !== undefined && !input.leaseLive())\n    return { kind: "lease_lapsed" };',
-        "",
-      ),
-  },
-  {
-    id: "MU-1231",
-    title:
-      "WEB-09b (OWN): the recovery job's capture is admitted for a binding that no longer owns the database",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /another binding's token/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (!owns(sync, input.token))\n      return { result: { kind: "gated", reason: "owner" } };',
-        "",
-      ),
-  },
-  {
-    id: "MU-1232",
-    title:
-      "WEB-09b: a draft saved through another facade (this page's screens, a follower page) does not wake the leader's dispatcher",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/leader.test.ts"],
-    expect: /L-11/,
-    patch: (t) =>
-      sub(
-        t,
-        '            message.stores.includes("drafts")\n          )\n            dispatcher.wake();',
-        '            message.stores.includes("drafts") &&\n            (false as boolean)\n          )\n            dispatcher.wake();',
-      ),
-  },
-  {
-    id: "MU-1233",
-    title:
-      "WEB-09b (trace 6, E-B13): the one attempt a page load permits while blocked is spent at the capture, so a request withheld at the issue check leaves the load with none",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /spent only by a request that is ISSUED/,
-    patch: (t) =>
-      sub(
-        t,
-        '    trigger ??= capture.position === null ? "first_snapshot" : "adopted";\n',
-        '    trigger ??= capture.position === null ? "first_snapshot" : "adopted";\n    permitBlocked = false;\n',
-      ),
-  },
-  {
-    id: "MU-1234",
-    title:
-      "WEB-09b (trace 6, E-B13 in WebKit): a request the session refuses before sending it (not_sent, not_covered) keeps the load's one permitted attempt, so the load sends nothing",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect:
-      /the permitted attempt is RETURNED when the session refuses its request/,
-    patch: (t) =>
-      sub(
-        t,
-        '        issued.permit &&\n        (error.kind === "not_sent" || error.kind === "not_covered")\n      )\n        permitBlocked = true;\n',
-        '        issued.permit &&\n        (error.kind === "not_sent" || error.kind === "not_covered")\n      )\n        void 0;\n',
-      ),
-  },
-  // ---- WEB-09b review cycle 1 (10 October 2026): R1 to R8 ------------------------------------------------------------------------------
-  {
-    id: "MU-1235",
-    title:
-      "WEB-09b R8: an activation in RECOVERY mode does the queue's receipt bookkeeping itself (the recovery writes acknowledged drafts and their effects)",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: [
-      "tests/data/snapshot-plans.test.ts",
-      "tests/data/recovery-job.test.ts",
-    ],
-    expect:
-      /S-12 unsent work is byte-identical|the whole queue is byte-identical/,
-    patch: (t) =>
-      sub(
-        t,
-        '    const stats =\n      input.mode === "recovery"',
-        "    const stats =\n      (false as boolean)",
-      ),
-  },
-  {
-    id: "MU-1236",
-    title:
-      "WEB-09b R8: a catch-up page in recovery mode reconciles the queue's effects (acknowledged drafts written by the recovery)",
-    file: "src/data/plans/reconcile-windows.ts",
-    tests: [
-      "tests/data/commit-page-recovery.test.ts",
-      "tests/data/recovery-job.test.ts",
-    ],
-    expect: /NOTHING of the queue is written|the whole queue is byte-identical/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (input.recovery === true) {",
-        "  if (input.recovery === true && (false as boolean)) {",
-      ),
-  },
-  {
-    id: "MU-1237",
-    title:
-      "WEB-09b R8: the receipt bookkeeping a recovery owed is never done after the display (W26 never runs)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /W26 releases the acknowledged receipt/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (capture.reconcilePending === true)\n",
-        "if (capture.reconcilePending === true && (false as boolean))\n",
-      ),
-  },
-  {
-    id: "MU-1238",
-    title:
-      "WEB-09b R1: a recovery is finished on ANY handle once some data commit was made (a second re-authentication finishes without its own catch-up)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R1 \(lock_timeout\)|R1 \(failed\)/,
-    // TWO layers protect R1 (the proof is cleared by a new `begin`, and it is bound to the exact handle): either alone is an equivalent
-    // mutant (the first run of review cycle 1 found the handle comparison alone survives). Removing both is the defect the review found.
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "        commitProof.handle === handle\n",
-          "        (true as boolean)\n",
-        ),
-        "        handle = null;\n        commitProof = null;\n        const begun",
-        "        handle = null;\n        const begun",
-      ),
-  },
-  {
-    id: "MU-1239",
-    title:
-      "WEB-09b R3: a refusal that only the durable record ends is never asked again on the record's notification (a resolved gate leaves recovery waiting)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R3 \(/,
-    // Redefined in review cycle 2 (R3): `awaitsRecord` is gone; the same defect in the new mechanism is a `begin` refusal on the record
-    // that is left as a bare event wait (no admission wait, so a resolution in the same epoch is never noticed).
-    // Anchor moved (WEB-08c, R3 of the review of 11 October 2026): the call now passes `begin`'s own revision; same mutation.
-    patch: (t) =>
-      sub(
-        t,
-        'return awaitAdmission(b, "recovery", epoch, "begin", revision);',
-        'return { when: "event" };',
-      ),
-  },
-  {
-    id: "MU-1240",
-    title:
-      "WEB-09b R4: when an obsolete step ends, the replacement binding is not scheduled (it waits for an unrelated notification)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts", "tests/data/leader.test.ts"],
-    expect: /R4: with NO further notification|L-13/,
-    patch: (t) =>
-      sub(
-        t,
-        '      woken = false;\n      const current = binding;\n      if (current !== null && alive(current))\n        schedule(current, { when: "now" });\n      else resolveWaiters();',
-        "      woken = false;\n      resolveWaiters();",
-      ),
-  },
-  {
-    id: "MU-1241",
-    title:
-      "WEB-09b R4: the recovery request does not carry its binding's ownership signal (an obsolete call stays outstanding)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R4: the obsolete request is aborted/,
-    patch: (t) =>
-      sub(
-        t,
-        '{ method: "GET", signal: b.ownership.signal }',
-        '{ method: "GET" }',
-      ),
-  },
-  {
-    id: "MU-1242",
-    title:
-      "WEB-09b R5: the response-derived budget write (W24) bypasses the stamp's admission (G1, G2, the persistence hold)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R5/,
-    patch: (t) =>
-      sub(
-        t,
-        "const out = await service.commit(recordRecoveryOutcome, {",
-        "const out = await service.store.run(recordRecoveryOutcome, {",
-      ),
-  },
-  {
-    id: "MU-1243",
-    title:
-      "WEB-09b R5: W24 lists no epoch mirror (an earlier epoch's answer, admitted before the mirror moved, counts)",
-    file: "src/data/plans/recovery-writers.ts",
-    tests: ["tests/data/snapshot-plans.test.ts"],
-    expect: /R-3b an answer of an EARLIER epoch/,
-    patch: (t) =>
-      sub(
-        t,
-        '    guards: ["INC", "CLS", "GEN", "OWN", "EPO"],\n    quota: null,',
-        '    guards: ["INC", "CLS", "GEN", "OWN"],\n    quota: null,',
-      ),
-  },
-  {
-    id: "MU-1244",
-    title:
-      "WEB-09b R6: a follower ignores the leader's durable stops and says 'Up to date'",
-    file: "src/data/model/status.ts",
-    tests: ["tests/data/follower-status.test.tsx"],
-    expect: /R6:/,
-    patch: (t) =>
-      sub(
-        t,
-        "        (stops.paused || stops.pageStopped || stops.floor)",
-        "        (false as boolean)",
-      ),
-  },
-  {
-    id: "MU-1245",
-    title:
-      "WEB-09b R6: the follower's facts do not read a durably paused `sync` read caller",
-    file: "src/data/plans/facts.ts",
-    tests: ["tests/data/follower-status.test.tsx"],
-    expect: /R6: a durably PAUSED/,
-    patch: (t) =>
-      sub(
-        t,
-        "    paused: sync.read_retry_states.sync?.paused === true,",
-        "    paused: false,",
-      ),
-  },
-  {
-    id: "MU-1246",
-    title:
-      "WEB-09b R2: the leading page ignores a follower's request to retry updates (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/retry-routing.test.ts"],
-    expect: /a FOLLOWER's retry is applied by the leading page/,
-    patch: (t) =>
-      sub(
-        t,
-        "            retryHere({\n              account: message.account,\n              epoch: message.epoch,\n",
-        "            void ({\n              account: message.account,\n              epoch: message.epoch,\n",
-      ),
-  },
-  {
-    id: "MU-1247",
-    title:
-      "WEB-09b R2: the leader applies a retry made against another epoch's view",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/retry-routing.test.ts"],
-    expect: /a retry made against another epoch/,
-    patch: (t) =>
-      sub(
-        t,
-        "      identity.epoch !== target.epoch\n",
-        "      (false as boolean)\n",
-      ),
-  },
-  {
-    id: "MU-1248",
-    title:
-      "WEB-09b R2: a follower's 'Retry now' / 'Try again' for updates asks nobody (it has no engine or job)",
-    file: "src/data/ui/env.ts",
-    tests: ["tests/data/retry-routing.test.ts"],
-    expect: /posts `retry_requested`/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (follower !== null && leader.engine === undefined) {\n        const identity = deps.identity.get();",
-        "      if (follower !== null && leader.engine === undefined && (false as boolean)) {\n        const identity = deps.identity.get();",
-      ),
-  },
-  {
-    id: "MU-1249",
-    title:
-      "WEB-09b R2: the neutral state's 'Try again' does not reach the recovery owner (the session's retry tells no listener)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/recovery-api.test.ts"],
-    expect: /the neutral state's Try again is the recovery owner's act too/,
-    patch: (t) => sub(t, "      recovery.retried();", "      void 0;"),
-  },
-  {
-    id: "MU-1250",
-    title:
-      "WEB-09b R7: 'save as new' is rebuilt on nothing although the authorised current read loaded",
-    file: "src/features/sync/ItemDetailDialog.tsx",
-    tests: ["tests/features/sync/recovery-screens.test.tsx"],
-    expect: /U-6/,
-    patch: (t) =>
-      sub(
-        t,
-        ".saveAsNew(draft.local_id, base)",
-        ".saveAsNew(draft.local_id, null)",
-      ),
-  },
-  {
-    id: "MU-1251",
-    title:
-      "WEB-09b R7: the new attempt is enabled while the authorised current read is still loading or has failed",
-    file: "src/features/sync/ItemDetailDialog.tsx",
-    tests: ["tests/features/sync/recovery-screens.test.tsx"],
-    expect: /U-7/,
-    patch: (t) =>
-      sub(t, '    read === "loaded" ||\n', "    (true as boolean) ||\n"),
-  },
-  // ---- WEB-09b review cycle 2 (R3, R7) ----------------------------------------------------------------------------------------------
-  {
-    id: "MU-1262",
-    title:
-      "WEB-09b R3 (cycle 2): a cover that closes after `begin` (closed, closed_unresolved) leaves the job running with nothing to wake it",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R3 \(closed/,
-    patch: (t) =>
-      sub(
-        t,
-        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "closed",\n          );',
-        '          return { when: "event" };',
-      ),
-  },
-  {
-    id: "MU-1263",
-    title:
-      "WEB-09b R3 (cycle 2): a not_sent that outlasts the immediate retries ends in a bare event wait (a released hold is never noticed)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R3 \(not_sent|R3 \(lost hint/,
-    patch: (t) =>
-      sub(
-        t,
-        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "not_sent",\n          );',
-        '          return { when: "event" };',
-      ),
-  },
-  {
-    id: "MU-1264",
-    title:
-      "WEB-09b R3 (cycle 2): a recovery request refused by the cover keeps its handle, so the resumed run is finished under the old `s`",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R3 \(closed/,
-    patch: (t) =>
-      sub(
-        t,
-        '          if (issued.mode === "recovery") {\n            handle = null;\n            commitProof = null;\n          }\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-1265",
-    title:
-      "WEB-09b R3 (cycle 2): an open, unchanged admission revision always permits another attempt (a refusal the probe cannot see loops)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /tried ONCE more/,
-    patch: (t) =>
-      sub(t, "(changed || !episode.consumed || due)", "(changed || true)"),
-  },
-  {
-    id: "MU-1266",
-    title:
-      "WEB-09b R3 (cycle 2): a standing admission wait has no paced reconciliation (a lost notification strands it)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /lost hint/,
-    patch: (t) =>
-      sub(
-        t,
-        "    let ms = Math.min(\n      config.recoveryBeginRetryMaxMs,",
-        '    return { when: "event" } as Next;\n    let ms = Math.min(\n      config.recoveryBeginRetryMaxMs,',
-      ),
-  },
-  {
-    id: "MU-1267",
-    title:
-      "WEB-09b R3 (cycle 2): the first probe after a refusal permits no attempt unless the revision moved since an earlier probe (a gate resolved before the wait was installed is never tried)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /came and went/,
-    patch: (t) =>
-      sub(
-        t,
-        "(changed || !episode.consumed || due)",
-        "((changed && seen) || due)",
-      ),
-  },
-  {
-    id: "MU-1268",
-    title:
-      "WEB-09b R3 (cycle 2): a notification is dropped while the job stands in an admission wait (only the paced timer is left)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /R3 \(closed after/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (eligibility() === lastEligibility && !waiting) return;",
-        "if (eligibility() === lastEligibility) return;",
-      ),
-  },
-  {
-    id: "MU-1269",
-    title:
-      "WEB-09b R7 (cycle 2): the authorised current read hands back the command's result without sealing it against the durable record",
-    file: "src/data/ui/env.ts",
-    tests: ["tests/data/current-read.test.ts"],
-    expect: /refused|durable record|fails closed|sealed once/,
-    patch: (t) =>
-      sub(
-        t,
-        "result = await seal(account, epoch, interpreted);",
-        "result = await interpreted;",
-      ),
-  },
-  {
-    id: "MU-1270",
-    title:
-      "WEB-09b R7 (cycle 2): the current read is validated against the page's identity mirror instead of the durable record",
-    file: "src/data/ui/env.ts",
-    tests: ["tests/data/current-read.test.ts"],
-    expect: /notice never arrives|LATER interpretation/,
-    patch: (t) =>
-      sub(
-        t,
-        "result = await seal(account, epoch, interpreted);",
-        "result = await interpreted;\n          const mirror = deps.identity.get();\n          if (mirror?.account_id !== account || mirror.epoch !== epoch) return unavailable;",
-      ),
-  },
-  {
-    id: "MU-1271",
-    title:
-      "WEB-09b R7 (cycle 2): the current read's own scope (lifetime, binding, service, caller's signal) is not checked at release",
-    file: "src/data/ui/env.ts",
-    tests: ["tests/data/current-read.test.ts"],
-    expect: /stops during the decode|service ends|cancels/,
-    patch: (t) =>
-      sub(t, "return live() ? result : unavailable;", "return result;"),
-  },
-  {
-    id: "MU-1272",
-    title:
-      "WEB-09b R7 (cycle 2): the caller's cancellation does not end the current read's scope (a command that ignores its signal is handed back)",
-    file: "src/data/ui/env.ts",
-    tests: ["tests/data/current-read.test.ts"],
-    expect: /cancels/,
-    patch: (t) =>
-      sub(
-        t,
-        'signal?.addEventListener("abort", onCaller, { once: true });',
-        "void onCaller;",
-      ),
-  },
-  {
-    id: "MU-1273",
-    title:
-      "WEB-09b R3 (cycle 2): the session's admission probe ignores this page's hold",
-    file: "src/session/kernel/admission.ts",
-    tests: ["tests/session/admission-probe.test.ts"],
-    expect: /hold and closing write block it/,
-    patch: (t) =>
-      sub(
-        t,
-        "blocked: !stamp || !open || hold || closing,",
-        "blocked: !stamp || !open || closing,",
-      ),
-  },
-  {
-    id: "MU-1274",
-    title:
-      "WEB-09b R3 (cycle 2): the admission revision does not include the account's fences (an O11 removal in the same epoch changes nothing it reads)",
-    file: "src/session/kernel/admission.ts",
-    tests: ["tests/session/admission-probe.test.ts"],
-    expect: /added and removed IN THE SAME EPOCH/,
-    patch: (t) =>
-      sub(
-        t,
-        "        state.fence_seq,\n        fences,\n",
-        "        state.fence_seq,\n",
-      ),
-  },
-  {
-    id: "MU-1275",
-    title:
-      "WEB-09b R3 (cycle 2): the admission revision counts this page's OWN leases (its own requests would wake its own wait)",
-    file: "src/session/kernel/admission.ts",
-    tests: ["tests/session/admission-probe.test.ts"],
-    expect: /another page's request lease/,
-    patch: (t) =>
-      sub(
-        t,
-        "leasesOfOthers(state, account, k.bootId)",
-        'leasesOfOthers(state, account, "not-a-page")',
-      ),
-  },
-  {
-    id: "MU-1277",
-    title:
-      "WEB-09b R3 (cycle 2): an open admission revision whose attempt was refused is never tried again (a CSRF token only a new verification can fetch strands the job)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /open but refused/,
-    patch: (t) =>
-      sub(
-        t,
-        "      now >= episode.retryAt;",
-        "      now >= episode.retryAt &&\n      (false as boolean);",
-      ),
-  },
-  {
-    id: "MU-1276",
-    title:
-      "WEB-09b R7 (cycle 2): `session.api.seal` hands a result back after the session was disposed",
-    file: "src/session/session.ts",
-    tests: ["tests/session/admission-probe.test.ts"],
-    expect: /disposed session/,
-    patch: (t) =>
-      sub(
-        t,
-        'if (k.disposed) throw new StampedRequestError("stale");',
-        "void k.disposed;",
-      ),
-  },
-  {
-    id: "MU-1732",
-    title:
-      "WEB-14a: the coordinator reloads on its own when a newer version is installed",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /through every event without an action/,
-    patch: (t) =>
-      sub(
-        t,
-        '      if (worker.state === "installed") {\n',
-        '      if (worker.state === "installed") {\n        reload();\n',
-      ),
-  },
-  {
-    id: "MU-1733",
-    title:
-      "WEB-14a: skip-waiting is posted to the ACTIVE worker instead of the waiting one",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the waiting worker \(and only it\) is told to skip waiting/,
-    patch: (t) =>
-      sub(
-        t,
-        '      waiting.postMessage({ type: "atlas:skip-waiting" });\n',
-        '      (registration?.active ?? waiting).postMessage({ type: "atlas:skip-waiting" });\n',
-      ),
-  },
-  {
-    id: "MU-1734",
-    title:
-      "WEB-14a: the acting tab does not wait for the other tabs' saves (bound 0)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /another tab's dirty form is saved before the update is applied/,
-    patch: (t) =>
-      sub(
-        t,
-        "const bound = after(FLUSH_MAX_MS, finish);",
-        "const bound = after(0, finish);",
-      ),
-  },
-  {
-    id: "MU-1735",
-    title:
-      "WEB-14a: the start grace never ends: the acting tab always waits the whole bound",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /no other tab answers: the acting tab waits only FLUSH_START_GRACE_MS/,
-    patch: (t) => sub(t, "        graceOver = true;\n", ""),
-  },
-  {
-    id: "MU-1736",
-    title:
-      "WEB-14a: the acting tab stops waiting for a tab that said it is saving",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /another tab's dirty form is saved before the update is applied/,
-    patch: (t) =>
-      sub(t, "            if (!wait.done.has(started)) return;\n", ""),
-  },
-  {
-    id: "MU-1737",
-    title: "WEB-14a: a dismissed banner never reappears",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /dismissed until the next return to the page/,
-    patch: (t) => sub(t, "    if (dismissed) {\n", "    if (false) {\n"),
-  },
-  {
-    id: "MU-1738",
-    title: "WEB-14a: 'Not now' does not dismiss",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /dismissed until the next return to the page/,
-    patch: (t) => sub(t, "      dismissed = true;\n", ""),
-  },
-  {
-    id: "MU-1739",
-    title:
-      "WEB-14a: the first install's controllerchange is taken for 'updated elsewhere'",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the first controllerchange from no controller is not 'updated elsewhere'/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (previous !== null) noteElsewhere();\n",
-        "    noteElsewhere();\n",
-      ),
-  },
-  {
-    id: "MU-1740",
-    title:
-      "WEB-14a: the accepting tab does not reload when its controller changes",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /reloads on the controller change even when the worker's statechange never reaches it/,
-    patch: (t) => sub(t, "    if (accepting) {\n", "    if (false) {\n"),
-  },
-  {
-    id: "MU-1741",
-    title:
-      "WEB-14a: a report answered with a newer active generation is ignored (a frozen tab never learns)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a frozen tab that missed the change finds out by reporting/,
-    patch: (t) => sub(t, "      if (ack.newer) noteElsewhere();\n", ""),
-  },
-  {
-    id: "MU-1742",
-    title: "WEB-14a: an unacknowledged report is not sent again",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an unacknowledged report is sent again with back-off/,
-    patch: (t) => sub(t, "    } else scheduleReport();\n", "    }\n"),
-  },
-  {
-    id: "MU-1743",
-    title:
-      "WEB-14a: a return to the page checks for an update every time (no 15-minute pace)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /on online; on a return to the page at most every 15 min/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!force && clock.now() - lastCheck < UPDATE_CHECK_VISIBLE_MIN_MS) return;\n",
-        "    if (false) return;\n",
-      ),
-  },
-  {
-    id: "MU-1744",
-    title: "WEB-14a: the hourly check also runs while the page is hidden",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /hourly while visible/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (deps.page.isVisible()) void checkForUpdate(true);\n",
-        "      void checkForUpdate(true);\n",
-      ),
-  },
-  {
-    id: "MU-1745",
-    title:
-      "WEB-14a: an unsupported server asks for a newer client on every answer (no 60-second pace)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /an unsupported server asks for a newer client at once, at most every 60 s/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (clock.now() - lastUnsupportedCheck < UPDATE_CHECK_UNSUPPORTED_MIN_MS)\n      return;\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1746",
-    title:
-      "WEB-14a: a failed save does not stop the update (the form's input is lost to the reload)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a failed save keeps the form, shows retry or discard/,
-    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!(await settleForms(next))) return;\n",
-        "      await settleForms(next);\n",
-      ),
-  },
-  {
-    id: "MU-1747",
-    title:
-      "WEB-14a: a refused save (signing out) is shown as an ordinary failure with 'Retry save'",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /signing out \(refused\)/,
-    patch: (t) =>
-      sub(t, 'results.includes("refused")', 'results.includes("never")'),
-  },
-  {
-    id: "MU-1748",
-    title:
-      "WEB-14a: no fallback: an activation that never happens leaves the tab waiting for ever",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /activation that never happens: the tab reloads after ACTIVATION_FALLBACK_MS/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "    fallback = after(ACTIVATION_FALLBACK_MS, () => {\n      fallback = null;\n      if (accepting) reload();\n    });\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1749",
-    title:
-      "WEB-14a: a tab that learns it was updated elsewhere does not save its input",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /saves its dirty forms as a precaution/,
-    patch: (t) =>
-      sub(
-        t,
-        "    publish();\n    void flushDirty(deps.forms);\n  };\n",
-        "    publish();\n  };\n",
-      ),
-  },
-  {
-    id: "MU-1750",
-    title:
-      "WEB-14a: an unsupported answer that came before the registration is never followed by an update check",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /asks for a newer client once registered/,
-    patch: (t) =>
-      sub(
-        t,
-        "      // An answer that came before the registration could not ask for a newer client: it asks now.\n      checkIfUnsupported();\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1751",
-    title:
-      "WEB-14a: one unacknowledged client no longer keeps every generation",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /one unacknowledged client keeps every generation/,
-    patch: (t) => sub(t, "      unknown ||\n", ""),
-  },
-  {
-    id: "MU-1752",
-    title: "WEB-14a: the active generation is not kept for being active",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the active generation is kept even if marked retired/,
-    patch: (t) => sub(t, "      generation === input.active ||\n", ""),
-  },
-  {
-    id: "MU-1753",
-    title:
-      "WEB-14a: a generation never retired (the waiting one) may be purged",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a generation retired within the grace is kept; one never retired/,
-    patch: (t) => sub(t, "      retiredAt === null ||\n", ""),
-  },
-  {
-    id: "MU-1754",
-    title: "WEB-14a: no grace: a generation is purged the moment it is retired",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a generation retired within the grace is kept/,
-    patch: (t) =>
-      sub(t, "      input.now - retiredAt < grace;", "      false;"),
-  },
-  {
-    id: "MU-1755",
-    title: "WEB-14a: a non-GET request is answered by the worker",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /non-GET is never answered/,
-    patch: (t) =>
-      sub(t, '  if (input.method !== "GET") return { kind: "pass" };\n', ""),
-  },
-  {
-    id: "MU-1756",
-    title: "WEB-14a: a cross-origin request is answered by the worker",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /cross-origin is never answered/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (url.origin !== input.origin) return { kind: "pass" };\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-1757",
-    title: "WEB-14a: backend paths are answered (the shell for a navigation)",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /backend path .* is passed/,
-    patch: (t) =>
-      sub(t, '  if (isBackendPath(url)) return { kind: "pass" };\n', ""),
-  },
-  {
-    id: "MU-1758",
-    title:
-      "WEB-14a: a navigation is not answered with the shell (offline navigation fails)",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is the shell/,
-    patch: (t) =>
-      sub(t, '      : { kind: "shell" };', '      : { kind: "pass" };'),
-  },
-  {
-    id: "MU-1759",
-    title:
-      "WEB-14a: an older page's hashed file is not answered from the retained precache",
-    file: "src/sw/core.ts",
-    tests: ["tests/pwa/sw-core.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /any hashed asset are answered from the precache/,
-    patch: (t) => sub(t, ' || path.startsWith("/assets/")', ""),
-  },
-  {
-    id: "MU-1760",
-    title: "WEB-14a: a report is answered before its record has landed",
-    file: "src/sw/lifecycle.ts",
-    tests: ["tests/pwa/sw-lifecycle.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /no answer before the record has landed/,
-    patch: (t) =>
-      sub(
-        t,
-        "    await deps.state.recordReport(clientId, {",
-        "    void deps.state.recordReport(clientId, {",
-      ),
-  },
-  {
-    id: "MU-1761",
-    title: "WEB-14a: the reports of closed clients are never forgotten",
-    file: "src/sw/lifecycle.ts",
-    tests: ["tests/pwa/sw-lifecycle.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an open page on A keeps A through B and C/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!open.has(clientId)) await deps.state.deleteClient(clientId);\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1762",
-    title:
-      "WEB-14a: activation does not retire the other generations (nothing is ever purged)",
-    file: "src/sw/lifecycle.ts",
-    tests: ["tests/pwa/sw-lifecycle.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a generation retired within the grace is not purged/,
-    patch: (t) =>
-      sub(
-        t,
-        "  await deps.state.retireAllBut(deps.own.generation, deps.now());\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1763",
-    title:
-      "WEB-14a: a trigger during a check is dropped (no check after a reconnect that came during one)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a reconnect during a check asks exactly once more after it/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (checking) {\n      again = true;\n      return;\n    }\n",
-        "    if (checking) return;\n",
-      ),
-  },
-  {
-    id: "MU-1764",
-    title:
-      "WEB-14a: a reconnect asks again only after an unreachable answer (the base behaviour)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a server upgraded under an open tab is noticed at the next reconnect/,
-    patch: (t) =>
-      sub(
-        t,
-        "          // while this page could not reach it. FIRST, before anything below can wake a sender.\n          revalidate();\n",
-        '          // while this page could not reach it.\n          if (compat.get().status === "unreachable") revalidate();\n',
-      ),
-  },
-  {
-    id: "MU-1765",
-    title: "WEB-14a: the pace does not start again when the answer changes",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the pace starts again when the answer changes/,
-    patch: (t) =>
-      sub(t, "    if (result.status !== before) retryStep = 0;\n", ""),
-  },
-  {
-    id: "MU-1766",
-    title:
-      "WEB-14a: the paced re-check keeps running once the server is supported",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /lifted once the server reports a supported version/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (k.disposed || result.status === "supported") return;\n',
-        "    if (k.disposed) return;\n",
-      ),
-  },
-  {
-    id: "MU-1767",
-    title:
-      "WEB-14a: a return to the page asks again whatever the last answer's age",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /asks again only after the minimum interval/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (ports.clock.now() - lastAnswerAt >= config.compatRecheckMinIntervalMs)\n",
-        "    if (true)\n",
-      ),
-  },
-  {
-    id: "MU-1768",
-    title: "WEB-14a: a return to the page during a check queues another one",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a return to the page while a check is in flight asks nothing more/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (checking) return;\n    if (ports.clock",
-        "    if (ports.clock",
-      ),
-  },
-  {
-    id: "MU-1769",
-    title:
-      "WEB-14a: the recovery identifier is minted at load, not at the first save",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the identifier is minted at the first save, not at load/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 4 (the mount effect opens its field state instead of reading mount values); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "    mountFields.current = own;\n",
-        "    mountFields.current = own;\n    void tab.id();\n",
-      ),
-  },
-  {
-    id: "MU-1770",
-    title:
-      "WEB-14a: a remounted form does not restore this page's own copy first",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/use-recoverable-form.test.tsx",
-      "tests/lib/recoverable-form-session.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /restores this page's own copy first/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "        const own = current.tab.current();\n        const gone",
-        "        const own = null;\n        const gone",
-      ),
-  },
-  {
-    id: "MU-1771",
-    title:
-      "WEB-14a: a copy is restored over input typed before the look finished",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /never restored over input typed before the look finished/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 4 (the whole untouched guard of the look: values at their initial state, nothing owed, no edit since the look began); the defect is unchanged.
-    // Re-anchored in revision 7 (the look was rewritten: pinned typed reads, the hand-off read under its lock, `startLook`); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '            Object.entries(valuesOf(current)).every(\n              ([name, value]) => value === (fields.initial[name] ?? ""),\n            ) &&\n            !hasDebt(fields) &&\n            fields.input === beganInput &&\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-1772",
-    title: "WEB-14a: the look is made again whenever the port changes",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the look is made once per mount/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '      if (bound.look !== "none") return undefined;\n      startLook(bound, shownBefore);',
-        "      startLook(bound, shownBefore);",
-      ),
-  },
-  {
-    id: "MU-1773",
-    title:
-      "WEB-14a: the copy restored from is discarded even when this page's own save failed",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a failed own save does not discard the restored-from copy/,
-    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '  if (result !== "saved") return result;\n',
-        '  if (result !== "saved") {\n    const lost = session.persisted.source;\n    if (lost !== null) await target.discard(session.formContext, lost.id);\n    return result;\n  }\n',
-      ),
-  },
-  {
-    id: "MU-1774",
-    title: "WEB-14a: a submission leaves this page's own copy behind",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /submission discards both copies/,
-    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 6 (R13: `discardAt` keys each copy by where it is stored); the defect is unchanged.
-    // Re-anchored in revision 8 (R16: `discardAt` stages exact removals); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "  if (own !== null && ownAsked)\n    stages[0]?.push({\n      formContext: context,\n      tabInstanceId: own,\n      capture: null,\n    });\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1775",
-    title:
-      "WEB-14a: the recovery identifier is kept in sessionStorage (an opener-copied tab shares it)",
-    file: "src/lib/form-recovery/tab-identity.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the identifier is minted at the first save, not at load/,
-    // Re-anchored in revision 3 (the code it patches changed for findings R3, R10, R11 and R12); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "        owned = candidate;\n        return Promise.resolve(candidate);",
-          '        owned = candidate;\n        sessionStorage.setItem("atlas-recovery-tab", candidate);\n        return Promise.resolve(candidate);',
-        ),
-        "              owned = candidate;\n",
-        '              owned = candidate;\n              sessionStorage.setItem("atlas-recovery-tab", candidate);\n',
-      ),
-  },
-  {
-    id: "MU-1776",
-    title:
-      "WEB-14a: an open owner's lock is read as gone (another open tab's copy is taken over)",
-    file: "src/lib/form-recovery/tab-identity.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an open owner's lock is held, a gone owner's is free/,
-    patch: (t) =>
-      sub(
-        t,
-        "          (lock) => lock === null,",
-        "          (lock) => lock !== null,",
-      ),
-  },
-  {
-    id: "MU-1777",
-    title: "WEB-14a: a discarded (terminal) copy is listed",
-    file: "src/data/plans/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a discarded copy is not listed/,
-    // Re-anchored in revision 1 (R5: the walk keeps the restorable rows as it meets them); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "if (!row.terminal) restorable.push(row);",
-        "restorable.push(row);",
-      ),
-  },
-  {
-    id: "MU-1778",
-    title: "WEB-14a: the list is oldest first",
-    file: "src/data/plans/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /newest first, one per tab/,
-    patch: (t) =>
-      sub(
-        t,
-        "a.saved_at < b.saved_at ? 1 : -1",
-        "a.saved_at < b.saved_at ? -1 : 1",
-      ),
-  },
-  {
-    id: "MU-1779",
-    title:
-      "WEB-14a revision 1, R1: a reconnect does not withdraw `supported`: queued writes are admitted before the fresh answer",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /withdrawn at the online event/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (compat.get().status === "supported") compat.set({ status: "unknown" });\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-1780",
-    title:
-      "WEB-14a revision 1, R1: an answer asked before the latest reconnect is applied (a stale `supported` reopens admission)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/compat-recheck.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /asked BEFORE the reconnect is dropped|drops that check's answer too/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (!k.disposed && asked === reconnects) answered(result);",
-        "if (!k.disposed) answered(result);",
-      ),
-  },
-  {
-    id: "MU-1781",
-    title:
-      "WEB-14a revision 1, R2: dirty is judged against the mount values only (a form back at them after a save looks clean)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /saved, then cleared back to the mount value|back to X: dirty/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 4 (the own-copy comparison of isDirty); the defect is unchanged.
-    patch: (t) =>
-      sub(t, "  if (own) return !copyMatches(fields, own.values, now);\n", ""),
-  },
-  {
-    id: "MU-1782",
-    title:
-      "WEB-14a revision 1, R2: a form back at its clean values saves a copy instead of discarding its copies",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /saved, then cleared back to the mount value|cleared back to the mount value: dirty, and the next page shows it empty/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 4 (the resolved-values branch of flushSession); the defect is unchanged.
-    patch: (t) =>
-      sub(t, "  if (allResolved(session.fields, now)) {", "  if (false) {"),
-  },
-  {
-    id: "MU-1783",
-    title:
-      "WEB-14a revision 1, R4: a flush overtaken by a submission or discard while it waits for its identifier is still written",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /first identifier still being granted|still overtakes it/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(t, '  if (session.order.lastTerminal > op) return "failed";\n', ""),
-  },
-  {
-    id: "MU-1784",
-    title:
-      "WEB-14a revision 1, R6: a discard that did not land is reported as discarded (nothing is owed)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /whose discard fails/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 8 (R16: the outcome is combined in `removeCopies`); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '      if (result === "discarded") settled.add(key);\n      else outcome = outcome === "refused" ? outcome : result;\n',
-        '      if (result === "discarded") settled.add(key);\n',
-      ),
-  },
-  {
-    id: "MU-1785",
-    title:
-      "WEB-14a revision 1, R6: 'Discard and reload anyway' reloads although the discard failed",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a discard that fails: discard_failed/,
-    patch: (t) =>
-      sub(t, '    if (results.includes("failed")) {', "    if (false) {"),
-  },
-  {
-    id: "MU-1786",
-    title:
-      "WEB-14a revision 1, R6: 'Discard and reload anyway' skips the discard (revision 0)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /copies are discarded before the reload|a discard that fails: discard_failed/,
-    patch: (t) =>
-      sub(
-        t,
-        '    discardAndReload: () => void act("discard"),',
-        '    discardAndReload: () => void act("anyway"),',
-      ),
-  },
-  {
-    id: "MU-1787",
-    title:
-      "WEB-14a revision 1, R3: nothing is frozen while the tab saves and waits for the reload",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /frozen from accept|a failed save releases the forms/,
-    patch: (t) => sub(t, "    frozen ??= deps.forms.freeze();\n", ""),
-  },
-  {
-    id: "MU-1788",
-    title:
-      "WEB-14a revision 1, R3: the freeze ends before the activation the tab waits for",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /frozen from accept/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!reloaded && !accepting && !resealing) unfreeze();",
-        "      if (!reloaded) unfreeze();",
-      ),
-  },
-  {
-    id: "MU-1789",
-    title:
-      "WEB-14a revision 1, R3: a form that mounts during a freeze is not frozen",
-    file: "src/lib/form-recovery/registry.ts",
-    tests: [
-      "tests/lib/use-recoverable-form.test.tsx",
-      "tests/pwa/coordinator.test.ts",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /registers during a freeze is frozen too|frozen from accept/,
-    patch: (t) =>
-      sub(t, "      for (const held of freezes) hold(held, handle);\n", ""),
-  },
-  {
-    id: "MU-1790",
-    title:
-      "WEB-14a revision 1, R5: the listing reads only its first page (revision 0's window): terminal rows hide a durable copy",
-    file: "src/data/plans/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /terminal rows whose ids sort first|ends exactly on a page boundary/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (page.length < LIST_PAGE_ROWS) return restorable;",
-        "      return restorable;",
-      ),
-  },
-  {
-    id: "MU-1791",
-    title:
-      "WEB-14a revision 1, R5: the answer is cut to ten copies before it is ordered (revision 0's bound)",
-    file: "src/data/plans/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /every copy is answered, newest first/,
-    patch: (t) =>
-      sub(
-        t,
-        "    result: [...rows].sort((a, b) =>",
-        "    result: [...rows].slice(0, 10).sort((a, b) =>",
-      ),
-  },
-  {
-    id: "MU-1792",
-    title:
-      "WEB-14a revision 1, R6: a discard whose terminal write failed over an existing copy answers `discarded`",
-    file: "src/data/ports/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a write that fails: failed, and the copy is still there/,
-    patch: (t) =>
-      sub(
-        t,
-        '          return created ? "discarded" : "failed";',
-        '          return "discarded";',
-      ),
-  },
-  {
-    id: "MU-1793",
-    title:
-      "WEB-14a revision 1, R8: the neutral banner announces through the protected tree's bridge (silent while signed out)",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-banner.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /announced once through the neutral live region/,
-    // Re-anchored in revision 12 (R19 rewrote the neutral announcement effect): the same mutation, the neutral banner announces nothing.
-    patch: (t) => sub(t, "    neutralLiveRegion.announce(text);\n", ""),
-  },
-  {
-    id: "MU-1794",
-    title:
-      "WEB-14a revision 1, R7: the form's port is withdrawn when the database is superseded (revision 0: no recovery connection)",
-    file: "src/data/ui/env.ts",
-    tests: ["tests/data/form-recovery-superseded.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /superseded: it reaches the recovery connection/,
-    patch: (t) =>
-      sub(
-        t,
-        "    current?.service.live ? current.service : recoveryTarget();",
-        "    current?.service.live ? current.service : null;",
-      ),
-  },
-  {
-    id: "MU-1795",
-    title:
-      "WEB-14a revision 1, R7: the recovery connection stands in for a page that left the account",
-    file: "src/data/ui/env.ts",
-    tests: ["tests/data/form-recovery-superseded.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the identity leaves the account/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (deps.identity.get()?.account_id !== last.account) return null;\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1796",
-    title:
-      "WEB-14a revision 1: a flush is not pinned when it is asked for (a write that waits lands in whichever account is displayed then)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the copy lands in the form's account only|changed under the form/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '  const target = targetOf(session);\n  if (!target) return "failed";',
-        '  const target = session.port;\n  if (!target) return "failed";',
-      ),
-  },
-  {
-    id: "MU-1797",
-    title:
-      "WEB-14a revision 1: a write is made for another account than the one the form was mounted for",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /changed under the form|unmounts after the account changed/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(t, "  if (pinned.scope !== session.scope) return null;\n", ""),
-  },
-  {
-    id: "MU-1798",
-    title:
-      "WEB-14a revision 1 (F-1): a form that unmounts dirty leaves nothing for its remount (the input is lost)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /leaves its input \(memory only\)/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 4 (detach empties the field state's ledger); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "  fields.form = () => null;\n  releaseAttached(session);",
-        "  fields.form = () => null;\n  fields.ledger = {};\n  fields.present = new Map();\n  releaseAttached(session);",
-      ),
-  },
-  {
-    id: "MU-1799",
-    title:
-      "WEB-14a revision 1 (F-1): the form mounted again does not take back what its previous mount left",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /leaves its input \(memory only\)/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    // Re-anchored in revision 4 (adopt no longer puts the session's value into the new mount's untouched field); the defect is unchanged.
-    // Re-anchored in revision 8 (R17: a field is written through its control-state access); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!field || field.key !== shown || field.write(theirs)) continue;",
-        "      if (!field || field.key !== shown || true) continue;",
-      ),
-  },
-  {
-    id: "MU-1800",
-    title:
-      "WEB-14a revision 1: `pin` answers a port that follows the displayed account (not pinned)",
-    file: "src/data/ports/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a pinned port keeps writing there/,
-    patch: (t) =>
-      sub(
-        t,
-        "        port = createFormRecoveryPort({ ...deps, service: () => target });",
-        "        port = createFormRecoveryPort(deps);",
-      ),
-  },
-  {
-    id: "MU-1801",
-    title:
-      "WEB-14a revision 1 (F-1): what a form left at a remount is handed to another account or a re-created database",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/use-recoverable-form.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /never to another account, nor/,
-    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        sub(t, "    retireOtherScopes(registry, scope);\n", ""),
-        "      existing.scope === scope &&\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1802",
-    title:
-      "WEB-14a revision 2, R2: each mount numbers its saves from zero again (a later save looks older than the baseline)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /saves 'one' and 'two', 'three' carried by a remount/,
-    patch: (t) =>
-      sub(
-        t,
-        "  session.left = null;\n  session.attached = attachment;",
-        "  session.left = null;\n  session.order.next = 0;\n  session.order.lastTerminal = 0;\n  session.attached = attachment;",
-      ),
-  },
-  {
-    id: "MU-1803",
-    title:
-      "WEB-14a revision 2, R4: a save keeps the terminal order of the mount that asked for it (a later mount's submission cannot overtake it)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is overtaken by the next mount's/,
-    // Re-anchored in revision 4 (the capture reads the field state's allow-list); the defect is unchanged. Re-anchored in revision 10 (the
-    // values are read before the order, for the copies' accounting); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        sub(
-          sub(
-            t,
-            "  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n",
-            "  const order = session.order;\n  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n",
-          ),
-          '  if (session.order.lastTerminal > op) return "failed";\n',
-          '  if (order.lastTerminal > op) return "failed";\n',
-        ),
-        "  session.left = null;\n  session.attached = attachment;",
-        "  session.left = null;\n  session.order = { ...session.order };\n  session.attached = attachment;",
-      ),
-  },
-  {
-    id: "MU-1804",
-    title:
-      "WEB-14a revision 2, R2/R4: a save that completes late sets the baseline whatever its order",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /completes after the next mount's/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (session.order.lastTerminal < op && (state.own?.op ?? -1) < op)",
-        "  if (session.order.lastTerminal < op)",
-      ),
-  },
-  {
-    id: "MU-1805",
-    title:
-      "WEB-14a revision 2, DA-1: a look answered after a submission or discard still restores the copy it found",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is offered, not put in the form|the last owner probe is held/,
-    patch: (t) => sub(t, "          current.order.next === began &&\n", ""),
-  },
-  {
-    id: "MU-1806",
-    title:
-      "WEB-14a revision 2, R3: a look answered while an update reload is prepared restores its copy into the held form",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /look answers during a freeze/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "            current.order.next === began &&\n            !current.registry.frozen();",
-        "            current.order.next === began;",
-      ),
-  },
-  {
-    id: "MU-1807",
-    title:
-      "WEB-14a revision 2, R3: another copy can be put in the form while an update reload is prepared",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /change nothing; `locked` says so/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
-    // Revision 7: the choice is applied after a fresh read, and the freeze is checked again at that moment (a second layer); the defect (a
-    // copy put in a held form) needs both checks gone, so the mutant removes both.
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          '      // Refused while an update reload is prepared (R3): it would change the form after its last save.\n      if (registry.frozen()) return Promise.resolve("refused");\n',
-          "",
-        ),
-        "          !form ||\n          registry.frozen() ||\n",
-        "          !form ||\n",
-      ),
-  },
-  {
-    id: "MU-1808",
-    title:
-      "WEB-14a revision 2, R3: 'Discard instead' changes the form while an update reload is prepared",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /change nothing; `locked` says so/,
-    patch: (t) => sub(t, '    if (registry.frozen()) return "failed";\n', ""),
-  },
-  {
-    id: "MU-1809",
-    title:
-      "WEB-14a revision 2, R3: a submission can be started while an update reload is prepared",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /change nothing; `locked` says so/,
-    patch: (t) => sub(t, "    if (registry.frozen()) return null;\n", ""),
-  },
-  {
-    id: "MU-1810",
-    title:
-      "WEB-14a revision 2, R3: a submission sent is not outstanding (an update reload does not wait for it)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a submission ticket is outstanding until it settles|a ticket outlives a remount/,
-    // Re-anchored in revision 3 (the code it patches changed for findings R3, R10, R11 and R12); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "      sent = submissionOf(current);\n      track(current, outstanding);\n",
-        "      sent = submissionOf(current);\n",
-      ),
-  },
-  {
-    id: "MU-1811",
-    title:
-      "WEB-14a revision 2, DA-2: only the account is compared, not its database's incarnation (a mounted form writes into the re-created database)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /deleted and created again while it stays mounted/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (pinned.scope !== session.scope) return null;",
-        "  if (pinned.account !== session.account) return null;",
-      ),
-  },
-  {
-    id: "MU-1812",
-    title:
-      "WEB-14a revision 2: an older discard landing late clears the debt of a newer one that failed",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an older discard landing late/,
-    patch: (t) =>
-      sub(t, "    if (next.owed <= op) next.owed = 0;", "    next.owed = 0;"),
-  },
-  {
-    id: "MU-1813",
-    title:
-      "WEB-14a revision 2, R3: a form that unmounts leaves the registry at once, unsaved input and all",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is still listed|a ticket outlives a remount/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "  session.relook = null;\n  unlistIfIdle(session);\n}",
-        "  session.relook = null;\n  retire(session);\n}",
-      ),
-  },
-  {
-    id: "MU-1814",
-    title:
-      "WEB-14a revision 2: the sessions of another scope are not retired when a form binds to a new one",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /retires the sessions of the old one|unsaved input of the first account is dropped/,
-    patch: (t) => sub(t, "    retireOtherScopes(registry, scope);\n", ""),
-  },
-  {
-    id: "MU-1815",
-    title:
-      "WEB-14a revision 2, R3: a form mounted again during a freeze is not held still as it attaches",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /held still as it attaches/,
-    patch: (t) =>
-      sub(
-        t,
-        "  session.attached = attachment;\n  list(session);\n  holdAttached(session);\n  return attachment;",
-        "  session.attached = attachment;\n  list(session);\n  return attachment;",
-      ),
-  },
-  {
-    id: "MU-1296",
-    title:
-      "WEB-14a revision 2, R3: the reload is not checked (work that arrived during the waits is lost to it)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /comes back dirty during the waits is saved before the reload|a late form whose save fails stops this tab's reload|cannot be held still/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!sealed()) {\n      void reseal();\n      return;\n    }\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1297",
-    title:
-      "WEB-14a revision 2, R3: the tab does not wait for work already outstanding (a submission sent before accepting is saved over)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is waited for; its success discards the copies/,
-    patch: (t) =>
-      sub(
-        t,
-        '      if (deps.forms.pending() > 0) {\n        busy = { kind: "saving" };\n        publish();\n        await deps.forms.settled();\n        if (disposed) return false;\n        // What settled may have started more (a submission\'s success discards the copies): that is waited for first.\n        if (deps.forms.pending() > 0) continue;\n      }\n      if (sealed()) return true;\n      if (act === "save") {',
-        '      if (sealed()) return true;\n      if (act === "save") {',
-      ),
-  },
-  {
-    id: "MU-1298",
-    title:
-      "WEB-14a revision 2, R3: a form that cannot be held still is taken for safe",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /cannot be held still is never taken for safe/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (forms.pending() > 0 || forms.unheld() > 0) return false;",
-        "    if (forms.pending() > 0) return false;",
-      ),
-  },
-  {
-    id: "MU-1299",
-    title:
-      "WEB-14a revision 2, R3: the registry never says a freeze is in force (the recovery actions stay available)",
-    file: "src/lib/form-recovery/registry.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /change nothing; `locked` says so/,
-    patch: (t) =>
-      sub(t, "    frozen: () => freezes.size > 0,", "    frozen: () => false,"),
-  },
-  {
-    id: "MU-2012",
-    title:
-      "WEB-14a revision 2, R3: a form without a freeze counts as held still",
-    file: "src/lib/form-recovery/registry.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /cannot be held still is never taken for safe/,
-    patch: (t) =>
-      sub(
-        t,
-        "      held.set(handle, handle.freeze ? handle.freeze() : null);",
-        "      held.set(handle, handle.freeze ? handle.freeze() : () => undefined);",
-      ),
-  },
-  {
-    id: "MU-2013",
-    title:
-      "WEB-14a revision 2, R3: 'Discard instead' stays enabled while an update reload is prepared",
-    file: "src/lib/form-recovery/RecoveryBanner.tsx",
-    tests: ["tests/lib/form-recovery.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /'Discard instead' is disabled and says why/,
-    patch: (t) => sub(t, "        {state.disabled ? (", "        {false ? ("),
-  },
-  {
-    id: "MU-2014",
-    title:
-      "WEB-14a revision 2, R3: a checkpoint that cannot be met leaves the tab accepting (a retry is ignored; the fallback can still fire)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a late form whose save fails stops this tab's reload/,
-    patch: (t) =>
-      sub(
-        t,
-        "    // This tab does not reload: the person keeps working (a worker may have activated for the other tabs; this tab's input is not lost).\n    stopAccepting();\n",
-        "    // This tab does not reload: the person keeps working (a worker may have activated for the other tabs; this tab's input is not lost).\n",
-      ),
-  },
-  {
-    id: "MU-2015",
-    title:
-      "WEB-14a revision 2: a save of the form is not counted as outstanding",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /with a save outstanding is listed/,
-    patch: (t) => sub(t, "  session.pending.add(operation);\n", ""),
-  },
-  {
-    id: "MU-2016",
-    title:
-      "WEB-14a revision 2, R3: a clean session is forgotten when its mount goes (the next mount starts afresh: an empty form during a freeze)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a CLEAN form \(its input saved\) mounted again while a freeze stands/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (session.registry.session(session.formContext) === session)\n    unlist(session);\n  else retire(session);",
-        "  retire(session);",
-      ),
-  },
-  {
-    id: "MU-2017",
-    title:
-      "WEB-14a revision 2: a mount resuming its session does not offer the copies other tabs left since",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /restores this page's own copy first/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '      startLook(current, shown, "offer");\n      return cancel;',
-        "      setReady(true);\n      return;",
-      ),
-  },
-  {
-    id: "MU-2018",
-    title:
-      "WEB-14a revision 2: a mount resuming its session says it is ready before the copies other tabs left since are known",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: [
-      "tests/lib/recoverable-form-session.test.tsx",
-      "tests/lib/use-recoverable-form.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /not ready until the copies other tabs left since are known/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '      offerOwed.current = true;\n      startLook(current, shown, "offer");',
-        '      offerOwed.current = true;\n      setReady(true);\n      startLook(current, shown, "offer");',
-      ),
-  },
-  {
-    id: "MU-1701",
-    title:
-      "WEB-14a revision 3, R3: every success is a terminal act with what the form holds when it answers (input changed after the send is declared clean)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /changed after the send: the success keeps the later input/,
-    // Re-anchored in revision 4 (the submission records everything the form held); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "  const unchanged =\n    sent.input !== null &&",
-          "  const unchanged =\n    true ||\n    sent.input !== null &&",
-        ),
-        'terminalAct(session, { ...sent.held }, "submission")',
-        'terminalAct(session, held(fields), "submission")',
-      ),
-  },
-  {
-    id: "MU-1702",
-    title:
-      "WEB-14a revision 3, R3: a success compares values only (an edit back to the sent text is taken for the sent input)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /changed away and back to the sent text after the send/,
-    // Re-anchored in revision 4 (the input revision lives in the field state); the defect is unchanged.
-    patch: (t) => sub(t, "    sent.input === fields.input &&\n", ""),
-  },
-  {
-    id: "MU-1703",
-    title:
-      "WEB-14a revision 3, R3: responses are applied in the order they arrive (an older success after a newer one acts again)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /two submissions answered newest first/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (known && sent.input !== null && sent.input <= known.input)\n",
-        "  if (false)\n",
-      ),
-  },
-  {
-    id: "MU-1704",
-    title:
-      "WEB-14a revision 3, R10: a ticket completes in the session the hook shows when it answers (context A's success discards context B)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /context A's success arrives after the same hook shows context B/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (joined) outcome = acknowledged(joined);",
-        "        const now = origin();\n        if (joined) outcome = acknowledged(now ? submissionOf(now) : joined);",
-      ),
-  },
-  {
-    id: "MU-1705",
-    title:
-      "WEB-14a revision 3, R3/Q8: a completed ticket acts again (a success after a failure discards the copies)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a failure first: a later success answers `failed` and discards nothing/,
-    patch: (t) => sub(t, "        if (outcome) return outcome;\n", ""),
-  },
-  {
-    id: "MU-1706",
-    title:
-      "WEB-14a revision 3, R10/Q8: a ticket taken before the form had a session is not waited for",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /is waited for while unbound, joins the session the same mount binds/,
-    patch: (t) =>
-      sub(
-        t,
-        "        const waiting = [...tickets].filter((ticket) => ticket.sent === null);",
-        "        const waiting: Provisional[] = [];",
-      ),
-  },
-  {
-    id: "MU-1707",
-    title:
-      "WEB-14a revision 3, R10/Q8: a ticket taken before the form had a session joins a session of another form context",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /never joins a session of another form context/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (ticket.sent !== null || ticket.formContext !== formContext) continue;",
-        "      if (ticket.sent !== null) continue;",
-      ),
-  },
-  {
-    id: "MU-1708",
-    title:
-      "WEB-14a revision 3, R11: a session keeps the allow-list of the mount that opened it",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /expanded on a remount: the carried title is restored, the new field starts from the mount/,
-    // Re-anchored in revision 4 (both transitions: a remount's adopt and a same-mount setSchema); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "  into.allow = from.allow;\n  into.schema = from.schema;\n",
-          "",
-        ),
-        "  if (key === fields.schema) return false;",
-        "  if (key !== null) return false;",
-      ),
-  },
-  {
-    id: "MU-1709",
-    title:
-      "WEB-14a revision 3, R11/D1: input in a field no longer admitted is dropped silently",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    // Revision 10: the removed field's copy is also refused by the positive accounting of the own copy (`accounts`), so the original case
-    // no longer reaches the drop; the drop itself is caught by the case that asserts the held content comes back when admitted again.
-    expect:
-      /reduced on a remount while the removed field holds input|admitted again: the held content comes back into the field and is captured/,
-    // Re-anchored in revision 4 (a remount's adopt drops the session's values of fields the new mount does not admit); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "  into.present = new Map(from.present);\n",
-        "  into.present = new Map(from.present);\n  for (const name of Object.keys(into.ledger))\n    if (!into.allow.some((spec) => spec.name === name)) delete into.ledger[name];\n",
-      ),
-  },
-  {
-    id: "MU-1710",
-    title:
-      "WEB-14a revision 3, R11/D1: a form holding input of a field no longer admitted is saved without it (the copy that held it is replaced)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /reduced on a remount while the removed field holds input/,
-    // Re-anchored in revision 4 (the debt check of flushSession); the defect is unchanged. Re-expressed in revision 10 as two sites: the
-    // copy that held the input is now also protected by the positive accounting of the own copy (`accounts`), so replacing it needs both
-    // protections gone (the debt check alone is MU-1942).
-    patch: (t) =>
-      sub(
-        sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
-        '    if (copy && !accounts(session.fields, copy.values, now)) return "failed";\n',
-        '    if (copy && (false as boolean)) return "failed";\n',
-      ),
-  },
-  {
-    id: "MU-1711",
-    title:
-      "WEB-14a revision 3, R11: durable values are compared across schemas (a copy captured without a newly admitted field never matches)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /expanded on a remount: the carried title is restored, the new field starts from the mount/,
-    // Re-anchored in revision 4 (copyMatches no longer reads a field a copy lacks as its initial value); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '    if ((copy[name] ?? fields.initial[name] ?? "") !== value) return false;',
-        "    if (copy[name] !== value) return false;",
-      ),
-  },
-  {
-    id: "MU-1712",
-    title:
-      "WEB-14a revision 3, R11: an allow-list changed while the form stays mounted is ignored",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /changed while mounted: an admitted field is captured from then on/,
-    // Re-anchored in revision 4 (the committed-schema layout effect); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "    if (current) changeSchema(current, now);",
-        "    if (current) void now;",
-      ),
-  },
-  {
-    id: "MU-1713",
-    title:
-      "WEB-14a revision 3, R12: a refused owning lock is reported as the page's identity (a copy is saved under a lock nobody holds)",
-    file: "src/lib/form-recovery/tab-identity.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a refused owning lock: the save fails, nothing is written/,
-    patch: (t) =>
-      sub(
-        t,
-        "            .catch(refused);",
-        "            .catch(() => {\n              end();\n              owned = candidate;\n              resolve(candidate);\n            });",
-      ),
-  },
-  {
-    id: "MU-1714",
-    title:
-      "WEB-14a revision 3, R12: a failed acquisition is remembered (a retry never acquires the lock)",
-    file: "src/lib/form-recovery/tab-identity.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a refused owning lock: the save fails, nothing is written/,
-    patch: (t) =>
-      sub(
-        t,
-        "        const refused = (reason: unknown): void => {\n          end();\n",
-        "        const refused = (reason: unknown): void => {\n",
-      ),
-  },
-  {
-    id: "MU-1715",
-    title:
-      "WEB-14a revision 3, R12: a candidate still being acquired is advertised as the page's identifier",
-    file: "src/lib/form-recovery/tab-identity.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a candidate still being granted is not advertised/,
-    patch: (t) =>
-      sub(
-        t,
-        "    current: () => owned,",
-        "    current: () => owned ?? acquiring?.candidate ?? null,",
-      ),
-  },
-  {
-    id: "MU-1716",
-    title:
-      "WEB-14a revision 3, R12: a page with no lock manager saves under an identifier it cannot hold",
-    file: "src/lib/form-recovery/tab-identity.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a page with no lock manager has no recovery identity/,
-    patch: (t) =>
-      sub(
-        t,
-        "    : unavailable;",
-        "    : createRecoveryTab({ uuid: () => crypto.randomUUID(), locks: null });",
-      ),
-  },
-  {
-    id: "MU-1717",
-    title:
-      "WEB-14a revision 3, R3: a success with later input leaves the copy of the sent input in the store",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /changed after the send: the success keeps the later input, its copy replaces the sent one/,
-    patch: (t) =>
-      sub(
-        t,
-        "      own !== null || source !== null || ownAsked || owed > 0",
-        "      false",
-      ),
-  },
-  {
-    id: "MU-1718",
-    title:
-      "WEB-14a revision 3, R3: the person's input events do not move the input revision",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /changed away and back to the sent text after the send/,
-    // Re-anchored in revision 4 (the field state's watcher) and revision 5 (the watcher's three edit branches); the defect is unchanged.
-    // Re-anchored in revision 8 (R17: the watcher reads the field's whole state); the defect is unchanged.
-    // Re-anchored in revision 11 (R18: the watcher maps an event to the admitted fields whose members include its target, and stamps them
-    // once): no branch stamps the input revision any more; the defect is unchanged.
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "      fields.evented.clear();\n      noteInput(fields);\n    } else if (names.length === 0) noteInput(fields, [named]);\n",
-          "      fields.evented.clear();\n    } else if (names.length === 0) {\n    }\n",
-        ),
-        "      if (edits.length > 0) noteInput(fields, edits);\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1719",
-    title:
-      "WEB-14a revision 4, R3 (assessment mutant a): coverage ignores edit provenance (a submitted value typed again after another send is taken for covered)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /A succeeds; B saved and sent; edited back to A; B succeeds|a submitted text needs no copy until it is edited/,
-    // Re-anchored in revision 10 (one coverage test for every kind of state; a text's coverage is its last line); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "    (covered && cover.value === value)\n",
-        "    (cover !== undefined && cover.value === value)\n",
-      ),
-  },
-  {
-    id: "MU-1720",
-    title:
-      "WEB-14a revision 4, R3 (assessment mutant b): the save's clean-discard branch compares values only (any covered value, edited since or not, discards the copies)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /A succeeds; B saved and sent; edited back to A; B succeeds|a proactive save of A before B succeeds/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (allResolved(session.fields, now)) {",
-        '  if (\n    Object.entries(now).every(\n      ([name, value]) =>\n        value === (session.fields.initial[name] ?? "") ||\n        session.fields.covered.get(name)?.value === value,\n    )\n  ) {',
-      ),
-  },
-  {
-    id: "MU-1721",
-    title:
-      "WEB-14a revision 4, R11 (assessment mutant c): retained input is ignored by isDirty (a form owing a hidden field's input looks clean)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /removed in ONE render: dirty, saves fail|a conditional field hidden\): dirty|R11 schedule: notes removed with their admission/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (owed > 0 || hasDebt(fields)) return true;",
-        "  if (owed > 0) return true;",
-      ),
-  },
-  {
-    id: "MU-1722",
-    title:
-      "WEB-14a revision 4, R11 (assessment mutant d): the empty allow-list is skipped (the previous admission stays)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /committed to allow=\[\] while blank|uses the empty schema/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (key === fields.schema) return false;",
-        "  if (key === fields.schema || allow.length === 0) return false;",
-      ),
-  },
-  {
-    id: "MU-1723",
-    title:
-      "WEB-14a revision 4, R11 (assessment mutant e1): input events do not read the field (the ledger keeps the value from the last read only)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /hidden by a child that owns the switch/,
-    // Re-anchored in revision 5 (the watcher's read after its edit branches); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '    }\n    sync(fields);\n    if (event.type === "reset")',
-        '    }\n    if (event.type === "reset")',
-      ),
-  },
-  {
-    id: "MU-1724",
-    title:
-      "WEB-14a revision 4, R11 (assessment mutant e2): the hook does not read the followed fields while it renders (a value changed without an event goes with its field)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /changed WITHOUT an input event/,
-    patch: (t) => sub(t, "  if (live) refresh(live);\n", "  void live;\n"),
-  },
-  {
-    id: "MU-1725",
-    title:
-      "WEB-14a revision 4, R11 (assessment mutant f1): an admitted field not on the page loses its value at the next read",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a conditional field hidden\)|re-admitted while still absent|hidden by a child that owns the switch/,
-    // Re-anchored in revision 8 (R17: a field is found through its control-state access); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!field) {\n      fields.present.delete(name);\n      continue;\n    }",
-        "    if (!field) {\n      fields.present.delete(name);\n      delete fields.ledger[name];\n      continue;\n    }",
-      ),
-  },
-  {
-    id: "MU-1726",
-    title:
-      "WEB-14a revision 4, R11 (assessment mutant f2): a retained value shadowed by new text in a field shown again is dropped",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the person typed something else into: their text stays, the held value stays owed/,
-    // Re-anchored in revision 5 (sync's shadowing now also clears the value's provenance); the defect is unchanged.
-    // Re-anchored in revision 9 (R17: the owed values are a list per field, `owe`; reconciliation is one rule, `reconcile`); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "        if (!untouched) owe(fields, name, { value: held });\n",
-        "        if (!untouched) void held;\n",
-      ),
-  },
-  {
-    id: "MU-1727",
-    title:
-      "WEB-14a revision 4, R11: a remount's new mount typed into before it bound drops the session's unsaved value",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the person's new text stays; the session's unsaved value for the field stays owed/,
-    // Re-anchored in revision 5 (the shadowing in adoption's edited branch, which the selected test reaches since revision 5); the defect is unchanged.
-    // Re-anchored in revision 9 (owed values: `owe`); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "      if (theirs !== undefined && theirs !== mine)\n        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1728",
-    title:
-      "WEB-14a revision 4, R3 (assessment mutant g): a success that answers after a later edit covers the input as it is when it answers",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: [
-      "tests/lib/recoverable-form-ownership.test.tsx",
-      "tests/lib/recoverable-form-preservation.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /changed away and back to the sent text after the send|A succeeds; B saved and sent; edited back to A/,
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "    if (lastEdit(fields, name) <= at && fields.ledger[name] === value)",
-          "    if (fields.ledger[name] === value)",
-        ),
-        "  cover(fields, unedited, at);",
-        "  cover(fields, unedited, fields.input);",
-      ),
-  },
-  {
-    id: "MU-1729",
-    title:
-      "WEB-14a revision 4, design assessment Q8: a look answered after an edit undone since restores its copy (values alone decide)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an edit away and back while the owner probe is held/,
-    patch: (t) => sub(t, "          fields.input === beganInput &&\n", ""),
-  },
-  {
-    id: "MU-1730",
-    title:
-      "WEB-14a revision 4, PRODUCT-DECISIONS-20261011 item 2: a successful submission does not cover the hidden values of the state it saved",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /notes hidden with input, the form submitted and successful/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (unchanged) result = terminalAct(session, { ...sent.held }, "submission");',
-        '  if (unchanged) result = terminalAct(session, valuesOf(session), "submission");',
-      ),
-  },
-  {
-    id: "MU-1731",
-    title:
-      "WEB-14a revision 4, R11: an unbound mount's retained input is not taken into the session it binds (the debt goes at binding)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /unbound in a remount: a field removed before the mount binds its resumed session/,
-    // Re-anchored in revision 5: an EDITED field the session lacks is now taken in by adoption's edited branch (the old anchor, the
-    // never-edited branch, still applied but no longer reached the selected test: it survived driver attempt 2026-10-11T13-51-35.488Z);
-    // the defect is unchanged.
-    // Re-anchored in revision 9 (the edited branch now owes through `owe`); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n      into.ledger[name] = mine;",
-        "        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n      if (theirs === undefined && !from.present.has(name)) continue;\n      into.ledger[name] = mine;",
-      ),
-  },
-  {
-    id: "MU-1816",
-    title:
-      "WEB-14a/main merge: a shared leader runtime hides its schema-superseded recovery connection from forms",
-    file: "src/data/ui/react.tsx",
-    tests: ["tests/data/follower-status.test.tsx"],
-    expect:
-      /a shared page runtime keeps the form recovery port after schema supersession/,
-    patch: (t) =>
-      sub(
-        t,
-        "host.runtime.get()?.recoveryStore?.(account, incarnationId) ??",
-        "null ??",
-      ),
-  },
   // WEB-12a merge: historical MU-1201..MU-1207 are MU-1281..MU-1287; main already owns the former IDs. Patches and assertions are unchanged.
   // ---- WEB-12a: the sharing defaults (W14, the source, capture), the defaults review and the sharing editors ---------------------------
   {
@@ -18265,2973 +15448,935 @@ export const UNIT = [
         '      ? { from: "complete", list: households.value, at: defaults.record?.fetched_at ?? households.at }\n',
       ),
   },
+
+  // ---- WEB-09b (10 October 2026): the production leader, the staged snapshot, the recovery job and its budgets ---------------------------
   {
-    id: "MU-1824",
+    id: "MU-1201",
     title:
-      "WEB-14a revision 5, R3 (assessment: omit equal-valued adoption provenance): an edit typed in a new mount to the session's own text is not carried",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /unbound remount, the person types the SAME text as the earlier submission/,
+      "WEB-09b: a staged snapshot page is not admitted by the staging compare-and-set (W22 lists no STG)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-2 to S-7|S-8 the same page requested again/,
     patch: (t) =>
       sub(
         t,
-        "    if (edit > 0) {\n",
-        "    if (edit > 0 && mine !== theirs) {\n",
+        '    guards: ["INC", "CLS", "STG", "GEN", "OWN", "EPO"],\n    quota: "cache",\n  },\n  scope: ["cache_staging"],',
+        '    guards: ["INC", "CLS", "GEN", "OWN", "EPO"],\n    quota: "cache",\n  },\n  scope: ["cache_staging"],',
       ),
   },
   {
-    id: "MU-1825",
+    id: "MU-1202",
     title:
-      "WEB-14a revision 5, R3 (assessment: treat an edited default as untouched): a field typed away and back to its start takes the session's value",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /typed away and back to where the field starts/,
+      "WEB-09b: the STG guard itself compares nothing (a page at another staged position is applied)",
+    file: "src/data/model/guards.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-2 to S-7|S-8 the same page requested again/,
     patch: (t) =>
       sub(
         t,
-        "    if (edit > 0) {\n",
-        "    if (edit > 0 && mine !== from.initial[name]) {\n",
+        '    if (sync.staging_position !== (captured.expectedPosition ?? null))\n      return "position";',
+        '    if (sync.staging_position !== (captured.expectedPosition ?? null) && (false as boolean))\n      return "position";',
       ),
   },
   {
-    id: "MU-1826",
+    id: "MU-1203",
     title:
-      "WEB-14a revision 5, R3 (assessment: revision aliasing): a new mount's revisions are taken as the session's without translation",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the provenance is translated, not invented/,
-    patch: (t) => sub(t, "  const base = into.input;\n", "  const base = 0;\n"),
-  },
-  {
-    id: "MU-1827",
-    title:
-      "WEB-14a revision 5, R3 (assessment: map all provisional tickets to the current revision): an older ticket taken before binding covers a later edit",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /answered oldest first: the older covers nothing newer/,
+      "WEB-09b: the activation swaps in the staged rows of ANOTHER generation, not those of the attempt it activates",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-9 the final page and the swap|S-11 adopted rows/,
     patch: (t) =>
       sub(
         t,
-        "            ? shown.revisionOf(ticket.input)\n",
-        "            ? current.fields.input\n",
+        '        "recovery_generation",\n        generation,\n',
+        '        "recovery_generation",\n        generation - 1,\n',
       ),
   },
   {
-    id: "MU-1828",
+    id: "MU-1204",
     title:
-      "WEB-14a revision 5, R3 (assessment: reuse an old acknowledgement): a ticket adopted at an acknowledged revision gets the earlier submission's answer",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /answers for itself, not with the old answer/,
+      "WEB-09b: the activation does not clear the old cache before the swap",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-9 the final page and the swap/,
+    patch: (t) => sub(t, 'writes: [w.clear("cache")],', "writes: [],"),
+  },
+  {
+    id: "MU-1205",
+    title:
+      "WEB-09b: the activation releases receipts NEWER than the snapshot's boundary (content that predates the change)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-12 unsent work is byte-identical/,
+    patch: (t) =>
+      sub(t, "row.receipt_revision <= boundary,", "row.receipt_revision >= 0,"),
+  },
+  {
+    id: "MU-1206",
+    title:
+      "WEB-09b (P-7): the activation's receipt bookkeeping writes the effect rows of UNSENT work too",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /S-12 unsent work is byte-identical/,
+    // Re-anchored in review cycle 1 (R8): the selection is the same; the `deletes` option it sat beside is gone (the receipt bookkeeping
+    // is no longer made in recovery mode at all). Its tests are the ordinary activation and W26 (S-12), where it now applies.
+    patch: (t) =>
+      sub(t, "        select: acknowledgedOnly,\n      });", "      });"),
+  },
+  {
+    id: "MU-1208",
+    title:
+      "WEB-09b (Q7): an attempt is adopted up to the whole lifetime, without the margin",
+    file: "src/data/model/recovery.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /O-2 at \(and after\) the lifetime/,
     patch: (t) =>
       sub(
         t,
-        "        input: revision !== null && revision > acknowledged ? revision : null,\n",
-        "        input: revision,\n",
+        "config.snapshotCursorLifetimeMs - config.snapshotAdoptMarginMs",
+        "config.snapshotCursorLifetimeMs",
       ),
   },
   {
-    id: "MU-1829",
+    id: "MU-1209",
     title:
-      "WEB-14a revision 5, R13 (assessment: restore the foreign-source clean shortcut): a restored copy counts as this page's reload protection",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /B saves different input \(deleting S\)|B saved different input first; A accepts the update|S discarded by B while A's save waits for its identity/,
+      "WEB-09b (case (c)): a restart under a new generation leaves the old generation's staged rows",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /O-2 at \(and after\) the lifetime/,
     patch: (t) =>
       sub(
         t,
-        "  if (source) return true;\n",
-        "  if (source) return !copyMatches(fields, source.values, now);\n",
+        '        writes: [w.clear("cache_staging")],\n        sync: {\n          ...sync,\n          ...withoutAttemptStreaks(sync),\n          owner,',
+        "        writes: [],\n        sync: {\n          ...sync,\n          ...withoutAttemptStreaks(sync),\n          owner,",
       ),
   },
   {
-    id: "MU-1830",
+    id: "MU-1210",
     title:
-      "WEB-14a revision 5, R13 (assessment: publish own protection before commit): the page counts its copy as durable before the save lands",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S discarded while A's save itself is held in the store/,
+      "WEB-09b (trace 5): a page's success resets the whole-attempt counter (a healthy page one keeps the loop going for ever)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /trace 5/,
     patch: (t) =>
       sub(
         t,
-        "  session.persisted = { ...session.persisted, ownAsked: true };\n",
-        "  session.persisted = {\n    ...session.persisted,\n    ownAsked: true,\n    own: { values: captured.values, op },\n  };\n",
+        "    delta_error_streak: 0,\n    ...(cursorless ? { sync_error_streak: 0 } : {}),\n  };",
+        "    delta_error_streak: 0,\n    recovery_attempt_streak: 0,\n    ...(cursorless ? { sync_error_streak: 0 } : {}),\n  };",
       ),
   },
   {
-    id: "MU-1831",
+    id: "MU-1211",
     title:
-      "WEB-14a revision 5, R13 (assessment: treat a failed save as saved): a failed own save moves the baseline and cleans up the restored copy",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /store write failed: the flush fails, S stays, A is dirty/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (result !== "saved") return result;\n',
-        '  if (result === "refused") return result;\n',
-      ),
-  },
-  {
-    id: "MU-1832",
-    title:
-      "WEB-14a revision 5, R13 (assessment: older clean-up clears newer state): a late clean-up of the old restored copy forgets the copy chosen since",
-    file: "src/lib/form-recovery/session.ts",
+      "WEB-09b (trace 6): a blocked budget still captures an automatic request",
+    file: "src/data/plans/recovery-writers.ts",
     tests: [
-      "tests/lib/recoverable-form-provenance.test.tsx",
-      "tests/lib/recoverable-form-lineage.test.tsx",
-      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/data/recovery-job.test.ts",
+      "tests/data/snapshot-plans.test.ts",
     ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    // Revision 8: the clean-up now acts on exact debts, never on the current source, so the original case cannot reach the defect; the
-    // same rule (a landed save owes only a source chosen before it was asked for) is caught by the revision-8 case.
-    // Re-anchored in revision 8 (R16: a landed save holds only a source restored before it was asked for); the defect is unchanged.
-    // Re-expressed in revision 10 (R11, C4) at the rule that now carries the meaning: the save holds the very source it accounted for when
-    // it was asked (taken before its order, so the order test it replaced was always true); dropping that identity lets a late save clean up
-    // and forget the copy chosen since, the original defect (caught by the revision-10 Q9 case too).
-    expect:
-      /an older clean-up held across choosing another copy|a save asked BEFORE another copy is chosen|Q9: a save asked for BEFORE another copy is chosen/,
+    expect: /trace 6|a blocked budget sends nothing|permits ONE attempt/,
     patch: (t) =>
       sub(
         t,
-        "      restored !== null && state.source === restored && restored.id !== id;",
-        "      restored !== null && restored.id !== id;",
+        "if (blocked !== null && input.allowBlocked !== true)",
+        "if (blocked !== null && input.allowBlocked !== true && (false as boolean))",
       ),
   },
   {
-    id: "MU-1833",
+    id: "MU-1212",
     title:
-      "WEB-14a revision 5 (the diagnosed Chromium precondition): a change event that only commits the last input is an edit (ends a submission's coverage)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /focus leaves the field AFTER the submission/,
-    // Re-anchored in revision 8 (R17: the change rule compares the field's whole state) and revision 11 (R18: per admitted field the target
-    // is a member of); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '        if (event.type !== "change" || fields.evented.get(name) !== state) {',
-        "        if (true as boolean) {",
-      ),
-  },
-  {
-    id: "MU-1834",
-    title:
-      "WEB-14a revision 5 (over-correction): input events with the text the field already reported are not edits (R3 equality taken for authority)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /input events always count, even with the same text/,
-    // Re-anchored in revision 11 (R18: per admitted field the target is a member of); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        '        if (event.type !== "change" || fields.evented.get(name) !== state) {',
-        "        if (fields.evented.get(name) !== state) {",
-      ),
-  },
-  {
-    id: "MU-1835",
-    title:
-      "WEB-14a revision 5 (privacy): the change rule keeps the value of a sensitive or not admitted field",
-    file: "src/lib/form-recovery/fields.ts",
+      "WEB-09b: three unrecognised answers on a cursor count the attempt but do not abandon the cursor",
+    file: "src/data/model/recovery.ts",
     tests: [
-      "tests/lib/recoverable-form-provenance.test.tsx",
-      "tests/lib/recoverable-form-membership.test.tsx",
+      "tests/data/snapshot-plans.test.ts",
+      "tests/data/recovery-job.test.ts",
     ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    // Revision 11 re-expression (R18): a not admitted field is never looked up any more (an event maps only to the ADMITTED fields whose
-    // members include its target), so the old not-admitted branch is gone and its original case cannot reach the change rule; the remaining
-    // branch, an admitted field with a sensitive member, is the membership suite's case. The original case is kept in the list.
-    expect:
-      /a sensitive or not admitted field's value is never kept|its value is never read nor kept/,
-    // Re-anchored in revision 8 (R17: a sensitive or not admitted field has no state access) and revision 11 (R18: per admitted field the
-    // target is a member of; a not admitted field is never looked up); the defect is unchanged.
+    expect: /R-1 the reducer|trace 5/,
     patch: (t) =>
       sub(
         t,
-        '        if (field === null || field === "sensitive") {\n          edits.push(name);\n          continue;\n        }\n        const state = field.read();',
-        '        const state =\n          field === null || field === "sensitive"\n            ? (target as HTMLInputElement).value\n            : field.read();',
+        "      return {\n        ...base,\n        delta_error_streak: 0,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        attemptCounted: true,\n        abandon: true,\n      };\n    }",
+        "      return {\n        ...base,\n        delta_error_streak: 0,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        attemptCounted: true,\n        abandon: false,\n      };\n    }",
       ),
   },
   {
-    id: "MU-1836",
+    id: "MU-1213",
     title:
-      "WEB-14a revision 5, R3: a successful submission covers a shadowed value typed again after its send",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the OLD mount's text typed again AFTER its send/,
-    // Re-anchored in revision 9 (R17: the owed values are a list per field, `owe`; reconciliation is one rule, `reconcile`); the defect is unchanged.
+      "WEB-09b: a server-instructed restart (410, 409 access_changed) is counted against the whole-attempt budget",
+    file: "src/data/model/recovery.ts",
+    tests: [
+      "tests/data/snapshot-plans.test.ts",
+      "tests/data/recovery-job.test.ts",
+    ],
+    expect: /R-1 the reducer|restarts cursor-less, counting nothing/,
     patch: (t) =>
       sub(
         t,
-        "        !(\n          entry.value === value &&\n          entry.made !== undefined &&\n          entry.made <= at\n        ),",
-        "        !(entry.value === value),",
+        '    case "server_restart":\n      return {\n        ...base,\n        delta_error_streak: 0,',
+        '    case "server_restart":\n      return {\n        ...base,\n        recovery_attempt_streak: base.recovery_attempt_streak + 1,\n        delta_error_streak: 0,',
       ),
   },
   {
-    id: "MU-1837",
+    id: "MU-1214",
     title:
-      "WEB-14a revision 5: a shadowed value a successful submission sent stays owed (every later save fails; only a discard of everything is left)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a ticket of the OLD mount answered after the new mount bound, with an edit typed in the new mount/,
-    // Re-anchored in revision 9 (the submission's settling of owed values, `settleOwed`); the defect is unchanged.
+      "WEB-09b (matrix 3.7.3): a recovery that has made its data commit never asks `finish` (the fence never clears)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /T24 A|T24 F/,
     patch: (t) =>
       sub(
         t,
-        "    settleOwed(\n      fields,\n      name,\n      (entry) =>\n        !(\n          entry.value === value &&",
-        "    settleOwed(\n      fields,\n      name,\n      (entry) =>\n        true || !(\n          entry.value === value &&",
+        'if (issued.mode === "ordinary") return idle();\n    return finish(b, issued.handle);',
+        'if (issued.mode === "ordinary") return idle();\n    return idle();',
       ),
   },
   {
-    id: "MU-1838",
+    id: "MU-1215",
     title:
-      "WEB-14a revision 6 (R13): the update writes no hand-off copy (only its reference)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /C saves different input before A2 reads/,
+      "WEB-09b (T24 H): an ineligible `begin` is ignored and the recovery reads anyway",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /T24 H/,
     patch: (t) =>
       sub(
         t,
-        "  const written = await target\n    .save({\n      formContext: handoffContext(session.formContext),",
-        '  const written: SaveResult = "saved";\n  void target\n    .save({\n      formContext: handoffContext("unwritten:" + session.formContext),',
+        // Re-anchored in review cycle 2 (R3): `ineligible` now also takes the binding and the epoch of its admission wait.
+        'if (begun.kind === "ineligible")\n          return ineligible(',
+        'if (begun.kind === "ineligible" && (false as boolean))\n          return ineligible(',
       ),
   },
   {
-    id: "MU-1839",
+    id: "MU-1216",
     title:
-      "WEB-14a revision 6 (R13): the hand-off is stored under the form's own context (any page may take and remove it)",
-    file: "src/lib/form-recovery/handoff.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /C saves different input before A2 reads/,
-    patch: (t) => sub(t, "  HANDOFF_PREFIX + formContext;", "  formContext;"),
+      "WEB-09b (matrix 3.7.3): recovery reads use the ORDINARY request class",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /T24 A|T24 B/,
+    patch: (t) =>
+      sub(t, 'mode === "recovery" ? "recovery" : "ordinary",', '"ordinary",'),
   },
   {
-    id: "MU-1840",
+    id: "MU-1217",
     title:
-      "WEB-14a revision 6 (R13): the next page ignores the hand-off left to it",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /C saves different input before A2 reads/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+      "WEB-09b (row 6 case 5): the leader gives the lock up on an account transition",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-3 the lock is never released/,
     patch: (t) =>
       sub(
         t,
-        '            if (found.kind === "found") handed = found.copy;',
-        '            if (found.kind === "found") handed = null;',
+        "    b.controller.abort();",
+        "    b.controller.abort();\n    deps.election.dispose();",
       ),
   },
   {
-    id: "MU-1841",
-    title:
-      "WEB-14a revision 6 (R13): a hand-off whose save failed is still referenced and counted as handed off",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the hand-off's save fails/,
-    patch: (t) => sub(t, '  if (written !== "saved") return written;\n', ""),
-  },
-  {
-    id: "MU-1842",
-    title:
-      "WEB-14a revision 6 (R13): a reference that could not be written is ignored",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /session storage refuses/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    id: "MU-1218",
+    title: "WEB-09b: a follower page binds and runs the writers as if it led",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-1\/L-2|F-1 variant 1|F-2 variant 2/,
     patch: (t) =>
       sub(
         t,
-        '  if (\n    referencing(session) &&\n    !rememberHandoff(session.handoffs, {\n      form: session.formContext,\n      scope: session.scope,\n      id,\n    })\n  )\n    return "failed";',
-        "  rememberHandoff(session.handoffs, {\n    form: session.formContext,\n    scope: session.scope,\n    id,\n  });",
+        "const leading = (): boolean =>",
+        "const leading = (): boolean => true || ",
       ),
   },
   {
-    id: "MU-1843",
+    id: "MU-1219",
     title:
-      "WEB-14a revision 6 (R13): a hand-off of an older copy counts as handed off",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an edit after the hand-off makes the form dirty/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+      "WEB-09b (P-8): the engine keeps running while the recovery job has the cache to itself",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-6 the engine is stopped while the job has the cache/,
     patch: (t) =>
       sub(
         t,
-        "    (session.persisted.handoff?.op ?? -1) >= own.op &&",
-        "    session.persisted.handoff !== null &&",
+        "const wanted = live && !job.exclusive.get();",
+        "const wanted = live;",
       ),
   },
   {
-    id: "MU-1844",
+    id: "MU-1220",
     title:
-      "WEB-14a revision 6 (R13): a page that cannot hold the hand-off takes it all the same (a duplicated tab removes it)",
-    file: "src/lib/form-recovery/tab-identity.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a duplicated tab carrying the same reference/,
+      "WEB-09b: the engine and the dispatcher run while the account is fenced (a loop of refused requests)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-10/,
     patch: (t) =>
       sub(
         t,
-        "          if (wait <= 0) return false;",
-        "          return true;",
+        "displayed(b.account);",
+        "(displayed(b.account) || (true as boolean));",
       ),
   },
   {
-    id: "MU-1845",
+    id: "MU-1221",
     title:
-      "WEB-14a revision 6 (R13): a hand-off chosen from the alternatives becomes the page's source (it removes it)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /abandoned \(A2 never came\)/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
-    patch: (t) => sub(t, "            !handoff || ours", "            true"),
-  },
-  {
-    id: "MU-1846",
-    title:
-      "WEB-14a revision 6 (R13): a hand-off a live page holds is offered to other pages",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a hand-off is shown to no other page while a live page holds it/,
+      "WEB-09b: the leader reopens the account by itself when its service ends (a wipe's latch is lifted)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-9b/,
     patch: (t) =>
       sub(
         t,
-        "            !(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false))",
-        "            true",
+        "if (bound === b) unbind();",
+        "if (bound === b) {\n          unbind();\n          follow();\n        }",
       ),
   },
   {
-    id: "MU-1847",
+    id: "MU-1222",
     title:
-      "WEB-14a revision 6 (R13): 'Discard this copy' removes a hand-off a live page holds",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /'Discard this copy' is refused/,
-    // Re-anchored in revision 8 (R16/C3: the alternative discard is tracked); the defect is unchanged.
+      "WEB-09b (row 3): the leader opens the account while a logout or retirement is pending",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-9/,
     patch: (t) =>
       sub(
         t,
-        '          (current.tab.whileFree\n            ? current.tab.whileFree(tabInstanceId, remove)\n            : remove()\n          ).catch((): DiscardResult => "failed"),',
-        '          remove().catch((): DiscardResult => "failed"),',
+        "if (deps.operationPending(identity.account_id)) return;",
+        "if (deps.operationPending(identity.account_id) && (false as boolean)) return;",
       ),
   },
   {
-    id: "MU-1848",
+    id: "MU-1223",
     title:
-      "WEB-14a revision 6 (R13): a terminal act leaves the page's own hand-off behind",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /A's own submission after an abandoned reload/,
-    // Re-anchored in revision 8 (R16: `discardAt` stages exact removals); the defect is unchanged.
+      "WEB-09b (E-B14): a staged page's local-write identity carries the generation (a reload forgets three failures)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /survives a reload/,
     patch: (t) =>
       sub(
         t,
-        "  if (handoff !== null)\n    stages[2]?.push({\n      formContext: handoffContext(context),\n      tabInstanceId: handoff,\n      capture: null,\n    });\n",
+        "? snapshotPageOperation(position)",
+        // A template literal is the patched TEXT here, so its placeholders are built, not interpolated.
+        [
+          "? `",
+          "$",
+          "{snapshotPageOperation(position)}#",
+          "$",
+          "{sync.recovery_generation}`",
+        ].join(""),
+      ),
+  },
+  {
+    id: "MU-1224",
+    title:
+      "WEB-09b (P-7): a catch-up page in recovery mode is reconciled like an ordinary page (unsent work written, receipts deleted)",
+    file: "src/data/plans/commit-page.ts",
+    tests: ["tests/data/commit-page-recovery.test.ts"],
+    // Review cycle 1 (R8): the case was renamed when the recovery stopped writing acknowledged work too.
+    expect: /NOTHING of the queue is written/,
+    patch: (t) =>
+      sub(t, '...(input.mode === "recovery" ? { recovery: true } : {}),', ""),
+  },
+  {
+    id: "MU-1225",
+    title:
+      "WEB-09b: an abandoned catch-up cursor leaves the cache shown as valid",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /R-2 an abandonment/,
+    patch: (t) =>
+      sub(
+        t,
+        '        ...(sync.cache_status === "valid"\n          ? { cache_status: "invalid" as const, cursor: null }\n          : {}),',
         "",
       ),
   },
   {
-    id: "MU-1849",
+    id: "MU-1226",
     title:
-      "WEB-14a revision 6 (R13): a reference left for another account's database is taken",
-    file: "src/lib/form-recovery/handoff.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /another account's database/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+      "WEB-09b: Try again resets a whole-attempt failure it did not see (the reset is not versioned)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /R-4 Try again/,
     patch: (t) =>
       sub(
         t,
-        "    (entry) => entry.form === form && entry.scope === scope,",
-        "    (entry) => entry.form === form,",
+        "if (fields.recovery_budget_version !== input.expect)",
+        "if (fields.recovery_budget_version !== input.expect && (false as boolean))",
       ),
   },
   {
-    id: "MU-1850",
+    id: "MU-1227",
     title:
-      "WEB-14a revision 6 (R13): the reload checkpoint ignores the hand-offs",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator-handoff.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a hand-off made stale before it is written again first/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+      "WEB-09b (P-3): with a production leader on the page the provider still builds and disposes a runtime of its own",
+    file: "src/data/ui/react.tsx",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /waits for and uses the PAGE's runtime/,
     patch: (t) =>
       sub(
         t,
-        "    return !handoffHandles(forms).some(unresolved) && handedOff(forms);",
-        "    return !handoffHandles(forms).some(unresolved);",
+        "if (leaderStarted() || host.runtime.get() !== null) {",
+        "if ((leaderStarted() || host.runtime.get() !== null) && (false as boolean)) {",
       ),
   },
   {
-    id: "MU-1851",
-    title: "WEB-14a revision 6 (R13): 'Save and reload' writes no hand-off",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator-handoff.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the hand-off is written before the other tabs are asked/,
+    id: "MU-1228",
+    title:
+      "WEB-09b (P-11): a follower page reads 'Updates stopped' merely because another page leads",
+    file: "src/data/model/status.ts",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /FS-1|FS-2/,
     patch: (t) =>
       sub(
         t,
-        '        if (!sealed()) {\n          busy = { kind: "saving" };\n          publish();\n          const failed = verdict(await prepareHandoffs(deps.forms));',
-        '        if (false as boolean) {\n          busy = { kind: "saving" };\n          publish();\n          const failed = verdict(await prepareHandoffs(deps.forms));',
+        "if (inputs.follower === true) {",
+        "if (inputs.follower === true && (false as boolean)) {",
       ),
   },
   {
-    id: "MU-1852",
+    id: "MU-1229",
     title:
-      "WEB-14a revision 6 (R13): 'Discard and reload anyway' waits for hand-offs it never writes",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator-handoff.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /write no hand-off/,
-    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+      "WEB-09b: a page of another boundary revision is staged into the attempt",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /a delta page, a revision mismatch and a lapsed hold/,
     patch: (t) =>
       sub(
         t,
-        '    if (mode === "discard") return discardTargets().length === 0;\n',
+        "revision !== staged",
+        "revision !== staged && (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-1230",
+    title:
+      "WEB-09b (R28): a staged page is written after the hold it was admitted under ended",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /a delta page, a revision mismatch and a lapsed hold/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (input.leaseLive !== undefined && !input.leaseLive())\n    return { kind: "lease_lapsed" };',
         "",
       ),
   },
   {
-    id: "MU-1853",
+    id: "MU-1231",
     title:
-      "WEB-14a revision 6 (R13): the ordinary copy identical to the hand-off is left behind",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /control: A updates; no other tab before A2 reads/,
-    // Re-anchored in revision 8 (R16: the predecessor is named by the hand-off's lineage, never by equal text; a landed save owes it); the defect is unchanged.
-    // Re-anchored in revision 10 (R17/R11 completeness: the source a save holds is the one it accounted for, `restored`); the defect is unchanged.
-    patch: (t) => sub(t, "            ...restored.lineage,\n", ""),
-  },
-  {
-    id: "MU-1854",
-    title:
-      "WEB-14a revision 6 (R13): the next page's own save does not remove the hand-off (wrong context)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /C saves different input before A2 reads/,
-    // Re-anchored in revision 8 (R16: a source is removed as an exact target); the defect is unchanged.
+      "WEB-09b (OWN): the recovery job's capture is admitted for a binding that no longer owns the database",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /another binding's token/,
     patch: (t) =>
       sub(
         t,
-        "  formContext: source.context,\n  tabInstanceId: source.id,",
-        '  formContext: source.context.replace(HANDOFF_PREFIX, ""),\n  tabInstanceId: source.id,',
-      ),
-  },
-  {
-    id: "MU-1855",
-    title:
-      "WEB-14a revision 6 (R13): a kept session no mount shows is not handed off",
-    file: "src/lib/form-recovery/handoff.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a kept session no mount shows/,
-    patch: (t) =>
-      sub(t, "    if (session.handle) handles.add(session.handle);\n", ""),
-  },
-  {
-    id: "MU-1856",
-    title:
-      "WEB-14a revision 6 (R13): a form context with the reserved prefix is accepted",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /reserved prefix is refused/,
-    patch: (t) =>
-      sub(
-        t,
-        // biome-ignore lint/suspicious/noTemplateCurlyInString: the patched source is itself a template literal
-        '  if (formContext.startsWith(HANDOFF_PREFIX))\n    throw new Error(`"${HANDOFF_PREFIX}" is reserved for update hand-offs`);\n',
+        '    if (!owns(sync, input.token))\n      return { result: { kind: "gated", reason: "owner" } };',
         "",
       ),
   },
   {
-    id: "MU-1857",
+    id: "MU-1232",
     title:
-      "WEB-14a revision 7 (R6): 'Discard and reload anyway' discards only the dirty forms (a form its failed save made clean keeps its copies)",
-    file: "src/lib/pwa/coordinator.ts",
+      "WEB-09b: a draft saved through another facade (this page's screens, a follower page) does not wake the leader's dispatcher",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/leader.test.ts"],
+    expect: /L-11/,
+    patch: (t) =>
+      sub(
+        t,
+        '            message.stores.includes("drafts")\n          )\n            dispatcher.wake();',
+        '            message.stores.includes("drafts") &&\n            (false as boolean)\n          )\n            dispatcher.wake();',
+      ),
+  },
+  {
+    id: "MU-1233",
+    title:
+      "WEB-09b (trace 6, E-B13): the one attempt a page load permits while blocked is spent at the capture, so a request withheld at the issue check leaves the load with none",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /spent only by a request that is ISSUED/,
+    patch: (t) =>
+      sub(
+        t,
+        '    trigger ??= capture.position === null ? "first_snapshot" : "adopted";\n',
+        '    trigger ??= capture.position === null ? "first_snapshot" : "adopted";\n    permitBlocked = false;\n',
+      ),
+  },
+  {
+    id: "MU-1234",
+    title:
+      "WEB-09b (trace 6, E-B13 in WebKit): a request the session refuses before sending it (not_sent, not_covered) keeps the load's one permitted attempt, so the load sends nothing",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect:
+      /the permitted attempt is RETURNED when the session refuses its request/,
+    patch: (t) =>
+      sub(
+        t,
+        '        issued.permit &&\n        (error.kind === "not_sent" || error.kind === "not_covered")\n      )\n        permitBlocked = true;\n',
+        '        issued.permit &&\n        (error.kind === "not_sent" || error.kind === "not_covered")\n      )\n        void 0;\n',
+      ),
+  },
+  // ---- WEB-09b review cycle 1 (10 October 2026): R1 to R8 ------------------------------------------------------------------------------
+  {
+    id: "MU-1235",
+    title:
+      "WEB-09b R8: an activation in RECOVERY mode does the queue's receipt bookkeeping itself (the recovery writes acknowledged drafts and their effects)",
+    file: "src/data/plans/recovery-writers.ts",
     tests: [
-      "tests/lib/recoverable-form-revision7.test.tsx",
-      "tests/pwa/coordinator-handoff.test.ts",
+      "tests/data/snapshot-plans.test.ts",
+      "tests/data/recovery-job.test.ts",
     ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
-      /own copy was saved \(clean\)|a clean form with copies whose hand-off failed|two forms and a kept form/,
+      /S-12 unsent work is byte-identical|the whole queue is byte-identical/,
     patch: (t) =>
       sub(
         t,
-        "    [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(\n      (form) => !refused.has(form) && !discardedNow(form),\n    );",
-        "    deps.forms.dirty().filter((form) => !refused.has(form));",
+        '    const stats =\n      input.mode === "recovery"',
+        "    const stats =\n      (false as boolean)",
       ),
   },
   {
-    id: "MU-1858",
+    id: "MU-1236",
     title:
-      "WEB-14a revision 7 (R6): a discard's reload is sealed once no form is dirty (clean forms' copies are not waited for)",
-    file: "src/lib/pwa/coordinator.ts",
+      "WEB-09b R8: a catch-up page in recovery mode reconciles the queue's effects (acknowledged drafts written by the recovery)",
+    file: "src/data/plans/reconcile-windows.ts",
     tests: [
-      "tests/lib/recoverable-form-revision7.test.tsx",
-      "tests/pwa/coordinator-handoff.test.ts",
+      "tests/data/commit-page-recovery.test.ts",
+      "tests/data/recovery-job.test.ts",
     ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /own copy was saved \(clean\)|a clean form with copies whose hand-off failed|two forms and a kept form/,
+    expect: /NOTHING of the queue is written|the whole queue is byte-identical/,
     patch: (t) =>
       sub(
         t,
-        '    if (mode === "discard") return discardTargets().length === 0;\n',
-        '    if (mode === "discard") return forms.dirty().length === 0;\n',
+        "  if (input.recovery === true) {",
+        "  if (input.recovery === true && (false as boolean)) {",
       ),
   },
   {
-    id: "MU-1859",
+    id: "MU-1237",
     title:
-      "WEB-14a revision 7 (R6): a form of the act that left the registry is not discarded",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator-handoff.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /even after it left the registry/,
+      "WEB-09b R8: the receipt bookkeeping a recovery owed is never done after the display (W26 never runs)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /W26 releases the acknowledged receipt/,
     patch: (t) =>
       sub(
         t,
-        "    [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(",
-        "    [...new Set([...handoffHandles(deps.forms)])].filter(",
+        "if (capture.reconcilePending === true)\n",
+        "if (capture.reconcilePending === true && (false as boolean))\n",
       ),
   },
   {
-    id: "MU-1860",
+    id: "MU-1238",
     title:
-      "WEB-14a revision 7 (R6): a new 'Save and reload' keeps the earlier act's forms",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator-handoff.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /starts a new act/,
-    patch: (t) => sub(t, "    if (fresh) participants = new Set();\n", ""),
-  },
-  {
-    id: "MU-1861",
-    title:
-      "WEB-14a revision 7 (R6): a form counts as discarded when it is clean",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /own copy was saved \(clean\)|two forms and a kept form/,
-    // Re-anchored in revision 8 (R16: the twin is replaced by exact debts); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "    state.owed === 0 &&\n    state.own === null &&\n    state.source === null &&\n    state.debts.length === 0 &&\n    session.handoffId === null &&\n    session.order.lastTerminal === session.order.next &&\n    !isDirty(session)",
-        "    !isDirty(session)",
-      ),
-  },
-  {
-    id: "MU-1862",
-    title:
-      "WEB-14a revision 7 (R13): a load with no store open answers 'no copy'",
-    file: "src/data/ports/form-recovery.ts",
-    tests: ["tests/data/form-recovery.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a failed write is `failed`, never a throw/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!service) throw new Error(NO_STORE);\n      const row =",
-        "      if (!service) return null;\n      const row =",
-      ),
-  },
-  {
-    id: "MU-1863",
-    title:
-      "WEB-14a revision 7 (R13): a list with no store open answers 'no copies'",
-    file: "src/data/ports/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /no open database: the read rejects/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!service) throw new Error(NO_STORE);\n      const rows =",
-        "      if (!service) return [];\n      const rows =",
-      ),
-  },
-  {
-    id: "MU-1864",
-    title:
-      "WEB-14a revision 7 (R13): a list whose transaction fails answers 'no copies'",
-    file: "src/data/ports/form-recovery.ts",
-    tests: ["tests/data/form-recovery-list.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a list or load whose transaction fails is unavailable/,
-    patch: (t) =>
-      sub(
-        t,
-        "      const rows = await service.store.run(listFormRecovery, {\n        incarnationId: service.incarnationId,\n        formContext,\n      });",
-        "      const rows = await service.store\n        .run(listFormRecovery, {\n          incarnationId: service.incarnationId,\n          formContext,\n        })\n        .catch(() => []);",
-      ),
-  },
-  {
-    id: "MU-1865",
-    title:
-      "WEB-14a revision 7 (R13): a listing that cannot be read is an empty listing",
-    file: "src/lib/form-recovery/port.ts",
-    tests: [
-      "tests/lib/recoverable-form-revision7.test.tsx",
-      "tests/data/form-recovery-list.test.ts",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the ordinary list cannot be read|the list of abandoned hand-offs cannot be read|no open database: the read rejects|transaction fails is unavailable/,
-    patch: (t) =>
-      sub(
-        t,
-        '      ? { kind: "listed", copies }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "unavailable" };',
-        '      ? { kind: "listed", copies }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "listed", copies: [] };',
-      ),
-  },
-  {
-    id: "MU-1866",
-    title: "WEB-14a revision 7 (R13): a copy that cannot be read is absent",
-    file: "src/lib/form-recovery/port.ts",
-    tests: [
-      "tests/lib/recoverable-form-revision7.test.tsx",
-      "tests/data/form-recovery-list.test.ts",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /hand-off read fails after C consumed|transaction fails is unavailable/,
-    patch: (t) =>
-      sub(
-        t,
-        '      ? { kind: "found", copy }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "unavailable" };',
-        '      ? { kind: "found", copy }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "absent" };',
-      ),
-  },
-  {
-    id: "MU-1867",
-    title:
-      "WEB-14a revision 7 (R13): a look that could not read the store says the form is ready",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /hand-off read fails after C consumed|cannot be read: unavailable|offer look fails|created again while A2's look reads/,
-    patch: (t) =>
-      sub(
-        t,
-        "          setUnavailable(true);\n          setReady(false);\n          return false;",
-        "          setUnavailable(false);\n          setReady(true);\n          return false;",
-      ),
-  },
-  {
-    id: "MU-1868",
-    title:
-      "WEB-14a revision 7 (R13): a look that could not read the store leaves the form resolved for the update",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /hand-off read fails after C consumed|still unreadable at the update's own retry/,
-    patch: (t) =>
-      sub(
-        t,
-        '          current.recovery = "unavailable";',
-        '          current.recovery = "ok";',
-      ),
-  },
-  {
-    id: "MU-1869",
-    title:
-      "WEB-14a revision 7 (R13): the reload checkpoint ignores a form whose look could not read the store",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: [
-      "tests/lib/recoverable-form-revision7.test.tsx",
-      "tests/pwa/coordinator-handoff.test.ts",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /still cannot read it: no reload|still unreadable at the update's own retry/,
-    patch: (t) =>
-      sub(
-        t,
-        "    return !handoffHandles(forms).some(unresolved) && handedOff(forms);",
-        "    return handedOff(forms);",
-      ),
-  },
-  {
-    id: "MU-1870",
-    title:
-      "WEB-14a revision 7 (R13): the update never asks an unresolved form to look again",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: [
-      "tests/lib/recoverable-form-revision7.test.tsx",
-      "tests/pwa/coordinator-handoff.test.ts",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /reads the store when asked again|readable at the update's own retry|unresolved before 'Save and reload' is asked to look once/,
-    patch: (t) =>
-      sub(
-        t,
-        "            (form.retryRecovery?.() ?? Promise.resolve(false)).catch(",
-        "            Promise.resolve(false).catch(",
-      ),
-  },
-  {
-    id: "MU-1871",
-    title:
-      "WEB-14a revision 7 (R13): an unreadable reference record is no reference",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the tab's reference record cannot be read/,
-    patch: (t) =>
-      sub(t, '          if (left.kind === "unknown") return null;\n', ""),
-  },
-  {
-    id: "MU-1872",
-    title:
-      "WEB-14a revision 7 (R13): a hand-off read that fails is taken as resolved (ordinary selection)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /hand-off read fails after C consumed/,
-    patch: (t) =>
-      sub(
-        t,
-        '            if (found.kind === "unavailable") return null;\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-1873",
-    title:
-      "WEB-14a revision 7 (R13): an ordinary list that fails is taken as empty",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the ordinary list cannot be read/,
-    patch: (t) =>
-      sub(
-        t,
-        '        const listed = await readCopies(through, context);\n        if (listed.kind === "unavailable") return null;',
-        '        const answered = await readCopies(through, context);\n        const listed =\n          answered.kind === "unavailable"\n            ? { kind: "listed" as const, copies: [] }\n            : answered;',
-      ),
-  },
-  {
-    id: "MU-1874",
-    title:
-      "WEB-14a revision 7 (C4): a look's answer is applied after the account's database changed under it",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is created again while A2's look reads/,
-    patch: (t) =>
-      sub(
-        t,
-        "        if (found === null || targetOf(current) === null) {",
-        "        if (found === null) {",
-      ),
-  },
-  {
-    id: "MU-1875",
-    title:
-      "WEB-14a revision 7 (R15): the hand-off is read without waiting for its lock",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /DUP reads only once it holds it/,
-    patch: (t) =>
-      sub(
-        t,
-        "            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true))",
-        "            true",
-      ),
-  },
-  {
-    id: "MU-1876",
-    title:
-      "WEB-14a revision 7 (R15): a page that cannot take the hand-off's lock reads it and takes it all the same",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /falls back to the ordinary copies without reading the hand-off|lock manager throws/,
-    patch: (t) =>
-      sub(
-        t,
-        "            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true))",
-        "            ((await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true)) ||\n              true)",
-      ),
-  },
-  {
-    id: "MU-1877",
-    title:
-      "WEB-14a revision 7 (DA-B): a chosen alternative is shown from the copy listed earlier",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /explicitly discarded by E after D listed it|discarded since it was listed/,
-    patch: (t) =>
-      sub(
-        t,
-        '        return found.kind === "absent" ? "gone" : apply(found.copy);',
-        '        return found.kind === "unavailable" ? "unavailable" : apply(chosen);',
-      ),
-  },
-  {
-    id: "MU-1878",
-    title:
-      "WEB-14a revision 7 (DA-B): an abandoned hand-off is chosen without holding its lock",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a live page took the abandoned hand-off before D chose it/,
-    patch: (t) =>
-      sub(
-        t,
-        '            (await (current.tab.whileFree\n              ? current.tab.whileFree(tabInstanceId, fresh)\n              : fresh())) ?? "refused"',
-        '            (await fresh()) ?? "refused"',
-      ),
-  },
-  {
-    id: "MU-1879",
-    title:
-      "WEB-14a revision 7 (DA-B): a chosen copy is shown over input typed while it was read",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the form changed while the choice read the copy/,
-    // Re-anchored in revision 8 (R17: an unreadable copy is refused in the same check); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "          current.order.next !== began ||\n          current.fields.input !== beganInput ||\n",
-        "          current.order.next !== began ||\n",
-      ),
-  },
-  {
-    id: "MU-1880",
-    title:
-      "WEB-14a revision 7 (DA-A): an unreadable reference record is an empty one",
-    file: "src/lib/form-recovery/handoff.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /unreadable or not a list|the record cannot be read during the second form's hand-off/,
-    patch: (t) =>
-      sub(
-        t,
-        '      } catch {\n        return { kind: "unknown" };\n      }',
-        '      } catch {\n        return { kind: "read", refs: [], others: [] };\n      }',
-      ),
-  },
-  {
-    id: "MU-1881",
-    title:
-      "WEB-14a revision 7 (DA-A): entries of the record this page cannot read are dropped when it writes",
-    file: "src/lib/form-recovery/handoff.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /unreadable or not a list/,
-    patch: (t) =>
-      sub(
-        t,
-        "  return store.write([...record.others, ...others, ref]);",
-        "  return store.write([...others, ref]);",
-      ),
-  },
-  {
-    id: "MU-1882",
-    title:
-      "WEB-14a revision 7 (DA-A): a hand-off counts as made whether or not its reference is in the record",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /no longer certified|the record cannot be read during the second form's hand-off/,
-    patch: (t) => sub(t, "    (!referencing(session) ||", "    (true ||"),
-  },
-  {
-    id: "MU-1883",
-    title:
-      "WEB-14a revision 7 (DA-A): a second mount of the same form context writes the context's reference too",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /two mounts of one form context/,
-    patch: (t) =>
-      sub(
-        t,
-        "    referencing(session) &&\n    !rememberHandoff(session.handoffs, {",
-        "    !rememberHandoff(session.handoffs, {",
-      ),
-  },
-  {
-    id: "MU-1884",
-    title:
-      "WEB-14a revision 8 (R16): the update hand-off is written with no lineage (its predecessor is named by nothing)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /removes A's copy and the hand-off/,
-    patch: (t) =>
-      sub(
-        t,
-        "      capture: crypto.randomUUID(),\n      lineage: versioned(lineage),\n",
-        "      capture: crypto.randomUUID(),\n      lineage: versioned([]),\n",
-      ),
-  },
-  {
-    id: "MU-1885",
-    title:
-      "WEB-14a revision 8 (R16): the hand-off's predecessor is guessed again: the first gone copy with EQUAL TEXT (revision 7)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /REQUIREMENT \(equal text\)|REQUIREMENT: (B saved|every copy|three more|the page's own save)/,
-    patch: (t) =>
-      sub(
-        t,
-        "        const lineage = handed ? lineageOf(handed) : [];\n",
-        "        const twin = handed\n          ? gone.find(\n              (copy) =>\n                copy.tabInstanceId !== own &&\n                JSON.stringify(copy.values) === JSON.stringify(handed.values),\n            )\n          : undefined;\n        const lineage: CopyTarget[] = twin\n          ? [{ formContext: twin.formContext, tabInstanceId: twin.tabInstanceId, capture: twin.capture ?? null }]\n          : [];\n",
-      ),
-  },
-  {
-    id: "MU-1886",
-    title:
-      "WEB-14a revision 8 (R16): the copies the restored hand-off names are offered on their own",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /is part of it \(not offered on its own\)|Nothing the chain owes|the hand-off is offered \(not A's copy/,
-    patch: (t) =>
-      sub(
-        t,
-        "        const owing = [\n          ...lineage,\n",
-        "        const owing = [\n",
-      ),
-  },
-  {
-    id: "MU-1887",
-    title:
-      "WEB-14a revision 8 (R16, Q2): the hand-off left to this page, chosen later, brings no lineage",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /choosing it then discarding removes|switching to B's copy and back/,
-    patch: (t) =>
-      sub(
-        t,
-        "                  lineage: ours ? lineageOf(copy) : [],",
-        "                  lineage: [],",
-      ),
-  },
-  {
-    id: "MU-1888",
-    title:
-      "WEB-14a revision 8 (R16, Q3): a copy is removed whatever capture it holds now",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /A's copy holds a newer capture of A's/,
-    patch: (t) =>
-      sub(
-        t,
-        "            : target.discard(copy.formContext, copy.tabInstanceId, copy.capture)",
-        "            : target.discard(copy.formContext, copy.tabInstanceId)",
-      ),
-  },
-  {
-    id: "MU-1889",
-    title:
-      "WEB-14a revision 8 (R16, Q4): a hand-off is removed although a copy it names was not (its record of what is owed is lost)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the hand-off is KEPT|whose answer was lost/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (outcome !== "discarded") return { settled, outcome };\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-1890",
-    title:
-      "WEB-14a revision 8 (R16, Q4): the next update's hand-off does not carry what is still owed",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /writes what is owed into its hand-off/,
-    patch: (t) => sub(t, "    ...session.persisted.debts,\n  ]);", "  ]);"),
-  },
-  {
-    id: "MU-1891",
-    title:
-      "WEB-14a revision 8 (C3): an explicit alternative discard is not outstanding work (an update's checkpoint does not wait for it)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /checkpoint waits for a hand-off discard in progress/,
-    patch: (t) =>
-      sub(
-        t,
-        "        (await track(\n          current,\n",
-        "        (await ((_session: unknown, work: Promise<DiscardResult>) => work)(\n          current,\n",
-      ),
-  },
-  {
-    id: "MU-1892",
-    title:
-      "WEB-14a revision 8 (R16, Q5/DA-C): an abandoned hand-off is hidden when another offered copy holds equal text (revision 7)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /REQUIREMENT \(equal text\): A updates and never returns/,
-    patch: (t) =>
-      sub(
-        t,
-        "          ...left.filter((copy) => !inLineage(owing, copy)),",
-        "          ...left.filter(\n            (copy) =>\n              !inLineage(owing, copy) &&\n              !candidates.some(\n                (other) =>\n                  JSON.stringify(other.values) === JSON.stringify(copy.values),\n              ),\n          ),",
-      ),
-  },
-  {
-    id: "MU-1893",
-    title:
-      "WEB-14a revision 8 (R16, C2): the conditional removal does not compare the capture",
-    file: "src/data/plans/form-recovery.ts",
-    tests: ["tests/data/form-recovery-capture.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /holds another capture|holds other content under another capture/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (stored.meta?.capture !== input.expect)",
-        "      if (false as boolean)",
-      ),
-  },
-  {
-    id: "MU-1894",
-    title:
-      "WEB-14a revision 8 (R16, C2): the conditional removal claims the row's writer (moves its order record) before it compares",
-    file: "src/data/ports/form-recovery.ts",
-    tests: ["tests/data/form-recovery-capture.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /no claim of its writer first/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (expected !== undefined)\n        return serialised(id, async (): Promise<DiscardResult> => {",
-        "      if (expected !== undefined) {\n        begin(service, formContext, tabInstanceId);\n      }\n      if (expected !== undefined)\n        return serialised(id, async (): Promise<DiscardResult> => {",
-      ),
-  },
-  {
-    id: "MU-1895",
-    title:
-      "WEB-14a revision 8 (R16, Q16): the same content saved again keeps the old capture's identity (a later equal capture is taken for the old one)",
-    file: "src/data/plans/form-recovery.ts",
-    tests: ["tests/data/form-recovery-capture.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the order record AND the identity move|moves with the same content/,
-    patch: (t) =>
-      sub(
-        t,
-        "                  meta: incoming.meta,",
-        "                  meta: stored.meta,",
-      ),
-  },
-  {
-    id: "MU-1896",
-    title:
-      "WEB-14a revision 8 (R17, Q16): control state is not content (a checked box is the same content as an unchecked one)",
-    file: "src/data/ports/form-recovery.ts",
-    tests: ["tests/data/form-recovery-capture.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is NOT the same content/,
-    patch: (t) =>
-      sub(
-        t,
-        "  meta?.controls ? { values, controls: meta.controls } : values;",
-        "  values;",
-      ),
-  },
-  {
-    id: "MU-1897",
-    title:
-      "WEB-14a revision 8 (R17, C5): control state this build cannot read is read as no control state",
-    file: "src/lib/form-recovery/control-state.ts",
-    tests: ["tests/data/form-recovery-capture.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /makes the copy unreadable/,
-    patch: (t) =>
-      sub(
-        t,
-        "    Object.values(entries).every(isControlState)\n    ? (entries as Record<string, ControlState>)\n    : null;",
-        "    Object.values(entries).every(isControlState)\n    ? (entries as Record<string, ControlState>)\n    : undefined;",
-      ),
-  },
-  {
-    id: "MU-1898",
-    title:
-      "WEB-14a revision 8 (R17): a checkbox is read as its `.value` (revision 7)",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /REQUIREMENT: a checkbox checked/,
-    patch: (t) =>
-      sub(
-        t,
-        '  const read = () => encodeState({ kind: "checkbox", checked: box.checked });',
-        "  const read = () => encodeText(box.value);",
-      ),
-  },
-  {
-    id: "MU-1899",
-    title:
-      "WEB-14a revision 8 (R17): a multiple select is read as its `.value` (revision 7)",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /REQUIREMENT: a multiple select/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (first instanceof HTMLSelectElement && first.multiple)\n      return multipleField(first);\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1900",
-    title:
-      "WEB-14a revision 8 (R17): a checkbox's state is captured but never shown again (restore omitted)",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /REQUIREMENT: a checkbox checked/,
-    // Re-anchored in revision 9 (exact writes); the defect is unchanged.
-    patch: (t) =>
-      sub(t, "      box.checked = state.checked;", "      void state.checked;"),
-  },
-  {
-    id: "MU-1901",
-    title:
-      "WEB-14a revision 8 (R17): a group's sensitivity is judged by its first member only",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /group with a sensitive member/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (members.some((member) => isSensitiveField(member))) return "sensitive";',
-        '  if (isSensitiveField(members[0] as Element)) return "sensitive";',
-      ),
-  },
-  {
-    id: "MU-1902",
-    title:
-      "WEB-14a revision 8 (R17, C5): a stored text that looks like a state is decoded as one",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /looks like a control state stays literal/,
-    patch: (t) =>
-      sub(
-        t,
-        "    values[name] = encodeText(text);",
-        "    values[name] = text;",
-      ),
-  },
-  {
-    id: "MU-1903",
-    title:
-      "WEB-14a revision 8 (R17, C5): an unsupported state is captured as if it were saved (a silent clean reload)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /cannot represent \(a file input\)|two text inputs of one name/,
-    // Re-anchored in revision 10 (R17/R11 completeness: `capturable` filters `shownOf`); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "      ([, value]) => !isUnsupported(value),\n",
-        "      ([, value]) => value !== undefined,\n",
-      ),
-  },
-  {
-    id: "MU-1904",
-    title:
-      "WEB-14a revision 8 (R17, C5): an edited unsupported field needs nothing",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /cannot represent \(a file input\)|two text inputs of one name/,
-    // Re-anchored in revision 10 (R17/R11 completeness: one coverage test for every kind of state); the defect is unchanged.
-    patch: (t) =>
-      sub(t, "  if (isUnsupported(value)) return edit === 0 || covered;\n", ""),
-  },
-  {
-    id: "MU-1905",
-    title:
-      "WEB-14a revision 8 (R17, Q7): a copy's state that does not fit the field is dropped, not owed",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /no longer fits the field/,
-    // Re-anchored in revision 10 (R17/R11 completeness: `applySnapshot` accounts for every entry of the copy in one loop); the defect is unchanged.
-    patch: (t) =>
-      sub(
-        t,
-        "      if (fields.ledger[name] === value) continue;\n      owe(fields, name, { value, returns: lastEdit(fields, name) });\n",
-        "      continue;\n",
-      ),
-  },
-  {
-    id: "MU-1906",
-    title:
-      "WEB-14a revision 8 (R17, Q7): a retained state the field shown again cannot show is dropped, not owed",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /shown by another kind of control|shown as a checkbox/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!(untouched && field.write(held))) {",
-        "      if (!(untouched && (field.write(held) || true))) {",
-      ),
-  },
-  {
-    id: "MU-1907",
-    title:
-      "WEB-14a revision 8 (R17, Q7): the same element showing another kind of state is not shown anew",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /shown as a checkbox/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const same =\n    before === field.key && sameShape(fields.shapes.get(name), field.shape);",
-        "  const same = before === field.key;",
-      ),
-  },
-  {
-    id: "MU-1908",
-    title:
-      "WEB-14a revision 8 (R17, C5): a copy holding state this build cannot read is restored in part",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /holding state this build cannot read/,
-    patch: (t) =>
-      sub(
-        t,
-        "          if (newest && !unreadable(newest) && form && untouched) {",
-        "          if (newest && form && untouched) {",
-      ),
-  },
-  {
-    id: "MU-1909",
-    title:
-      "WEB-14a revision 9 (R17-A, Q3): a render's read of the fields takes a field in another shape as it shows (refresh membership-insensitive)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a render that reads the fields \(refresh\) never takes the reduced state/,
-    patch: (t) =>
-      sub(
-        t,
-        "      field?.key === element &&\n      sameShape(fields.shapes.get(name), field.shape)\n",
-        "      field?.key === element\n",
-      ),
-  },
-  {
-    id: "MU-1910",
-    title:
-      "WEB-14a revision 9 (R17-A, Q2/Q3): reconciliation compares only the element and the kind of state (revision 8): a removed option or member is taken as the person's value",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /REQUIREMENT (a single select|a multiple select|a radio group|same-named checkboxes): B removed/,
-    patch: (t) =>
-      sub(
-        t,
-        "    before === field.key && sameShape(fields.shapes.get(name), field.shape);",
-        "    before === field.key &&\n    fields.shapes.get(name)?.text.slice(0, 8) === field.shape.text.slice(0, 8);",
-      ),
-  },
-  {
-    id: "MU-1911",
-    title:
-      "WEB-14a revision 9 (R17-B, Q4): a single select's write assigns any text and reports success (revision 8), two sites: no option check, no read-back",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a single select: an option it does not have is not written|REQUIREMENT a single select: the successor without B/,
+      "WEB-09b R1: a recovery is finished on ANY handle once some data commit was made (a second re-authentication finishes without its own catch-up)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R1 \(lock_timeout\)|R1 \(failed\)/,
+    // TWO layers protect R1 (the proof is cleared by a new `begin`, and it is bound to the exact handle): either alone is an equivalent
+    // mutant (the first run of review cycle 1 found the handle comparison alone survives). Removing both is the defect the review found.
     patch: (t) =>
       sub(
         sub(
           t,
-          "        if (select && !options().some((option) => option.value === text))\n          return false;\n",
-          "",
+          "        commitProof.handle === handle\n",
+          "        (true as boolean)\n",
         ),
-        "    if (read() === encoded) return true;",
-        '    if (read() === encoded || read() === "") return true;',
+        "        handle = null;\n        commitProof = null;\n        const begun",
+        "        handle = null;\n        const begun",
       ),
   },
   {
-    id: "MU-1912",
+    id: "MU-1239",
     title:
-      "WEB-14a revision 9 (R17, Q4): a write the field does not read back exactly is left in the field (reported failed, the field changed)",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a write the browser does not show exactly is put back/,
-    patch: (t) =>
-      sub(t, "    putBack();\n    return false;", "    return false;"),
-  },
-  {
-    id: "MU-1913",
-    title:
-      "WEB-14a revision 9 (R17, Q4): a text is assigned to an input before knowing its type keeps it (not tried on a copy first)",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is never assigned to it at all/,
+      "WEB-09b R3: a refusal that only the durable record ends is never asked again on the record's notification (a resolved gate leaves recovery waiting)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(/,
+    // Redefined in review cycle 2 (R3): `awaitsRecord` is gone; the same defect in the new mechanism is a `begin` refusal on the record
+    // that is left as a bare event wait (no admission wait, so a resolution in the same epoch is never noticed).
+    // Anchor moved (WEB-08c, R3 of the review of 11 October 2026): the call now passes `begin`'s own revision; same mutation.
     patch: (t) =>
       sub(
         t,
-        "          probe.value = text;\n          if (probe.value !== text) return false;\n",
-        "          void probe;\n",
+        'return awaitAdmission(b, "recovery", epoch, "begin", revision);',
+        'return { when: "event" };',
       ),
   },
   {
-    id: "MU-1914",
+    id: "MU-1240",
     title:
-      "WEB-14a revision 9 (R17, Q4): a write reports success without reading the field back",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a write the browser does not show exactly is put back/,
+      "WEB-09b R4: when an obsolete step ends, the replacement binding is not scheduled (it waits for an unrelated notification)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts", "tests/data/leader.test.ts"],
+    expect: /R4: with NO further notification|L-13/,
     patch: (t) =>
       sub(
         t,
-        "    if (read() === encoded) return true;",
-        "    if (read() === encoded || encoded !== null) return true;",
+        '      woken = false;\n      const current = binding;\n      if (current !== null && alive(current))\n        schedule(current, { when: "now" });\n      else resolveWaiters();',
+        "      woken = false;\n      resolveWaiters();",
       ),
   },
   {
-    id: "MU-1915",
+    id: "MU-1241",
     title:
-      "WEB-14a revision 9 (R17-A/B, C3): an owed value never comes back when the field can show it again",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /B shown again comes back chosen|B shown: back, saved/,
+      "WEB-09b R4: the recovery request does not carry its binding's ownership signal (an obsolete call stays outstanding)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R4: the obsolete request is aborted/,
     patch: (t) =>
       sub(
         t,
-        "    back.value !== fields.ledger[name] &&\n    field.write(back.value)\n",
-        "    back.value !== fields.ledger[name] &&\n    false\n",
+        '{ method: "GET", signal: b.ownership.signal }',
+        '{ method: "GET" }',
       ),
   },
   {
-    id: "MU-1916",
+    id: "MU-1242",
     title:
-      "WEB-14a revision 9 (R17, C3/Q6): a field owes one value at a time (revision 8's `shadowed`): a second owed value replaces the first",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /BOTH earlier values stay owed/,
+      "WEB-09b R5: the response-derived budget write (W24) bypasses the stamp's admission (G1, G2, the persistence hold)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R5/,
     patch: (t) =>
       sub(
         t,
-        "  fields.owed.set(name, [...others, entry]);",
-        "  fields.owed.set(name, others.length >= 0 ? [entry] : others);",
+        "const out = await service.commit(recordRecoveryOutcome, {",
+        "const out = await service.store.run(recordRecoveryOutcome, {",
       ),
   },
   {
-    id: "MU-1917",
+    id: "MU-1243",
     title:
-      "WEB-14a revision 9 (R17): what a field shows in place of an owed value is owed in turn when it changes (the browser's state taken for input)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an option's VALUE changed in place/,
+      "WEB-09b R5: W24 lists no epoch mirror (an earlier epoch's answer, admitted before the mirror moved, counts)",
+    file: "src/data/plans/recovery-writers.ts",
+    tests: ["tests/data/snapshot-plans.test.ts"],
+    expect: /R-3b an answer of an EARLIER epoch/,
     patch: (t) =>
       sub(
         t,
-        "          if (fields.fallback.get(name) !== held)\n",
-        "          if (fields.fallback.get(name) !== held || held !== null)\n",
+        '    guards: ["INC", "CLS", "GEN", "OWN", "EPO"],\n    quota: null,',
+        '    guards: ["INC", "CLS", "GEN", "OWN"],\n    quota: null,',
       ),
   },
   {
-    id: "MU-1918",
+    id: "MU-1244",
     title:
-      "WEB-14a revision 9 (R17-B, C4): a restored copy's value the field cannot show is not owed (the restore taken as complete)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the successor without B reports the restore incomplete/,
-    // Re-anchored in revision 10 (R17/R11 completeness: `applySnapshot` accounts for every entry of the copy in one loop); the defect is unchanged.
+      "WEB-09b R6: a follower ignores the leader's durable stops and says 'Up to date'",
+    file: "src/data/model/status.ts",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /R6:/,
     patch: (t) =>
       sub(
         t,
-        "      owe(fields, name, { value, returns: lastEdit(fields, name) });\n",
+        "        (stops.paused || stops.pageStopped || stops.floor)",
+        "        (false as boolean)",
+      ),
+  },
+  {
+    id: "MU-1245",
+    title:
+      "WEB-09b R6: the follower's facts do not read a durably paused `sync` read caller",
+    file: "src/data/plans/facts.ts",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect: /R6: a durably PAUSED/,
+    patch: (t) =>
+      sub(
+        t,
+        "    paused: sync.read_retry_states.sync?.paused === true,",
+        "    paused: false,",
+      ),
+  },
+  {
+    id: "MU-1246",
+    title:
+      "WEB-09b R2: the leading page ignores a follower's request to retry updates (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/retry-routing.test.ts"],
+    expect: /a FOLLOWER's retry is applied by the leading page/,
+    patch: (t) =>
+      sub(
+        t,
+        "            retryHere({\n              account: message.account,\n              epoch: message.epoch,\n",
+        "            void ({\n              account: message.account,\n              epoch: message.epoch,\n",
+      ),
+  },
+  {
+    id: "MU-1247",
+    title:
+      "WEB-09b R2: the leader applies a retry made against another epoch's view",
+    file: "src/data/leader/leader.ts",
+    tests: ["tests/data/retry-routing.test.ts"],
+    expect: /a retry made against another epoch/,
+    patch: (t) =>
+      sub(
+        t,
+        "      identity.epoch !== target.epoch\n",
+        "      (false as boolean)\n",
+      ),
+  },
+  {
+    id: "MU-1248",
+    title:
+      "WEB-09b R2: a follower's 'Retry now' / 'Try again' for updates asks nobody (it has no engine or job)",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/retry-routing.test.ts"],
+    expect: /posts `retry_requested`/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (follower !== null && leader.engine === undefined) {\n        const identity = deps.identity.get();",
+        "      if (follower !== null && leader.engine === undefined && (false as boolean)) {\n        const identity = deps.identity.get();",
+      ),
+  },
+  {
+    id: "MU-1249",
+    title:
+      "WEB-09b R2: the neutral state's 'Try again' does not reach the recovery owner (the session's retry tells no listener)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/recovery-api.test.ts"],
+    expect: /the neutral state's Try again is the recovery owner's act too/,
+    patch: (t) => sub(t, "      recovery.retried();", "      void 0;"),
+  },
+  {
+    id: "MU-1250",
+    title:
+      "WEB-09b R7: 'save as new' is rebuilt on nothing although the authorised current read loaded",
+    file: "src/features/sync/ItemDetailDialog.tsx",
+    tests: ["tests/features/sync/recovery-screens.test.tsx"],
+    expect: /U-6/,
+    patch: (t) =>
+      sub(
+        t,
+        "        draft.local_id,\n        base,\n",
+        "        draft.local_id,\n        null,\n",
+      ),
+  },
+  {
+    id: "MU-1251",
+    title:
+      "WEB-09b R7: the new attempt is enabled while the authorised current read is still loading or has failed",
+    file: "src/features/sync/ItemDetailDialog.tsx",
+    tests: ["tests/features/sync/recovery-screens.test.tsx"],
+    expect: /U-7/,
+    patch: (t) =>
+      sub(t, '    read === "loaded" ||\n', "    (true as boolean) ||\n"),
+  },
+  // ---- WEB-09b review cycle 2 (R3, R7) ----------------------------------------------------------------------------------------------
+  {
+    id: "MU-1262",
+    title:
+      "WEB-09b R3 (cycle 2): a cover that closes after `begin` (closed, closed_unresolved) leaves the job running with nothing to wake it",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(closed/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "closed",\n          );',
+        '          return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1263",
+    title:
+      "WEB-09b R3 (cycle 2): a not_sent that outlasts the immediate retries ends in a bare event wait (a released hold is never noticed)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(not_sent|R3 \(lost hint/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return awaitAdmission(\n            issued.binding,\n            issued.mode,\n            issued.epoch,\n            "not_sent",\n          );',
+        '          return { when: "event" };',
+      ),
+  },
+  {
+    id: "MU-1264",
+    title:
+      "WEB-09b R3 (cycle 2): a recovery request refused by the cover keeps its handle, so the resumed run is finished under the old `s`",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(closed/,
+    patch: (t) =>
+      sub(
+        t,
+        '          if (issued.mode === "recovery") {\n            handle = null;\n            commitProof = null;\n          }\n',
         "",
       ),
   },
   {
-    id: "MU-1919",
+    id: "MU-1265",
     title:
-      "WEB-14a revision 9 (R17, Q7): an owed value the field shows again (the person chose it) stays owed: the form can never be saved",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /BOTH earlier values stay owed|B does NOT come back over the later edit/,
-    // Re-anchored in revision 10 (R17/R11 completeness: an owed native editing state is never settled by another); the defect is unchanged.
+      "WEB-09b R3 (cycle 2): an open, unchanged admission revision always permits another attempt (a refusal the probe cannot see loops)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /tried ONCE more/,
     patch: (t) =>
-      sub(
-        t,
-        "    (entry) => entry.value !== holds || entry.value === OPAQUE,\n",
-        "    (entry) => entry.value !== holds || true,\n",
-      ),
-  },
-  {
-    id: "MU-1920",
-    title:
-      "WEB-14a revision 9 (R17, C5): 'Discard instead' claims the initial state of a field that cannot show it (covers the initial value, not what it shows)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /'Discard instead' when the initial option is gone/,
-    patch: (t) =>
-      sub(
-        t,
-        "          if (shown === undefined) delete before[name];\n          else before[name] = shown;\n",
-        "          void shown;\n",
-      ),
-  },
-  {
-    id: "MU-1921",
-    title:
-      "WEB-14a revision 9 (R17-B, C4): `restoreAlternative` and the restore at mount report a restore the form could not show completely as complete",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the successor without B reports the restore incomplete|answers `incomplete`, never `restored`/,
-    patch: (t) =>
-      sub(
-        t,
-        "    incomplete: view.incomplete ?? NONE,",
-        "    incomplete: NONE,",
-      ),
-  },
-  {
-    id: "MU-1922",
-    title:
-      "WEB-14a revision 10 (R17, C1): a native editing state (badInput) is read as its empty value",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: [
-      "tests/lib/recoverable-form-completeness.test.tsx",
-      "tests/pwa/coordinator-completeness.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /in an initially empty number field|then the field cleared and|REQUIREMENT \(activation\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "    control instanceof HTMLInputElement && control.validity.badInput\n",
-        "    control instanceof HTMLInputElement && (false as boolean)\n",
-      ),
-  },
-  {
-    id: "MU-1923",
-    title:
-      "WEB-14a revision 10 (R17, C1): a write goes over a native editing state (what it held cannot be put back)",
-    file: "src/lib/form-recovery/controls.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the field is never written over/,
-    patch: (t) =>
-      sub(
-        t,
-        '        if (decoded.kind !== "text" || read() === OPAQUE) return false;\n',
-        '        if (decoded.kind !== "text") return false;\n',
-      ),
-  },
-  {
-    id: "MU-1924",
-    title:
-      "WEB-14a revision 10 (R17, C2): a native editing state with no edit counted yet needs nothing (an untouched count taken as proof)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /already there when the form first reads it/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (value === OPAQUE) return covered && cover.value === OPAQUE;\n",
-        "  if (value === OPAQUE) return edit === 0 || covered;\n",
-      ),
-  },
-  {
-    id: "MU-1925",
-    title:
-      "WEB-14a revision 10 (R17, C2): a native editing state ended without an edit (a script, a render) is taken as ended by the person",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a script sets 7 without an event|a render that reads the fields/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (fields.ledger[name] === OPAQUE && shown !== OPAQUE && !edited)\n    owe(fields, name, { value: OPAQUE });\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1926",
-    title:
-      "WEB-14a revision 10 (R17, C2): a render that reads the fields takes what they show over a native editing state",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a render that reads the fields/,
-    patch: (t) =>
-      sub(
-        t,
-        "      take(\n        fields,\n        name,\n        field.read(),\n        lastEdit(fields, name) > (fields.seen.get(name) ?? 0),\n      );\n",
-        "      fields.ledger[name] = field.read();\n",
-      ),
-  },
-  {
-    id: "MU-1927",
-    title:
-      "WEB-14a revision 10 (R17, C2): an owed native editing state is settled by a later one shown in the field",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /one native state never settles another/,
-    patch: (t) =>
-      sub(
-        t,
-        "    (entry) => entry.value !== holds || entry.value === OPAQUE,\n",
-        "    (entry) => entry.value !== holds,\n",
-      ),
-  },
-  {
-    id: "MU-1928",
-    title:
-      "WEB-14a revision 10 (R17, C2): what a native form reset leaves is not read as the reset's edit",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a form reset ends it/,
-    patch: (t) =>
-      sub(
-        t,
-        "      for (const name of fields.seen.keys())\n        fields.seen.set(name, fields.input - 1);\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1929",
-    title:
-      "WEB-14a revision 10 (R11, C3): a restore imports only the fields the schema admits (the others neither restored nor owed)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: [
-      "tests/lib/recoverable-form-completeness.test.tsx",
-      "tests/pwa/coordinator-completeness.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the successor admits nothing|partial admission|an EMPTY saved value|ON THE PAGE but not admitted|closed tab|the successor does not admit the saved field/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (unshown(name)) fields.ledger[name] = values[name] as string;\n",
-        "    if (admits.has(name) && unshown(name))\n      fields.ledger[name] = values[name] as string;\n",
-      ),
-  },
-  {
-    id: "MU-1930",
-    title:
-      "WEB-14a revision 10 (R11, C3): a restore reports complete although fields of the copy are not shown",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: [
-      "tests/lib/recoverable-form-completeness.test.tsx",
-      "tests/pwa/coordinator-completeness.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the successor admits nothing|partial admission|an EMPTY saved value|unchecked checkbox|CHOSEN from the alternatives|ABANDONED hand-off|the successor does not admit the saved field/,
-    patch: (t) =>
-      sub(
-        t,
-        "    } else if (!unshown(name) || resolved(fields, name, value)) continue;\n",
-        "    } else continue;\n",
-      ),
-  },
-  {
-    id: "MU-1931",
-    title:
-      'WEB-14a revision 10 (R11, I2): an unknown start is taken for "" (an empty saved value of a field never shown needs nothing)',
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /an EMPTY saved value/,
-    patch: (t) =>
-      sub(
-        t,
-        "    (start !== undefined && value === start) ||\n",
-        '    value === (start ?? "") ||\n',
-      ),
-  },
-  {
-    id: "MU-1932",
-    title:
-      "WEB-14a revision 10 (R11, C4): a save replaces or cleans up a copy the form does not account for",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the form holds NO value|the clean path too/,
-    // Replaces the condition: removing the line would leave the loop without a body (a syntax error, no evidence).
-    patch: (t) =>
-      sub(
-        t,
-        '    if (copy && !accounts(session.fields, copy.values, now)) return "failed";\n',
-        '    if (copy && (false as boolean)) return "failed";\n',
-      ),
-  },
-  {
-    id: "MU-1933",
-    title:
-      "WEB-14a revision 10 (R11, C4): a field of the copy the form holds no value for is taken as accounted for",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the form holds NO value|the clean path too/,
-    patch: (t) =>
-      sub(
-        t,
-        "      name in captured || (holds !== undefined && resolved(fields, name, holds))\n",
-        "      name in captured || holds === undefined || resolved(fields, name, holds)\n",
-      ),
-  },
-  {
-    id: "MU-1934",
-    title:
-      "WEB-14a revision 10 (R11, C3): the copy restored at mount is recorded as what the form shows of it (a projection)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the form holds NO value|OWN copy read again with a narrower schema/,
-    patch: (t) =>
-      sub(
-        t,
-        "            const values = internalOf(newest);\n",
-        "            const values = valuesOf(current);\n",
-      ),
-  },
-  {
-    id: "MU-1935",
-    title:
-      "WEB-14a revision 10 (R11, C3): a copy chosen from the alternatives is recorded as what the form shows of it (a projection)",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /CHOSEN from the alternatives/,
-    patch: (t) =>
-      sub(
-        t,
-        "        const values = internalOf(copy);\n",
-        "        const values = valuesOf(current);\n",
-      ),
-  },
-  {
-    id: "MU-1936",
-    title:
-      "WEB-14a revision 10 (R11): a terminal act leaves the restored copy's values owed (its clean-up refused after a failed discard)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /when the clean-up of P and H fails/,
-    patch: (t) =>
-      sub(t, "    source: source && { ...source, values: {} },\n", ""),
-  },
-  {
-    id: "MU-1937",
-    title:
-      "WEB-14a revision 10 (R11): a terminal act leaves the own copy's values owed (every later save refused after a failed discard)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /with an own copy holding a field now hidden/,
-    patch: (t) => sub(t, "    own: own && { ...own, values: {} },\n", ""),
-  },
-  {
-    id: "MU-1938",
-    title:
-      "WEB-14a revision 10 (R17): 'Discard and reload anyway' covers only what a copy can hold (a native editing state stays dirty: the discard reload never happens)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-completeness.test.tsx",
-      "tests/pwa/coordinator-completeness.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the coordinator's discard of the session|'Discard and reload anyway' after it/,
-    patch: (t) =>
-      sub(
-        t,
-        "      discard: () => terminalAct(session, shownOf(session.fields)),\n",
-        "      discard: () => terminalAct(session, valuesOf(session)),\n",
-      ),
-  },
-  {
-    id: "MU-1939",
-    title:
-      "WEB-14a revision 10 (R17): the provisional form's discard covers only what a copy can hold",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /before the form has a database/,
-    patch: (t) =>
-      sub(
-        t,
-        "        cover(own, shownOf(own), own.input);\n",
-        "        cover(own, capturable(own), own.input);\n",
-      ),
-  },
-  {
-    id: "MU-1940",
-    title:
-      "WEB-14a revision 10 (R11, C3): a field reported incomplete stays reported after it shows its value again",
-    file: "src/lib/form-recovery/use-recoverable-form.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the successor admits nothing|unchecked checkbox/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (left.length < named.length)\n",
-        "    if (false as boolean)\n",
-      ),
-  },
-  {
-    id: "MU-1941",
-    title:
-      "WEB-14a revision 10 (R17/R11, I7): the dirty check ignores what no copy can hold (every normal reload exit proceeds)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-completeness.test.tsx",
-      "tests/pwa/coordinator-completeness.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /REQUIREMENT \(activation\)|REQUIREMENT \(fallback\)|in an initially empty number field|the successor does not admit the saved field/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (owed > 0 || hasDebt(fields)) return true;\n",
-        "  if (owed > 0) return true;\n",
-      ),
-  },
-  {
-    id: "MU-1942",
-    title:
-      "WEB-14a revision 10 (R17/R11, C4): a save goes ahead over what no copy can hold",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    // The R11 cases are refused by the second layer (`accounts`); the R17 cases with no copy reach the clean path through this check alone.
-    expect:
-      /in an initially empty number field|already there when the form first reads it|a script sets 7 without an event/,
-    patch: (t) =>
-      sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
-  },
-  {
-    id: "MU-1943",
-    title:
-      "WEB-14a revision 11 (R18, C2/I1): edits are listened to on the form only (an associated control outside it goes unseen)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: [
-      "tests/lib/recoverable-form-membership.test.tsx",
-      "tests/pwa/coordinator-membership.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /REQUIREMENT \(sibling\): typed UNFINISHED|REQUIREMENT \(sibling\): FIRST saved|REQUIREMENT \(activation\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (root !== element)\n      for (const type of INPUT_EVENTS)\n        root.addEventListener(type, onInput, true);",
-        "    if (root !== element && (false as boolean))\n      for (const type of INPUT_EVENTS)\n        root.addEventListener(type, onInput, true);",
-      ),
-  },
-  {
-    id: "MU-1944",
-    title:
-      "WEB-14a revision 11 (R18, C1): an event is mapped to a field by its target's name only (a member found by its id goes unseen)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    // A name-only mapping still stamps an unnamed member's event as an edit of every field and reads the field, so retention alone cannot
-    // tell; the commit rule can (a change only committing what the member reported is then a new edit).
-    expect: /a member found by its id: the focus change committing/,
-    patch: (t) =>
-      sub(
-        t,
-        "              membersOf(element, name).includes(target as Element),",
-        "              name === (target as HTMLInputElement).name,",
-      ),
-  },
-  {
-    id: "MU-1945",
-    title:
-      "WEB-14a revision 11 (R18, C1): a control inside the form that belongs to another form is taken for this form's input",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /belongs to ANOTHER form is not this form's input/,
-    patch: (t) =>
-      sub(
-        t,
-        "        control !== null ||\n        !(target instanceof Node && element.contains(target))",
-        "        !(target instanceof Node && element.contains(target))",
-      ),
-  },
-  {
-    id: "MU-1946",
-    title:
-      "WEB-14a revision 11 (R18, C2/I2): another form's reset is taken for this form's edit",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /another form's reset is not this form's edit/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (event.type === "reset" ? target !== element : control !== element) {',
-        '    if (event.type === "reset" ? (false as boolean) : control !== element) {',
-      ),
-  },
-  {
-    id: "MU-1947",
-    title:
-      "WEB-14a revision 11 (R18, C2/I5): an event reaching both the root and the form is taken twice (duplicate edit stamps)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /one input event moves the input revision by exactly one/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (stopped || taken.has(event)) return;",
-        "    if (stopped) return;",
-      ),
-  },
-  {
-    id: "MU-1948",
-    title:
-      "WEB-14a revision 11 (R18, C2): structural changes are observed in the form's subtree only (an associated member shown again is not restored)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /sibling member removed, then a new untouched one shown/,
-    patch: (t) =>
-      sub(
-        t,
-        "    observer?.observe(root, {\n      childList: true,",
-        "    observer?.observe(element, {\n      childList: true,",
-      ),
-  },
-  {
-    id: "MU-1949",
-    title:
-      "WEB-14a revision 11 (R18, C3/I6): a freeze holds the form's subtree only (an associated control outside it stays usable)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: [
-      "tests/lib/recoverable-form-membership.test.tsx",
-      "tests/pwa/coordinator-membership.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the associated member is held \(inert\) with the form|is held with the form until the act ends|the provisional mount \(no port yet\) holds/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (!form.contains(member) && !releases.has(member))",
-        "      if (!form.contains(member) && !releases.has(member) && (false as boolean))",
-      ),
-  },
-  {
-    id: "MU-1950",
-    title:
-      "WEB-14a revision 11 (R18, C3/I6): a hold is certified without checking it still holds every member",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a render that takes a member's inert away while held/,
-    patch: (t) =>
-      sub(
-        t,
-        '    return [...releases.keys()].every((element) =>\n      element.hasAttribute("inert"),\n    );',
-        "    return true;",
-      ),
-  },
-  {
-    id: "MU-1951",
-    title:
-      "WEB-14a revision 11 (R18, C3/I7): the registry takes a hold for held without asking it (in the reload's own step)",
-    file: "src/lib/form-recovery/registry.ts",
-    tests: [
-      "tests/lib/recoverable-form-membership.test.tsx",
-      "tests/pwa/coordinator-membership.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a render that takes a member's inert away while held|is held with the form until the act ends|is held before the registry certifies/,
-    patch: (t) =>
-      sub(t, "            holds &&= release?.holds?.() !== false;\n", ""),
-  },
-  {
-    id: "MU-1952",
-    title:
-      "WEB-14a revision 11 (R18, C3/I7): a bound session's freeze says it holds the form whatever its hold says",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a render that takes a member's inert away while held/,
-    patch: (t) =>
-      sub(
-        t,
-        "          (elementHolds.get(session)?.holds() ?? false)),",
-        "          (elementHolds.get(session) !== undefined)),",
-      ),
-  },
-  {
-    id: "MU-1953",
-    title:
-      "WEB-14a revision 11 (review-webkit-inert-text-delivery): a held field keeps its focus (WebKit, and Firefox for a field made inert itself, deliver late keys)",
-    file: "src/lib/form-recovery/session.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a focused member loses focus as the hold starts/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (focused instanceof HTMLElement && element.contains(focused))\n    focused.blur();",
-        "  if (focused instanceof HTMLElement && element.contains(focused) && (false as boolean))\n    focused.blur();",
-      ),
-  },
-  {
-    id: "MU-1954",
-    title:
-      "WEB-14a revision 12 (R19, C2/I3): the neutral root draws no failure (revision 11: a failed save or discard had no choices there)",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: [
-      "tests/pwa/update-surfaces.test.tsx",
-      "tests/pwa/update-neutral-root.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /REQUIREMENT: 'Reload here' on the neutral root fails|save failed on the neutral root/,
-    patch: (t) =>
-      sub(
-        t,
-        '  const notice = noticeOf(state, "neutral");',
-        '  const shown = noticeOf(state, "neutral");\n  const notice = shown?.failure ? null : shown;',
-      ),
-  },
-  {
-    id: "MU-1955",
-    title:
-      "WEB-14a revision 12 (R19, I3/I4): 'Retry save' asks for a fresh acceptance instead of continuing the failed act",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-surfaces.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /save failed on the (shell|neutral root): 'Retry save' asks retrySave/,
-    patch: (t) =>
-      sub(
-        t,
-        '  label: "Retry save",\n  act: "retrySave",',
-        '  label: "Retry save",\n  act: "accept",',
-      ),
-  },
-  {
-    id: "MU-1956",
-    title:
-      "WEB-14a revision 12 (R19, I3/I5): 'Discard and reload anyway' reloads anyway (no discard)",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: [
-      "tests/pwa/update-surfaces.test.tsx",
-      "tests/pwa/update-neutral-root.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /save (failed|refused) on the (shell|neutral root): .*'Discard and reload anyway' asks discardAndReload|REQUIREMENT: on the neutral root only 'Discard and reload anyway'/,
-    patch: (t) =>
-      sub(
-        t,
-        '  label: "Discard and reload anyway",\n  act: "discardAndReload",',
-        '  label: "Discard and reload anyway",\n  act: "reloadAnyway",',
-      ),
-  },
-  {
-    id: "MU-1957",
-    title:
-      "WEB-14a revision 12 (R19, I3): the neutral discard failure no longer warns that the copy may be restored",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-surfaces.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /discard failed on the neutral root/,
-    patch: (t) =>
-      sub(
-        t,
-        "Try again, or reload knowing that copy may be restored afterwards.",
-        "Try again, or reload.",
-      ),
-  },
-  {
-    id: "MU-1958",
-    title:
-      "WEB-14a revision 12 (R19, C3/I8): a failure is not announced on the neutral root, and 'Saving…' stays in its region",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: [
-      "tests/pwa/update-surfaces.test.tsx",
-      "tests/pwa/update-neutral-root.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /'Saving…' is replaced by the failure|REQUIREMENT: 'Saving…' on the neutral root/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (!text) return;\n    neutralLiveRegion.announce(text);\n    return () => neutralLiveRegion.clear();",
-        "    if (!text || notice?.failure) return;\n    neutralLiveRegion.announce(text);",
-      ),
-  },
-  {
-    id: "MU-1959",
-    title:
-      "WEB-14a revision 12 (R19, I2): the neutral root uses the shell's wording (the form is still here)",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-surfaces.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /(save failed|save refused|discard failed) on the neutral root/,
-    patch: (t) =>
-      sub(
-        t,
-        '  const neutral = surface === "neutral";',
-        "  const neutral = false;",
-      ),
-  },
-  {
-    id: "MU-1960",
-    title:
-      "WEB-14a revision 12 (R19, I4; oracle: the R6 test of a form that left the registry): 'Retry save' and 'Discard and reload anyway' start a new act (the forms it saved are forgotten)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator-handoff.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /is discarded, even after it left the registry/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (fresh) participants = new Set();\n",
-        "    participants = new Set();\n",
-      ),
-  },
-  {
-    id: "MU-1961",
-    title:
-      "WEB-14a revision 12 (R19, I8): a message that went (dismissed) stays in the neutral region",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-surfaces.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /when there is nothing left to say/,
-    patch: (t) => sub(t, "    return () => neutralLiveRegion.clear();\n", ""),
-  },
-  {
-    id: "MU-1962",
-    title:
-      "WEB-14a revision 12 (R19, C1): the shell's failure buttons ask each other's action",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-surfaces.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /save failed on the shell: 'Retry save' asks retrySave/,
-    patch: (t) =>
-      sub(
-        t,
-        '{ kind: "save-failed", onRetry: first, onDiscardAndReload: second }',
-        '{ kind: "save-failed", onRetry: second, onDiscardAndReload: first }',
-      ),
-  },
-  {
-    id: "MU-1963",
-    title:
-      "WEB-14a revision 12 (C5, R18 family): a form out of the page reads its outside member as removed (revision 11: its input owed, no save could take it)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /REQUIREMENT \(sibling\): typed UNFINISHED, the page unmounted/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (away && readOutside(fields, form, name)) continue;\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1964",
-    title:
-      "WEB-14a revision 12 (C5, R18 family): a form IN the page keeps an outside member it no longer has (a removal is never read)",
-    file: "src/lib/form-recovery/fields.ts",
-    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /CONTROL \(sibling\): the member removed and read while the form is still in the page|CONTROL \(sibling\)|REQUIREMENT \(sibling\): typed UNFINISHED, the control removed/,
-    patch: (t) =>
-      sub(t, "  const away = !form.isConnected;", "  const away = true;"),
-  },
-  {
-    id: "MU-1965",
-    title:
-      "WEB-14a revision 17 (R24, the reviewed defect): the coordinator does not listen to in-app navigation",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: [
-      "tests/pwa/coordinator.test.ts",
-      "tests/app/update-navigation.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /available: hidden until a navigation, which brings it back|a link: the destination renders and the banner is back/,
-    patch: (t) => sub(t, "    deps.onNavigation(redisplay),\n", ""),
-  },
-  {
-    id: "MU-1966",
-    title:
-      "WEB-14a revision 17 (R24, I2: the production bridge bypassed): the router's navigations are never raised (NavigationSignal not mounted)",
-    file: "src/app/root-route.tsx",
-    tests: ["tests/app/update-navigation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a link: the destination renders and the banner is back|a programmatic navigation, a history step/,
-    patch: (t) => sub(t, "      <NavigationSignal />\n", ""),
-  },
-  {
-    id: "MU-1967",
-    title:
-      "WEB-14a revision 17 (R24, I1): a navigation brings back only 'available', never 'updated elsewhere'",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: [
-      "tests/pwa/coordinator.test.ts",
-      "tests/app/update-navigation.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /updated elsewhere: brought back by this tab's navigation|updated in another tab: this tab's navigation brings it back/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const redisplay = (): void => {\n    if (dismissed) {\n",
-        "  const redisplay = (): void => {\n    if (dismissed && !elsewhere) {\n",
-      ),
-  },
-  {
-    id: "MU-1968",
-    title:
-      "WEB-14a revision 17 (R24, I5/S7): every router render is a navigation (first load, same-address reload and remount included)",
-    file: "src/app/shell/NavigationSignal.tsx",
-    tests: ["tests/app/update-navigation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /without a navigation it stays dismissed|none for a first load|replaced before it rendered/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (event.fromLocation && event.hrefChanged) noteNavigation();",
-        "noteNavigation();",
-      ),
-  },
-  {
-    id: "MU-1969",
-    title:
-      "WEB-14a revision 17 (R24, S5): a render of the same address counts as a navigation (hrefChanged ignored)",
-    file: "src/app/shell/NavigationSignal.tsx",
-    tests: ["tests/app/update-navigation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /without a navigation it stays dismissed|none for a first load/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (event.fromLocation && event.hrefChanged) noteNavigation();",
-        "if (event.fromLocation) noteNavigation();",
-      ),
-  },
-  {
-    id: "MU-1970",
-    title:
-      "WEB-14a revision 17 (R24, I3): a navigation is taken for a return to the page (a report and an update check)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /available: hidden until a navigation, which brings it back and does nothing else|updated elsewhere: brought back by this tab's navigation/,
-    patch: (t) =>
-      sub(
-        t,
-        "    deps.onNavigation(redisplay),\n",
-        "    deps.onNavigation(returned),\n",
-      ),
-  },
-  {
-    id: "MU-1971",
-    title:
-      "WEB-14a revision 17 (R24, I3): a navigation accepts the update (saves, freezes and reloads unasked)",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /available: hidden until a navigation, which brings it back and does nothing else|updated elsewhere: brought back by this tab's navigation/,
-    patch: (t) =>
-      sub(
-        t,
-        "    deps.onNavigation(redisplay),\n",
-        "    deps.onNavigation(() => {\n      redisplay();\n      actions.accept();\n    }),\n",
-      ),
-  },
-  {
-    id: "MU-1972",
-    title:
-      "WEB-14a revision 17 (R24, I4/S12): a navigation clears a save in progress or its failure",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /saving and a failed save keep their place and their choices/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const redisplay = (): void => {\n",
-        "  const redisplay = (): void => {\n    busy = null;\n    publish();\n",
-      ),
-  },
-  {
-    id: "MU-1973",
-    title:
-      "WEB-14a revision 17 (R24, I5/S7): the router subscription is never removed (a remount or StrictMode adds another)",
-    file: "src/app/shell/NavigationSignal.tsx",
-    tests: ["tests/app/update-navigation.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /StrictMode and a new tree: one signal per navigation/,
-    patch: (t) =>
-      sub(
-        t,
-        '    () =>\n      router.subscribe("onRendered", (event) => {\n        if (event.fromLocation && event.hrefChanged) noteNavigation();\n      }),\n',
-        '    () => {\n      router.subscribe("onRendered", (event) => {\n        if (event.fromLocation && event.hrefChanged) noteNavigation();\n      });\n    },\n',
-      ),
-  },
-  {
-    id: "MU-1974",
-    title:
-      "WEB-14a revision 17 (R24, I5): a disposed coordinator keeps listening to navigation",
-    file: "src/lib/pwa/coordinator.ts",
-    tests: ["tests/pwa/coordinator.test.ts"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a disposed coordinator stops listening/,
-    patch: (t) =>
-      sub(
-        t,
-        "    deps.onNavigation(redisplay),\n",
-        "    (deps.onNavigation(redisplay), () => {}),\n",
-      ),
-  },
-  {
-    id: "MU-1975",
-    title:
-      "WEB-14a revision 19 (R26, I1/S1): the state-1 prompt never takes focus",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: [
-      "tests/pwa/update-focus.test.tsx",
-      "tests/app/update-route-focus.test.tsx",
-    ],
-    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a form is open and Title has focus: 'Save and reload' takes focus|'Save and reload' keeps focus over the route's heading/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (request.kind === "prompt") {\n',
-        '  if (request.kind === "prompt") return false;\n  if (request.kind === "prompt") {\n',
-      ),
-  },
-  {
-    id: "MU-1976",
-    title:
-      "WEB-14a revision 19 (R26, I1/S2): a failure never focuses its recovery action",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: [
-      "tests/pwa/update-focus.test.tsx",
-      "tests/pwa/update-surfaces.test.tsx",
-    ],
-    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /failed \(Retry save\)|focuses its recovery action once|a discard that failed focuses 'Try again'/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const target = request.target();\n  if (!target || !eligible(target)) return false;\n",
-        '  if (request.kind === "failure") return false;\n  const target = request.target();\n  if (!target || !eligible(target)) return false;\n',
-      ),
-  },
-  {
-    id: "MU-1977",
-    title:
-      "WEB-14a revision 19 (R26, I7/S13): a refused save focuses its only, destructive, choice",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a refused save offers only a destructive choice/,
-    patch: (t) =>
-      sub(
-        t,
-        '        kind === "refused"\n          ? section.current\n          : section.current?.querySelector("button"),\n',
-        '        section.current?.querySelector("button"),\n',
-      ),
-  },
-  {
-    id: "MU-1978",
-    title:
-      "WEB-14a revision 19 (R26/R27, I6/S15): focus counts as placed although the target never took it",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: [
-      "tests/pwa/update-focus.test.tsx",
-      "tests/lib/form-recovery.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a target that could not take focus is not counted|a first field that could not take focus is not counted/,
-    patch: (t) =>
-      sub(
-        t,
-        "  return !!target && target.ownerDocument.activeElement === target;\n",
-        "  return !!target;\n",
-      ),
-  },
-  {
-    id: "MU-1979",
-    title:
-      "WEB-14a revision 19 (R26, I6): a presentation takes focus again on every render and remount",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: [
-      "tests/pwa/update-focus.test.tsx",
-      "tests/pwa/update-surfaces.test.tsx",
-    ],
-    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts. Two sites: the hook and the attempt both check the presentation.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /one presentation: a re-render, a remount of the shell and an equal publication|the same presentation does not take focus again|an equal publication repeats nothing/,
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          "    if (!kind || placed?.at === presentation) return;\n",
-          "    if (!kind) return;\n",
-        ),
-        '  if (request.kind !== "restored" && placed?.at === request.at) {\n',
-        "  if (false) {\n",
-      ),
-  },
-  {
-    id: "MU-1980",
-    title:
-      "WEB-14a revision 19 (R26, I6): an equal state published again is taken for a new presentation",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: [
-      "tests/pwa/update-focus.test.tsx",
-      "tests/pwa/update-surfaces.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /one presentation: a re-render, a remount of the shell and an equal publication|an equal publication repeats nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (next !== shown) presentation += 1;\n",
-        "  presentation += 1;\n",
-      ),
-  },
-  {
-    id: "MU-1981",
-    title:
-      "WEB-14a revision 19 (DA-F1): the state-1 prompt takes focus from the restored field of the same arrival",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /restored first, then the prompt appears: the field keeps focus/,
-    patch: (t) =>
-      sub(
-        t,
-        '    if (restored("done") || restored("pending")) return false;\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-1982",
-    title:
-      "WEB-14a revision 19 (DA-F1): a navigation does not end the restored arrival (the prompt never takes focus again)",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /after a navigation the prompt's next presentation takes it/,
-    patch: (t) =>
-      sub(
-        t,
-        "onNavigation(() => {\n  arrivals += 1;\n});\n",
-        "onNavigation(() => {});\n",
-      ),
-  },
-  {
-    id: "MU-1983",
-    title:
-      "WEB-14a revision 19 (DA-F1): a restore that focused its field is not noted (the prompt of the same arrival takes focus)",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /restored first, then the prompt appears: the field keeps focus/,
-    patch: (t) => sub(t, "    request.arrival = arrivals;\n", ""),
-  },
-  {
-    id: "MU-1984",
-    title:
-      "WEB-14a revision 19 (R26, I7/S13): a choice that removes its button leaves focus on the body",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /focus kept at the banner|keeps focus at the banner/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (!dismissed) {\n    section.focus();\n    return;\n  }\n",
-        "  if (!dismissed) return;\n",
-      ),
-  },
-  {
-    id: "MU-1985",
-    title:
-      "WEB-14a revision 19 (R26, S14): 'Not now' does not return focus to where the prompt took it from",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /'Not now' returns focus to the field the prompt took it from/,
-    patch: (t) =>
-      sub(t, "    back instanceof HTMLElement &&\n", "    false &&\n"),
-  },
-  {
-    id: "MU-1986",
-    title:
-      "WEB-14a revision 19 (R26, I7/S14): with nowhere to return to, 'Not now' leaves focus on the body",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /focus goes to the surface's page heading|focus goes to the page heading, not the body/,
-    patch: (t) => sub(t, "  focus(heading);\n}\n", "}\n"),
-  },
-  {
-    id: "MU-1987",
-    title:
-      "WEB-14a revision 19 (R26, I2/S14): 'Not now' moves focus the person put elsewhere",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a pointer that leaves focus elsewhere/,
-    patch: (t) =>
-      sub(
-        t,
-        "  if (!section?.contains(section.ownerDocument.activeElement)) return;\n",
-        "  if (!section) return;\n",
-      ),
-  },
-  {
-    id: "MU-1988",
-    title:
-      "WEB-14a revision 19 (R27, I6/S15): the restored field's focus is counted done before it is placed",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/lib/form-recovery.test.tsx"],
-    // Re-anchored in revision 20 (same intent): RecoveryBanner now registers a request (useRestoredFocus), so the restored request is counted done at registration.
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a first field that could not take focus is not counted as focused/,
-    patch: (t) =>
-      sub(
-        t,
-        '  const made: Request = { kind, target, at, state: "pending" };\n',
-        '  const made: Request = {\n    kind,\n    target,\n    at,\n    state: kind === "restored" ? "done" : "pending",\n  };\n',
-      ),
-  },
-  {
-    id: "MU-1989",
-    title:
-      "WEB-14a revision 19 (S14): 'Discard instead' leaves focus on the body, not in the form",
-    file: "src/lib/form-recovery/RecoveryBanner.tsx",
-    tests: ["tests/lib/form-recovery.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /'Discard instead' used from the keyboard leaves focus in the form/,
-    patch: (t) =>
-      sub(t, "              if (used) firstFieldRef?.current?.focus();\n", ""),
-  },
-  {
-    id: "MU-1990",
-    title:
-      "WEB-14a revision 19 (R26, I7): the shell banner's choices do not keep focus at the banner",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /focus kept at the banner|keeps focus at the banner|'Not now' returns focus to the field/,
-    patch: (t) =>
-      sub(t, '    keepFocus(section.current, choice.act === "notNow");\n', ""),
-  },
-  {
-    id: "MU-1991",
-    title:
-      "WEB-14a revision 19 (R26, I2): the shell banner's plain notices take focus",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a plain notice \(no form open\) never takes focus/,
-    patch: (t) =>
-      sub(
-        t,
-        '    prompt ? "prompt" : focusKind(state, notice),\n',
-        '    prompt ? "prompt" : "failure",\n',
-      ),
-  },
-  {
-    id: "MU-1992",
-    title:
-      "WEB-14a revision 19 (R26, S11/S12): the neutral root's failures never focus their recovery action",
-    file: "src/lib/pwa/UpdateBanner.tsx",
-    tests: [
-      "tests/pwa/update-focus.test.tsx",
-      "tests/pwa/update-surfaces.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /focuses its recovery action once|a new one does|S12: 'Reload to update' on the compatibility screen fails to save/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const { section, run } = useBanner(state, focusKind(state, notice));\n",
-        "  const { section, run } = useBanner(state, null);\n",
-      ),
-  },
-  {
-    id: "MU-1993",
-    title:
-      "WEB-14a revision 19 (R27): the reviewed defect restored: the heading attempt focuses the heading before checking for focus placed in the tree",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/heading-fallback.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /restored field focus is retained when the delayed route heading arrives/,
-    patch: (t) =>
-      sub(
-        t,
-        "        claimed ||\n        (active !== doc.body && tree.contains(active)) ||\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1994",
-    title:
-      "WEB-14a revision 19 (R27, I4): a claim whose control has gone is forgotten (the heading takes focus later)",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/heading-fallback.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /a claim ends the wait even when the claimed control has gone/,
-    patch: (t) => sub(t, "        claimed ||\n", ""),
-  },
-  {
-    id: "MU-1995",
-    title:
-      "WEB-14a revision 19 (R27, I4): focus placed in the tree before the first attempt is overridden by a heading already there",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/heading-fallback.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /focus already placed in the tree before the FIRST attempt/,
-    patch: (t) =>
-      sub(t, "        (active !== doc.body && tree.contains(active)) ||\n", ""),
-  },
-  {
-    id: "MU-1996",
-    title:
-      "WEB-14a revision 19 (R27, I3/I5/S7): the gate does not end a pending heading focus",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/heading-fallback.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /the gate closes while it waits/,
-    patch: (t) =>
-      sub(
-        t,
-        "      // A pending heading focus is the tree's: the gate owns focus now (revision 19, R27).\n      focusToken += 1;\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1997",
-    title:
-      "WEB-14a revision 19 (R27, I4/S10): RouteFocus's frame overrides focus placed after the navigation resolved",
-    file: "src/app/shell/RouteFocus.tsx",
-    tests: ["tests/app/update-route-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /'Save and reload' keeps focus over the route's heading|a field focused after the navigation resolved/,
-    patch: (t) => sub(t, "        if (claimed) return;\n", ""),
-  },
-  {
-    id: "MU-1998",
-    title:
-      "WEB-14a revision 20 (R26/R27, I2/C3, S3/S4/S6/S9): a refused request is never attempted again (no wake-up when the surface becomes eligible)",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /S4: the prompt published while the existing shell is gated|S3: a prompt already published|S6: a restored banner mounted behind the gate|S9: /,
-    patch: (t) => sub(t, "  if (waiting && !observer) {\n", "  if (false) {\n"),
+      sub(t, "(changed || !episode.consumed || due)", "(changed || true)"),
   },
   {
-    id: "MU-1999",
+    id: "MU-1266",
     title:
-      "WEB-14a revision 20 (R26/R27, I1): an attempt the browser refused is counted as fulfilled",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: [
-      "tests/pwa/update-focus.test.tsx",
-      "tests/lib/form-recovery.test.tsx",
-    ],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a target that could not take focus is not counted|a first field that could not take focus/,
+      "WEB-09b R3 (cycle 2): a standing admission wait has no paced reconciliation (a lost notification strands it)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /lost hint/,
     patch: (t) =>
-      sub(t, "  if (!focus(target)) return false;\n", "  focus(target);\n"),
-  },
-  {
-    id: "MU-2000",
-    title:
-      "WEB-14a revision 20 (I3, S4/S14/S15/S17): a target inside an inert gate, hold or dialog background is focused",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /S4: the prompt published while the existing shell is gated|S14: a restored field held|S15: an app dialog's inert background|S17: the gate closes again/,
-    patch: (t) => sub(t, '  !target.closest("[inert]") &&\n', ""),
-  },
-  {
-    id: "MU-2001",
-    title:
-      "WEB-14a revision 20 (I3, S10): a target behind the modal gate dialog is focused",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /S10: a neutral-root failure behind the open modal gate dialog|S11: a failure pending on both surfaces/,
-    patch: (t) =>
-      sub(
-        t,
-        "    (dialog) => !dialog.contains(target) && modal(dialog),\n",
-        "    () => false,\n",
-      ),
-  },
-  {
-    id: "MU-2002",
-    title:
-      "WEB-14a revision 20 (I4/I12, S18/S21): an unmounted owner does not withdraw its request (it is watched for ever)",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S18\/S21: an owner unmounted while its request waits/,
-    patch: (t) => sub(t, "    requests.delete(made);\n", ""),
-  },
-  {
-    id: "MU-2003",
-    title:
-      "WEB-14a revision 20 (DA-F2, S30): a later save failure does not cancel a restored-field request still pending",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S30, DA-F2/,
-    patch: (t) =>
-      sub(
-        sub(
-          t,
-          '  if (kind === "failure" || kind === "refused") cancel("restored");\n',
-          "",
-        ),
-        '    if (request.kind !== "prompt") cancel("restored");\n',
-        "",
-      ),
-  },
-  {
-    id: "MU-2004",
-    title:
-      "WEB-14a revision 20 (DA-F1, S14): the prompt does not wait for a restored field held in the page",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /S14, DA-F1: a state-1 prompt waits while a restored field in the page is held/,
-    patch: (t) =>
       sub(
         t,
-        '    if (restored("done") || restored("pending")) return false;\n',
-        '    if (restored("done")) return false;\n',
+        "    let ms = Math.min(\n      config.recoveryBeginRetryMaxMs,",
+        '    return { when: "event" } as Next;\n    let ms = Math.min(\n      config.recoveryBeginRetryMaxMs,',
       ),
   },
   {
-    id: "MU-2005",
+    id: "MU-1267",
     title:
-      "WEB-14a revision 20 (S11): the neutral root goes before the shell when both hold a pending failure",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S11: a failure pending on both surfaces/,
+      "WEB-09b R3 (cycle 2): the first probe after a refusal permits no attempt unless the revision moved since an earlier probe (a gate resolved before the wait was installed is never tried)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /came and went/,
     patch: (t) =>
       sub(
         t,
-        '  (request.target()?.closest("#neutral-root") ? 1 : 0);\n',
-        '  (request.target()?.closest("#neutral-root") ? -1 : 0);\n',
+        "(changed || !episode.consumed || due)",
+        "((changed && seen) || due)",
       ),
   },
   {
-    id: "MU-2006",
+    id: "MU-1268",
     title:
-      "WEB-14a revision 20 (S15): an app dialog returning focus to its opener takes it from the recovery action placed since",
-    file: "src/components/ui/dialog.tsx",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /the dialog keeps focus while open; when it closes the failure's 'Retry save' takes focus/,
+      "WEB-09b R3 (cycle 2): a notification is dropped while the job stands in an admission wait (only the paced timer is left)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /R3 \(closed after/,
     patch: (t) =>
       sub(
         t,
-        "              !content?.contains(active)\n",
-        "              false\n",
+        "if (eligibility() === lastEligibility && !waiting) return;",
+        "if (eligibility() === lastEligibility) return;",
       ),
-  },
-  {
-    id: "MU-2007",
-    title:
-      "WEB-14a revision 20 (S16): a restored field given by a different ref is not attempted until the document changes",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/lib/form-recovery.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /a first field that could not take focus is not counted as focused; the field given next is focused/,
-    patch: (t) => sub(t, "  useEffect(reconcile, [field]);\n", ""),
   },
   {
-    id: "MU-2008",
+    id: "MU-1269",
     title:
-      "WEB-14a revision 20 (I5, S21): loaded after a publication, the module takes that state for a new presentation at its next equal publication",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /I5: a banner loaded after the state was published/,
+      "WEB-09b R7 (cycle 2): the authorised current read hands back the command's result without sealing it against the durable record",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /refused|durable record|fails closed|sealed once/,
     patch: (t) =>
       sub(
         t,
-        "let shown = JSON.stringify(appUpdates.get());\n",
-        'let shown = "";\n',
+        "result = await seal(account, epoch, interpreted);",
+        "result = await interpreted;",
       ),
   },
   {
-    id: "MU-2009",
+    id: "MU-1270",
     title:
-      "WEB-14a revision 20 (S10): the close of a modal dialog is not a wake-up",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S10: a neutral-root failure behind the open modal gate dialog/,
-    // Re-anchored in revision 21 (same intent): the observer now watches every attribute, so the mutant ignores only `open` changes.
+      "WEB-09b R7 (cycle 2): the current read is validated against the page's identity mirror instead of the durable record",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /notice never arrives|LATER interpretation/,
     patch: (t) =>
       sub(
         t,
-        "    observer = new MutationObserver(reconcile);\n",
-        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "open")) reconcile();\n    });\n',
+        "result = await seal(account, epoch, interpreted);",
+        "result = await interpreted;\n          const mirror = deps.identity.get();\n          if (mirror?.account_id !== account || mirror.epoch !== epoch) return unavailable;",
       ),
-  },
-  {
-    id: "MU-2010",
-    title:
-      "WEB-14a revision 20 (S16): a target rendered later is not a wake-up",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S16: a restored field rendered after its banner/,
-    patch: (t) =>
-      sub(t, "      childList: true,\n", "      childList: false,\n"),
   },
   {
-    id: "MU-2011",
+    id: "MU-1271",
     title:
-      "WEB-14a revision 20 (I5, S11): a presentation focused on one surface is focused again by its other pending surface (no check at the attempt)",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S11: a failure pending on both surfaces/,
+      "WEB-09b R7 (cycle 2): the current read's own scope (lifetime, binding, service, caller's signal) is not checked at release",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /stops during the decode|service ends|cancels/,
     patch: (t) =>
-      sub(
-        t,
-        '  if (request.kind !== "restored" && placed?.at === request.at) {\n    request.state = "done";\n    return false;\n  }\n',
-        "",
-      ),
+      sub(t, "return live() ? result : unavailable;", "return result;"),
   },
-
-  // ---- WEB-14a revision 21 (R26/R27 CSS readiness; review r20, design assessment Q3): one wake source removed at a time ----
   {
-    id: "MU-2019",
+    id: "MU-1272",
     title:
-      "WEB-14a revision 21 (R26/R27, I2, S2/S6): a change of `class` is not a wake-up",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /hidden by its class: focused when only that class|hidden by its own class is focused/,
+      "WEB-09b R7 (cycle 2): the caller's cancellation does not end the current read's scope (a command that ignores its signal is handed back)",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/current-read.test.ts"],
+    expect: /cancels/,
     patch: (t) =>
       sub(
         t,
-        "    observer = new MutationObserver(reconcile);\n",
-        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "class")) reconcile();\n    });\n',
+        'signal?.addEventListener("abort", onCaller, { once: true });',
+        "void onCaller;",
       ),
   },
   {
-    id: "MU-2020",
+    id: "MU-1273",
     title:
-      "WEB-14a revision 21 (R26/R27, I2, S2/S4/S6): a change of `style` is not a wake-up",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /hidden by its style: focused when only that style|hidden by its own style is focused|hidden by the neutral root's style/,
+      "WEB-09b R3 (cycle 2): the session's admission probe ignores this page's hold",
+    file: "src/session/kernel/admission.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /hold and closing write block it/,
     patch: (t) =>
       sub(
         t,
-        "    observer = new MutationObserver(reconcile);\n",
-        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "style")) reconcile();\n    });\n',
+        "blocked: !stamp || !open || hold || closing,",
+        "blocked: !stamp || !open || closing,",
       ),
   },
   {
-    id: "MU-2021",
+    id: "MU-1274",
     title:
-      "WEB-14a revision 21 (R26/R27, I2, S6): the revision-20 wake list restored (`inert`, `open`, `hidden`, `disabled` only): a stylesheet's attribute selector is not a wake-up",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /hidden by its own data-state is focused/,
+      "WEB-09b R3 (cycle 2): the admission revision does not include the account's fences (an O11 removal in the same epoch changes nothing it reads)",
+    file: "src/session/kernel/admission.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /added and removed IN THE SAME EPOCH/,
     patch: (t) =>
       sub(
         t,
-        "      attributes: true,\n    });\n",
-        '      attributes: true,\n      attributeFilter: ["inert", "open", "hidden", "disabled"],\n    });\n',
+        "        state.fence_seq,\n        fences,\n",
+        "        state.fence_seq,\n",
       ),
   },
   {
-    id: "MU-2022",
+    id: "MU-1275",
     title:
-      "WEB-14a revision 21 (R26, C2, S2/S12): only a change of a target itself is a wake-up (an ancestor's reveal is missed)",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect:
-      /presented while <main> is hidden by its (class|style)|S12, DA-F1: the prompt and a restored field both hidden/,
+      "WEB-09b R3 (cycle 2): the admission revision counts this page's OWN leases (its own requests would wake its own wait)",
+    file: "src/session/kernel/admission.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /another page's request lease/,
     patch: (t) =>
       sub(
         t,
-        "    observer = new MutationObserver(reconcile);\n",
-        '    observer = new MutationObserver((records) => {\n      const targets = [...requests].map((request) => request.target());\n      if (records.some((record) => record.type === "childList" || targets.includes(record.target as HTMLElement))) reconcile();\n    });\n',
+        "leasesOfOthers(state, account, k.bootId)",
+        'leasesOfOthers(state, account, "not-a-page")',
       ),
   },
   {
-    id: "MU-2023",
+    id: "MU-1277",
     title:
-      "WEB-14a revision 21 (I9): each change is its own attempt (no coalescing of a batch)",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /I9: a batch of changes is one attempt/,
+      "WEB-09b R3 (cycle 2): an open admission revision whose attempt was refused is never tried again (a CSRF token only a new verification can fetch strands the job)",
+    file: "src/data/engine/recovery-job.ts",
+    tests: ["tests/data/recovery-job.test.ts"],
+    expect: /open but refused/,
     patch: (t) =>
       sub(
         t,
-        "    observer = new MutationObserver(reconcile);\n",
-        "    observer = new MutationObserver((records) => {\n      for (const _ of records) reconcile();\n    });\n",
+        "      now >= episode.retryAt;",
+        "      now >= episode.retryAt &&\n      (false as boolean);",
       ),
   },
   {
-    id: "MU-2024",
+    id: "MU-1276",
     title:
-      "WEB-14a revision 21 (I9, S23): the watch is kept when nothing is pending any more",
-    file: "src/lib/form-recovery/focus.ts",
-    tests: ["tests/pwa/update-focus.test.tsx"],
-    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
-    expect: /S23\/I9: once fulfilled, the watch stops/,
+      "WEB-09b R7 (cycle 2): `session.api.seal` hands a result back after the session was disposed",
+    file: "src/session/session.ts",
+    tests: ["tests/session/admission-probe.test.ts"],
+    expect: /disposed session/,
     patch: (t) =>
       sub(
         t,
-        "  } else if (!waiting && observer) {\n",
-        "  } else if (false) {\n",
+        'if (k.disposed) throw new StampedRequestError("stale");',
+        "void k.disposed;",
       ),
   },
-
-  // Accepted WEB-13a calendar mutations, retained with their reviewed IDs during the WEB-14a main merge.
-
+  // ---- WEB-08c (session-lifecycle integration): the switcher, the retained-account directory, 1c.ended, the return destination and
+  // K-1. Each is killed by the test written for it (`expect`); the unmutated control of the same tests runs beside it. ----------------
+  ...UNIT_LIFECYCLE,
   // ---- WEB-13a: calendar sources, connections and the manual refresh (MU-1300 onwards; the range reserved for WEB-13a) ----------
   {
     id: "MU-1300",
@@ -21246,7 +16391,6 @@ export const UNIT = [
     patch: (t) =>
       sub(t, '    if (typeof kind === "string") return kind;\n', ""),
   },
-
   {
     id: "MU-1301",
     title:
@@ -21261,7 +16405,6 @@ export const UNIT = [
         "          void cached;\n",
       ),
   },
-
   {
     id: "MU-1302",
     title:
@@ -21276,7 +16419,6 @@ export const UNIT = [
         '          unsettled(row) &&\n          row.status !== "acknowledged" &&\n',
       ),
   },
-
   {
     id: "MU-1303",
     title:
@@ -21291,7 +16433,6 @@ export const UNIT = [
         "      total: kept.length,\n      next: later",
       ),
   },
-
   {
     id: "MU-1304",
     title:
@@ -21306,7 +16447,6 @@ export const UNIT = [
         "last !== undefined ? last.created_seq + 1 : null,",
       ),
   },
-
   {
     id: "MU-1305",
     title:
@@ -21321,7 +16461,6 @@ export const UNIT = [
         '      if (candidates.length > 0) {\n        await bulkGetWindowed(\n          reader,\n          "draft_commands",\n          candidates.map((row) => row.local_id),\n        );\n',
       ),
   },
-
   {
     id: "MU-1306",
     title:
@@ -21332,7 +16471,6 @@ export const UNIT = [
     // Re-anchored in WEB-13a revision 2 (the fold moved into \`OutstandingFold\`): the same mutation.
     patch: (t) => sub(t, "    if (!unsettled(row)) return;\n", ""),
   },
-
   {
     id: "MU-1307",
     title:
@@ -21347,7 +16485,6 @@ export const UNIT = [
         "row.created_seq < this.newest.created_seq",
       ),
   },
-
   {
     id: "MU-1308",
     title: "WEB-13a D-13a-2: the QUEUED create carries a connection key",
@@ -21361,7 +16498,6 @@ export const UNIT = [
         "command: {\n        command: { kind: CREATE_SOURCE, id, label, timezone, connection: null },\n      },",
       ),
   },
-
   {
     id: "MU-1309",
     title: "WEB-13a D-13a-2: the QUEUED settings change carries disconnect",
@@ -21375,7 +16511,6 @@ export const UNIT = [
         "          timezone,\n          enabled,\n          disconnect: false,\n        },\n      },\n      displayPatch: {",
       ),
   },
-
   {
     id: "MU-1310",
     title:
@@ -21390,7 +16525,6 @@ export const UNIT = [
         "expected_version: (row as { version?: number }).version as number,",
       ),
   },
-
   {
     id: "MU-1311",
     title: "WEB-13a: Replace… also sends disconnect",
@@ -21404,7 +16538,6 @@ export const UNIT = [
         "    connection: wire(connection),\n    disconnect: false,\n  };",
       ),
   },
-
   {
     id: "MU-1312",
     title: "WEB-13a: Remove… also sends a connection",
@@ -21418,7 +16551,6 @@ export const UNIT = [
         "    disconnect: true,\n    connection: null,\n  };",
       ),
   },
-
   {
     id: "MU-1313",
     title: "WEB-13a D-13a-9: Add source is offered with no account database",
@@ -21435,7 +16567,6 @@ export const UNIT = [
         "return { add: on, link };",
       ),
   },
-
   {
     id: "MU-1314",
     title: "WEB-13a D-13a-2: Link a calendar… is offered offline",
@@ -21452,7 +16583,6 @@ export const UNIT = [
         "    (env.online ? direct(env) : null) ??\n    (env.calendarLinks === false ? off(CAUSE_UNCONFIGURED) : on);",
       ),
   },
-
   {
     id: "MU-1315",
     title:
@@ -21471,7 +16601,6 @@ export const UNIT = [
         "        : input.outstandingTotal > 1_000_000\n",
       ),
   },
-
   {
     id: "MU-1316",
     title: "WEB-13a: Refresh is offered offline",
@@ -21488,7 +16617,6 @@ export const UNIT = [
         "    refresh =\n      (env.online ? direct(env) : null) ??\n",
       ),
   },
-
   {
     id: "MU-1317",
     title: "WEB-13a: Refresh is offered for a turned-off source",
@@ -21505,7 +16633,6 @@ export const UNIT = [
         "      (false\n        ? off(TURNED_OFF_REASON)",
       ),
   },
-
   {
     id: "MU-1318",
     title:
@@ -21521,7 +16648,6 @@ export const UNIT = [
         ".refresh(id, deps.mintKey(), () => current(id, generation) !== null)",
       ),
   },
-
   {
     id: "MU-1319",
     title:
@@ -21536,7 +16662,6 @@ export const UNIT = [
         "        void entry;\n",
       ),
   },
-
   {
     id: "MU-1320",
     title:
@@ -21551,7 +16676,6 @@ export const UNIT = [
         '  if (status === 422 && code === "connection_unavailable")\n    return { kind: "transient" };',
       ),
   },
-
   {
     id: "MU-1321",
     title:
@@ -21566,7 +16690,6 @@ export const UNIT = [
         '    return { kind: "transient" };',
       ),
   },
-
   {
     id: "MU-1322",
     title: "WEB-13a B8 cause 6b: a 403 or 404 is retried automatically",
@@ -21580,7 +16703,6 @@ export const UNIT = [
         '  if (status === 403 || status === 404) return { kind: "transient" };',
       ),
   },
-
   {
     id: "MU-1323",
     title:
@@ -21595,7 +16717,6 @@ export const UNIT = [
         '  if (status === 409 && code === "refresh_in_progress")\n    return { kind: "unconfirmed" };',
       ),
   },
-
   {
     id: "MU-1324",
     title:
@@ -21611,7 +16732,6 @@ export const UNIT = [
         '        run: { ...run, checking: "superseded", waitedMs: 0, seen: null },\n        effect: { type: "send" },',
       ),
   },
-
   {
     id: "MU-1325",
     title: "WEB-13a B8 cause 5: lease_expired is retried more than once",
@@ -21625,7 +16745,6 @@ export const UNIT = [
         "      if (run.leaseRetried && false)\n",
       ),
   },
-
   {
     id: "MU-1326",
     title:
@@ -21640,7 +16759,6 @@ export const UNIT = [
         '  if (atlas === null)\n    return response.status === 404\n      ? { ok: false, kind: "refused", status: 404, code: "not_found" }\n      : { ok: false, kind: "uncertain", status: response.status };',
       ),
   },
-
   {
     id: "MU-1327",
     title:
@@ -21655,7 +16773,6 @@ export const UNIT = [
         '      if (delay === undefined)\n        return end(\n          run,\n          result.kind === "fetch_failed"\n            ? { kind: "succeeded" }\n            : { kind: "failed", cause: result.kind },\n        );',
       ),
   },
-
   {
     id: "MU-1328",
     title:
@@ -21670,7 +16787,6 @@ export const UNIT = [
         "    invalidate() {\n",
       ),
   },
-
   {
     id: "MU-1329",
     title:
@@ -21685,7 +16801,6 @@ export const UNIT = [
         "      if (pair !== undefined || text !== pairBody) {",
       ),
   },
-
   {
     id: "MU-1330",
     title:
@@ -21700,7 +16815,6 @@ export const UNIT = [
         '  if (afterUncertain && VALIDATION_BEFORE_RECEIPT.includes(code + "!"))',
       ),
   },
-
   {
     id: "MU-1331",
     title: "WEB-13a D-13a-10: calendar_links false is ignored",
@@ -21717,7 +16831,6 @@ export const UNIT = [
         "    direct(env) ?? on;",
       ),
   },
-
   {
     id: "MU-1332",
     title: "WEB-13a: Replace… can be sent without a URL",
@@ -21731,7 +16844,6 @@ export const UNIT = [
         '      : panel === "replace" && connection.url.trim() === "\\u0000"',
       ),
   },
-
   {
     id: "MU-1333",
     title: "WEB-13a: a bearer token over 4,096 characters is accepted",
@@ -21745,7 +16857,6 @@ export const UNIT = [
         "length(bearer) > BEARER_MAX * 2 ? BEARER_TOO_LONG : null",
       ),
   },
-
   {
     id: "MU-1334",
     title: "WEB-13a: a label over 300 characters is accepted",
@@ -21759,7 +16870,6 @@ export const UNIT = [
         "if (length(trimmed) > LABEL_MAX + 1) return LABEL_TOO_LONG;",
       ),
   },
-
   {
     id: "MU-1335",
     title:
@@ -21779,7 +16889,6 @@ export const UNIT = [
         "      for (const [id, entry] of entries) {\n",
       ),
   },
-
   {
     id: "MU-1336",
     title:
@@ -21790,7 +16899,6 @@ export const UNIT = [
     patch: (t) =>
       sub(t, '"data-atlas-sensitive": "",', '"data-atlas-ordinary": "",'),
   },
-
   {
     id: "MU-1337",
     title:
@@ -21805,7 +16913,6 @@ export const UNIT = [
     expect: /Replace… starts EMPTY|the wait outlives Manage/,
     patch: (t) => sub(t, "              onAwaiting(id, version);\n", ""),
   },
-
   {
     id: "MU-1338",
     title:
@@ -21821,7 +16928,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1339",
     title:
@@ -21840,7 +16946,6 @@ export const UNIT = [
         '    latest.kind !== "configure_source!" ||',
       ),
   },
-
   {
     id: "MU-1340",
     title:
@@ -21854,7 +16959,6 @@ export const UNIT = [
     patch: (t) =>
       sub(t, "    refresh: off(NOT_CREATED_REASON),\n", "    refresh: on,\n"),
   },
-
   {
     id: "MU-1341",
     title:
@@ -21869,7 +16973,6 @@ export const UNIT = [
         "        (input.outstandingTotal === -1\n          ? off(CHECKING_CHANGES)",
       ),
   },
-
   // ---- WEB-13a revision 1 (R1 to R5 of the first independent review) -----------------------------------------------------------
   {
     id: "MU-1344",
@@ -21884,7 +16987,6 @@ export const UNIT = [
     patch: (t) =>
       sub(t, '    if (!live()) return { ok: false, kind: "closed" };\n', ""),
   },
-
   {
     id: "MU-1345",
     title:
@@ -21900,7 +17002,6 @@ export const UNIT = [
         ".refresh(id, entry.run.key, () => true)",
       ),
   },
-
   {
     id: "MU-1346",
     title:
@@ -21915,7 +17016,6 @@ export const UNIT = [
         "    if (disposed) return;",
       ),
   },
-
   {
     id: "MU-1347",
     title:
@@ -21926,7 +17026,6 @@ export const UNIT = [
     patch: (t) =>
       sub(t, "            status.refresh.enabled ? (", "            true ? ("),
   },
-
   {
     id: "MU-1348",
     title:
@@ -21942,7 +17041,6 @@ export const UNIT = [
         "      (afterUncertain ? null : null) ??",
       ),
   },
-
   {
     id: "MU-1349",
     title:
@@ -21957,7 +17055,6 @@ export const UNIT = [
         'if (outcome.kind === "succeeded")\n      return onDone(currentSettings(current, defaultTimezone()).version);',
       ),
   },
-
   {
     id: "MU-1350",
     title:
@@ -21975,7 +17072,6 @@ export const UNIT = [
         '      return { kind: "cached", row: merged, view: view.value };',
       ),
   },
-
   {
     id: "MU-1351",
     title:
@@ -21994,7 +17090,6 @@ export const UNIT = [
         '    if (seenCached) return { kind: "resolving", row: last };',
       ),
   },
-
   {
     id: "MU-1352",
     title:
@@ -22009,7 +17104,6 @@ export const UNIT = [
         "      : displayedRow(current, null);",
       ),
   },
-
   {
     id: "MU-1353",
     title:
@@ -22024,7 +17118,6 @@ export const UNIT = [
         "          : on;",
       ),
   },
-
   {
     id: "MU-1354",
     title:
@@ -22043,7 +17136,6 @@ export const UNIT = [
         "      latest.current.api === api &&",
       ),
   },
-
   {
     id: "MU-1355",
     title:
@@ -22054,7 +17146,6 @@ export const UNIT = [
     // Re-anchored in revision 4 (the effect also stops the observer offline); the same mutation: the online branch is removed.
     patch: (t) => sub(t, "    } else controller?.online();\n", "    }\n"),
   },
-
   {
     id: "MU-1356",
     title:
@@ -22073,7 +17164,6 @@ export const UNIT = [
         "      latest.current.admit(),",
       ),
   },
-
   // ---- WEB-13a revision 2 (R6 to R8 of review r1, and the design assessment's schedules) ----------------------------------------
   {
     id: "MU-1359",
@@ -22092,7 +17182,6 @@ export const UNIT = [
         '    if (seenCached && base !== null && merged !== null)\n      return gate === "open"',
       ),
   },
-
   {
     id: "MU-1360",
     title:
@@ -22107,7 +17196,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1361",
     title:
@@ -22122,7 +17210,6 @@ export const UNIT = [
         "    sourceValue(asked.value).timezone ?? editedTimezone ?? defaultTimezone();",
       ),
   },
-
   {
     id: "MU-1362",
     title:
@@ -22141,7 +17228,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1363",
     title:
@@ -22156,7 +17242,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1364",
     title:
@@ -22166,7 +17251,6 @@ export const UNIT = [
     expect: /another tab saves between Save and its transaction/,
     patch: (t) => sub(t, "        live.observation,\n", "        undefined,\n"),
   },
-
   {
     id: "MU-1365",
     title:
@@ -22181,7 +17265,6 @@ export const UNIT = [
         "      : displayedRow(current, live.outstanding.latest);",
       ),
   },
-
   {
     id: "MU-1366",
     title:
@@ -22196,7 +17279,6 @@ export const UNIT = [
         "  const outstanding = useOutstanding(id);",
       ),
   },
-
   {
     id: "MU-1367",
     title:
@@ -22211,7 +17293,6 @@ export const UNIT = [
         "    if (newer(this.applicableOf.get(row.kind)))",
       ),
   },
-
   {
     id: "MU-1368",
     title:
@@ -22227,7 +17308,6 @@ export const UNIT = [
         "    if (live === null) return;",
       ),
   },
-
   {
     id: "MU-1369",
     title:
@@ -22242,7 +17322,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1370",
     title:
@@ -22257,7 +17336,6 @@ export const UNIT = [
         "    if (sending.current > 0) return false;",
       ),
   },
-
   {
     id: "MU-1371",
     title:
@@ -22272,7 +17350,6 @@ export const UNIT = [
         "      : input.awaitingSync",
       ),
   },
-
   {
     id: "MU-1372",
     title: "WEB-13a R8: Link's URL and token stay editable offline",
@@ -22286,7 +17363,6 @@ export const UNIT = [
         "  const entry = {};",
       ),
   },
-
   {
     id: "MU-1373",
     title: "WEB-13a R8: Replace's URL and token stay editable offline",
@@ -22300,7 +17376,6 @@ export const UNIT = [
         "  const entry = {};",
       ),
   },
-
   {
     id: "MU-1374",
     title: "WEB-13a R8: Link takes a URL or token change that arrives offline",
@@ -22314,7 +17389,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1375",
     title:
@@ -22329,7 +17403,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1376",
     title:
@@ -22340,7 +17413,6 @@ export const UNIT = [
     patch: (t) =>
       sub(t, "    if (lifetime.mounted()) onClose();", "    onClose();"),
   },
-
   {
     id: "MU-1377",
     title:
@@ -22355,7 +17427,6 @@ export const UNIT = [
         "              openPanel(null);",
       ),
   },
-
   {
     id: "MU-1378",
     title:
@@ -22370,7 +17441,6 @@ export const UNIT = [
         "  const lifetime = useLive(api, online);",
       ),
   },
-
   {
     id: "MU-1379",
     title:
@@ -22385,7 +17455,6 @@ export const UNIT = [
         "    : input.connectionBusy === true",
       ),
   },
-
   {
     id: "MU-1380",
     title:
@@ -22395,7 +17464,6 @@ export const UNIT = [
     expect: /Add source: two submissions/,
     patch: (t) => sub(t, "    if (saving.current) return;\n", ""),
   },
-
   {
     id: "MU-1381",
     title:
@@ -22410,7 +17478,6 @@ export const UNIT = [
         "  const submit = async () => {\n",
       ),
   },
-
   {
     id: "MU-1386",
     title:
@@ -22428,7 +17495,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1387",
     title:
@@ -22443,7 +17509,6 @@ export const UNIT = [
         '      entry === undefined || finishedSince(run.seen, entry)\n        ? { kind: "successor_finished", health: entry?.health ?? null }',
       ),
   },
-
   {
     id: "MU-1388",
     title:
@@ -22458,7 +17523,6 @@ export const UNIT = [
         "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n  return true;\n",
       ),
   },
-
   {
     id: "MU-1389",
     title:
@@ -22468,7 +17532,6 @@ export const UNIT = [
     expect: /settings change that cleared|reset to pending/,
     patch: (t) => sub(t, '    now.health !== "pending" &&\n', ""),
   },
-
   {
     id: "MU-1390",
     title:
@@ -22478,7 +17541,6 @@ export const UNIT = [
     expect: /FIRST read that saw it running/,
     patch: (t) => sub(t, "        seen: run.seen ?? {\n", "        seen: {\n"),
   },
-
   {
     id: "MU-1391",
     title:
@@ -22493,7 +17555,6 @@ export const UNIT = [
         "now.lastSuccess >= seen.lastSuccess",
       ),
   },
-
   {
     id: "MU-1392",
     title:
@@ -22503,7 +17564,6 @@ export const UNIT = [
     expect: /NO completing write|the same failure again/,
     patch: (t) => sub(t, " &&\n    now.health !== seen.health", ""),
   },
-
   {
     id: "MU-1393",
     title:
@@ -22518,7 +17578,6 @@ export const UNIT = [
         "        lastSuccess: null,\n",
       ),
   },
-
   {
     id: "MU-1394",
     title: "WEB-13a R9: the row says an unconfirmed newer refresh finished",
@@ -22532,7 +17591,6 @@ export const UNIT = [
         '    case "successor_unconfirmed":\n      return successorFinished(SUCCESSOR_HEALTHY);\n',
       ),
   },
-
   {
     id: "MU-1397",
     title:
@@ -22548,7 +17606,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1398",
     title:
@@ -22563,7 +17620,6 @@ export const UNIT = [
         '  if (entry === undefined) return { kind: "idle" };\n',
       ),
   },
-
   {
     id: "MU-1399",
     title:
@@ -22578,7 +17634,6 @@ export const UNIT = [
         "    refreshing: running,\n",
       ),
   },
-
   {
     id: "MU-1400",
     title:
@@ -22596,7 +17651,6 @@ export const UNIT = [
         "      if (entry === undefined) return;\n      notify();\n",
       ),
   },
-
   {
     id: "MU-1401",
     title:
@@ -22625,7 +17679,6 @@ export const UNIT = [
         "            entry.listed,\n",
       ),
   },
-
   {
     id: "MU-1402",
     title: "WEB-13a R10: going offline does not stop the screen's observation",
@@ -22634,7 +17687,6 @@ export const UNIT = [
     expect: /offline while running is observed|offline when the screen opens/,
     patch: (t) => sub(t, "      observer?.offline();\n", ""),
   },
-
   {
     id: "MU-1403",
     title:
@@ -22645,7 +17697,6 @@ export const UNIT = [
       /coming back online reads nothing|offline when the screen opens|stops being compatible ends it|dispose/,
     patch: (t) => sub(t, "    stopped = true;\n", ""),
   },
-
   {
     id: "MU-1404",
     title:
@@ -22661,7 +17712,6 @@ export const UNIT = [
         "      if (entry !== undefined && false) {\n        if (entry.listed) continue;\n",
       ),
   },
-
   {
     id: "MU-1405",
     title:
@@ -22676,7 +17726,6 @@ export const UNIT = [
         '  if (observation?.kind === "busy") return REFRESHING;\n  if (observation?.kind === "idle") return REFRESHED;\n',
       ),
   },
-
   {
     id: "MU-1406",
     title:
@@ -22697,7 +17746,6 @@ export const UNIT = [
         "    if (stopped || !compatible || attached === null) return;\n",
       ),
   },
-
   {
     id: "MU-1407",
     title:
@@ -22712,7 +17760,6 @@ export const UNIT = [
         "      disposed = true;\n      listeners.clear();\n",
       ),
   },
-
   {
     id: "MU-1408",
     title:
@@ -22723,7 +17770,6 @@ export const UNIT = [
     patch: (t) =>
       sub(t, "    return OBSERVED_UNCONFIRMED;\n", "    return null;\n"),
   },
-
   {
     id: "MU-1409",
     title:
@@ -22737,7 +17783,6 @@ export const UNIT = [
       /yields the source when a press is ADMITTED|press's own outcome is shown/,
     patch: (t) => sub(t, "    deps.onBegin?.(id);\n", ""),
   },
-
   {
     id: "MU-1410",
     title:
@@ -22765,7 +17810,6 @@ export const UNIT = [
         "        cohort.some(",
       ),
   },
-
   {
     id: "MU-1414",
     title:
@@ -22782,7 +17826,6 @@ export const UNIT = [
         "      attachment.detach();\n      visit.dispose();\n",
       ),
   },
-
   {
     id: "MU-1415",
     title:
@@ -22802,7 +17845,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1416",
     title:
@@ -22818,7 +17860,6 @@ export const UNIT = [
         "    for (const entry of watched.values()) {\n      drop(entry);\n      entry.listed = false;\n      entry.leftBy = null;\n",
       ),
   },
-
   {
     id: "MU-1417",
     title:
@@ -22833,7 +17874,6 @@ export const UNIT = [
         "      walking = false;\n      if (disposed || attached === null) return;\n",
       ),
   },
-
   {
     id: "MU-1418",
     title:
@@ -22850,7 +17890,6 @@ export const UNIT = [
         "            now() < (entry.deadline ?? 0),\n",
       ),
   },
-
   {
     id: "MU-1419",
     title:
@@ -22866,7 +17905,6 @@ export const UNIT = [
         "        entry.due = observing(entry.observation);\n",
       ),
   },
-
   {
     id: "MU-1420",
     title:
@@ -22882,7 +17920,6 @@ export const UNIT = [
         "        if (entry.listed) continue;\n        if (entry.deadlineTimer !== null) timers.clearTimeout(entry.deadlineTimer);\n        entry.deadlineTimer = null;\n        entry.deadline = null;\n        entry.listed = true;\n",
       ),
   },
-
   {
     id: "MU-1421",
     title:
@@ -22901,7 +17938,6 @@ export const UNIT = [
         "        if (disposed) return;\n",
       ),
   },
-
   {
     id: "MU-1422",
     title:
@@ -22911,7 +17947,6 @@ export const UNIT = [
     expect: /a remount's read asks nothing|admitted for the screen mounted NOW/,
     patch: (t) => sub(t, '        state = "reading";\n', ""),
   },
-
   {
     id: "MU-1423",
     title:
@@ -22931,7 +17966,6 @@ export const UNIT = [
         "                  false\n",
       ),
   },
-
   {
     id: "MU-1424",
     title:
@@ -22946,7 +17980,6 @@ export const UNIT = [
         '        state = "reading";\n        caller = live;\n',
       ),
   },
-
   {
     id: "MU-1425",
     title:
@@ -22957,7 +17990,6 @@ export const UNIT = [
     // Re-anchored in revision 6 (an identity's memory is dropped by `drop`, which also revokes its refresh ownership).
     patch: (t) => sub(t, "  memory.visit?.dispose();\n", ""),
   },
-
   {
     id: "MU-1429",
     title:
@@ -22976,7 +18008,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1430",
     title:
@@ -22995,7 +18026,6 @@ export const UNIT = [
         "  const adopt = (id: string): void => {\n    return;\n",
       ),
   },
-
   {
     id: "MU-1431",
     title:
@@ -23012,7 +18042,6 @@ export const UNIT = [
         "    !revoked && slots.has(ticket.source);\n",
       ),
   },
-
   {
     id: "MU-1432",
     title:
@@ -23031,7 +18060,6 @@ export const UNIT = [
         "  const offOwnership = (): void => undefined;\n",
       ),
   },
-
   {
     id: "MU-1433",
     title:
@@ -23049,7 +18077,6 @@ export const UNIT = [
         '        return { kind: "closed" };\n',
       ),
   },
-
   {
     id: "MU-1434",
     title:
@@ -23067,7 +18094,6 @@ export const UNIT = [
         "",
       ),
   },
-
   {
     id: "MU-1435",
     title:
@@ -23082,7 +18108,6 @@ export const UNIT = [
         "          entry.waitsFor = null;\n",
       ),
   },
-
   {
     id: "MU-1436",
     title:
@@ -23092,7 +18117,6 @@ export const UNIT = [
     expect: /SENT nothing, so the next screen reads it once/,
     patch: (t) => sub(t, "      if (!admitted) declined = true;\n", ""),
   },
-
   {
     id: "MU-1437",
     title:
@@ -23107,7 +18131,6 @@ export const UNIT = [
         "                    declined)\n",
       ),
   },
-
   // Revision 6 (R12, R13; design assessment M1-M10). M2 (adoption guarded only while the successor runs) has no separate anchor: the
   // design has no running-only guard, and its failure (an older publication over a finished successor) is MU-1431 and MU-1439. M6
   // (a new visit at every remount) is MU-1414.
@@ -23128,7 +18151,6 @@ export const UNIT = [
         "      if (!revoked && !slots.has(source))\n        slots.set(source, { owner: ticket, run: null });\n",
       ),
   },
-
   {
     id: "MU-1439",
     title:
@@ -23150,7 +18172,6 @@ export const UNIT = [
         "      slot.owner = ticket;\n      slot.run = run;\n      (slot as { released?: boolean }).released = true;\n",
       ),
   },
-
   {
     id: "MU-1440",
     title:
@@ -23168,7 +18189,6 @@ export const UNIT = [
         "    return;\n",
       ),
   },
-
   {
     id: "MU-1441",
     title:
@@ -23188,7 +18208,6 @@ export const UNIT = [
         "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
       ),
   },
-
   {
     id: "MU-1442",
     title:
@@ -23211,7 +18230,6 @@ export const UNIT = [
         "    const result = replace.apply(this, args);\n",
       ),
   },
-
   {
     id: "MU-1443",
     title:
@@ -23224,7 +18242,6 @@ export const UNIT = [
     expect: /R13's witness|Back, then Forward|Back and Forward|MOUNTED screen/,
     patch: (t) => sub(t, '  win.addEventListener("popstate", changed);\n', ""),
   },
-
   {
     id: "MU-1444",
     title:
@@ -23239,7 +18256,6 @@ export const UNIT = [
         "      memory.visit = null;\n",
       ),
   },
-
   {
     id: "MU-1445",
     title:
@@ -23255,7 +18271,6 @@ export const UNIT = [
         '          state = "unread";\n',
       ),
   },
-
   {
     id: "MU-1446",
     title:
@@ -23265,7 +18280,6 @@ export const UNIT = [
     expect: /another identity revokes/,
     patch: (t) => sub(t, "      revoked = true;\n      slots.clear();\n", ""),
   },
-
   {
     id: "MU-1447",
     title:
@@ -23280,599 +18294,8414 @@ export const UNIT = [
         "    !revoked && slots.get(ticket.source)?.owner.key === ticket.key;\n",
       ),
   },
+  // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
 
-  // Accepted WEB-08c lifecycle coverage, retained when merging main on 24 October 2026.
+  // ---- WEB-10a (Today view, task/occurrence core): MU-2001..MU-2030 (a range no sibling branch uses) -------------------------------
   {
-    id: "MU-8C-01",
+    id: "MU-2001",
     title:
-      "WEB-08c §2.1: a rejected indeterminate listing (indexedDB.databases()) is reported as 'no other accounts'",
-    file: "src/data/store/retained-accounts.ts",
-    tests: [
-      "tests/data/retained-accounts.test.ts",
-      "tests/features/switch/switch-flow.test.tsx",
-    ],
-    expect: /MU-8C-01/,
+      "WEB-10a: an unobserved closed window of a goal with a maximum finalises to missed (it stays unknown)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /unobserved closed window|finalise\(evaluate\(open\)\)/,
     patch: (t) =>
       sub(
         t,
-        '    names = await deps.host.list();\n  } catch {\n    return { kind: "unknown" };',
-        '    names = await deps.host.list();\n  } catch {\n    return { kind: "ok", accounts: [] };',
+        '  goal.kind === "checkbox" || goal.kind === "checklist" || minimumOnly(goal);',
+        '  goal.kind === "checkbox" || goal.kind === "checklist" || goal.kind === "numeric";',
       ),
   },
+
   {
-    id: "MU-8C-02",
+    id: "MU-2002",
     title:
-      "WEB-08c §2.1: the settled account is not excluded from the retained list",
-    file: "src/data/store/retained-accounts.ts",
-    tests: ["tests/data/retained-accounts.test.ts"],
-    expect: /MU-8C-02/,
+      "WEB-10a: offline finalisation leaves a provisional result provisional after the window closes (late completion never Done)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /late completion|finalise\(evaluate\(open\)\)|nine-against-eight/,
     patch: (t) =>
       sub(
         t,
-        "if (account === null || account === options.exclude || seen.has(account))",
-        "if (account === null || seen.has(account))",
+        '    case "provisional":\n      return "complete";\n',
+        '    case "provisional":\n      return "provisional";\n',
       ),
   },
+
   {
-    id: "MU-8C-03",
+    id: "MU-2003",
     title:
-      "WEB-08c §2.1 (D-8c-01): an account without its own profile record is labelled with another account's name",
-    file: "src/data/store/retained-accounts.ts",
-    tests: ["tests/data/retained-accounts.test.ts"],
-    expect: /MU-8C-03/,
+      "WEB-10a: a correction is layered as exact when the stream has more than eight entries (only eight are known)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /a correction is exact only when the whole stream is known/,
     patch: (t) =>
       sub(
         t,
-        "    if (read !== null) accounts.push(read);",
-        "    if (read !== null)\n      accounts.push(\n        read.lastVerifiedName === null && accounts.length > 0\n          ? { ...read, lastVerifiedName: accounts[accounts.length - 1].lastVerifiedName }\n          : read,\n      );",
+        "  if (base.entry_count > 8 || base.recent_entries.length !== base.entry_count)",
+        "  if (base.recent_entries.length > base.entry_count)",
       ),
   },
+
   {
-    id: "MU-8C-04",
+    id: "MU-2004",
     title:
-      "WEB-08c §2.1: an account this page latched closed_for_deletion is still listed (and read)",
-    file: "src/data/store/retained-accounts.ts",
-    tests: ["tests/data/retained-accounts.test.ts"],
-    expect: /MU-8C-04/,
+      "WEB-10a: my exclusion is checked before a covered day (ARCH §3.3c order inverted)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /covered comes BEFORE excluded/,
     patch: (t) =>
       sub(
         t,
-        '    if (deps.registry.latch(account) === "closed_for_deletion") continue;\n',
+        "  if (occ.covered_by !== null && occ.participants.includes(me)) {",
+        "  if (\n    occ.covered_by !== null &&\n    occ.participants.includes(me) &&\n    !(stream?.excluded && occ.definition.allow_streak_exclusions)\n  ) {",
+      ),
+  },
+
+  {
+    id: "MU-2005",
+    title:
+      "WEB-10a: actionable ignores close_incomplete's closes_at (a closed day stays to do)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /close_incomplete is not actionable after closes_at/,
+    patch: (t) =>
+      sub(
+        t,
+        '    (occurrence.definition.carry !== "close_incomplete" ||\n      occurrence.closes_at === null ||\n      now < occurrence.closes_at) &&\n',
         "",
       ),
   },
+
   {
-    id: "MU-8C-05",
+    id: "MU-2006",
     title:
-      "WEB-08c G-9: the rail's account control is given a name that is not verified for the current epoch (the account id)",
-    file: "src/app/protected-tree.tsx",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-05/,
+      "WEB-10a: an Anyone occurrence I may edit is not eligible without a stream of mine",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /Anyone with occurrence can_edit is eligible/,
+    patch: (t) =>
+      sub(
+        t,
+        '    input.streamPresent ||\n    (occurrence.definition.participation === "anyone" && input.canEdit)\n',
+        "    input.streamPresent\n",
+      ),
+  },
+
+  {
+    id: "MU-2007",
+    title:
+      "WEB-10a: offline, the joint line shows the last server answer as if it were current (Q8: never presented as fresh)",
+    file: "src/features/tasks/model/row-state.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect: /the joint line is the server's or nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!input.online)\n",
+        "    if (!input.online && (false as boolean))\n",
+      ),
+  },
+
+  {
+    id: "MU-2008",
+    title:
+      "WEB-10a: day membership uses slot.date for a timed slot (the instant's date in the display zone is ignored)",
+    file: "src/features/tasks/model/evaluate.ts",
+    tests: ["tests/features/tasks/evaluate.test.ts"],
+    expect: /a timed slot belongs to the day of its INSTANT/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (slot.instant !== null) return dateIn(slot.instant, zone) === day;",
+        "  if (slot.instant !== null && slot.date === null)\n    return dateIn(slot.instant, zone) === day;",
+      ),
+  },
+
+  {
+    id: "MU-2009",
+    title:
+      "WEB-10a: the occurrence id is a UUIDv5 under NAMESPACE_URL instead of the task's own UUID",
+    file: "src/features/tasks/model/ids.ts",
+    tests: ["tests/features/tasks/ids.test.ts"],
+    expect: /the documented first occurrence/,
+    patch: (t) =>
+      sub(
+        t,
+        "uuidV5(taskId, `atlas-occurrence-v1:${slotKey}`)",
+        'uuidV5("6ba7b811-9dad-11d1-80b4-00c04fd430c8", `atlas-occurrence-v1:${slotKey}`)',
+      ),
+  },
+
+  {
+    id: "MU-2010",
+    title: "WEB-10a: a dated one-off's slot key is its date, not `once`",
+    file: "src/features/tasks/model/ids.ts",
+    tests: ["tests/features/tasks/ids.test.ts"],
+    expect: /slot keys: `once` for every schedule without repeat/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (\n    schedule.repeat === null ||\n    schedule.repeat.frequency === "after_completion" ||',
+        '  if (\n    schedule.repeat?.frequency === "after_completion" ||',
+      ),
+  },
+
+  {
+    id: "MU-2011",
+    title: "WEB-10a: in a fold the LATER instant is taken",
+    file: "src/features/tasks/model/time.ts",
+    tests: ["tests/features/tasks/time.test.ts"],
+    expect: /autumn fold/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (found.length > 0) return found[0] as number;",
+        "  if (found.length > 0) return found[found.length - 1] as number;",
+      ),
+  },
+
+  {
+    id: "MU-2012",
+    title:
+      "WEB-10a: in a gap the wall time moves BACKWARDS by the change of offset",
+    file: "src/features/tasks/model/time.ts",
+    tests: ["tests/features/tasks/time.test.ts"],
+    expect: /spring gap|Lord Howe/,
+    patch: (t) =>
+      sub(
+        t,
+        "instantsOf(zone, wall + gap)[0]",
+        "instantsOf(zone, wall - gap)[0]",
+      ),
+  },
+
+  {
+    id: "MU-2013",
+    title:
+      "WEB-10a: a checkbox record omits expected_version (the server refuses it: required for checkbox and checklist)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /a create seeds task, details, first occurrence/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ? { expected_version: bases[input.progressId] as number }\n",
+        "          ? {}\n",
+      ),
+  },
+
+  {
+    id: "MU-2014",
+    title:
+      "WEB-10a: exclude is checked against the OCCURRENCE's version instead of my progress stream's",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /exclude is checked against MY PROGRESS version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          expected_version: bases[input.progressId] as number,\n",
+        "          expected_version: bases[input.occurrenceId] as number,\n",
+      ),
+  },
+
+  {
+    id: "MU-2015",
+    title:
+      "WEB-10a: revise_task does not raise the task's details (the server raises the execution too)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /revise_task: the task's version and its policy_version/,
+    patch: (t) =>
+      sub(
+        t,
+        '      {\n        resourceId: input.executionId,\n        role: "side_effect",\n        basis: "resource",\n        versionChecked: true,\n        requiresEdit: true,\n      },\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2016",
+    title:
+      "WEB-10a: revise_occurrence raises no progress stream (the server raises every participant's)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect:
+      /revise_occurrence: the occurrence's version, and EVERY known progress stream raised/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const progress = [...new Set(input.progressIds)];",
+        "  const progress: string[] = [];",
+      ),
+  },
+
+  {
+    id: "MU-2017",
+    title:
+      "WEB-10a: revise_task omits expected_policy_version (Q1: refused with conflict)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /revise_task: the task's version and its policy_version/,
+    patch: (t) =>
+      sub(t, "          expected_policy_version: input.policyVersion,\n", ""),
+  },
+
+  {
+    id: "MU-2018",
+    title:
+      "WEB-10a: a private ('Only me') create does not capture the progress defaults (the creator's enrolment uses them)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /never fetched is held for review|a create seeds task/,
+    patch: (t) =>
+      sub(
+        t,
+        '["task", "progress"] : ["progress"];',
+        '["task", "progress"] : [];',
+      ),
+  },
+
+  {
+    id: "MU-2019",
+    title:
+      "WEB-10a: an Anyone first record does not capture the progress defaults (the stream is created on demand from them)",
+    file: "src/features/tasks/model/commands.ts",
+    tests: ["tests/features/tasks/commands.test.ts"],
+    expect: /an Anyone first stream is seeded at 1 and captures progress/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const captured = input.firstAnyoneStream\n",
+        "  const captured = input.firstAnyoneStream && (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-2020",
+    title:
+      "WEB-10a: a successful save sends hidden numeric bounds after switching to a tick (PRODUCT-DECISIONS item 2)",
+    file: "src/features/tasks/model/form.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect: /switching numeric → checkbox keeps the bounds/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (show.numeric) {",
+        '  if (show.numeric || state.minimum.trim() !== "") {',
+      ),
+  },
+
+  {
+    id: "MU-2021",
+    title:
+      "WEB-10a: switching the goal kind discards the hidden checklist items",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /switching the goal kind away and back keeps the checklist items/,
+    patch: (t) =>
+      sub(
+        t,
+        "onChange={() => set({ goalKind: kind })}",
+        "onChange={() => set({ goalKind: kind, checklist: [] })}",
+      ),
+  },
+
+  {
+    id: "MU-2022",
+    title:
+      "WEB-10a: a refused save clears the form (a failure must keep every value)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /a refused save keeps every value/,
+    // Re-expressed in revision 18 (same intent): the form's values now live in its editing session (`kept-input.ts`, R33).
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!saved.ok) note = saved.message;",
+        "        if (!saved.ok) {\n          note = saved.message;\n          kept.edit(() => ({ initial, state: initial }));\n        }",
+      ),
+  },
+
+  {
+    id: "MU-2023",
+    title:
+      "WEB-10a: a 409 on a /daily continuation is not a restart (TASK-7: the read fails instead of starting again)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-page.test.tsx"],
+    expect: /TASK-7/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (page.kind === "conflict" && revision !== undefined) {',
+        '        if (page.kind === "conflict" && revision !== undefined && (false as boolean)) {',
+      ),
+  },
+
+  {
+    id: "MU-2024",
+    title:
+      "WEB-10a: a refused mount-time read is not remembered (the remount asks again, for ever)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/today-page.test.tsx",
+      "tests/features/tasks/model.test.ts",
+    ],
+    expect: /a 403 is remembered|AFTER the view unmounted/,
+    patch: (t) =>
+      sub(t, "    noteRefusal(identity, read, result.kind);", "    void read;"),
+  },
+
+  {
+    id: "MU-2025",
+    title:
+      "WEB-10a: a late /daily answer of the previous identity is applied (the read's currency, checked per page and on completion, and the answer's key are all ignored)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-page.test.tsx"],
+    expect: /a late answer for a previous identity is never shown/,
+    patch: (t) =>
+      sub(
+        t.replace(
+          "const isCurrent = () => mine === read.current;",
+          "const isCurrent = () => mine === mine;",
+        ),
+        // Re-expressed in revision 1 (R2 moved the answer's key check into `listed`): the same three layers are defeated.
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    env.online && answer !== null ? answer : null;",
+      ),
+  },
+
+  {
+    id: "MU-2026",
+    title:
+      "WEB-10a: mergeResource takes a projection of another resource (a multi-resource create projects the task as its occurrence)",
+    file: "src/data/model/overlay.ts",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/data/outcomes-model.test.ts",
+    ],
+    expect: /mergeResource ignores a projection with another id/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (projected !== null && projected.id === target) {",
+        "      if (projected !== null) {",
+      ),
+  },
+
+  {
+    id: "MU-2027",
+    title:
+      "WEB-10a: commandKindOf ignores a wrapped `{command: {kind}}` (every task draft's kind is the endpoint)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/features/tasks/commands.test.ts",
+    ],
+    expect: /commandKindOf reads a WRAPPED command|a create seeds task/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const kind = (wrapped as Record<string, unknown>).kind;\n    if (typeof kind === "string") return kind;\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2028",
+    title:
+      "WEB-10a: readOutstanding keeps an acknowledged draft whose effect is gone (counted twice once the cache has it)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /queued, in-flight and blocked drafts naming a resource/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-expressed in revision 1 (R4 moved the check into `oldestNaming`): an acknowledged draft is kept whatever its effect.
+        '        (draft.status === "acknowledged" &&\n          (await effectStands(reader, id, draft)))',
+        '        draft.status === "acknowledged"',
+      ),
+  },
+
+  {
+    id: "MU-2029",
+    title:
+      "WEB-10a: 'Exclude from my streak' is offered when the task does not allow exclusions",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/task-screens.test.tsx"],
+    expect: /Exclude is hidden entirely when the policy is off/,
+    patch: (t) =>
+      sub(
+        t,
+        "    data.definition.allow_streak_exclusions &&\n    data.covered_by === null &&",
+        "    data.covered_by === null &&",
+      ),
+  },
+
+  {
+    id: "MU-2030",
+    title:
+      "WEB-10a: a pooled task with a tick goal passes validation (pooled needs an amount)",
+    file: "src/features/tasks/model/form.ts",
+    tests: ["tests/features/tasks/model.test.ts"],
+    expect:
+      /validation matches the contract bounds, and pooled needs an amount/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (state.participation === "pooled" && goal.kind !== "numeric")',
+        '  if (state.participation === "pooled" && goal.kind !== "numeric" && (false as boolean))',
+      ),
+  },
+  // ---- WEB-10a revision 1 (review of 13 October 2026, R1-R6): MU-2034..MU-2060 ------------------------------------------------------
+  {
+    id: "MU-2034",
+    title:
+      "WEB-10a R1: an occurrence in the address is accepted only when it is on the loaded page of saved days",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /BEYOND the first page/,
+    // Re-expressed in revision 4 (same intent): the selection is made inside the detail's certified read, against its first page.
+    patch: (t) =>
+      sub(
+        t,
+        "    if (belongs(asked.value)) {",
+        "    if (\n      belongs(asked.value) &&\n      firstPage?.rows.some((r) => r.base.id === occurrenceParam) === true\n    ) {",
+      ),
+  },
+
+  {
+    id: "MU-2035",
+    title:
+      "WEB-10a R1: an occurrence in the address that is unavailable falls back to another day (today's or the page's last)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /not on this device|another task's day/,
+    // Re-expressed in revision 4 (same intent): the fallback would be the first page's last day of the certified read.
+    patch: (t) =>
+      sub(
+        t,
+        '    } else selection = "unavailable";',
+        "    } else {\n      const last = firstPage?.rows[firstPage.rows.length - 1];\n      chosen = last?.base.id ?? null;\n      chosenRow = last?.merged ?? null;\n    }",
+      ),
+  },
+
+  {
+    id: "MU-2036",
+    title:
+      "WEB-10a R1: an occurrence in the address is not checked against the task (its parent and task id)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /another task's day/,
     patch: (t) =>
       sub(
         sub(
           t,
-          "...(label === null || account === null",
-          "...(account === null",
+          "    if (executionId === null || row.parent_id !== executionId) return false;\n",
+          "",
         ),
-        "                label={label}",
-        "                label={label ?? account}",
+        "    return parsed === null || parsed.task_id === taskId;",
+        "    return parsed === parsed;",
       ),
   },
+
   {
-    id: "MU-8C-06",
-    title: "WEB-08c WF-SWITCH-02: the queued caution is shown at zero",
-    file: "src/features/switch/SwitchFlow.tsx",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /MU-8C-06/,
-    patch: (t) =>
-      sub(
-        t,
-        '        {waiting !== null && waiting > 0 ? (\n          <div\n            role="note"',
-        '        {waiting !== null && waiting >= 0 ? (\n          <div\n            role="note"',
-      ),
-  },
-  {
-    id: "MU-8C-07",
+    id: "MU-2037",
     title:
-      "WEB-08c D-8c-04: 'That sign-in didn't finish' is raised on an exit to a fence (1b, 1d, 1a, 1e) or catching up",
-    file: "src/features/authentication/attempt-end.ts",
-    tests: ["tests/features/authentication/attempt-end.test.ts"],
-    expect: /MU-8C-07/,
-    patch: (t) =>
-      sub(
-        t,
-        '  if (view.kind === "displaying") return true;\n  return view.kind === "signed_out" && view.state === null;',
-        '  return view.kind !== "booting";',
-      ),
-  },
-  {
-    id: "MU-8C-08",
-    title:
-      "WEB-08c D-8c-04: 'That sign-in didn't finish' is raised although a newer epoch settled",
-    file: "src/features/authentication/attempt-end.ts",
-    tests: ["tests/features/authentication/attempt-end.test.ts"],
-    expect: /MU-8C-08/,
-    patch: (t) =>
-      sub(
-        t,
-        "if (advanced || !endedExit(view)) return;",
-        "if (!endedExit(view)) return;",
-      ),
-  },
-  {
-    id: "MU-8C-09",
-    title:
-      "WEB-08c D-8c-03: a return destination is applied for (or survives) another account",
-    file: "src/app/return-destination.ts",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-09/,
-    patch: (t) => sub(t, "      found.account !== account ||\n", ""),
-  },
-  {
-    id: "MU-8C-10",
-    title:
-      "WEB-08c D-8c-03: a return destination ignores the epoch it asks for",
-    file: "src/app/return-destination.ts",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-10/,
-    patch: (t) => sub(t, "    if (!due) return null;\n", ""),
-  },
-  {
-    id: "MU-8C-11",
-    title: "WEB-08c G-10: boot does not pass onReviewDevice",
-    file: "src/app/boot.tsx",
-    tests: ["tests/app/web08c-composition.test.tsx"],
-    expect: /MU-8C-11/,
-    patch: (t) =>
-      sub(
-        t,
-        "      onReviewDevice: () => lifecycle.reviewDevice(session),\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-8C-12",
-    title:
-      "WEB-08c D-8c-02: the switch sends the picked account's id instead of an ordinary attempt with what was typed",
-    file: "src/features/switch/SwitchFlow.tsx",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /MU-8C-12/,
-    patch: (t) =>
-      sub(
-        t,
-        "onSubmit={(credentials) => submitSwitch(session, owner, credentials)}",
-        'onSubmit={(credentials) =>\n            submitSwitch(session, owner, {\n              ...credentials,\n              username: target.kind === "retained" ? target.account_id : credentials.username,\n            })\n          }',
-      ),
-  },
-  {
-    id: "MU-8C-13",
-    title:
-      "WEB-08c G-23: 'Confirm it's you' sends whatever username the (read-only) field holds instead of this account's",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /whatever the field holds/,
-    // Anchor moved (WEB-08c, R1 of the review of 11 October 2026): the sign-in is now `confirmSignIn`'s journey; same mutation.
-    patch: (t) =>
-      sub(
-        t,
-        "confirmSignIn(session, owner, username, credentials.password)",
-        "confirmSignIn(session, owner, credentials.username, credentials.password)",
-      ),
-  },
-  {
-    id: "MU-8C-14",
-    title:
-      "WEB-08c §3: the switch flow opened by one account is shown over another account's display",
-    file: "src/features/switch/entry.tsx",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /belongs to the account it was opened for/,
+      "WEB-10a R1: without an occurrence in the address, the latest day of the FIRST page is shown (not of every saved day)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /latest day by date over EVERY saved day/,
+    // Re-expressed in revision 4 (same intent): the walk stops after its first window and that window's latest is taken.
     patch: (t) =>
       sub(
         sub(
           t,
-          '    if (account !== null && stage.stage !== "closed" && stage.owner !== account)\n      switchFlow.dropUnless(account);',
-          "    void switchFlow;",
+          "              best = { id: listed.base.id, date, row: listed.merged };\n          }\n          return undefined;",
+          '              best = { id: listed.base.id, date, row: listed.merged };\n          }\n          return "stop";',
         ),
-        '  if (account === null || stage.stage === "closed" || stage.owner !== account)',
-        '  if (account === null || stage.stage === "closed")',
+        '      if (end !== "complete") return unread();\n      const found',
+        '      if (end === "closed") return unread();\n      const found',
       ),
   },
+
   {
-    id: "MU-8C-15",
+    id: "MU-2038",
     title:
-      "WEB-08c D-8c-04: the password sign-in does not tell the watcher that its activation is indeterminate (a page that resolves its own activation before 1c.resolving is published raises no 1c.ended)",
-    file: "src/features/authentication/controller.ts",
-    tests: ["tests/features/authentication/attempt-end.test.ts"],
-    expect: /MU-8C-15/,
+      "WEB-10a R1: the day picker never offers the next page of saved days",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-selection.test.tsx"],
+    expect: /a page of 100 at a time/,
     patch: (t) =>
       sub(
         t,
-        '  if (outcome.kind === "gating") attemptEnd.indeterminate(before);\n',
+        "      more: page?.next !== null && page?.next !== undefined,",
+        "      more: false,",
+      ),
+  },
+
+  {
+    id: "MU-2039",
+    title:
+      "WEB-10a R2: the last /daily answer still lists the day and gives my result once the device is offline",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /offline WITHOUT a remount/,
+    patch: (t) =>
+      sub(
+        t,
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    answer !== null && answer.key === key ? answer : null;",
+      ),
+  },
+
+  {
+    id: "MU-2040",
+    title:
+      "WEB-10a R2: my result from /daily still applies after a sync page committed since its read began",
+    // Re-expressed in revision 2 (same intent): the cache generation is now the answer's `current` basis, checked in `composeRow`.
+    // Re-expressed in revision 3 (same intent): the condition now also names the clock generation (`sameClock`), kept by this patch.
+    file: "src/features/tasks/view.ts",
+    tests: [
+      "tests/features/tasks/today-freshness.test.tsx",
+      "tests/features/tasks/freshness-provenance.test.tsx",
+    ],
+    expect:
+      /sync page committed after the read began|cache first|permission the cache committed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    basis?.current === true &&\n    basis.sameClock &&",
+        "    basis !== null &&\n    basis.sameClock &&",
+      ),
+  },
+
+  {
+    id: "MU-2041",
+    title:
+      "WEB-10a R2: my result from /daily still applies after a window boundary passed since it was answered",
+    // Re-expressed in revision 2 (same intent): the boundary is now measured from the read's dispatch (`requestedAt`).
+    // Re-expressed in revision 3 (same intent): the coverage is the last term of the condition.
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /window closes before the re-read answers/,
+    patch: (t) =>
+      sub(
+        t,
+        "    answerCovers(data, basis.requestedAt, nowMs);",
+        "    basis.requestedAt !== null;",
+      ),
+  },
+
+  {
+    id: "MU-2042",
+    title:
+      "WEB-10a R2: an answer is taken as current at the instant of the boundary itself",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/today-freshness.test.tsx"],
+    expect: /answerCovers/,
+    // Re-expressed in revision 3 (same intent): the interval is now between the dispatch and now in either direction (`from`, `to`).
+    patch: (t) => sub(t, "boundary * 1000 <= to)", "boundary * 1000 < to)"),
+  },
+
+  {
+    id: "MU-2043",
+    title:
+      "WEB-10a R3: a successful record clears an amount typed while it was pending",
+    file: "src/features/tasks/detail/RecordCard.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /typed while the save was pending stays after its success/,
+    // Re-expressed in revision 18 (same intent): the amount and its revision now live in the card's editing session (R33).
+    patch: (t) =>
+      sub(
+        t,
+        "                        completeKept(ticket, ok);",
+        '                        completeKept(ticket, ok);\n                        if (ok) input.edit((v) => ({ ...v, amount: "" }));',
+      ),
+  },
+
+  {
+    id: "MU-2044",
+    title:
+      "WEB-10a R3: a successful correction closes the dialog and forgets the retained draft whatever was edited since",
+    // Re-expressed in revision 2 (same intent): the edit revision now lives in the correction owner, which outlives the dialog's mounts.
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: [
+      "tests/features/tasks/save-acknowledgement.test.tsx",
+      "tests/features/tasks/correction-ownership.test.tsx",
+    ],
+    expect:
+      /edit made while the save was pending|newer edit kept while the person went to the queue|keeps 15|B's own save|edit after the submission/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (saved && held.revision === ticket.revision) {",
+        "  if (saved) {",
+      ),
+  },
+
+  {
+    id: "MU-2045",
+    title:
+      "WEB-10a R3: a successful fix closes the form whatever was typed since it was submitted",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /value typed while the save was pending stays in the open fix/,
+    // Re-expressed in revision 2 (same intent): the completion now names its fix session. Again in revision 4: the open fix is held by
+    // the history (its value and edit count), and its completion compares the edit count there. Again in revision 6 (R16): the
+    // completion compares the DRAFT's revision (edits across every editor of it).
+    patch: (t) =>
+      sub(
+        t,
+        "      if (ok && f.draft.rev === rev)\n        return f.session === session",
+        "      if (ok)\n        return f.session === session",
+      ),
+  },
+
+  {
+    id: "MU-2046",
+    title:
+      "WEB-10a R3: the fix can be saved again while its save is pending (two attempts)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/save-acknowledgement.test.tsx"],
+    expect: /Save waits for the pending one/,
+    // Re-expressed in revision 4 (same intent): the pending save is the held fix's `busy`, refused both by the form and by the history.
+    // Again in revision 6 (R16): the pending save is the draft's `saving`, refused by the form and by `submit`.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      ) : fix.draft.saving !== null ? (\n        <Button disabled reason={copy.SAVING}>",
+          "      ) : fix.draft.saving !== null && (false as boolean) ? (\n        <Button disabled reason={copy.SAVING}>",
+        ),
+        "    if (open === null || open.draft.saving !== null) return;",
+        "    if (open === null) return;",
+      ),
+  },
+
+  {
+    id: "MU-2047",
+    title:
+      "WEB-10a R4: a resource with more than a window of outstanding entries is cut to its oldest with no continuation",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect:
+      /101 outstanding drafts of one resource|attention headers beyond the window/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (entries.length > room)\n        next = {",
+        "      if (entries.length > room && (false as boolean))\n        next = {",
+      ),
+  },
+
+  {
+    id: "MU-2048",
+    title:
+      "WEB-10a R4: a page that looked at its bound of headers without a match says it is the last (no continuation)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect:
+      /one match after more headers of other kinds|read further than another/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : Number.isFinite(reach)\n          ? reach\n          : null;",
+        "        : null;",
+      ),
+  },
+
+  {
+    id: "MU-2049",
+    title:
+      "WEB-10a R4: an acknowledged draft whose effect is already in the cache is still listed as outstanding",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /whose effects are in the cache, is found|only the asked kinds/,
+    patch: (t) =>
+      sub(
+        t,
+        '        draft.status === "acknowledged" &&\n        !(await effectStands(reader, draft.target_resource_ids[0], draft))',
+        '        draft.status === "acknowledged" &&\n        (false as boolean)',
+      ),
+  },
+
+  {
+    id: "MU-2050",
+    title:
+      "WEB-10a R4: a page answers entries past what every status was read to (the next page answers them again)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/outstanding-reads.test.ts"],
+    expect: /read further than another/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const candidates = found.filter((d) => d.created_seq <= reach).sort(bySeq);",
+        "    const candidates = found.sort(bySeq);",
+      ),
+  },
+
+  {
+    id: "MU-2051",
+    title:
+      "WEB-10a R4: a chained live read is ready with its first page (the continuation is not followed)",
+    file: "src/data/ui/outstanding.tsx",
+    tests: [
+      "tests/data/outstanding-reads.test.ts",
+      "tests/features/tasks/today-freshness.test.tsx",
+    ],
+    expect: /ready only when every page|after 120 others|105 amounts/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (next === null) {",
+        "      if (next === null || pages.length > 0) {",
+      ),
+  },
+
+  {
+    id: "MU-2052",
+    title:
+      "WEB-10a R5: a rebuilt task command is based on the local record, not the version the person reviewed",
+    file: "src/features/tasks/register.ts",
+    tests: [
+      "tests/features/tasks/rebuild.test.ts",
+      "tests/features/tasks/model.test.ts",
+    ],
+    expect:
+      /reviewed at 5|raised from the reviewed version|reviewed task version|reviewed version|takes the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ? { ...target, reviewedBase: reviewed.version }",
+        "        ? target",
+      ),
+  },
+
+  {
+    id: "MU-2053",
+    title:
+      "WEB-10a R5: a rebuilt first record of an Anyone task drops the defaults it captured",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /keeps the defaults it captured/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!captured) return built;",
+        "      if (captured || !captured) return built;",
+      ),
+  },
+
+  {
+    id: "MU-2054",
+    title:
+      "WEB-10a R5: a rebuild replaces the draft even when it changed after it was read",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /changed since it was read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    expectDraft: (stored) =>\n      stored.local_id === draft.local_id &&",
+        "    expectDraft: (stored) =>\n      stored.local_id === stored.local_id ||",
+      ),
+  },
+
+  {
+    id: "MU-2055",
+    title:
+      "WEB-10a R5: my stream is looked for among the primary targets only (an amount's stream is a side effect)",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/rebuild.test.ts"],
+    expect: /among its side effects|stream stays a side effect/,
+    patch: (t) =>
+      sub(t, "    ...Object.keys(draft.side_effect_bases ?? {}),\n", ""),
+  },
+
+  {
+    id: "MU-2056",
+    title:
+      "WEB-10a R5: the outbox ignores a target's reviewed base (the record or the cache is the base)",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/reviewed-base.test.ts",
+      "tests/features/tasks/rebuild.test.ts",
+    ],
+    expect:
+      /ahead of the record and the cache|reviewed at 5|raised from the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      target.reviewedBase ??\n      tracked ??",
+        "      tracked ??",
+      ),
+  },
+
+  {
+    id: "MU-2057",
+    title: "WEB-10a R5: the request snapshot drops a target's reviewed base",
+    file: "src/data/model/outbox.ts",
+    tests: [
+      "tests/data/reviewed-base.test.ts",
+      "tests/features/tasks/rebuild.test.ts",
+    ],
+    expect:
+      /ahead of the record and the cache|reviewed at 5|raised from the reviewed version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ...(target.reviewedBase === undefined\n        ? {}\n        : { reviewedBase: target.reviewedBase }),",
         "",
       ),
   },
+
   {
-    id: "MU-8C-E1",
+    id: "MU-2058",
     title:
-      "WEB-08c D-8c-05: the switch journey is imported statically into the protected tree (no behavioural difference in an engine: the static lazy-load check and check-initial-chunk are its detectors)",
-    file: "src/features/switch/entry.tsx",
-    tests: ["tests/features/switch/switch-copy.test.ts"],
-    expect: /D-8c-05/,
+      "WEB-10a R5: a reviewed base that is not a whole version of at least 1 is accepted",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/reviewed-base.test.ts"],
+    expect: /whole version of at least 1/,
     patch: (t) =>
       sub(
         t,
-        'const SwitchFlow = lazy(() => import("./SwitchFlow"));',
-        'import SwitchFlowEager from "./SwitchFlow";\nconst SwitchFlow = SwitchFlowEager;\nvoid lazy;',
+        '      throw new OutboxRequestError("reviewed_base");',
+        "      void 0;",
       ),
   },
+
   {
-    id: "MU-8C-K1a",
+    id: "MU-2059",
     title:
-      "WEB-08c K-1: an identity read's 200-other-account / 401 answer leaves the credential_unverified entry beside the stronger fence (the unbounded re-verification)",
-    file: "src/session/kernel/identity.ts",
+      "WEB-10a R6: a wake on the same day does not arm the next wait (the day never rolls over more than six hours ahead)",
+    file: "src/features/tasks/screens.tsx",
+    tests: ["tests/features/tasks/today-day-timer.test.tsx"],
+    expect: /opened at 12:00|opened at 01:00/,
+    patch: (t) =>
+      sub(t, "          if (!check()) arm();", "          check();"),
+  },
+
+  {
+    id: "MU-2060",
+    title:
+      "WEB-10a R6: a page shown again after the device slept past midnight keeps yesterday",
+    file: "src/features/tasks/screens.tsx",
+    tests: ["tests/features/tasks/today-day-timer.test.tsx"],
+    expect: /slept past midnight/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (document.visibilityState === "visible") check();',
+        '      if (document.visibilityState === "visible") void 0;',
+      ),
+  },
+
+  // ---- WEB-10a revision 2 (R2, R3, R7, R8, DA-N1): unit mutants of the corrections ---------------------------------------------------
+  {
+    id: "MU-2064",
+    title:
+      "WEB-10a R2 (rev 2): the daily item is the structure whatever version the committed cache holds",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /older one never is|cache first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : item.version > cached.version ||\n        (item.version === cached.version && basis.current);",
+        "      : true;",
+      ),
+  },
+
+  {
+    id: "MU-2065",
+    title:
+      "WEB-10a R2 (rev 2): at the same version the daily item's permission wins even after a later cache commit",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /same version|permission the cache committed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (item.version === cached.version && basis.current);",
+        "        item.version === cached.version;",
+      ),
+  },
+
+  {
+    id: "MU-2066",
+    title:
+      "WEB-10a R2 (rev 2): an old answer brings back an occurrence the cache once held and removed",
+    file: "src/features/tasks/view.ts",
+    // Re-expressed in revision 3 (same intent, wider): the `neverCached` exception is gone; a row the cache lacks takes the daily structure
+    // only from a CURRENT answer, so the patch accepts any answer (the removed row comes back, and so does one removed before this view
+    // first looked: Q14).
     tests: [
-      "tests/session/web08c-k1.test.ts",
-      "tests/session/web08c-traces.test.ts",
+      "tests/features/tasks/freshness-provenance.test.tsx",
+      "tests/features/tasks/local-coherence.test.tsx",
     ],
-    expect: /K-1|T21/,
-    patch: (t) => sub(t, "      replaces_unverified: inflight.fenceSeq,\n", ""),
+    expect: /never brought back|removed by a committed page|Q14/,
+    patch: (t) => sub(t, "      ? basis.current\n", "      ? true\n"),
   },
+
   {
-    id: "MU-8C-K1b",
+    id: "MU-2067",
     title:
-      "WEB-08c K-1: the recording transaction does not replace the covered credential_unverified entries",
-    file: "src/session/model/reducers/observation.ts",
+      "WEB-10a R2 (rev 2): my result from /daily is used although its item is of another version than the row",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /another version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sources.personal !== null && sources.personal.version === version) {",
+        "    if (sources.personal !== null) {",
+      ),
+  },
+
+  {
+    id: "MU-2068",
+    title:
+      "WEB-10a R2 (rev 2): a /daily answer is dated by its delivery (receipt time as evaluation time)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /delivered (joint|personal) first/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const requestedAt = Math.min(joint.startedAt, personal.startedAt);",
+        "        const requestedAt = env.now();",
+      ),
+  },
+
+  {
+    id: "MU-2069",
+    title:
+      "WEB-10a R2 (rev 2): a scope restarted on 409 keeps the dispatch time of the discarded pages",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /409 restart/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (let restart = 0; restart < RESTARTS; restart += 1) {\n    const startedAt = clock();",
+        "  const startedAt = clock();\n  for (let restart = 0; restart < RESTARTS; restart += 1) {",
+      ),
+  },
+
+  {
+    id: "MU-2070",
+    title:
+      "WEB-10a R2 (rev 2): an answer already stale when it arrives is not asked for again",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /stale when it arrives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (staleOnArrival) setRestale((n) => n + 1);",
+        "        if (staleOnArrival) void 0;",
+      ),
+  },
+
+  {
+    id: "MU-2071",
+    title:
+      "WEB-10a F4 (rev 2): a pending entry the synced stream already lists is counted again",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /not counted again/,
+    patch: (t) => sub(t, " && !landed.has(p.entryId),", ","),
+  },
+
+  {
+    id: "MU-2072",
+    title:
+      "WEB-10a R8 (rev 2): the clock does not arm the next wait after a wake (only the first boundary is followed)",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /opening, then at the closing|thirteen hours/,
+    patch: (t) =>
+      sub(
+        t,
+        "          revalidate();\n          arm();",
+        "          revalidate();",
+      ),
+  },
+
+  {
+    id: "MU-2073",
+    title:
+      "WEB-10a R8 (rev 2): the clock is not read again when the page is shown, focused or restored",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /slept past the close/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (document.visibilityState !== "visible") return;\n      revalidate();',
+        '      if (document.visibilityState !== "visible") return;\n      void 0;',
+      ),
+  },
+
+  {
+    id: "MU-2074",
+    title:
+      "WEB-10a R8 (rev 2): a clock moved backwards is not a reason to ask again",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /BACKWARDS/,
+    patch: (t) =>
+      // Re-expressed in revision 3 (same intent): the backwards test is now named (`back`), which also moves the clock generation.
+      sub(
+        t,
+        "      back || crossedBetween(latest.current.boundaries, prev.now, t);",
+        "      crossedBetween(latest.current.boundaries, prev.now, t);",
+      ),
+  },
+
+  {
+    id: "MU-2075",
+    title:
+      "WEB-10a R8 (rev 2): new data whose boundary already passed waits for the next wake",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /late answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "    // New data may carry a boundary that has already passed: evaluate at once.\n    revalidate();",
+        "    // New data may carry a boundary that has already passed: evaluate at once.",
+      ),
+  },
+
+  {
+    id: "MU-2076",
+    title:
+      "WEB-10a R8 (rev 2): the task detail's clock is not told its day's window",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect:
+      /left open offline across the close|opens while the detail|queued correction gives/,
+    patch: (t) =>
+      sub(t, "    shownWindow === null ? [] : [shownWindow],", "    [],"),
+  },
+
+  {
+    id: "MU-2077",
+    title:
+      "WEB-10a R8 (rev 2): the detail follows the cached window, not the one its queued correction gives",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/boundary-clock.test.tsx"],
+    expect: /queued correction gives/,
+    patch: (t) =>
+      // Re-expressed in revision 3 (same intent): the window is the effective structure of the certified inputs (`effectiveOccurrence`).
+      sub(
+        t,
+        "      : effectiveOccurrence(rowSources, inputs.detail).data;",
+        "      : effectiveOccurrence(rowSources, { drafts: [], attention: [] }).data;",
+      ),
+  },
+
+  {
+    id: "MU-2078",
+    title:
+      "WEB-10a R3 (rev 2): a completion consumes a session other than the one it submitted",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /never reused|NOTHING edited/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (held === undefined || held.session !== ticket.session) return "gone";',
+        '  if (held === undefined) return "gone";',
+      ),
+  },
+
+  {
+    id: "MU-2079",
+    title:
+      "WEB-10a R3 (rev 2): an editing session let go of ends at once (a development remount loses its input)",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /development remount/,
+    patch: (t) =>
+      // Re-anchored in WEB-10a revision 22 (same intent): the release now marks the session releasing with its visit's keeping decided.
+      sub(
+        t,
+        "  entries.set(key, { ...held, retained: false, releasing: true });\n  dropReleasing(key, session);\n",
+        "  entries.delete(key);\n",
+      ),
+  },
+
+  {
+    id: "MU-2080",
+    title: "WEB-10a R3 (rev 2): Cancel does not end the editing session",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /NOTHING edited|opened again and edited|never reused/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (held !== undefined && held.session === session) entries.delete(key);",
+        "  if (held !== undefined && held.session === session) void 0;",
+      ),
+  },
+
+  {
+    id: "MU-2081",
+    title:
+      "WEB-10a R3 (rev 2): another identity's editing sessions are kept when the displayed identity opens one",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /another identity/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const other of [...entries.keys()])",
+        "  for (const other of [] as string[])",
+      ),
+  },
+
+  {
+    id: "MU-2082",
+    title:
+      "WEB-10a R3 (rev 2): the dialog that saved closes itself through its own (possibly obsolete) callback",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /never through the old mount/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeCorrection(ticket, ok);",
+        "      completeCorrection(ticket, ok);\n      if (ok) onClose();",
+      ),
+  },
+
+  {
+    id: "MU-2083",
+    title:
+      "WEB-10a R3 (rev 2): the parent closes any open fix of the entry when an earlier fix's save succeeds",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /SAME entry|reopened with nothing typed/,
+    // Re-expressed in revision 4 (same intent): the completion closes whatever fix is open, not only its own session. Again in
+    // revision 6 (R16): a success closes whatever fix is open, not only an editor of the draft it submitted.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (f === null || f.draft.id !== draftId) return f;",
+        "      if (f === null || f.draft.id !== draftId) return ok ? null : f;",
+      ),
+  },
+
+  {
+    id: "MU-2084",
+    title:
+      "WEB-10a R3 (rev 2): a late task-form success navigates although the person has left the form",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /went to the task list/,
+    // Re-expressed in revision 18 (same intent): only the form mounted when the owner consumes the session closes onto the task (R33).
+    patch: (t) =>
+      sub(
+        t,
+        "        detail: taskId,\n      });\n    }\n  };",
+        '        detail: taskId,\n      });\n      if (ok && taskId !== null)\n        void navigate({ to: "/tasks/$taskId", params: { taskId }, search: {} });\n    }\n  };',
+      ),
+  },
+
+  {
+    id: "MU-2085",
+    title:
+      "WEB-10a S5 (rev 2): a correction save that throws leaves the dialog waiting",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    tests: ["tests/features/tasks/correction-ownership.test.tsx"],
+    expect: /save that throws/,
+    patch: (t) =>
+      sub(
+        t,
+        "      completeCorrection(ticket, ok);",
+        "      if (ok) completeCorrection(ticket, ok);",
+      ),
+  },
+
+  {
+    id: "MU-2086",
+    title:
+      "WEB-10a DA-N1 (rev 2): the conflict choices do not read the submitted correction from the queued operation",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /submitted day is shown|replacement made by/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : submittedCorrection(commandOf(stored), row.id);",
+        "      : null;",
+      ),
+  },
+
+  {
+    id: "MU-2087",
+    title:
+      "WEB-10a DA-N1 (rev 2): 'Save mine' supersedes whatever the queued operation has become since it was read",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /operation changed/,
+    patch: (t) =>
+      sub(t, "        expectDraft: (now) =>", "        _expectDraft: (now) =>"),
+  },
+
+  {
+    id: "MU-2088",
+    title:
+      "WEB-10a DA-N1 (rev 2): 'Save mine' is offered before the version that defeated it is on the device",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /until a newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row !== null && (builtOn === undefined || row.version > builtOn);",
+        "    row !== null;",
+      ),
+  },
+
+  {
+    id: "MU-2089",
+    title:
+      "WEB-10a DA-N1 (rev 2): an unreadable submitted correction is not said to be unreadable",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/conflict-context.test.tsx"],
+    expect: /unreadable submitted correction/,
+    patch: (t) =>
+      sub(t, "      {mine === null && readable ? (", "      {false ? ("),
+  },
+
+  {
+    id: "MU-2090",
+    title:
+      "WEB-10a R7 (rev 2): the dialog does not reveal a focused control that is partly out of its scrolling body (WebKit)",
+    file: "src/components/ui/dialog.tsx",
+    tests: ["tests/components/dialog-reveal.test.tsx"],
+    expect: /scrolled into view|revealed too/,
+    patch: (t) =>
+      sub(t, "    return revealInBody(body);", "    return undefined;"),
+  },
+
+  {
+    id: "MU-2091",
+    title:
+      "WEB-10a heading regression (rev 2): Today's level-one heading is not the route's (the gated or loading page has none)",
+    file: "src/features/today/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /Today: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "          <PageHeading>{TODAY_TITLE}</PageHeading>\n          <CacheGate>",
+        "          <CacheGate>",
+      ),
+  },
+
+  {
+    id: "MU-2092",
+    title:
+      "WEB-10a heading regression (rev 2): a task's gated page shows no heading",
+    file: "src/features/tasks/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "      <CacheGate heading={child ? heading : null}>",
+        "      <CacheGate>",
+      ),
+  },
+
+  {
+    id: "MU-2093",
+    title:
+      "WEB-10a heading regression (rev 2): the task list's level-one heading is not the route's",
+    file: "src/features/tasks/route.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) => sub(t, "      {child ? null : heading}", "      {null}"),
+  },
+
+  {
+    id: "MU-2094",
+    title:
+      "WEB-10a heading regression (rev 2): the cache gate's refreshing state drops the heading it was given",
+    file: "src/features/sync/CacheGate.tsx",
+    tests: ["tests/features/tasks/route-headings.test.tsx"],
+    expect: /task list: one h1/,
+    patch: (t) =>
+      sub(
+        t,
+        "    <>\n      {heading}\n      <section",
+        "    <>\n      <section",
+      ),
+  },
+
+  {
+    id: "MU-2102",
+    title:
+      "WEB-10a loop (rev 2): Today asks /daily again on every committed page, an empty one included (page_seq instead of the content revision)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/freshness-provenance.test.tsx"],
+    expect: /empty delta page/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
+        "      ? (position.value?.pageSeq ?? -1)",
+      ),
+  },
+
+  // ---- WEB-10a revision 3 (R2, R8, R9; design assessment C1-C3): one isolated mutant per guard ---------------------------------------
+  {
+    id: "MU-2104",
+    title:
+      "WEB-10a R2 (rev 3): the server's fields apply although the clock went back since the read was asked (no clock-generation check)",
+    file: "src/features/tasks/view.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q1|Q2/,
+    patch: (t) => sub(t, "    basis.sameClock &&\n", ""),
+  },
+
+  {
+    id: "MU-2106",
+    title:
+      "WEB-10a R2 (rev 3): a clock that went back does not move the clock generation",
+    file: "src/features/tasks/clock.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q1|Q2/,
+    patch: (t) =>
+      sub(
+        t,
+        "      generation: back ? prev.generation + 1 : prev.generation,",
+        "      generation: prev.generation,",
+      ),
+  },
+
+  {
+    id: "MU-2107",
+    title:
+      "WEB-10a R8 (rev 3): Today schedules the committed windows only, not those its outstanding creates and corrections give",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q4|Q5/,
+    patch: (t) =>
+      sub(
+        t,
+        "        snapshot.outstanding,\n      );\n      if (effective.data) out.push(effective.data);",
+        "        NOTHING,\n      );\n      if (effective.data) out.push(effective.data);",
+      ),
+  },
+
+  {
+    id: "MU-2108",
+    title:
+      "WEB-10a R9 (rev 3): the last of the bounded attempts is certified although it spanned a commit",
+    file: "src/data/ui/scan.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        "    if (sameBasis(before.basis, after.basis) || attempt === 2)",
+      ),
+  },
+
+  {
+    id: "MU-2109",
+    title:
+      "WEB-10a R9 (rev 3): the certificate ignores the local composition generation (compares the other fields only)",
+    file: "src/data/ui/scan.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q7|Q8|Q9|Q12/,
+    patch: (t) => sub(t, "  a.composition === b.composition &&\n", ""),
+  },
+
+  {
+    id: "MU-2110",
+    title:
+      "WEB-10a R9 (rev 3): a day whose saved tasks could not be read says 'nothing due'",
+    file: "src/features/tasks/today/TodayPage.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q10/,
+    patch: (t) =>
+      sub(
+        t,
+        "view.localError === null && (view.error === null || all.length > 0) ? (",
+        "(view.error === null || all.length > 0) ? (",
+      ),
+  },
+
+  {
+    id: "MU-2111",
+    title:
+      "WEB-10a R9 (rev 3): a walk that failed part-way is composed as if it had seen everything",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q10/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (walked !== "complete")',
+        '  if (walked !== "complete" && walked !== "closed")',
+      ),
+  },
+
+  {
+    id: "MU-2112",
+    title:
+      "WEB-10a R9 (rev 3): the store never advances the local composition generation",
+    file: "src/data/model/composition.ts",
     tests: [
-      "tests/session/web08c-k1.test.ts",
-      "tests/session/web08c-traces.test.ts",
+      "tests/data/composition-generation.test.ts",
+      "tests/features/tasks/local-coherence.test.tsx",
     ],
-    expect: /K-1|T21/,
+    expect: /Q12|Q15|Q7|Q8|Q9/,
     patch: (t) =>
       sub(
         t,
-        "    if (replaces === undefined) return;",
-        "    if (replaces === undefined || (true as boolean)) return;",
+        '  if (!scope.includes("sync_state")) return false;',
+        "  return false;",
       ),
   },
+
   {
-    id: "MU-8C-R1a",
+    id: "MU-2113",
     title:
-      "WEB-08c R1: `attempts.cancel` does not mark the attempt cancelled in page memory (a late grant activates when the clear has to wait for atlas-auth)",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-cancel.test.ts"],
+      "WEB-10a R9 (rev 3): the generation is advanced by a transaction that wrote no composition store (any write counts)",
+    file: "src/data/model/composition.ts",
+    tests: ["tests/data/composition-generation.test.ts"],
+    expect: /Q12/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const store of written) if (COMPOSITION_STORES.has(store)) return true;",
+        "  for (const _store of written) return true;",
+      ),
+  },
+
+  {
+    id: "MU-2114",
+    title:
+      "WEB-10a R9 (rev 3): a stale day freezes its rows (composed again only when data changes, not with the time)",
+    file: "src/features/tasks/today/useTodayView.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9b/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [snapshot, listed, env.accountId, now, day, zone, clock.generation]);",
+        "  }, [snapshot, listed, env.accountId, day, zone, clock.generation]);",
+      ),
+  },
+
+  {
+    id: "MU-2115",
+    title:
+      "WEB-10a R9 (rev 3): a trigger that arrives while a read is in progress is dropped (the last change is not read)",
+    file: "src/features/tasks/local-read.ts",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /Q9/,
+    patch: (t) => sub(t, "      current.again = true;\n", ""),
+  },
+
+  {
+    id: "MU-2116",
+    title:
+      "WEB-10a R9 (rev 3, Q17): the task list says 'No tasks' when its read failed",
+    file: "src/features/tasks/detail/TaskList.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /list: a failed read/,
+    patch: (t) => sub(t, "        known ? (", "        true ? ("),
+  },
+
+  {
+    id: "MU-2117",
+    title:
+      "WEB-10a R9 (rev 3, Q17): an edit saves while the queue (its write target) could not be read",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    // Re-expressed in revision 4 (same intent, same patch): with the queue unreadable AT ENTRY the edit page now shows the detail read's
+    // error (no form); the form's own block is witnessed by the case where the queue becomes unreadable while the form is open.
+    expect: /form: the queue becomes unreadable while the form is open/,
+    patch: (t) => sub(t, "    !queueUnread &&\n", ""),
+  },
+
+  {
+    id: "MU-2118",
+    title:
+      "WEB-10a R9 (rev 3, Q17): the detail says 'no day' when the day's inputs could not be read",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/local-coherence.test.tsx"],
+    expect: /detail: a failed read/,
+    // Re-expressed in revision 4 (same intent): the detail's whole read is one; its failure with nothing complete is the error state.
+    patch: (t) =>
+      sub(
+        t,
+        '  if (view.status === "error" && view.readError !== null)',
+        "  if (false as boolean)",
+      ),
+  },
+
+  // ---- WEB-10a revision 4 (R9-R12; design assessment C1, C3, C4; D1-D9, J1-J5, E1-E4): one mutant per guard --------------------------
+  {
+    id: "MU-2123",
+    title:
+      "WEB-10a R9 (rev 4, D1): a detail read that failed with nothing complete is shown as an absent task",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task.*(detail|edit)$/,
+    patch: (t) =>
+      sub(
+        t,
+        '          ? "loading"\n          : "error"',
+        '          ? "loading"\n          : "absent"',
+      ),
+  },
+
+  {
+    id: "MU-2124",
+    title:
+      "WEB-10a R9 (rev 4, D2): a walk over the saved days that did not complete is taken as 'no day'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /the walk over every saved day/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (end !== "complete") return unread();\n      const found',
+        "      const found",
+      ),
+  },
+
+  {
+    id: "MU-2125",
+    title:
+      "WEB-10a R9 (rev 4, D2): a failed read of a day by its id is taken as an absent day ('unavailable', or another default)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D2: .*(the day named in the address|today's day)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read === null) return unread();\n    return { ok: true, value: read.get(id)?.merged ?? null };",
+        "    return { ok: true, value: read?.get(id)?.merged ?? null };",
+      ),
+  },
+
+  {
+    id: "MU-2126",
+    title:
+      "WEB-10a R9 (rev 4, D3/D4): a stale detail (a failed refresh of a complete read) offers no Try again",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D3\/D4: .*warm/,
+    patch: (t) =>
+      sub(
+        t,
+        "      <span>\n        <Button onClick={retry}>{copy.TRY_AGAIN}</Button>\n      </span>",
+        "      {stale ? null : (\n        <span>\n          <Button onClick={retry}>{copy.TRY_AGAIN}</Button>\n        </span>\n      )}",
+      ),
+  },
+
+  {
+    id: "MU-2127",
+    title:
+      "WEB-10a R9 (rev 4, D4): Try again does not read the detail again (only a later commit would)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task/,
+    patch: (t) =>
+      sub(
+        t,
+        "    retry: () => setAttempt((n) => n + 1),",
+        "    retry: () => undefined,",
+      ),
+  },
+
+  {
+    id: "MU-2128",
+    title:
+      "WEB-10a R9 (rev 4, D9): a later page of saved days that could not be read is shown as 'no more days'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /a later page that cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const pickerError =\n    cursors.length > 1 &&",
+        "  const pickerError =\n    (false as boolean) &&",
+      ),
+  },
+
+  {
+    id: "MU-2129",
+    title:
+      "WEB-10a R9 (rev 4): the default day is chosen again on every read (it moves under the person to a later synced day)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /chosen once for the visit/,
+    patch: (t) =>
+      sub(
+        t,
+        "              pinned:\n                pinned.current?.scope === scope ? pinned.current.id : null,",
+        "              pinned: null,",
+      ),
+  },
+
+  {
+    id: "MU-2130",
+    title:
+      "WEB-10a R9 (rev 4, D9): a failed page of the day's progress streams is taken as 'nobody else'",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /progress streams are read whole/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (end !== "complete") return unread();\n  }\n  return {',
+        "  }\n  return {",
+      ),
+  },
+
+  {
+    id: "MU-2131",
+    title:
+      "WEB-10a R9 (rev 4, D1): the edit page takes a failed read for an absent task",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/detail-read-coherence.test.tsx"],
+    expect: /D1: a failed read of the task.*edit$/,
+    patch: (t) => sub(t, '  if (view.status === "error") return notice;\n', ""),
+  },
+
+  {
+    id: "MU-2132",
+    title:
+      "WEB-10a R12 (rev 4, J3): Load more keeps every page (a fourth is retained)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J3:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const drop = Math.max(0, pages.length - MAX_PAGES);",
+        "    const drop = 0;",
+      ),
+  },
+
+  {
+    id: "MU-2133",
+    title:
+      "WEB-10a R12 (rev 4, J3): Earlier entries keeps every page (a fourth is retained)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J3:/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
+    patch: (t) =>
+      sub(
+        t,
+        "            pages: [page, ...now.pages].slice(0, MAX_PAGES),",
+        "            pages: [page, ...now.pages],",
+      ),
+  },
+
+  {
+    id: "MU-2134",
+    title:
+      "WEB-10a R10 (rev 4, J1): an open full history is not read again when its stream's committed version changes",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
     expect:
-      /cancelled while another page holds atlas-auth|cancelled while the activating write waits/,
-    patch: (t) => sub(t, "    this.cancelled.add(handle.epoch);\n", ""),
-  },
-  {
-    id: "MU-8C-R1b",
-    title:
-      "WEB-08c R1: a cancelled attempt's grant is recorded and activated when its exchange answers",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-cancel.test.ts"],
-    expect: /cancelled while another page holds atlas-auth/,
+      /J1: .*(correction committed while it is open|offline, a newer version waits)/,
     patch: (t) =>
       sub(
         t,
-        "    if (this.cancelled.has(handle.epoch)) {",
-        "    if (this.cancelled.has(handle.epoch) && (false as boolean)) {",
+        "      journal.version === row.progressVersion ||",
+        "      (true as boolean) ||",
       ),
   },
+
   {
-    id: "MU-8C-R1c",
+    id: "MU-2135",
     title:
-      "WEB-08c R1: the activating write is not abandoned for a cancellation that came while it waited for atlas-auth",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-cancel.test.ts"],
-    expect: /cancelled while the activating write waits/,
+      "WEB-10a R10 (rev 4, J2): an older journal answer that arrives after a newer one is shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /older answer that arrives after a newer one/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14). Neither Back to recent nor a new open begins another authority, so the older answer of the earlier one still publishes.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    forgetRefusal(env.identity, readKey);\n    life.current += 1;\n",
+          "    forgetRefusal(env.identity, readKey);\n",
+        ),
+        "  const close = () => {\n    life.current += 1;\n",
+        "  const close = () => {\n",
+      ),
+  },
+
+  {
+    id: "MU-2136",
+    title:
+      "WEB-10a R10/R12 (rev 4, J2): outside a window that reaches the end, Fix opens without checking the rest of the journal",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /Fix first checks the rest of the journal/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
     patch: (t) =>
       sub(
         t,
-        "        () => hiddenNow() || cancelledNow(),\n",
-        "        hiddenNow,\n",
+        "    if (!full || toEnd || j === null) return openFixOf(entry, mine);",
+        "    return openFixOf(entry, mine);",
       ),
   },
+
   {
-    id: "MU-8C-R1d",
+    id: "MU-2137",
     title:
-      "WEB-08c R1: the controller never cancels the attempt when its caller's signal aborts",
-    file: "src/features/authentication/controller.ts",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect: /while the exchange is outstanding|cancels it too/,
+      "WEB-10a R12 (rev 4, J5): an open fix whose page is let go is no longer shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /J5: .*evicted/,
     patch: (t) =>
       sub(
         t,
-        "  const cancel = () => void session.attempts.cancel(handle);",
-        "  const cancel = () => undefined;",
+        "      {fix !== null && !fixShown ? (",
+        "      {false as boolean ? (",
       ),
   },
+
   {
-    id: "MU-8C-R1e",
+    id: "MU-2138",
     title:
-      "WEB-08c R1: 'Cancel — stay as …' returns to the picker without cancelling the sign-in in flight",
-    file: "src/features/switch/state.ts",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect:
-      /Cancel — stay as …' while the exchange|cancelled BEFORE `begin` returned/,
+      "WEB-10a R10 (rev 4, J5): a fix whose entry was corrected since (a saved correction) can still be saved",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /corrected since \(a saved correction\)/,
+    // Re-expressed in revision 6 (same intent): the committed-replacement block is now the first test of the one save decision. Re-anchored
+    // in revision 19 (same intent): the committed facts are now the second operand of that test, after the queued corrections (DA19-N1).
     patch: (t) =>
       sub(
         t,
-        '    if (state.stage !== "sign-in" || state.owner !== owner) return;\n    abandon();\n    set({ stage: "picker", owner });',
-        '    if (state.stage !== "sign-in" || state.owner !== owner) return;\n    set({ stage: "picker", owner });',
+        '    (j !== null &&\n      (j.checks[entryId]?.found === "replaced" ||',
+        '    ((false as boolean) &&\n      j !== null &&\n      (j.checks[entryId]?.found === "replaced" ||',
       ),
   },
+
   {
-    id: "MU-8C-R1f",
+    id: "MU-2139",
     title:
-      "WEB-08c R1: Escape or Close ends the switch flow without cancelling the sign-in in flight",
-    file: "src/features/switch/state.ts",
-    tests: ["tests/features/switch/switch-flow.test.tsx"],
-    expect:
-      /Escape while the exchange is outstanding|Close while the exchange is outstanding/,
-    patch: (t) =>
-      sub(t, "  close(): void {\n    abandon();\n", "  close(): void {\n"),
-  },
-  {
-    id: "MU-8C-R1g",
-    title:
-      "WEB-08c R1: 'Confirm it's you' Cancel closes the section without cancelling the sign-in in flight",
-    file: "src/features/settings/signing-in/confirm-state.ts",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /R1: Cancel while the confirmation is in flight/,
-    patch: (t) =>
-      sub(t, "  cancel(): void {\n    abandon();\n", "  cancel(): void {\n"),
-  },
-  {
-    id: "MU-8C-R2a",
-    title:
-      "WEB-08c R2: an indeterminate (gating) re-authentication drops its return destination",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /an indeterminate activation keeps the destination/,
-    patch: (t) =>
-      sub(t, '  if (result.kind === "gating") return result;\n', ""),
-  },
-  {
-    id: "MU-8C-R2b",
-    title:
-      "WEB-08c R2: a re-authentication's terminal result drops whatever destination is pending, including a newer request's",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /R2: an older request's terminal result/,
-    patch: (t) =>
-      sub(
-        t,
-        "  returnDestination.clearIf(destination);",
-        "  returnDestination.clear();",
-      ),
-  },
-  {
-    id: "MU-8C-R3a",
-    title:
-      "WEB-08c R3: the recovery job's admission wait ignores `begin`'s own revision (a gate that ended before the first probe strands state 3)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect:
-      /R3 \((attempt_gating|operation_pending)\): begin reported the gate/,
-    patch: (t) =>
-      sub(t, "      admission.revision = baseline;", "      void baseline;"),
-  },
-  {
-    id: "MU-8C-R3b",
-    title:
-      "WEB-08c R3: the session's `recovery.begin` refusal carries no admission revision",
-    file: "src/session/kernel/recovery.ts",
+      "WEB-10a R10/R14 (rev 4, J4; rev 5, Q6): a refused journal read (any: a page or a check) keeps showing what can no longer be seen",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
     tests: [
-      "tests/session/admission-probe.test.ts",
-      "tests/session/recovery-api.test.ts",
+      "tests/features/tasks/journal-window.test.tsx",
+      "tests/features/tasks/journal-ownership.test.tsx",
+    ],
+    expect: /refused refresh drops the pages|Q6: .*refused/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14). Every read meets a refusal in one place, so this one fault is the suffix check's too (R14).
+    patch: (t) =>
+      sub(
+        t,
+        '      if (live(by)) revoke();\n      return { kind: "stop" };',
+        '      return { kind: "failed" };',
+      ),
+  },
+
+  {
+    id: "MU-2140",
+    title:
+      "WEB-10a R10 (rev 4, J4): a failed refresh drops the pages (unknown is shown as the recent entries)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /failed refresh keeps the pages/,
+    // Re-expressed in revision 5 (same intent): the journal has one controller (R13/R14).
+    patch: (t) =>
+      sub(
+        t,
+        '          update((now) => ({\n            ...now,\n            tried: version,\n            error: "failed",\n          }));',
+        "          put(null);",
+      ),
+  },
+
+  {
+    id: "MU-2141",
+    title:
+      "WEB-10a R10 (rev 4, J4): a failed refresh is asked again on its own, in a loop",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-window.test.tsx"],
+    expect: /failed refresh keeps the pages/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.tried === row.progressVersion\n",
+        "      (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-2142",
+    title:
+      "WEB-10a R11 (rev 4, E1): a second activation while an enrolment change is pending takes a new key and is sent",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /E1: /,
+    // Re-anchored in revision 11 (R23): the attempt owner now also refuses a change while the previous one is unconfirmed (its cycle);
+    // the same refusal, removed whole.
+    patch: (t) =>
+      sub(
+        t,
+        '  if (held?.phase === "pending" || cycle.phase !== "done") return null;\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2143",
+    title:
+      "WEB-10a R11 (rev 4, E1): Join/Leave stays enabled (with no reason) while a change is pending",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /E1: .*activated twice/,
+    // Re-anchored in revision 10 (R22): the pending rule now lives in `blocked`, which disables every enrolment control (same mechanism).
+    // Re-anchored in revision 11 (R23): `blocked` names the lock (sending, then confirming); the whole rule removed.
+    patch: (t) =>
+      sub(
+        t,
+        '    : lock?.phase === "sending"\n      ? CONTROLS_COPY.sending\n      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n',
+        "    : null;\n",
+      ),
+  },
+
+  {
+    id: "MU-2144",
+    title:
+      "WEB-10a R11 (rev 4, E2): Try again builds the change again from the enrolment shown (another body and key)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /Try again resends the same body and key/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  onClick={() => void send(uncertain.command)}",
+        "                  onClick={() =>\n                    void send({\n                      ...uncertain.command,\n                      expected_version: enrolment.version,\n                    })\n                  }",
+      ),
+  },
+
+  {
+    id: "MU-2145",
+    title:
+      "WEB-10a R11 (rev 4, E2): an uncertain change keeps its body but not its key (a retry is another attempt)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /Try again resends the same body and key/,
+    patch: (t) =>
+      sub(
+        t,
+        "    key: held !== undefined && held.body === body ? held.key : newKey(),",
+        "    key: newKey(),",
+      ),
+  },
+
+  {
+    id: "MU-2146",
+    title:
+      "WEB-10a R11 (rev 4, E3): an enrolment read answered while a change is pending replaces what is shown",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read answered while a change is pending/,
+    // Re-anchored in revision 11 (R23): a read that is not the current state is shown only when nothing is (the same rule).
+    patch: (t) =>
+      sub(
+        t,
+        "        } else setEnrolment((shown) => shown ?? value);",
+        "        } else setEnrolment(value);",
+      ),
+  },
+
+  {
+    id: "MU-2147",
+    title:
+      "WEB-10a R11 (rev 4, E3): an enrolment read asked before a change and answered just after it is shown",
+    // Re-anchored in revision 11 (R23): a read asked before the latest change was admitted is now judged by the change's generation in
+    // page memory (it was the mount's own count of changes sent); the same rule removed.
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read asked before a change/,
+    patch: (t) => sub(t, "    read.generation !== cycle.generation ||\n", ""),
+  },
+
+  {
+    id: "MU-2148",
+    title:
+      "WEB-10a R11 (rev 4, E1/E3): the end of a pending change is not followed by a read (a remounted screen never learns the result)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /remounted while pending|next change after the answer/,
+    // Re-anchored in revision 11 (R23): the read follows the change's answer as recorded in page memory (`reading`), not a pending edge.
+    patch: (t) =>
+      sub(
+        t,
+        "    if (reading !== 0 && reading !== readFor.current) setReload((n) => n + 1);",
+        "    if (reading !== 0 && reading !== readFor.current) void 0;",
+      ),
+  },
+
+  {
+    id: "MU-2152",
+    title:
+      "WEB-10a R13 (rev 5, Q1): a check of the rest of the journal opens its fix whatever was chosen since",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q1: /,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      live(by) && sel.current === mine && versionRef.current === version;",
+          "      live(by) && versionRef.current === version;",
+        ),
+        "    if (sel.current !== mine || !mounted.current) return;",
+        "    if (!mounted.current) return;",
+      ),
+  },
+
+  {
+    id: "MU-2153",
+    title:
+      "WEB-10a R13 (rev 5, Q1): Fix does not take the selection before its check (an older check still owns it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q1: /,
+    // Re-expressed in revision 6 (same intent): Check again also takes the selection, so the anchor names Fix's own next lines.
+    patch: (t) =>
+      sub(
+        t,
+        "    const mine = ++sel.current;\n    const j = journalNow();\n    // A window",
+        "    const mine = sel.current;\n    const j = journalNow();\n    // A window",
+      ),
+  },
+
+  {
+    id: "MU-2154",
+    title:
+      "WEB-10a R13 (rev 5, Q2): Cancel does not end a lookup asked after the open fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Cancel of the open fix also ends a lookup/,
+    patch: (t) =>
+      sub(
+        t,
+        "        onCancel={() => {\n          sel.current += 1;\n",
+        "        onCancel={() => {\n",
+      ),
+  },
+
+  {
+    id: "MU-2155",
+    title:
+      "WEB-10a R13 (rev 5, Q5): a check of the rest of the journal ignores a newer committed version of the stream",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /committed version moves while the lookup is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "      live(by) && sel.current === mine && versionRef.current === version;",
+        "      live(by) && sel.current === mine;",
+      ),
+  },
+
+  {
+    id: "MU-2157",
+    title:
+      "WEB-10a R14 (rev 5, Q7): a refusal met by a request no longer wanted (a superseded check) is ignored",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /superseded lookup is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (live(by)) revoke();",
+        "      if (live(by) && wanted()) revoke();",
+      ),
+  },
+
+  {
+    id: "MU-2158",
+    title:
+      "WEB-10a R14 (rev 5, Q7): an answer of an ended authority (before a refusal) still counts",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q7: /,
+    patch: (t) =>
+      sub(
+        t,
+        "    ownerRef.current === by.owner &&\n    life.current === by.life;",
+        "    ownerRef.current === by.owner;",
+      ),
+  },
+
+  {
+    id: "MU-2159",
+    title:
+      "WEB-10a R14 (rev 5, Q8): a refusal keeps open a fix known only from the refused history (it can be saved)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q8: .*refused while it is open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    setScan(null);\n    dropFullOnlyFix();\n    put({",
+        "    setScan(null);\n    put({",
+      ),
+  },
+
+  {
+    id: "MU-2160",
+    title:
+      "WEB-10a R13 (rev 5, Q8): Back to recent keeps open a fix known only from the full history",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Back to recent closes a full-history fix/,
+    patch: (t) =>
+      sub(t, "    dropFullOnlyFix();\n    put(null);", "    put(null);"),
+  },
+
+  {
+    id: "MU-2161",
+    title:
+      "WEB-10a R14 (rev 5, Q9): a failure that is not a refusal (uncertain, offline) is taken as one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: [
+      "tests/features/tasks/journal-window.test.tsx",
+      "tests/features/tasks/journal-ownership.test.tsx",
+    ],
+    expect: /check fails \(uncertain\)|failed refresh keeps the pages/,
+    patch: (t) =>
+      sub(
+        t,
+        '      return { kind: result.kind === "closed" ? "closed" : "failed" };',
+        '      return result.kind === "closed"\n        ? { kind: "closed" }\n        : (revoke(), { kind: "stop" });',
+      ),
+  },
+
+  {
+    id: "MU-2162",
+    title:
+      "WEB-10a C3 (rev 5, Q14): no bound on the journal requests in flight",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /at most 2 journal requests are in flight/,
+    patch: (t) =>
+      sub(
+        t,
+        "    while (g.busy >= IN_FLIGHT)",
+        "    while (g.busy >= IN_FLIGHT + 100)",
+      ),
+  },
+
+  {
+    id: "MU-2163",
+    title:
+      "WEB-10a C3 (rev 5, Q14): a waiting request is sent although nothing wants it any more",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /waiting check that is no longer wanted/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!wanted()) {\n      g.waiting.shift()?.();\n      return { kind: "stop" };\n    }\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2164",
+    title:
+      "WEB-10a C3 (rev 5, Q9): a page that does not move past its cursor is taken as an answer",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect:
+      /does not move past where it was asked|first page that does not move/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (next !== null && next <= at) return { kind: "failed" };\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2165",
+    title:
+      "WEB-10a C3 (rev 5, Q14): a refresh assembles a second window behind the one shown",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /replaces its pages in place/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    let at = j.starts[from] ?? 0;",
+          "    let at = j.starts[from] ?? 0;\n    const staged: Page[] = [];",
+        ),
+        "        const pages = [...now.pages];\n        pages[i] = page;",
+        "        staged[i] = page;\n        const pages =\n          page.next === null || i === count - 1 ? [...staged] : [...now.pages];",
+      ),
+  },
+
+  {
+    id: "MU-2166",
+    title:
+      "WEB-10a C1 (rev 5, Q15): offline, an entry known only from the full history can be fixed",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /Q15: .*offline with the full history open/,
+    patch: (t) =>
+      sub(
+        t,
+        "    journal.version === row.progressVersion &&\n    env.online;",
+        "    journal.version === row.progressVersion;",
+      ),
+  },
+
+  {
+    id: "MU-2167",
+    title:
+      "WEB-10a C1 (rev 5, Q5): an entry known only from a window read at an older version can be fixed",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /while a refresh for a newer version is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "    journal.version === row.progressVersion &&\n    env.online;",
+        "    env.online;",
+      ),
+  },
+
+  {
+    id: "MU-2168",
+    title:
+      "WEB-10a C1 (rev 5, Q13): an unmounted history goes on with its checks",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-ownership.test.tsx"],
+    expect: /unmounted while a lookup is held/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const live = (by: Asker) =>\n    mounted.current &&\n",
+        "  const live = (by: Asker) =>\n",
+      ),
+  },
+
+  {
+    id: "MU-2171",
+    title:
+      "WEB-10a R16 (rev 6, Q1): a restored draft forgets that its input is unsaved (the next closure loses it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /Q1: .*back, 2 closure/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, unsaved: false }) ?? {",
+      ),
+  },
+
+  {
+    id: "MU-2172",
+    title:
+      "WEB-10a R16 (rev 6, Q1): a closure of the full history keeps nothing of the typed draft",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /Q1: .*back, 1 closure/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = draft;\n    fixRef.current = null;",
+        "      parked.current = null;\n    fixRef.current = null;",
+      ),
+  },
+
+  {
+    id: "MU-2173",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a save's success closes a newer editor of the same draft (reopened while it was pending)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving, reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "        return f.session === session\n          ? null",
+        "        return (true as boolean)\n          ? null",
+      ),
+  },
+
+  {
+    id: "MU-2174",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a parked draft whose save succeeded is not retired (an acknowledged draft comes back)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /the acknowledged draft is retired/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = { ...p, saving: null };",
+      ),
+  },
+
+  {
+    id: "MU-2175",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a save's success retires a parked draft edited after it was submitted",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /then parked before the answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = ok ? null : { ...p, saving: null };",
+      ),
+  },
+
+  {
+    id: "MU-2176",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a reopened draft forgets its pending save (a second save while the first is pending)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving, reopened/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, saving: null }) ?? {",
+      ),
+  },
+
+  {
+    id: "MU-2177",
+    title:
+      "WEB-10a R16 (rev 6, Q2): a failed save closes the open fix (its input is lost)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /a failed save keeps the input/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return { ...f, draft: { ...f.draft, saving: null } };\n    });",
+        "      return ok ? { ...f, draft: { ...f.draft, saving: null } } : null;\n    });",
+      ),
+  },
+
+  {
+    id: "MU-2178",
+    title:
+      "WEB-10a R16 (rev 6, Q3): a failed save of a parked draft discards it",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-drafts.test.tsx"],
+    expect: /parked while saving and the save fails/,
+    patch: (t) =>
+      sub(
+        t,
+        "      parked.current = ok && p.rev === rev ? null : { ...p, saving: null };",
+        "      parked.current = ok && p.rev === rev ? null : ok ? { ...p, saving: null } : null;",
+      ),
+  },
+
+  {
+    id: "MU-2179",
+    title:
+      "WEB-10a R17 (rev 6, Q4/Q5/Q11): Save is admitted without the save decision (only the rendered control refuses)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /direct call queues nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (saveBlock(factsNow(), open.entry.id) !== null) return;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2180",
+    title:
+      "WEB-10a R17 (rev 6, Q4): the open fix's Save is shown without the save decision",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q4: .*target=full-only, offline/,
+    patch: (t) => sub(t, "      : decided;", "      : null;"),
+  },
+
+  {
+    id: "MU-2181",
+    title:
+      "WEB-10a R17 (rev 6, Q4): an entry known only from the full history can be saved offline",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q4: .*target=full-only, offline/,
+    patch: (t) =>
+      sub(
+        sub(t, "  if (!f.online) return HISTORY_COPY.fixOffline;\n", ""),
+        "    f.online &&\n    f.current &&",
+        "    f.current &&",
+      ),
+  },
+
+  {
+    id: "MU-2182",
+    title:
+      "WEB-10a R17 (rev 6, Q5): the open fix is judged at the version its history was read at, not the stream's committed one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /the re-read is held/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  if (j === null || !fullAuthority(f)) return HISTORY_COPY.fixWaits;",
+            "  if (j === null || !fullAuthority({ ...f, version: j.version }))\n    return HISTORY_COPY.fixWaits;",
+          ),
+          '  if (check?.found === "current" && check.version === f.version) return null;',
+          '  if (check?.found === "current" && check.version === j.version) return null;',
+        ),
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if (coversToEnd(j, entryId, j.version)) return null;",
+      ),
+  },
+
+  {
+    id: "MU-2183",
+    title:
+      "WEB-10a R17 (rev 6, Q11): a local change not yet read in still counts as a current detail for a full-only save",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q11: .*target=full-only/,
+    patch: (t) =>
+      sub(t, "    f.online &&\n    f.current &&\n", "    f.online &&\n"),
+  },
+
+  {
+    id: "MU-2184",
+    title:
+      "WEB-10a R17 (rev 6, Q11): the task detail does not tell the history whether its local read is current",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q11: .*target=full-only/,
+    patch: (t) => sub(t, "            current={view.current}\n", ""),
+  },
+
+  {
+    id: "MU-2185",
+    title:
+      "WEB-10a R17 (rev 6, Q6): any current window authorises a detached fix (no evidence about its own entry)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if ((true as boolean)) return null;",
+      ),
+  },
+
+  {
+    id: "MU-2186",
+    title:
+      "WEB-10a R17 (rev 6, Q6): a check made at an older version still answers for the entry",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (check?.found === "current" && check.version === f.version) return null;',
+        '  if (check?.found === "current") return null;',
+      ),
+  },
+
+  {
+    id: "MU-2187",
+    title:
+      "WEB-10a R17 (rev 6, Q4/Q5): a recent entry loses its own authority (offline and during a re-read)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /target=recent/,
+    patch: (t) => sub(t, "  if (f.recent.has(entryId)) return null;\n", ""),
+  },
+
+  {
+    id: "MU-2188",
+    title:
+      "WEB-10a R17 (rev 6, Q6): Check again replaces the open fix (its value is lost)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q6: .*newer version/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (open !== null && open.entry.id === entry.id) return;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2189",
+    title:
+      "WEB-10a R17 (rev 6, Q9): a check answered after the connection went opens a full-only fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /Q9: .*offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (!facts.recent.has(entry.id) && !fullAuthority(facts))",
+        "      (!facts.recent.has(entry.id) && (false as boolean))",
+      ),
+  },
+
+  {
+    id: "MU-2190",
+    title:
+      "WEB-10a R17 (rev 6, Q6): a window that reached the end does not answer for its entry once the window moves",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    tests: ["tests/features/tasks/journal-save-authority.test.tsx"],
+    expect: /window that reached the end answers/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (j !== null && coversToEnd(j, entry.id, row.progressVersion))",
+        "    if (j !== null && (false as boolean))",
+      ),
+  },
+
+  {
+    id: "MU-2195",
+    title:
+      "WEB-10a R19: the current read looks at the first page of the progress collection only (a later page's stream is 'inaccessible')",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /on the (second|third) page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (page.next_after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+        '    if (page.next_after === null || after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+
+  {
+    id: "MU-2196",
+    title:
+      "WEB-10a R19: the walk does not send the page's cursor (it asks for the first page again)",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /on the (second|third) page/,
+    patch: (t) =>
+      sub(
+        t,
+        '        after === null ? "" : `&after=${encodeURIComponent(after)}`',
+        '        after === null ? "" : ""',
+      ),
+  },
+
+  {
+    id: "MU-2197",
+    title:
+      "WEB-10a R19: a FULL page without a cursor is taken as the end of the collection (absence)",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /full page with no cursor/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (out.length === PROGRESS_PAGE ? next !== last : next !== null)",
+        "  if (out.length !== PROGRESS_PAGE && next !== null)",
+      ),
+  },
+
+  {
+    id: "MU-2198",
+    title: "WEB-10a R19: a later page's error is taken as the stream's absence",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /later page answers (401|429|500|503): error/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (status !== 200) return failedFor(status);",
+        '    if (status !== 200)\n      return after === null\n        ? failedFor(status)\n        : { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+
+  {
+    id: "MU-2199",
+    title:
+      "WEB-10a R19: the page's ids are not checked to follow the cursor in the endpoint's order (a repeated or backward cursor is followed)",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect:
+      /repeated cursor|goes back before the cursor|out of the endpoint's order/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (last !== null && !(row.id > last))",
+        "      (false as boolean)",
+      ),
+  },
+
+  {
+    id: "MU-2200",
+    title: "WEB-10a R19: a page is asked for after the read's scope ended",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /aborted before the first page/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (;;) {\n    if (io.signal.aborted) return ended;\n",
+        "  for (;;) {\n",
+      ),
+  },
+
+  {
+    id: "MU-2201",
+    title:
+      "WEB-10a R19: a page that arrived after the read's scope ended is still answered",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /HOLDS mine is held/,
+    patch: (t) =>
+      sub(t, "    );\n    if (io.signal.aborted) return ended;\n", "    );\n"),
+  },
+
+  {
+    id: "MU-2202",
+    title:
+      "WEB-10a R19: a projection of another kind is taken as my progress stream",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /projection of another kind/,
+    patch: (t) => sub(t, '      row.kind !== "progress" ||\n', ""),
+  },
+
+  {
+    id: "MU-2203",
+    title:
+      "WEB-10a R19: a projection of another occurrence is taken as my progress stream",
+    file: "src/features/tasks/model/contract.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /projection of another occurrence/,
+    patch: (t) => sub(t, "      row.parent_id !== occurrenceId ||\n", ""),
+  },
+
+  {
+    id: "MU-2204",
+    title: "WEB-10a R19: the walk goes on past the page that holds my stream",
+    file: "src/features/tasks/register.ts",
+    tests: ["tests/features/tasks/current-progress-read.test.ts"],
+    expect: /LAST row of a full page/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (row !== undefined) return { kind: "loaded", value: row };',
+        '    if (row !== undefined && page.next_after === null)\n      return { kind: "loaded", value: row };',
+      ),
+  },
+
+  {
+    id: "MU-2206",
+    title:
+      "WEB-10a rev 7 (live region): an earlier announcement's retraction erases a later message",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /never erases the later one|later notice's announcement survives/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (owners.current.get(region) !== announcement) return;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2207",
+    title:
+      "WEB-10a rev 7 (live region): a retraction does not cancel the announcement's pending frame",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /withdrawn before its frame|Dismiss BEFORE the frame/,
+    patch: (t) =>
+      sub(
+        t,
+        "          owners.current.delete(region);\n          cancel(region);\n",
+        "          owners.current.delete(region);\n",
+      ),
+  },
+
+  {
+    id: "MU-2208",
+    title:
+      "WEB-10a rev 7 (live region): a retraction leaves the announcement's written text",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /withdrawn after its frame|the failed order/,
+    patch: (t) =>
+      sub(
+        t,
+        '          cancel(region);\n          region.textContent = "";\n        },',
+        "          cancel(region);\n        },",
+      ),
+  },
+
+  {
+    id: "MU-2209",
+    title:
+      "WEB-10a rev 7 (live region): dismissing a notice does not withdraw its announcement",
+    file: "src/app/SessionNotices.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /the failed order|Dismiss BEFORE the frame/,
+    // Re-anchored in revision 8 (R20): the retraction now stands in the one reconciliation of the lists (the unmount cleanup is separate).
+    patch: (t) =>
+      sub(
+        t,
+        "        seen.delete(id);\n        announcement?.retract();\n",
+        "        seen.delete(id);\n",
+      ),
+  },
+
+  {
+    id: "MU-2210",
+    title:
+      "WEB-10a rev 7 (live region): a retraction owns the region by TEXT, not by announcement (it erases a later announcement of the same words)",
+    file: "src/components/ui/announcer.tsx",
+    tests: [
+      "tests/components/ui.test.tsx",
+      "tests/app/protected-tree-join.test.tsx",
+    ],
+    expect: /ownership is the announcement, not its text/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (owners.current.get(region) !== announcement) return;\n",
+        "          if (\n            owners.current.get(region) !== announcement &&\n            region.textContent !== message\n          )\n            return;\n",
+      ),
+  },
+
+  {
+    id: "MU-2211",
+    title:
+      "WEB-10a rev 8 (R20): a change of the list re-announces whatever fact is now LATEST (positional reannouncement: dismissing the newest replays the survivor over a later message)",
+    file: "src/app/SessionNotices.tsx",
+    tests: ["tests/app/notice-announcements.test.tsx"],
+    expect:
+      /N1: dismissing the newest of two notices|N2: dismissing the newest of two notices/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const fact = feedback.filter((item) => !seen.has(item.id)).pop();\n",
+        "    const fact = feedback[feedback.length - 1];\n",
+      ),
+  },
+
+  {
+    id: "MU-2212",
+    title:
+      "WEB-10a rev 8 (R20): only ANNOUNCED notices are remembered, so a survivor that was shown without announcing counts as new when another is removed",
+    file: "src/app/SessionNotices.tsx",
+    tests: ["tests/app/notice-announcements.test.tsx"],
+    expect: /N4: two session notices shown|N5: facts that arrive in one render/,
+    patch: (t) =>
+      sub(
+        t,
+        "    for (const id of shown) if (!seen.has(id)) seen.set(id, null);\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2213",
+    title:
+      "WEB-10a rev 10 (R22): an enrolment change omits initial_policy (the server then resolves the current progress defaults)",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: |Q2: |Q5: /,
+    patch: (t) =>
+      sub(
+        t,
+        "    initial_policy: copyPolicy(change.policy ?? base.policy),\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2214",
+    title:
+      "WEB-10a rev 10 (R22): Leave and the consent send a private policy instead of the audience that was read",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*(Leave keeps|consent alone)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    initial_policy: copyPolicy(change.policy ?? base.policy),\n",
+        "    initial_policy: copyPolicy(change.policy ?? { grants: [], exclude_accounts: [] }),\n",
+      ),
+  },
+
+  {
+    id: "MU-2215",
+    title: "WEB-10a rev 10 (R22): a command's policy loses its exclusions",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*exclusion/,
+    patch: (t) =>
+      sub(
+        t,
+        "  exclude_accounts: [...policy.exclude_accounts],\n",
+        "  exclude_accounts: [],\n",
+      ),
+  },
+
+  {
+    id: "MU-2216",
+    title:
+      "WEB-10a rev 10 (R22): rejoining sends expected_version 0 instead of the enrolment's current version",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining/,
+    patch: (t) =>
+      sub(
+        t,
+        "    expected_version: base.version,\n",
+        "    expected_version: change.active === true ? 0 : base.version,\n",
+      ),
+  },
+
+  {
+    id: "MU-2217",
+    title:
+      "WEB-10a rev 10 (R22): the primary-household default is offered with edit access whatever the template says",
+    file: "src/features/tasks/model/enrolment.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q2: .*version 0|Q3\/Q8: .*the first Join keeps/,
+    patch: (t) =>
+      sub(t, "        edit: template.edit,\n", "        edit: true,\n"),
+  },
+
+  {
+    id: "MU-2218",
+    title:
+      "WEB-10a rev 10 (R22, C3): the captured attempt keeps the caller's live object, not a frozen copy of its body",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q3\/Q8: .*the sent command/,
+    patch: (t) =>
+      sub(
+        t,
+        "    command: frozen(JSON.parse(body)) as EnrolCommand,\n",
+        "    command,\n",
+      ),
+  },
+
+  {
+    id: "MU-2219",
+    title:
+      "WEB-10a rev 10 (R22, C2): an unreadable default audience is shown as Private and Join can send it",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q2: .*the default can't be read/,
+    patch: (t) =>
+      sub(
+        t,
+        '            : { status: "failed" },\n',
+        '            : { status: "ready", policy: { grants: [], exclude_accounts: [] } },\n',
+      ),
+  },
+
+  {
+    id: "MU-2220",
+    title:
+      "WEB-10a rev 10 (R22, F1): joining implies the consent instead of asking it",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining|X3: /,
+    patch: (t) =>
+      // Re-anchored in revision 11 (R23): the join form's choices live in the settings' draft; no choice made is the consent `null`.
+      sub(
+        t,
+        "  const consent = draft?.consent ?? null;\n",
+        "  const consent = draft?.consent ?? true;\n",
+      ),
+  },
+
+  {
+    id: "MU-2221",
+    title:
+      "WEB-10a rev 10 (R22): rejoining starts from a private audience instead of the one last used",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*rejoining/,
+    patch: (t) =>
+      // Re-anchored in revision 11 (R23): the rejoin form's seed is passed by the settings (the draft starts from it).
+      sub(
+        t,
+        "            joinForm(enrolment, enrolment.policy, CONTROLS_COPY.lastAudience)\n",
+        "            joinForm(\n              enrolment,\n              { grants: [], exclude_accounts: [] },\n              CONTROLS_COPY.lastAudience,\n            )\n",
+      ),
+  },
+
+  {
+    id: "MU-2222",
+    title: "WEB-10a rev 10 (R22): Cancel of the audience editor saves the edit",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-policy.test.tsx"],
+    expect: /Q1: .*control: Cancel/,
+    patch: (t) =>
+      // Re-anchored in revision 11 (R23): Cancel is an Act (frozen while a change is sent or confirmed) that discards the draft.
+      sub(
+        t,
+        '              <Act variant="quiet" blocked={blocked} onClick={cancel}>\n',
+        '              <Act\n                variant="quiet"\n                blocked={blocked}\n                onClick={() => save(draft)}\n              >\n',
+      ),
+  },
+
+  {
+    id: "MU-2223",
+    title:
+      "WEB-10a rev 11 (R23): an open directory lookup's Choose stays enabled while the caller sends its policy",
+    file: "src/features/sharing/DirectoryLookup.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1: /,
+    patch: (t) =>
+      sub(
+        t,
+        "            {...(blocked\n              ? { disabled: true, reason: blocked }\n              : { onClick: () => onChoose(entry) })}\n",
+        "            onClick={() => onChoose(entry)}\n",
+      ),
+  },
+
+  {
+    id: "MU-2224",
+    title:
+      "WEB-10a rev 11 (R23): an enrolment change's answer ends its cycle (the read that follows is not awaited)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S2: /,
+    // Re-anchored in revision 12 (R25): the answer's settlement also records what a success acknowledged; the same move to `reading`.
+    patch: (t) =>
+      sub(t, '    cycle.phase = "reading";\n', '    cycle.phase = "done";\n'),
+  },
+
+  {
+    id: "MU-2225",
+    title:
+      "WEB-10a rev 11 (R23): an audience/consent edit is admitted when it happens without asking whether a change owns the settings",
+    // Re-expressed in revision 12 (R23, C1): the page owner of the draft admits each edit when it happens (the settings only ask it); the
+    // same lock check removed there.
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S5: .*Choose, one turn/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (\n    enrolmentLock(identity, taskId) !== null ||\n    (draft !== undefined && draft.base.version !== base.version)\n  )\n",
+        "  if (draft !== undefined && draft.base.version !== base.version)\n",
+      ),
+  },
+
+  {
+    id: "MU-2226",
+    title:
+      "WEB-10a rev 11 (R23): a read showing another version drops a draft whose later edits were never sent",
+    // Re-expressed in revision 12 (R23/R25): the current read ends drafts in page memory (`answerEnrolment`); the same fault, any draft
+    // of another version dropped by the read.
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S8: a draft not acknowledged/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (draft.revision === 0 && draft.base.version !== value.version))\n",
+        "        draft.base.version !== value.version)\n",
+      ),
+  },
+
+  {
+    id: "MU-2227",
+    title:
+      "WEB-10a rev 11 (R23): a read asked while the change was being sent is taken as the current state",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-attempt.test.tsx"],
+    expect: /read answered while a change is pending/,
+    patch: (t) => sub(t, '  if (!read.after) return "early";\n', ""),
+  },
+
+  {
+    id: "MU-2228",
+    title:
+      "WEB-10a rev 11 (R23): a read asked after the answer is not taken as current, so the change's cycle never ends (frozen for ever)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1\/S2 controls: /,
+    patch: (t) =>
+      sub(
+        t,
+        '    after: cycle.phase !== "sending",\n',
+        '    after: cycle.phase === "done",\n',
+      ),
+  },
+
+  {
+    id: "MU-2229",
+    title:
+      "WEB-10a rev 11 (DA-1): an offline retry is taken as a definite answer (the uncertain attempt's body and key are forgotten)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S8\/DA-1: .*Try again finds the page offline/,
+    patch: (t) =>
+      sub(t, '  "invalid",\n]);\n', '  "invalid",\n  "offline",\n]);\n'),
+  },
+
+  {
+    id: "MU-2230",
+    title:
+      "WEB-10a rev 11 (R23, I8): Leave and the consent proceed beside an unsaved audience edit (their answer then drops it)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S4: .*an unsaved edit/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 12 (R25): any draft with an edit holds them (unsent, refused or uncertain); the same rule removed.
+        "    blocked ??\n    (draft !== null && draft.revision > 0 ? CONTROLS_COPY.finishFirst : null);\n",
+        "    blocked;\n",
+      ),
+  },
+
+  {
+    id: "MU-2231",
+    title:
+      "WEB-10a rev 11 (R23): a failed read after the answer ends the change's cycle (the settings are free on no current state)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S9: .*the follow-up read is closed/,
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored in revision 12: the read's value (null: failed) is passed; a failed read passed as a successful one.
+        "answerEnrolment(env.identity, taskId, read, got)",
+        "answerEnrolment(\n        env.identity,\n        taskId,\n        read,\n        got ?? ({ version: -1 } as Enrolment),\n      )",
+      ),
+  },
+
+  {
+    id: "MU-2233",
+    title:
+      "WEB-10a rev 11 (R23): the settings are frozen while a change is sent but not while its read is awaited",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S2: |S3: /,
+    patch: (t) =>
+      sub(
+        t,
+        "      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n",
+        "      : null;\n",
+      ),
+  },
+
+  {
+    id: "MU-2234",
+    title:
+      "WEB-10a rev 11 (R23, S5): the audience editor's Cancel stays enabled while its change is sent or confirmed",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S3: /,
+    patch: (t) =>
+      sub(
+        t,
+        '              <Act variant="quiet" blocked={blocked} onClick={cancel}>\n',
+        '              <Act variant="quiet" blocked={null} onClick={cancel}>\n',
+      ),
+  },
+
+  {
+    id: "MU-2235",
+    title:
+      "WEB-10a rev 11 (R24): the expected unit count is left behind when the catalogue grows (revision 10's 1,269)",
+    file: "scripts/mutation/expected.mjs",
+    tests: ["tests/static/mutation-inventory.test.ts"],
+    expect: /maintained catalogue agrees/,
+    patch: (t) =>
+      sub(
+        t,
+        /export const EXPECTED_UNIT = \d+;/,
+        "export const EXPECTED_UNIT = 1269;",
+      ),
+  },
+
+  {
+    id: "MU-2236",
+    title:
+      "WEB-10a rev 11 (R23): a draft's edits are not marked as sent when its change is admitted (its own answer then leaves it kept as unsaved)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-ownership.test.tsx"],
+    expect: /S1\/S2 controls: /,
+    // Re-expressed in revision 12 (R25, C2): a Save/Join names the draft revision it submits (its ticket) instead of marking it sent; the
+    // same fault, the change submitted without naming it (its own success then leaves the draft kept as unsaved).
+    patch: (t) =>
+      sub(
+        t,
+        "    send(enrolCommand(taskId, d.base, change), {\n      session: d.session,\n      revision: d.revision,\n    });\n",
+        "    send(enrolCommand(taskId, d.base, change));\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 12 (review 12, R23/R25; design assessment C1-C7, Q2-Q15): MU-2237..MU-2250 --------------------------------------
+  {
+    id: "MU-2237",
+    title:
+      "WEB-10a rev 12 (R23, C1): the settings end the page's draft when they unmount (an ordinary remount loses the later edit)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q2 \(R23\): .*REMOUNT/,
+    patch: (t) =>
+      sub(
+        t,
+        "  useEffect(() => subscribeEnrolment(changed), []);\n",
+        "  // biome-ignore lint/correctness/useExhaustiveDependencies: mutant\n  useEffect(() => {\n    const stop = subscribeEnrolment(changed);\n    return () => {\n      stop();\n      const d = enrolmentDraftOf(env.identity, taskId);\n      if (d !== null) discardEnrolmentDraft(env.identity, taskId, d.session);\n    };\n  }, []);\n",
+      ),
+  },
+
+  {
+    id: "MU-2238",
+    title:
+      "WEB-10a rev 12 (R25, C2): a refusal acknowledges the submitted draft like a success (the read that follows ends it)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q4 \(R25\): .*kept with its grant|refused, the read at version/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (outcome === "saved") cycle.acknowledged = attempt.ticket;\n',
+        '    if (outcome !== "uncertain") cycle.acknowledged = attempt.ticket;\n',
+      ),
+  },
+
+  {
+    id: "MU-2239",
+    title:
+      "WEB-10a rev 12 (R25, I4): an uncertain answer acknowledges the submitted draft (a later read showing another version ends it)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-ownership.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
     ],
     expect:
-      /refuses with the revision of its read|a gating attempt|no fence at all/,
+      /SAME audience at version 8|uncertain, the read at version|S8: a draft not acknowledged/,
     patch: (t) =>
       sub(
         t,
-        '        revision: admissionFrom(k, records, "recovery", account, settled.epoch)\n          .revision,',
-        "        revision: undefined,",
+        '    if (outcome === "saved") cycle.acknowledged = attempt.ticket;\n',
+        '    if (outcome !== "refused") cycle.acknowledged = attempt.ticket;\n',
       ),
   },
+
   {
-    id: "MU-8C-R3c",
+    id: "MU-2240",
     title:
-      "WEB-08c R3: the admission revision ignores `latest_epoch` (an attempt that came and went between two probes is invisible)",
-    file: "src/session/kernel/admission.ts",
-    tests: ["tests/session/admission-probe.test.ts"],
-    expect: /still changes the revision/,
-    patch: (t) => sub(t, "        state.latest_epoch,\n", ""),
-  },
-  {
-    id: "MU-8C-R4a",
-    title:
-      "WEB-08c R4 (revision 2): the stall bound regains a 250 ms grace (a lease completing at 5,200 ms is sent; the review's regression)",
-    file: "src/session/kernel/state.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /is late: stalled \(no grace\)|NOT_COVERED, never sent/,
-    patch: (t) =>
-      sub(
-        t,
-        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);',
-        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms + 250);',
-      ),
-  },
-  {
-    id: "MU-8C-R4d",
-    title:
-      "WEB-08c R4 (revision 2): the bound's verdict waits one more timer turn (revision 1's first tie-break: an answer observed after the bound's timer still wins)",
-    file: "src/session/kernel/state.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /observed AFTER the bound's timer is late/,
-    patch: (t) =>
-      sub(
-        t,
-        '      const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);',
-        '      const timer = this.ports.clock.setTimeout(\n        () => this.ports.clock.setTimeout(() => resolve("stalled"), 0),\n        ms,\n      );',
-      ),
-  },
-  {
-    id: "MU-8C-R4e",
-    title:
-      "WEB-08c R4 (T22-READ-BOUND-20261012): the display read keeps the 5 s recording bound (T22's 5 s read ties with the timer and fails closed)",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /is an answer: the page stays displayed/,
-    patch: (t) =>
-      sub(
-        t,
-        "  const records = await readRecords(k, k.config.displayReadStallMs);",
-        "  const records = await readRecords(k);",
-      ),
-  },
-  {
-    id: "MU-8C-R4f",
-    title:
-      "WEB-08c R4 (T22-READ-BOUND-20261012): every record reader gets the display read's 6 s (the longer bound leaks beyond the display check)",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-stall-bound.test.ts"],
-    expect: /every other reader keeps the hard 5 s/,
-    patch: (t) =>
-      sub(
-        t,
-        "  bound = k.config.recordingStallMs,",
-        "  bound = k.config.displayReadStallMs,",
-      ),
-  },
-  {
-    id: "MU-8C-HF1a",
-    title:
-      "WEB-08c HF-1 (HF1-SHARED-CONFIRMATION-20261013): the settlement does not share the activation's token (every other page makes its own identity read again)",
-    file: "src/session/kernel/attempts.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
+      "WEB-10a rev 12 (R23, Q9): a success ends a LATER revision of the draft it submitted (the edit made after it is lost)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
     expect:
-      /writes the confirmation of exactly the settled session|adopts the token and the confirmation/,
-    patch: (t) => sub(t, "            csrf_token: session.csrf_token,\n", ""),
-  },
-  {
-    id: "MU-8C-HF1b",
-    title:
-      "WEB-08c HF-1: a page adopts a shared token that names another session",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /names ANOTHER session is neither adopted/,
+      /Q9: .*a later edit after the uncertain save|a later revision survives/,
     patch: (t) =>
       sub(
         t,
-        "    shared.session_id === settled.session_id\n  ) {",
-        "    true\n  ) {",
+        "        saved.session === draft.session &&\n        saved.revision === draft.revision) ||\n",
+        "        saved.session === draft.session) ||\n",
       ),
   },
+
   {
-    id: "MU-8C-HF1c",
-    title: "WEB-08c HF-1: a page adopts a shared token of an older epoch",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /older epoch .* is never adopted/,
-    patch: (t) => sub(t, "    shared.epoch === settled.epoch &&\n", ""),
-  },
-  {
-    id: "MU-8C-HF1d",
+    id: "MU-2241",
     title:
-      "WEB-08c HF-1: a confirmation of another session spares the resume verification",
+      "WEB-10a rev 12 (C5, Q9): a success ends ANOTHER editor session's draft (one reopened after Cancel, its revision and values equal)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Cancel and reopen|another session with the same revision/,
+    patch: (t) => sub(t, "        saved.session === draft.session &&\n", ""),
+  },
+
+  {
+    id: "MU-2242",
+    title:
+      "WEB-10a rev 12 (C3, Q9): Try again names the LIVE draft's revision as what it submits (its success ends the later edit)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q9: .*a later edit after the uncertain save/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  onClick={() => void send(uncertain.command)}",
+        "                  onClick={() =>\n                    void send(\n                      uncertain.command,\n                      held === null\n                        ? undefined\n                        : { session: held.session, revision: held.revision },\n                    )\n                  }",
+      ),
+  },
+
+  {
+    id: "MU-2243",
+    title:
+      "WEB-10a rev 12 (C4, Q7): a first Join already begun waits for the defaults read again (a failed read hides the choices made)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-retention.test.tsx"],
+    expect: /Q7: .*consent No and the default audience chosen/,
+    // Re-anchored in revision 13 (R26, C1/C2): the first Join's form no longer moves once begun; the same fault is its defaults read asked
+    // for again with a draft begun, and the defaults' loading or failure shown in place of the draft.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      {begun === null ? <SeedRead round={round} found={setSeed} /> : null}\n",
+          "      <SeedRead round={round} found={setSeed} />\n",
+        ),
+        '      {begun !== null ? (\n        form(begun.policy)\n      ) : seed.status === "ready" ? (\n',
+        '      {seed.status === "ready" ? (\n',
+      ),
+  },
+
+  {
+    id: "MU-2244",
+    title:
+      "WEB-10a rev 12 (Q6): a refused enrolment read keeps the unsaved draft (shown again when the read is allowed)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /the enrolment read is refused|a 403\/404 of the enrolment read/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (read.startsWith("enrolment:") && memory.drafts.delete(read.slice(10)))\n    enrolmentChanged();\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2245",
+    title:
+      "WEB-10a rev 12 (C6, Q14): a late answer for a replaced identity allocates its page memory (the current identity's is dropped)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q14: |another identity starts with nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const memory = memories.get(identity);\n  if (memory === undefined || memory.enrolment.get(taskId) !== attempt) return;\n",
+        "  const memory = memoryOf(identity);\n  if (memory.enrolment.get(taskId) !== attempt) return;\n",
+      ),
+  },
+
+  {
+    id: "MU-2246",
+    title:
+      "WEB-10a rev 12 (C6, Q15): a full page reclaims the oldest cycle even while it owns the settings (its lock is lost)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an unconfirmed cycle is never reclaimed/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (id !== taskId && !owned(memory, id)) {\n",
+        "        if (id !== taskId) {\n",
+      ),
+  },
+
+  {
+    id: "MU-2247",
+    title:
+      "WEB-10a rev 12 (I8, Q15): a full page admits a new draft or change without limit (no refusal with why)",
+    file: "src/features/tasks/memory.ts",
+    tests: [
+      "tests/features/tasks/enrolment-retention.test.tsx",
+      "tests/features/tasks/enrolment-owner.test.ts",
+    ],
+    expect: /Q15: |at capacity a NEW task/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.enrolment.size + memory.drafts.size >= limit\n",
+        "    (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-2248",
+    title:
+      "WEB-10a rev 12 (C5): opening the editor replaces a draft with edits (Change… loses the unsaved change)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an edited draft is never replaced by an opening/,
+    patch: (t) =>
+      sub(t, "    (held !== undefined && held.revision > 0) ||\n", ""),
+  },
+
+  {
+    id: "MU-2249",
+    title:
+      "WEB-10a rev 12 (I5): an edit made to the version shown changes a kept draft of an earlier version (it is moved onto it)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /a draft of another version is never edited/,
+    patch: (t) =>
+      sub(
+        t,
+        " ||\n    (draft !== undefined && draft.base.version !== base.version)\n  )\n",
+        "\n  )\n",
+      ),
+  },
+
+  {
+    id: "MU-2250",
+    title:
+      "WEB-10a rev 12: an editor opened with nothing in it outlives a change of the version (it then blocks the next edit there)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/enrolment-owner.test.ts"],
+    expect: /an editor opened with nothing in it ends at another version/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (draft.revision === 0 && draft.base.version !== value.version))\n",
+        "        (false as boolean))\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 13 (review 13, R26; design assessment C1/C2, Q1/Q3): MU-2251..MU-2253 (unit), MU-2254 (REAL ENGINE) -------------
+  {
+    id: "MU-2251",
+    title:
+      "WEB-10a rev 13 (R26): the first Join's form is keyed by whether a draft is begun (the first choice replaces it, and focus falls to the body)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect: /F1 \(R26\): .*first join, consent|F2 \(R26\): .*first join, /,
+    patch: (t) =>
+      sub(
+        t,
+        "            <FirstJoin\n              begun={current}\n",
+        '            <FirstJoin\n              key={current === null ? "seed" : "draft"}\n              begun={current}\n',
+      ),
+  },
+
+  {
+    id: "MU-2252",
+    title:
+      "WEB-10a rev 13 (R26): revision 12's first Join restored: once begun, its form is rendered outside FirstJoin (the focussed control is replaced)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect:
+      /F1 \(R26\): .*first join, consent|F2 \(R26\): .*first join, |F4 \(R26\): .*first join/,
+    patch: (t) => sub(t, FIRST_JOIN_R13, FIRST_JOIN_R12),
+  },
+
+  {
+    id: "MU-2253",
+    title:
+      "WEB-10a rev 13 (R26, C2): a first Join already begun still asks for the defaults snapshot (the draft shown, but a read asked for nothing)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/enrolment-focus.test.tsx"],
+    expect: /F5 \(R26, C2\): .*a draft begun/,
+    patch: (t) =>
+      sub(
+        t,
+        "      {begun === null ? <SeedRead round={round} found={setSeed} /> : null}\n",
+        "      <SeedRead round={round} found={setSeed} />\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 15 (review 15, R28 today-participant-membership-label, R29 task-edit-permission-admission): MU-2255..MU-2265
+  // (unit), MU-2266/MU-2267 (REAL ENGINE) ------------------------------------------------------------------------------------------------
+  {
+    id: "MU-2255",
+    title:
+      "WEB-10a rev 15 (R28): Today's row restored to review 15's defect: every shared row says You (or You and N others), whoever the roster names",
+    file: "src/features/tasks/today/TodayRow.tsx",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect:
+      /Today never names a viewer who is not taking part \(R28\) (everyone|pooled|anyone): |an empty roster says no one/,
+    patch: (t) => sub(t, TODAY_WHO_R15, TODAY_WHO_R14),
+  },
+
+  {
+    id: "MU-2256",
+    title:
+      "WEB-10a rev 15 (R28): edit permission counted as taking part (an Anyone task I may record on names me before I have)",
+    file: "src/features/tasks/format.ts",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /eligibility is not membership/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row.data.participants.includes(me) || row.streamPresent || row.streamPending\n",
+        "    row.data.participants.includes(me) ||\n    row.streamPresent ||\n    row.streamPending ||\n    row.canEdit\n",
+      ),
+  },
+
+  {
+    id: "MU-2257",
+    title:
+      "WEB-10a rev 15 (R28): my own stream (held, or being created by a queued first record) is not counted as taking part",
+    file: "src/features/tasks/format.ts",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /own stream held|my first record makes me You/,
+    patch: (t) =>
+      sub(
+        t,
+        "    row.data.participants.includes(me) || row.streamPresent || row.streamPending\n",
+        "    row.data.participants.includes(me)\n",
+      ),
+  },
+
+  {
+    id: "MU-2258",
+    title:
+      "WEB-10a rev 15 (R28): the task's Who's on this says You unconditionally (the two screens disagree)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    tests: ["tests/features/tasks/today-participants.test.tsx"],
+    expect: /the task says the same as Today \(R28\) a viewer off the roster/,
+    patch: (t) =>
+      sub(
+        t,
+        "        {whoLabel(row, env.accountId)}\n",
+        `        {others.length === 0\n          ? "You"\n          : \`You and \${others.length} other\${others.length === 1 ? "" : "s"}\`}\n`,
+      ),
+  },
+
+  {
+    id: "MU-2259",
+    title:
+      "WEB-10a rev 15 (R29): a revision needs only the task editable (a read-only execution is ignored)",
+    file: "src/features/tasks/reasons.ts",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /denied execution|both resources must be editable/,
+    patch: (t) => sub(t, EDITABLE_R15, "  return task.can_edit;\n"),
+  },
+
+  {
+    id: "MU-2260",
+    title:
+      "WEB-10a rev 15 (R29): a revision needs only the execution editable (a read-only task is ignored)",
+    file: "src/features/tasks/reasons.ts",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /denied task|both resources must be editable/,
+    patch: (t) =>
+      sub(t, EDITABLE_R15, "  return execution?.can_edit !== false;\n"),
+  },
+
+  {
+    id: "MU-2261",
+    title:
+      "WEB-10a rev 15 (R29): the form's admission ignores a known denial (Save still disabled with its reason, but Enter queues the revision)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    // Revision 16: the writing transaction refuses such a write too (`denied`), so the form's own admission is observed by
+    // task-revision-admission.test.tsx's "attempts no write" cases (no write is even asked for).
+    tests: [
+      "tests/features/tasks/task-edit-permission.test.tsx",
+      "tests/features/tasks/task-revision-admission.test.tsx",
+    ],
+    expect:
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)|attempts no write under a known denial/,
+    patch: (t) =>
+      sub(t, "    !queueUnread &&\n    !denied &&\n", "    !queueUnread &&\n"),
+  },
+
+  {
+    id: "MU-2262",
+    title:
+      "WEB-10a rev 15 (R29): save() admits whatever started it (Enter's implicit submission bypasses the disabled Save)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    // Revision 16: the writing transaction refuses such a write too (`denied`), so the form's own admission is observed by
+    // task-revision-admission.test.tsx's "attempts no write" cases (no write is even asked for).
+    tests: [
+      "tests/features/tasks/task-edit-permission.test.tsx",
+      "tests/features/tasks/task-revision-admission.test.tsx",
+    ],
+    expect:
+      /the edit form admits no revision under a known denial \(R29\) (denied |the (task|execution) permission lost|a queued revision is not edited)|attempts no write under a known denial/,
+    patch: (t) => sub(t, "    if (!canSave) return;\n", ""),
+  },
+
+  {
+    id: "MU-2263",
+    title:
+      "WEB-10a rev 15 (R29): a denied Save gives the wrong reason (wait for syncing) instead of saying the task can't be edited",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /Save is withheld with the reason|withholds Save; the typed name/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ) : denied ? (\n          <Button disabled reason={FORM_COPY.denied}>\n            {FORM_COPY.save}\n          </Button>\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-2264",
+    title:
+      "WEB-10a rev 15 (R29): the task detail offers the Edit task link under a known denial (sync and policy version only)",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect: /the task's Edit affordance \(R29\) denied /,
+    patch: (t) =>
+      sub(
+        t,
+        "          {!editable(task, view.execution) ? (\n",
+        "          {false ? (\n",
+      ),
+  },
+
+  {
+    id: "MU-2265",
+    title:
+      "WEB-10a rev 15 (R29): the edit route does not carry the permissions it read into the form (a direct route is always editable)",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    tests: ["tests/features/tasks/task-edit-permission.test.tsx"],
+    expect:
+      /direct route: Save is withheld|permission lost while the form is open|a queued revision is not edited/,
+    patch: (t) =>
+      sub(
+        t,
+        "          editable: editable(view.task, view.execution),\n",
+        "          editable: true,\n",
+      ),
+  },
+  // WEB-10a revision 16 (R30, R31, DA-A1..A3): MU-2268..MU-2298, kept in their own module (this file reached Biome's size limit).
+  ...UNIT_R16,
+  ...UNIT_R17,
+  ...UNIT_R18,
+  ...UNIT_R19,
+  ...UNIT_R20,
+  ...UNIT_R21,
+  ...UNIT_R22,
+  ...UNIT_R23,
+  ...UNIT_R24,
+  ...UNIT_R25,
+  ...UNIT_R26,
+
+  // WEB-14a additions retained when merging accepted WEB-10a; see id-migrations.json for collisions.
+
+  {
+    id: "MU-1732",
+    title:
+      "WEB-14a: the coordinator reloads on its own when a newer version is installed",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /through every event without an action/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (worker.state === "installed") {\n',
+        '      if (worker.state === "installed") {\n        reload();\n',
+      ),
+  },
+
+  {
+    id: "MU-1733",
+    title:
+      "WEB-14a: skip-waiting is posted to the ACTIVE worker instead of the waiting one",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the waiting worker \(and only it\) is told to skip waiting/,
+    patch: (t) =>
+      sub(
+        t,
+        '      waiting.postMessage({ type: "atlas:skip-waiting" });\n',
+        '      (registration?.active ?? waiting).postMessage({ type: "atlas:skip-waiting" });\n',
+      ),
+  },
+
+  {
+    id: "MU-1734",
+    title:
+      "WEB-14a: the acting tab does not wait for the other tabs' saves (bound 0)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another tab's dirty form is saved before the update is applied/,
+    patch: (t) =>
+      sub(
+        t,
+        "const bound = after(FLUSH_MAX_MS, finish);",
+        "const bound = after(0, finish);",
+      ),
+  },
+
+  {
+    id: "MU-1735",
+    title:
+      "WEB-14a: the start grace never ends: the acting tab always waits the whole bound",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /no other tab answers: the acting tab waits only FLUSH_START_GRACE_MS/,
+    patch: (t) => sub(t, "        graceOver = true;\n", ""),
+  },
+
+  {
+    id: "MU-1736",
+    title:
+      "WEB-14a: the acting tab stops waiting for a tab that said it is saving",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another tab's dirty form is saved before the update is applied/,
+    patch: (t) =>
+      sub(t, "            if (!wait.done.has(started)) return;\n", ""),
+  },
+
+  {
+    id: "MU-1737",
+    title: "WEB-14a: a dismissed banner never reappears",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /dismissed until the next return to the page/,
+    patch: (t) => sub(t, "    if (dismissed) {\n", "    if (false) {\n"),
+  },
+
+  {
+    id: "MU-1738",
+    title: "WEB-14a: 'Not now' does not dismiss",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /dismissed until the next return to the page/,
+    patch: (t) => sub(t, "      dismissed = true;\n", ""),
+  },
+
+  {
+    id: "MU-1739",
+    title:
+      "WEB-14a: the first install's controllerchange is taken for 'updated elsewhere'",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the first controllerchange from no controller is not 'updated elsewhere'/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (previous !== null) noteElsewhere();\n",
+        "    noteElsewhere();\n",
+      ),
+  },
+
+  {
+    id: "MU-1740",
+    title:
+      "WEB-14a: the accepting tab does not reload when its controller changes",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /reloads on the controller change even when the worker's statechange never reaches it/,
+    patch: (t) => sub(t, "    if (accepting) {\n", "    if (false) {\n"),
+  },
+
+  {
+    id: "MU-1741",
+    title:
+      "WEB-14a: a report answered with a newer active generation is ignored (a frozen tab never learns)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a frozen tab that missed the change finds out by reporting/,
+    patch: (t) => sub(t, "      if (ack.newer) noteElsewhere();\n", ""),
+  },
+
+  {
+    id: "MU-1742",
+    title: "WEB-14a: an unacknowledged report is not sent again",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an unacknowledged report is sent again with back-off/,
+    patch: (t) => sub(t, "    } else scheduleReport();\n", "    }\n"),
+  },
+
+  {
+    id: "MU-1743",
+    title:
+      "WEB-14a: a return to the page checks for an update every time (no 15-minute pace)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /on online; on a return to the page at most every 15 min/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!force && clock.now() - lastCheck < UPDATE_CHECK_VISIBLE_MIN_MS) return;\n",
+        "    if (false) return;\n",
+      ),
+  },
+
+  {
+    id: "MU-1744",
+    title: "WEB-14a: the hourly check also runs while the page is hidden",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /hourly while visible/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (deps.page.isVisible()) void checkForUpdate(true);\n",
+        "      void checkForUpdate(true);\n",
+      ),
+  },
+
+  {
+    id: "MU-1745",
+    title:
+      "WEB-14a: an unsupported server asks for a newer client on every answer (no 60-second pace)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /an unsupported server asks for a newer client at once, at most every 60 s/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (clock.now() - lastUnsupportedCheck < UPDATE_CHECK_UNSUPPORTED_MIN_MS)\n      return;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1746",
+    title:
+      "WEB-14a: a failed save does not stop the update (the form's input is lost to the reload)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a failed save keeps the form, shows retry or discard/,
+    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!(await settleForms(next))) return;\n",
+        "      await settleForms(next);\n",
+      ),
+  },
+
+  {
+    id: "MU-1747",
+    title:
+      "WEB-14a: a refused save (signing out) is shown as an ordinary failure with 'Retry save'",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /signing out \(refused\)/,
+    patch: (t) =>
+      sub(t, 'results.includes("refused")', 'results.includes("never")'),
+  },
+
+  {
+    id: "MU-1748",
+    title:
+      "WEB-14a: no fallback: an activation that never happens leaves the tab waiting for ever",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /activation that never happens: the tab reloads after ACTIVATION_FALLBACK_MS/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    fallback = after(ACTIVATION_FALLBACK_MS, () => {\n      fallback = null;\n      if (accepting) reload();\n    });\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1749",
+    title:
+      "WEB-14a: a tab that learns it was updated elsewhere does not save its input",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saves its dirty forms as a precaution/,
+    patch: (t) =>
+      sub(
+        t,
+        "    publish();\n    void flushDirty(deps.forms);\n  };\n",
+        "    publish();\n  };\n",
+      ),
+  },
+
+  {
+    id: "MU-1750",
+    title:
+      "WEB-14a: an unsupported answer that came before the registration is never followed by an update check",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /asks for a newer client once registered/,
+    patch: (t) =>
+      sub(
+        t,
+        "      // An answer that came before the registration could not ask for a newer client: it asks now.\n      checkIfUnsupported();\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1751",
+    title:
+      "WEB-14a: one unacknowledged client no longer keeps every generation",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /one unacknowledged client keeps every generation/,
+    patch: (t) => sub(t, "      unknown ||\n", ""),
+  },
+
+  {
+    id: "MU-1752",
+    title: "WEB-14a: the active generation is not kept for being active",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the active generation is kept even if marked retired/,
+    patch: (t) => sub(t, "      generation === input.active ||\n", ""),
+  },
+
+  {
+    id: "MU-1753",
+    title:
+      "WEB-14a: a generation never retired (the waiting one) may be purged",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a generation retired within the grace is kept; one never retired/,
+    patch: (t) => sub(t, "      retiredAt === null ||\n", ""),
+  },
+
+  {
+    id: "MU-1754",
+    title: "WEB-14a: no grace: a generation is purged the moment it is retired",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a generation retired within the grace is kept/,
+    patch: (t) =>
+      sub(t, "      input.now - retiredAt < grace;", "      false;"),
+  },
+
+  {
+    id: "MU-1755",
+    title: "WEB-14a: a non-GET request is answered by the worker",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /non-GET is never answered/,
+    patch: (t) =>
+      sub(t, '  if (input.method !== "GET") return { kind: "pass" };\n', ""),
+  },
+
+  {
+    id: "MU-1756",
+    title: "WEB-14a: a cross-origin request is answered by the worker",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cross-origin is never answered/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (url.origin !== input.origin) return { kind: "pass" };\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1757",
+    title: "WEB-14a: backend paths are answered (the shell for a navigation)",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /backend path .* is passed/,
+    patch: (t) =>
+      sub(t, '  if (isBackendPath(url)) return { kind: "pass" };\n', ""),
+  },
+
+  {
+    id: "MU-1758",
+    title:
+      "WEB-14a: a navigation is not answered with the shell (offline navigation fails)",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is the shell/,
+    patch: (t) =>
+      sub(t, '      : { kind: "shell" };', '      : { kind: "pass" };'),
+  },
+
+  {
+    id: "MU-1759",
+    title:
+      "WEB-14a: an older page's hashed file is not answered from the retained precache",
+    file: "src/sw/core.ts",
+    tests: ["tests/pwa/sw-core.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /any hashed asset are answered from the precache/,
+    patch: (t) => sub(t, ' || path.startsWith("/assets/")', ""),
+  },
+
+  {
+    id: "MU-1760",
+    title: "WEB-14a: a report is answered before its record has landed",
+    file: "src/sw/lifecycle.ts",
+    tests: ["tests/pwa/sw-lifecycle.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no answer before the record has landed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    await deps.state.recordReport(clientId, {",
+        "    void deps.state.recordReport(clientId, {",
+      ),
+  },
+
+  {
+    id: "MU-1761",
+    title: "WEB-14a: the reports of closed clients are never forgotten",
+    file: "src/sw/lifecycle.ts",
+    tests: ["tests/pwa/sw-lifecycle.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an open page on A keeps A through B and C/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!open.has(clientId)) await deps.state.deleteClient(clientId);\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1762",
+    title:
+      "WEB-14a: activation does not retire the other generations (nothing is ever purged)",
+    file: "src/sw/lifecycle.ts",
+    tests: ["tests/pwa/sw-lifecycle.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a generation retired within the grace is not purged/,
+    patch: (t) =>
+      sub(
+        t,
+        "  await deps.state.retireAllBut(deps.own.generation, deps.now());\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1763",
+    title:
+      "WEB-14a: a trigger during a check is dropped (no check after a reconnect that came during one)",
     file: "src/session/session.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /does not spare the resume verification/,
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a reconnect during a check asks exactly once more after it/,
     patch: (t) =>
       sub(
         t,
-        "      shared.session_id !== identity.session_id\n",
-        "      false\n",
+        "    if (checking) {\n      again = true;\n      return;\n    }\n",
+        "    if (checking) return;\n",
       ),
   },
+
   {
-    id: "MU-8C-HF1e",
+    id: "MU-1764",
     title:
-      "WEB-08c HF-1: a confirmation dated in the future spares the resume verification",
+      "WEB-14a: a reconnect asks again only after an unreachable answer (the base behaviour)",
     file: "src/session/session.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /dated in the FUTURE/,
-    patch: (t) => sub(t, "    return age >= 0 && age <", "    return age <"),
-  },
-  {
-    id: "MU-8C-HF1f",
-    title:
-      "WEB-08c HF-1: the lease retirement records a confirmation for a session the record does not settle",
-    file: "src/session/model/reducers/observation.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /writes NO confirmation/,
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a server upgraded under an open tab is noticed at the next reconnect/,
     patch: (t) =>
       sub(
         t,
-        "    settled.session_id === confirm.session_id;",
-        "    settled.account_id === confirm.account_id;",
+        "          // while this page could not reach it. FIRST, before anything below can wake a sender.\n          revalidate();\n",
+        '          // while this page could not reach it.\n          if (compat.get().status === "unreachable") revalidate();\n',
       ),
   },
+
   {
-    id: "MU-8C-HF1g",
+    id: "MU-1765",
+    title: "WEB-14a: the pace does not start again when the answer changes",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the pace starts again when the answer changes/,
+    patch: (t) =>
+      sub(t, "    if (result.status !== before) retryStep = 0;\n", ""),
+  },
+
+  {
+    id: "MU-1766",
     title:
-      "WEB-08c HF-1: a clean identity read does not refresh the shared confirmation",
-    file: "src/session/kernel/identity.ts",
-    tests: ["tests/session/web08c-shared-confirmation.test.ts"],
-    expect: /refreshes the shared confirmation/,
+      "WEB-14a: the paced re-check keeps running once the server is supported",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /lifted once the server reports a supported version/,
     patch: (t) =>
       sub(
         t,
-        "  cleanRelease(k, inflight, {\n    account_id: inflight.account,",
-        "  cleanRelease(k, inflight, undefined && {\n    account_id: inflight.account,",
+        '    if (k.disposed || result.status === "supported") return;\n',
+        "    if (k.disposed) return;\n",
       ),
   },
+
   {
-    id: "MU-8C-R4b",
+    id: "MU-1767",
     title:
-      "WEB-08c R4: the resume gate's polite status never says 'Checking your account' while the local check is pending",
-    file: "src/components/ui/gate-dialog.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
-    expect: /Read pending/,
+      "WEB-14a: a return to the page asks again whatever the last answer's age",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /asks again only after the minimum interval/,
     patch: (t) =>
       sub(
         t,
-        '    if (message.textContent === "") message.textContent = GATE_HEADING;',
-        "    void GATE_HEADING;",
+        "    if (ports.clock.now() - lastAnswerAt >= config.compatRecheckMinIntervalMs)\n",
+        "    if (true)\n",
       ),
   },
+
   {
-    id: "MU-8C-R4c",
-    title:
-      "WEB-08c R4: a tree for a different account keeps the previous account's address (a Settings dialog route opens again; focus is not the main heading)",
-    file: "src/app/protected-tree.tsx",
-    tests: ["tests/app/protected-tree-join.test.tsx"],
-    expect: /where a tree starts/,
+    id: "MU-1768",
+    title: "WEB-14a: a return to the page during a check queues another one",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a return to the page while a check is in flight asks nothing more/,
     patch: (t) =>
       sub(
         t,
-        '        history.replaceState(null, "", "/");\n      lastMounted = account;',
-        "        void account;\n      lastMounted = account;",
+        "    if (checking) return;\n    if (ports.clock",
+        "    if (ports.clock",
       ),
   },
+
   {
-    id: "MU-8C-R3d",
+    id: "MU-1769",
     title:
-      "WEB-08c R3: a re-authentication refusal is not kept in page memory (lost when the activation's gate remounts the tree)",
-    file: "src/features/settings/signing-in/ConfirmItsYou.tsx",
-    tests: ["tests/features/settings/confirm-its-you.test.tsx"],
-    expect: /R3: a refusal that arrives after the activation's gate/,
+      "WEB-14a: the recovery identifier is minted at load, not at the first save",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the identifier is minted at the first save, not at load/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 4 (the mount effect opens its field state instead of reading mount values); the defect is unchanged.
     patch: (t) =>
       sub(
         t,
-        "    confirmFlow.fail(journey, result.message);",
-        "    void journey;",
+        "    mountFields.current = own;\n",
+        "    mountFields.current = own;\n    void tab.id();\n",
       ),
   },
+
   {
-    id: "MU-8C-HF13b",
+    id: "MU-1770",
     title:
-      "WEB-08c revision 3 (R8, HF-13): the level-0 gate does not cancel a heading attempt still waiting from the mount",
+      "WEB-14a: a remounted form does not restore this page's own copy first",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/use-recoverable-form.test.tsx",
+      "tests/lib/recoverable-form-session.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restores this page's own copy first/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "        const own = current.tab.current();\n        const gone",
+        "        const own = null;\n        const gone",
+      ),
+  },
+
+  {
+    id: "MU-1771",
+    title:
+      "WEB-14a: a copy is restored over input typed before the look finished",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /never restored over input typed before the look finished/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 4 (the whole untouched guard of the look: values at their initial state, nothing owed, no edit since the look began); the defect is unchanged.
+    // Re-anchored in revision 7 (the look was rewritten: pinned typed reads, the hand-off read under its lock, `startLook`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '            Object.entries(valuesOf(current)).every(\n              ([name, value]) => value === (fields.initial[name] ?? ""),\n            ) &&\n            !hasDebt(fields) &&\n            fields.input === beganInput &&\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1772",
+    title: "WEB-14a: the look is made again whenever the port changes",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the look is made once per mount/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '      if (bound.look !== "none") return undefined;\n      startLook(bound, shownBefore);',
+        "      startLook(bound, shownBefore);",
+      ),
+  },
+
+  {
+    id: "MU-1773",
+    title:
+      "WEB-14a: the copy restored from is discarded even when this page's own save failed",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a failed own save does not discard the restored-from copy/,
+    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '  if (result !== "saved") return result;\n',
+        '  if (result !== "saved") {\n    const lost = session.persisted.source;\n    if (lost !== null) await target.discard(session.formContext, lost.id);\n    return result;\n  }\n',
+      ),
+  },
+
+  {
+    id: "MU-1774",
+    title: "WEB-14a: a submission leaves this page's own copy behind",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /submission discards both copies/,
+    // Re-anchored in revision 1 (the code it patches moved); the defect is unchanged.
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 6 (R13: `discardAt` keys each copy by where it is stored); the defect is unchanged.
+    // Re-anchored in revision 8 (R16: `discardAt` stages exact removals); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "  if (own !== null && ownAsked)\n    stages[0]?.push({\n      formContext: context,\n      tabInstanceId: own,\n      capture: null,\n    });\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1775",
+    title:
+      "WEB-14a: the recovery identifier is kept in sessionStorage (an opener-copied tab shares it)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the identifier is minted at the first save, not at load/,
+    // Re-anchored in revision 3 (the code it patches changed for findings R3, R10, R11 and R12); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "        owned = candidate;\n        return Promise.resolve(candidate);",
+          '        owned = candidate;\n        sessionStorage.setItem("atlas-recovery-tab", candidate);\n        return Promise.resolve(candidate);',
+        ),
+        "              owned = candidate;\n",
+        '              owned = candidate;\n              sessionStorage.setItem("atlas-recovery-tab", candidate);\n',
+      ),
+  },
+
+  {
+    id: "MU-1776",
+    title:
+      "WEB-14a: an open owner's lock is read as gone (another open tab's copy is taken over)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an open owner's lock is held, a gone owner's is free/,
+    patch: (t) =>
+      sub(
+        t,
+        "          (lock) => lock === null,",
+        "          (lock) => lock !== null,",
+      ),
+  },
+
+  {
+    id: "MU-1777",
+    title: "WEB-14a: a discarded (terminal) copy is listed",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a discarded copy is not listed/,
+    // Re-anchored in revision 1 (R5: the walk keeps the restorable rows as it meets them); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "if (!row.terminal) restorable.push(row);",
+        "restorable.push(row);",
+      ),
+  },
+
+  {
+    id: "MU-1778",
+    title: "WEB-14a: the list is oldest first",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /newest first, one per tab/,
+    patch: (t) =>
+      sub(
+        t,
+        "a.saved_at < b.saved_at ? 1 : -1",
+        "a.saved_at < b.saved_at ? -1 : 1",
+      ),
+  },
+
+  {
+    id: "MU-1779",
+    title:
+      "WEB-14a revision 1, R1: a reconnect does not withdraw `supported`: queued writes are admitted before the fresh answer",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /withdrawn at the online event/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (compat.get().status === "supported") compat.set({ status: "unknown" });\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1780",
+    title:
+      "WEB-14a revision 1, R1: an answer asked before the latest reconnect is applied (a stale `supported` reopens admission)",
+    file: "src/session/session.ts",
+    tests: ["tests/session/compat-recheck.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /asked BEFORE the reconnect is dropped|drops that check's answer too/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (!k.disposed && asked === reconnects) answered(result);",
+        "if (!k.disposed) answered(result);",
+      ),
+  },
+
+  {
+    id: "MU-1781",
+    title:
+      "WEB-14a revision 1, R2: dirty is judged against the mount values only (a form back at them after a save looks clean)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saved, then cleared back to the mount value|back to X: dirty/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 4 (the own-copy comparison of isDirty); the defect is unchanged.
+    patch: (t) =>
+      sub(t, "  if (own) return !copyMatches(fields, own.values, now);\n", ""),
+  },
+
+  {
+    id: "MU-1782",
+    title:
+      "WEB-14a revision 1, R2: a form back at its clean values saves a copy instead of discarding its copies",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /saved, then cleared back to the mount value|cleared back to the mount value: dirty, and the next page shows it empty/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 4 (the resolved-values branch of flushSession); the defect is unchanged.
+    patch: (t) =>
+      sub(t, "  if (allResolved(session.fields, now)) {", "  if (false) {"),
+  },
+
+  {
+    id: "MU-1783",
+    title:
+      "WEB-14a revision 1, R4: a flush overtaken by a submission or discard while it waits for its identifier is still written",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /first identifier still being granted|still overtakes it/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(t, '  if (session.order.lastTerminal > op) return "failed";\n', ""),
+  },
+
+  {
+    id: "MU-1784",
+    title:
+      "WEB-14a revision 1, R6: a discard that did not land is reported as discarded (nothing is owed)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /whose discard fails/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 8 (R16: the outcome is combined in `removeCopies`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '      if (result === "discarded") settled.add(key);\n      else outcome = outcome === "refused" ? outcome : result;\n',
+        '      if (result === "discarded") settled.add(key);\n',
+      ),
+  },
+
+  {
+    id: "MU-1785",
+    title:
+      "WEB-14a revision 1, R6: 'Discard and reload anyway' reloads although the discard failed",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a discard that fails: discard_failed/,
+    patch: (t) =>
+      sub(t, '    if (results.includes("failed")) {', "    if (false) {"),
+  },
+
+  {
+    id: "MU-1786",
+    title:
+      "WEB-14a revision 1, R6: 'Discard and reload anyway' skips the discard (revision 0)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /copies are discarded before the reload|a discard that fails: discard_failed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    discardAndReload: () => void act("discard"),',
+        '    discardAndReload: () => void act("anyway"),',
+      ),
+  },
+
+  {
+    id: "MU-1787",
+    title:
+      "WEB-14a revision 1, R3: nothing is frozen while the tab saves and waits for the reload",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /frozen from accept|a failed save releases the forms/,
+    patch: (t) => sub(t, "    frozen ??= deps.forms.freeze();\n", ""),
+  },
+
+  {
+    id: "MU-1788",
+    title:
+      "WEB-14a revision 1, R3: the freeze ends before the activation the tab waits for",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /frozen from accept/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!reloaded && !accepting && !resealing) unfreeze();",
+        "      if (!reloaded) unfreeze();",
+      ),
+  },
+
+  {
+    id: "MU-1789",
+    title:
+      "WEB-14a revision 1, R3: a form that mounts during a freeze is not frozen",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: [
+      "tests/lib/use-recoverable-form.test.tsx",
+      "tests/pwa/coordinator.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /registers during a freeze is frozen too|frozen from accept/,
+    patch: (t) =>
+      sub(t, "      for (const held of freezes) hold(held, handle);\n", ""),
+  },
+
+  {
+    id: "MU-1790",
+    title:
+      "WEB-14a revision 1, R5: the listing reads only its first page (revision 0's window): terminal rows hide a durable copy",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /terminal rows whose ids sort first|ends exactly on a page boundary/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (page.length < LIST_PAGE_ROWS) return restorable;",
+        "      return restorable;",
+      ),
+  },
+
+  {
+    id: "MU-1791",
+    title:
+      "WEB-14a revision 1, R5: the answer is cut to ten copies before it is ordered (revision 0's bound)",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /every copy is answered, newest first/,
+    patch: (t) =>
+      sub(
+        t,
+        "    result: [...rows].sort((a, b) =>",
+        "    result: [...rows].slice(0, 10).sort((a, b) =>",
+      ),
+  },
+
+  {
+    id: "MU-1792",
+    title:
+      "WEB-14a revision 1, R6: a discard whose terminal write failed over an existing copy answers `discarded`",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a write that fails: failed, and the copy is still there/,
+    patch: (t) =>
+      sub(
+        t,
+        '          return created ? "discarded" : "failed";',
+        '          return "discarded";',
+      ),
+  },
+
+  {
+    id: "MU-1793",
+    title:
+      "WEB-14a revision 1, R8: the neutral banner announces through the protected tree's bridge (silent while signed out)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-banner.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /announced once through the neutral live region/,
+    // Re-anchored in revision 12 (R19 rewrote the neutral announcement effect): the same mutation, the neutral banner announces nothing.
+    patch: (t) => sub(t, "    neutralLiveRegion.announce(text);\n", ""),
+  },
+
+  {
+    id: "MU-1794",
+    title:
+      "WEB-14a revision 1, R7: the form's port is withdrawn when the database is superseded (revision 0: no recovery connection)",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/form-recovery-superseded.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /superseded: it reaches the recovery connection/,
+    patch: (t) =>
+      sub(
+        t,
+        "    current?.service.live ? current.service : recoveryTarget();",
+        "    current?.service.live ? current.service : null;",
+      ),
+  },
+
+  {
+    id: "MU-1795",
+    title:
+      "WEB-14a revision 1, R7: the recovery connection stands in for a page that left the account",
+    file: "src/data/ui/env.ts",
+    tests: ["tests/data/form-recovery-superseded.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the identity leaves the account/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (deps.identity.get()?.account_id !== last.account) return null;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1796",
+    title:
+      "WEB-14a revision 1: a flush is not pinned when it is asked for (a write that waits lands in whichever account is displayed then)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the copy lands in the form's account only|changed under the form/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '  const target = targetOf(session);\n  if (!target) return "failed";',
+        '  const target = session.port;\n  if (!target) return "failed";',
+      ),
+  },
+
+  {
+    id: "MU-1797",
+    title:
+      "WEB-14a revision 1: a write is made for another account than the one the form was mounted for",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /changed under the form|unmounts after the account changed/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(t, "  if (pinned.scope !== session.scope) return null;\n", ""),
+  },
+
+  {
+    id: "MU-1798",
+    title:
+      "WEB-14a revision 1 (F-1): a form that unmounts dirty leaves nothing for its remount (the input is lost)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /leaves its input \(memory only\)/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 4 (detach empties the field state's ledger); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "  fields.form = () => null;\n  releaseAttached(session);",
+        "  fields.form = () => null;\n  fields.ledger = {};\n  fields.present = new Map();\n  releaseAttached(session);",
+      ),
+  },
+
+  {
+    id: "MU-1799",
+    title:
+      "WEB-14a revision 1 (F-1): the form mounted again does not take back what its previous mount left",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /leaves its input \(memory only\)/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    // Re-anchored in revision 4 (adopt no longer puts the session's value into the new mount's untouched field); the defect is unchanged.
+    // Re-anchored in revision 8 (R17: a field is written through its control-state access); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!field || field.key !== shown || field.write(theirs)) continue;",
+        "      if (!field || field.key !== shown || true) continue;",
+      ),
+  },
+
+  {
+    id: "MU-1800",
+    title:
+      "WEB-14a revision 1: `pin` answers a port that follows the displayed account (not pinned)",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a pinned port keeps writing there/,
+    patch: (t) =>
+      sub(
+        t,
+        "        port = createFormRecoveryPort({ ...deps, service: () => target });",
+        "        port = createFormRecoveryPort(deps);",
+      ),
+  },
+
+  {
+    id: "MU-1801",
+    title:
+      "WEB-14a revision 1 (F-1): what a form left at a remount is handed to another account or a re-created database",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/use-recoverable-form.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /never to another account, nor/,
+    // Re-anchored in revision 2 (the code it patches moved into the form session or the reload checkpoint); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        sub(t, "    retireOtherScopes(registry, scope);\n", ""),
+        "      existing.scope === scope &&\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1802",
+    title:
+      "WEB-14a revision 2, R2: each mount numbers its saves from zero again (a later save looks older than the baseline)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saves 'one' and 'two', 'three' carried by a remount/,
+    patch: (t) =>
+      sub(
+        t,
+        "  session.left = null;\n  session.attached = attachment;",
+        "  session.left = null;\n  session.order.next = 0;\n  session.order.lastTerminal = 0;\n  session.attached = attachment;",
+      ),
+  },
+
+  {
+    id: "MU-1803",
+    title:
+      "WEB-14a revision 2, R4: a save keeps the terminal order of the mount that asked for it (a later mount's submission cannot overtake it)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is overtaken by the next mount's/,
+    // Re-anchored in revision 4 (the capture reads the field state's allow-list); the defect is unchanged. Re-anchored in revision 10 (the
+    // values are read before the order, for the copies' accounting); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n",
+            "  const order = session.order;\n  session.order.next += 1;\n  const op = session.order.next;\n  const allow = session.fields.allow;\n",
+          ),
+          '  if (session.order.lastTerminal > op) return "failed";\n',
+          '  if (order.lastTerminal > op) return "failed";\n',
+        ),
+        "  session.left = null;\n  session.attached = attachment;",
+        "  session.left = null;\n  session.order = { ...session.order };\n  session.attached = attachment;",
+      ),
+  },
+
+  {
+    id: "MU-1804",
+    title:
+      "WEB-14a revision 2, R2/R4: a save that completes late sets the baseline whatever its order",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /completes after the next mount's/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (session.order.lastTerminal < op && (state.own?.op ?? -1) < op)",
+        "  if (session.order.lastTerminal < op)",
+      ),
+  },
+
+  {
+    id: "MU-1805",
+    title:
+      "WEB-14a revision 2, DA-1: a look answered after a submission or discard still restores the copy it found",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is offered, not put in the form|the last owner probe is held/,
+    patch: (t) => sub(t, "          current.order.next === began &&\n", ""),
+  },
+
+  {
+    id: "MU-1806",
+    title:
+      "WEB-14a revision 2, R3: a look answered while an update reload is prepared restores its copy into the held form",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /look answers during a freeze/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "            current.order.next === began &&\n            !current.registry.frozen();",
+        "            current.order.next === began;",
+      ),
+  },
+
+  {
+    id: "MU-1807",
+    title:
+      "WEB-14a revision 2, R3: another copy can be put in the form while an update reload is prepared",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    // Revision 7: the choice is applied after a fresh read, and the freeze is checked again at that moment (a second layer); the defect (a
+    // copy put in a held form) needs both checks gone, so the mutant removes both.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      // Refused while an update reload is prepared (R3): it would change the form after its last save.\n      if (registry.frozen()) return Promise.resolve("refused");\n',
+          "",
+        ),
+        "          !form ||\n          registry.frozen() ||\n",
+        "          !form ||\n",
+      ),
+  },
+
+  {
+    id: "MU-1808",
+    title:
+      "WEB-14a revision 2, R3: 'Discard instead' changes the form while an update reload is prepared",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    patch: (t) => sub(t, '    if (registry.frozen()) return "failed";\n', ""),
+  },
+
+  {
+    id: "MU-1809",
+    title:
+      "WEB-14a revision 2, R3: a submission can be started while an update reload is prepared",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    patch: (t) => sub(t, "    if (registry.frozen()) return null;\n", ""),
+  },
+
+  {
+    id: "MU-1810",
+    title:
+      "WEB-14a revision 2, R3: a submission sent is not outstanding (an update reload does not wait for it)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a submission ticket is outstanding until it settles|a ticket outlives a remount/,
+    // Re-anchored in revision 3 (the code it patches changed for findings R3, R10, R11 and R12); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      sent = submissionOf(current);\n      track(current, outstanding);\n",
+        "      sent = submissionOf(current);\n",
+      ),
+  },
+
+  {
+    id: "MU-1811",
+    title:
+      "WEB-14a revision 2, DA-2: only the account is compared, not its database's incarnation (a mounted form writes into the re-created database)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /deleted and created again while it stays mounted/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (pinned.scope !== session.scope) return null;",
+        "  if (pinned.account !== session.account) return null;",
+      ),
+  },
+
+  {
+    id: "MU-1812",
+    title:
+      "WEB-14a revision 2: an older discard landing late clears the debt of a newer one that failed",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an older discard landing late/,
+    patch: (t) =>
+      sub(t, "    if (next.owed <= op) next.owed = 0;", "    next.owed = 0;"),
+  },
+
+  {
+    id: "MU-1813",
+    title:
+      "WEB-14a revision 2, R3: a form that unmounts leaves the registry at once, unsaved input and all",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is still listed|a ticket outlives a remount/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "  session.relook = null;\n  unlistIfIdle(session);\n}",
+        "  session.relook = null;\n  retire(session);\n}",
+      ),
+  },
+
+  {
+    id: "MU-1814",
+    title:
+      "WEB-14a revision 2: the sessions of another scope are not retired when a form binds to a new one",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /retires the sessions of the old one|unsaved input of the first account is dropped/,
+    patch: (t) => sub(t, "    retireOtherScopes(registry, scope);\n", ""),
+  },
+
+  {
+    id: "MU-1815",
+    title:
+      "WEB-14a revision 2, R3: a form mounted again during a freeze is not held still as it attaches",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /held still as it attaches/,
+    patch: (t) =>
+      sub(
+        t,
+        "  session.attached = attachment;\n  list(session);\n  holdAttached(session);\n  return attachment;",
+        "  session.attached = attachment;\n  list(session);\n  return attachment;",
+      ),
+  },
+
+  {
+    id: "MU-1296",
+    title:
+      "WEB-14a revision 2, R3: the reload is not checked (work that arrived during the waits is lost to it)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /comes back dirty during the waits is saved before the reload|a late form whose save fails stops this tab's reload|cannot be held still/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!sealed()) {\n      void reseal();\n      return;\n    }\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1297",
+    title:
+      "WEB-14a revision 2, R3: the tab does not wait for work already outstanding (a submission sent before accepting is saved over)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is waited for; its success discards the copies/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (deps.forms.pending() > 0) {\n        busy = { kind: "saving" };\n        publish();\n        await deps.forms.settled();\n        if (disposed) return false;\n        // What settled may have started more (a submission\'s success discards the copies): that is waited for first.\n        if (deps.forms.pending() > 0) continue;\n      }\n      if (sealed()) return true;\n      if (act === "save") {',
+        '      if (sealed()) return true;\n      if (act === "save") {',
+      ),
+  },
+
+  {
+    id: "MU-1298",
+    title:
+      "WEB-14a revision 2, R3: a form that cannot be held still is taken for safe",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot be held still is never taken for safe/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (forms.pending() > 0 || forms.unheld() > 0) return false;",
+        "    if (forms.pending() > 0) return false;",
+      ),
+  },
+
+  {
+    id: "MU-1299",
+    title:
+      "WEB-14a revision 2, R3: the registry never says a freeze is in force (the recovery actions stay available)",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /change nothing; `locked` says so/,
+    patch: (t) =>
+      sub(t, "    frozen: () => freezes.size > 0,", "    frozen: () => false,"),
+  },
+
+  {
+    id: "MU-3012",
+    title:
+      "WEB-14a revision 2, R3: a form without a freeze counts as held still",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot be held still is never taken for safe/,
+    patch: (t) =>
+      sub(
+        t,
+        "      held.set(handle, handle.freeze ? handle.freeze() : null);",
+        "      held.set(handle, handle.freeze ? handle.freeze() : () => undefined);",
+      ),
+  },
+
+  {
+    id: "MU-3013",
+    title:
+      "WEB-14a revision 2, R3: 'Discard instead' stays enabled while an update reload is prepared",
+    file: "src/lib/form-recovery/RecoveryBanner.tsx",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard instead' is disabled and says why/,
+    patch: (t) => sub(t, "        {state.disabled ? (", "        {false ? ("),
+  },
+
+  {
+    id: "MU-3014",
+    title:
+      "WEB-14a revision 2, R3: a checkpoint that cannot be met leaves the tab accepting (a retry is ignored; the fallback can still fire)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a late form whose save fails stops this tab's reload/,
+    patch: (t) =>
+      sub(
+        t,
+        "    // This tab does not reload: the person keeps working (a worker may have activated for the other tabs; this tab's input is not lost).\n    stopAccepting();\n",
+        "    // This tab does not reload: the person keeps working (a worker may have activated for the other tabs; this tab's input is not lost).\n",
+      ),
+  },
+
+  {
+    id: "MU-3015",
+    title:
+      "WEB-14a revision 2: a save of the form is not counted as outstanding",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /with a save outstanding is listed/,
+    patch: (t) => sub(t, "  session.pending.add(operation);\n", ""),
+  },
+
+  {
+    id: "MU-3016",
+    title:
+      "WEB-14a revision 2, R3: a clean session is forgotten when its mount goes (the next mount starts afresh: an empty form during a freeze)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a CLEAN form \(its input saved\) mounted again while a freeze stands/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (session.registry.session(session.formContext) === session)\n    unlist(session);\n  else retire(session);",
+        "  retire(session);",
+      ),
+  },
+
+  {
+    id: "MU-3017",
+    title:
+      "WEB-14a revision 2: a mount resuming its session does not offer the copies other tabs left since",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restores this page's own copy first/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '      startLook(current, shown, "offer");\n      return cancel;',
+        "      setReady(true);\n      return;",
+      ),
+  },
+
+  {
+    id: "MU-3018",
+    title:
+      "WEB-14a revision 2: a mount resuming its session says it is ready before the copies other tabs left since are known",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: [
+      "tests/lib/recoverable-form-session.test.tsx",
+      "tests/lib/use-recoverable-form.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /not ready until the copies other tabs left since are known/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '      offerOwed.current = true;\n      startLook(current, shown, "offer");',
+        '      offerOwed.current = true;\n      setReady(true);\n      startLook(current, shown, "offer");',
+      ),
+  },
+
+  {
+    id: "MU-1701",
+    title:
+      "WEB-14a revision 3, R3: every success is a terminal act with what the form holds when it answers (input changed after the send is declared clean)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /changed after the send: the success keeps the later input/,
+    // Re-anchored in revision 4 (the submission records everything the form held); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const unchanged =\n    sent.input !== null &&",
+          "  const unchanged =\n    true ||\n    sent.input !== null &&",
+        ),
+        'terminalAct(session, { ...sent.held }, "submission")',
+        'terminalAct(session, held(fields), "submission")',
+      ),
+  },
+
+  {
+    id: "MU-1702",
+    title:
+      "WEB-14a revision 3, R3: a success compares values only (an edit back to the sent text is taken for the sent input)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /changed away and back to the sent text after the send/,
+    // Re-anchored in revision 4 (the input revision lives in the field state); the defect is unchanged.
+    patch: (t) => sub(t, "    sent.input === fields.input &&\n", ""),
+  },
+
+  {
+    id: "MU-1703",
+    title:
+      "WEB-14a revision 3, R3: responses are applied in the order they arrive (an older success after a newer one acts again)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /two submissions answered newest first/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (known && sent.input !== null && sent.input <= known.input)\n",
+        "  if (false)\n",
+      ),
+  },
+
+  {
+    id: "MU-1704",
+    title:
+      "WEB-14a revision 3, R10: a ticket completes in the session the hook shows when it answers (context A's success discards context B)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /context A's success arrives after the same hook shows context B/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (joined) outcome = acknowledged(joined);",
+        "        const now = origin();\n        if (joined) outcome = acknowledged(now ? submissionOf(now) : joined);",
+      ),
+  },
+
+  {
+    id: "MU-1705",
+    title:
+      "WEB-14a revision 3, R3/Q8: a completed ticket acts again (a success after a failure discards the copies)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a failure first: a later success answers `failed` and discards nothing/,
+    patch: (t) => sub(t, "        if (outcome) return outcome;\n", ""),
+  },
+
+  {
+    id: "MU-1706",
+    title:
+      "WEB-14a revision 3, R10/Q8: a ticket taken before the form had a session is not waited for",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /is waited for while unbound, joins the session the same mount binds/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const waiting = [...tickets].filter((ticket) => ticket.sent === null);",
+        "        const waiting: Provisional[] = [];",
+      ),
+  },
+
+  {
+    id: "MU-1707",
+    title:
+      "WEB-14a revision 3, R10/Q8: a ticket taken before the form had a session joins a session of another form context",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /never joins a session of another form context/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (ticket.sent !== null || ticket.formContext !== formContext) continue;",
+        "      if (ticket.sent !== null) continue;",
+      ),
+  },
+
+  {
+    id: "MU-1708",
+    title:
+      "WEB-14a revision 3, R11: a session keeps the allow-list of the mount that opened it",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /expanded on a remount: the carried title is restored, the new field starts from the mount/,
+    // Re-anchored in revision 4 (both transitions: a remount's adopt and a same-mount setSchema); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  into.allow = from.allow;\n  into.schema = from.schema;\n",
+          "",
+        ),
+        "  if (key === fields.schema) return false;",
+        "  if (key !== null) return false;",
+      ),
+  },
+
+  {
+    id: "MU-1709",
+    title:
+      "WEB-14a revision 3, R11/D1: input in a field no longer admitted is dropped silently",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    // Revision 10: the removed field's copy is also refused by the positive accounting of the own copy (`accounts`), so the original case
+    // no longer reaches the drop; the drop itself is caught by the case that asserts the held content comes back when admitted again.
+    expect:
+      /reduced on a remount while the removed field holds input|admitted again: the held content comes back into the field and is captured/,
+    // Re-anchored in revision 4 (a remount's adopt drops the session's values of fields the new mount does not admit); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "  into.present = new Map(from.present);\n",
+        "  into.present = new Map(from.present);\n  for (const name of Object.keys(into.ledger))\n    if (!into.allow.some((spec) => spec.name === name)) delete into.ledger[name];\n",
+      ),
+  },
+
+  {
+    id: "MU-1710",
+    title:
+      "WEB-14a revision 3, R11/D1: a form holding input of a field no longer admitted is saved without it (the copy that held it is replaced)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /reduced on a remount while the removed field holds input/,
+    // Re-anchored in revision 4 (the debt check of flushSession); the defect is unchanged. Re-expressed in revision 10 as two sites: the
+    // copy that held the input is now also protected by the positive accounting of the own copy (`accounts`), so replacing it needs both
+    // protections gone (the debt check alone is MU-1942).
+    patch: (t) =>
+      sub(
+        sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
+        '    if (copy && !accounts(session.fields, copy.values, now)) return "failed";\n',
+        '    if (copy && (false as boolean)) return "failed";\n',
+      ),
+  },
+
+  {
+    id: "MU-1711",
+    title:
+      "WEB-14a revision 3, R11: durable values are compared across schemas (a copy captured without a newly admitted field never matches)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /expanded on a remount: the carried title is restored, the new field starts from the mount/,
+    // Re-anchored in revision 4 (copyMatches no longer reads a field a copy lacks as its initial value); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '    if ((copy[name] ?? fields.initial[name] ?? "") !== value) return false;',
+        "    if (copy[name] !== value) return false;",
+      ),
+  },
+
+  {
+    id: "MU-1712",
+    title:
+      "WEB-14a revision 3, R11: an allow-list changed while the form stays mounted is ignored",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /changed while mounted: an admitted field is captured from then on/,
+    // Re-anchored in revision 4 (the committed-schema layout effect); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    if (current) changeSchema(current, now);",
+        "    if (current) void now;",
+      ),
+  },
+
+  {
+    id: "MU-1713",
+    title:
+      "WEB-14a revision 3, R12: a refused owning lock is reported as the page's identity (a copy is saved under a lock nobody holds)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a refused owning lock: the save fails, nothing is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "            .catch(refused);",
+        "            .catch(() => {\n              end();\n              owned = candidate;\n              resolve(candidate);\n            });",
+      ),
+  },
+
+  {
+    id: "MU-1714",
+    title:
+      "WEB-14a revision 3, R12: a failed acquisition is remembered (a retry never acquires the lock)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a refused owning lock: the save fails, nothing is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const refused = (reason: unknown): void => {\n          end();\n",
+        "        const refused = (reason: unknown): void => {\n",
+      ),
+  },
+
+  {
+    id: "MU-1715",
+    title:
+      "WEB-14a revision 3, R12: a candidate still being acquired is advertised as the page's identifier",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a candidate still being granted is not advertised/,
+    patch: (t) =>
+      sub(
+        t,
+        "    current: () => owned,",
+        "    current: () => owned ?? acquiring?.candidate ?? null,",
+      ),
+  },
+
+  {
+    id: "MU-1716",
+    title:
+      "WEB-14a revision 3, R12: a page with no lock manager saves under an identifier it cannot hold",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a page with no lock manager has no recovery identity/,
+    patch: (t) =>
+      sub(
+        t,
+        "    : unavailable;",
+        "    : createRecoveryTab({ uuid: () => crypto.randomUUID(), locks: null });",
+      ),
+  },
+
+  {
+    id: "MU-1717",
+    title:
+      "WEB-14a revision 3, R3: a success with later input leaves the copy of the sent input in the store",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /changed after the send: the success keeps the later input, its copy replaces the sent one/,
+    patch: (t) =>
+      sub(
+        t,
+        "      own !== null || source !== null || ownAsked || owed > 0",
+        "      false",
+      ),
+  },
+
+  {
+    id: "MU-1718",
+    title:
+      "WEB-14a revision 3, R3: the person's input events do not move the input revision",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-ownership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /changed away and back to the sent text after the send/,
+    // Re-anchored in revision 4 (the field state's watcher) and revision 5 (the watcher's three edit branches); the defect is unchanged.
+    // Re-anchored in revision 8 (R17: the watcher reads the field's whole state); the defect is unchanged.
+    // Re-anchored in revision 11 (R18: the watcher maps an event to the admitted fields whose members include its target, and stamps them
+    // once): no branch stamps the input revision any more; the defect is unchanged.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      fields.evented.clear();\n      noteInput(fields);\n    } else if (names.length === 0) noteInput(fields, [named]);\n",
+          "      fields.evented.clear();\n    } else if (names.length === 0) {\n    }\n",
+        ),
+        "      if (edits.length > 0) noteInput(fields, edits);\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1719",
+    title:
+      "WEB-14a revision 4, R3 (assessment mutant a): coverage ignores edit provenance (a submitted value typed again after another send is taken for covered)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /A succeeds; B saved and sent; edited back to A; B succeeds|a submitted text needs no copy until it is edited/,
+    // Re-anchored in revision 10 (one coverage test for every kind of state; a text's coverage is its last line); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    (covered && cover.value === value)\n",
+        "    (cover !== undefined && cover.value === value)\n",
+      ),
+  },
+
+  {
+    id: "MU-1720",
+    title:
+      "WEB-14a revision 4, R3 (assessment mutant b): the save's clean-discard branch compares values only (any covered value, edited since or not, discards the copies)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /A succeeds; B saved and sent; edited back to A; B succeeds|a proactive save of A before B succeeds/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (allResolved(session.fields, now)) {",
+        '  if (\n    Object.entries(now).every(\n      ([name, value]) =>\n        value === (session.fields.initial[name] ?? "") ||\n        session.fields.covered.get(name)?.value === value,\n    )\n  ) {',
+      ),
+  },
+
+  {
+    id: "MU-1721",
+    title:
+      "WEB-14a revision 4, R11 (assessment mutant c): retained input is ignored by isDirty (a form owing a hidden field's input looks clean)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /removed in ONE render: dirty, saves fail|a conditional field hidden\): dirty|R11 schedule: notes removed with their admission/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (owed > 0 || hasDebt(fields)) return true;",
+        "  if (owed > 0) return true;",
+      ),
+  },
+
+  {
+    id: "MU-1722",
+    title:
+      "WEB-14a revision 4, R11 (assessment mutant d): the empty allow-list is skipped (the previous admission stays)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /committed to allow=\[\] while blank|uses the empty schema/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (key === fields.schema) return false;",
+        "  if (key === fields.schema || allow.length === 0) return false;",
+      ),
+  },
+
+  {
+    id: "MU-1723",
+    title:
+      "WEB-14a revision 4, R11 (assessment mutant e1): input events do not read the field (the ledger keeps the value from the last read only)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /hidden by a child that owns the switch/,
+    // Re-anchored in revision 5 (the watcher's read after its edit branches); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '    }\n    sync(fields);\n    if (event.type === "reset")',
+        '    }\n    if (event.type === "reset")',
+      ),
+  },
+
+  {
+    id: "MU-1724",
+    title:
+      "WEB-14a revision 4, R11 (assessment mutant e2): the hook does not read the followed fields while it renders (a value changed without an event goes with its field)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /changed WITHOUT an input event/,
+    patch: (t) => sub(t, "  if (live) refresh(live);\n", "  void live;\n"),
+  },
+
+  {
+    id: "MU-1725",
+    title:
+      "WEB-14a revision 4, R11 (assessment mutant f1): an admitted field not on the page loses its value at the next read",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a conditional field hidden\)|re-admitted while still absent|hidden by a child that owns the switch/,
+    // Re-anchored in revision 8 (R17: a field is found through its control-state access); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!field) {\n      fields.present.delete(name);\n      continue;\n    }",
+        "    if (!field) {\n      fields.present.delete(name);\n      delete fields.ledger[name];\n      continue;\n    }",
+      ),
+  },
+
+  {
+    id: "MU-1726",
+    title:
+      "WEB-14a revision 4, R11 (assessment mutant f2): a retained value shadowed by new text in a field shown again is dropped",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the person typed something else into: their text stays, the held value stays owed/,
+    // Re-anchored in revision 5 (sync's shadowing now also clears the value's provenance); the defect is unchanged.
+    // Re-anchored in revision 9 (R17: the owed values are a list per field, `owe`; reconciliation is one rule, `reconcile`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!untouched) owe(fields, name, { value: held });\n",
+        "        if (!untouched) void held;\n",
+      ),
+  },
+
+  {
+    id: "MU-1727",
+    title:
+      "WEB-14a revision 4, R11: a remount's new mount typed into before it bound drops the session's unsaved value",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the person's new text stays; the session's unsaved value for the field stays owed/,
+    // Re-anchored in revision 5 (the shadowing in adoption's edited branch, which the selected test reaches since revision 5); the defect is unchanged.
+    // Re-anchored in revision 9 (owed values: `owe`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (theirs !== undefined && theirs !== mine)\n        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1728",
+    title:
+      "WEB-14a revision 4, R3 (assessment mutant g): a success that answers after a later edit covers the input as it is when it answers",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-ownership.test.tsx",
+      "tests/lib/recoverable-form-preservation.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /changed away and back to the sent text after the send|A succeeds; B saved and sent; edited back to A/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (lastEdit(fields, name) <= at && fields.ledger[name] === value)",
+          "    if (fields.ledger[name] === value)",
+        ),
+        "  cover(fields, unedited, at);",
+        "  cover(fields, unedited, fields.input);",
+      ),
+  },
+
+  {
+    id: "MU-1729",
+    title:
+      "WEB-14a revision 4, design assessment Q8: a look answered after an edit undone since restores its copy (values alone decide)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an edit away and back while the owner probe is held/,
+    patch: (t) => sub(t, "          fields.input === beganInput &&\n", ""),
+  },
+
+  {
+    id: "MU-1730",
+    title:
+      "WEB-14a revision 4, PRODUCT-DECISIONS-20261011 item 2: a successful submission does not cover the hidden values of the state it saved",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /notes hidden with input, the form submitted and successful/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (unchanged) result = terminalAct(session, { ...sent.held }, "submission");',
+        '  if (unchanged) result = terminalAct(session, valuesOf(session), "submission");',
+      ),
+  },
+
+  {
+    id: "MU-1731",
+    title:
+      "WEB-14a revision 4, R11: an unbound mount's retained input is not taken into the session it binds (the debt goes at binding)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-preservation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /unbound in a remount: a field removed before the mount binds its resumed session/,
+    // Re-anchored in revision 5: an EDITED field the session lacks is now taken in by adoption's edited branch (the old anchor, the
+    // never-edited branch, still applied but no longer reached the selected test: it survived driver attempt 2026-10-11T13-51-35.488Z);
+    // the defect is unchanged.
+    // Re-anchored in revision 9 (the edited branch now owes through `owe`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n      into.ledger[name] = mine;",
+        "        owe(into, name, { value: theirs, made: lastEdit(into, name) });\n      if (theirs === undefined && !from.present.has(name)) continue;\n      into.ledger[name] = mine;",
+      ),
+  },
+
+  {
+    id: "MU-1816",
+    title:
+      "WEB-14a/main merge: a shared leader runtime hides its schema-superseded recovery connection from forms",
+    file: "src/data/ui/react.tsx",
+    tests: ["tests/data/follower-status.test.tsx"],
+    expect:
+      /a shared page runtime keeps the form recovery port after schema supersession/,
+    patch: (t) =>
+      sub(
+        t,
+        "host.runtime.get()?.recoveryStore?.(account, incarnationId) ??",
+        "null ??",
+      ),
+  },
+
+  {
+    id: "MU-1824",
+    title:
+      "WEB-14a revision 5, R3 (assessment: omit equal-valued adoption provenance): an edit typed in a new mount to the session's own text is not carried",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /unbound remount, the person types the SAME text as the earlier submission/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (edit > 0) {\n",
+        "    if (edit > 0 && mine !== theirs) {\n",
+      ),
+  },
+
+  {
+    id: "MU-1825",
+    title:
+      "WEB-14a revision 5, R3 (assessment: treat an edited default as untouched): a field typed away and back to its start takes the session's value",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /typed away and back to where the field starts/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (edit > 0) {\n",
+        "    if (edit > 0 && mine !== from.initial[name]) {\n",
+      ),
+  },
+
+  {
+    id: "MU-1826",
+    title:
+      "WEB-14a revision 5, R3 (assessment: revision aliasing): a new mount's revisions are taken as the session's without translation",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the provenance is translated, not invented/,
+    patch: (t) => sub(t, "  const base = into.input;\n", "  const base = 0;\n"),
+  },
+
+  {
+    id: "MU-1827",
+    title:
+      "WEB-14a revision 5, R3 (assessment: map all provisional tickets to the current revision): an older ticket taken before binding covers a later edit",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /answered oldest first: the older covers nothing newer/,
+    patch: (t) =>
+      sub(
+        t,
+        "            ? shown.revisionOf(ticket.input)\n",
+        "            ? current.fields.input\n",
+      ),
+  },
+
+  {
+    id: "MU-1828",
+    title:
+      "WEB-14a revision 5, R3 (assessment: reuse an old acknowledgement): a ticket adopted at an acknowledged revision gets the earlier submission's answer",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /answers for itself, not with the old answer/,
+    patch: (t) =>
+      sub(
+        t,
+        "        input: revision !== null && revision > acknowledged ? revision : null,\n",
+        "        input: revision,\n",
+      ),
+  },
+
+  {
+    id: "MU-1829",
+    title:
+      "WEB-14a revision 5, R13 (assessment: restore the foreign-source clean shortcut): a restored copy counts as this page's reload protection",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /B saves different input \(deleting S\)|B saved different input first; A accepts the update|S discarded by B while A's save waits for its identity/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (source) return true;\n",
+        "  if (source) return !copyMatches(fields, source.values, now);\n",
+      ),
+  },
+
+  {
+    id: "MU-1830",
+    title:
+      "WEB-14a revision 5, R13 (assessment: publish own protection before commit): the page counts its copy as durable before the save lands",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S discarded while A's save itself is held in the store/,
+    patch: (t) =>
+      sub(
+        t,
+        "  session.persisted = { ...session.persisted, ownAsked: true };\n",
+        "  session.persisted = {\n    ...session.persisted,\n    ownAsked: true,\n    own: { values: captured.values, op },\n  };\n",
+      ),
+  },
+
+  {
+    id: "MU-1831",
+    title:
+      "WEB-14a revision 5, R13 (assessment: treat a failed save as saved): a failed own save moves the baseline and cleans up the restored copy",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /store write failed: the flush fails, S stays, A is dirty/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (result !== "saved") return result;\n',
+        '  if (result === "refused") return result;\n',
+      ),
+  },
+
+  {
+    id: "MU-1832",
+    title:
+      "WEB-14a revision 5, R13 (assessment: older clean-up clears newer state): a late clean-up of the old restored copy forgets the copy chosen since",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-provenance.test.tsx",
+      "tests/lib/recoverable-form-lineage.test.tsx",
+      "tests/lib/recoverable-form-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    // Revision 8: the clean-up now acts on exact debts, never on the current source, so the original case cannot reach the defect; the
+    // same rule (a landed save owes only a source chosen before it was asked for) is caught by the revision-8 case.
+    // Re-anchored in revision 8 (R16: a landed save holds only a source restored before it was asked for); the defect is unchanged.
+    // Re-expressed in revision 10 (R11, C4) at the rule that now carries the meaning: the save holds the very source it accounted for when
+    // it was asked (taken before its order, so the order test it replaced was always true); dropping that identity lets a late save clean up
+    // and forget the copy chosen since, the original defect (caught by the revision-10 Q9 case too).
+    expect:
+      /an older clean-up held across choosing another copy|a save asked BEFORE another copy is chosen|Q9: a save asked for BEFORE another copy is chosen/,
+    patch: (t) =>
+      sub(
+        t,
+        "      restored !== null && state.source === restored && restored.id !== id;",
+        "      restored !== null && restored.id !== id;",
+      ),
+  },
+
+  {
+    id: "MU-1833",
+    title:
+      "WEB-14a revision 5 (the diagnosed Chromium precondition): a change event that only commits the last input is an edit (ends a submission's coverage)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /focus leaves the field AFTER the submission/,
+    // Re-anchored in revision 8 (R17: the change rule compares the field's whole state) and revision 11 (R18: per admitted field the target
+    // is a member of); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '        if (event.type !== "change" || fields.evented.get(name) !== state) {',
+        "        if (true as boolean) {",
+      ),
+  },
+
+  {
+    id: "MU-1834",
+    title:
+      "WEB-14a revision 5 (over-correction): input events with the text the field already reported are not edits (R3 equality taken for authority)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /input events always count, even with the same text/,
+    // Re-anchored in revision 11 (R18: per admitted field the target is a member of); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '        if (event.type !== "change" || fields.evented.get(name) !== state) {',
+        "        if (fields.evented.get(name) !== state) {",
+      ),
+  },
+
+  {
+    id: "MU-1835",
+    title:
+      "WEB-14a revision 5 (privacy): the change rule keeps the value of a sensitive or not admitted field",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-provenance.test.tsx",
+      "tests/lib/recoverable-form-membership.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    // Revision 11 re-expression (R18): a not admitted field is never looked up any more (an event maps only to the ADMITTED fields whose
+    // members include its target), so the old not-admitted branch is gone and its original case cannot reach the change rule; the remaining
+    // branch, an admitted field with a sensitive member, is the membership suite's case. The original case is kept in the list.
+    expect:
+      /a sensitive or not admitted field's value is never kept|its value is never read nor kept/,
+    // Re-anchored in revision 8 (R17: a sensitive or not admitted field has no state access) and revision 11 (R18: per admitted field the
+    // target is a member of; a not admitted field is never looked up); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '        if (field === null || field === "sensitive") {\n          edits.push(name);\n          continue;\n        }\n        const state = field.read();',
+        '        const state =\n          field === null || field === "sensitive"\n            ? (target as HTMLInputElement).value\n            : field.read();',
+      ),
+  },
+
+  {
+    id: "MU-1836",
+    title:
+      "WEB-14a revision 5, R3: a successful submission covers a shadowed value typed again after its send",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the OLD mount's text typed again AFTER its send/,
+    // Re-anchored in revision 9 (R17: the owed values are a list per field, `owe`; reconciliation is one rule, `reconcile`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "        !(\n          entry.value === value &&\n          entry.made !== undefined &&\n          entry.made <= at\n        ),",
+        "        !(entry.value === value),",
+      ),
+  },
+
+  {
+    id: "MU-1837",
+    title:
+      "WEB-14a revision 5: a shadowed value a successful submission sent stays owed (every later save fails; only a discard of everything is left)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-provenance.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a ticket of the OLD mount answered after the new mount bound, with an edit typed in the new mount/,
+    // Re-anchored in revision 9 (the submission's settling of owed values, `settleOwed`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    settleOwed(\n      fields,\n      name,\n      (entry) =>\n        !(\n          entry.value === value &&",
+        "    settleOwed(\n      fields,\n      name,\n      (entry) =>\n        true || !(\n          entry.value === value &&",
+      ),
+  },
+
+  {
+    id: "MU-1838",
+    title:
+      "WEB-14a revision 6 (R13): the update writes no hand-off copy (only its reference)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const written = await target\n    .save({\n      formContext: handoffContext(session.formContext),",
+        '  const written: SaveResult = "saved";\n  void target\n    .save({\n      formContext: handoffContext("unwritten:" + session.formContext),',
+      ),
+  },
+
+  {
+    id: "MU-1839",
+    title:
+      "WEB-14a revision 6 (R13): the hand-off is stored under the form's own context (any page may take and remove it)",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    patch: (t) => sub(t, "  HANDOFF_PREFIX + formContext;", "  formContext;"),
+  },
+
+  {
+    id: "MU-1840",
+    title:
+      "WEB-14a revision 6 (R13): the next page ignores the hand-off left to it",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '            if (found.kind === "found") handed = found.copy;',
+        '            if (found.kind === "found") handed = null;',
+      ),
+  },
+
+  {
+    id: "MU-1841",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off whose save failed is still referenced and counted as handed off",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the hand-off's save fails/,
+    patch: (t) => sub(t, '  if (written !== "saved") return written;\n', ""),
+  },
+
+  {
+    id: "MU-1842",
+    title:
+      "WEB-14a revision 6 (R13): a reference that could not be written is ignored",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /session storage refuses/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '  if (\n    referencing(session) &&\n    !rememberHandoff(session.handoffs, {\n      form: session.formContext,\n      scope: session.scope,\n      id,\n    })\n  )\n    return "failed";',
+        "  rememberHandoff(session.handoffs, {\n    form: session.formContext,\n    scope: session.scope,\n    id,\n  });",
+      ),
+  },
+
+  {
+    id: "MU-1843",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off of an older copy counts as handed off",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an edit after the hand-off makes the form dirty/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    (session.persisted.handoff?.op ?? -1) >= own.op &&",
+        "    session.persisted.handoff !== null &&",
+      ),
+  },
+
+  {
+    id: "MU-1844",
+    title:
+      "WEB-14a revision 6 (R13): a page that cannot hold the hand-off takes it all the same (a duplicated tab removes it)",
+    file: "src/lib/form-recovery/tab-identity.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a duplicated tab carrying the same reference/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (wait <= 0) return false;",
+        "          return true;",
+      ),
+  },
+
+  {
+    id: "MU-1845",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off chosen from the alternatives becomes the page's source (it removes it)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /abandoned \(A2 never came\)/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) => sub(t, "            !handoff || ours", "            true"),
+  },
+
+  {
+    id: "MU-1846",
+    title:
+      "WEB-14a revision 6 (R13): a hand-off a live page holds is offered to other pages",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a hand-off is shown to no other page while a live page holds it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            !(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false))",
+        "            true",
+      ),
+  },
+
+  {
+    id: "MU-1847",
+    title:
+      "WEB-14a revision 6 (R13): 'Discard this copy' removes a hand-off a live page holds",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard this copy' is refused/,
+    // Re-anchored in revision 8 (R16/C3: the alternative discard is tracked); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '          (current.tab.whileFree\n            ? current.tab.whileFree(tabInstanceId, remove)\n            : remove()\n          ).catch((): DiscardResult => "failed"),',
+        '          remove().catch((): DiscardResult => "failed"),',
+      ),
+  },
+
+  {
+    id: "MU-1848",
+    title:
+      "WEB-14a revision 6 (R13): a terminal act leaves the page's own hand-off behind",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /A's own submission after an abandoned reload/,
+    // Re-anchored in revision 8 (R16: `discardAt` stages exact removals); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "  if (handoff !== null)\n    stages[2]?.push({\n      formContext: handoffContext(context),\n      tabInstanceId: handoff,\n      capture: null,\n    });\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1849",
+    title:
+      "WEB-14a revision 6 (R13): a reference left for another account's database is taken",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another account's database/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    (entry) => entry.form === form && entry.scope === scope,",
+        "    (entry) => entry.form === form,",
+      ),
+  },
+
+  {
+    id: "MU-1850",
+    title:
+      "WEB-14a revision 6 (R13): the reload checkpoint ignores the hand-offs",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a hand-off made stale before it is written again first/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    return !handoffHandles(forms).some(unresolved) && handedOff(forms);",
+        "    return !handoffHandles(forms).some(unresolved);",
+      ),
+  },
+
+  {
+    id: "MU-1851",
+    title: "WEB-14a revision 6 (R13): 'Save and reload' writes no hand-off",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the hand-off is written before the other tabs are asked/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (!sealed()) {\n          busy = { kind: "saving" };\n          publish();\n          const failed = verdict(await prepareHandoffs(deps.forms));',
+        '        if (false as boolean) {\n          busy = { kind: "saving" };\n          publish();\n          const failed = verdict(await prepareHandoffs(deps.forms));',
+      ),
+  },
+
+  {
+    id: "MU-1852",
+    title:
+      "WEB-14a revision 6 (R13): 'Discard and reload anyway' waits for hand-offs it never writes",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /write no hand-off/,
+    // Re-anchored in revision 7 (the code it patches was rewritten for R6/R13/R15/DA-A); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        '    if (mode === "discard") return discardTargets().length === 0;\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1853",
+    title:
+      "WEB-14a revision 6 (R13): the ordinary copy identical to the hand-off is left behind",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /control: A updates; no other tab before A2 reads/,
+    // Re-anchored in revision 8 (R16: the predecessor is named by the hand-off's lineage, never by equal text; a landed save owes it); the defect is unchanged.
+    // Re-anchored in revision 10 (R17/R11 completeness: the source a save holds is the one it accounted for, `restored`); the defect is unchanged.
+    patch: (t) => sub(t, "            ...restored.lineage,\n", ""),
+  },
+
+  {
+    id: "MU-1854",
+    title:
+      "WEB-14a revision 6 (R13): the next page's own save does not remove the hand-off (wrong context)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /C saves different input before A2 reads/,
+    // Re-anchored in revision 8 (R16: a source is removed as an exact target); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "  formContext: source.context,\n  tabInstanceId: source.id,",
+        '  formContext: source.context.replace(HANDOFF_PREFIX, ""),\n  tabInstanceId: source.id,',
+      ),
+  },
+
+  {
+    id: "MU-1855",
+    title:
+      "WEB-14a revision 6 (R13): a kept session no mount shows is not handed off",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a kept session no mount shows/,
+    patch: (t) =>
+      sub(t, "    if (session.handle) handles.add(session.handle);\n", ""),
+  },
+
+  {
+    id: "MU-1856",
+    title:
+      "WEB-14a revision 6 (R13): a form context with the reserved prefix is accepted",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-handoff.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /reserved prefix is refused/,
+    patch: (t) =>
+      sub(
+        t,
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: the patched source is itself a template literal
+        '  if (formContext.startsWith(HANDOFF_PREFIX))\n    throw new Error(`"${HANDOFF_PREFIX}" is reserved for update hand-offs`);\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1857",
+    title:
+      "WEB-14a revision 7 (R6): 'Discard and reload anyway' discards only the dirty forms (a form its failed save made clean keeps its copies)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /own copy was saved \(clean\)|a clean form with copies whose hand-off failed|two forms and a kept form/,
+    patch: (t) =>
+      sub(
+        t,
+        "    [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(\n      (form) => !refused.has(form) && !discardedNow(form),\n    );",
+        "    deps.forms.dirty().filter((form) => !refused.has(form));",
+      ),
+  },
+
+  {
+    id: "MU-1858",
+    title:
+      "WEB-14a revision 7 (R6): a discard's reload is sealed once no form is dirty (clean forms' copies are not waited for)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /own copy was saved \(clean\)|a clean form with copies whose hand-off failed|two forms and a kept form/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (mode === "discard") return discardTargets().length === 0;\n',
+        '    if (mode === "discard") return forms.dirty().length === 0;\n',
+      ),
+  },
+
+  {
+    id: "MU-1859",
+    title:
+      "WEB-14a revision 7 (R6): a form of the act that left the registry is not discarded",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /even after it left the registry/,
+    patch: (t) =>
+      sub(
+        t,
+        "    [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(",
+        "    [...new Set([...handoffHandles(deps.forms)])].filter(",
+      ),
+  },
+
+  {
+    id: "MU-1860",
+    title:
+      "WEB-14a revision 7 (R6): a new 'Save and reload' keeps the earlier act's forms",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /starts a new act/,
+    patch: (t) => sub(t, "    if (fresh) participants = new Set();\n", ""),
+  },
+
+  {
+    id: "MU-1861",
+    title:
+      "WEB-14a revision 7 (R6): a form counts as discarded when it is clean",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /own copy was saved \(clean\)|two forms and a kept form/,
+    // Re-anchored in revision 8 (R16: the twin is replaced by exact debts); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    state.owed === 0 &&\n    state.own === null &&\n    state.source === null &&\n    state.debts.length === 0 &&\n    session.handoffId === null &&\n    session.order.lastTerminal === session.order.next &&\n    !isDirty(session)",
+        "    !isDirty(session)",
+      ),
+  },
+
+  {
+    id: "MU-1862",
+    title:
+      "WEB-14a revision 7 (R13): a load with no store open answers 'no copy'",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a failed write is `failed`, never a throw/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!service) throw new Error(NO_STORE);\n      const row =",
+        "      if (!service) return null;\n      const row =",
+      ),
+  },
+
+  {
+    id: "MU-1863",
+    title:
+      "WEB-14a revision 7 (R13): a list with no store open answers 'no copies'",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no open database: the read rejects/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!service) throw new Error(NO_STORE);\n      const rows =",
+        "      if (!service) return [];\n      const rows =",
+      ),
+  },
+
+  {
+    id: "MU-1864",
+    title:
+      "WEB-14a revision 7 (R13): a list whose transaction fails answers 'no copies'",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-list.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a list or load whose transaction fails is unavailable/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const rows = await service.store.run(listFormRecovery, {\n        incarnationId: service.incarnationId,\n        formContext,\n      });",
+        "      const rows = await service.store\n        .run(listFormRecovery, {\n          incarnationId: service.incarnationId,\n          formContext,\n        })\n        .catch(() => []);",
+      ),
+  },
+
+  {
+    id: "MU-1865",
+    title:
+      "WEB-14a revision 7 (R13): a listing that cannot be read is an empty listing",
+    file: "src/lib/form-recovery/port.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/data/form-recovery-list.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the ordinary list cannot be read|the list of abandoned hand-offs cannot be read|no open database: the read rejects|transaction fails is unavailable/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ? { kind: "listed", copies }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "unavailable" };',
+        '      ? { kind: "listed", copies }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "listed", copies: [] };',
+      ),
+  },
+
+  {
+    id: "MU-1866",
+    title: "WEB-14a revision 7 (R13): a copy that cannot be read is absent",
+    file: "src/lib/form-recovery/port.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/data/form-recovery-list.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hand-off read fails after C consumed|transaction fails is unavailable/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ? { kind: "found", copy }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "unavailable" };',
+        '      ? { kind: "found", copy }\n      : { kind: "unavailable" };\n  } catch {\n    return { kind: "absent" };',
+      ),
+  },
+
+  {
+    id: "MU-1867",
+    title:
+      "WEB-14a revision 7 (R13): a look that could not read the store says the form is ready",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hand-off read fails after C consumed|cannot be read: unavailable|offer look fails|created again while A2's look reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "          setUnavailable(true);\n          setReady(false);\n          return false;",
+        "          setUnavailable(false);\n          setReady(true);\n          return false;",
+      ),
+  },
+
+  {
+    id: "MU-1868",
+    title:
+      "WEB-14a revision 7 (R13): a look that could not read the store leaves the form resolved for the update",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hand-off read fails after C consumed|still unreadable at the update's own retry/,
+    patch: (t) =>
+      sub(
+        t,
+        '          current.recovery = "unavailable";',
+        '          current.recovery = "ok";',
+      ),
+  },
+
+  {
+    id: "MU-1869",
+    title:
+      "WEB-14a revision 7 (R13): the reload checkpoint ignores a form whose look could not read the store",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /still cannot read it: no reload|still unreadable at the update's own retry/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return !handoffHandles(forms).some(unresolved) && handedOff(forms);",
+        "    return handedOff(forms);",
+      ),
+  },
+
+  {
+    id: "MU-1870",
+    title:
+      "WEB-14a revision 7 (R13): the update never asks an unresolved form to look again",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/lib/recoverable-form-revision7.test.tsx",
+      "tests/pwa/coordinator-handoff.test.ts",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /reads the store when asked again|readable at the update's own retry|unresolved before 'Save and reload' is asked to look once/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (form.retryRecovery?.() ?? Promise.resolve(false)).catch(",
+        "            Promise.resolve(false).catch(",
+      ),
+  },
+
+  {
+    id: "MU-1871",
+    title:
+      "WEB-14a revision 7 (R13): an unreadable reference record is no reference",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the tab's reference record cannot be read/,
+    patch: (t) =>
+      sub(t, '          if (left.kind === "unknown") return null;\n', ""),
+  },
+
+  {
+    id: "MU-1872",
+    title:
+      "WEB-14a revision 7 (R13): a hand-off read that fails is taken as resolved (ordinary selection)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /hand-off read fails after C consumed/,
+    patch: (t) =>
+      sub(
+        t,
+        '            if (found.kind === "unavailable") return null;\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1873",
+    title:
+      "WEB-14a revision 7 (R13): an ordinary list that fails is taken as empty",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the ordinary list cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        '        const listed = await readCopies(through, context);\n        if (listed.kind === "unavailable") return null;',
+        '        const answered = await readCopies(through, context);\n        const listed =\n          answered.kind === "unavailable"\n            ? { kind: "listed" as const, copies: [] }\n            : answered;',
+      ),
+  },
+
+  {
+    id: "MU-1874",
+    title:
+      "WEB-14a revision 7 (C4): a look's answer is applied after the account's database changed under it",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is created again while A2's look reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (found === null || targetOf(current) === null) {",
+        "        if (found === null) {",
+      ),
+  },
+
+  {
+    id: "MU-1875",
+    title:
+      "WEB-14a revision 7 (R15): the hand-off is read without waiting for its lock",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /DUP reads only once it holds it/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true))",
+        "            true",
+      ),
+  },
+
+  {
+    id: "MU-1876",
+    title:
+      "WEB-14a revision 7 (R15): a page that cannot take the hand-off's lock reads it and takes it all the same",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /falls back to the ordinary copies without reading the hand-off|lock manager throws/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true))",
+        "            ((await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??\n              true)) ||\n              true)",
+      ),
+  },
+
+  {
+    id: "MU-1877",
+    title:
+      "WEB-14a revision 7 (DA-B): a chosen alternative is shown from the copy listed earlier",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /explicitly discarded by E after D listed it|discarded since it was listed/,
+    patch: (t) =>
+      sub(
+        t,
+        '        return found.kind === "absent" ? "gone" : apply(found.copy);',
+        '        return found.kind === "unavailable" ? "unavailable" : apply(chosen);',
+      ),
+  },
+
+  {
+    id: "MU-1878",
+    title:
+      "WEB-14a revision 7 (DA-B): an abandoned hand-off is chosen without holding its lock",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a live page took the abandoned hand-off before D chose it/,
+    patch: (t) =>
+      sub(
+        t,
+        '            (await (current.tab.whileFree\n              ? current.tab.whileFree(tabInstanceId, fresh)\n              : fresh())) ?? "refused"',
+        '            (await fresh()) ?? "refused"',
+      ),
+  },
+
+  {
+    id: "MU-1879",
+    title:
+      "WEB-14a revision 7 (DA-B): a chosen copy is shown over input typed while it was read",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the form changed while the choice read the copy/,
+    // Re-anchored in revision 8 (R17: an unreadable copy is refused in the same check); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "          current.order.next !== began ||\n          current.fields.input !== beganInput ||\n",
+        "          current.order.next !== began ||\n",
+      ),
+  },
+
+  {
+    id: "MU-1880",
+    title:
+      "WEB-14a revision 7 (DA-A): an unreadable reference record is an empty one",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /unreadable or not a list|the record cannot be read during the second form's hand-off/,
+    patch: (t) =>
+      sub(
+        t,
+        '      } catch {\n        return { kind: "unknown" };\n      }',
+        '      } catch {\n        return { kind: "read", refs: [], others: [] };\n      }',
+      ),
+  },
+
+  {
+    id: "MU-1881",
+    title:
+      "WEB-14a revision 7 (DA-A): entries of the record this page cannot read are dropped when it writes",
+    file: "src/lib/form-recovery/handoff.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /unreadable or not a list/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return store.write([...record.others, ...others, ref]);",
+        "  return store.write([...others, ref]);",
+      ),
+  },
+
+  {
+    id: "MU-1882",
+    title:
+      "WEB-14a revision 7 (DA-A): a hand-off counts as made whether or not its reference is in the record",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /no longer certified|the record cannot be read during the second form's hand-off/,
+    patch: (t) => sub(t, "    (!referencing(session) ||", "    (true ||"),
+  },
+
+  {
+    id: "MU-1883",
+    title:
+      "WEB-14a revision 7 (DA-A): a second mount of the same form context writes the context's reference too",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-revision7.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /two mounts of one form context/,
+    patch: (t) =>
+      sub(
+        t,
+        "    referencing(session) &&\n    !rememberHandoff(session.handoffs, {",
+        "    !rememberHandoff(session.handoffs, {",
+      ),
+  },
+
+  {
+    id: "MU-1884",
+    title:
+      "WEB-14a revision 8 (R16): the update hand-off is written with no lineage (its predecessor is named by nothing)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /removes A's copy and the hand-off/,
+    patch: (t) =>
+      sub(
+        t,
+        "      capture: crypto.randomUUID(),\n      lineage: versioned(lineage),\n",
+        "      capture: crypto.randomUUID(),\n      lineage: versioned([]),\n",
+      ),
+  },
+
+  {
+    id: "MU-1885",
+    title:
+      "WEB-14a revision 8 (R16): the hand-off's predecessor is guessed again: the first gone copy with EQUAL TEXT (revision 7)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT \(equal text\)|REQUIREMENT: (B saved|every copy|three more|the page's own save)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const lineage = handed ? lineageOf(handed) : [];\n",
+        "        const twin = handed\n          ? gone.find(\n              (copy) =>\n                copy.tabInstanceId !== own &&\n                JSON.stringify(copy.values) === JSON.stringify(handed.values),\n            )\n          : undefined;\n        const lineage: CopyTarget[] = twin\n          ? [{ formContext: twin.formContext, tabInstanceId: twin.tabInstanceId, capture: twin.capture ?? null }]\n          : [];\n",
+      ),
+  },
+
+  {
+    id: "MU-1886",
+    title:
+      "WEB-14a revision 8 (R16): the copies the restored hand-off names are offered on their own",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /is part of it \(not offered on its own\)|Nothing the chain owes|the hand-off is offered \(not A's copy/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const owing = [\n          ...lineage,\n",
+        "        const owing = [\n",
+      ),
+  },
+
+  {
+    id: "MU-1887",
+    title:
+      "WEB-14a revision 8 (R16, Q2): the hand-off left to this page, chosen later, brings no lineage",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /choosing it then discarding removes|switching to B's copy and back/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  lineage: ours ? lineageOf(copy) : [],",
+        "                  lineage: [],",
+      ),
+  },
+
+  {
+    id: "MU-1888",
+    title:
+      "WEB-14a revision 8 (R16, Q3): a copy is removed whatever capture it holds now",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /A's copy holds a newer capture of A's/,
+    patch: (t) =>
+      sub(
+        t,
+        "            : target.discard(copy.formContext, copy.tabInstanceId, copy.capture)",
+        "            : target.discard(copy.formContext, copy.tabInstanceId)",
+      ),
+  },
+
+  {
+    id: "MU-1889",
+    title:
+      "WEB-14a revision 8 (R16, Q4): a hand-off is removed although a copy it names was not (its record of what is owed is lost)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the hand-off is KEPT|whose answer was lost/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (outcome !== "discarded") return { settled, outcome };\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1890",
+    title:
+      "WEB-14a revision 8 (R16, Q4): the next update's hand-off does not carry what is still owed",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /writes what is owed into its hand-off/,
+    patch: (t) => sub(t, "    ...session.persisted.debts,\n  ]);", "  ]);"),
+  },
+
+  {
+    id: "MU-1891",
+    title:
+      "WEB-14a revision 8 (C3): an explicit alternative discard is not outstanding work (an update's checkpoint does not wait for it)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /checkpoint waits for a hand-off discard in progress/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (await track(\n          current,\n",
+        "        (await ((_session: unknown, work: Promise<DiscardResult>) => work)(\n          current,\n",
+      ),
+  },
+
+  {
+    id: "MU-1892",
+    title:
+      "WEB-14a revision 8 (R16, Q5/DA-C): an abandoned hand-off is hidden when another offered copy holds equal text (revision 7)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-lineage.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT \(equal text\): A updates and never returns/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ...left.filter((copy) => !inLineage(owing, copy)),",
+        "          ...left.filter(\n            (copy) =>\n              !inLineage(owing, copy) &&\n              !candidates.some(\n                (other) =>\n                  JSON.stringify(other.values) === JSON.stringify(copy.values),\n              ),\n          ),",
+      ),
+  },
+
+  {
+    id: "MU-1893",
+    title:
+      "WEB-14a revision 8 (R16, C2): the conditional removal does not compare the capture",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /holds another capture|holds other content under another capture/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (stored.meta?.capture !== input.expect)",
+        "      if (false as boolean)",
+      ),
+  },
+
+  {
+    id: "MU-1894",
+    title:
+      "WEB-14a revision 8 (R16, C2): the conditional removal claims the row's writer (moves its order record) before it compares",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no claim of its writer first/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (expected !== undefined)\n        return serialised(id, async (): Promise<DiscardResult> => {",
+        "      if (expected !== undefined) {\n        begin(service, formContext, tabInstanceId);\n      }\n      if (expected !== undefined)\n        return serialised(id, async (): Promise<DiscardResult> => {",
+      ),
+  },
+
+  {
+    id: "MU-1895",
+    title:
+      "WEB-14a revision 8 (R16, Q16): the same content saved again keeps the old capture's identity (a later equal capture is taken for the old one)",
+    file: "src/data/plans/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the order record AND the identity move|moves with the same content/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  meta: incoming.meta,",
+        "                  meta: stored.meta,",
+      ),
+  },
+
+  {
+    id: "MU-1896",
+    title:
+      "WEB-14a revision 8 (R17, Q16): control state is not content (a checked box is the same content as an unchecked one)",
+    file: "src/data/ports/form-recovery.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is NOT the same content/,
+    patch: (t) =>
+      sub(
+        t,
+        "  meta?.controls ? { values, controls: meta.controls } : values;",
+        "  values;",
+      ),
+  },
+
+  {
+    id: "MU-1897",
+    title:
+      "WEB-14a revision 8 (R17, C5): control state this build cannot read is read as no control state",
+    file: "src/lib/form-recovery/control-state.ts",
+    tests: ["tests/data/form-recovery-capture.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /makes the copy unreadable/,
+    patch: (t) =>
+      sub(
+        t,
+        "    Object.values(entries).every(isControlState)\n    ? (entries as Record<string, ControlState>)\n    : null;",
+        "    Object.values(entries).every(isControlState)\n    ? (entries as Record<string, ControlState>)\n    : undefined;",
+      ),
+  },
+
+  {
+    id: "MU-1898",
+    title:
+      "WEB-14a revision 8 (R17): a checkbox is read as its `.value` (revision 7)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT: a checkbox checked/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const read = () => encodeState({ kind: "checkbox", checked: box.checked });',
+        "  const read = () => encodeText(box.value);",
+      ),
+  },
+
+  {
+    id: "MU-1899",
+    title:
+      "WEB-14a revision 8 (R17): a multiple select is read as its `.value` (revision 7)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT: a multiple select/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (first instanceof HTMLSelectElement && first.multiple)\n      return multipleField(first);\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1900",
+    title:
+      "WEB-14a revision 8 (R17): a checkbox's state is captured but never shown again (restore omitted)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT: a checkbox checked/,
+    // Re-anchored in revision 9 (exact writes); the defect is unchanged.
+    patch: (t) =>
+      sub(t, "      box.checked = state.checked;", "      void state.checked;"),
+  },
+
+  {
+    id: "MU-1901",
+    title:
+      "WEB-14a revision 8 (R17): a group's sensitivity is judged by its first member only",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /group with a sensitive member/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (members.some((member) => isSensitiveField(member))) return "sensitive";',
+        '  if (isSensitiveField(members[0] as Element)) return "sensitive";',
+      ),
+  },
+
+  {
+    id: "MU-1902",
+    title:
+      "WEB-14a revision 8 (R17, C5): a stored text that looks like a state is decoded as one",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /looks like a control state stays literal/,
+    patch: (t) =>
+      sub(
+        t,
+        "    values[name] = encodeText(text);",
+        "    values[name] = text;",
+      ),
+  },
+
+  {
+    id: "MU-1903",
+    title:
+      "WEB-14a revision 8 (R17, C5): an unsupported state is captured as if it were saved (a silent clean reload)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot represent \(a file input\)|two text inputs of one name/,
+    // Re-anchored in revision 10 (R17/R11 completeness: `capturable` filters `shownOf`); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      ([, value]) => !isUnsupported(value),\n",
+        "      ([, value]) => value !== undefined,\n",
+      ),
+  },
+
+  {
+    id: "MU-1904",
+    title:
+      "WEB-14a revision 8 (R17, C5): an edited unsupported field needs nothing",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /cannot represent \(a file input\)|two text inputs of one name/,
+    // Re-anchored in revision 10 (R17/R11 completeness: one coverage test for every kind of state); the defect is unchanged.
+    patch: (t) =>
+      sub(t, "  if (isUnsupported(value)) return edit === 0 || covered;\n", ""),
+  },
+
+  {
+    id: "MU-1905",
+    title:
+      "WEB-14a revision 8 (R17, Q7): a copy's state that does not fit the field is dropped, not owed",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /no longer fits the field/,
+    // Re-anchored in revision 10 (R17/R11 completeness: `applySnapshot` accounts for every entry of the copy in one loop); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (fields.ledger[name] === value) continue;\n      owe(fields, name, { value, returns: lastEdit(fields, name) });\n",
+        "      continue;\n",
+      ),
+  },
+
+  {
+    id: "MU-1906",
+    title:
+      "WEB-14a revision 8 (R17, Q7): a retained state the field shown again cannot show is dropped, not owed",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /shown by another kind of control|shown as a checkbox/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!(untouched && field.write(held))) {",
+        "      if (!(untouched && (field.write(held) || true))) {",
+      ),
+  },
+
+  {
+    id: "MU-1907",
+    title:
+      "WEB-14a revision 8 (R17, Q7): the same element showing another kind of state is not shown anew",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /shown as a checkbox/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const same =\n    before === field.key && sameShape(fields.shapes.get(name), field.shape);",
+        "  const same = before === field.key;",
+      ),
+  },
+
+  {
+    id: "MU-1908",
+    title:
+      "WEB-14a revision 8 (R17, C5): a copy holding state this build cannot read is restored in part",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-controls.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /holding state this build cannot read/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (newest && !unreadable(newest) && form && untouched) {",
+        "          if (newest && form && untouched) {",
+      ),
+  },
+
+  {
+    id: "MU-1909",
+    title:
+      "WEB-14a revision 9 (R17-A, Q3): a render's read of the fields takes a field in another shape as it shows (refresh membership-insensitive)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a render that reads the fields \(refresh\) never takes the reduced state/,
+    patch: (t) =>
+      sub(
+        t,
+        "      field?.key === element &&\n      sameShape(fields.shapes.get(name), field.shape)\n",
+        "      field?.key === element\n",
+      ),
+  },
+
+  {
+    id: "MU-1910",
+    title:
+      "WEB-14a revision 9 (R17-A, Q2/Q3): reconciliation compares only the element and the kind of state (revision 8): a removed option or member is taken as the person's value",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT (a single select|a multiple select|a radio group|same-named checkboxes): B removed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    before === field.key && sameShape(fields.shapes.get(name), field.shape);",
+        "    before === field.key &&\n    fields.shapes.get(name)?.text.slice(0, 8) === field.shape.text.slice(0, 8);",
+      ),
+  },
+
+  {
+    id: "MU-1911",
+    title:
+      "WEB-14a revision 9 (R17-B, Q4): a single select's write assigns any text and reports success (revision 8), two sites: no option check, no read-back",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a single select: an option it does not have is not written|REQUIREMENT a single select: the successor without B/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "        if (select && !options().some((option) => option.value === text))\n          return false;\n",
+          "",
+        ),
+        "    if (read() === encoded) return true;",
+        '    if (read() === encoded || read() === "") return true;',
+      ),
+  },
+
+  {
+    id: "MU-1912",
+    title:
+      "WEB-14a revision 9 (R17, Q4): a write the field does not read back exactly is left in the field (reported failed, the field changed)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a write the browser does not show exactly is put back/,
+    patch: (t) =>
+      sub(t, "    putBack();\n    return false;", "    return false;"),
+  },
+
+  {
+    id: "MU-1913",
+    title:
+      "WEB-14a revision 9 (R17, Q4): a text is assigned to an input before knowing its type keeps it (not tried on a copy first)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is never assigned to it at all/,
+    patch: (t) =>
+      sub(
+        t,
+        "          probe.value = text;\n          if (probe.value !== text) return false;\n",
+        "          void probe;\n",
+      ),
+  },
+
+  {
+    id: "MU-1914",
+    title:
+      "WEB-14a revision 9 (R17, Q4): a write reports success without reading the field back",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a write the browser does not show exactly is put back/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read() === encoded) return true;",
+        "    if (read() === encoded || encoded !== null) return true;",
+      ),
+  },
+
+  {
+    id: "MU-1915",
+    title:
+      "WEB-14a revision 9 (R17-A/B, C3): an owed value never comes back when the field can show it again",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /B shown again comes back chosen|B shown: back, saved/,
+    patch: (t) =>
+      sub(
+        t,
+        "    back.value !== fields.ledger[name] &&\n    field.write(back.value)\n",
+        "    back.value !== fields.ledger[name] &&\n    false\n",
+      ),
+  },
+
+  {
+    id: "MU-1916",
+    title:
+      "WEB-14a revision 9 (R17, C3/Q6): a field owes one value at a time (revision 8's `shadowed`): a second owed value replaces the first",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /BOTH earlier values stay owed/,
+    patch: (t) =>
+      sub(
+        t,
+        "  fields.owed.set(name, [...others, entry]);",
+        "  fields.owed.set(name, others.length >= 0 ? [entry] : others);",
+      ),
+  },
+
+  {
+    id: "MU-1917",
+    title:
+      "WEB-14a revision 9 (R17): what a field shows in place of an owed value is owed in turn when it changes (the browser's state taken for input)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an option's VALUE changed in place/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (fields.fallback.get(name) !== held)\n",
+        "          if (fields.fallback.get(name) !== held || held !== null)\n",
+      ),
+  },
+
+  {
+    id: "MU-1918",
+    title:
+      "WEB-14a revision 9 (R17-B, C4): a restored copy's value the field cannot show is not owed (the restore taken as complete)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the successor without B reports the restore incomplete/,
+    // Re-anchored in revision 10 (R17/R11 completeness: `applySnapshot` accounts for every entry of the copy in one loop); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "      owe(fields, name, { value, returns: lastEdit(fields, name) });\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1919",
+    title:
+      "WEB-14a revision 9 (R17, Q7): an owed value the field shows again (the person chose it) stays owed: the form can never be saved",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /BOTH earlier values stay owed|B does NOT come back over the later edit/,
+    // Re-anchored in revision 10 (R17/R11 completeness: an owed native editing state is never settled by another); the defect is unchanged.
+    patch: (t) =>
+      sub(
+        t,
+        "    (entry) => entry.value !== holds || entry.value === OPAQUE,\n",
+        "    (entry) => entry.value !== holds || true,\n",
+      ),
+  },
+
+  {
+    id: "MU-1920",
+    title:
+      "WEB-14a revision 9 (R17, C5): 'Discard instead' claims the initial state of a field that cannot show it (covers the initial value, not what it shows)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard instead' when the initial option is gone/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (shown === undefined) delete before[name];\n          else before[name] = shown;\n",
+        "          void shown;\n",
+      ),
+  },
+
+  {
+    id: "MU-1921",
+    title:
+      "WEB-14a revision 9 (R17-B, C4): `restoreAlternative` and the restore at mount report a restore the form could not show completely as complete",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-shapes.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the successor without B reports the restore incomplete|answers `incomplete`, never `restored`/,
+    patch: (t) =>
+      sub(
+        t,
+        "    incomplete: view.incomplete ?? NONE,",
+        "    incomplete: NONE,",
+      ),
+  },
+
+  {
+    id: "MU-1922",
+    title:
+      "WEB-14a revision 10 (R17, C1): a native editing state (badInput) is read as its empty value",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /in an initially empty number field|then the field cleared and|REQUIREMENT \(activation\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    control instanceof HTMLInputElement && control.validity.badInput\n",
+        "    control instanceof HTMLInputElement && (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-1923",
+    title:
+      "WEB-14a revision 10 (R17, C1): a write goes over a native editing state (what it held cannot be put back)",
+    file: "src/lib/form-recovery/controls.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the field is never written over/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (decoded.kind !== "text" || read() === OPAQUE) return false;\n',
+        '        if (decoded.kind !== "text") return false;\n',
+      ),
+  },
+
+  {
+    id: "MU-1924",
+    title:
+      "WEB-14a revision 10 (R17, C2): a native editing state with no edit counted yet needs nothing (an untouched count taken as proof)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /already there when the form first reads it/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (value === OPAQUE) return covered && cover.value === OPAQUE;\n",
+        "  if (value === OPAQUE) return edit === 0 || covered;\n",
+      ),
+  },
+
+  {
+    id: "MU-1925",
+    title:
+      "WEB-14a revision 10 (R17, C2): a native editing state ended without an edit (a script, a render) is taken as ended by the person",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a script sets 7 without an event|a render that reads the fields/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (fields.ledger[name] === OPAQUE && shown !== OPAQUE && !edited)\n    owe(fields, name, { value: OPAQUE });\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1926",
+    title:
+      "WEB-14a revision 10 (R17, C2): a render that reads the fields takes what they show over a native editing state",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a render that reads the fields/,
+    patch: (t) =>
+      sub(
+        t,
+        "      take(\n        fields,\n        name,\n        field.read(),\n        lastEdit(fields, name) > (fields.seen.get(name) ?? 0),\n      );\n",
+        "      fields.ledger[name] = field.read();\n",
+      ),
+  },
+
+  {
+    id: "MU-1927",
+    title:
+      "WEB-14a revision 10 (R17, C2): an owed native editing state is settled by a later one shown in the field",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /one native state never settles another/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (entry) => entry.value !== holds || entry.value === OPAQUE,\n",
+        "    (entry) => entry.value !== holds,\n",
+      ),
+  },
+
+  {
+    id: "MU-1928",
+    title:
+      "WEB-14a revision 10 (R17, C2): what a native form reset leaves is not read as the reset's edit",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a form reset ends it/,
+    patch: (t) =>
+      sub(
+        t,
+        "      for (const name of fields.seen.keys())\n        fields.seen.set(name, fields.input - 1);\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1929",
+    title:
+      "WEB-14a revision 10 (R11, C3): a restore imports only the fields the schema admits (the others neither restored nor owed)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the successor admits nothing|partial admission|an EMPTY saved value|ON THE PAGE but not admitted|closed tab|the successor does not admit the saved field/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (unshown(name)) fields.ledger[name] = values[name] as string;\n",
+        "    if (admits.has(name) && unshown(name))\n      fields.ledger[name] = values[name] as string;\n",
+      ),
+  },
+
+  {
+    id: "MU-1930",
+    title:
+      "WEB-14a revision 10 (R11, C3): a restore reports complete although fields of the copy are not shown",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the successor admits nothing|partial admission|an EMPTY saved value|unchecked checkbox|CHOSEN from the alternatives|ABANDONED hand-off|the successor does not admit the saved field/,
+    patch: (t) =>
+      sub(
+        t,
+        "    } else if (!unshown(name) || resolved(fields, name, value)) continue;\n",
+        "    } else continue;\n",
+      ),
+  },
+
+  {
+    id: "MU-1931",
+    title:
+      'WEB-14a revision 10 (R11, I2): an unknown start is taken for "" (an empty saved value of a field never shown needs nothing)',
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /an EMPTY saved value/,
+    patch: (t) =>
+      sub(
+        t,
+        "    (start !== undefined && value === start) ||\n",
+        '    value === (start ?? "") ||\n',
+      ),
+  },
+
+  {
+    id: "MU-1932",
+    title:
+      "WEB-14a revision 10 (R11, C4): a save replaces or cleans up a copy the form does not account for",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the form holds NO value|the clean path too/,
+    // Replaces the condition: removing the line would leave the loop without a body (a syntax error, no evidence).
+    patch: (t) =>
+      sub(
+        t,
+        '    if (copy && !accounts(session.fields, copy.values, now)) return "failed";\n',
+        '    if (copy && (false as boolean)) return "failed";\n',
+      ),
+  },
+
+  {
+    id: "MU-1933",
+    title:
+      "WEB-14a revision 10 (R11, C4): a field of the copy the form holds no value for is taken as accounted for",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the form holds NO value|the clean path too/,
+    patch: (t) =>
+      sub(
+        t,
+        "      name in captured || (holds !== undefined && resolved(fields, name, holds))\n",
+        "      name in captured || holds === undefined || resolved(fields, name, holds)\n",
+      ),
+  },
+
+  {
+    id: "MU-1934",
+    title:
+      "WEB-14a revision 10 (R11, C3): the copy restored at mount is recorded as what the form shows of it (a projection)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the form holds NO value|OWN copy read again with a narrower schema/,
+    patch: (t) =>
+      sub(
+        t,
+        "            const values = internalOf(newest);\n",
+        "            const values = valuesOf(current);\n",
+      ),
+  },
+
+  {
+    id: "MU-1935",
+    title:
+      "WEB-14a revision 10 (R11, C3): a copy chosen from the alternatives is recorded as what the form shows of it (a projection)",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /CHOSEN from the alternatives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        const values = internalOf(copy);\n",
+        "        const values = valuesOf(current);\n",
+      ),
+  },
+
+  {
+    id: "MU-1936",
+    title:
+      "WEB-14a revision 10 (R11): a terminal act leaves the restored copy's values owed (its clean-up refused after a failed discard)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /when the clean-up of P and H fails/,
+    patch: (t) =>
+      sub(t, "    source: source && { ...source, values: {} },\n", ""),
+  },
+
+  {
+    id: "MU-1937",
+    title:
+      "WEB-14a revision 10 (R11): a terminal act leaves the own copy's values owed (every later save refused after a failed discard)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /with an own copy holding a field now hidden/,
+    patch: (t) => sub(t, "    own: own && { ...own, values: {} },\n", ""),
+  },
+
+  {
+    id: "MU-1938",
+    title:
+      "WEB-14a revision 10 (R17): 'Discard and reload anyway' covers only what a copy can hold (a native editing state stays dirty: the discard reload never happens)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the coordinator's discard of the session|'Discard and reload anyway' after it/,
+    patch: (t) =>
+      sub(
+        t,
+        "      discard: () => terminalAct(session, shownOf(session.fields)),\n",
+        "      discard: () => terminalAct(session, valuesOf(session)),\n",
+      ),
+  },
+
+  {
+    id: "MU-1939",
+    title:
+      "WEB-14a revision 10 (R17): the provisional form's discard covers only what a copy can hold",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /before the form has a database/,
+    patch: (t) =>
+      sub(
+        t,
+        "        cover(own, shownOf(own), own.input);\n",
+        "        cover(own, capturable(own), own.input);\n",
+      ),
+  },
+
+  {
+    id: "MU-1940",
+    title:
+      "WEB-14a revision 10 (R11, C3): a field reported incomplete stays reported after it shows its value again",
+    file: "src/lib/form-recovery/use-recoverable-form.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the successor admits nothing|unchecked checkbox/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (left.length < named.length)\n",
+        "    if (false as boolean)\n",
+      ),
+  },
+
+  {
+    id: "MU-1941",
+    title:
+      "WEB-14a revision 10 (R17/R11, I7): the dirty check ignores what no copy can hold (every normal reload exit proceeds)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-completeness.test.tsx",
+      "tests/pwa/coordinator-completeness.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT \(activation\)|REQUIREMENT \(fallback\)|in an initially empty number field|the successor does not admit the saved field/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (owed > 0 || hasDebt(fields)) return true;\n",
+        "  if (owed > 0) return true;\n",
+      ),
+  },
+
+  {
+    id: "MU-1942",
+    title:
+      "WEB-14a revision 10 (R17/R11, C4): a save goes ahead over what no copy can hold",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-completeness.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    // The R11 cases are refused by the second layer (`accounts`); the R17 cases with no copy reach the clean path through this check alone.
+    expect:
+      /in an initially empty number field|already there when the form first reads it|a script sets 7 without an event/,
+    patch: (t) =>
+      sub(t, '  if (hasDebt(session.fields)) return "failed";\n', ""),
+  },
+
+  {
+    id: "MU-1943",
+    title:
+      "WEB-14a revision 11 (R18, C2/I1): edits are listened to on the form only (an associated control outside it goes unseen)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: [
+      "tests/lib/recoverable-form-membership.test.tsx",
+      "tests/pwa/coordinator-membership.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT \(sibling\): typed UNFINISHED|REQUIREMENT \(sibling\): FIRST saved|REQUIREMENT \(activation\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (root !== element)\n      for (const type of INPUT_EVENTS)\n        root.addEventListener(type, onInput, true);",
+        "    if (root !== element && (false as boolean))\n      for (const type of INPUT_EVENTS)\n        root.addEventListener(type, onInput, true);",
+      ),
+  },
+
+  {
+    id: "MU-1944",
+    title:
+      "WEB-14a revision 11 (R18, C1): an event is mapped to a field by its target's name only (a member found by its id goes unseen)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    // A name-only mapping still stamps an unnamed member's event as an edit of every field and reads the field, so retention alone cannot
+    // tell; the commit rule can (a change only committing what the member reported is then a new edit).
+    expect: /a member found by its id: the focus change committing/,
+    patch: (t) =>
+      sub(
+        t,
+        "              membersOf(element, name).includes(target as Element),",
+        "              name === (target as HTMLInputElement).name,",
+      ),
+  },
+
+  {
+    id: "MU-1945",
+    title:
+      "WEB-14a revision 11 (R18, C1): a control inside the form that belongs to another form is taken for this form's input",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /belongs to ANOTHER form is not this form's input/,
+    patch: (t) =>
+      sub(
+        t,
+        "        control !== null ||\n        !(target instanceof Node && element.contains(target))",
+        "        !(target instanceof Node && element.contains(target))",
+      ),
+  },
+
+  {
+    id: "MU-1946",
+    title:
+      "WEB-14a revision 11 (R18, C2/I2): another form's reset is taken for this form's edit",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /another form's reset is not this form's edit/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (event.type === "reset" ? target !== element : control !== element) {',
+        '    if (event.type === "reset" ? (false as boolean) : control !== element) {',
+      ),
+  },
+
+  {
+    id: "MU-1947",
+    title:
+      "WEB-14a revision 11 (R18, C2/I5): an event reaching both the root and the form is taken twice (duplicate edit stamps)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /one input event moves the input revision by exactly one/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (stopped || taken.has(event)) return;",
+        "    if (stopped) return;",
+      ),
+  },
+
+  {
+    id: "MU-1948",
+    title:
+      "WEB-14a revision 11 (R18, C2): structural changes are observed in the form's subtree only (an associated member shown again is not restored)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /sibling member removed, then a new untouched one shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "    observer?.observe(root, {\n      childList: true,",
+        "    observer?.observe(element, {\n      childList: true,",
+      ),
+  },
+
+  {
+    id: "MU-1949",
+    title:
+      "WEB-14a revision 11 (R18, C3/I6): a freeze holds the form's subtree only (an associated control outside it stays usable)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: [
+      "tests/lib/recoverable-form-membership.test.tsx",
+      "tests/pwa/coordinator-membership.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the associated member is held \(inert\) with the form|is held with the form until the act ends|the provisional mount \(no port yet\) holds/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!form.contains(member) && !releases.has(member))",
+        "      if (!form.contains(member) && !releases.has(member) && (false as boolean))",
+      ),
+  },
+
+  {
+    id: "MU-1950",
+    title:
+      "WEB-14a revision 11 (R18, C3/I6): a hold is certified without checking it still holds every member",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a render that takes a member's inert away while held/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return [...releases.keys()].every((element) =>\n      element.hasAttribute("inert"),\n    );',
+        "    return true;",
+      ),
+  },
+
+  {
+    id: "MU-1951",
+    title:
+      "WEB-14a revision 11 (R18, C3/I7): the registry takes a hold for held without asking it (in the reload's own step)",
+    file: "src/lib/form-recovery/registry.ts",
+    tests: [
+      "tests/lib/recoverable-form-membership.test.tsx",
+      "tests/pwa/coordinator-membership.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a render that takes a member's inert away while held|is held with the form until the act ends|is held before the registry certifies/,
+    patch: (t) =>
+      sub(t, "            holds &&= release?.holds?.() !== false;\n", ""),
+  },
+
+  {
+    id: "MU-1952",
+    title:
+      "WEB-14a revision 11 (R18, C3/I7): a bound session's freeze says it holds the form whatever its hold says",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a render that takes a member's inert away while held/,
+    patch: (t) =>
+      sub(
+        t,
+        "          (elementHolds.get(session)?.holds() ?? false)),",
+        "          (elementHolds.get(session) !== undefined)),",
+      ),
+  },
+
+  {
+    id: "MU-1953",
+    title:
+      "WEB-14a revision 11 (review-webkit-inert-text-delivery): a held field keeps its focus (WebKit, and Firefox for a field made inert itself, deliver late keys)",
+    file: "src/lib/form-recovery/session.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a focused member loses focus as the hold starts/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (focused instanceof HTMLElement && element.contains(focused))\n    focused.blur();",
+        "  if (focused instanceof HTMLElement && element.contains(focused) && (false as boolean))\n    focused.blur();",
+      ),
+  },
+
+  {
+    id: "MU-1954",
+    title:
+      "WEB-14a revision 12 (R19, C2/I3): the neutral root draws no failure (revision 11: a failed save or discard had no choices there)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-surfaces.test.tsx",
+      "tests/pwa/update-neutral-root.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /REQUIREMENT: 'Reload here' on the neutral root fails|save failed on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const notice = noticeOf(state, "neutral");',
+        '  const shown = noticeOf(state, "neutral");\n  const notice = shown?.failure ? null : shown;',
+      ),
+  },
+
+  {
+    id: "MU-1955",
+    title:
+      "WEB-14a revision 12 (R19, I3/I4): 'Retry save' asks for a fresh acceptance instead of continuing the failed act",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /save failed on the (shell|neutral root): 'Retry save' asks retrySave/,
+    patch: (t) =>
+      sub(
+        t,
+        '  label: "Retry save",\n  act: "retrySave",',
+        '  label: "Retry save",\n  act: "accept",',
+      ),
+  },
+
+  {
+    id: "MU-1956",
+    title:
+      "WEB-14a revision 12 (R19, I3/I5): 'Discard and reload anyway' reloads anyway (no discard)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-surfaces.test.tsx",
+      "tests/pwa/update-neutral-root.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /save (failed|refused) on the (shell|neutral root): .*'Discard and reload anyway' asks discardAndReload|REQUIREMENT: on the neutral root only 'Discard and reload anyway'/,
+    patch: (t) =>
+      sub(
+        t,
+        '  label: "Discard and reload anyway",\n  act: "discardAndReload",',
+        '  label: "Discard and reload anyway",\n  act: "reloadAnyway",',
+      ),
+  },
+
+  {
+    id: "MU-1957",
+    title:
+      "WEB-14a revision 12 (R19, I3): the neutral discard failure no longer warns that the copy may be restored",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /discard failed on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        "Try again, or reload knowing that copy may be restored afterwards.",
+        "Try again, or reload.",
+      ),
+  },
+
+  {
+    id: "MU-1958",
+    title:
+      "WEB-14a revision 12 (R19, C3/I8): a failure is not announced on the neutral root, and 'Saving…' stays in its region",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-surfaces.test.tsx",
+      "tests/pwa/update-neutral-root.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /'Saving…' is replaced by the failure|REQUIREMENT: 'Saving…' on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!text) return;\n    neutralLiveRegion.announce(text);\n    return () => neutralLiveRegion.clear();",
+        "    if (!text || notice?.failure) return;\n    neutralLiveRegion.announce(text);",
+      ),
+  },
+
+  {
+    id: "MU-1959",
+    title:
+      "WEB-14a revision 12 (R19, I2): the neutral root uses the shell's wording (the form is still here)",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /(save failed|save refused|discard failed) on the neutral root/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const neutral = surface === "neutral";',
+        "  const neutral = false;",
+      ),
+  },
+
+  {
+    id: "MU-1960",
+    title:
+      "WEB-14a revision 12 (R19, I4; oracle: the R6 test of a form that left the registry): 'Retry save' and 'Discard and reload anyway' start a new act (the forms it saved are forgotten)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator-handoff.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /is discarded, even after it left the registry/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (fresh) participants = new Set();\n",
+        "    participants = new Set();\n",
+      ),
+  },
+
+  {
+    id: "MU-1961",
+    title:
+      "WEB-14a revision 12 (R19, I8): a message that went (dismissed) stays in the neutral region",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /when there is nothing left to say/,
+    patch: (t) => sub(t, "    return () => neutralLiveRegion.clear();\n", ""),
+  },
+
+  {
+    id: "MU-1962",
+    title:
+      "WEB-14a revision 12 (R19, C1): the shell's failure buttons ask each other's action",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-surfaces.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /save failed on the shell: 'Retry save' asks retrySave/,
+    patch: (t) =>
+      sub(
+        t,
+        '{ kind: "save-failed", onRetry: first, onDiscardAndReload: second }',
+        '{ kind: "save-failed", onRetry: second, onDiscardAndReload: first }',
+      ),
+  },
+
+  {
+    id: "MU-1963",
+    title:
+      "WEB-14a revision 12 (C5, R18 family): a form out of the page reads its outside member as removed (revision 11: its input owed, no save could take it)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /REQUIREMENT \(sibling\): typed UNFINISHED, the page unmounted/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (away && readOutside(fields, form, name)) continue;\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1964",
+    title:
+      "WEB-14a revision 12 (C5, R18 family): a form IN the page keeps an outside member it no longer has (a removal is never read)",
+    file: "src/lib/form-recovery/fields.ts",
+    tests: ["tests/lib/recoverable-form-membership.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /CONTROL \(sibling\): the member removed and read while the form is still in the page|CONTROL \(sibling\)|REQUIREMENT \(sibling\): typed UNFINISHED, the control removed/,
+    patch: (t) =>
+      sub(t, "  const away = !form.isConnected;", "  const away = true;"),
+  },
+
+  {
+    id: "MU-1965",
+    title:
+      "WEB-14a revision 17 (R24, the reviewed defect): the coordinator does not listen to in-app navigation",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/pwa/coordinator.test.ts",
+      "tests/app/update-navigation.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /available: hidden until a navigation, which brings it back|a link: the destination renders and the banner is back/,
+    patch: (t) => sub(t, "    deps.onNavigation(redisplay),\n", ""),
+  },
+
+  {
+    id: "MU-1966",
+    title:
+      "WEB-14a revision 17 (R24, I2: the production bridge bypassed): the router's navigations are never raised (NavigationSignal not mounted)",
+    file: "src/app/root-route.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a link: the destination renders and the banner is back|a programmatic navigation, a history step/,
+    patch: (t) => sub(t, "      <NavigationSignal />\n", ""),
+  },
+
+  {
+    id: "MU-1967",
+    title:
+      "WEB-14a revision 17 (R24, I1): a navigation brings back only 'available', never 'updated elsewhere'",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: [
+      "tests/pwa/coordinator.test.ts",
+      "tests/app/update-navigation.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /updated elsewhere: brought back by this tab's navigation|updated in another tab: this tab's navigation brings it back/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const redisplay = (): void => {\n    if (dismissed) {\n",
+        "  const redisplay = (): void => {\n    if (dismissed && !elsewhere) {\n",
+      ),
+  },
+
+  {
+    id: "MU-1968",
+    title:
+      "WEB-14a revision 17 (R24, I5/S7): every router render is a navigation (first load, same-address reload and remount included)",
+    file: "src/app/shell/NavigationSignal.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /without a navigation it stays dismissed|none for a first load|replaced before it rendered/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (event.fromLocation && event.hrefChanged) noteNavigation();",
+        "noteNavigation();",
+      ),
+  },
+
+  {
+    id: "MU-1969",
+    title:
+      "WEB-14a revision 17 (R24, S5): a render of the same address counts as a navigation (hrefChanged ignored)",
+    file: "src/app/shell/NavigationSignal.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /without a navigation it stays dismissed|none for a first load/,
+    patch: (t) =>
+      sub(
+        t,
+        "if (event.fromLocation && event.hrefChanged) noteNavigation();",
+        "if (event.fromLocation) noteNavigation();",
+      ),
+  },
+
+  {
+    id: "MU-1970",
+    title:
+      "WEB-14a revision 17 (R24, I3): a navigation is taken for a return to the page (a report and an update check)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /available: hidden until a navigation, which brings it back and does nothing else|updated elsewhere: brought back by this tab's navigation/,
+    patch: (t) =>
+      sub(
+        t,
+        "    deps.onNavigation(redisplay),\n",
+        "    deps.onNavigation(returned),\n",
+      ),
+  },
+
+  {
+    id: "MU-1971",
+    title:
+      "WEB-14a revision 17 (R24, I3): a navigation accepts the update (saves, freezes and reloads unasked)",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /available: hidden until a navigation, which brings it back and does nothing else|updated elsewhere: brought back by this tab's navigation/,
+    patch: (t) =>
+      sub(
+        t,
+        "    deps.onNavigation(redisplay),\n",
+        "    deps.onNavigation(() => {\n      redisplay();\n      actions.accept();\n    }),\n",
+      ),
+  },
+
+  {
+    id: "MU-1972",
+    title:
+      "WEB-14a revision 17 (R24, I4/S12): a navigation clears a save in progress or its failure",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /saving and a failed save keep their place and their choices/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const redisplay = (): void => {\n",
+        "  const redisplay = (): void => {\n    busy = null;\n    publish();\n",
+      ),
+  },
+
+  {
+    id: "MU-1973",
+    title:
+      "WEB-14a revision 17 (R24, I5/S7): the router subscription is never removed (a remount or StrictMode adds another)",
+    file: "src/app/shell/NavigationSignal.tsx",
+    tests: ["tests/app/update-navigation.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /StrictMode and a new tree: one signal per navigation/,
+    patch: (t) =>
+      sub(
+        t,
+        '    () =>\n      router.subscribe("onRendered", (event) => {\n        if (event.fromLocation && event.hrefChanged) noteNavigation();\n      }),\n',
+        '    () => {\n      router.subscribe("onRendered", (event) => {\n        if (event.fromLocation && event.hrefChanged) noteNavigation();\n      });\n    },\n',
+      ),
+  },
+
+  {
+    id: "MU-1974",
+    title:
+      "WEB-14a revision 17 (R24, I5): a disposed coordinator keeps listening to navigation",
+    file: "src/lib/pwa/coordinator.ts",
+    tests: ["tests/pwa/coordinator.test.ts"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a disposed coordinator stops listening/,
+    patch: (t) =>
+      sub(
+        t,
+        "    deps.onNavigation(redisplay),\n",
+        "    (deps.onNavigation(redisplay), () => {}),\n",
+      ),
+  },
+
+  {
+    id: "MU-1975",
+    title:
+      "WEB-14a revision 19 (R26, I1/S1): the state-1 prompt never takes focus",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/app/update-route-focus.test.tsx",
+    ],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a form is open and Title has focus: 'Save and reload' takes focus|'Save and reload' keeps focus over the route's heading/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (request.kind === "prompt") {\n',
+        '  if (request.kind === "prompt") return false;\n  if (request.kind === "prompt") {\n',
+      ),
+  },
+
+  {
+    id: "MU-1976",
+    title:
+      "WEB-14a revision 19 (R26, I1/S2): a failure never focuses its recovery action",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /failed \(Retry save\)|focuses its recovery action once|a discard that failed focuses 'Try again'/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const target = request.target();\n  if (!target || !eligible(target)) return false;\n",
+        '  if (request.kind === "failure") return false;\n  const target = request.target();\n  if (!target || !eligible(target)) return false;\n',
+      ),
+  },
+
+  {
+    id: "MU-1977",
+    title:
+      "WEB-14a revision 19 (R26, I7/S13): a refused save focuses its only, destructive, choice",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a refused save offers only a destructive choice/,
+    patch: (t) =>
+      sub(
+        t,
+        '        kind === "refused"\n          ? section.current\n          : section.current?.querySelector("button"),\n',
+        '        section.current?.querySelector("button"),\n',
+      ),
+  },
+
+  {
+    id: "MU-1978",
+    title:
+      "WEB-14a revision 19 (R26/R27, I6/S15): focus counts as placed although the target never took it",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/lib/form-recovery.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a target that could not take focus is not counted|a first field that could not take focus is not counted/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return !!target && target.ownerDocument.activeElement === target;\n",
+        "  return !!target;\n",
+      ),
+  },
+
+  {
+    id: "MU-1979",
+    title:
+      "WEB-14a revision 19 (R26, I6): a presentation takes focus again on every render and remount",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts. Two sites: the hook and the attempt both check the presentation.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /one presentation: a re-render, a remount of the shell and an equal publication|the same presentation does not take focus again|an equal publication repeats nothing/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (!kind || placed?.at === presentation) return;\n",
+          "    if (!kind) return;\n",
+        ),
+        '  if (request.kind !== "restored" && placed?.at === request.at) {\n',
+        "  if (false) {\n",
+      ),
+  },
+
+  {
+    id: "MU-1980",
+    title:
+      "WEB-14a revision 19 (R26, I6): an equal state published again is taken for a new presentation",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /one presentation: a re-render, a remount of the shell and an equal publication|an equal publication repeats nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (next !== shown) presentation += 1;\n",
+        "  presentation += 1;\n",
+      ),
+  },
+
+  {
+    id: "MU-1981",
+    title:
+      "WEB-14a revision 19 (DA-F1): the state-1 prompt takes focus from the restored field of the same arrival",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restored first, then the prompt appears: the field keeps focus/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (restored("done") || restored("pending")) return false;\n',
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1982",
+    title:
+      "WEB-14a revision 19 (DA-F1): a navigation does not end the restored arrival (the prompt never takes focus again)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /after a navigation the prompt's next presentation takes it/,
+    patch: (t) =>
+      sub(
+        t,
+        "onNavigation(() => {\n  arrivals += 1;\n});\n",
+        "onNavigation(() => {});\n",
+      ),
+  },
+
+  {
+    id: "MU-1983",
+    title:
+      "WEB-14a revision 19 (DA-F1): a restore that focused its field is not noted (the prompt of the same arrival takes focus)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // Re-anchored in revision 20 (same intent) to the request mechanism of focus.ts.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /restored first, then the prompt appears: the field keeps focus/,
+    patch: (t) => sub(t, "    request.arrival = arrivals;\n", ""),
+  },
+
+  {
+    id: "MU-1984",
+    title:
+      "WEB-14a revision 19 (R26, I7/S13): a choice that removes its button leaves focus on the body",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /focus kept at the banner|keeps focus at the banner/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!dismissed) {\n    section.focus();\n    return;\n  }\n",
+        "  if (!dismissed) return;\n",
+      ),
+  },
+
+  {
+    id: "MU-1985",
+    title:
+      "WEB-14a revision 19 (R26, S14): 'Not now' does not return focus to where the prompt took it from",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Not now' returns focus to the field the prompt took it from/,
+    patch: (t) =>
+      sub(t, "    back instanceof HTMLElement &&\n", "    false &&\n"),
+  },
+
+  {
+    id: "MU-1986",
+    title:
+      "WEB-14a revision 19 (R26, I7/S14): with nowhere to return to, 'Not now' leaves focus on the body",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /focus goes to the surface's page heading|focus goes to the page heading, not the body/,
+    patch: (t) => sub(t, "  focus(heading);\n}\n", "}\n"),
+  },
+
+  {
+    id: "MU-1987",
+    title:
+      "WEB-14a revision 19 (R26, I2/S14): 'Not now' moves focus the person put elsewhere",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a pointer that leaves focus elsewhere/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!section?.contains(section.ownerDocument.activeElement)) return;\n",
+        "  if (!section) return;\n",
+      ),
+  },
+
+  {
+    id: "MU-1988",
+    title:
+      "WEB-14a revision 19 (R27, I6/S15): the restored field's focus is counted done before it is placed",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // Re-anchored in revision 20 (same intent): RecoveryBanner now registers a request (useRestoredFocus), so the restored request is counted done at registration.
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a first field that could not take focus is not counted as focused/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const made: Request = { kind, target, at, state: "pending" };\n',
+        '  const made: Request = {\n    kind,\n    target,\n    at,\n    state: kind === "restored" ? "done" : "pending",\n  };\n',
+      ),
+  },
+
+  {
+    id: "MU-1989",
+    title:
+      "WEB-14a revision 19 (S14): 'Discard instead' leaves focus on the body, not in the form",
+    file: "src/lib/form-recovery/RecoveryBanner.tsx",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /'Discard instead' used from the keyboard leaves focus in the form/,
+    patch: (t) =>
+      sub(t, "              if (used) firstFieldRef?.current?.focus();\n", ""),
+  },
+
+  {
+    id: "MU-1990",
+    title:
+      "WEB-14a revision 19 (R26, I7): the shell banner's choices do not keep focus at the banner",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /focus kept at the banner|keeps focus at the banner|'Not now' returns focus to the field/,
+    patch: (t) =>
+      sub(t, '    keepFocus(section.current, choice.act === "notNow");\n', ""),
+  },
+
+  {
+    id: "MU-1991",
+    title:
+      "WEB-14a revision 19 (R26, I2): the shell banner's plain notices take focus",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a plain notice \(no form open\) never takes focus/,
+    patch: (t) =>
+      sub(
+        t,
+        '    prompt ? "prompt" : focusKind(state, notice),\n',
+        '    prompt ? "prompt" : "failure",\n',
+      ),
+  },
+
+  {
+    id: "MU-1992",
+    title:
+      "WEB-14a revision 19 (R26, S11/S12): the neutral root's failures never focus their recovery action",
+    file: "src/lib/pwa/UpdateBanner.tsx",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/pwa/update-surfaces.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /focuses its recovery action once|a new one does|S12: 'Reload to update' on the compatibility screen fails to save/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const { section, run } = useBanner(state, focusKind(state, notice));\n",
+        "  const { section, run } = useBanner(state, null);\n",
+      ),
+  },
+
+  {
+    id: "MU-1993",
+    title:
+      "WEB-14a revision 19 (R27): the reviewed defect restored: the heading attempt focuses the heading before checking for focus placed in the tree",
     file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
-    expect: /a level-0 gate cancels the pending heading attempt/,
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /restored field focus is retained when the delayed route heading arrives/,
+    patch: (t) =>
+      sub(
+        t,
+        "        claimed ||\n        (active !== doc.body && tree.contains(active)) ||\n",
+        "",
+      ),
+  },
+
+  {
+    id: "MU-1994",
+    title:
+      "WEB-14a revision 19 (R27, I4): a claim whose control has gone is forgotten (the heading takes focus later)",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /a claim ends the wait even when the claimed control has gone/,
+    patch: (t) => sub(t, "        claimed ||\n", ""),
+  },
+
+  {
+    id: "MU-1995",
+    title:
+      "WEB-14a revision 19 (R27, I4): focus placed in the tree before the first attempt is overridden by a heading already there",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /focus already placed in the tree before the FIRST attempt/,
+    patch: (t) =>
+      sub(t, "        (active !== doc.body && tree.contains(active)) ||\n", ""),
+  },
+
+  {
+    id: "MU-1996",
+    title:
+      "WEB-14a revision 19 (R27, I3/I5/S7): the gate does not end a pending heading focus",
+    file: "src/session/adapters/protected-surface.ts",
+    tests: ["tests/session/heading-fallback.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /the gate closes while it waits/,
     patch: (t) =>
       sub(
         t,
@@ -23880,325 +26709,327 @@ export const UNIT = [
         "",
       ),
   },
+
   {
-    id: "MU-8C-HF13c",
+    id: "MU-1997",
     title:
-      "WEB-08c revision 3 (R8, HF-13): a deferred heading attempt takes focus from a control the person moved to inside the tree",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
-    expect: /does not take focus from a control the person moved to/,
-    patch: (t) =>
-      sub(
-        sub(t, "        claimed ||\n", ""),
-        "        (active !== doc.body && tree.contains(active)) ||\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-8C-HF13d",
-    title:
-      "WEB-08c revision 3 (R8, HF-13 sensitivity): a same-account lift does not restore the keyed control (the original assertion must fail)",
-    file: "src/session/adapters/protected-surface.ts",
-    tests: ["tests/session/resume-gate.test.tsx"],
+      "WEB-14a revision 19 (R27, I4/S10): RouteFocus's frame overrides focus placed after the navigation resolved",
+    file: "src/app/shell/RouteFocus.tsx",
+    tests: ["tests/app/update-route-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
-      /focus returns to the control that had it|the original schedule of HF-13/,
-    patch: (t) =>
-      sub(t, "          target.focus();\n", "          void target;\n"),
+      /'Save and reload' keeps focus over the route's heading|a field focused after the navigation resolved/,
+    patch: (t) => sub(t, "        if (claimed) return;\n", ""),
   },
+
   {
-    id: "MU-8C-RR1",
+    id: "MU-1998",
     title:
-      "WEB-08c revision 3 (R5, S9): the leading page does not announce its recovery report (a follower keeps showing 'Catching up' after the recovery stopped) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /adopts the leader's 'failed' report/,
+      "WEB-14a revision 20 (R26/R27, I2/C3, S3/S4/S6/S9): a refused request is never attempted again (no wake-up when the surface becomes eligible)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /S4: the prompt published while the existing shell is gated|S3: a prompt already published|S6: a restored banner mounted behind the gate|S9: /,
+    patch: (t) => sub(t, "  if (waiting && !observer) {\n", "  if (false) {\n"),
+  },
+
+  {
+    id: "MU-1999",
+    title:
+      "WEB-14a revision 20 (R26/R27, I1): an attempt the browser refused is counted as fulfilled",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: [
+      "tests/pwa/update-focus.test.tsx",
+      "tests/lib/form-recovery.test.tsx",
+    ],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a target that could not take focus is not counted|a first field that could not take focus/,
+    patch: (t) =>
+      sub(t, "  if (!focus(target)) return false;\n", "  focus(target);\n"),
+  },
+
+  {
+    id: "MU-2000",
+    title:
+      "WEB-14a revision 20 (I3, S4/S14/S15/S17): a target inside an inert gate, hold or dialog background is focused",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /S4: the prompt published while the existing shell is gated|S14: a restored field held|S15: an app dialog's inert background|S17: the gate closes again/,
+    patch: (t) => sub(t, '  !target.closest("[inert]") &&\n', ""),
+  },
+
+  {
+    id: "MU-3001",
+    title:
+      "WEB-14a revision 20 (I3, S10): a target behind the modal gate dialog is focused",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /S10: a neutral-root failure behind the open modal gate dialog|S11: a failure pending on both surfaces/,
     patch: (t) =>
       sub(
         t,
-        "        failure,\n      };\n      postStatus();\n",
-        "        failure,\n      };\n",
+        "    (dialog) => !dialog.contains(target) && modal(dialog),\n",
+        "    () => false,\n",
       ),
   },
+
   {
-    id: "MU-8C-RR2",
+    id: "MU-3002",
     title:
-      "WEB-08c revision 3 (R5, S9): a hint for another identity replaces the page's kept report (and withdraws its card 3) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect:
-      /a report for another epoch is not adopted|a report for another account is not adopted/,
-    patch: (t) =>
-      sub(
-        t,
-        "      identity.account_id !== message.account ||\n      identity.epoch !== message.epoch\n    )\n      return;\n    const kept = ownStatus();",
-        "      false\n    )\n      return;\n    const kept = ownStatus();",
-      ),
+      "WEB-14a revision 20 (I4/I12, S18/S21): an unmounted owner does not withdraw its request (it is watched for ever)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S18\/S21: an owner unmounted while its request waits/,
+    patch: (t) => sub(t, "    requests.delete(made);\n", ""),
   },
+
   {
-    id: "MU-8C-RR3",
+    id: "MU-3003",
     title:
-      "WEB-08c revision 3 (R5, S9): the leading page applies another page's recovery report instead of showing its own job's (both leader guards: adoption and application) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /the leading page never adopts/,
+      "WEB-14a revision 20 (DA-F2, S30): a later save failure does not cancel a restored-field request still pending",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S30, DA-F2/,
     patch: (t) =>
       sub(
         sub(
           t,
-          "  ): void => {\n    if (leading()) return;\n    const identity = deps.identity.get();\n",
-          "  ): void => {\n    const identity = deps.identity.get();\n",
+          '  if (kind === "failure" || kind === "refused") cancel("restored");\n',
+          "",
         ),
-        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
-        "    if (!showingRecoveryCard() || !visible()) return;\n",
+        '    if (request.kind !== "prompt") cancel("restored");\n',
+        "",
       ),
   },
+
   {
-    id: "MU-8C-RR4",
+    id: "MU-3004",
     title:
-      "WEB-08c revision 3 (R5, S9): a page that starts after the report never asks for the standing one (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /opened AFTER the report/,
-    patch: (t) =>
-      sub(
-        t,
-        '    deps.channel.post({\n      type: "recovery_state_query",\n',
-        '    void ({\n      type: "recovery_state_query",\n',
-      ),
-  },
-  {
-    id: "MU-8C-RR5",
-    title:
-      "WEB-08c revision 3 (R5, S9): the leading page does not answer a query for its standing report (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /opened AFTER the report/,
-    patch: (t) =>
-      sub(
-        t,
-        "              };\n            postStatus();\n            return;\n",
-        "              };\n            return;\n",
-      ),
-  },
-  {
-    id: "MU-8C-RR6",
-    title:
-      "WEB-08c revision 3 (R5, S9): a page whose identity changed keeps the report kept for the previous identity (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /identity changes drops the adopted report/,
-    patch: (t) =>
-      sub(
-        t,
-        "    return kept !== null &&\n      identity !== null &&\n      kept.account === identity.account_id &&\n      kept.epoch === identity.epoch\n",
-        "    return kept !== null &&\n      identity !== null\n",
-      ),
-  },
-  {
-    id: "MU-8C-RR7",
-    title:
-      "WEB-08c revision 3 (R5, S9): a page is given a report that changes nothing it shows (every hint re-evaluates it) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /is NOT re-evaluated by a report that changes nothing/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (failed === showsFailed) return;\n    const phase = failed",
-        "    const phase = failed",
-      ),
-  },
-  {
-    id: "MU-8C-RR8",
-    title:
-      "WEB-08c revision 3 (R5, S9; the T22 (i) regression): a page that is not showing the recovery card is given a report (a hint wakes a gated or hidden page) (re-anchored in WEB-08c revision 4 to the versioned report protocol; same intent)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /T22 \(i\): a page that is NOT showing the recovery card/,
-    patch: (t) =>
-      sub(
-        t,
-        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
-        "    if (leading() || !visible()) return;\n",
-      ),
-  },
-  {
-    id: "MU-8C-R9a",
-    title:
-      "WEB-08c revision 4 (R9): the session never withdraws a held recovery report at its record read (another identity's report, or one held after the fence was cleared, stays)",
-    file: "src/session/kernel/evaluate.ts",
-    tests: ["tests/session/recovery-api.test.ts"],
+      "WEB-14a revision 20 (DA-F1, S14): the prompt does not wait for a restored field held in the page",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect:
-      /a report scoped to ANOTHER identity shows nothing|a report made while the account has NO fence is withdrawn/,
+      /S14, DA-F1: a state-1 prompt waits while a restored field in the page is held/,
     patch: (t) =>
       sub(
         t,
-        "  if (\n    k.neutral.recovery &&\n    !(",
-        "  if (\n    (false as boolean) &&\n    !(",
+        '    if (restored("done") || restored("pending")) return false;\n',
+        '    if (restored("done")) return false;\n',
       ),
   },
+
   {
-    id: "MU-8C-R9b",
+    id: "MU-3005",
     title:
-      "WEB-08c revision 4 (R9): a recovery report names state 2 or 3 with no fence at all (the WEB-08a fallback that stranded the follower)",
-    file: "src/session/model/neutral-state.ts",
-    tests: ["tests/session/model/neutral-state.test.ts"],
-    expect: /the catch-up states/,
+      "WEB-14a revision 20 (S11): the neutral root goes before the shell when both hold a pending failure",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S11: a failure pending on both surfaces/,
     patch: (t) =>
       sub(
         t,
-        '  if (memory.waitingOnOtherWindow) return "1e.waiting";\n',
-        '  if (memory.waitingOnOtherWindow) return "1e.waiting";\n  if (memory.recovery === "catching_up") return "2";\n  if (memory.recovery === "failed") return "3";\n',
+        '  (request.target()?.closest("#neutral-root") ? 1 : 0);\n',
+        '  (request.target()?.closest("#neutral-root") ? -1 : 0);\n',
       ),
   },
+
   {
-    id: "MU-8C-R9c",
+    id: "MU-3006",
     title:
-      "WEB-08c revision 4 (R9, S3): the scan reads only a displaying page (a visible page on recovery state 2 or 3 waits for a hint that was lost)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/recovery-api.test.ts"],
-    expect: /S3: every hint to the follower is LOST too/,
+      "WEB-14a revision 20 (S15): an app dialog returning focus to its opener takes it from the recovery action placed since",
+    file: "src/components/ui/dialog.tsx",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /the dialog keeps focus while open; when it closes the failure's 'Retry save' takes focus/,
     patch: (t) =>
       sub(
         t,
-        '(view.kind === "neutral" && /^[23]$/.test(view.state))',
-        '(view.kind === "neutral" && (false as boolean))',
+        "              !content?.contains(active)\n",
+        "              false\n",
       ),
   },
+
   {
-    id: "MU-8C-R9d",
+    id: "MU-3007",
     title:
-      "WEB-08c revision 4 (R9, S8): the scan reads a hidden page too (a recovery-card scan wakes a hidden page)",
-    file: "src/session/session.ts",
-    tests: ["tests/session/recovery-api.test.ts"],
-    expect: /a HIDDEN page on state 3 reads nothing on its own/,
+      "WEB-14a revision 20 (S16): a restored field given by a different ref is not attempted until the document changes",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/lib/form-recovery.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /a first field that could not take focus is not counted as focused; the field given next is focused/,
+    patch: (t) => sub(t, "  useEffect(reconcile, [field]);\n", ""),
+  },
+
+  {
+    id: "MU-3008",
+    title:
+      "WEB-14a revision 20 (I5, S21): loaded after a publication, the module takes that state for a new presentation at its next equal publication",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /I5: a banner loaded after the state was published/,
     patch: (t) =>
       sub(
         t,
-        "        if (\n          ports.page.isVisible() &&\n",
-        "        if (\n          (true as boolean) &&\n",
+        "let shown = JSON.stringify(appUpdates.get());\n",
+        'let shown = "";\n',
       ),
   },
+
   {
-    id: "MU-8C-R9e",
+    id: "MU-3009",
     title:
-      "WEB-08c revision 4 (R9, S2): a follower asks for the leader's report ONCE per card (a lost report or answer is never repaired)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S2 \(lost report\)|S2 \(lost question, then lost answer\)/,
+      "WEB-14a revision 20 (S10): the close of a modal dialog is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S10: a neutral-root failure behind the open modal gate dialog/,
+    // Re-anchored in revision 21 (same intent): the observer now watches every attribute, so the mutant ignores only `open` changes.
     patch: (t) =>
       sub(
         t,
-        "        followStatus(Math.min(delay * 2, STATUS_ASK_MAX_MS));\n",
-        "        void delay;\n",
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "open")) reconcile();\n    });\n',
       ),
   },
+
   {
-    id: "MU-8C-R9f",
+    id: "MU-3010",
     title:
-      "WEB-08c revision 4 (R9, S4): reports of one producer are not ordered (a late 'none' replaces its newer 'failed')",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S4: a late report of the SAME producer/,
+      "WEB-14a revision 20 (S16): a target rendered later is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S16: a restored field rendered after its banner/,
     patch: (t) =>
-      sub(t, "      message.seq <= kept.seq\n", "      (false as boolean)\n"),
+      sub(t, "      childList: true,\n", "      childList: false,\n"),
   },
+
   {
-    id: "MU-8C-R9g",
+    id: "MU-3011",
     title:
-      "WEB-08c revision 4 (R9, S11): the leading page applies a follower's retry whatever failure it was pressed against (a spent retry resets the current stop)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S11: a follower's retry names the failure it saw/,
+      "WEB-14a revision 20 (I5, S11): a presentation focused on one surface is focused again by its other pending surface (no check at the attempt)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S11: a failure pending on both surfaces/,
     patch: (t) =>
       sub(
         t,
-        "    if (\n      target.failure !== undefined &&\n",
-        "    if (\n      (false as boolean) &&\n      target.failure !== undefined &&\n",
+        '  if (request.kind !== "restored" && placed?.at === request.at) {\n    request.state = "done";\n    return false;\n  }\n',
+        "",
       ),
   },
+
+  // ---- WEB-14a revision 21 (R26/R27 CSS readiness; review r20, design assessment Q3): one wake source removed at a time ----
   {
-    id: "MU-8C-R9h",
+    id: "MU-3019",
     title:
-      "WEB-08c revision 4 (R9, S8): a hidden follower is given the kept report (a hint wakes a hidden page)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /S8: a HIDDEN follower neither asks nor is given a report/,
+      "WEB-14a revision 21 (R26/R27, I2, S2/S6): a change of `class` is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hidden by its class: focused when only that class|hidden by its own class is focused/,
     patch: (t) =>
       sub(
         t,
-        "    if (leading() || !showingRecoveryCard() || !visible()) return;\n",
-        "    if (leading() || !showingRecoveryCard()) return;\n",
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "class")) reconcile();\n    });\n',
       ),
   },
+
   {
-    id: "MU-8C-R9i",
+    id: "MU-3020",
     title:
-      "WEB-08c revision 4 (R9): the leading page answers a question only when it has a failure or progress to report (revision 3: 'none' was never answered)",
-    file: "src/data/leader/leader.ts",
-    tests: ["tests/data/recovery-report-routing.test.ts"],
-    expect: /the leader answers a question with 'none' too/,
+      "WEB-14a revision 21 (R26/R27, I2, S2/S4/S6): a change of `style` is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /hidden by its style: focused when only that style|hidden by its own style is focused|hidden by the neutral root's style/,
     patch: (t) =>
       sub(
         t,
-        '              announced === null ||\n              announced.account !== message.account ||\n              announced.epoch !== message.epoch\n            )\n              announced = {\n                account: message.account,\n                epoch: message.epoch,\n                phase: "none",\n                failure: null,\n              };\n',
-        '              announced === null ||\n              announced.phase === "none" ||\n              announced.account !== message.account ||\n              announced.epoch !== message.epoch\n            )\n              return;\n',
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      if (records.some((record) => record.attributeName !== "style")) reconcile();\n    });\n',
       ),
   },
+
   {
-    id: "MU-8C-Q1",
+    id: "MU-3021",
     title:
-      "WEB-08c revision 4 (DA-N1): a wake (a notification that changes connectivity, the view or the identity object) re-enters a recovery quota stop",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once/,
+      "WEB-14a revision 21 (R26/R27, I2, S6): the revision-20 wake list restored (`inert`, `open`, `hidden`, `disabled` only): a stylesheet's attribute selector is not a wake-up",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /hidden by its own data-state is focused/,
     patch: (t) =>
       sub(
         t,
-        "    if (quotaHeld()) return;\n    void tick();\n",
-        "    void tick();\n",
+        "      attributes: true,\n    });\n",
+        '      attributes: true,\n      attributeFilter: ["inert", "open", "hidden", "disabled"],\n    });\n',
       ),
   },
+
   {
-    id: "MU-8C-Q2",
+    id: "MU-3022",
     title:
-      "WEB-08c revision 4 (DA-N1): connectivity returning re-enters a recovery quota stop",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once|D2 \(accepted limit\)/,
+      "WEB-14a revision 21 (R26, C2, S2/S12): only a change of a target itself is a wake-up (an ancestor's reveal is missed)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect:
+      /presented while <main> is hidden by its (class|style)|S12, DA-F1: the prompt and a restored field both hidden/,
     patch: (t) =>
       sub(
         t,
-        "              if (alive(b) && !quotaHeld()) {\n",
-        "              if (alive(b)) {\n",
+        "    observer = new MutationObserver(reconcile);\n",
+        '    observer = new MutationObserver((records) => {\n      const targets = [...requests].map((request) => request.target());\n      if (records.some((record) => record.type === "childList" || targets.includes(record.target as HTMLElement))) reconcile();\n    });\n',
       ),
   },
+
   {
-    id: "MU-8C-Q3",
+    id: "MU-3023",
     title:
-      "WEB-08c revision 4 (DA-N1, S7): a recovery quota stop is not recorded in the write-failure marker (a reload or a takeover retries it)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once|S7\/S6: the stop survives a reload/,
+      "WEB-14a revision 21 (I9): each change is its own attempt (no coalescing of a batch)",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /I9: a batch of changes is one attempt/,
     patch: (t) =>
       sub(
         t,
-        '    const recorded = recordStop(\n      deps.markers,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
-        '    const recorded = recordStop(\n      undefined,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
+        "    observer = new MutationObserver(reconcile);\n",
+        "    observer = new MutationObserver((records) => {\n      for (const _ of records) reconcile();\n    });\n",
       ),
   },
+
   {
-    id: "MU-8C-Q4",
+    id: "MU-3024",
     title:
-      "WEB-08c revision 4 (DA-N1): 'Try again' does not retire a recovery quota stop's marker (the person's act cannot end it)",
-    file: "src/data/engine/recovery-job.ts",
-    tests: ["tests/data/recovery-job.test.ts"],
-    expect: /S9: quota once|S7\/S6: the stop survives a reload/,
+      "WEB-14a revision 21 (I9, S23): the watch is kept when nothing is pending any more",
+    file: "src/lib/form-recovery/focus.ts",
+    tests: ["tests/pwa/update-focus.test.tsx"],
+    // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
+    expect: /S23\/I9: once fulfilled, the watch stops/,
     patch: (t) =>
       sub(
         t,
-        '              current.cause === "storage_full") &&\n',
-        "              (false as boolean)) &&\n",
+        "  } else if (!waiting && observer) {\n",
+        "  } else if (false) {\n",
       ),
   },
 ];
@@ -24360,12 +27191,23 @@ export const RETIRED = [
     replacedBy:
       "MU-1062 (the listing walks by index again: the review's churn then hides a standing failure), MU-1064 and MU-1065 (an established key the snapshot left out is read again and contradicts it)",
   },
+
+  {
+    id: "MU-2232",
+    why: "(WEB-10a revision 11, R23 S13) an unsaved enrolment draft shown under another identity: the draft's own owner check was removed as unreachable. The qualification run (`.agtx/evidence/web10a-revision-11/validation/runs/2026-10-15T20-43-03.594Z-612cc000`) found the mutant SURVIVED S13 with no failure at all, because the task detail's complete read belongs to one identity (`useTaskDetail`'s scope): another identity remounts the settings and drops the draft before it could be shown. A guard no composed schedule can reach is not kept, so there is no anchor (`draft?.owner === owner`) to patch",
+    replacedBy:
+      "enrolment-ownership S13 (asserts the composed behaviour) and the detail's identity-scoped read (its existing coherence mutants)",
+  },
+
+  // WEB-14a additions retained when merging accepted WEB-10a; see id-migrations.json for collisions.
+
   {
     id: "MU-1822",
     why: "WEB-14a revision 1: EQUIVALENT. It removed only the check made before the recovery connection is opened; the check made after the open and before the transaction refuses exactly the same calls, so no outcome changes (it opens one connection, closed at once). It SURVIVED in all three engines in pool request-824743e1a5ee45cdada6 (2026-10-10, control passed), recorded in .agtx/execute.md",
     replacedBy:
       "MU-1821 (every admission check of the recovery connection removed)",
   },
+
   {
     id: "MU-1823",
     why: "WEB-14a revision 1 (R5): the ten-copy bound of the answer was REMOVED on purpose (it hid an eligible copy and omitted alternatives), so the mutant that lifted it has nothing to patch",
@@ -26716,85 +29558,6 @@ export const ENGINE = [
       ),
   },
   {
-    id: "MU-1817",
-    title:
-      "WEB-14a D-P8: (REAL ENGINE) the probe is skipped: a database a newer build upgraded is opened and used by this build's code",
-    file: "src/data/store/dexie-adapter.ts",
-    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
-    grep: "a\\ database\\ already\\ NEWER\\ than\\ this\\ build",
-    expect: /a database already NEWER than this build/,
-    patch: (t) =>
-      sub(
-        t,
-        "      if (installedVersion(strict) > DECLARED_IDB_VERSION) throw supersede();\n",
-        "",
-      ),
-  },
-  {
-    id: "MU-1818",
-    title:
-      "WEB-14a D-P8: (REAL ENGINE) the probe compares with >=: this build's own version is taken for a newer one (nothing opens)",
-    file: "src/data/store/dexie-adapter.ts",
-    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
-    grep: "Q\\-P1\\ and\\ the\\ positive\\ control",
-    expect: /Q-P1 and the positive control/,
-    patch: (t) =>
-      sub(
-        t,
-        "installedVersion(strict) > DECLARED_IDB_VERSION",
-        "installedVersion(strict) >= DECLARED_IDB_VERSION",
-      ),
-  },
-  {
-    id: "MU-1819",
-    title:
-      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection runs any plan (not only the recovery plans): a way back into the account's data",
-    file: "src/data/store/recovery-store.ts",
-    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
-    grep: "E\\-R7\\ \\(revision\\ 1\\)",
-    expect: /E-R7 \(revision 1\)/,
-    patch: (t) =>
-      sub(
-        t,
-        "        !ALLOWED.has(plan.name) ||\n        plan.apply !== undefined ||\n        plan.scope.some((store) => !SCOPE.has(store))\n",
-        "        false\n",
-      ),
-  },
-  {
-    id: "MU-1820",
-    title:
-      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection's open creates a database that is not there",
-    file: "src/data/store/recovery-store.ts",
-    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
-    grep: "E\\-R7\\ \\(revision\\ 1\\)",
-    expect: /E-R7 \(revision 1\)/,
-    patch: (t) => sub(t, "        request.transaction?.abort();\n", ""),
-  },
-  {
-    id: "MU-1821",
-    title:
-      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection never asks whether it is admitted (a closed or left account is written and read)",
-    file: "src/data/store/recovery-store.ts",
-    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
-    grep: "E\\-R7\\ \\(revision\\ 1\\)",
-    expect: /E-R7 \(revision 1\)/,
-    // Every admission check at once: each alone is covered by the next (see MU-1822 in RETIRED).
-    patch: (t) =>
-      sub(
-        sub(
-          sub(
-            t,
-            "      if (closed || !factory || !deps.admitted())",
-            "      if (closed || !factory)",
-          ),
-          '            if (!deps.admitted()) throw new StoreFailure("closed");\n',
-          "",
-        ),
-        '        if (!deps.admitted()) throw new StoreFailure("closed");\n',
-        "",
-      ),
-  },
-  {
     id: "MU-1140",
     title:
       "WEB-12a: (REAL ENGINE) a queued draft's captured defaults context is not stored (the review's Was cannot show the captured audience)",
@@ -26949,9 +29712,7 @@ export const ENGINE = [
         "      : { known: true, value: { template: null, version: 0 } };\n  const personal = personalEvidence.known",
       ),
   },
-
-  // Accepted WEB-13a calendar mutations, retained with their reviewed IDs during the WEB-14a main merge.
-
+  ...ENGINE_LIFECYCLE,
   // ---- WEB-13a (REAL ENGINE): the Calendars screen in the production composition --------------------------------------------
   {
     id: "MU-1342",
@@ -26968,7 +29729,6 @@ export const ENGINE = [
         '    setFields((previous) => {\n      const next = { ...previous, [name]: value };\n      sessionStorage.setItem("calendar-link-form", JSON.stringify(next));\n      return next;\n    });\n',
       ),
   },
-
   {
     id: "MU-1343",
     title:
@@ -26984,7 +29744,6 @@ export const ENGINE = [
         "          void cached;\n",
       ),
   },
-
   {
     id: "MU-1357",
     title:
@@ -27000,7 +29759,6 @@ export const ENGINE = [
         "      (afterUncertain ? null : null) ??",
       ),
   },
-
   {
     id: "MU-1358",
     title:
@@ -27016,7 +29774,6 @@ export const ENGINE = [
         '      return { kind: "cached", row: merged, view: view.value };',
       ),
   },
-
   {
     id: "MU-1382",
     title:
@@ -27032,7 +29789,6 @@ export const ENGINE = [
         '    if (seenCached && base !== null && merged !== null)\n      return gate === "open"',
       ),
   },
-
   {
     id: "MU-1383",
     title:
@@ -27052,7 +29808,6 @@ export const ENGINE = [
         "    if (live === null) return;",
       ),
   },
-
   {
     id: "MU-1384",
     title:
@@ -27068,7 +29823,6 @@ export const ENGINE = [
         "  const entry = {};",
       ),
   },
-
   {
     id: "MU-1385",
     title:
@@ -27084,7 +29838,6 @@ export const ENGINE = [
         "  const entry = {};",
       ),
   },
-
   {
     id: "MU-1395",
     title:
@@ -27108,7 +29861,6 @@ export const ENGINE = [
         "export function finishedSince(seen: SeenSource, now: LiveSource): boolean {\n  return true;\n",
       ),
   },
-
   {
     id: "MU-1396",
     title:
@@ -27124,7 +29876,6 @@ export const ENGINE = [
         "",
       ),
   },
-
   {
     id: "MU-1411",
     title:
@@ -27140,7 +29891,6 @@ export const ENGINE = [
         "    refreshing: running,\n",
       ),
   },
-
   {
     id: "MU-1412",
     title:
@@ -27151,7 +29901,6 @@ export const ENGINE = [
     expect: /revision 4, R10/,
     patch: (t) => sub(t, "      observer?.offline();\n", ""),
   },
-
   {
     id: "MU-1413",
     title:
@@ -27162,7 +29911,6 @@ export const ENGINE = [
     expect: /revision 4, R10/,
     patch: (t) => sub(t, "    deps.onBegin?.(id);\n", ""),
   },
-
   {
     id: "MU-1426",
     title:
@@ -27179,7 +29927,6 @@ export const ENGINE = [
         "      attachment.detach();\n      visit.dispose();\n",
       ),
   },
-
   {
     id: "MU-1427",
     title:
@@ -27195,7 +29942,6 @@ export const ENGINE = [
         "        if (disposed) return;\n",
       ),
   },
-
   {
     id: "MU-1428",
     title:
@@ -27216,7 +29962,6 @@ export const ENGINE = [
         "",
       ),
   },
-
   // Revision 6 (R12, R13), in a real engine through the production composition.
   {
     id: "MU-1448",
@@ -27233,7 +29978,6 @@ export const ENGINE = [
         "    !revoked && slots.has(ticket.source);\n",
       ),
   },
-
   {
     id: "MU-1449",
     title:
@@ -27253,200 +29997,608 @@ export const ENGINE = [
         "      attachment.detach();\n      if (window.location.pathname !== opened) visit.dispose();\n",
       ),
   },
+  // Accepted WEB-12a entries retained at their reviewed IDs (historical MU-1201..MU-1207 were already MU-1281..MU-1287 on main).
 
-  // Accepted WEB-08c lifecycle coverage, retained when merging main on 24 October 2026.
   {
-    id: "MU-1301",
+    id: "MU-2031",
     title:
-      "WEB-08c revision 3 (R5, T24 A/S4): (REAL ENGINE) the recovery finishes after its FIRST catch-up page, before the final data commit (the fence is cleared early)",
-    file: "src/data/engine/recovery-job.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-1 T24 A",
-    expect: /LR-1 T24 A/,
+      "WEB-10a N-T1: (REAL ENGINE) the offline Today walk keeps the occurrences of an archived task",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T6:",
+    expect: /E-T6:/,
+    patch: (t) => sub(t, "      if (row.archived) continue;\n", ""),
+  },
+
+  {
+    id: "MU-2032",
+    title:
+      "WEB-10a N-T2: (REAL ENGINE) the first occurrence of a repeating schedule is keyed `once` (its deterministic id is not the server's)",
+    file: "src/features/tasks/model/ids.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T3:",
+    expect: /E-T3:/,
     patch: (t) =>
       sub(
         t,
-        '    if (hasMore) {\n      setState({ kind: "running", mode: issued.mode, path: issued.path });',
-        '    if (hasMore && issued.mode !== "recovery") {\n      setState({ kind: "running", mode: issued.mode, path: issued.path });',
+        "  if (\n    schedule.repeat === null ||\n",
+        "  if (\n    schedule.repeat !== undefined ||\n",
       ),
   },
+
   {
-    id: "MU-1302",
+    id: "MU-2033",
     title:
-      "WEB-08c revision 3 (R5, T24 B\u2032): (REAL ENGINE) a recovery snapshot's `409 access_changed` does not restart the snapshot",
-    file: "src/data/engine/recovery-job.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-2 T24 B",
-    expect: /LR-2 T24 B/,
+      "WEB-10a N-T3: (REAL ENGINE) happened_at is not the instant of the person's act (an hour later)",
+    file: "src/features/tasks/actions.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T2:",
+    expect: /E-T2:/,
     patch: (t) =>
       sub(
         t,
-        '      if (code === "access_changed" && issued.path === "snapshot")',
-        '      if (code === "access_changed" && issued.path === "snapshot" && (false as boolean))',
+        "            happenedAt: Math.floor(env.now() / 1000),",
+        "            happenedAt: Math.floor(env.now() / 1000) + 3_600,",
       ),
   },
+
+  // ---- WEB-10a revision 1 (R2, R3, R7): N-T4..N-T6 -------------------------------------------------------------------------------------
   {
-    id: "MU-1303",
+    id: "MU-2061",
     title:
-      "WEB-08c revision 3 (R5, T24 C, QR2-a attribution): (REAL ENGINE) a RECOVERY-class request's 401 is not recorded as an observation",
-    file: "src/session/kernel/send.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-3 T24 C",
-    expect: /LR-3 T24 C/,
+      "WEB-10a N-T4: (REAL ENGINE) a mounted Today keeps the /daily answer it received online after the device goes offline",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9b:",
+    expect: /E-T9b:/,
     patch: (t) =>
       sub(
         t,
-        '  if (response.status === 401) {\n    observe("unauthenticated");',
-        '  if (response.status === 401) {\n    if (inflight.klass !== "recovery") observe("unauthenticated");',
+        "    env.online && answer !== null && answer.key === key ? answer : null;",
+        "    answer !== null && answer.key === key ? answer : null;",
       ),
   },
+
   {
-    id: "MU-1304",
+    id: "MU-2062",
     title:
-      "WEB-08c revision 3 (R5, T24 C3): (REAL ENGINE) `finish_recovery` does not refuse a current-epoch entry (NOT_ELIGIBLE never answered)",
-    file: "src/session/model/reducers/operation.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-4 T24 C3",
-    expect: /LR-4 T24 C3/,
+      "WEB-10a N-T5: (REAL ENGINE) a correction refused on a version conflict offers neither 'Save mine on the current version' nor 'Discard mine'",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7b:",
+    expect: /E-T7b:/,
     patch: (t) =>
       sub(
         t,
-        "        f.epoch >= input.epoch,\n",
-        "        f.epoch > input.epoch,\n",
+        '    row.attention.status === "version_conflict"',
+        '    row.attention.status === "rejected"',
       ),
   },
+
   {
-    id: "MU-1305",
+    id: "MU-2063",
     title:
-      "WEB-08c revision 3 (R5, T24 C3 RERUN): (REAL ENGINE) `finish_recovery` removes older-epoch entries above the captured `s` too (over-clearing)",
-    file: "src/session/model/reducers/operation.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-5 T24 C3",
-    expect: /LR-5 T24 C3/,
+      "WEB-10a N-T6: (REAL ENGINE) the correction being edited is not kept when the person opens the queue from the dialog",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7c:",
+    expect: /E-T7c:/,
+    // Re-expressed in revision 2 (same intent): retention is now the correction owner's `retainCorrection`. Re-anchored in WEB-10a revision
+    // 22 (same intent): the visit the dialog opens its session on keeps a correction holding input through the sync screens too, so the
+    // explicit retain alone is a redundant layer for an edited correction (Run 6: MU-2063 survived in all three engines). The mutant takes
+    // both of the dialog's keepers away: its session belongs to no visit and its sync control retains nothing. Re-anchored in revision 23
+    // (same intent): the dialog now asks for its visit once (`owner`, also what it attaches to, R35) and opens its session on it.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "        if (session.current !== null) retainCorrection(key, session.current);",
+          "        if (session.current !== null) void 0;",
+        ),
+        "      owner,\n",
+        "      null,\n",
+      ),
+  },
+
+  // ---- WEB-10a revision 2 (R2, R3, R7, R8, DA-N1): N-T7..N-T13 ------------------------------------------------------------------------
+  {
+    id: "MU-2095",
+    title:
+      "WEB-10a N-T7: (REAL ENGINE) the correction dialog's Save is taken out of the keyboard's tab order",
+    file: "src/features/tasks/detail/CorrectionDialog.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8d: .*correction dialog",
+    expect: /E-T8d:/,
     patch: (t) =>
       sub(
         t,
-        "  const kept = list.filter((f) => !(f.epoch < input.epoch && f.seq <= input.s));",
-        "  const kept = list.filter((f) => !(f.epoch < input.epoch));",
+        '              <Button variant="primary" onClick={() => void save()}>',
+        '              <Button\n                variant="primary"\n                tabIndex={-1}\n                onClick={() => void save()}\n              >',
       ),
   },
+
   {
-    id: "MU-1306",
+    id: "MU-2096",
     title:
-      "WEB-08c revision 3 (R5, T24 D, K-3): (REAL ENGINE) the leading page publishes no recovery report (a follower never shows state 3). Revision 4: a report is announced AND answered to questions, so the mutant silences both (the announcement alone was equivalent: a follower that opens later asks; pool request-18efefc5e2a04a89829c, survived)",
-    file: "src/data/leader/leader.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-6 T24 D",
-    expect: /LR-6 T24 D/,
+      "WEB-10a N-T8: (REAL ENGINE) the task form's Save is taken out of the keyboard's tab order",
+    file: "src/features/tasks/form/TaskFormPage.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8d: .*task form",
+    expect: /E-T8d:/,
     patch: (t) =>
       sub(
         t,
-        "    if (standing === null) return;\n",
-        "    if (standing === null || (true as boolean)) return;\n",
+        '          <Button variant="primary" type="submit">',
+        '          <Button variant="primary" type="submit" tabIndex={-1}>',
       ),
   },
+
   {
-    id: "MU-1308",
+    id: "MU-2097",
     title:
-      "WEB-08c revision 3 (R5, T24 H(ii)): (REAL ENGINE) the leader binds an account whose operation is unresolved (row 3)",
-    file: "src/data/leader/leader.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-8 T24 H\\(ii\\)",
-    expect: /LR-8 T24 H\(ii\)/,
+      "WEB-10a N-T9: (REAL ENGINE) an older correction save consumes the session whatever was edited since (keys, held save, queue visit)",
+    file: "src/features/tasks/detail/correction-owner.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T8e:",
+    expect: /E-T8e:/,
     patch: (t) =>
       sub(
         t,
-        "    if (deps.operationPending(identity.account_id)) return;\n",
-        "    void deps.operationPending;\n",
+        "  if (saved && held.revision === ticket.revision) {",
+        "  if (saved) {",
       ),
   },
+
   {
-    id: "MU-1309",
+    id: "MU-2098",
     title:
-      "WEB-08c revision 3 (R5, T24 H(iv)): (REAL ENGINE) E5 never converts an older-epoch unresolved lease into an entry (the reducer refuses every lease; a call-site mutant of recovery.begin was EQUIVALENT: verifyUnresolved converts first too)",
-    file: "src/session/model/reducers/observation.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-9 T24 H\\(iv\\)",
-    expect: /LR-9 T24 H\(iv\)/,
+      "WEB-10a N-T10: (REAL ENGINE) the task detail's clock is not told its day's window (no wake at the close)",
+    file: "src/features/tasks/detail/useTaskDetail.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9c:",
+    expect: /E-T9c:/,
+    patch: (t) =>
+      sub(t, "    shownWindow === null ? [] : [shownWindow],", "    [],"),
+  },
+
+  {
+    id: "MU-2099",
+    title:
+      "WEB-10a N-T11: (REAL ENGINE) a /daily answer is dated by its delivery instead of its dispatch",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9d:",
+    expect: /E-T9d:/,
     patch: (t) =>
       sub(
         t,
-        "        lease.epoch >= settled.epoch\n      )\n        continue;\n      pushFence(",
-        "        lease.epoch >= 0\n      )\n        continue;\n      pushFence(",
+        "        const requestedAt = Math.min(joint.startedAt, personal.startedAt);",
+        "        const requestedAt = env.now();",
       ),
   },
+
   {
-    id: "MU-1313",
+    id: "MU-2100",
     title:
-      "WEB-08c revision 3 (R8, HF-13): (REAL ENGINE) both corrections reverted: the level-0 gate does not cancel the mount's heading attempt and a deferred attempt takes focus from the restored control",
-    file: "src/session/adapters/protected-surface.ts",
-    spec: "tests/e2e/fixture.session-gate.spec.ts",
-    grep: "HF-13 \\(revision 3\\)",
-    expect: /HF-13 \(revision 3\)/,
-    // The merged fallback also cancels on a keyed lift and remembers any focus claim.
-    // Revert all paths that protect the pending heading, preserving this mutant's original defect.
+      "WEB-10a N-T12: (REAL ENGINE) the daily item is taken as the structure even when the committed cache holds a newer version",
+    file: "src/features/tasks/view.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9e:",
+    expect: /E-T9e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : item.version > cached.version ||\n        (item.version === cached.version && basis.current);",
+        "      : true;",
+      ),
+  },
+
+  {
+    id: "MU-2101",
+    title:
+      "WEB-10a N-T13: (REAL ENGINE) the conflict choices do not read what was submitted from the queued operation (after a reload)",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T7e:",
+    expect: /E-T7e:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : submittedCorrection(commandOf(stored), row.id);",
+        "      : null;",
+      ),
+  },
+
+  {
+    id: "MU-2103",
+    title:
+      "WEB-10a N-T14: (REAL ENGINE) Today asks /daily again on every committed page, an empty one included: with the production leader the read wakes the engine and they loop",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.data-wake.spec.ts",
+    grep: "E-C13: .*a healthy engine beside a second real tab",
+    expect: /E-C13:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? (position.value?.appliedRevision ?? (position.value ? 0 : -1))",
+        "      ? (position.value?.pageSeq ?? -1)",
+      ),
+  },
+
+  // ---- WEB-10a revision 3 (R8, R9; design assessment C2, C3, Q13, Q19): the real engines ----------------------------------------------
+  {
+    id: "MU-2119",
+    title:
+      "WEB-10a N-T14: (REAL ENGINE) a local read is certified at its first attempt whatever was committed between its stages",
+    file: "src/data/ui/scan.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T14:.*between=true",
+    expect: /E-T14:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        '    if (after.kind === "ok")',
+      ),
+  },
+
+  {
+    id: "MU-2120",
+    title:
+      "WEB-10a N-T15: (REAL ENGINE) Today schedules the committed windows only, not the one an outstanding create gives",
+    file: "src/features/tasks/today/useTodayView.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T9f:.*today:",
+    expect: /E-T9f:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        snapshot.outstanding,\n      );\n      if (effective.data) out.push(effective.data);",
+        "        NOTHING,\n      );\n      if (effective.data) out.push(effective.data);",
+      ),
+  },
+
+  {
+    id: "MU-2121",
+    title:
+      "WEB-10a N-CG1: (REAL ENGINE) the Dexie adapter never advances the local composition generation",
+    file: "src/data/store/dexie-adapter.ts",
+    spec: "tests/e2e/fixture.data-composition.spec.ts",
+    grep: "E-CG1:",
+    expect: /E-CG1:/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (advancesComposition(written, plan.scope)) {",
+        "        if (false as boolean) {",
+      ),
+  },
+
+  {
+    id: "MU-2122",
+    title:
+      "WEB-10a N-CG2: (REAL ENGINE) the schema stays at version 2: an older build's connection is never closed and it can still open",
+    file: "src/data/model/schema.ts",
+    spec: "tests/e2e/fixture.data-composition.spec.ts",
+    grep: "E-CG2:",
+    expect: /E-CG2:/,
+    patch: (t) =>
+      sub(
+        t,
+        "export const SCHEMA_VERSION = 3;",
+        "export const SCHEMA_VERSION = 2;",
+      ),
+  },
+
+  // ---- WEB-10a revision 4 (R9, R10, R11; design assessment D7, J1, E1): the real engines -------------------------------------------------
+  {
+    id: "MU-2149",
+    title:
+      "WEB-10a N-T15: (REAL ENGINE) an open full history is not read again when its stream's committed version changes",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T15:.*opened=true",
+    expect: /E-T15:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      journal.version === row.progressVersion ||",
+        "      (true as boolean) ||",
+      ),
+  },
+
+  {
+    id: "MU-2150",
+    title:
+      "WEB-10a N-T16: (REAL ENGINE) an enrolment change has no owner while it is pending (no refusal of a second attempt, the control stays enabled)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T16:",
+    expect: /E-T16:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          // Re-anchored in revision 12: `startEnrolment` also takes the change's ticket (R25); the same owner bypassed.
+          "    const mine = startEnrolment(\n      env.identity,\n      taskId,\n      command,\n      env.newId,\n      ticket,\n    );\n    if (mine === null) return false;",
+          '    const mine = {\n      key: env.newId(),\n      body: JSON.stringify(command),\n      command,\n      phase: "pending" as const,\n    };',
+        ),
+        // Re-expressed in revision 10 (R22): the pending rule now lives in `blocked` (every enrolment control), and the body is sent.
+        // Re-anchored in revision 11 (R23): `send` reports whether it sent, and `blocked` names the lock (sending, then confirming).
+        '    : lock?.phase === "sending"\n      ? CONTROLS_COPY.sending\n      : lock !== null\n        ? CONTROLS_COPY.confirming\n        : null;\n',
+        "    : null;\n",
+      ),
+  },
+
+  {
+    id: "MU-2151",
+    title:
+      "WEB-10a N-T17: (REAL ENGINE) the task detail's read is certified at its first attempt whatever another tab committed between its stages",
+    file: "src/data/ui/scan.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T17:.*between=true",
+    expect: /E-T17:/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (sameBasis(before.basis, after.basis))",
+        '    if (after.kind === "ok")',
+      ),
+  },
+
+  {
+    id: "MU-2169",
+    title:
+      "WEB-10a N-T18: (REAL ENGINE) a check of the rest of the journal opens its fix whatever was chosen since",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T18:.*held=true",
+    expect: /E-T18:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "      live(by) && sel.current === mine && versionRef.current === version;",
+          "      live(by) && versionRef.current === version;",
+        ),
+        "    if (sel.current !== mine || !mounted.current) return;",
+        "    if (!mounted.current) return;",
+      ),
+  },
+
+  {
+    id: "MU-2170",
+    title:
+      "WEB-10a N-T19: (REAL ENGINE) a refused check of the rest of the journal only marks the entry (the full history stays)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T19:.*refused=true",
+    expect: /E-T19:/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (live(by)) revoke();\n      return { kind: "stop" };',
+        '      return { kind: "failed" };',
+      ),
+  },
+
+  {
+    id: "MU-2191",
+    title:
+      "WEB-10a N-T24: (REAL ENGINE) a restored draft forgets that its input is unsaved (the next closure loses it)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T24:.*2 closures",
+    expect: /E-T24:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      draft: kept ?? {",
+        "      draft: (kept && { ...kept, unsaved: false }) ?? {",
+      ),
+  },
+
+  {
+    id: "MU-2192",
+    title:
+      "WEB-10a N-T25: (REAL ENGINE) an entry known only from the full history can be saved offline (no save decision shown or taken)",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T25:.*offline-full",
+    expect: /E-T25:/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (saveBlock(factsNow(), open.entry.id) !== null) return;\n",
+          "",
+        ),
+        "      : decided;",
+        "      : null;",
+      ),
+  },
+
+  {
+    id: "MU-2193",
+    title:
+      "WEB-10a N-T21: (REAL ENGINE) the open fix is judged at the version its history was read at, not the stream's committed one",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T21:",
+    expect: /E-T21:/,
     patch: (t) =>
       sub(
         sub(
           sub(
-            sub(
-              t,
-              "      // A pending heading focus is the tree's: the gate owns focus now (revision 19, R27).\n      focusToken += 1;\n",
-              "",
-            ),
-            "          // The person's own place wins over a heading focus still pending from an earlier mount (revision 19, R27).\n          focusToken += 1;\n",
-            "",
+            t,
+            "  if (j === null || !fullAuthority(f)) return HISTORY_COPY.fixWaits;",
+            "  if (j === null || !fullAuthority({ ...f, version: j.version }))\n    return HISTORY_COPY.fixWaits;",
           ),
-          "        claimed ||\n",
-          "",
+          '  if (check?.found === "current" && check.version === f.version) return null;',
+          '  if (check?.found === "current" && check.version === j.version) return null;',
         ),
-        "        (active !== doc.body && tree.contains(active)) ||\n",
+        "  if (coversToEnd(j, entryId, f.version)) return null;",
+        "  if (coversToEnd(j, entryId, j.version)) return null;",
+      ),
+  },
+
+  {
+    id: "MU-2194",
+    title:
+      "WEB-10a N-T20: (REAL ENGINE) a check answered after another tab's commit moved the version still opens its fix",
+    file: "src/features/tasks/detail/EntryHistory.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T20:.*committed=true",
+    expect: /E-T20:/,
+    patch: (t) =>
+      sub(
+        t,
+        "      live(by) && sel.current === mine && versionRef.current === version;",
+        "      live(by) && sel.current === mine;",
+      ),
+  },
+
+  {
+    id: "MU-2205",
+    title:
+      "WEB-10a N-T26: (REAL ENGINE) the conflict dialog's current read looks at the first page of /progress only",
+    file: "src/features/tasks/register.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T26:.*mine on the second page",
+    expect: /E-T26:/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (page.next_after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+        '    if (page.next_after === null || after === null)\n      return { kind: "failed", reason: "inaccessible" };',
+      ),
+  },
+
+  {
+    id: "MU-2254",
+    title:
+      "WEB-10a N-T34: (REAL ENGINE) revision 12's first Join restored: once begun, its form is rendered outside FirstJoin (focus leaves the control chosen)",
+    file: "src/features/tasks/detail/Controls.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T34:",
+    expect: /E-T34:/,
+    patch: (t) => sub(t, FIRST_JOIN_R13, FIRST_JOIN_R12),
+  },
+
+  {
+    id: "MU-2266",
+    title:
+      "WEB-10a N-T35: (REAL ENGINE) Today's row restored to review 15's defect: every shared row says You, whoever the roster names",
+    file: "src/features/tasks/today/TodayRow.tsx",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T35:",
+    expect: /E-T35:/,
+    patch: (t) => sub(t, TODAY_WHO_R15, TODAY_WHO_R14),
+  },
+
+  {
+    id: "MU-2267",
+    title:
+      "WEB-10a N-T36: (REAL ENGINE) a revision is offered whatever the task's and its details' permissions (review 15's defect)",
+    file: "src/features/tasks/reasons.ts",
+    spec: "tests/e2e/fixture.tasks.spec.ts",
+    grep: "E-T36:",
+    expect: /E-T36:/,
+    patch: (t) => sub(t, EDITABLE_R15, "  return true;\n"),
+  },
+  // WEB-10a revision 16 (R30, R31): MU-2299..MU-2303, in their own module.
+  ...ENGINE_R16,
+  ...ENGINE_R17,
+  ...ENGINE_R18,
+  ...ENGINE_R19,
+  ...ENGINE_R20,
+  ...ENGINE_R21,
+  ...ENGINE_R22,
+  ...ENGINE_R23,
+
+  // WEB-14a additions retained when merging accepted WEB-10a; see id-migrations.json for collisions.
+
+  {
+    id: "MU-1817",
+    title:
+      "WEB-14a D-P8: (REAL ENGINE) the probe is skipped: a database a newer build upgraded is opened and used by this build's code",
+    file: "src/data/store/dexie-adapter.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "a\\ database\\ already\\ NEWER\\ than\\ this\\ build",
+    expect: /a database already NEWER than this build/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (installedVersion(strict) > DECLARED_IDB_VERSION) throw supersede();\n",
         "",
       ),
   },
+
   {
-    id: "MU-1314",
+    id: "MU-1818",
     title:
-      "WEB-08c revision 4 (R9, S2): (REAL ENGINE) a follower asks for the leader's report ONCE per card (its paced question never re-arms, so neither time nor its own evaluations ask again; the timer-only form was equivalent natively: pool request-18efefc5e2a04a89829c, survived)",
-    file: "src/data/leader/leader.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-12 S2",
-    expect: /LR-12 S2/,
+      "WEB-14a D-P8: (REAL ENGINE) the probe compares with >=: this build's own version is taken for a newer one (nothing opens)",
+    file: "src/data/store/dexie-adapter.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "Q\\-P1\\ and\\ the\\ positive\\ control",
+    expect: /Q-P1 and the positive control/,
     patch: (t) =>
       sub(
         t,
-        "        if (asking?.key !== key) return;\n        asking = null;\n        followStatus(Math.min(delay * 2, STATUS_ASK_MAX_MS));\n",
-        "        void delay;\n",
+        "installedVersion(strict) > DECLARED_IDB_VERSION",
+        "installedVersion(strict) >= DECLARED_IDB_VERSION",
       ),
   },
+
   {
-    id: "MU-1315",
+    id: "MU-1819",
     title:
-      "WEB-08c revision 4 (R9, S3): (REAL ENGINE) the scan reads only a displaying page (a visible follower on a recovery card never learns the completion when every hint is lost)",
-    file: "src/session/session.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-13 S3",
-    expect: /LR-13 S3/,
+      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection runs any plan (not only the recovery plans): a way back into the account's data",
+    file: "src/data/store/recovery-store.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "E\\-R7\\ \\(revision\\ 1\\)",
+    expect: /E-R7 \(revision 1\)/,
     patch: (t) =>
       sub(
         t,
-        '(view.kind === "neutral" && /^[23]$/.test(view.state))',
-        '(view.kind === "neutral" && (false as boolean))',
+        "        !ALLOWED.has(plan.name) ||\n        plan.apply !== undefined ||\n        plan.scope.some((store) => !SCOPE.has(store))\n",
+        "        false\n",
       ),
   },
+
   {
-    id: "MU-1316",
+    id: "MU-1820",
     title:
-      "WEB-08c revision 4 (DA-N1, S7): (REAL ENGINE) a recovery quota stop is not recorded in the write-failure marker (a reload retries it)",
-    file: "src/data/engine/recovery-job.ts",
-    spec: "tests/e2e/fixture.lifecycle-recovery.spec.ts",
-    grep: "LR-15 S7",
-    expect: /LR-15 S7/,
+      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection's open creates a database that is not there",
+    file: "src/data/store/recovery-store.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "E\\-R7\\ \\(revision\\ 1\\)",
+    expect: /E-R7 \(revision 1\)/,
+    patch: (t) => sub(t, "        request.transaction?.abort();\n", ""),
+  },
+
+  {
+    id: "MU-1821",
+    title:
+      "WEB-14a revision 1, R7: (REAL ENGINE) the recovery connection never asks whether it is admitted (a closed or left account is written and read)",
+    file: "src/data/store/recovery-store.ts",
+    spec: "tests/e2e/fixture.data-schema-probe.spec.ts",
+    grep: "E\\-R7\\ \\(revision\\ 1\\)",
+    expect: /E-R7 \(revision 1\)/,
+    // Every admission check at once: each alone is covered by the next (see MU-1822 in RETIRED).
     patch: (t) =>
       sub(
-        t,
-        '    const recorded = recordStop(\n      deps.markers,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
-        '    const recorded = recordStop(\n      undefined,\n      service,\n      operation,\n      () => service.live,\n      { hold: () => memoryStops.add(memoryKey(service, operation)) },\n    );\n    if (recorded === "obsolete") return quiet();\n    stoppedOperation = operation;',
+        sub(
+          sub(
+            t,
+            "      if (closed || !factory || !deps.admitted())",
+            "      if (closed || !factory)",
+          ),
+          '            if (!deps.admitted()) throw new StoreFailure("closed");\n',
+          "",
+        ),
+        '        if (!deps.admitted()) throw new StoreFailure("closed");\n',
+        "",
       ),
   },
 ];

@@ -1,5 +1,5 @@
 import { canonicalJson } from "./canonical";
-import type { Bases, EnqueueRequest, TargetSpec } from "./outbox";
+import type { Bases, EnqueueRequest, TargetNeeds, TargetSpec } from "./outbox";
 import type {
   DraftRow,
   JsonObject,
@@ -88,10 +88,14 @@ const sameBases = (a: Bases, b: Readonly<Record<ResourceId, number>>) => {
   );
 };
 
-/** The targets of a stored draft, as the request that built it named them (ids, roles, version checks), with the basis on record. */
+/**
+ * The targets of a stored draft, as the request that built it named them (ids, roles, version checks), with the basis on record, and
+ * what its slice says each needs of the person's access (`needs`, derived from the stored draft: the header does not keep it).
+ */
 export function targetsOf(
   draft: DraftRow,
   basis: ReadonlyMap<ResourceId, ResourceVersionRow["basis"]>,
+  needs: TargetNeeds = {},
 ): TargetSpec[] {
   const targets: TargetSpec[] = [];
   for (const id of draft.target_resource_ids) {
@@ -107,6 +111,7 @@ export function targetsOf(
       ...(versionChecked || base === undefined
         ? {}
         : { seedIfUntracked: base }),
+      ...needs[id],
     });
   }
   for (const id of Object.keys(draft.side_effect_bases))
@@ -115,23 +120,29 @@ export function targetsOf(
       role: "side_effect",
       basis: basis.get(id) ?? "resource",
       versionChecked: true,
+      ...needs[id],
     });
   return targets;
 }
 
-/** The request that confirms a reviewed draft. Its `build` refuses (`BasesMoved`) unless handed exactly the draft's stored bases. */
+/**
+ * The request that confirms a reviewed draft. Its `build` refuses (`BasesMoved`) unless handed exactly the draft's stored bases. `needs`:
+ * what the draft's slice says its targets need of the person's access, so the confirmation is refused under a known denial as the
+ * slice's own save would be (WEB-10a DA17-N2: an Anyone occurrence's first record, whose progress defaults are what is reviewed).
+ */
 export function confirmationRequest(
   draft: DraftRow,
   command: JsonObject,
   basis: ReadonlyMap<ResourceId, ResourceVersionRow["basis"]>,
   confirmation: ReviewConfirmation,
+  needs: TargetNeeds = {},
 ): EnqueueRequest {
   const stored = { ...draft.bases };
   const patch = draft.display_patch;
   return {
     endpoint: draft.endpoint,
     ...(draft.target_id === null ? {} : { targetId: draft.target_id }),
-    targets: targetsOf(draft, basis),
+    targets: targetsOf(draft, basis, needs),
     ...(confirmation.replacementId === undefined
       ? {}
       : { localId: confirmation.replacementId }),

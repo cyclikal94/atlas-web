@@ -169,6 +169,15 @@ export const DEFAULT_STACKS = [
     oidc: false,
     mutates: "account data seeded for the snapshot; paced by its stack ledger",
   },
+  // WEB-10a: task journeys have their own backend, accounts and pacing state.
+  {
+    name: "tasks",
+    suffix: "-tasks",
+    files: [SPEC("tasks")],
+    oidc: false,
+    mutates:
+      "tasks, evidence, sharing and enrolment; paced by its stack ledger",
+  },
 ];
 
 /** Discovered by Playwright but NOT run by the default suite: a separate, mandatory command. Never counted as passed by it. */

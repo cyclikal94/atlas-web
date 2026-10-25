@@ -1,0 +1,149 @@
+{
+  "description": "Local WEB-14a merge of accepted WEB-10a b9fd602f. IDs on accepted main remain unchanged. The 24 colliding WEB-14a entries move by +1000; their patches and expected tests are unchanged. Historical evidence and approval plans retain their original IDs and candidate identity; apply this explicit mapping to future WEB-14a selections, never reinterpret old results as covering main entries.",
+  "mappings": [
+    {
+      "from": "MU-2012",
+      "to": "MU-3012",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2013",
+      "to": "MU-3013",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2014",
+      "to": "MU-3014",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2015",
+      "to": "MU-3015",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2016",
+      "to": "MU-3016",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2017",
+      "to": "MU-3017",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2018",
+      "to": "MU-3018",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2001",
+      "to": "MU-3001",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2002",
+      "to": "MU-3002",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2003",
+      "to": "MU-3003",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2004",
+      "to": "MU-3004",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2005",
+      "to": "MU-3005",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2006",
+      "to": "MU-3006",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2007",
+      "to": "MU-3007",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2008",
+      "to": "MU-3008",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2009",
+      "to": "MU-3009",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2010",
+      "to": "MU-3010",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2011",
+      "to": "MU-3011",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2019",
+      "to": "MU-3019",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2020",
+      "to": "MU-3020",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2021",
+      "to": "MU-3021",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2022",
+      "to": "MU-3022",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2023",
+      "to": "MU-3023",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-2024",
+      "to": "MU-3024",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    }
+  ]
+}

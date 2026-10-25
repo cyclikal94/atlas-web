@@ -10,13 +10,16 @@ import { test as base, expect, type Page } from "@playwright/test";
  * open, and what a page reported before it closed is kept. A test may also declare one exact console message by a regular expression
  * (`provokes(/^...$/)`): the reconnect-then-leave schedule (S10) is the only user, for the one Firefox warning it provokes on purpose.
  */
+type Provoked = number | "abort" | "idb-navigation-abort" | RegExp;
+const IDB_NAVIGATION_ABORT =
+  /An IndexedDB transaction that was not yet complete has been aborted due to page navigation\./;
 export const test = base.extend<{
-  provokes: (...provoked: Array<number | "abort" | RegExp>) => void;
+  provokes: (...provoked: Provoked[]) => void;
   toleratesNavigationAbort: (engine: string, message: RegExp) => void;
   guard: undefined;
 }>({
   provokes: async ({ page: _page }, use, info) => {
-    const allowed = new Set<number | "abort" | RegExp>();
+    const allowed = new Set<Provoked>();
     allowedByTest.set(info.testId, allowed);
     await use((...provoked) => {
       for (const one of provoked) allowed.add(one);
@@ -67,6 +70,18 @@ export const test = base.extend<{
             return;
           const status = /status of (\d{3})/.exec(text)?.[1];
           if (status && allowed.has(Number(status))) return;
+          // Only the test that deliberately interrupts this read declares and counts the warning.
+          if (
+            allowed.has("idb-navigation-abort") &&
+            message.type() === "warning" &&
+            IDB_NAVIGATION_ABORT.test(text)
+          ) {
+            idbWarnings.set(
+              info.testId,
+              (idbWarnings.get(info.testId) ?? 0) + 1,
+            );
+            return;
+          }
           if (
             allowed.has("abort") &&
             /ERR_|NetworkError|Load failed|Failed to fetch/i.test(text)
@@ -100,7 +115,7 @@ export const test = base.extend<{
     { auto: true },
   ],
 });
-const allowedByTest = new Map<string, Set<number | "abort" | RegExp>>();
+const allowedByTest = new Map<string, Set<Provoked>>();
 
 const toleratedByTest = new Map<
   string,
@@ -108,3 +123,8 @@ const toleratedByTest = new Map<
 >();
 
 export { expect };
+
+const idbWarnings = new Map<string, number>();
+/** How many declared `idb-navigation-abort` warnings the test has seen so far. */
+export const provokedIdbWarnings = (testId: string): number =>
+  idbWarnings.get(testId) ?? 0;

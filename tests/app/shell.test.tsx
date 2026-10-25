@@ -284,10 +284,14 @@ describe("More sheet (mobile)", () => {
 });
 
 describe("the shell shows no account data", () => {
+  // Adapted (WEB-10a): `/today` is no longer a placeholder (it is the Today view, which shows only its heading without a data layer), so
+  // the remaining placeholder destination is asserted instead.
   test("placeholder destinations render only a heading and a neutral line", async () => {
-    await mount("/today");
+    await mount("/people");
     const main = screen.getByRole("main");
-    expect(main.textContent).toBe("TodayThis area arrives in a later release.");
+    expect(main.textContent).toBe(
+      "PeopleThis area arrives in a later release.",
+    );
   });
 });
 

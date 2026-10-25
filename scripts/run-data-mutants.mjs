@@ -37,7 +37,12 @@
 // a control over the same selection and an exact check of the cases that ran.
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  catalogueProblems,
+  selectionProblems,
+} from "./lib/mutation-inventory.mjs";
 import { ENGINE, UNIT } from "./mutation/data-catalogue.mjs";
+import { EXPECTED_ENGINE, EXPECTED_UNIT } from "./mutation/expected.mjs";
 import {
   runUnitMutants,
   unauthorisedSelections,
@@ -56,13 +61,15 @@ const only = value("--only", "").split(",").filter(Boolean);
 const jobs = Number(value("--jobs", "3"));
 const check = flag("--check");
 
-const EXPECTED_UNIT = 1608;
-const EXPECTED_ENGINE = 198;
-
-const unknown = only.filter((id) => !UNIT.some((m) => m.id === id));
-if (unknown.length > 0) {
-  console.error(`unknown --only id(s): ${unknown.join(", ")}`);
-  process.exit(2);
+// Check the complete inventory before any patch or child runs, including narrowed and patch-only invocations.
+const inventory = [
+  ...catalogueProblems(UNIT, EXPECTED_UNIT),
+  ...catalogueProblems(ENGINE, EXPECTED_ENGINE, "engine"),
+  ...selectionProblems(UNIT, only),
+];
+if (inventory.length > 0) {
+  for (const problem of inventory) console.error(`INVENTORY ${problem}`);
+  process.exit(1);
 }
 // The declared, narrowed selections (scripts/mutation/unit-selections.mjs) apply only to the mutants their human decision covers.
 const unauthorised = unauthorisedSelections(
