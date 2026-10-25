@@ -424,7 +424,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
           stacks.map((s) => [s.name, inBrowser(s.keys, browser).length]),
         ),
       ).toEqual({
-        base: 25,
+        base: 28,
         pages: 13,
         "password-path": 8,
         i14e: 4,
@@ -443,7 +443,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         tasks: 22,
         labels: 15,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(237);
+      expect(inBrowser(whole, browser)).toHaveLength(240);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -615,8 +615,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 237,
-        passed: 231,
+        planned_cases: 240,
+        passed: 234,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
