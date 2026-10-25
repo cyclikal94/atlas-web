@@ -1,78 +1,142 @@
-import type { AnchorKept } from "../../calendars/anchors";
+import {
+  type AnchorDraft,
+  type AnchorEditor,
+  type AnchorNames,
+  createAnchorEditor,
+} from "../../calendars/anchors";
 import { onTaskVisitEnded, type TaskVisit } from "../visit";
 
 /**
- * The task detail's anchor panel kept by its in-dialog sync control (WEB-13b revision 1; ia.md §1.3.3, task states I1): checking sync
- * state is part of the task's visit, not a discard, so the panel's whole state (and what it was opened for: the change it supersedes and
- * the read it is checked against) is kept for the NEXT panel opened on the task while that visit goes on, at the sync screens included.
- * The visit's end (any ordinary departure, another identity) drops it, opened again or not. Page memory only: never stored, a reload
- * forgets it. One entry per displayed identity and task; taking it (the next panel opening) removes it.
+ * The owner of the task detail's anchor editing sessions (WEB-13b revision 2, review 2 R3a/R3b; design assessment, invariants 1–6; ia.md
+ * §1.3.3, task states I1). One session (`calendars/anchor-editor.ts`) per displayed identity and task, owned by the task's VISIT, not by
+ * the panel showing it or the section that opened it:
  *
- * A save still being made when the panel was kept settles here (`settleKeptPanel`): when nothing was edited after what it submitted, the
- * kept state is what was saved and is dropped (never offered to be saved twice); newer input stays.
+ *  - The next panel opened on the visit shows the session the visit still has, if the in-dialog sync control kept it, or a panel that left
+ *    without being cancelled (the section remounted, the data hid it) left it holding input or a save being made. Showing it again never
+ *    takes it away: a save still being made settles in the session whether or not a panel shows it, before, while or after it is shown
+ *    again (R3a). Otherwise the panel starts a new session, and the previous one ends.
+ *  - Cancel, Escape and the close icon end the session they showed (`discardPanel`), and only that one: an ended session's late completion
+ *    changes nothing, so a cancelled panel's save can never consume another panel's input (R3b). A session consumed by its own save leaves.
+ *  - The visit's end (any ordinary departure, another identity) ends every session it owns, shown or not. Page memory only: never stored;
+ *    a reload forgets it.
+ *
+ * The identity of each change pressed and not yet known to be stored (`operationKeys`, R2) is kept per task for the visit too, apart from
+ * the sessions: the same change pressed again after a refusal or a failure that may have stored it, in this panel, a panel shown again or
+ * a new one, names the same operation; a stored change's identity is retired by the save that stored it.
  */
-export interface KeptPanel<C> extends AnchorKept {
-  owner: TaskVisit;
-  /** What the panel was opened for, given back with it. */
-  context: C;
+interface Held {
+  editor: AnchorEditor<unknown>;
+  owner: TaskVisit | null;
 }
 
-const kept = new Map<string, KeptPanel<unknown>>();
+const panels = new Map<string, Held>();
+const operations = new Map<
+  string,
+  { owner: TaskVisit; keys: Map<string, string> }
+>();
 
 onTaskVisitEnded((visit) => {
-  for (const [key, entry] of [...kept])
-    if (entry.owner === visit) kept.delete(key);
+  for (const [key, held] of [...panels])
+    if (held.owner === visit) {
+      held.editor.end();
+      panels.delete(key);
+    }
+  for (const [key, entry] of [...operations])
+    if (entry.owner === visit) operations.delete(key);
 });
 
 export const keptPanelKey = (identity: string, taskId: string): string =>
   `${identity}\u0000anchor:${taskId}`;
 
-/** Keeps the panel's state for `key` on `owner`'s visit (forgetting every other identity's entries). Ignored once the visit has ended. */
-export function keepPanel<C>(
-  key: string,
-  owner: TaskVisit,
-  value: AnchorKept & { context: C },
-): void {
-  if (owner.ended()) return;
-  const identity = key.slice(0, key.indexOf("\u0000"));
-  for (const other of [...kept.keys()])
-    if (!other.startsWith(`${identity}\u0000`)) kept.delete(other);
-  kept.set(key, { ...value, owner });
+/** Only the displayed identity's sessions and operations are kept. */
+function forgetOtherIdentities(key: string): void {
+  const mine = `${key.slice(0, key.indexOf("\u0000"))}\u0000`;
+  for (const [other, held] of [...panels])
+    if (!other.startsWith(mine)) {
+      held.editor.end();
+      panels.delete(other);
+    }
+  for (const other of [...operations.keys()])
+    if (!other.startsWith(mine)) operations.delete(other);
 }
 
-/** The kept state the next panel for `key` opens with, or null; it is removed (the panel holds it now). Never another visit's. */
-export function takeKeptPanel<C>(
-  key: string,
-  owner: TaskVisit | null,
-): KeptPanel<C> | null {
-  const entry = kept.get(key);
-  if (entry === undefined) return null;
-  kept.delete(key);
-  if (owner === null || entry.owner !== owner || entry.owner.ended())
-    return null;
-  return entry as KeptPanel<C>;
-}
+const holdsInput = (editor: AnchorEditor<unknown>): boolean => {
+  const state = editor.state();
+  return state.revision > 0 || state.busy;
+};
 
 /**
- * A save the kept panel was still making is done (`revision` is what it submitted): drop what it saved, or keep the newer input with its
- * context as `newer` makes it (the done save is the panel's own: the next one is a new operation, as `AnchorDialog`'s `onKept`).
+ * The session the panel opening now for `key` shows, on `owner`'s visit (null: a section outside any router, whose panels keep nothing):
+ * the visit's kept or left session, else a new one from `fresh`. `renew` makes what the next save is checked against after a done save of
+ * the session that left newer input.
  */
-export function settleKeptPanel<C>(
+export function openPanel<C>(
   key: string,
-  revision: number,
-  newer: (context: C) => C,
-): void {
-  const entry = kept.get(key);
-  if (entry === undefined || entry.pending !== revision) return;
-  if (entry.revision === revision) {
-    kept.delete(key);
-    return;
+  owner: TaskVisit | null,
+  fresh: () => { draft: AnchorDraft; names: AnchorNames; context: C },
+  renew: (context: C) => C,
+): AnchorEditor<C> {
+  forgetOtherIdentities(key);
+  const held = panels.get(key);
+  if (
+    held !== undefined &&
+    owner !== null &&
+    held.owner === owner &&
+    !owner.ended() &&
+    !held.editor.ended() &&
+    (held.editor.retained() || holdsInput(held.editor))
+  ) {
+    held.editor.resume();
+    return held.editor as AnchorEditor<C>;
   }
-  entry.pending = null;
-  entry.context = newer(entry.context as C);
+  held?.editor.end();
+  const editor: AnchorEditor<C> = createAnchorEditor<C>({
+    ...fresh(),
+    renew,
+    // Only a session that has not ended settles, and every session but the task's current one has ended (replaced, cancelled, its
+    // visit or identity gone): the one consumed is the one the task has.
+    onConsumed: () => panels.delete(key),
+  });
+  panels.set(key, { editor: editor as AnchorEditor<unknown>, owner });
+  return editor;
+}
+
+/** The in-dialog sync control keeps `editor` for the next panel opened on its visit (nothing outside a visit, or once it has ended). */
+export function retainPanel(key: string, editor: AnchorEditor<unknown>): void {
+  const held = panels.get(key);
+  if (
+    held === undefined ||
+    held.editor !== editor ||
+    held.owner === null ||
+    held.owner.ended()
+  )
+    return;
+  editor.retain();
+}
+
+/** Cancel, Escape or the close icon: `editor`'s session ends (a save it already made stays queued); no other session is touched. */
+export function discardPanel(key: string, editor: AnchorEditor<unknown>): void {
+  editor.end();
+  if (panels.get(key)?.editor === editor) panels.delete(key);
+}
+
+/** The identities of `key`'s changes pressed and not yet stored, for `owner`'s visit; outside a live visit, the caller's own (`mine`). */
+export function operationKeys(
+  key: string,
+  owner: TaskVisit | null,
+  mine: Map<string, string>,
+): Map<string, string> {
+  if (owner === null || owner.ended()) return mine;
+  const entry = operations.get(key);
+  if (entry !== undefined && entry.owner === owner) return entry.keys;
+  const keys = new Map<string, string>();
+  operations.set(key, { owner, keys });
+  return keys;
 }
 
 /** Tests only. */
 export function forgetKeptPanels(): void {
-  kept.clear();
+  for (const held of panels.values()) held.editor.end();
+  panels.clear();
+  operations.clear();
 }

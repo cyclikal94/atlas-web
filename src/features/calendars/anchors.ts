@@ -3,7 +3,13 @@
  * and its queued command, and the "Anchor review needed" pieces the task screens use. A narrow entry of its own, so a task screen that
  * imports it does not take the calendar screen's modules along.
  */
-export { AnchorDialog, type AnchorKept } from "./AnchorDialog";
+export { AnchorDialog } from "./AnchorDialog";
+export {
+  type AnchorEditor,
+  type AnchorEditorState,
+  type AnchorRefusal,
+  createAnchorEditor,
+} from "./anchor-editor";
 export {
   type AnchorDraft,
   type AnchorNames,

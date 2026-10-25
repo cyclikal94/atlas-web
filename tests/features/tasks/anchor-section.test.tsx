@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { CacheRow } from "../../../src/data";
+import { setAnchorRequest } from "../../../src/features/calendars/anchors";
 import * as words from "../../../src/features/calendars/copy-anchor";
 import type { CalendarAnchor } from "../../../src/features/calendars/model/anchor";
 import {
@@ -1280,5 +1281,556 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
         )
         .sort(),
     );
+  });
+});
+
+describe("revision 2: the panel's editing session owns its save, whichever panel shows it (review 2 R3a/R3b)", () => {
+  const read = {
+    rows: [sourceRow],
+    binding: async () => ({
+      ok: true as const,
+      value: { binding: { anchor: ANCHOR, version: 1, active: true } },
+    }),
+  };
+  const dialogNow = () => screen.queryByRole("dialog");
+  async function openChange(t: Mounted, name: string = words.CHANGE_ANCHOR) {
+    fireEvent.click(
+      present(within(section() as HTMLElement).queryByRole("button", { name })),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await t.settle();
+    return dialog;
+  }
+  /** The dialog's own sync control: the session is kept, the dialog closes, then the queue opens. */
+  async function viaSyncControl(t: Mounted, dialog: HTMLElement) {
+    const chip = present(
+      within(dialog)
+        .queryAllByRole("button")
+        .find((b) => b.hasAttribute("data-sync-tone")) ?? null,
+    );
+    await act(async () => {
+      fireEvent.click(chip);
+      await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+  }
+  async function to(t: Mounted, path: string) {
+    await act(async () => {
+      await t.router.navigate({ to: path, search: {} } as never);
+    });
+    await t.settle();
+  }
+  async function backToTask(t: Mounted, task: SeededTask) {
+    await to(t, `/tasks/${task.taskId}`);
+    await t.until(() => section() !== null);
+  }
+  const days = (dialog: HTMLElement) =>
+    (within(dialog).getByLabelText(words.DAYS_LABEL) as HTMLInputElement).value;
+  const setDays = (dialog: HTMLElement, value: string) =>
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value },
+    });
+  const press = (dialog: HTMLElement, name: string) =>
+    fireEvent.click(present(within(dialog).queryByRole("button", { name })));
+  const saveButton = (dialog: HTMLElement) =>
+    present(
+      within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+    ) as HTMLButtonElement;
+  const offsets = (t: Mounted) =>
+    anchorDrafts(t).map((d) =>
+      JSON.stringify(
+        (bodyOf(t, d.local_id)?.anchor as CalendarAnchor | null | undefined)
+          ?.offset ?? null,
+      ),
+    );
+  const dayOffsets = (...list: number[]) =>
+    list.map((n) =>
+      JSON.stringify({ kind: "calendar_days", days: n, time: "18:00:00" }),
+    );
+  /** Holds the delivery of the outbox's answer to the NEXT call of `method`; the change itself is written first (it IS stored). */
+  function holdStored(t: Mounted, method: "enqueue" | "supersede" = "enqueue") {
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = (
+      outbox[method] as (...a: never[]) => Promise<unknown>
+    ).bind(outbox);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(outbox, method).mockImplementationOnce((async (
+      ...args: never[]
+    ) => {
+      const outcome = await original(...args);
+      await gate;
+      return outcome;
+    }) as never);
+    return async () => {
+      await act(async () => release());
+      await t.settle();
+    };
+  }
+  /**
+   * The NEXT enqueue is refused for storage (the outbox's documented refusal; nothing is written) once released; `asked` is the identity
+   * the refused press carried.
+   */
+  function holdRefusal(t: Mounted) {
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    let refuse!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      refuse = resolve;
+    });
+    const asked: string[] = [];
+    vi.spyOn(outbox, "enqueue").mockImplementationOnce(async (request) => {
+      asked.push(String(request.localId));
+      await gate;
+      return { kind: "refused", reason: "storage" } as never;
+    });
+    return {
+      asked,
+      refuse: async () => {
+        await act(async () => refuse());
+        await t.settle();
+      },
+    };
+  }
+  const STORAGE_REFUSAL = "Couldn't save on this device. Try again.";
+
+  test.each([
+    ["shown again before the earlier save completes", true],
+    ["shown again after it completes (control)", false],
+  ])(
+    "R3a: newer input kept by the sync control while its earlier save was being made is saved next as a new change, %s",
+    async (_, early) => {
+      const task = await seededTask();
+      const t = await mounted(task, read);
+      const release = holdStored(t);
+      let dialog = await openChange(t);
+      setDays(dialog, "-2");
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(anchorDrafts(t)).toHaveLength(1);
+      setDays(dialog, "-3");
+      fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
+        target: { value: "newer filter" },
+      });
+      // Hidden while the person-date reference is chosen: kept too.
+      fireEvent.click(
+        within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+      );
+      await viaSyncControl(t, dialog);
+      if (!early) await release();
+      await backToTask(t, task);
+      dialog = await openChange(t);
+      expect(days(dialog)).toBe("-3");
+      if (early) {
+        // The session's save is still being made: shown as such, and no second one can start.
+        expect(saveButton(dialog)).toBeDisabled();
+        await release();
+      }
+      expect(dialogNow()).not.toBeNull();
+      expect(
+        within(dialog).queryByText(words.ANCHOR_SAVED_NEWER),
+      ).not.toBeNull();
+      expect(saveButton(dialog)).not.toBeDisabled();
+      fireEvent.click(
+        within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+      );
+      expect(within(dialog).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
+        "newer filter",
+      );
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+      const all = anchorDrafts(t);
+      expect(all).toHaveLength(2);
+      expect(new Set(all.map((d) => d.local_id)).size).toBe(2);
+      expect(offsets(t).sort()).toEqual(dayOffsets(-2, -3).sort());
+      const newer = all.find(
+        (d) =>
+          JSON.stringify(
+            (bodyOf(t, d.local_id)?.anchor as CalendarAnchor | undefined)
+              ?.offset,
+          ) === dayOffsets(-3)[0],
+      );
+      expect(bodyOf(t, newer?.local_id as string)?.anchor).toMatchObject({
+        title_contains: "newer filter",
+      });
+    },
+  );
+
+  test("an unchanged save shown again before it completes: still being made, no second save by Save or Enter; its completion consumes the session and closes the panel", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const release = holdStored(t);
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    await viaSyncControl(t, dialog);
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-2");
+    expect(saveButton(dialog)).toBeDisabled();
+    const enqueue = vi.spyOn(outbox, "enqueue");
+    enqueue.mockClear();
+    fireEvent.submit(present(dialog.querySelector("form")));
+    await t.settle();
+    expect(enqueue).not.toHaveBeenCalled();
+    await release();
+    expect(dialogNow()).toBeNull();
+    expect(anchorDrafts(t)).toHaveLength(1);
+    // The session is gone: the next panel starts from the binding.
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-1");
+  });
+
+  test.each([
+    ["before", true],
+    ["after (control)", false],
+  ])(
+    "R3b: a cancelled panel's save completing %s another panel's save is refused never consumes that panel's input; it is retried as the same change",
+    async (_, oldFirst) => {
+      const task = await seededTask();
+      const t = await mounted(task, read);
+      const releaseOld = holdStored(t);
+      let dialog = await openChange(t);
+      setDays(dialog, "-2");
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      press(dialog, "Cancel");
+      await t.settle();
+      dialog = await openChange(t);
+      expect(days(dialog)).toBe("-1");
+      const refusal = holdRefusal(t);
+      setDays(dialog, "-5");
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(anchorDrafts(t)).toHaveLength(1);
+      await viaSyncControl(t, dialog);
+      if (oldFirst) await releaseOld();
+      await refusal.refuse();
+      await backToTask(t, task);
+      dialog = await openChange(t);
+      if (!oldFirst) await releaseOld();
+      expect(days(dialog)).toBe("-5");
+      expect(within(dialog).queryByText(STORAGE_REFUSAL)).not.toBeNull();
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+      expect(offsets(t).sort()).toEqual(dayOffsets(-2, -5).sort());
+      // The refused attempt and its retry are ONE operation (R2): the refused press's identity was kept with the visit.
+      expect(refusal.asked).toHaveLength(1);
+      expect(anchorDrafts(t).map((d) => d.local_id)).toContain(
+        refusal.asked[0],
+      );
+    },
+  );
+
+  test("R3b (pending): a cancelled panel's save never consumes or closes another panel's save still being made; that save settles on its own session", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const releaseOld = holdStored(t);
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    press(dialog, "Cancel");
+    await t.settle();
+    dialog = await openChange(t);
+    const releaseNew = holdStored(t);
+    setDays(dialog, "-5");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(anchorDrafts(t)).toHaveLength(2);
+    await viaSyncControl(t, dialog);
+    await releaseOld();
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-5");
+    expect(saveButton(dialog)).toBeDisabled();
+    await releaseNew();
+    expect(dialogNow()).toBeNull();
+    expect(offsets(t).sort()).toEqual(dayOffsets(-2, -5).sort());
+  });
+
+  test("an earlier, cancelled session's completion never closes the newer panel shown (only the session shown closes it)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const releaseOld = holdStored(t);
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    press(dialog, "Cancel");
+    await t.settle();
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-1");
+    await releaseOld();
+    expect(dialogNow()).not.toBeNull();
+    expect(days(dialog)).toBe("-1");
+    expect(within(dialog).queryByText(words.ANCHOR_SAVED_NEWER)).toBeNull();
+  });
+
+  test("kept, shown, kept and shown again: one session and one settlement (its save completing while kept the second time)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const release = holdStored(t);
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    setDays(dialog, "-3");
+    await viaSyncControl(t, dialog);
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-3");
+    expect(saveButton(dialog)).toBeDisabled();
+    await viaSyncControl(t, dialog);
+    await release();
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-3");
+    expect(within(dialog).queryByText(words.ANCHOR_SAVED_NEWER)).not.toBeNull();
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(offsets(t).sort()).toEqual(dayOffsets(-2, -3).sort());
+  });
+
+  test("Remove anchor still being made, newer input kept and shown again before it completes: the removal is stored once and the newer input saved after it", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const release = holdStored(t);
+    let dialog = await openChange(t);
+    press(dialog, words.REMOVE_ANCHOR);
+    await t.settle();
+    setDays(dialog, "-6");
+    await viaSyncControl(t, dialog);
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-6");
+    await release();
+    expect(within(dialog).queryByText(words.ANCHOR_SAVED_NEWER)).not.toBeNull();
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(offsets(t).sort()).toEqual(
+      [JSON.stringify(null), ...dayOffsets(-6)].sort(),
+    );
+  });
+
+  test("a superseding Review save still being made, newer input kept and shown again before it completes: the next save is an ordinary change, not a second supersession", async () => {
+    const task = await seededTask();
+    const conflicted = draftRow({
+      local_id: "00000000-0000-4000-8000-00000000c0f2",
+      endpoint: "/calendar-commands",
+      status: "version_conflict",
+      command: {
+        command: {
+          kind: "set_anchor",
+          id: task.taskId,
+          expected_version: 0,
+          anchor: ANCHOR,
+        },
+      } as never,
+      target_resource_ids: [task.taskId],
+      index_targets: [task.taskId],
+      bases: { [task.taskId]: 0 },
+      last_error: { status: 409, code: "conflict", stage: "conflict" },
+    });
+    const t = await mounted(task, {
+      online: false,
+      rows: [sourceRow, eventRow()],
+      drafts: [conflicted],
+    });
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const release = holdStored(t, "supersede");
+    let dialog = await openChange(t, words.REVIEW_ANCHOR);
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    setDays(dialog, "-4");
+    await viaSyncControl(t, dialog);
+    await backToTask(t, task);
+    dialog = await openChange(
+      t,
+      section()?.querySelector("[data-anchor-conflict]")
+        ? words.REVIEW_ANCHOR
+        : words.ANCHOR_ACTION,
+    );
+    expect(days(dialog)).toBe("-4");
+    await release();
+    const supersede = vi.spyOn(outbox, "supersede");
+    supersede.mockClear();
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(supersede).not.toHaveBeenCalled();
+    expect(dialogNow()).toBeNull();
+    const queued = anchorDrafts(t).filter((d) => d.status === "queued");
+    expect(
+      queued
+        .map((d) =>
+          JSON.stringify(
+            (bodyOf(t, d.local_id)?.anchor as CalendarAnchor | undefined)
+              ?.offset,
+          ),
+        )
+        .sort(),
+    ).toEqual(dayOffsets(-1, -4).sort());
+  });
+
+  test("a save that may have been stored, kept and shown again by a NEW section mount, is retried as the same operation (stored once)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = outbox.enqueue.bind(outbox);
+    const enqueue = vi
+      .spyOn(outbox, "enqueue")
+      .mockImplementationOnce(async (request) => {
+        await original(request);
+        throw new Error("the completion was lost");
+      });
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(anchorDrafts(t)).toHaveLength(1);
+    await viaSyncControl(t, dialog);
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    const keys = enqueue.mock.calls.map(([request]) => request.localId);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    expect(anchorDrafts(t)).toHaveLength(1);
+  });
+
+  test("a panel that left without Cancel while the visit goes on (the screen went to the sync screens without its control) is shown again with its input; one with nothing in it starts again", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    let dialog = await openChange(t);
+    setDays(dialog, "-5");
+    await act(async () => {
+      await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-5");
+    press(dialog, "Cancel");
+    await t.settle();
+    // Control: nothing typed, nothing kept.
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-1");
+    await act(async () => {
+      await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await t.settle();
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-1");
+  });
+
+  test("an ordinary departure while a save is being made: the next visit's panel starts from the binding, and the late save neither changes nor closes it", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const release = holdStored(t);
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    setDays(dialog, "-3");
+    await viaSyncControl(t, dialog);
+    await to(t, "/tasks");
+    await backToTask(t, task);
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-1");
+    setDays(dialog, "-7");
+    await release();
+    expect(dialogNow()).not.toBeNull();
+    expect(days(dialog)).toBe("-7");
+    expect(within(dialog).queryByText(words.ANCHOR_SAVED_NEWER)).toBeNull();
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(offsets(t).sort()).toEqual(dayOffsets(-2, -7).sort());
+  });
+
+  /** Another tab's save of this task's anchor, through the same database (the real outbox): `days` from the binding's anchor. */
+  async function otherTabSets(t: Mounted, task: SeededTask, days: number) {
+    const outbox = t.data.outbox();
+    const row = task.rows.find((r) => r.id === task.taskId);
+    if (outbox === null || row === undefined) throw new Error("setup");
+    const outcome = await outbox.enqueue(
+      setAnchorRequest(
+        row,
+        {
+          ...ANCHOR,
+          offset: { kind: "calendar_days", days, time: "18:00:00" },
+        },
+        `00000000-0000-4000-8000-0000000007a${String(Math.abs(days))}`,
+      ),
+    );
+    expect(outcome.kind).toBe("queued");
+  }
+
+  test("told that the task changed (another tab saved first), the input stays and saving again is a deliberate save of the task as it is then", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const real = outbox.enqueue.bind(outbox);
+    const dialog = await openChange(t);
+    setDays(dialog, "-5");
+    vi.spyOn(outbox, "enqueue").mockImplementationOnce(async (request) => {
+      // The other tab's change commits first, after the panel was opened from what it saw.
+      await otherTabSets(t, task, -8);
+      return real(request);
+    });
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).not.toBeNull();
+    expect(
+      within(dialog).queryByText(words.ANCHOR_NOT_SAVED_CHANGED),
+    ).not.toBeNull();
+    expect(days(dialog)).toBe("-5");
+    expect(offsets(t)).toEqual(dayOffsets(-8));
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(offsets(t)).toEqual(dayOffsets(-8, -5));
+  });
+
+  test("another tab saves between the session's own done save and its next one: the transaction orders them (own, the other tab's, then the newer input)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const release = holdStored(t);
+    const dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    setDays(dialog, "-3");
+    await release();
+    expect(within(dialog).queryByText(words.ANCHOR_SAVED_NEWER)).not.toBeNull();
+    await act(async () => otherTabSets(t, task, -9));
+    await t.settle();
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    // All three are real enqueues: their queue order is the store's own sequence.
+    expect(offsets(t)).toEqual(dayOffsets(-2, -9, -3));
   });
 });

@@ -14,8 +14,10 @@ import {
 import {
   AnchorDialog,
   type AnchorDraft,
+  type AnchorEditor,
   type AnchorNames,
   type CalendarAnchor,
+  createAnchorEditor,
   describeAnchor,
   EMPTY_ANCHOR,
 } from "../../calendars/anchors";
@@ -1029,16 +1031,17 @@ function AnchorSection({
   /** Keeps (or, with null, lets go of) the panel's unsaved state in the form's session. */
   onPanel(panel: { draft: AnchorDraft; names: AnchorNames } | null): void;
 }) {
-  const [open, setOpen] = useState<{
-    draft: AnchorDraft;
-    names: AnchorNames;
-  } | null>(null);
+  // The panel's editing session (revision 2): its own, from the kept panel or the anchor; the form's session keeps what is kept.
+  const [open, setOpen] = useState<AnchorEditor | null>(null);
   const openPanel = () => {
     setOpen(
-      panel ?? {
-        draft: anchor?.draft ?? EMPTY_ANCHOR,
-        names: anchor?.names ?? {},
-      },
+      createAnchorEditor({
+        ...(panel ?? {
+          draft: anchor?.draft ?? EMPTY_ANCHOR,
+          names: anchor?.names ?? {},
+        }),
+        context: null,
+      }),
     );
     // The panel now holds it: a later Cancel discards it, as any panel's.
     if (panel !== null) onPanel(null);
@@ -1069,8 +1072,7 @@ function AnchorSection({
       </div>
       {open !== null ? (
         <AnchorDialog
-          initial={open.draft}
-          initialNames={open.names}
+          editor={open}
           repeats={false}
           onRetain={({ draft, names }) => onPanel({ draft, names })}
           onSave={async (next, names, draft) => {
@@ -1078,7 +1080,10 @@ function AnchorSection({
             onSave({ draft, anchor: next, names });
             return null;
           }}
-          onClose={() => setOpen(null)}
+          onClose={() => {
+            open.end();
+            setOpen((o) => (o === open ? null : o));
+          }}
         />
       ) : null}
     </section>

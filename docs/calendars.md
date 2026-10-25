@@ -168,8 +168,12 @@ after the day) reads the binding ONLINE once per visit and identity (`tasks/deta
 offline it says "Binding details need a connection." and the rest of the task stays as the cache shows it) and queues `set_anchor` on the
 task's version (`anchor: null` removes it), with its waiting, saving, conflict ("Review" supersedes it) and refused states. A change pressed
 again after a refusal (or a failure that may have stored it) keeps its identity; a STORED change's identity is retired, so A, B, then A
-again is three changes (R2). The panel's in-dialog sync control keeps its whole state for the next panel opened while the task's visit goes
-on (ia.md §1.3.3, I1; `tasks/detail/anchor-kept.ts` for the task detail, the form's own session for the new-task form); the import dialog
+again is three changes (R2). The panel PRESENTS one editing session (`anchor-editor.ts`, revision 2, R3a/R3b): the session, not the panel's mount,
+owns the input, the save being made (one at a time) and what it said; a save settles on its own session (never numbers re-used, so a
+cancelled panel's late save changes nothing) whichever panel shows it then. Told that the task changed, the person's next press saves the
+task as it is then (still checked when written). The in-dialog sync control keeps the session for the next panel opened while the task's
+visit goes on (ia.md §1.3.3, I1; `tasks/detail/anchor-kept.ts`, owned by the visit, for the task detail; a panel that left without Cancel
+leaves its input there too; the form's own session for the new-task form); the import dialog
 does not keep input there, as WEB-13a's calendar dialogs do not: the Calendars screen's visit ends at the sync screens (`visit.ts`). The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 

@@ -14,9 +14,9 @@ import {
 } from "../../../data";
 import {
   AnchorDialog,
-  type AnchorDraft,
-  type AnchorKept,
+  type AnchorEditor,
   type AnchorNames,
+  type AnchorRefusal,
   anchorDraftOf,
   anchorOfCommand,
   type CalendarAnchor,
@@ -61,10 +61,11 @@ import {
   subscribeBinding,
 } from "./anchor-binding";
 import {
-  keepPanel,
+  discardPanel,
   keptPanelKey,
-  settleKeptPanel,
-  takeKeptPanel,
+  openPanel,
+  operationKeys,
+  retainPanel,
 } from "./anchor-kept";
 
 const SET_ANCHOR = "set_anchor";
@@ -208,69 +209,80 @@ export function AnchorSection({
       : { field: label };
   };
 
+  /** What a panel's session was opened for (`anchor-kept.ts` keeps it with the session, renewed by the session's own done saves). */
   type PanelFor = {
     anchor: CalendarAnchor | null;
     supersede: string | null;
     observed: Observation | null;
-    /** A save from this panel was done while newer input stayed in it: the next save is checked against the task as it is NOW. */
+    /** A save of the session was done while newer input stayed in it: the next save is checked against the task as it is NOW. */
     renewed: boolean;
   };
-  const [dialog, setDialog] = useState<
-    | (PanelFor & {
-        /** A panel kept by the in-dialog sync control, resumed: its state as it was left. */
-        resumed?: { draft: AnchorDraft; names: AnchorNames };
-      })
-    | null
-  >(null);
+  // The session the panel shows (revision 2, R3a/R3b): owned by the task's visit, not by this section or the panel.
+  const [dialog, setDialog] = useState<AnchorEditor<PanelFor> | null>(null);
   const panelKey = keptPanelKey(env.identity, task.id);
-  // The identity of each change pressed and not yet stored, so the same change pressed again after a refusal (or a failure that may
-  // have stored it) is recognised; a STORED change's identity is retired (R2): pressing a change again later, even one equal to an earlier
-  // one (A, B, then A), is a new operation.
-  const keys = useRef(new Map<string, string>());
-  // The next panel opened while the visit goes on resumes one the in-dialog sync control kept (I1), with what it was opened for.
+  // Outside any visit (a section outside a router): this mount's own change identities (`operationKeys`).
+  const ownKeys = useRef(new Map<string, string>());
+  // The next panel opened while the visit goes on shows the session the visit kept or left (I1, R3a), else a new one opened for this.
   const open = (from: CalendarAnchor | null, supersede: string | null) => {
-    const resumed = takeKeptPanel<PanelFor>(panelKey, owner.current);
     setDialog(
-      resumed !== null
-        ? {
-            ...resumed.context,
-            resumed: { draft: resumed.draft, names: resumed.names },
-          }
-        : {
+      openPanel<PanelFor>(
+        panelKey,
+        owner.current,
+        () => ({
+          draft: from === null ? EMPTY_ANCHOR : anchorDraftOf(from),
+          names: knownNames(from),
+          context: {
             anchor: from,
             supersede,
             observed: view.status === "ready" ? view.value.observation : null,
             renewed: false,
           },
+        }),
+        // A stored change of the session ended any conflict it superseded: the next save is an ordinary one, after it in the queue,
+        // checked against the task as it is then.
+        (context) => ({ ...context, supersede: null, renewed: true }),
+      ),
     );
   };
   const observedNow = view.status === "ready" ? view.value.observation : null;
 
-  const save = async (next: CalendarAnchor | null): Promise<string | null> => {
-    if (dialog === null) return null;
+  // `context`: what the saving session was opened for, as it is when the save is pressed (whichever panel or section shows it).
+  const save = async (
+    next: CalendarAnchor | null,
+    context: PanelFor,
+  ): Promise<string | null | AnchorRefusal<PanelFor>> => {
     if (!env.writable) return copy.NOT_WRITABLE;
     const outbox = data.outbox();
     if (outbox === null) return copy.NO_DATABASE;
-    // The same change pressed again after a refusal keeps its identity, so a save whose completion was lost is not made twice.
-    const what = JSON.stringify([next, dialog.supersede]);
-    let key = keys.current.get(what);
+    // The identity of each change pressed and not yet stored, so the same change pressed again after a refusal (or a failure that may
+    // have stored it) is recognised; a STORED change's identity is retired (R2): pressing a change again later, even one equal to an earlier
+    // one (A, B, then A), is a new operation.
+    const keys = operationKeys(panelKey, owner.current, ownKeys.current);
+    const what = JSON.stringify([next, context.supersede]);
+    let key = keys.get(what);
     if (key === undefined) {
       key = env.newId();
-      keys.current.set(what, key);
+      keys.set(what, key);
     }
-    const observed = dialog.renewed ? observedNow : dialog.observed;
+    const observed = context.renewed ? observedNow : context.observed;
     const request = setAnchorRequest(task, next, key, observed ?? undefined);
     try {
       const outcome =
-        dialog.supersede === null
+        context.supersede === null
           ? await outbox.enqueue(request)
-          : await outbox.supersede(dialog.supersede, request);
+          : await outbox.supersede(context.supersede, request);
       if (outcome.kind === "queued" || outcome.kind === "superseded") {
-        keys.current.delete(what);
+        keys.delete(what);
         announcer.announce(next === null ? ANCHOR_REMOVED : ANCHOR_SAVED);
         return null;
       }
-      if (outcome.reason === "changed") return ANCHOR_NOT_SAVED_CHANGED;
+      // Told that the task changed, the person checks it and saves again (WEB-13a's rule for its own dialogs): that next press is a
+      // deliberate save of the task as it is then, still checked when it is written. Any supersession it was making stands.
+      if (outcome.reason === "changed")
+        return {
+          refused: ANCHOR_NOT_SAVED_CHANGED,
+          context: { ...context, renewed: true },
+        };
       if (outcome.reason === "denied") return ANCHOR_NOT_SAVED_DENIED;
       return copy.refusalMessage(outcome.reason) ?? copy.NOT_WRITABLE;
     } catch {
@@ -409,43 +421,25 @@ export function AnchorSection({
       </span>
       {dialog !== null ? (
         <AnchorDialog
-          initial={
-            dialog.resumed?.draft ??
-            (dialog.anchor === null
-              ? EMPTY_ANCHOR
-              : anchorDraftOf(dialog.anchor))
-          }
-          initialNames={dialog.resumed?.names ?? knownNames(dialog.anchor)}
+          editor={dialog}
           repeats={repeats}
-          onSave={(next) => save(next)}
-          {...(dialog.anchor !== null || anchor !== null
-            ? { onRemove: () => save(null) }
+          onSave={(next, _names, _draft, context) => save(next, context)}
+          {...(dialog.context().anchor !== null || anchor !== null
+            ? { onRemove: (context: PanelFor) => save(null, context) }
             : {})}
-          // The panel stayed open with newer input after a stored change: that change ended any conflict it superseded, so the next save
-          // is an ordinary one, after it in the queue, checked against the task as it is then.
-          onKept={() =>
-            setDialog((d) =>
-              d === null ? d : { ...d, supersede: null, renewed: true },
-            )
-          }
           {...(owner.current === null
             ? {}
             : {
-                onRetain: (kept: AnchorKept) => {
-                  const visit = owner.current;
-                  if (visit === null) return;
-                  const { resumed: _, ...context } = dialog;
-                  keepPanel<PanelFor>(panelKey, visit, { ...kept, context });
-                },
-                // A save done after the panel was kept with newer input: the next save is an ordinary, new change (as `onKept`).
-                onSettledKept: (revision: number) =>
-                  settleKeptPanel<PanelFor>(panelKey, revision, (context) => ({
-                    ...context,
-                    supersede: null,
-                    renewed: true,
-                  })),
+                onRetain: () =>
+                  retainPanel(panelKey, dialog as AnchorEditor<unknown>),
               })}
-          onClose={() => setDialog(null)}
+          // Cancel, Escape, the close icon: the session shown ends unless the sync control kept it; a consumed one has left already. Only
+          // the session shown closes this panel (never an earlier one's late answer).
+          onClose={() => {
+            if (!dialog.retained())
+              discardPanel(panelKey, dialog as AnchorEditor<unknown>);
+            setDialog((d) => (d === dialog ? null : d));
+          }}
         />
       ) : null}
     </section>

@@ -748,10 +748,12 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
   a connection."; the queued `set_anchor` (`setAnchorRequest`, version-checked on the task, `requiresEdit`) with its states. The read is
   given the task screen's lifetime (`readAnchor(taskId, live)`: the person is at the task's address by its router and the document, `useTaskScreenAt`; WEB-13b R6): `untilSentWhile` asks it, then connectivity, before EVERY admission,
   the first and each after a `not_sent` wait, and answers `closed` (or `offline`) without sending. `untilSent` and the other reads are
-  unchanged. A stored `set_anchor`'s identity is retired (R2); the panel settles only the revision it submitted (R3). The panel's in-dialog sync control
-  keeps its whole state for the next panel opened on the task while the visit goes on (`detail/anchor-kept.ts`, owned by the `TaskVisit`,
-  dropped at its end; a save still being made settles there and never leaves a saved state to be saved twice). The new-task form keeps it
-  in its session (`FormInput.panel`).
+  unchanged. A stored `set_anchor`'s identity is retired (R2); the panel settles only the revision it submitted (R3). The panel shows ONE
+  editing session (`calendars/anchor-editor.ts`, revision 2, R3a/R3b) owned by the task's visit (`detail/anchor-kept.ts`): the session
+  holds the input, the save being made and its outcome, so a save settles on its own session whether the panel is shown, kept by its
+  in-dialog sync control or shown again (before or after the save completes); Cancel ends only the session it showed, and an ended
+  session's late save changes nothing; the visit's end ends them all. A change's identity (R2) is kept per task for the visit, apart from
+  the sessions. The new-task form keeps the panel's state in its session (`FormInput.panel`).
 * **`?move=` (`model/move.ts`).** "Review this move…" links to `/tasks/<id>?occurrence=<id>&move=<YYYY-MM-DD[THH:MM:SS]>`. The value is read
   strictly in the lazy detail screen (the entry route's search validation is unchanged, for the first-load budget), consumed ONCE per value,
   and opens the day's correction only when it is the displayed day and I may correct it; the seed fills only a NEW session (a resumed one

@@ -1,9 +1,19 @@
-import { useEffect, useId, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
+import type {
+  AnchorEditor,
+  AnchorEditorState,
+  AnchorRefusal,
+} from "./anchor-editor";
 import { CANCEL } from "./copy";
 import {
-  ANCHOR_SAVED_NEWER,
   ANCHOR_TITLE,
   CALENDAR_DAYS,
   CHANGE_EVENT,
@@ -53,39 +63,26 @@ import { EventPicker, FieldPicker } from "./pickers";
  * not shown) and shows it again when it comes back; Save sends only what applies (PRODUCT-DECISIONS-20261011). Field messages are inline,
  * under their field, on an attempted save; nothing typed is cleared.
  *
- * What Save and Remove DO is the caller's (`onSave`/`onRemove`): the new-task form keeps the anchor for its create; a task's own section
- * queues `set_anchor`. Each returns null when done or the words of why not (the panel stays, with everything kept). Done settles only what
- * was submitted (R3, PRODUCT-DECISIONS-20261011): the panel closes when nothing was changed in it while the save was being made; otherwise
- * it stays with the newer input (hidden fields' values included), says that the save was made as pressed, and tells the caller
- * (`onKept`), whose next save is a new operation.
+ * The panel PRESENTS one editing session (`anchor-editor.ts`; revision 2, R3a/R3b): the input, the save being made and what it said are
+ * the session's, so they outlive this mount. What Save and Remove DO is the caller's (`onSave`/`onRemove`): the new-task form keeps the
+ * anchor for its create; a task's own section queues `set_anchor`. Each answers null when done or the words of why not (the panel stays,
+ * with everything kept). Done settles only what was submitted (R3, PRODUCT-DECISIONS-20261011): a session consumed by its own save closes
+ * the panel showing it; with newer input the panel stays and says the save was made as pressed.
  *
  * The in-dialog sync control is a deliberate check of sync state, not a discard (ia.md §1.3.3, task states I1; WEB-13b revision 1): with
- * `onRetain`, the panel's whole state (every field, hidden ones included, and the names its summary shows) is handed to the caller, which
- * keeps it for the next panel it opens while the person's visit goes on. A save still being made then settles through `onSettledKept`.
+ * `onRetain`, the caller keeps the session (or, the new-task form, its state) for the next panel it opens while the person's visit goes on.
+ * Cancel, Escape and the close icon are the caller's `onClose` (it ends the session unless it was kept).
  */
-/** The panel's whole state as the in-dialog sync control hands it over. */
-export interface AnchorKept {
-  draft: AnchorDraft;
-  names: AnchorNames;
-  /** The panel's edit count when it was kept. */
-  revision: number;
-  /** The revision a save still being made submitted, or null. */
-  pending: number | null;
-}
-
-export function AnchorDialog({
-  initial,
-  initialNames = {},
+export function AnchorDialog<C>({
+  editor,
   repeats,
   onSave,
   onRemove,
-  onKept,
   onRetain,
-  onSettledKept,
   onClose,
 }: {
-  initial: AnchorDraft;
-  initialNames?: AnchorNames;
+  /** The editing session this panel shows. */
+  editor: AnchorEditor<C>;
   /** The task repeats on its own schedule: no anchor can be saved (the server answers `422`). */
   repeats: boolean;
   /** `draft`: the panel's whole state when it was saved (every field, applicable or not), for a caller that opens it again. */
@@ -93,76 +90,47 @@ export function AnchorDialog({
     anchor: CalendarAnchor,
     names: AnchorNames,
     draft: AnchorDraft,
-  ): Promise<string | null>;
-  onRemove?(): Promise<string | null>;
-  /** A save or removal was done while newer input was kept in the panel (it stays open). */
-  onKept?(): void;
-  /** The in-dialog sync control: keep this state for the next panel (the dialog closes, the sync screens open). */
-  onRetain?(kept: AnchorKept): void;
-  /** A save made before the panel was kept by the sync control is done: `revision` is what it submitted. */
-  onSettledKept?(revision: number): void;
+    context: C,
+  ): Promise<string | null | AnchorRefusal<C>>;
+  onRemove?(context: C): Promise<string | null | AnchorRefusal<C>>;
+  /** The in-dialog sync control: keep this session (or its state) for the next panel (the dialog closes, the sync screens open). */
+  onRetain?(state: AnchorEditorState): void;
   onClose(): void;
 }) {
   const formId = useId();
-  const [draft, setDraft] = useState<AnchorDraft>(initial);
-  const [names, setNames] = useState<AnchorNames>(initialNames);
+  const { draft, names, busy, note } = useSyncExternalStore(
+    editor.subscribe,
+    editor.state,
+  );
   const [view, setView] = useState<"main" | "event" | "field">("main");
   const [errors, setErrors] = useState<AnchorErrors>({});
-  const [message, setMessage] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const acting = useRef(false);
-  // Every edit moves it (a pick, a weekday, a hidden field's value included): a done save closes the panel only at the revision it submitted.
-  const revision = useRef(0);
-  // The revision a save still being made submitted (null: none), for a panel kept by the sync control meanwhile.
-  const submittedNow = useRef<number | null>(null);
-  const mounted = useRef(false);
+  const close = useRef(onClose);
+  close.current = onClose;
+  // The session consumed by its own save closes the panel showing it, whenever the save completes (before this panel was shown included).
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-    };
-  }, []);
-  const edit = (patch: Partial<AnchorDraft>) => {
-    revision.current += 1;
-    setDraft((d) => ({ ...d, ...patch }));
-  };
-
-  const act = async (run: () => Promise<string | null>) => {
-    if (acting.current) return;
-    acting.current = true;
-    const submitted = revision.current;
-    submittedNow.current = submitted;
-    setBusy(true);
-    setMessage(null);
-    try {
-      const refused = await run();
-      if (!mounted.current) {
-        // The panel left (the sync control kept it, or it was cancelled): a done save is the caller's to settle.
-        if (refused === null) onSettledKept?.(submitted);
-        return;
-      }
-      if (refused !== null) setMessage(refused);
-      else if (revision.current === submitted) onClose();
-      else {
-        setMessage(ANCHOR_SAVED_NEWER);
-        onKept?.();
-      }
-    } finally {
-      acting.current = false;
-      submittedNow.current = null;
-      if (mounted.current) setBusy(false);
+    if (editor.ended()) {
+      close.current();
+      return;
     }
-  };
+    return editor.subscribe((event) => {
+      if (event === "consumed") close.current();
+    });
+  }, [editor]);
+  const edit = (patch: Partial<AnchorDraft>, picked?: Partial<AnchorNames>) =>
+    editor.edit(patch, picked);
 
   const save = () => {
     if (repeats) return;
-    const out = validateAnchor(draft);
+    const now = editor.state();
+    const out = validateAnchor(now.draft);
     if ("errors" in out) {
       setErrors(out.errors);
       return;
     }
     setErrors({});
-    void act(() => onSave(out.anchor, names, draft));
+    editor.submit((context) =>
+      onSave(out.anchor, now.names, now.draft, context),
+    );
   };
 
   const seconds = secondsAllowed(draft);
@@ -182,13 +150,7 @@ export function AnchorDialog({
       {...(onRetain === undefined
         ? {}
         : {
-            onRetainDraft: () =>
-              onRetain({
-                draft,
-                names,
-                revision: revision.current,
-                pending: submittedNow.current,
-              }),
+            onRetainDraft: () => onRetain(editor.state()),
           })}
       title={ANCHOR_TITLE}
       footer={
@@ -213,7 +175,7 @@ export function AnchorDialog({
                   {REMOVE_ANCHOR}
                 </Button>
               ) : (
-                <Button onClick={() => void act(onRemove)}>
+                <Button onClick={() => editor.submit(onRemove)}>
                   {REMOVE_ANCHOR}
                 </Button>
               )
@@ -230,8 +192,7 @@ export function AnchorDialog({
           initialSource={draft.event?.sourceId ?? null}
           onBack={() => setView("main")}
           onPick={(event, picked) => {
-            edit({ reference: "event_series", event });
-            setNames((n) => ({ ...n, ...picked }));
+            edit({ reference: "event_series", event }, picked);
             setView("main");
           }}
         />
@@ -239,8 +200,7 @@ export function AnchorDialog({
         <FieldPicker
           onBack={() => setView("main")}
           onPick={(field, picked) => {
-            edit({ reference: "person_date", field });
-            setNames((n) => ({ ...n, ...picked }));
+            edit({ reference: "person_date", field }, picked);
             setView("main");
           }}
         />
@@ -444,7 +404,7 @@ export function AnchorDialog({
               {REMOVE_HELP}
             </p>
           ) : null}
-          <FormMessage message={message} />
+          <FormMessage message={note} />
         </form>
       )}
     </Dialog>

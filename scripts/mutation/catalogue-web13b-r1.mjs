@@ -13,6 +13,7 @@ const REVIEW_PANEL = "src/features/calendars/ReviewPanel.tsx";
 const SECTION = "src/features/tasks/detail/AnchorSection.tsx";
 const TASKS_API = "src/features/tasks/api.ts";
 const KEPT = "src/features/tasks/detail/anchor-kept.ts";
+const EDITOR = "src/features/calendars/anchor-editor.ts";
 const TASK_FORM = "src/features/tasks/form/TaskFormPage.tsx";
 const T_IMPORT_UI = "tests/features/calendars/import-ui.test.tsx";
 const T_ANCHOR_MODEL = "tests/features/calendars/anchor-model.test.ts";
@@ -194,7 +195,8 @@ export const UNIT_13B_R1 = [
     file: SECTION,
     tests: [T_SECTION],
     expect: /R2: A, B, then A again|R2: remove, then set the same anchor again/,
-    patch: (t) => sub(t, "        keys.current.delete(what);\n", ""),
+    // Re-anchored in revision 2 (the identities live with the task's visit: `operationKeys`).
+    patch: (t) => sub(t, "        keys.delete(what);\n", ""),
   },
   {
     id: "MU-2485",
@@ -206,7 +208,7 @@ export const UNIT_13B_R1 = [
     patch: (t) =>
       sub(
         t,
-        "    let key = keys.current.get(what);\n",
+        "    let key = keys.get(what);\n",
         "    let key: string | undefined;\n",
       ),
   },
@@ -214,15 +216,16 @@ export const UNIT_13B_R1 = [
     id: "MU-2486",
     title:
       "WEB-13b R3: a done anchor save closes the panel whatever was edited in it meanwhile",
-    file: ANCHOR_DIALOG,
+    // Re-expressed in revision 2: a done save consumes the editing session (whose consumption closes the panel) at any edit count.
+    file: EDITOR,
     tests: [T_SECTION],
     expect:
       /R3: a save that completes after a hidden field was edited|R3: after a superseding Review save/,
     patch: (t) =>
       sub(
         t,
-        "      else if (revision.current === submitted) onClose();\n",
-        "      else if (submitted >= 0) onClose();\n",
+        "    else if (state.revision === ticket.revision) {\n",
+        "    else if (ticket.revision >= 0) {\n",
       ),
   },
   {
@@ -235,8 +238,8 @@ export const UNIT_13B_R1 = [
     patch: (t) =>
       sub(
         t,
-        "              d === null ? d : { ...d, supersede: null, renewed: true },\n",
-        "              d === null ? d : { ...d, renewed: true },\n",
+        "        (context) => ({ ...context, supersede: null, renewed: true }),\n",
+        "        (context) => ({ ...context, renewed: true }),\n",
       ),
   },
   {
@@ -250,8 +253,8 @@ export const UNIT_13B_R1 = [
     patch: (t) =>
       sub(
         t,
-        "    const observed = dialog.renewed ? observedNow : dialog.observed;\n",
-        "    const observed = dialog.observed;\n",
+        "    const observed = context.renewed ? observedNow : context.observed;\n",
+        "    const observed = context.observed;\n",
       ),
   },
   {
@@ -364,11 +367,17 @@ export const UNIT_13B_R1 = [
     id: "MU-2497",
     title:
       "WEB-13b I1: the task detail does not resume a kept panel (the next panel starts from the binding)",
-    file: SECTION,
+    // Re-expressed in revision 2: the task's visit never shows a kept session again (`openPanel`).
+    file: KEPT,
     tests: [T_SECTION],
     expect:
       /kept through the sync screens and back: the next panel resumes every field|a save still being made when the panel was kept|Cancel discards/,
-    patch: (t) => sub(t, "      resumed !== null\n", "      false\n"),
+    patch: (t) =>
+      sub(
+        t,
+        "    (held.editor.retained() || holdsInput(held.editor))\n",
+        "    false\n",
+      ),
   },
   {
     id: "MU-2498",
@@ -377,14 +386,15 @@ export const UNIT_13B_R1 = [
     file: KEPT,
     tests: [T_SECTION],
     expect: /an ordinary departure from the sync screens ends the visit/,
+    // Re-expressed in revision 2: the visit's end ends nothing, and a session is shown again on any visit.
     patch: (t) =>
       sub(
         sub(
           t,
-          "    if (entry.owner === visit) kept.delete(key);\n",
-          "    void [key, entry, visit];\n",
+          "    if (held.owner === visit) {\n      held.editor.end();\n      panels.delete(key);\n    }\n",
+          "    void [key, held, visit];\n",
         ),
-        "  if (owner === null || entry.owner !== owner || entry.owner.ended())\n    return null;\n",
+        "    held.owner === owner &&\n",
         "",
       ),
   },
@@ -392,48 +402,56 @@ export const UNIT_13B_R1 = [
     id: "MU-2499",
     title:
       "WEB-13b I1: a resumed panel is not taken (a Cancel of it does not discard: the next panel resumes it again)",
-    file: KEPT,
+    // Re-expressed in revision 2: a session shown again stays marked as kept by the sync control, so its Cancel does not end it.
+    file: EDITOR,
     tests: [T_SECTION],
     expect: /Cancel discards/,
     patch: (t) =>
       sub(
         t,
-        "  kept.delete(key);\n  if (owner === null || entry.owner !== owner || entry.owner.ended())\n",
-        "  if (owner === null || entry.owner !== owner || entry.owner.ended())\n",
+        "    resume() {\n      kept = false;\n    },\n",
+        "    resume() {},\n",
       ),
   },
   {
     id: "MU-2500",
     title:
       "WEB-13b I1: a kept panel whose pending save stored exactly what it held is still resumed (offered to be saved twice)",
-    file: KEPT,
+    // Re-expressed in revision 2: a session whose save stored exactly what it held is not consumed.
+    file: EDITOR,
     tests: [T_SECTION],
     expect: /a save still being made when the panel was kept/,
     patch: (t) =>
       sub(
         t,
-        "  if (entry.revision === revision) {\n    kept.delete(key);\n    return;\n  }\n",
-        "",
+        '      over = true;\n      publish("consumed");\n      listeners.clear();\n      onConsumed?.();\n',
+        "      change({ busy: false });\n",
       ),
   },
   {
     id: "MU-2501",
     title:
       "WEB-13b I1: a kept panel's newer input after its own save keeps the old context (its save is refused as changed by its own change)",
-    file: KEPT,
+    // Re-expressed in revision 2: the session's own done save does not renew what its next save is checked against.
+    file: EDITOR,
     tests: [T_SECTION],
     expect: /a save still being made when the panel was kept/,
-    patch: (t) => sub(t, "  entry.context = newer(entry.context as C);\n", ""),
+    patch: (t) => sub(t, "      current = renew(current);\n", ""),
   },
   {
     id: "MU-2502",
     title:
       "WEB-13b I1: a save done after the panel was kept is never settled (the kept state of a saved change is resumed)",
-    file: ANCHOR_DIALOG,
+    // Re-expressed in revision 2: the session never hears its save's completion.
+    file: EDITOR,
     tests: [T_SECTION],
     expect: /a save still being made when the panel was kept/,
     patch: (t) =>
-      sub(t, "        if (refused === null) onSettledKept?.(submitted);\n", ""),
+      sub(
+        t,
+        "        (refused) => settle(ticket, refused),\n",
+        "        () => undefined,\n",
+      ),
   },
   {
     id: "MU-2503",
@@ -441,7 +459,8 @@ export const UNIT_13B_R1 = [
     file: TASK_FORM,
     tests: [T_FORM],
     expect: /kept through the sync screens and back: the next panel resumes it/,
-    patch: (t) => sub(t, "      panel ?? {\n", "      {\n"),
+    // Re-anchored in revision 2 (the kept panel starts the panel's own session).
+    patch: (t) => sub(t, "        ...(panel ?? {\n", "        ...({\n"),
   },
   {
     id: "MU-2504",
