@@ -7,7 +7,7 @@ import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { momentLabel } from "../format";
 import { forgetRefusal, noteIfRefused } from "../memory";
-import { pendingEvidenceOf } from "../model/commands";
+import { pendingEvidenceListOf } from "../model/commands";
 import type {
   Evidence,
   Goal,
@@ -785,8 +785,8 @@ export function EntryHistory({
   };
 
   const pending = row.drafts
-    .map((d) => pendingEvidenceOf(d, env.accountId))
-    .filter((p) => p !== null && p.occurrenceId === row.id);
+    .flatMap((d) => pendingEvidenceListOf(d, env.accountId))
+    .filter((p) => p.occurrenceId === row.id);
   const recent = row.progress?.recent_entries ?? [];
   const pages =
     journal !== null && journal.error !== "refused" ? journal.pages : [];

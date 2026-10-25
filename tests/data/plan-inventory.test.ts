@@ -14,6 +14,8 @@ import "../../src/data/plans/profile";
 import "../../src/data/plans/sync-writers";
 import "../../src/data/plans/retry-state";
 import "../../src/data/plans/recovery-writers";
+import "../../src/data/plans/materialise";
+import "../../src/data/plans/timer-copy";
 
 /**
  * F-S7 and lint rule R18 (plan 5.2.4): the writer inventory is the authority. Every registered plan must belong to a writer of
@@ -126,6 +128,17 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
     guards: ["INC", "CLS", "OWN", "EPO"],
     durability: "default",
   },
+  // WEB-10c: the catch-up sequences (a compare-and-set of the reserved store) and the running-timer copy (one record, a cache write).
+  W27: {
+    name: "writeMaterialiseSequence / pruneMaterialiseSequences",
+    guards: ["INC", "CLS", "EPO"],
+    durability: "strict",
+  },
+  W28: {
+    name: "writeTimerCopy",
+    guards: ["INC", "CLS", "EPO"],
+    durability: "default",
+  },
 };
 
 /**
@@ -158,6 +171,8 @@ const PRESENT_WRITERS: readonly string[] = [
   "W24",
   "W25",
   "W26",
+  "W27",
+  "W28",
 ];
 
 describe("F-S7: the writer inventory", () => {
@@ -287,6 +302,8 @@ describe("F-S7: the writer inventory", () => {
       "data.saveFormRecovery",
       // WEB-12a: the B5 sharing snapshot is server-sized (up to 32 households of 100 members), admitted as a cache write by the defaults source.
       "data.writeDefaults",
+      // WEB-10c: the running-timer copy is server-sized (up to 50 rows with titles), admitted as a cache write by its caller.
+      "data.writeTimerCopy",
     ];
     // A fixed few hundred bytes, once per page context and form (the writer claim) or in place in the singleton `sync_state` row (the
     // verified name and the device id): no caller-sized growth, covered by the reserve's slack and the allowance each save carries.
@@ -294,6 +311,8 @@ describe("F-S7: the writer inventory", () => {
       "data.claimFormWriter",
       "data.writeProfile",
       "data.recordDeviceVerification",
+      // WEB-10c: one catch-up row of a few hundred bytes per task and day while it catches up, pruned when a later day begins.
+      "data.writeMaterialiseSequence",
     ];
     expect(
       listPlans()
@@ -302,9 +321,9 @@ describe("F-S7: the writer inventory", () => {
         .sort(),
     ).toEqual([...ADMITTED, ...FIXED_SIZE].sort());
   });
-  test("the table is exactly W1 to W26 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026)", () => {
+  test("the table is exactly W1 to W28 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026; W27 and W28 are WEB-10c's)", () => {
     expect(Object.keys(WRITER_TABLE)).toEqual(
-      Array.from({ length: 26 }, (_, i) => `W${i + 1}`),
+      Array.from({ length: 28 }, (_, i) => `W${i + 1}`),
     );
   });
 });

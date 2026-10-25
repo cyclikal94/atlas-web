@@ -247,6 +247,12 @@ export interface SyncStateRow {
   composition_seq?: number;
   draft_fence: DraftFence | null;
   defaults: unknown | null;
+  /**
+   * WEB-10c (W28, D-10c-4): a bounded copy of the last COMPLETE first page of the displayed account's running timer sessions
+   * (`GET /timer-sessions?state=running`), so a reload offline can still show what was running. Read tolerantly (`readTimerCopy`):
+   * absent (a database created before it) or damaged is "no copy". Optional, so no migration.
+   */
+  timer_copy?: unknown | null;
   device_id: string | null;
   device_verified: boolean;
   device_verified_for: { account_id: AccountId; epoch: Epoch } | null;
@@ -297,6 +303,43 @@ export interface SyncStateRow {
    * the cache as it is then, and clears this. Absent: nothing is owed.
    */
   recovery_reconcile_pending?: boolean;
+}
+
+/**
+ * WEB-10c (W27, D-10c-1/2): one catch-up sequence of a task's occurrences through a day, in the store `materialise_sequences` that
+ * WEB-09a reserved (key `[task_id+through_date]`, version 1: no schema change). The data layer knows its shape and its compare-and-set,
+ * never what the phases mean: the task slice's pure state machine decides every transition.
+ */
+export interface MaterialiseSequenceRow {
+  task_id: string;
+  /** `YYYY-MM-DD` in the task's zone. */
+  through_date: string;
+  /** A fresh UUID per incarnation of the key: an answer read under an earlier one never applies. */
+  sequence_generation: string;
+  phase: "ready" | "submitting" | "awaiting_position_read" | "stopped";
+  /** The `materialise` attempt in flight or uncertain: its key and canonical body, written BEFORE it is sent. */
+  attempt: { key: string; body: string } | null;
+  /** +1 on each move to `awaiting_position_read`: a position read applies only to the move it was asked after. */
+  read_seq: number;
+  /** Counted successful calls of this run (the unattended budget). */
+  successful_calls: number;
+  /** `materialisation.last_date` as last read. */
+  last_known_position: string | null;
+  /** ms, the device clock: display only. */
+  started_at: number;
+  /** Consecutive uncertain answers (a send or a read). */
+  read_failures: number;
+  stop: null | {
+    reason:
+      | "bound"
+      | "no_progress"
+      | "horizon"
+      | "capacity"
+      | "rejected"
+      | "unreachable";
+    request_id?: string;
+  };
+  trigger: "daily" | "streak" | "draft";
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

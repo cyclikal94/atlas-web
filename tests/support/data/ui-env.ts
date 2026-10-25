@@ -247,6 +247,8 @@ export function stubEnv(
       defaultsSettled.set(settled);
     },
     commands: createCommandRegistry(),
+    // No screen of this double writes a server-sized record of its own (WEB-10c's timer copy needs the real controller).
+    quota: null as never,
     actions,
     outbox: () => null,
     service: () => serviceCell.get() as never,

@@ -186,7 +186,7 @@ function makeSink(db: TableSource, written: Set<StoreName>): WriteSink {
     async bulkPut(store, rows) {
       if (rows.length === 0) return;
       written.add(store);
-      await tableOf(db, store).bulkPut(rows as object[]);
+      await tableOf(db, store).bulkPut(rows as unknown as object[]);
     },
     async bulkDelete(store, keys) {
       if (keys.length === 0) return;

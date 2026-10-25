@@ -122,6 +122,8 @@ export interface DataEnv {
   readonly defaults: DefaultsSource;
   readonly commands: CommandRegistry;
   readonly actions: DataActions;
+  /** The origin's quota ledger, for a slice's own server-sized cache write (WEB-10c's W28 timer copy): admitted before it commits. */
+  readonly quota: QuotaGuard;
   /** The facade of the displayed account's outbox, or null (no database yet): for the slices that save drafts. */
   outbox(): Outbox | null;
   /** The displayed account's open service, or null. Read-only views use it through the hooks; nothing here creates it. */
@@ -1164,6 +1166,7 @@ export function createDataEnv(
     defaults,
     commands,
     actions,
+    quota: deps.quota,
     outbox: () => outbox,
     service: () => (current?.service.live ? current.service : null),
     serviceStore,

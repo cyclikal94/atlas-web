@@ -111,6 +111,8 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
+| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key; through `AccountService.commit`, the person's "Try again" included) | INC, CLS, EPO |
+| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write) | INC, CLS, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished

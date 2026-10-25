@@ -1,0 +1,640 @@
+import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { recordEvidence } from "./data-evidence";
+import { serveIdentityReads } from "./data-local-faults";
+import {
+  ACCOUNT,
+  type SyncStub,
+  seedSettled,
+  stubNetwork,
+  untilTreeSettled,
+} from "./data-sync-helpers";
+import { runAxe } from "./helpers";
+import {
+  type Answer,
+  detailOf,
+  held,
+  type Reads10c,
+  refusal,
+  serveTasks10c,
+} from "./tasks-10c-helpers";
+import {
+  type BuiltTask,
+  buildTask,
+  cacheTasks,
+  dailyPage,
+  draftsOf,
+  goOfflineAtBoundary,
+  serveTaskReads,
+  type TaskReads,
+  todayUtc,
+  view,
+} from "./tasks-helpers";
+
+/**
+ * WEB-10c in Chromium, Firefox and WebKit: the PRODUCTION session and protected tree (`/__session`), the production data controller and
+ * REAL IndexedDB and Web Locks; the cache is filled by one `/sync` delta page through the fixture leader. Every server answer here is the
+ * stub's (`page.route`): FIXTURE evidence, never integration evidence (the I-M/I-S/I-D/I-TM/I-R cases run against the released backend).
+ *
+ * E-M1 Today brings a listed task up to date automatically and the banner leaves; E-M2 a reload while the attempt is held in `submitting`
+ * (the same key resent) and while the position read is held (one read, no new `materialise`); E-M4 two tabs, one lock, one sequence;
+ * E-S1 the streak's `409 materialisation_required` → catch-up → figures; E-S2 the streak at 390 px, tablet and desktop (axe);
+ * E-D1 the dependency dialog's modes and focus return at desktop, 390 px (sheet) and tablet; E-TM1 the account's timers, then offline
+ * after a reload from the kept copy; E-R1 the rota's consent and order. E-M3 (the command path) is not here: the fixture outbox
+ * decides `409`s with its own registry, so the page's handler is never asked natively (jsdom `catchup-conflicts.test.ts` covers it).
+ */
+const TODAY = todayUtc();
+const yesterday = (n = 1) =>
+  new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+
+async function bootAt(
+  context: BrowserContext,
+  route: string,
+  viewport?: { width: number; height: number },
+): Promise<Page> {
+  const page = await context.newPage();
+  if (viewport) await page.setViewportSize(viewport);
+  await page.goto(`/__session?route=${encodeURIComponent(route)}`);
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await page.waitForFunction(() => window.__atlasData !== undefined);
+  return page;
+}
+
+/** A reload of the session page (a plain reload would load the app route, where no fixture harness boots). */
+async function reboot(page: Page): Promise<void> {
+  const route = new URL(page.url()).pathname + new URL(page.url()).search;
+  await page.goto(`/__session?route=${encodeURIComponent(route)}`);
+  await page.waitForFunction(
+    () => window.__atlasFixture?.session?.booted !== undefined,
+  );
+  await page.evaluate(() => window.__atlasFixture?.session?.ready);
+  await page.waitForFunction(() => window.__atlasData !== undefined);
+}
+
+async function setup(
+  context: BrowserContext,
+  route: string,
+  tasks: BuiltTask[],
+  arrange: (reads: TaskReads, r10c: Reads10c) => void = () => undefined,
+  viewport?: { width: number; height: number },
+): Promise<{ page: Page; net: SyncStub; reads: TaskReads; r10c: Reads10c }> {
+  const net = await stubNetwork(context);
+  await serveIdentityReads(context);
+  const reads = await serveTaskReads(context);
+  const r10c = await serveTasks10c(context);
+  arrange(reads, r10c);
+  await seedSettled(context);
+  const page = await bootAt(context, route, viewport);
+  await cacheTasks(page, net, tasks);
+  return { page, net, reads, r10c };
+}
+
+const repeating = (n: number, title: string) => {
+  const t = buildTask({ n, title, date: yesterday(20) });
+  const definition = t.data.definition as { schedule: { repeat: unknown } };
+  definition.schedule.repeat = { frequency: "daily", interval: 1 };
+  for (const u of t.upserts as Array<{
+    resource: { kind: string; value: { schedule?: { repeat: unknown } } };
+  }>)
+    if (u.resource.kind === "execution" && u.resource.value.schedule)
+      u.resource.value.schedule.repeat = { frequency: "daily", interval: 1 };
+  return t;
+};
+const posts = (r: Reads10c) =>
+  r.log.filter((e) => e.what === "POST materialise");
+const positionReads = (r: Reads10c, task: BuiltTask) =>
+  r.log.filter((e) => e.what === `GET /tasks/${task.taskId}`);
+
+test.describe("E-M1: Today catches a listed task up (A1)", () => {
+  test("pending → one call → caught up; the banner says it is working, then leaves once Today no longer lists the task", async ({
+    context,
+  }, info) => {
+    const task = repeating(401, "Water the plants");
+    let listed = true;
+    let caughtUp = false;
+    const call = held<void>();
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      (reads, r) => {
+        reads.respond = (q) =>
+          dailyPage(
+            [view(task)],
+            q.scope === "joint" && listed
+              ? { pending_tasks: [task.taskId] }
+              : {},
+          );
+        r.position = () =>
+          detailOf(
+            task,
+            caughtUp
+              ? { last_date: TODAY, pending: false }
+              : { last_date: yesterday(20), pending: true },
+          );
+        r.materialise = async () => {
+          await call.promise;
+          caughtUp = true;
+          return { status: 200, body: { revision: 7 } };
+        };
+      },
+    );
+    const banner = page.locator("[data-pending-tasks]");
+    await expect(banner).toHaveAttribute("data-catch-up", "running");
+    await expect(banner).toContainText("Bringing 1 repeating task up to date");
+    call.release();
+    await expect
+      .poll(() => positionReads(r10c, task).length)
+      .toBeGreaterThanOrEqual(2);
+    expect(posts(r10c)).toHaveLength(1);
+    expect(posts(r10c)[0]?.body).toEqual({
+      kind: "materialise",
+      task_id: task.taskId,
+      through_date: TODAY,
+      limit: 16,
+    });
+    // The new occurrences arrive by sync; Today's next current answer no longer lists the task.
+    listed = false;
+    await page.evaluate(() => {
+      history.pushState(null, "", "/tasks");
+      dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await page.evaluate((day) => {
+      history.pushState(null, "", `/today?day=${day}&tz=UTC`);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, TODAY);
+    await expect(banner).toHaveCount(0);
+    recordEvidence(info, "e-m1", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+});
+
+test.describe("E-M2: a reload in each phase (A3; CM-440)", () => {
+  test("held in submitting: the new page resends the stored attempt with the SAME key", async ({
+    context,
+  }, info) => {
+    const task = repeating(402, "Sweep the floor");
+    let caughtUp = false;
+    const first = held<Answer>();
+    let calls = 0;
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      (reads, r) => {
+        reads.respond = (q) =>
+          dailyPage(
+            [view(task)],
+            q.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+          );
+        r.position = () =>
+          detailOf(
+            task,
+            caughtUp
+              ? { last_date: TODAY, pending: false }
+              : { last_date: yesterday(20), pending: true },
+          );
+        r.materialise = () => {
+          calls += 1;
+          if (calls === 1) return first.promise;
+          caughtUp = true;
+          return { status: 200, body: { revision: 8 } };
+        };
+      },
+    );
+    await expect.poll(() => posts(r10c).length).toBe(1);
+    await reboot(page);
+    await expect.poll(() => posts(r10c).length, { timeout: 20_000 }).toBe(2);
+    expect(posts(r10c)[1]?.key).toBe(posts(r10c)[0]?.key);
+    first.release({ status: 200, body: { revision: 8 } });
+    recordEvidence(info, "e-m2-submitting", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+
+  test("held awaiting the position: after the reload exactly one more position read and no new materialise", async ({
+    context,
+  }, info) => {
+    const task = repeating(403, "Feed the cat");
+    let sent = false;
+    const hold = held<Answer>();
+    let heldOnce = false;
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      (reads, r) => {
+        reads.respond = (q) =>
+          dailyPage(
+            [view(task)],
+            q.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+          );
+        r.position = () => {
+          if (!sent)
+            return detailOf(task, { last_date: yesterday(20), pending: true });
+          if (!heldOnce) {
+            heldOnce = true;
+            return hold.promise;
+          }
+          return detailOf(task, { last_date: TODAY, pending: false });
+        };
+        r.materialise = () => {
+          sent = true;
+          return { status: 200, body: { revision: 9 } };
+        };
+      },
+    );
+    await expect.poll(() => heldOnce).toBe(true);
+    const postsBefore = posts(r10c).length;
+    const readsBefore = positionReads(r10c, task).length;
+    await reboot(page);
+    await expect
+      .poll(() => positionReads(r10c, task).length, { timeout: 20_000 })
+      .toBe(readsBefore + 1);
+    await page.waitForTimeout(1_500);
+    expect(positionReads(r10c, task).length).toBe(readsBefore + 1);
+    expect(posts(r10c).length).toBe(postsBefore);
+    hold.release(detailOf(task, { last_date: TODAY, pending: false }));
+    recordEvidence(info, "e-m2-awaiting", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+});
+
+test.describe("E-M4: two tabs, one lock, one sequence (A3)", () => {
+  test("both tabs list the task; only the lock holder sends, the other waits and then finds it done", async ({
+    context,
+  }, info) => {
+    const task = repeating(404, "Empty the dishwasher");
+    let listed = false;
+    // Three calls bring the task up to date; each answer takes a moment (requests of the account's windows are taken one at a time,
+    // so the other tab's reads pass between them).
+    const positions = [yesterday(20), yesterday(10), yesterday(2), TODAY];
+    let calls = 0;
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      (reads, r) => {
+        reads.respond = (q) =>
+          dailyPage(
+            [view(task)],
+            q.scope === "joint" && listed
+              ? { pending_tasks: [task.taskId] }
+              : {},
+          );
+        r.position = () =>
+          detailOf(task, {
+            last_date: positions[Math.min(calls, 3)] as string,
+            pending: calls < 3,
+          });
+        r.materialise = async () => {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          calls += 1;
+          return { status: 200, body: { revision: 10 + calls } };
+        };
+      },
+    );
+    // Both tabs are shown first: a window that opens while another holds a request waits for it (the session's protocol).
+    const second = await bootAt(context, `/today?day=${TODAY}&tz=UTC`);
+    await expect(second.locator("[data-today-page]")).toBeVisible();
+    listed = true;
+    for (const tab of [page, second]) {
+      // A tab behind another is hidden to WebKit; each is shown while it is navigated, as a person would.
+      await tab.bringToFront();
+      await tab.evaluate(() => {
+        history.pushState(null, "", "/tasks");
+        dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await expect(tab.locator("[data-task-list]")).toBeVisible();
+      await tab.evaluate((day) => {
+        history.pushState(null, "", `/today?day=${day}&tz=UTC`);
+        dispatchEvent(new PopStateEvent("popstate"));
+      }, TODAY);
+      await expect(tab.locator("[data-pending-tasks]")).toBeVisible({
+        timeout: 15_000,
+      });
+    }
+    await expect.poll(() => calls, { timeout: 20_000 }).toBe(3);
+    await second.waitForTimeout(2_000);
+    const sent = posts(r10c);
+    expect(sent).toHaveLength(3);
+    expect(new Set(sent.map((e) => e.key)).size).toBe(3);
+    // One tab held the lock for the whole sequence; the other sent nothing.
+    expect(new Set(sent.map((e) => e.from)).size).toBe(1);
+    recordEvidence(info, "e-m4", {
+      log: r10c.log.map(({ from, ...e }) => ({
+        ...e,
+        tab: from === page ? 1 : from === second ? 2 : 0,
+      })),
+    });
+  });
+});
+
+test.describe("E-S1/E-S2: the streak (A5, A6)", () => {
+  test("409 materialisation_required → the task is caught up → the figures", async ({
+    context,
+  }) => {
+    const task = repeating(405, "Stretch");
+    let caughtUp = false;
+    const { page, r10c } = await setup(
+      context,
+      `/tasks/${task.taskId}/streak`,
+      [task],
+      (_reads, r) => {
+        r.streak = () =>
+          caughtUp
+            ? { status: 200, body: { current: 3, longest: 5 } }
+            : refusal(409, "materialisation_required");
+        r.position = () =>
+          detailOf(
+            task,
+            caughtUp
+              ? { last_date: TODAY, pending: false }
+              : { last_date: yesterday(20), pending: true },
+          );
+        r.materialise = () => {
+          caughtUp = true;
+          return { status: 200, body: { revision: 11 } };
+        };
+      },
+    );
+    await expect(page.locator("[data-streak-scope=personal]")).toHaveAttribute(
+      "data-streak-state",
+      "ready",
+      { timeout: 20_000 },
+    );
+    await expect(page.locator("[data-streak-scope=personal]")).toContainText(
+      "On a run of 3 days",
+    );
+    expect(posts(r10c)).toHaveLength(1);
+  });
+
+  for (const [width, height] of [
+    [390, 844],
+    [1180, 820],
+    [1440, 900],
+  ] as const)
+    test(`axe and layout at ${width}×${height} (browser emulation, not a device)`, async ({
+      context,
+    }) => {
+      const task = repeating(406, "Stretch");
+      const { page } = await setup(
+        context,
+        `/tasks/${task.taskId}/streak`,
+        [task],
+        (_reads, r) => {
+          r.streak = () => ({ status: 200, body: { current: 2, longest: 4 } });
+        },
+        { width, height },
+      );
+      await expect(page.locator("[data-streak-strip]")).toBeVisible();
+      expect(await runAxe(page)).toEqual([]);
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      );
+      expect(overflow).toBeLessThanOrEqual(0);
+    });
+});
+
+test.describe("E-D1: what needs doing first (A8, A22)", () => {
+  for (const [width, height] of [
+    [1440, 900],
+    [390, 844],
+    [1180, 820],
+  ] as const)
+    test(`the dialog's ordered list and modes, axe, and focus returning to its opener at ${width}×${height}`, async ({
+      context,
+    }) => {
+      const root = buildTask({ n: 407, title: "Hang the washing" });
+      const pre = buildTask({ n: 408, title: "Run the washing machine" });
+      const { page } = await setup(
+        context,
+        `/tasks/${root.taskId}?occurrence=${root.occurrenceId}`,
+        [root, pre],
+        (_reads, r) => {
+          r.preview = () => ({
+            status: 200,
+            body: {
+              token: "d".repeat(64),
+              items: [
+                {
+                  occurrence_id: pre.occurrenceId,
+                  task_id: pre.taskId,
+                  complete: false,
+                  can_complete: true,
+                  progress_version: 1,
+                },
+                {
+                  occurrence_id: root.occurrenceId,
+                  task_id: root.taskId,
+                  complete: false,
+                  can_complete: true,
+                  progress_version: 1,
+                },
+              ],
+              unavailable: false,
+              strict: false,
+            },
+          });
+        },
+        { width, height },
+      );
+      await untilTreeSettled(page);
+      const opener = page.getByRole("button", {
+        name: "See what needs doing first",
+      });
+      await expect(opener).toBeVisible();
+      await opener.focus();
+      await page.keyboard.press("Enter");
+      const dialog = page.getByRole("dialog");
+      await expect(dialog.locator("[data-dependency-list] li")).toHaveCount(2);
+      await expect(
+        dialog.locator("[data-dependency-list] li").first(),
+      ).toContainText("Run the washing machine");
+      await expect(dialog.getByRole("radiogroup")).toBeVisible();
+      expect(await runAxe(page)).toEqual([]);
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(opener).toBeFocused();
+      const overflow = await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      );
+      expect(overflow).toBeLessThanOrEqual(0);
+    });
+});
+
+test.describe("E-TM1: the account's timers (A15)", () => {
+  test("running rows online are kept on this device, and shown offline after a reload; a restricted row has no actions", async ({
+    context,
+  }, info) => {
+    const task = buildTask({
+      n: 409,
+      title: "Practise piano",
+      goal: {
+        kind: "numeric",
+        minimum: "1800",
+        maximum: null,
+        unit: "seconds",
+      },
+    });
+    const started = Math.floor(Date.now() / 1000) - 600;
+    const { page, r10c } = await setup(
+      context,
+      "/tasks/timers",
+      [task],
+      (_reads, r) => {
+        r.accountTimers = (q) =>
+          q.state === "running"
+            ? {
+                status: 200,
+                body: {
+                  items: [
+                    {
+                      access: "available",
+                      id: "cccccccc-0000-4000-8000-000000000101",
+                      occurrence_id: task.occurrenceId,
+                      task_id: task.taskId,
+                      task_title: "Practise piano",
+                      slot_date: TODAY,
+                      started_at: started,
+                      stopped_at: null,
+                      version: 2,
+                      can_modify: true,
+                    },
+                    {
+                      access: "restricted",
+                      id: "cccccccc-0000-4000-8000-000000000102",
+                      started_at: started - 60,
+                      stopped_at: null,
+                      version: 1,
+                    },
+                  ],
+                  next_after: null,
+                },
+              }
+            : { status: 200, body: { items: [], next_after: null } };
+      },
+    );
+    const live = page.locator(
+      '[data-account-timer="cccccccc-0000-4000-8000-000000000101"]',
+    );
+    await expect(live).toContainText("Practise piano");
+    await expect(
+      page
+        .locator('[data-account-timer="cccccccc-0000-4000-8000-000000000102"]')
+        .getByRole("button"),
+    ).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(async (acct) => {
+          const rows = (await window.__atlasData?.rows(
+            acct,
+            "sync_state",
+          )) as Array<{ timer_copy?: unknown }>;
+          return rows?.[0]?.timer_copy != null;
+        }, ACCOUNT),
+      )
+      .toBe(true);
+    await reboot(page);
+    await goOfflineAtBoundary(page);
+    await page.evaluate(() => {
+      history.pushState(null, "", "/tasks");
+      dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await expect(page.locator("[data-task-list]")).toBeVisible();
+    await page.evaluate(() => {
+      history.pushState(null, "", "/tasks/timers");
+      dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await expect(page.locator("[data-timers-running=offline]")).toBeVisible();
+    await expect(live).toContainText("Practise piano");
+    await expect(page.locator("[data-timers-history]")).toContainText(
+      "Session history is shown when you're online.",
+    );
+    recordEvidence(info, "e-tm1", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+});
+
+test.describe("E-R1: the rota (A17)", () => {
+  test("consent is sent online (never queued) and the order dialog projects the turns; axe", async ({
+    context,
+  }) => {
+    let consented = false;
+    const task = repeating(410, "Take the bins out");
+    (task.data.definition as { participation: string }).participation =
+      "anyone";
+    for (const u of task.upserts as Array<{
+      resource: { kind: string; value: Record<string, unknown> };
+    }>) {
+      if (u.resource.kind === "execution")
+        u.resource.value.participation = "anyone";
+      if (u.resource.kind === "occurrence") {
+        (
+          u.resource.value.definition as { participation: string }
+        ).participation = "anyone";
+        u.resource.value.rota = {
+          revision: 1,
+          ordinal: 0,
+          account_id: ACCOUNT,
+        };
+      }
+    }
+    const { page, r10c } = await setup(
+      context,
+      `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      [task],
+      (_reads, r) => {
+        r.enrolment = () => ({
+          status: 200,
+          body: {
+            version: 1,
+            active: true,
+            aggregate_consent: true,
+            policy: { grants: [], exclude_accounts: [] },
+          },
+        });
+        r.rota = () => ({
+          status: 200,
+          body: {
+            version: 1,
+            participants: [ACCOUNT],
+            consent_version: consented ? 3 : 2,
+            accepted: consented,
+            eligible_participants: [ACCOUNT],
+          },
+        });
+        r.access = ({ command }) => {
+          if (command.kind === "rota_consent")
+            consented = command.accepted === true;
+          return { status: 200, body: { revision: 4 } };
+        };
+      },
+    );
+    await expect(page.locator("[data-rota-turn]")).toContainText(
+      "This turn: You",
+    );
+    const consent = page.getByLabel("Take turns on this task");
+    await expect(consent).toBeEnabled();
+    // The box follows the server: it is ticked once the read after the answer says so.
+    await consent.click();
+    await expect
+      .poll(() => r10c.log.filter((e) => e.what === "POST rota_consent").length)
+      .toBe(1);
+    await expect(consent).toBeChecked();
+    expect(await draftsOf(page)).toEqual([]);
+    await page.getByRole("button", { name: "Turn order…" }).click();
+    await expect(page.locator("[data-rota-dialog]")).toBeVisible();
+    await expect(page.locator("[data-rota-projected]").first()).toBeVisible();
+    expect(await runAxe(page)).toEqual([]);
+  });
+});

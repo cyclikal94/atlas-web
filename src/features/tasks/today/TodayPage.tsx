@@ -20,6 +20,7 @@ import {
 } from "../model/row-state";
 import { addDays, todayIn } from "../model/time";
 import type { RowModel } from "../view";
+import { CatchUpBanner } from "./CatchUpBanner";
 import { TodayRow } from "./TodayRow";
 import { useTodayView } from "./useTodayView";
 
@@ -46,7 +47,7 @@ const inputsOf = (row: RowModel, now: number): RowInputs => ({
 
 /**
  * WF-TODAY-01: the day's tasks for the displayed account, in the display zone, with filters, the progress summary, time-of-day groups and
- * the states loading / empty / error / offline, and the `pending_tasks` notice (D-10a-6; "Catch up" is WEB-10c's). Choosing another day
+ * the states loading / empty / error / offline, and the `pending_tasks` catch-up banner (WEB-10c, `CatchUpBanner`). Choosing another day
  * changes only what is read; nothing is ever deleted by a day change.
  */
 export function TodayPage({
@@ -171,14 +172,8 @@ export function TodayPage({
         {copy.SUMMARY(counts.done, counts.total, counts.toDo, counts.notKnown)}
       </p>
       <p className="text-[12px] text-ink-2">{copy.ZONE_HINT(zone)}</p>
-      {view.pendingTasks.length > 0 ? (
-        <p
-          data-pending-tasks=""
-          className="max-w-[620px] rounded-row border border-hairline-strong bg-raised px-3.5 py-2.5 text-[13px] leading-[1.55] text-ink-1"
-        >
-          {copy.PENDING_TASKS}
-        </p>
-      ) : null}
+      {/* WEB-10c: the tasks Today's current answer lists in `pending_tasks` are brought up to date automatically (D-10c-5). */}
+      <CatchUpBanner pendingTasks={view.pendingTasks} />
       {view.error !== null ? (
         <section
           data-today-error={view.error.kind}

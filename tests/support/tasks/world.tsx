@@ -275,6 +275,61 @@ export function fakeApi(over: Partial<TasksApi> = {}): FakeApi {
       count("enrol");
       return { ok: false, kind: "uncertain" };
     },
+    // WEB-10c's reads and commands. By default a day waits for nothing (a root-only preview), lists no sessions and has an empty rota;
+    // the commands and the streak answer nothing (uncertain) unless a test says so.
+    readDependencies: async (occurrence) => {
+      count("readDependencies");
+      return {
+        ok: true,
+        value: {
+          token: "0".repeat(64),
+          items: [
+            {
+              occurrence_id: occurrence,
+              task_id: "00000000-0000-4000-8000-00000000ffff",
+              complete: false,
+              can_complete: true,
+              progress_version: null,
+            },
+          ],
+          unavailable: false,
+          strict: false,
+        },
+      };
+    },
+    readTimers: async () => {
+      count("readTimers");
+      return { ok: true, value: { items: [], next_after: null } };
+    },
+    readAccountTimers: async () => {
+      count("readAccountTimers");
+      return { ok: true, value: { items: [], next_after: null } };
+    },
+    readRota: async () => {
+      count("readRota");
+      return {
+        ok: true,
+        value: {
+          version: 0,
+          participants: [],
+          consent_version: 0,
+          accepted: false,
+          eligible_participants: [],
+        },
+      };
+    },
+    readStreak: async () => {
+      count("readStreak");
+      return { ok: false, kind: "uncertain" };
+    },
+    materialise: async () => {
+      count("materialise");
+      return { ok: false, kind: "uncertain" };
+    },
+    access: async () => {
+      count("access");
+      return { ok: false, kind: "uncertain" };
+    },
     ...over,
   };
   return api;
@@ -372,6 +427,9 @@ export async function mountTasks(options: {
   sharing?: FakeSharingApi;
   /** `GET /defaults/snapshot` (revision 10, R22: the first Join's default audience). Absent: the defaults are never read. */
   defaultsSnapshot?: () => Promise<ReadResult<unknown>>;
+  /** WEB-10c: rows of other stores seeded before the screens mount (catch-up sequences, a timer copy in `sync_state`). */
+  sequences?: object[];
+  timerCopy?: unknown;
 }): Promise<Mounted> {
   assertNoOpenActScope("mountTasks");
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
@@ -386,6 +444,17 @@ export async function mountTasks(options: {
     if (options.rows?.length) world.idb.seed(NAME, "cache", options.rows);
     if (options.drafts?.length)
       world.idb.seed(NAME, "drafts", options.drafts as never);
+    if (options.sequences?.length)
+      world.idb.seed(NAME, "materialise_sequences", options.sequences as never);
+    if (options.timerCopy !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        { ...sync, timer_copy: options.timerCopy },
+      ]);
+    }
     if (options.cacheStatus !== undefined) {
       const sync = world.idb.peek(NAME, "sync_state", "singleton") as
         | SyncStateRow

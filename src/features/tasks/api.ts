@@ -2,16 +2,28 @@ import type { Policy } from "../../data";
 import { recogniseAtlasError } from "../../lib/api-client/problem";
 import { type Session, StampedRequestError } from "../../session";
 import {
+  type AccountTimerPage,
+  type DependencyPreview,
   type Enrolment,
   type OccurrencePage,
   type ProgressJournal,
+  parseAccountTimerPage,
+  parseDependencyPreview,
   parseEnrolment,
   parseJournalPage,
   parseOccurrencePage,
   parsePresets,
+  parseRotaState,
+  parseStreak,
   parseTaskDetail,
+  parseTaskResult,
+  parseTimerPage,
+  type RotaState,
   type TaskDetail,
   type TaskPreset,
+  type TaskResult,
+  type TaskStreak,
+  type TimerPage,
 } from "./model/contract";
 
 /**
@@ -31,7 +43,8 @@ export type RefusalKind =
 export type TasksResult<T> =
   | { ok: true; value: T; requestId?: string }
   | { ok: false; kind: RefusalKind; requestId?: string; code?: string }
-  | { ok: false; kind: "uncertain"; requestId?: string }
+  /** `code`: an Atlas body's code when the answer had one (a `503 slice_capacity`), for a caller that stops on it (WEB-10c's catch-up). */
+  | { ok: false; kind: "uncertain"; requestId?: string; code?: string }
   | { ok: false; kind: "not_sent" | "offline" | "closed" };
 
 export type TasksFailure = Extract<TasksResult<never>, { ok: false }>;
@@ -59,6 +72,28 @@ export interface EnrolCommand {
   initial_policy: Policy;
 }
 
+/** WEB-10c's online-only access commands (`/task-access-commands`; `set_rota`/`rota_consent` are refused on `/task-commands`). */
+export interface SetRotaCommand {
+  kind: "set_rota";
+  task_id: string;
+  expected_version: number;
+  participants: string[];
+}
+export interface RotaConsentCommand {
+  kind: "rota_consent";
+  task_id: string;
+  expected_version: number;
+  accepted: boolean;
+}
+export type AccessCommand = EnrolCommand | SetRotaCommand | RotaConsentCommand;
+/** `materialise`: sent only by the catch-up runner (D-10c-1), never queued. */
+export interface MaterialiseCommand {
+  kind: "materialise";
+  task_id: string;
+  through_date: string;
+  limit: number;
+}
+
 export interface TasksApi {
   readDaily(query: DailyQuery): Promise<TasksResult<OccurrencePage>>;
   readPresets(query: {
@@ -76,7 +111,36 @@ export interface TasksApi {
     command: EnrolCommand,
     key: string,
   ): Promise<TasksResult<{ revision: number }>>;
+  // ---- WEB-10c -------------------------------------------------------------------------------------------------------------------
+  readDependencies(
+    occurrenceId: string,
+  ): Promise<TasksResult<DependencyPreview>>;
+  /** My sessions of one occurrence, 50 a page, in id order. */
+  readTimers(
+    occurrenceId: string,
+    after?: string,
+  ): Promise<TasksResult<TimerPage>>;
+  readAccountTimers(query: {
+    state: "running" | "stopped";
+    after?: string;
+    limit: number;
+  }): Promise<TasksResult<AccountTimerPage>>;
+  readRota(taskId: string): Promise<TasksResult<RotaState>>;
+  readStreak(
+    taskId: string,
+    scope: "personal" | "joint",
+  ): Promise<TasksResult<TaskStreak>>;
+  /** `POST /task-commands` with the attempt's key: the catch-up runner only. */
+  materialise(
+    command: MaterialiseCommand,
+    key: string,
+  ): Promise<TasksResult<TaskResult>>;
+  /** `POST /task-access-commands` (enrolment, rota consent, turn order), one attempt per body. `enrol` is a call of it. */
+  access(command: AccessCommand, key: string): Promise<TasksResult<TaskResult>>;
 }
+
+/** The size of a timer-session page this slice asks for (the endpoint's default). */
+export const TIMER_PAGE = 50;
 
 const REFUSAL_CODES: Readonly<Record<string, RefusalKind>> = {
   conflict: "conflict",
@@ -109,7 +173,12 @@ export function classifyAnswer(
   }
   return atlas === null
     ? { ok: false, kind: "uncertain" }
-    : { ok: false, kind: "uncertain", requestId: atlas.request_id };
+    : {
+        ok: false,
+        kind: "uncertain",
+        requestId: atlas.request_id,
+        code: atlas.code,
+      };
 }
 
 export function classifyThrown(error: unknown): TasksFailure {
@@ -171,15 +240,6 @@ export async function untilSent<T>(
   }
 }
 
-const parseReceipt = (body: unknown): { revision: number } | null =>
-  typeof body === "object" &&
-  body !== null &&
-  !Array.isArray(body) &&
-  Object.keys(body).length === 1 &&
-  Number.isSafeInteger((body as { revision: unknown }).revision)
-    ? { revision: (body as { revision: number }).revision }
-    : null;
-
 /** The production client over the session, for the displayed `(account, epoch)`. */
 export function createTasksApi(
   session: Session,
@@ -209,6 +269,19 @@ export function createTasksApi(
             parse,
           ),
         ),
+    );
+  const access = async (
+    command: AccessCommand,
+    key: string,
+  ): Promise<TasksResult<TaskResult>> =>
+    offline() ??
+    call(
+      () =>
+        client().POST("/task-access-commands", {
+          params: { header: { "Idempotency-Key": key } },
+          body: { command } as never,
+        }),
+      parseTaskResult,
     );
   return {
     readDaily: (q) =>
@@ -242,15 +315,55 @@ export function createTasksApi(
         { path: { id: progressId }, query: { after, limit: 200 } },
         parseJournalPage,
       ),
-    enrol: async (command, key) =>
+    enrol: (command, key) => access(command, key),
+    access: (command, key) => access(command, key),
+    materialise: async (command, key) =>
       offline() ??
       call(
         () =>
-          client().POST("/task-access-commands", {
+          client().POST("/task-commands", {
             params: { header: { "Idempotency-Key": key } },
             body: { command } as never,
           }),
-        parseReceipt,
+        parseTaskResult,
+      ),
+    readDependencies: (occurrenceId) =>
+      get(
+        "/occurrences/{id}/dependencies",
+        { path: { id: occurrenceId } },
+        parseDependencyPreview,
+      ),
+    readTimers: (occurrenceId, after) =>
+      get(
+        "/occurrences/{id}/timers",
+        {
+          path: { id: occurrenceId },
+          query: {
+            limit: TIMER_PAGE,
+            ...(after === undefined ? {} : { after }),
+          },
+        },
+        (body) => parseTimerPage(body, occurrenceId, after ?? null, TIMER_PAGE),
+      ),
+    readAccountTimers: (q) =>
+      get(
+        "/timer-sessions",
+        {
+          query: {
+            state: q.state,
+            limit: q.limit,
+            ...(q.after === undefined ? {} : { after: q.after }),
+          },
+        },
+        (body) => parseAccountTimerPage(body, q.state, q.limit),
+      ),
+    readRota: (taskId) =>
+      get("/tasks/{id}/rota", { path: { id: taskId } }, parseRotaState),
+    readStreak: (taskId, scope) =>
+      get(
+        "/tasks/{id}/streak",
+        { path: { id: taskId }, query: { scope } },
+        parseStreak,
       ),
   };
 }

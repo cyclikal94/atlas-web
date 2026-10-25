@@ -8,6 +8,7 @@
  * `src/data` modules side-effect free, so a boot that uses only the ports does not pull the rest of this file's graph along.
  */
 
+export type { AccountService } from "./engine/account-service";
 export type {
   Acquisition,
   DefaultsSource,
@@ -84,12 +85,14 @@ export type {
 export type {
   AccountId,
   CacheRow,
+  Captured,
   DraftRow,
   DraftStatus,
   DraftWithCommand,
   Epoch,
   JsonObject,
   LocalId,
+  MaterialiseSequenceRow,
   ProjectionPatch,
   ResourceId,
   ResourceKind,
@@ -196,3 +199,18 @@ export {
   type Stage,
   scanResources,
 } from "./ui/scan";
+// ---- WEB-10c: the catch-up sequences (W27) and the running-timer copy (W28); only the lazy task screens import them ----------------
+export {
+  commitMaterialiseSequence,
+  commitTimerCopy,
+  pruneOlderSequences,
+  type RecordCommit,
+  readMaterialiseSequenceNow,
+  type SequenceExpectation,
+  type SequenceKey,
+  type SequenceWrite,
+  TIMER_COPY_ROWS,
+  type TimerCopyRecord,
+  useMaterialiseSequences,
+  useTimerCopy,
+} from "./ui/task-records";

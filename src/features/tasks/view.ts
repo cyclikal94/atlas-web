@@ -4,7 +4,7 @@ import type {
   DraftWithCommand,
   ProjectionPatch,
 } from "../../data";
-import { pendingEvidenceOf } from "./model/commands";
+import { pendingEvidenceListOf } from "./model/commands";
 import {
   type OccurrenceData,
   type OccurrenceView,
@@ -312,7 +312,7 @@ export function composeRow(
   // still says, so it is never counted twice (design assessment F4).
   const landed = new Set((progress?.recent_entries ?? []).map((e) => e.id));
   const pending: PendingEvidence[] = drafts
-    .map((d) => pendingEvidenceOf(d, me))
+    .flatMap((d) => pendingEvidenceListOf(d, me))
     .filter(
       (p): p is PendingEvidence & { occurrenceId: string } =>
         p !== null && p.occurrenceId === occurrenceId && !landed.has(p.entryId),

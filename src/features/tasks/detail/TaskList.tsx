@@ -10,6 +10,7 @@ import { patched } from "../view";
 export const LIST_COPY = {
   heading: "Your tasks",
   newTask: "New task",
+  timers: "Your timers",
   showArchived: "Archived",
   showActive: "Active",
   none: "No tasks here yet.",
@@ -65,12 +66,22 @@ export function TaskList({ selected }: { selected?: string }) {
         <h2 id={heading} className="text-[15px] font-medium text-ink-1">
           {LIST_COPY.heading}
         </h2>
-        <Link
-          to="/tasks/new"
-          className="atlas-transition inline-flex min-h-11 items-center rounded-control bg-action-fill px-4 text-[13.5px] font-medium text-action-on hover:bg-action-hover"
-        >
-          {LIST_COPY.newTask}
-        </Link>
+        <span className="flex flex-wrap items-center gap-2">
+          {/* WEB-10c (D-10c-12, E-4): the account's timers, from the Tasks screens rather than the shell's first load. */}
+          <Link
+            to="/tasks/timers"
+            className="atlas-transition inline-flex min-h-11 items-center text-[13px] text-ink-2 hover:text-ink-1"
+            data-your-timers=""
+          >
+            {LIST_COPY.timers}
+          </Link>
+          <Link
+            to="/tasks/new"
+            className="atlas-transition inline-flex min-h-11 items-center rounded-control bg-action-fill px-4 text-[13.5px] font-medium text-action-on hover:bg-action-hover"
+          >
+            {LIST_COPY.newTask}
+          </Link>
+        </span>
       </div>
       <label className="inline-flex min-h-11 items-center gap-2 text-[13px] text-ink-1">
         <input
