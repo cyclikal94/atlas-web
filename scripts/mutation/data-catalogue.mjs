@@ -21,6 +21,7 @@ import { ENGINE_13B, UNIT_13B } from "./catalogue-web13b.mjs";
 import { UNIT_13B_R1 } from "./catalogue-web13b-r1.mjs";
 import { UNIT_13B_R2 } from "./catalogue-web13b-r2.mjs";
 import { UNIT_13B_R3 } from "./catalogue-web13b-r3.mjs";
+import { UNIT_13B_R4 } from "./catalogue-web13b-r4.mjs";
 
 export class PatchError extends Error {}
 
@@ -14098,8 +14099,10 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '        if (out.kind === "applied") answered(service);\n        return { when: "event" };\n',
-        '        return { when: "event" };\n',
+        // Re-expressed in WEB-13b revision 4 (same defect): the record of an issued answer after its run ended is disposed of by
+        // `retained`, which the receipt's branch calls; an applied receipt is no longer handed to it.
+        "      if (!alive(id))\n        return retained(\n",
+        '      if (!alive(id) && out.kind === "applied") return { when: "event" };\n      if (!alive(id))\n        return retained(\n',
       ),
   },
   {
@@ -14114,8 +14117,10 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '    if (!alive(id)) {\n      if (out.kind === "applied") answered(service);\n      return { when: "event" };\n    }\n',
-        '    if (!alive(id)) return { when: "event" };\n',
+        // Re-expressed in WEB-13b revision 4 (same defect): the outcome's branch hands the record to `retained`; an applied one is
+        // no longer handed to it.
+        "    if (!alive(id))\n      return retained(\n",
+        '    if (!alive(id) && out.kind === "applied") return { when: "event" };\n    if (!alive(id))\n      return retained(\n',
       ),
   },
   {
@@ -21838,6 +21843,7 @@ export const UNIT = [
   ...UNIT_13B_R1,
   ...UNIT_13B_R2,
   ...UNIT_13B_R3,
+  ...UNIT_13B_R4,
 ];
 
 /**

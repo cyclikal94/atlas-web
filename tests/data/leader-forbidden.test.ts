@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
+import { LOCAL_WRITE_STOPS_STORE } from "../../src/data/engine/sync-channel";
 import { accountDatabaseName } from "../../src/data/model/schema";
 import type { DraftRow } from "../../src/data/model/types";
 import { StampedRequestError } from "../../src/session";
@@ -257,5 +258,203 @@ describe("F-13b-1: an issued command's answer is the draft's, whatever became of
     expect(sent.length).toBe(2);
     expect(sent.every((r) => r.key === key)).toBe(true);
     expect(draft(w)).toMatchObject({ status: "rejected", attempts: 1 });
+  });
+});
+
+/**
+ * F-13b-1a (WEB-13b revision 4, review 4): revision 3 recorded the answer a stopped run had issued when its commit SUCCEEDED, but returned
+ * for the ended run before looking at a FAILED commit, so the failure was never counted, paced or stopped, and the run the leader started
+ * when the display opened sent the unchanged `in_flight` draft again at once (review 4: four sends 25-31 ms apart where three, 250 ms apart,
+ * are the bound). Every send is held here until the case answers it; the record of the answer fails by a named injection whose hits are
+ * counted. The display closes and opens around each answer as the session's interim hold makes it (`holdDisplay`, `reopenDisplay`).
+ */
+function heldEvery(w: LeaderWorld, status: number, body: unknown) {
+  const at: number[] = [];
+  const pending: Array<() => void> = [];
+  w.server = (request) => {
+    if (request.path === "/commands") {
+      at.push(w.env.world.time);
+      return new Promise<Response>((resolve) => {
+        pending.push(() =>
+          resolve(
+            new Response(JSON.stringify(body), {
+              status,
+              headers: { "content-type": "application/json" },
+            }),
+          ),
+        );
+      });
+    }
+    if (request.path !== "/sync") return w.status(404);
+    if (request.cursor === null) return w.json(snapshot());
+    return w.json({
+      phase: "delta",
+      hasMore: false,
+      nextCursor: request.cursor,
+      batches: [],
+    });
+  };
+  return {
+    at,
+    async answer() {
+      const release = pending.shift();
+      if (release === undefined) throw new Error("setup: no send is held");
+      release();
+      await w.settle();
+    },
+  };
+}
+async function enqueueOne(w: LeaderWorld, one: LeaderPage) {
+  const outbox = one.leader.outbox();
+  if (outbox === null) throw new Error("setup: no outbox");
+  const saved = await w.env.run(
+    outbox.enqueue({
+      endpoint: "/commands",
+      targets: [],
+      localId: LOCAL_ID,
+      build: () => ({ command: { kind: "note", body: "x" } }),
+    } as never),
+  );
+  expect(saved).toMatchObject({ kind: "queued" });
+  await w.settle();
+}
+function failNamed(
+  w: LeaderWorld,
+  label: string,
+  times: number,
+  mode: "error" | "quota" = "error",
+) {
+  const hits = { count: 0 };
+  w.env.idb.inject({
+    match: (tx) => {
+      if (tx.label !== label || hits.count >= times) return false;
+      hits.count += 1;
+      return true;
+    },
+    mode,
+    times,
+  });
+  return hits;
+}
+const RECEIPT_OP = `receipt:${LOCAL_ID}`;
+
+describe("F-13b-1a: a failed record of an issued answer is counted, paced and stopped through the session's display hold (production leadership)", () => {
+  test.each([
+    ["an ordinary 403", 403, forbidden, "data.recordOutcome"],
+    ["a receipt", 200, { revision: 30 }, "data.admitReceipt"],
+  ] as const)(
+    "%s with three failed records, the display closed and opened before each answer: three sends 250 ms apart at least, streak 1/2/3, then stopped",
+    async (_, status, body, label) => {
+      const w = leaderWorld();
+      const one = w.page("A");
+      await w.settle();
+      const sends = heldEvery(w, status, body);
+      await enqueueOne(w, one);
+      expect(sends.at).toHaveLength(1);
+      const hits = failNamed(w, label, 3);
+      for (let n = 1; n <= 3; n += 1) {
+        await holdDisplay(w, one);
+        await reopenDisplay(w, one);
+        expect(
+          sends.at,
+          "nothing is sent while an answer is held",
+        ).toHaveLength(n);
+        await sends.answer();
+        expect(hits.count).toBe(n);
+        expect(w.sync()?.local_write_streaks).toEqual({ [RECEIPT_OP]: n });
+        expect(draft(w)).toMatchObject({ status: "in_flight", attempts: 0 });
+        if (n < 3) {
+          await w.advance(249);
+          expect(sends.at, "not sent again before the pause").toHaveLength(n);
+          await w.advance(1);
+          expect(sends.at).toHaveLength(n + 1);
+        }
+      }
+      await w.advance(5 * 60_000);
+      expect(sends.at).toHaveLength(3);
+      for (let i = 1; i < sends.at.length; i += 1)
+        expect(
+          (sends.at[i] as number) - (sends.at[i - 1] as number),
+        ).toBeGreaterThanOrEqual(250);
+      expect(new Set(posts(w).map((r) => r.key))).toEqual(new Set([LOCAL_ID]));
+      expect(one.leader.dispatcher.state.get()).toEqual({
+        kind: "stopped",
+        cause: "local_storage",
+      });
+      // The stop is durable: the display closing and opening again sends nothing, and neither does a new page after this one's end.
+      await holdDisplay(w, one);
+      await reopenDisplay(w, one);
+      await w.advance(60_000);
+      w.destroy("A");
+      const next = w.page("C");
+      await w.settle();
+      await w.advance(60_000);
+      expect(sends.at).toHaveLength(3);
+      expect(next.leader.dispatcher.state.get()).toEqual({
+        kind: "stopped",
+        cause: "local_storage",
+      });
+    },
+  );
+
+  test("the stop recorded by a stopped run's failed record is announced to the account's other pages (they read their own records: R60)", async () => {
+    const w = leaderWorld();
+    const one = w.page("A");
+    w.page("B");
+    await w.settle();
+    const sends = heldEvery(w, 403, forbidden);
+    await enqueueOne(w, one);
+    failNamed(w, "data.recordOutcome", 3);
+    const stopHints = () =>
+      w.posted.filter(
+        (p) =>
+          p.from === "A" &&
+          p.message.type === "data_changed" &&
+          (p.message as { stores?: readonly string[] }).stores?.includes(
+            LOCAL_WRITE_STOPS_STORE,
+          ),
+      ).length;
+    for (let n = 1; n <= 3; n += 1) {
+      await holdDisplay(w, one);
+      await reopenDisplay(w, one);
+      // `sync_state` is the record of durable stops, which the sync engine's own commits also announce: only the answer's delta counts.
+      const before = stopHints();
+      await sends.answer();
+      if (n < 3) expect(stopHints(), "no stop below the bound").toBe(before);
+      else expect(stopHints()).toBeGreaterThan(before);
+      await w.advance(250);
+    }
+    expect(sends.at).toHaveLength(3);
+    expect(w.sync()?.local_write_streaks).toEqual({ [RECEIPT_OP]: 3 });
+    expect(w.dropped).toEqual([]);
+  });
+
+  test("a full disk met recording an ordinary 403 under the display hold: one send, storage full after the display opens, until the person's retry", async () => {
+    const w = leaderWorld();
+    const one = w.page("A");
+    await w.settle();
+    const sends = heldEvery(w, 403, forbidden);
+    await enqueueOne(w, one);
+    const hits = failNamed(w, "data.recordOutcome", 1, "quota");
+    await holdDisplay(w, one);
+    await reopenDisplay(w, one);
+    await sends.answer();
+    expect(hits.count).toBe(1);
+    await w.advance(5 * 60_000);
+    await holdDisplay(w, one);
+    await reopenDisplay(w, one);
+    await w.advance(60_000);
+    expect(sends.at).toHaveLength(1);
+    expect(one.leader.dispatcher.state.get()).toEqual({
+      kind: "stopped",
+      cause: "storage_full",
+    });
+    one.leader.dispatcher.retry(LOCAL_ID);
+    await w.settle();
+    expect(sends.at).toHaveLength(2);
+    await sends.answer();
+    expect(draft(w)).toMatchObject({ status: "rejected", attempts: 1 });
+    await w.advance(5 * 60_000);
+    expect(sends.at).toHaveLength(2);
   });
 });

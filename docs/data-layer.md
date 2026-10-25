@@ -759,10 +759,25 @@ dispatcher had already ISSUED is still answered into its draft while its run is 
 `delivery/handoffs/web13b-foundation-403-approved-20261025.md`): the session closes the display for a moment around every `403` (its interim hold, released when the
 refusal is an ordinary `forbidden`), and an answer dropped with the run it stopped left the draft `in_flight` and uncounted, so the next run sent the same refused command
 again at once (review 1 of WEB-13b saw seven identical `POST`s in 82 ms). The dispatcher now records such an answer (`settles`: the run that issued it still has its
-binding's ownership) under the commit's own guards (identity, epoch, incarnation, ownership) and changes nothing of the run that stands (R27); an ownership that ENDED
-(another identity, a lost lead, an ended service) still drops it for the next owner to send under the same key (F-2). Nothing new is sent while the display is closed.
-`tests/data/leader-forbidden.test.ts` (both orders of the reopening around the answer, a receipt, a closure that stands, an `auth_state` refusal and the ended binding as
-controls), E-F1 in `tests/e2e/fixture.data-forbidden.spec.ts` (the production session's own hold, three engines), mutants MU-2526 and MU-2527. It has two modes over one implementation:
+binding's ownership, asked after the response and again after its body is decoded) through the guarded commit: the plans' own guards (W6/W7 declare `INC`, `CLS` and
+`EPO`) and the account service's stamped identity, liveness and persistence-hold checks. There is NO transactional ownership guard on W6/W7: ownership is what `settles`
+asks before the commit (corrected wording, WEB-13b revision 4). Nothing of the run that stands is changed (R27); an ownership that ENDED (another identity, a lost lead, an
+ended service) still drops it for the next owner to send under the same key (F-2). Nothing new is sent while the display is closed. **Every result of that record is disposed
+of, including a failure** (F-13b-1a, WEB-13b revision 4; review 4 found revision 3 returned for the ended run before looking at a FAILED commit, so a failed record was
+neither counted, paced nor stopped and the next run resent the draft at once: four sends 25-31 ms apart, and a second send after a full disk). `retained` handles the
+record a stopped run delivers: an applied one tells the account's other pages and, while the binding stands, ends what its success ends (`succeeded`); a failed one is
+counted against `receipt:<id>` once (`localFailure`: the durable streak, the fallback marker when the counter cannot be written, the page's memory when neither can);
+an unverified one owes its pause; after the binding ended nothing is counted. What a live run would then have done with ITS schedule is kept for the binding instead
+(`owed`): the 250 ms pause after a below-bound failure, the pause of an unverified commit and the hold of a full disk (until the person's retry). It is enforced where a
+draft is picked (`blockedUntil`), by the run that stands or the next run the leader starts with the SAME ownership, so neither a restart, a wake nor `online` sends it
+early, the rest of the queue goes on (D-18), and only the run that stands schedules or shows anything (a run that finds only a held draft shows `storage_full`). Another
+binding inherits none of it, and it is memory only: a reload or another tab sees the durable streak and markers, never a sub-threshold pause or a full disk's hold
+(which has no durable record). The same pause now also holds in a live run against a wake during it. `tests/data/leader-forbidden.test.ts` (both orders of the reopening
+around the answer, a receipt, a closure that stands, an `auth_state` refusal and the ended binding as controls; revision 4: three failed records of a `403` and of a
+receipt through the display hold, a full disk, the stop announced to another page, a reload), `tests/data/outbox-retained-settlement.test.ts` (revision 4: the 250 ms
+boundary in both reopening orders and while closed, wakes during the pause, a full disk through restarts and the retry, the counter and marker fallbacks, an unverified
+commit, an ended binding before and during the record; every send held, every fault counted, each interrupted case with its uninterrupted control), E-F1 in
+`tests/e2e/fixture.data-forbidden.spec.ts` (the production session's own hold, three engines), mutants MU-2526, MU-2527 and MU-2529 to MU-2539. It has two modes over one implementation:
 
 * ORDINARY (the account is displayed): a fresh database (`empty`), an invalidated cache (W18's `410`/`400`/`422` on a delta cursor) or an abandoned attempt is snapshotted
   with ordinary requests while the cache stays hidden through `cache_status`.
