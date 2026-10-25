@@ -1,4 +1,8 @@
 import type { BrowserContext, Page, Route } from "@playwright/test";
+import type {
+  RuntimeDisposalObservation,
+  RuntimeOpenObservation,
+} from "../../src/fixture/data-harness/runtime-lifetime";
 
 /**
  * Shared helpers for the real-engine sync specs: the production session with the network stubbed, a scriptable `/sync`, and the
@@ -473,10 +477,12 @@ export interface Lifetime {
   connections: Array<[number, number, string]>;
   /**
    * The opens of the account database this page made (R43, revision 24): `[ms, "request" | "success" | "error", "began <ms>"]`. A
-   * production tree's LOOK for the database is an open with `create: false`; one that has completed when the tree is disposed has bound
-   * the database (its connections stand in the registry), one that is still pending when it is disposed closes nothing.
+   * native success is only a connection event: the second connection, singleton transaction and service installation can still be
+   * pending. `runtimeDisposals` records the service actually installed in the disposed runtime; `runtimeOpens` names its operations.
    */
   opens: Array<[number, string, string]>;
+  runtimeOpens: RuntimeOpenObservation[];
+  runtimeDisposals: RuntimeDisposalObservation[];
 }
 
 /** Installs the recorder of `readLifetime` in a booted session page. Idempotent; it records only, and changes nothing the page does. */
@@ -521,6 +527,8 @@ export async function recordLifetime(
       connections: [] as Array<[number, number, string]>,
       opens: [] as Array<[number, string, string]>,
     };
+    data.recordRuntimeLifetime(acct);
+    // Every native account-database open remains recorded independently. This is NOT service completion.
     // Every open of the account database, request and outcome (it records only: the request is returned as it came).
     const databaseName = `atlas-${acct}`;
     const nativeOpen = indexedDB.open.bind(indexedDB);
@@ -578,6 +586,8 @@ export async function readLifetime(
     const data = window.__atlasData;
     const diagnostics = data?.gateDiagnostics();
     const life = w.__lifetime;
+    if (!data || !life) throw new Error("lifetime recorder not installed");
+    const runtimeLife = data.runtimeLifetime(acct);
     const episodes: Array<[number, number | null]> = [];
     let begun: number | null = null;
     for (const [at, text] of life?.views ?? []) {
@@ -601,6 +611,8 @@ export async function readLifetime(
       episodes,
       connections: life?.connections ?? [],
       opens: life?.opens ?? [],
+      runtimeOpens: runtimeLife.opens,
+      runtimeDisposals: runtimeLife.disposals,
     };
   }, account);
 }

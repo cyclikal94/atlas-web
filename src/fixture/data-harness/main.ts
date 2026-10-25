@@ -107,6 +107,10 @@ import {
   listPlan,
   putPlan,
 } from "./conformance";
+import {
+  createRuntimeLifetimeObserver,
+  type RuntimeLifetime,
+} from "./runtime-lifetime";
 
 /**
  * FIXTURE ONLY. The data harness (`/__data`): the PRODUCTION Dexie adapter, raw-IndexedDB host, registry and open predicate in a
@@ -358,6 +362,8 @@ export interface DataHarness {
    * (`[ms, account, latch]`) and every end of a service the gate controller followed (`[ms, reason]`). FIXTURE diagnostics: a spec
    * that sees a binding end can say why.
    */
+  recordRuntimeLifetime(account: AccountId): void;
+  runtimeLifetime(account: AccountId): RuntimeLifetime;
   gateDiagnostics(): {
     latches: Array<[number, string, string]>;
     ends: Array<[number, string]>;
@@ -834,6 +840,10 @@ let gateFacts = { starts: 0, emissions: 0, calls: 0 };
 const latchLog: Array<[number, string, string]> = [];
 const endLog: Array<[number, string]> = [];
 const closeLog: Array<[number, string, string, string]> = [];
+const runtimeLifetimes = createRuntimeLifetimeObserver(
+  DataRuntime.prototype,
+  (account) => closeLog.filter((row) => row[1] === account).length,
+);
 {
   const closeAll = registry.closeAll.bind(registry);
   registry.closeAll = (account, options) => {
@@ -841,14 +851,15 @@ const closeLog: Array<[number, string, string, string]> = [];
     // `DataRuntime.open` and the Dexie `versionchange` handler (a minified build keeps chunk names and positions, not function names).
     const stack = (new Error().stack ?? "")
       .split("\n")
-      .slice(2, 5)
+      // Include the fixture observation wrapper and its production caller; retain the full closure cause.
+      .slice(2, 6)
       .map((line) => line.trim().replace(/^at /, ""))
       .join(" < ");
     closeLog.push([
       Math.round(performance.now()),
       account,
       options?.latch ?? "",
-      stack.slice(0, 300),
+      stack.slice(0, 600),
     ]);
     closeAll(account, options);
   };
@@ -2174,6 +2185,8 @@ const harness: DataHarness = {
   resetGateHistory() {
     gateSeen = [];
   },
+  recordRuntimeLifetime: (account) => runtimeLifetimes.watch(account),
+  runtimeLifetime: (account) => runtimeLifetimes.read(account),
   gateDiagnostics: () => ({
     latches: [...latchLog],
     ends: [...endLog],
