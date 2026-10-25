@@ -4,7 +4,7 @@
 //
 //  - a backend path (/api, /health, /ready, /auth, /oidc and below) is a 404 that never carries the shell, except the stub `/health` and
 //    `/ready` (the `/health` body is set from the control port: the `api_version` gate's fixture cases) and, once set, the stub identity read
-//    `browser-sessions/current`, `me` and `sessions` (so a seeded account is verified without a backend);
+//    `browser-sessions/current`, `me`, `sessions` and empty Today/defaults reads (so a seeded account has a healthy landing without a backend);
 //  - `/assets/` files are immutable and a missing one is a 404; the unhashed entry points (index.html, sw.js, manifest.webmanifest, ...) and
 //    every other file revalidate (`no-cache`); a missing file with an extension is a 404; anything else is the shell (history fallback);
 //  - every response carries the production security headers (deploy/nginx/security-headers.conf), the content security policy included;
@@ -175,6 +175,37 @@ const app = createServer((request, response) => {
             current: true,
           },
         ],
+      }),
+    );
+  // The accepted WEB-10a landing screen reads Today and sharing defaults. As in auth-stub.ts, this PWA fixture owns no task
+  // resources: answer the healthy empty-account shapes only while its stub identity is set. Unknown backend paths still fail below.
+  if (path === "/api/experimental/v1/daily" && identity !== null)
+    return answer(
+      200,
+      { "content-type": "application/json", "Cache-Control": "no-store" },
+      JSON.stringify({
+        items: [],
+        next_after: null,
+        revision: 1,
+        pending_tasks: [],
+      }),
+    );
+  if (path === "/api/experimental/v1/defaults/snapshot" && identity !== null)
+    return answer(
+      200,
+      { "content-type": "application/json", "Cache-Control": "no-store" },
+      JSON.stringify({
+        defaults: {
+          revision: `${"0".repeat(63)}1`,
+          preferences_version: 1,
+          primary_household_id: null,
+          person: { kind: "private" },
+          field: { kind: "private" },
+          task: { kind: "private" },
+          list: { kind: "private" },
+          progress: { kind: "private" },
+        },
+        households: [],
       }),
     );
   if (BACKEND.test(path))
