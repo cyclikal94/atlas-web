@@ -8,8 +8,8 @@ import { expect, test } from "./helpers";
 
 /**
  * WEB-14a D-P8, DECLARED-THEN-PROBE (WEB-03 5, eighth round) with the REAL Dexie adapter (`/__data`, the production opener, host and
- * registry) in a real engine. Also qualification probe Q-P1: Dexie 4.4.6 stores this build's declared version 2 as IndexedDB version 20,
- * and opens a database another build has raised to 30 WITHOUT an error (which is why the adapter must probe).
+ * registry) in a real engine. Also qualification probe Q-P1: Dexie 4.4.6 stores this build's declared version 3 as IndexedDB version 30,
+ * and opens a database another build has raised to 40 WITHOUT an error (which is why the adapter must probe).
  *
  * A newer build's database is never used by this page's code: an open that finds it fails `refused:closed` before reading anything, the
  * account is latched `upgrade_pending`, `upgraded` is reported ONCE, and every later open on the page is refused; an upgrade made while the
@@ -58,7 +58,7 @@ const installedVersion = (page: Page, name: string) =>
   );
 
 test.describe("D-P8: declared-then-probe with the real adapter", () => {
-  test("Q-P1 and the positive control: version 2 is IndexedDB 20, an equal version opens normally", async ({
+  test("Q-P1 and the positive control: version 3 is IndexedDB 30, an equal version opens normally", async ({
     context,
   }, info) => {
     const page = await openPage(context);

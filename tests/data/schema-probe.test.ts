@@ -30,8 +30,8 @@ const createdAt = async (f: DataTestWorld, page = f.page("A")) => {
 
 describe("the declared version", () => {
   test("Dexie's declared version n is IndexedDB version n * 10", () => {
-    expect(SCHEMA_VERSION).toBe(2);
-    expect(DECLARED_IDB_VERSION).toBe(20);
+    expect(SCHEMA_VERSION).toBe(3);
+    expect(DECLARED_IDB_VERSION).toBe(30);
   });
 });
 

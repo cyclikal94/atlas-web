@@ -158,8 +158,10 @@ describe("completion is judged by membership: every selected mutant exactly once
 
 describe("the runner checks the inventory before anything runs, in every mode (no vitest is started here)", () => {
   const runner = (args: string[]) => {
-    const out = mkdtempSync(join(tmpdir(), "atlas-inventory-"));
-    made.push(out);
+    const parent = mkdtempSync(join(tmpdir(), "atlas-inventory-"));
+    made.push(parent);
+    // The supervised WEB-14a runner claims a fresh child; it must never reuse an existing evidence directory.
+    const out = join(parent, "run");
     return spawnSync(
       process.execPath,
       ["scripts/run-data-mutants.mjs", ...args, "--out", out],

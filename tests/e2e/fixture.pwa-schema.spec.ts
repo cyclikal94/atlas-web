@@ -1,5 +1,8 @@
 import type { Page } from "@playwright/test";
-import { accountDatabaseName } from "../../src/data/model/schema";
+import {
+  accountDatabaseName,
+  DECLARED_IDB_VERSION,
+} from "../../src/data/model/schema";
 import {
   BANNER,
   displayed,
@@ -16,12 +19,13 @@ import {
 
 /**
  * WEB-14a P-U7: capability row 400's declared-then-probe, in the running app. Another tab's NEWER build upgrades the account's database
- * (here: a raw version change to 30, as a build with schema version 3 would make). A tab that has the database open closes it, stops
+ * (here: a raw version change one Dexie version beyond this build’s declared schema). A tab that has the database open closes it, stops
  * reading and writing it and says "Atlas was updated in another tab and needs to reload here to keep working" (PROPOSED copy); a tab that
  * opens afterwards finds the newer version at its probe and says the same. Neither reloads on its own. FIXTURE evidence. The data-level
  * assertions (latch, refusal, a single report) are `fixture.data-schema-probe.spec.ts`.
  */
 const NAME = accountDatabaseName("acct-a");
+const NEWER = DECLARED_IDB_VERSION + 10;
 
 const upgradeTo = (page: Page, version: number) =>
   page.evaluate(
@@ -52,7 +56,7 @@ test("an upgrade by a newer build: the open tab and a tab opened later both stop
   // The newer build, in a page of its own on the same origin.
   const newer = await open.context().newPage();
   await navigate(newer, `${generations.url}/__neutral`);
-  expect(await upgradeTo(newer, 30)).toBe(30);
+  expect(await upgradeTo(newer, NEWER)).toBe(NEWER);
   await newer.close();
 
   await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
@@ -90,7 +94,7 @@ test("an upgrade by a newer build: the open tab and a tab opened later both stop
       }),
     NAME,
   );
-  expect(version).toBe(30);
+  expect(version).toBe(NEWER);
 
   // "Reload here" reloads this tab only (it then finds the newer version again: this build cannot use it).
   await quiet(open);
@@ -202,12 +206,12 @@ test.describe("revision 1, R7: the form's recovery path through a newer build's 
     return open;
   };
 
-  test("an upgrade (20 to 30, no store changed): 'Reload here' saves the edits made after the first copy, through a fresh connection", async ({
+  test("an upgrade (one declared version newer, no store changed): 'Reload here' saves the edits made after the first copy, through a fresh connection", async ({
     context,
     generations,
   }) => {
     const open = await dirtyForm(context, generations);
-    expect(await newerBuild(open, generations.url, 30, "none")).toBe(30);
+    expect(await newerBuild(open, generations.url, NEWER, "none")).toBe(NEWER);
     await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
     await expect(open.locator("[data-fixture-form]")).toHaveAttribute(
       "data-port",
@@ -223,7 +227,7 @@ test.describe("revision 1, R7: the form's recovery path through a newer build's 
     // This build still cannot use the newer database (it asks again); the copy is there, at the newer version, unchanged by this build.
     await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
     const state = await recoveryState(open);
-    expect(state.version).toBe(30);
+    expect(state.version).toBe(NEWER);
     // ADAPTED (revision 6, R13; owner decision of 12 October 2026). Was: every non-terminal row's title, `["unfinished after first copy"]`.
     // The update now also writes its hand-off (through the same fresh recovery connection): the ordinary copy as before, and the hand-off
     // holding the same edits.
@@ -238,14 +242,14 @@ test.describe("revision 1, R7: the form's recovery path through a newer build's 
     ]);
   });
 
-  test("a migration that failed (rolled back to 20): the old tab saves through a fresh connection, and the reloaded tab restores the form", async ({
+  test("a migration that failed (rolled back to this build’s declared version): the old tab saves through a fresh connection, and the reloaded tab restores the form", async ({
     context,
     generations,
   }) => {
     const open = await dirtyForm(context, generations);
-    expect(await newerBuild(open, generations.url, 30, "fail")).toBe(-1);
+    expect(await newerBuild(open, generations.url, NEWER, "fail")).toBe(-1);
     await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
-    expect((await recoveryState(open)).version).toBe(20);
+    expect((await recoveryState(open)).version).toBe(DECLARED_IDB_VERSION);
     await mark(open);
     await quiet(open);
     await updateRegion(open)
@@ -270,9 +274,9 @@ test.describe("revision 1, R7: the form's recovery path through a newer build's 
     generations,
   }) => {
     const open = await dirtyForm(context, generations);
-    expect(await newerBuild(open, generations.url, 30, "drop-recovery")).toBe(
-      30,
-    );
+    expect(
+      await newerBuild(open, generations.url, NEWER, "drop-recovery"),
+    ).toBe(NEWER);
     await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
     await mark(open);
     await updateRegion(open)
