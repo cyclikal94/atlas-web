@@ -6,23 +6,32 @@ import {
   commitTimerCopy,
   readResourcesNow,
   TIMER_COPY_ROWS,
+  useAllOutstandingByKind,
   useCachedResources,
   useDataEnv,
 } from "../../../data";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
-import { TIMER_COPY } from "../detail/Timer";
+import { MARK, TIMER_COPY } from "../detail/Timer";
 import { useTasksEnv } from "../env";
 import { dayLabel, momentLabel } from "../format";
 import { noteIfRefused } from "../memory";
 import { cancelTimer, stopTimer } from "../model/commands";
 import {
   type AccountTimerSession,
+  type OccurrenceData,
   parseOccurrenceData,
 } from "../model/contract";
 import { progressId } from "../model/ids";
-import { elapsed, SEVEN_DAYS, stopChoice } from "../model/timers";
+import {
+  elapsed,
+  SEVEN_DAYS,
+  type StopChoice,
+  stopChoice,
+  timerCommandOf,
+} from "../model/timers";
 import { taskPath } from "../route";
+import type { PendingMark } from "../view";
 import { useCopiedTimers } from "./copy";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
@@ -46,6 +55,7 @@ export const TIMERS_COPY = {
 } as const;
 
 const PAGE = 50;
+const TIMER_KINDS = ["start_timer", "stop_timer", "cancel_timer"];
 
 type Section =
   | { kind: "loading" }
@@ -163,24 +173,54 @@ function useSection(state: "running" | "stopped", again: number) {
   };
 }
 
+/** What a person does to a running row: Stop (which may first ask about the 7 days), Discard, or "Record the first 7 days". */
+type Act = (
+  row: AccountTimerSession & { access: "available" },
+  what: "stop" | "discard" | "seven_days",
+) => void;
+
+/**
+ * How a stop of `row` is recorded now: the detail's rule (`stopChoice`) when its day is on this device; otherwise only the 7-day cap is
+ * known (no window to close at).
+ */
+function choiceFor(
+  row: Pick<AccountTimerSession, "started_at">,
+  data: OccurrenceData | null,
+  nowMs: number,
+): StopChoice {
+  const session = { startedAt: row.started_at };
+  if (data !== null) return stopChoice(session, data, nowMs);
+  const now = Math.max(Math.floor(nowMs / 1000), row.started_at + 1);
+  return now - row.started_at > SEVEN_DAYS
+    ? { kind: "seven_days", capped: row.started_at + SEVEN_DAYS }
+    : { kind: "now", stoppedAt: now };
+}
+
 function SessionRow({
   row,
   nowMs,
   zone,
   offlineTitle,
   act,
+  choosing = false,
+  pending,
+  disabled = null,
+  closedAt = null,
 }: {
   row: AccountTimerSession;
   nowMs: number;
   zone: string;
   /** Offline from the copy: the title only while its day is still in this device's cache, otherwise restricted. */
   offlineTitle?: string | null;
-  act:
-    | ((
-        row: AccountTimerSession & { access: "available" },
-        stop: boolean,
-      ) => void)
-    | null;
+  act: Act | null;
+  /** The stop asked about the 7 days: "Record the first 7 days" or "Discard the session" (review R3: never truncated silently). */
+  choosing?: boolean;
+  /** A stop or discard of this session is on its way from this device: its mark, and no second one is offered. */
+  pending?: PendingMark;
+  /** Why a stop or discard cannot be made now (this page is saving one). */
+  disabled?: string | null;
+  /** Its day closes before now (`close_incomplete`): the time recorded is up to then (s). */
+  closedAt?: number | null;
 }) {
   const start = momentLabel(row.started_at * 1000, nowMs, zone);
   const end =
@@ -232,15 +272,59 @@ function SessionRow({
               {elapsed(row.started_at, row.stopped_at * 1000)}
             </p>
           )}
-          {row.stopped_at === null && row.can_modify && act !== null ? (
-            <span className="flex flex-wrap gap-2">
-              <Button variant="primary" onClick={() => act(row, true)}>
-                {TIMER_COPY.stop}
-              </Button>
-              <Button onClick={() => act(row, false)}>
-                {TIMER_COPY.discard}
-              </Button>
-            </span>
+          {row.stopped_at === null && pending !== undefined ? (
+            <p className="text-[12px] text-ink-2" data-timer-pending={pending}>
+              {copy.PENDING[pending]}
+            </p>
+          ) : row.stopped_at === null && row.can_modify && act !== null ? (
+            choosing ? (
+              <div className="flex flex-col gap-2" data-timer-seven-days="">
+                <p className="text-[12.5px] text-ink-2">
+                  {TIMER_COPY.sevenDays}
+                </p>
+                <span className="flex flex-wrap gap-2">
+                  {disabled ? (
+                    <Button disabled reason={disabled}>
+                      {TIMER_COPY.recordSeven}
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="primary"
+                      onClick={() => act(row, "seven_days")}
+                    >
+                      {TIMER_COPY.recordSeven}
+                    </Button>
+                  )}
+                  {disabled ? null : (
+                    <Button onClick={() => act(row, "discard")}>
+                      {TIMER_COPY.discardSession}
+                    </Button>
+                  )}
+                </span>
+              </div>
+            ) : (
+              <span className="flex flex-wrap gap-2">
+                {disabled ? (
+                  <Button disabled reason={disabled}>
+                    {TIMER_COPY.stop}
+                  </Button>
+                ) : (
+                  <Button variant="primary" onClick={() => act(row, "stop")}>
+                    {TIMER_COPY.stop}
+                  </Button>
+                )}
+                {disabled ? null : (
+                  <Button onClick={() => act(row, "discard")}>
+                    {TIMER_COPY.discard}
+                  </Button>
+                )}
+              </span>
+            )
+          ) : null}
+          {row.stopped_at === null && closedAt !== null ? (
+            <p className="text-[12px] text-ink-2">
+              {TIMER_COPY.closedDay(momentLabel(closedAt * 1000, nowMs, zone))}
+            </p>
           ) : null}
         </>
       ) : null}
@@ -274,48 +358,100 @@ export function TimersPage() {
   }, []);
   const offline = running.value.kind === "offline";
   const copiedRows = offline ? (copied?.rows ?? []) : [];
+  const shownRunning = offline
+    ? copiedRows
+    : running.value.kind === "ready"
+      ? running.value.rows
+      : [];
+  // The days of the running rows this device holds: a copied row's title offline, and every row's window (a closed day's stop).
   const cached = useCachedResources(
-    copiedRows.flatMap((r) =>
+    shownRunning.flatMap((r) =>
       r.access === "available" ? [r.occurrence_id] : [],
     ),
   );
+  const dataOf = (row: AccountTimerSession): OccurrenceData | null => {
+    if (row.access !== "available" || cached.status !== "ready") return null;
+    const day = cached.value[row.occurrence_id]?.merged;
+    return day ? parseOccurrenceData(day.value) : null;
+  };
   const offlineTitleOf = (row: AccountTimerSession): string | null => {
     if (row.access !== "available") return null;
     const day =
       cached.status === "ready" ? cached.value[row.occurrence_id] : null;
     return day ? row.task_title : null;
   };
-  const act = async (
-    row: AccountTimerSession & { access: "available" },
-    stop: boolean,
-  ) => {
-    const stream = await progressId(row.occurrence_id, env.accountId);
-    const held = await readResourcesNow(data, [stream, row.occurrence_id]);
-    const day = held?.get(row.occurrence_id)?.merged;
-    const parsed = day ? parseOccurrenceData(day.value) : null;
-    const input = {
-      occurrenceId: row.occurrence_id,
-      sessionId: row.id,
-      progressId: stream,
-      streamKnown: held?.has(stream) ?? false,
-      knownVersion: row.version,
-    };
-    if (!stop) {
-      await actions.enqueue(cancelTimer(input), TIMER_COPY.saved);
+  // A stop or discard this device has on its way (review R3): the session shows its mark and is not offered another, as on the detail.
+  const outstanding = useAllOutstandingByKind(TIMER_KINDS);
+  const ending = new Map<string, PendingMark>();
+  for (const d of outstanding.status === "ready"
+    ? outstanding.value.drafts
+    : []) {
+    const t = timerCommandOf(d);
+    const mark = MARK[d.status];
+    if (t !== null && t.kind !== "start_timer" && mark !== undefined)
+      ending.set(t.session, mark);
+  }
+  // One act at a time, and the 7-day question asked before anything is queued (review R3: the detail's choice, at both entry points).
+  const [busy, setBusy] = useState(false);
+  const [choosing, setChoosing] = useState<string | null>(null);
+  const act: Act = async (row, what) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const stream = await progressId(row.occurrence_id, env.accountId);
+      const held = await readResourcesNow(data, [stream, row.occurrence_id]);
+      const day = held?.get(row.occurrence_id)?.merged;
+      const parsed = day ? parseOccurrenceData(day.value) : null;
+      const input = {
+        occurrenceId: row.occurrence_id,
+        sessionId: row.id,
+        progressId: stream,
+        streamKnown: held?.has(stream) ?? false,
+        knownVersion: row.version,
+      };
+      if (what === "discard") {
+        setChoosing(null);
+        await actions.enqueue(cancelTimer(input), TIMER_COPY.saved);
+        setAgain((n) => n + 1);
+        return;
+      }
+      if (what === "seven_days") {
+        setChoosing(null);
+        await actions.enqueue(
+          stopTimer({ ...input, stoppedAt: row.started_at + SEVEN_DAYS }),
+          TIMER_COPY.saved,
+        );
+        setAgain((n) => n + 1);
+        return;
+      }
+      const choice = choiceFor(row, parsed, env.now());
+      if (choice.kind === "seven_days") {
+        setChoosing(row.id);
+        return;
+      }
+      await actions.enqueue(
+        stopTimer({ ...input, stoppedAt: choice.stoppedAt }),
+        TIMER_COPY.saved,
+      );
       setAgain((n) => n + 1);
-      return;
+    } finally {
+      setBusy(false);
     }
-    const session = { startedAt: row.started_at };
-    const choice =
-      parsed !== null
-        ? stopChoice(session, parsed, env.now())
-        : Math.floor(env.now() / 1000) - row.started_at > SEVEN_DAYS
-          ? { kind: "seven_days" as const, capped: row.started_at + SEVEN_DAYS }
-          : { kind: "now" as const, stoppedAt: Math.floor(env.now() / 1000) };
-    const stoppedAt =
-      choice.kind === "seven_days" ? choice.capped : choice.stoppedAt;
-    await actions.enqueue(stopTimer({ ...input, stoppedAt }), TIMER_COPY.saved);
-    setAgain((n) => n + 1);
+  };
+  const rowProps = (row: AccountTimerSession) => {
+    const day = dataOf(row);
+    const closed =
+      day !== null &&
+      day.closes_at !== null &&
+      choiceFor(row, day, now).kind === "closed"
+        ? day.closes_at
+        : null;
+    return {
+      choosing: choosing === row.id,
+      ...(ending.has(row.id) ? { pending: ending.get(row.id) } : {}),
+      disabled: busy ? copy.SAVING : null,
+      closedAt: closed,
+    };
   };
   const runningRows = running.value.kind === "ready" ? running.value.rows : [];
   const historyRows = history.value.kind === "ready" ? history.value.rows : [];
@@ -387,10 +523,11 @@ export function TimersPage() {
                     zone={zone}
                     offlineTitle={offlineTitleOf(row)}
                     act={
-                      offlineTitleOf(row) === null
+                      offlineTitleOf(row) === null || !env.writable
                         ? null
-                        : (r, s) => void act(r, s)
+                        : (r, w) => void act(r, w)
                     }
+                    {...rowProps(row)}
                   />
                 ))}
               </ul>
@@ -408,7 +545,8 @@ export function TimersPage() {
                 row={row}
                 nowMs={now}
                 zone={zone}
-                act={env.writable ? (r, s) => void act(r, s) : null}
+                act={env.writable ? (r, w) => void act(r, w) : null}
+                {...rowProps(row)}
               />
             ))}
           </ul>

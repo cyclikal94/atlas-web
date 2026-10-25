@@ -1,7 +1,10 @@
 import { Outlet, useMatchRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { getPageDataHost } from "../../data";
-import { registerCatchUpConflicts } from "./catchup/useCatchUp";
+import {
+  registerCatchUpConflicts,
+  useCatchUpService,
+} from "./catchup/useCatchUp";
 import { TaskDetail } from "./detail/TaskDetail";
 import { TaskList } from "./detail/TaskList";
 import { TasksBoundary } from "./env";
@@ -105,6 +108,9 @@ export function TasksLayoutScreen() {
 }
 
 function TasksLayoutInner() {
+  // The page's catch-up service, live on every task screen (review R8): a task command refused with `materialisation_required` on a
+  // directly opened detail, the list or the account's timers finds a runner for the displayed identity.
+  useCatchUpService();
   const matchRoute = useMatchRoute();
   const selected = matchRoute({ to: "/tasks/$taskId", fuzzy: true });
   const child =

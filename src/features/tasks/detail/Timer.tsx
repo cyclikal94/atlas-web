@@ -89,7 +89,8 @@ function useSecond(active: boolean): number {
 const timerKind = (kind: string) =>
   kind === "start_timer" || kind === "stop_timer" || kind === "cancel_timer";
 
-const MARK: Readonly<Record<string, PendingMark>> = {
+/** A timer draft's status as its pending mark (the detail's and the account list's). */
+export const MARK: Readonly<Record<string, PendingMark>> = {
   queued: "queued",
   blocked: "queued",
   in_flight: "sending",
@@ -131,6 +132,8 @@ function useDaySessions(occurrenceId: string, again: string) {
     next: string | null;
     status: "loading" | "ready" | "error" | "offline";
     requestId?: string;
+    /** When the read's FIRST page was issued (ms): a later page cannot make it newer than that. */
+    askedAt?: number;
   }>({ scope: "", pages: [], next: null, status: "loading" });
   const scope = `${env.identity}\u0000${occurrenceId}`;
   const load = async (after: string | null) => {
@@ -151,15 +154,18 @@ function useDaySessions(occurrenceId: string, again: string) {
             ? { requestId: result.requestId }
             : {}),
         };
-      const pages = after === null || prev.scope !== scope ? [] : prev.pages;
+      const fresh = after === null || prev.scope !== scope;
+      const pages = fresh ? [] : prev.pages;
       const all = [...pages, result.value.items];
+      const askedAt = fresh ? asked : (prev.askedAt ?? asked);
       if (result.value.next_after === null)
-        remember(env.identity, occurrenceId, all.flat(), asked);
+        remember(env.identity, occurrenceId, all.flat(), askedAt);
       return {
         scope,
         pages: all,
         next: result.value.next_after,
         status: "ready",
+        askedAt,
       };
     });
   };
@@ -182,6 +188,13 @@ function useDaySessions(occurrenceId: string, again: string) {
       (current !== null && current.next === null && current.status === "ready"),
     /** When the sessions shown offline were read (ms), or null for a read now. */
     keptAt: kept?.at ?? null,
+    /** When the complete read shown was issued (ms; the kept one's offline), or null while there is none. */
+    readAt:
+      kept !== null
+        ? kept.at
+        : current?.status === "ready" && current.next === null
+          ? (current.askedAt ?? null)
+          : null,
     more: current?.next ? () => void load(current.next) : null,
     retry: () => void load(null),
   };
@@ -219,6 +232,8 @@ export function TimerBlock({
     drafts: timerDrafts,
     read: day.complete ? day.sessions : null,
     copy: copied?.rows ?? null,
+    readAt: day.readAt,
+    copyAt: copied?.readAt ?? null,
   });
   const now = useSecond(running.length > 0);
   const [showSessions, setShowSessions] = useState(false);

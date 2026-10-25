@@ -1,5 +1,14 @@
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { recordEvidence } from "./data-evidence";
+import {
+  deltaPage,
+  fresh,
+  type LeaderNet,
+  leaderPage,
+  settleElsewhere,
+  snapshotPage,
+  untilSync,
+} from "./data-leader-helpers";
 import { serveIdentityReads } from "./data-local-faults";
 import {
   ACCOUNT,
@@ -39,8 +48,11 @@ import {
  * (the same key resent) and while the position read is held (one read, no new `materialise`); E-M4 two tabs, one lock, one sequence;
  * E-S1 the streak's `409 materialisation_required` → catch-up → figures; E-S2 the streak at 390 px, tablet and desktop (axe);
  * E-D1 the dependency dialog's modes and focus return at desktop, 390 px (sheet) and tablet; E-TM1 the account's timers, then offline
- * after a reload from the kept copy; E-R1 the rota's consent and order. E-M3 (the command path) is not here: the fixture outbox
- * decides `409`s with its own registry, so the page's handler is never asked natively (jsdom `catchup-conflicts.test.ts` covers it).
+ * after a reload from the kept copy; E-R1 the rota's consent and order; and (revision 1, review R9) E-D1/E-R1 identity: a preview and a
+ * rota answer held across an account switch, with their positive controls. E-M3 (the command path) is not here: the fixture outbox
+ * decides `409`s with its own registry, so the page's handler is never asked natively. Its journey (`409 materialisation_required` →
+ * catch-up through the day → the SAME key resent → applied) runs in jsdom over the PRODUCTION dispatcher and registry
+ * (`catchup-conflicts.test.ts`, revision 1); the first version's claim that the jsdom file covered it was of classification only.
  */
 const TODAY = todayUtc();
 const yesterday = (n = 1) =>
@@ -636,5 +648,310 @@ test.describe("E-R1: the rota (A17)", () => {
     await expect(page.locator("[data-rota-dialog]")).toBeVisible();
     await expect(page.locator("[data-rota-projected]").first()).toBeVisible();
     expect(await runAxe(page)).toEqual([]);
+  });
+});
+
+// ---- revision 1 (review R9, A18): identity schedules in the real engines -----------------------------------------------------------
+
+/**
+ * A18 (CM-384) in the real engines, with the PRODUCTION leader (`?leader=production`): one task is held by two accounts (shared), the first
+ * account's answer is HELD, another account signs in in another tab (this page follows it: the protected tree and its database move), and
+ * the held answer is delivered afterwards. It is never shown for the account now displayed, whose own answer is. FIXTURE evidence.
+ */
+const VIEWED = "22222222-2222-4222-8222-222222222222";
+const settledAt = (account: string, epoch: number, session: string) => ({
+  schema: 1,
+  latest_epoch: epoch,
+  fence_seq: 0,
+  attempt: null,
+  settled: {
+    account_id: account,
+    epoch,
+    settled_at: new Date().toISOString(),
+    session_id: session,
+  },
+  fences: {},
+  leases: {},
+});
+
+/** The page of `task` under the production leader, both accounts' caches holding it; `arrange` answers the 10c reads. */
+async function sharedDetail(
+  context: BrowserContext,
+  task: BuiltTask,
+  arrange: (r: Reads10c, net: LeaderNet) => void,
+) {
+  const net = await fresh(context);
+  net.answer = (call) =>
+    call.cursor === null
+      ? snapshotPage(task.upserts, "delta-0", false)
+      : deltaPage([], call.cursor);
+  await serveTaskReads(context);
+  const r10c = await serveTasks10c(context);
+  arrange(r10c, net);
+  const page = await leaderPage(context, net, "one", undefined, {
+    route: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+  });
+  await expect(page.locator(`[data-task-detail="${task.taskId}"]`)).toBeVisible(
+    { timeout: 20_000 },
+  );
+  return { net, r10c, page };
+}
+
+/**
+ * Another tab signs in as VIEWED; this page follows (its protected tree and database move, and it shows Today, as a switch does), its
+ * database is brought up to date for VIEWED, and the same task's detail is opened again, now for VIEWED.
+ */
+async function switchToViewed(
+  context: BrowserContext,
+  net: LeaderNet,
+  page: Page,
+  task: BuiltTask,
+): Promise<void> {
+  net.identity = { account: VIEWED, session: "s2" };
+  await settleElsewhere(context, settledAt(VIEWED, 2, "s2"));
+  const synced = await untilSync(
+    page,
+    (state) => state?.cache_status === "valid",
+    VIEWED,
+  );
+  expect(synced?.cache_status).toBe("valid");
+  await page.evaluate((path) => {
+    history.pushState(null, "", path);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`);
+  await expect(page.locator(`[data-task-detail="${task.taskId}"]`)).toBeVisible(
+    { timeout: 20_000 },
+  );
+}
+
+test.describe("E-D1 identity (A18; CM-384): a preview held across an account switch", () => {
+  test("the previous account's preview, delivered after another account is displayed, is never shown; the new account's own is", async ({
+    context,
+  }) => {
+    const root = buildTask({ n: 440, title: "Hang the washing" });
+    const preRoot = buildTask({ n: 441, title: "Run the washing machine" });
+    const hold = held<void>();
+    const asked: string[] = [];
+    const theirs = (r: BuiltTask): Answer => ({
+      status: 200,
+      body: {
+        token: "e".repeat(64),
+        items: [
+          {
+            occurrence_id: preRoot.occurrenceId,
+            task_id: preRoot.taskId,
+            complete: false,
+            can_complete: true,
+            progress_version: 1,
+          },
+          {
+            occurrence_id: r.occurrenceId,
+            task_id: r.taskId,
+            complete: false,
+            can_complete: true,
+            progress_version: 1,
+          },
+        ],
+        unavailable: false,
+        strict: false,
+      },
+    });
+    const mine = (r: BuiltTask): Answer => ({
+      status: 200,
+      body: {
+        token: "f".repeat(64),
+        items: [
+          {
+            occurrence_id: r.occurrenceId,
+            task_id: r.taskId,
+            complete: false,
+            can_complete: true,
+            progress_version: null,
+          },
+        ],
+        unavailable: false,
+        strict: false,
+      },
+    });
+    let viewedAnswered = false;
+    const both = {
+      ...root,
+      upserts: [...root.upserts, ...preRoot.upserts],
+    } as BuiltTask;
+    const { net, page } = await sharedDetail(context, both, (r, n) => {
+      r.preview = async () => {
+        const who = n.identity.account;
+        asked.push(who);
+        if (who === ACCOUNT) {
+          await hold.promise;
+          return theirs(root);
+        }
+        viewedAnswered = true;
+        return mine(root);
+      };
+    });
+    await expect.poll(() => asked.includes(ACCOUNT)).toBe(true);
+    await switchToViewed(context, net, page, root);
+    // The new account's detail is composed from its own answer before the late one is delivered.
+    await expect(page.locator("[data-dependencies-none]")).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(viewedAnswered).toBe(true);
+    hold.release();
+    // Long enough for a late answer to be composed and shown, were it applied.
+    await page.waitForTimeout(1_500);
+    await expect(page.locator("[data-dependencies-none]")).toBeVisible();
+    await expect(page.locator("[data-dependencies-progress]")).toHaveCount(0);
+    await expect(page.locator("[data-dependencies]")).not.toContainText(
+      "Run the washing machine",
+    );
+  });
+});
+
+test.describe("E-D1/E-R1 identity controls (A18): the same held answers, delivered BEFORE the switch, are shown for their own account", () => {
+  test("the held preview, released while its account is displayed, names what the day waits for", async ({
+    context,
+  }) => {
+    const root = buildTask({ n: 443, title: "Hang the washing" });
+    const pre = buildTask({ n: 444, title: "Run the washing machine" });
+    const hold = held<void>();
+    const both = {
+      ...root,
+      upserts: [...root.upserts, ...pre.upserts],
+    } as BuiltTask;
+    const { page } = await sharedDetail(context, both, (r) => {
+      r.preview = async () => {
+        await hold.promise;
+        return {
+          status: 200,
+          body: {
+            token: "e".repeat(64),
+            items: [
+              {
+                occurrence_id: pre.occurrenceId,
+                task_id: pre.taskId,
+                complete: false,
+                can_complete: true,
+                progress_version: 1,
+              },
+              {
+                occurrence_id: root.occurrenceId,
+                task_id: root.taskId,
+                complete: false,
+                can_complete: true,
+                progress_version: 1,
+              },
+            ],
+            unavailable: false,
+            strict: false,
+          },
+        };
+      };
+    });
+    hold.release();
+    await expect(page.locator("[data-dependencies-progress]")).toContainText(
+      "Run the washing machine",
+      { timeout: 20_000 },
+    );
+  });
+
+  test("the held rota, released while its account is displayed, shows its consent", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 445,
+      title: "Take the bins out",
+      participation: "anyone",
+    });
+    const hold = held<void>();
+    const { page } = await sharedDetail(context, task, (r) => {
+      r.enrolment = () => ({
+        status: 200,
+        body: {
+          version: 1,
+          active: true,
+          aggregate_consent: true,
+          policy: { grants: [], exclude_accounts: [] },
+        },
+      });
+      r.rota = async () => {
+        await hold.promise;
+        return {
+          status: 200,
+          body: {
+            version: 3,
+            participants: [ACCOUNT],
+            consent_version: 4,
+            accepted: true,
+            eligible_participants: [ACCOUNT],
+          },
+        };
+      };
+    });
+    hold.release();
+    await expect(page.getByLabel("Take turns on this task")).toBeChecked({
+      timeout: 20_000,
+    });
+  });
+});
+
+test.describe("E-R1 identity (A18; CM-384): a rota answer held across an account switch", () => {
+  test("the previous account's rota (its consent and order), delivered after another account is displayed, is never shown", async ({
+    context,
+  }) => {
+    const task = buildTask({
+      n: 442,
+      title: "Take the bins out",
+      participation: "anyone",
+    });
+    const hold = held<void>();
+    const asked: string[] = [];
+    const { net, page } = await sharedDetail(context, task, (r, n) => {
+      r.enrolment = () => ({
+        status: 200,
+        body: {
+          version: 1,
+          active: true,
+          aggregate_consent: true,
+          policy: { grants: [], exclude_accounts: [] },
+        },
+      });
+      r.rota = async () => {
+        const who = n.identity.account;
+        asked.push(who);
+        if (who === ACCOUNT) {
+          await hold.promise;
+          return {
+            status: 200,
+            body: {
+              version: 3,
+              participants: [ACCOUNT, VIEWED],
+              consent_version: 4,
+              accepted: true,
+              eligible_participants: [ACCOUNT, VIEWED],
+            },
+          };
+        }
+        return {
+          status: 200,
+          body: {
+            version: 1,
+            participants: [],
+            consent_version: 1,
+            accepted: false,
+            eligible_participants: [],
+          },
+        };
+      };
+    });
+    await expect.poll(() => asked.includes(ACCOUNT)).toBe(true);
+    await switchToViewed(context, net, page, task);
+    const consent = page.getByLabel("Take turns on this task");
+    await expect(consent).toBeEnabled({ timeout: 20_000 });
+    await expect(consent).not.toBeChecked();
+    expect(asked).toContain(VIEWED);
+    hold.release();
+    await page.waitForTimeout(1_500);
+    await expect(consent).not.toBeChecked();
   });
 });

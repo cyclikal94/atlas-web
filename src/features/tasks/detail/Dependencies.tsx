@@ -946,11 +946,27 @@ export function DependencyEditor({
         : ` · ${date === null ? DEPENDENCY_COPY.undated : dayLabel(date)}`
     }`;
   };
-  const block = replacing
-    ? env.online
-      ? null
-      : "offline"
-    : editorBlock({ online: env.online, canEdit: row.canEdit, preview });
+  // Opening the editor reads the preview again, and a save is admitted only on that answer or a later one (review R4): what it may replace
+  // is judged on what the server says NOW, for a new list and for "Keep editing" alike. A replacement is no exception: saving it
+  // supersedes the whole direct list on the version shown now, so a day whose prerequisites have become private, an edit right that has
+  // gone or a preview not yet answered withholds Save. What was typed (or the submitted list) is kept meanwhile.
+  const [refreshed, setRefreshed] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read once when it opens
+  useEffect(() => {
+    if (!open) return;
+    let live = true;
+    void state.refresh().then(() => {
+      if (live) setRefreshed(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [open]);
+  const block = editorBlock({
+    online: env.online,
+    canEdit: row.canEdit,
+    preview: refreshed ? preview : null,
+  });
   const title = row.title ?? copy.UNTITLED;
   const save = async () => {
     const problem = validateList(row.id, input.value.list);
@@ -1004,7 +1020,11 @@ export function DependencyEditor({
         : block === "unavailable"
           ? DEPENDENCY_COPY.editorUnavailable
           : block === "loading"
-            ? DEPENDENCY_COPY.editorLoading
+            ? refreshed && read.kind === "error"
+              ? DEPENDENCY_COPY.failed
+              : refreshed && read.kind === "refused"
+                ? copy.UNREADABLE
+                : DEPENDENCY_COPY.editorLoading
             : !env.writable
               ? copy.NOT_WRITABLE
               : input.busy

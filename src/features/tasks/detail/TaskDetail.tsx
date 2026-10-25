@@ -10,6 +10,7 @@ import {
 } from "../../../data";
 import { ResourcePolicyEditor } from "../../sharing";
 import { useTaskActions } from "../actions";
+import { CatchUpNotice } from "../catchup/CatchUpNotice";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel, longDayLabel } from "../format";
@@ -275,6 +276,7 @@ export function TaskDetail({
       {view.readError !== null ? (
         <ReadError error={view.readError} stale retry={view.retry} />
       ) : null}
+      <CatchUpNotice taskId={task.id} title={task.label} />
       {view.occurrences.length > 1 ||
       view.days.more ||
       view.days.previous ||

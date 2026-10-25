@@ -752,8 +752,10 @@ are focused evidence, never integration acceptance.*
   definite refusal (`rejected`: the archived task's `422` is terminal, never "no progress"), `503 slice_capacity` (`capacity`) or three
   consecutive uncertain answers (`unreachable`, its attempt kept for Try again). The streak's `409 materialisation_required` uses the same
   runner (trigger `streak`) and reads the streak ONCE more; a second 409 in the visit is a stop. The command path (a queued task command
-  refused with `materialisation_required`) is registered (`registerCatchUpConflicts`: retried with its key under the back-off) but is
-  fixture-only: the released backend raises that code on no command.
+  refused with `materialisation_required`) asks the page's catch-up service, held by every task screen, for what the command needs (its
+  task through the day it names, or a day's own task through that day's date) and is retried with its own key under the back-off; it is
+  fixture-only: the released backend raises that code on no command. A stopped catch-up is also shown on the task's own detail
+  (revision 1).
 - **Dependencies (WF-TASK-04, CM-354/423/424, TASK-14/14a).** The detail's "What needs doing first" (`detail/Dependencies.tsx`): the day's
   preview (`GET /occurrences/{id}/dependencies`, online, one per identity and day, read again on Refresh, on opening the dialog and when this
   device's own dependency drafts of the day are answered); the dialog's ORDERED LIST (no tree: no edges are published) with Done / To do pills,
@@ -761,8 +763,10 @@ are focused evidence, never integration acceptance.*
   as well" = `complete_prerequisites`, "Start anyway" = `advisory_override`, each disabled with its reason; "Mark done" = `require_satisfied`
   once everything is done). The record card's gate: online, with something still open, evidence that would complete the day opens the dialog
   instead of a plain record (the server would refuse it); its entered evidence is kept while "Wait" is chosen and settled only by a successful
-  save of what was submitted. The editor ("Set what this waits for") replaces the WHOLE direct list: it opens only online, with a fresh preview
-  that holds nothing private, starts EMPTY, and saves the chosen list (≤32, unique, never the day itself) with the strict rule. Conflicts are
+  save of what was submitted. The editor ("Set what this waits for") replaces the WHOLE direct list: it reads the preview again when it opens
+  and admits a save only on that answer (or a later one), online, while the person may edit the day and nothing is private; it starts EMPTY,
+  and saves the chosen list (≤32, unique, never the day itself) with the strict rule. "Keep editing" of a refused set is admitted by the same
+  conditions (revision 1, review R4). Conflicts are
   said from what the server holds: a refused completion re-reads the preview and says why ("Everything it waits for is done now", …) with
   "Review and send again" (a supersession) and Discard; a record or a timer's stop refused because something is still open says "This can't be
   marked done until “X” is"; a refused `set_dependencies` says "Couldn't set what this waits for as sent." (never naming an edge) with "Keep
@@ -772,12 +776,15 @@ are focused evidence, never integration acceptance.*
   session"), a closed `close_incomplete` day recorded up to its close, the cause-neutral conflict block ("This timer action couldn't be
   completed as sent.") and the day's sessions (online, 50 a page). One running session per person per DAY: another day's timer never
   withholds Start. "Your timers" (`/tasks/timers`, `timers/TimersPage.tsx`, linked from the task list and the timer block): running first, then
-  earlier sessions, a restricted row with its times only, Stop and Discard while `can_modify`; offline, the kept copy of the last running read
-  (W28), each copied row titled only while its day is still in this device's cache.
+  earlier sessions, a restricted row with its times only, Stop and Discard while `can_modify` (with the detail's 7-day choice and closed-day
+  rule, one act at a time, and no second Stop for a session whose stop is on its way: revision 1, review R3); offline, the kept copy of the
+  last running read (W28), each copied row titled only while its day is still in this device's cache. A current complete read of the day's
+  sessions supersedes an older copy: a copied session it does not list (cancelled) is not running (review R2).
 - **Rotas (WF-TASK-05, CM-356, TASK-15/29/32).** On an Anyone task's participation (`detail/Rota.tsx`): "This turn: {You | username | Someone
   (abcd…) | Nobody yet}", "Take turns on this task" (`rota_consent`, online only, needs my enrolment: "Join this task first") and, for an
   editor of the task's details, "Turn order…": the ordered roster (Move up/down, Remove; "n of 8"), who could be added (`eligible_participants`),
-  what that gives ("Already set" from this device's days, "Projected" for the next days, "Left open" for someone who has not agreed), and
+  what that gives ("Already set" from this device's days, "Projected" for the next days, as the server dates them from the schedule's own
+  start, a missing month-day skipped; "Left open" for someone who has not agreed, an editor's empty eligibility list meaning nobody has), and
   "Save order" (`set_rota`, online only). Both access commands use WEB-10a's attempt model (one key per body, the same key on Try again).
 - **Streak (WF-TASK-06, CM-368/395, TASK-5).** `/tasks/$taskId/streak` (`streak/StreakPage.tsx`, the detail's "Streak" link): the server's
   current and best runs (both scopes for a shared task: "Shared" and "You"); a joint null is "Withheld — someone keeps their part private",
@@ -790,7 +797,9 @@ are focused evidence, never integration acceptance.*
 | --- | --- |
 | `model/contract.ts` | `DependencyPreview`, `DependencyItem`, `TimerSession`/`TimerPage`, `AccountTimerSession`/`AccountTimerPage`, `RotaState`, `TaskStreak`, `TaskResult` and their strict parsers (`parseDependencyPreview`, `parseTimerPage`, `parseAccountTimerPage`, `parseAccountTimer`, `parseRotaState`, `parseStreak`, `parseTaskResult`). |
 | `api.ts` | `readDependencies`, `readTimers`, `readAccountTimers`, `readRota`, `readStreak`, `materialise(command, key)` (the runner only) and `access(command, key)` (`/task-access-commands`; `enrol` is a call of it). `uncertain` may carry the Atlas code of a 5xx (`slice_capacity`). |
-| `model/commands.ts` | `setDependencies`, `completeDependencies`, `startTimer`, `stopTimer`, `cancelTimer`; `QUEUED_KINDS` gains the five kinds; `pendingEvidenceListOf` (a record's evidence, and a queued completion's evidence on each day it completes). |
+| `model/commands.ts` | `setDependencies`, `completeDependencies`, `startTimer`, `stopTimer`, `cancelTimer`; `QUEUED_KINDS` gains the five kinds; `pendingEvidenceListOf` (a record's evidence, and a queued completion's evidence on each day it completes, under the SERVER's entry ids); `pendingOn` (my pending evidence on a day without what its synced stream lists). |
+| `model/ids.ts` | `completionEntryId(operation, occurrence, actor)` and `uuidV5Sync` (revision 1): the server's id of a completion's entry, computed synchronously. |
+| `catchup/useCatchUp.ts` | `useCatchUpService()` (revision 1): the page's catch-up service, held by every task screen. |
 | `model/materialise.ts`, `dependencies.ts`, `timers.ts`, `rota.ts`, `streak.ts` | The pure models (each unit-tested). |
 | `register.ts` | Descriptions and stored-draft admission for the five kinds; no `readCurrent` or `rebuild` (WF-QUEUE-02 offers discard; the detail offers the review). |
 
@@ -829,16 +838,53 @@ are focused evidence, never integration acceptance.*
 Also: a discarded or rejected timer draft's version record of its session is removed by the existing recompute (no other draft targets it,
 nothing cached), so a later stop seeds from the authoritative version; no new data-layer retention rule was needed (plan §4.3 "Retention").
 The `materialisation_required` handler is registered when the task screens load (`screens.tsx`); the fixture outbox decides `409`s with its
-own registry, so the command path has jsdom evidence only.
+own registry, so the command path has jsdom evidence only (its journey over the production dispatcher: `catchup-conflicts.test.ts`).
+
+### Revision 1 (independent review of 25 October 2026, R1–R9)
+
+- **R1, paused work resumes.** A sequence whose work stops part-way for a reason that can clear (offline, not compatible, the session held,
+  a write not applied, a thrown read or store) is PARKED with its key and taken up again by `kick()` (connectivity, compatibility or the
+  binding moved), by `ensure()` of the task (Today's next read) or by "Try again": the stored attempt is resent with its own key, or only its
+  position is read. A genuine stop is never parked, so it is never restarted.
+- **R2, a complete read and the copy.** A current COMPLETE read of the day's sessions (issued no earlier than the copy's read) supersedes the
+  copy: a copied session it does not list is not running (the server omits a cancelled one). A copy taken after the read, a partial read or
+  none (offline) leaves the copy standing; this device's unsettled start stays until its draft settles.
+- **R3, the account list's Stop.** The detail's rules at the list's entry point: beyond 7 days it asks ("Record the first 7 days" / "Discard
+  the session") and queues nothing first; a closed day (its occurrence on this device) records up to its close and says so; one act at a
+  time; a session whose stop or discard is on its way shows its mark and is offered no second one.
+- **R4, one admission for every save of the editor.** As above: a fresh preview read when the editor opens, for a new list and "Keep editing".
+- **R5, the server's dates.** `nextDates` derives every candidate from the schedule's own start (`schedule.rs` `slots`), skipping a day that
+  does not exist (31 April) instead of clamping; the maintained oracle is the backend's own test (`domain.rs`).
+- **R6, a completion's entries by the server's ids.** UUIDv5(operation key = the draft's `local_id`, "dependency-completion:<occurrence>:<me>"),
+  computed synchronously (`uuidV5Sync`, cross-checked against WebCrypto and Python's `uuid5`). A landed completion is counted once on the row,
+  the history and the streak strip (`pendingOn`), as WEB-10a's F4 requires; the earlier synthetic ids are gone.
+- **R7, a known empty eligibility list.** For an editor (who alone sees the turn order) an empty `eligible_participants` means nobody has
+  joined and agreed now: every projected turn is "Left open".
+- **R8, the command path on every task screen.** The catch-up service is held by Today, the task list and detail, the editors, the streak and
+  the account's timers; an occurrence-level command's need is its day's task through that day's date (from the cache; a day not held cannot be
+  derived and keeps the generic rule); the command is resent under the dispatcher's own back-off, after the sequence completes, with the SAME
+  key; a stop is shown on the task's detail with "Try again" and is never restarted by a resend.
+- **R9, coverage.** I-10C-TM5 (a first Anyone timer and a completion, each held for a defaults review, against the released backend),
+  I-10C-SU1 check 6 (another participant's completion on a stream the schedule's owner cannot see triggers no successor through a whole
+  reconciliation; control: once that stream is shared, exactly one, dated from it, as the server's own test), a late rota answer across an
+  identity change (jsdom, screen and hook level) and the native E-D1/E-R1 identity schedules with their controls. The earlier claims that
+  I-TM5 was folded into another case and that `catchup-conflicts.test.ts` covered E-M3's journey were wrong and are corrected.
+- **Found by I-10C-TM5 (generic data layer).** A draft that SEEDED a version-checked target (a first Anyone stream: a `record`'s primary, a
+  `start_timer`'s or `complete_dependencies`' side effect) and was refused `defaults_changed` could not be confirmed: the supersession
+  retires the draft's contribution, and the rebuilt targets (`targetsOf`) carried no seed, so it was refused `no_base` and could only be
+  discarded (present at the accepted base for WEB-10a's first Anyone record too). Each rebuilt target now carries the draft's own base as its
+  seed (`docs/data-layer.md`).
 
 ## Tests
 
 jsdom: `materialise-model`, `catchup-runner` (bound, no progress, horizon, uncertain with one key, a reload in each phase, two runners and
 one lock, an identity that ends, offline), `catchup-banner`, `catchup-conflicts`, `streak-model`, `streak-page`, `dependency-model`,
-`dependency-dialog`, `commands-10c`, `timer-block`, `timers-page`, `rota`; data: `materialise-plans` (W27/W28). Native (fixture, three engines):
-`fixture.tasks-10c.spec.ts` E-M1, E-M2 (two), E-M4, E-S1, E-S2 (390, 1180, 1440), E-D1 (1440, 390, 1180), E-TM1, E-R1. Released backend:
-`integration.tasks-10c.spec.ts` (17 cases, in the `tasks` stack). Mutants: `scripts/mutation/catalogue-web10c.mjs` (MU-3001…MU-3035 unit,
-MU-3051/3052/3054 real-engine; MU-10C-25, MU-10C-30 and N-10C-03 retired with their reasons).
+`dependency-dialog`, `commands-10c`, `timer-block`, `timer-model` (revision 1), `timers-page`, `rota`, `ids`; data: `materialise-plans`
+(W27/W28), `outbox-defaults-review` (the seeded supersession, revision 1). Native (fixture, three engines): `fixture.tasks-10c.spec.ts` E-M1,
+E-M2 (two), E-M4, E-S1, E-S2 (390, 1180, 1440), E-D1 (1440, 390, 1180), E-TM1, E-R1, and (revision 1) E-D1/E-R1 identity with their two
+controls. Released backend: `integration.tasks-10c.spec.ts` (20 cases, in the `tasks` stack: revision 1 adds I-10C-TM5's two and I-10C-SU1
+check 6). Mutants: `scripts/mutation/catalogue-web10c.mjs` (MU-3001…MU-3035 unit, MU-3051/3052/3054 real-engine; revision 1 adds
+MU-3036…MU-3050 and MU-3060…MU-3065, one or more per correction; MU-10C-25, MU-10C-30 and N-10C-03 retired with their reasons).
 
 ## Limits (WEB-10c)
 
@@ -846,11 +892,12 @@ MU-3051/3052/3054 real-engine; MU-10C-25, MU-10C-30 and N-10C-03 retired with th
   cannot show the current direct list and replaces it whole.
 - **Expansion limit.** Over 200 preview nodes the released backend answers a generic `500` (`ExpansionLimit` has no error mapping; E-7);
   shown as "Couldn't show what this waits for" with the request ID.
-- **Pending evidence of a queued completion** is named by the draft and day, not by the server's entry ids (derived from the operation key,
-  which a synchronous layering pass cannot compute): layered once per draft.
 - **Request cost** (not profiled here; WEB-09c): one preview read per day shown, two streak reads per visit, up to 16 calls and reads per
   pending task, one session read per timer day shown.
-- **Command path fixture-only (E-8)**; TASK-30 checks 3 and 5 are backend-internal (E-9).
+- **Command path fixture-only (E-8)**; TASK-30 checks 3 and 5 are backend-internal (E-9). A command on a day this device does not hold
+  cannot have its need derived (its task and date come from the cache): it is retried under the back-off as before, with nothing asked.
+- **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
+  compatibility are those last rendered (a pause is taken up again when a task screen renders).
 
 ## Deviations and additions for the connected-app checkpoint (WEB-10c)
 

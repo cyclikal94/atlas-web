@@ -33,7 +33,9 @@ import {
  * The plan's case names map to these titles (`I-10C-…`, so the integration runner's historical-selection inventory accounts for them):
  * I-M1…I-M5 catch-up (A1–A4), I-S1/I-S2 streak (A5/A6), I-D1…I-D7 dependencies (A8–A11), I-TM1…I-TM6 timers (A12–A15), I-SU1
  * successors (A16), I-R1/I-R4 rotas (A17). Plan cases folded into another: I-D5 (stale token) into I-10C-D4's token check and the
- * jsdom conflict test; I-TM5 (defaults guard of a first Anyone timer) and I-R2/I-R3 into I-10C-R1/R4.
+ * jsdom conflict test; I-R2/I-R3 into I-10C-R1/R4. Revision 1 (review R9) corrects the first version's claim that I-TM5 was folded
+ * into another case (it was not run): I-10C-TM5 is its own pair of cases (a first Anyone timer and a completion, each held for a
+ * defaults review), and TASK-30 check 6 (a hidden completion exposes and triggers no successor) is I-10C-SU1 check 6.
  */
 const API = "/api/experimental/v1";
 
@@ -1465,6 +1467,324 @@ test.describe("I-10C-SU1: one successor after completion (A16; TASK-30 checks 2 
     expect(fixed.status, JSON.stringify(fixed.body)).toBe(200);
     await page.waitForTimeout(2_000);
     expect(await views(page, id, made.taskId, "personal")).toHaveLength(2);
+  });
+});
+
+// ---- revision 1 (review R9): the defaults review (A14, I-TM5) and a hidden completion (A16, TASK-30 check 6) ------------------------
+
+/** The person's sharing defaults are on this device (WEB-12a's `sync_state.defaults`): what a command captures when it is queued. */
+const untilDefaultsKept = (page: Page, account: string) =>
+  expect
+    .poll(
+      async () =>
+        (
+          (await page.evaluate(
+            (a) => window.__atlasData?.rows(a, "sync_state"),
+            account,
+          )) as Array<{ defaults?: unknown }>
+        )[0]?.defaults != null,
+      { timeout: 60_000 },
+    )
+    .toBe(true);
+/** The defaults move on the server (the progress template), as another device would move them. */
+async function moveDefaults(page: Page, id: Id): Promise<void> {
+  const templates = await call(page, id, "GET", "/defaults/templates");
+  const moved = await call(
+    page,
+    id,
+    "POST",
+    "/management-commands",
+    {
+      commands: [
+        {
+          kind: "set_defaults",
+          household_id: null,
+          resource_kind: "progress",
+          expected_version: (
+            templates.body as { progress: { version: number } }
+          ).progress.version,
+          template: { kind: "private" },
+        },
+      ],
+    },
+    crypto.randomUUID(),
+  );
+  expect(moved.status, JSON.stringify(moved.body)).toBe(200);
+}
+/** The queued command of `kind` this device holds (its stored body). */
+const queuedBody = async (page: Page, account: string, kind: string) => {
+  const drafts = (await page.evaluate(
+    (a) => window.__atlasData?.rows(a, "drafts"),
+    account,
+  )) as Array<{ local_id: string; kind: string }>;
+  const bodies = (await page.evaluate(
+    (a) => window.__atlasData?.rows(a, "draft_commands"),
+    account,
+  )) as Array<{ local_id: string; command: Record<string, unknown> }>;
+  const draft = drafts.find((d) => d.kind === kind);
+  return bodies.find((b) => b.local_id === draft?.local_id)?.command as
+    | { command: Record<string, unknown>; defaults_revision?: string }
+    | undefined;
+};
+/** Review and confirm the audience in the Sync screen's conflicts (WEB-12a), then let the outbox send again. */
+async function reviewAndConfirm(page: Page): Promise<void> {
+  await page.evaluate(() => window.__atlasData?.retryOutbox());
+  await go(page, "/sync?tab=conflicts");
+  await page
+    .getByRole("button", { name: /^Review sharing/ })
+    .first()
+    .click({ timeout: 60_000 });
+  const review = page.getByRole("dialog", { name: "Review sharing" });
+  await expect(review).toContainText("Sharing defaults have changed", {
+    timeout: 30_000,
+  });
+  await review.locator("[data-confirm]").click();
+  await expect(review).toBeHidden({ timeout: 30_000 });
+  await page.evaluate(() => window.__atlasData?.retryOutbox());
+}
+
+test.describe("I-10C-TM5: the first Anyone timer and a completion each wait for a defaults review (A14; WEB-04 §5.7 items 3–4)", () => {
+  test("a first Anyone start queued offline under the defaults it saw: the defaults move, it is refused defaults_changed, reviewed and confirmed, then applied once", async ({
+    context,
+    browser,
+    provokes,
+  }) => {
+    provokes(409);
+    const { page, id } = await bootAs(context, main);
+    const ownerContext = await browser.newContext();
+    try {
+      const owner = await apiAs(ownerContext, "frank");
+      // Someone else's Anyone task shared with me: my first start creates my stream, so it captures my progress defaults.
+      const made = await makeTask(
+        owner.page,
+        owner.id,
+        def({ goal: SECONDS, participation: "anyone", carry: "retain_one" }),
+        {
+          title: "I-10C-TM5 timer",
+          grants: [{ kind: "account", id: id.account_id, edit: true }],
+        },
+      );
+      await expect
+        .poll(
+          async () =>
+            (await cacheRow(page, id.account_id, made.occurrenceId))?.id,
+          {
+            timeout: 60_000,
+          },
+        )
+        .toBe(made.occurrenceId);
+      await go(page, `/tasks/${made.taskId}?occurrence=${made.occurrenceId}`);
+      const block = page.locator("[data-timer-block]");
+      await expect(block).toHaveAttribute("data-timer-block", "idle", {
+        timeout: 60_000,
+      });
+      // The timer block reads my sharing defaults (WEB-12a): what its first Anyone start captures.
+      await untilDefaultsKept(page, id.account_id);
+      await offline(page);
+      await block.getByRole("button", { name: "Start" }).click();
+      await expect(block).toHaveAttribute("data-timer-block", "running");
+      const queued = await queuedBody(page, id.account_id, "start_timer");
+      // The precondition the case rests on: the start captured the defaults it was queued under.
+      expect(queued?.defaults_revision, JSON.stringify(queued)).toBeTruthy();
+      const session = queued?.command.session_id as string;
+      await moveDefaults(page, id);
+      await online(page);
+      await reviewAndConfirm(page);
+      await expect
+        .poll(
+          async () => {
+            const out = await call(
+              page,
+              id,
+              "GET",
+              `/occurrences/${made.occurrenceId}/timers`,
+            );
+            return out.status === 200
+              ? (
+                  out.body as {
+                    items: Array<{ id: string; stopped_at: unknown }>;
+                  }
+                ).items.map((i) => [i.id, i.stopped_at])
+              : [out.status, out.body];
+          },
+          { timeout: 60_000 },
+        )
+        .toEqual([[session, null]]);
+    } finally {
+      await ownerContext.close();
+    }
+  });
+
+  test("a completion composed online and held before it is sent: the defaults move, it is refused defaults_changed, reviewed and confirmed, then applied once", async ({
+    context,
+    provokes,
+  }) => {
+    provokes(409);
+    const { page, id } = await bootAs(context, main);
+    const first = await makeTask(page, id, def(), { title: "I-10C-TM5 first" });
+    const root = await makeTask(page, id, def(), { title: "I-10C-TM5 root" });
+    expect(
+      (
+        await setDeps(
+          page,
+          id,
+          root.taskId,
+          root.occurrenceId,
+          [first.occurrenceId],
+          false,
+        )
+      ).status,
+    ).toBe(200);
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await go(page, `/tasks/${root.taskId}?occurrence=${root.occurrenceId}`);
+    await expect(page.locator("[data-dependencies-progress]")).toBeVisible({
+      timeout: 60_000,
+    });
+    // The detail reads my sharing defaults (WEB-12a): what the completion captures.
+    await untilDefaultsKept(page, id.account_id);
+    // Queue first, send after: the outbox keeps what is saved and sends nothing until it begins again.
+    await page.evaluate(async (a) => {
+      const data = window.__atlasData;
+      if (!data) throw new Error("no data harness");
+      data.stopOutbox();
+      await data.startOutbox(a, { start: false });
+    }, id.account_id);
+    await page
+      .locator("[data-dependencies]")
+      .getByRole("button", { name: "See what needs doing first" })
+      .click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.locator("[data-dependency-list] li")).toHaveCount(2);
+    await dialog
+      .getByRole("radio", { name: "Tick the others off as well" })
+      .click();
+    await dialog
+      .getByRole("button", { name: "Tick the others off as well" })
+      .click();
+    await expect(dialog).toHaveCount(0);
+    const queued = await queuedBody(
+      page,
+      id.account_id,
+      "complete_dependencies",
+    );
+    expect(queued?.defaults_revision, JSON.stringify(queued)).toBeTruthy();
+    await moveDefaults(page, id);
+    await page.evaluate(() => window.__atlasData?.beginOutbox());
+    await reviewAndConfirm(page);
+    await expect
+      .poll(
+        async () =>
+          (await preview(page, id, root.occurrenceId)).items.every(
+            (i) => i.complete,
+          ),
+        { timeout: 60_000 },
+      )
+      .toBe(true);
+    // Applied once: one completion entry on each stream.
+    for (const occ of [first.occurrenceId, root.occurrenceId]) {
+      const mine = (await progressOf(page, id, occ)).find(
+        (p) =>
+          p.id ===
+          (occ === root.occurrenceId ? root.progressId : first.progressId),
+      );
+      expect(
+        (mine?.value as { entry_count?: number } | undefined)?.entry_count,
+      ).toBe(1);
+    }
+  });
+});
+
+test.describe("I-10C-SU1 check 6: a hidden completion exposes and triggers no successor (A16; TASK-30)", () => {
+  test("B completes an Anyone after-completion task of mine on a stream I cannot see: no successor through a whole reconciliation; once B shares the stream, exactly one, dated from that completion", async ({
+    context,
+    browser,
+  }) => {
+    const { page, id } = await bootAs(context, main);
+    const bContext = await browser.newContext();
+    try {
+      const b = await apiAs(bContext, "frank");
+      // The server's own case (`successors.rs`, completion_relative_does_not_reveal_private_anyone_timestamp): a second participant's
+      // completion on a stream another schedule reader cannot see is not common evidence. B's first record creates B's stream with B's
+      // progress defaults (`commands.rs`), private here; the successor is decided only on evidence every reader can see.
+      const made = await makeTask(
+        page,
+        id,
+        def(
+          { participation: "anyone", carry: "accumulate" },
+          { repeat: { frequency: "after_completion", interval: 2 } },
+        ),
+        {
+          title: "I-10C-SU1 check 6",
+          grants: [{ kind: "account", id: b.id.account_id, edit: true }],
+        },
+      );
+      const stream = await progressId(made.occurrenceId, b.id.account_id);
+      // B's first record creates B's stream (seeded at 1, as the client's builder resolves it: `seedIfUntracked`).
+      const done = await send(
+        b.page,
+        b.id,
+        record(
+          made.occurrenceId,
+          stream,
+          b.id.account_id,
+          { kind: "checkbox", complete: true },
+          { firstAnyoneStream: true },
+        ),
+        { [stream]: 1 },
+      );
+      expect(done.status, JSON.stringify(done.body)).toBe(200);
+      const recordedAt = Date.now();
+      // The precondition the case rests on: B's stream (and its timestamp) is hidden from me.
+      expect(
+        (await progressOf(page, id, made.occurrenceId)).map((p) => p.id),
+      ).not.toContain(stream);
+      // The server re-checks a pending completion a minute later on its 15 s worker tick (`successors.rs`, `main.rs`): wait through one
+      // whole reconciliation, never a shortened one, then look from both readers.
+      await page.waitForTimeout(
+        Math.max(0, 80_000 - (Date.now() - recordedAt)),
+      );
+      // Seen from the schedule's owner: still the one day. B's own listing is not evidence either way: it lists only the days B takes
+      // part in, so it shows no successor even once one exists (observed in the control below).
+      expect(await views(page, id, made.taskId, "personal")).toHaveLength(1);
+      // Control (the server case's own second step): B shares the stream with me; the same completion is now common evidence and the
+      // next reconciliation gives exactly one successor, dated from it (interval 2), so the absence above was the hidden evidence.
+      const mine = (await progressOf(b.page, b.id, made.occurrenceId)).find(
+        (p) => p.id === stream,
+      ) as { policy_version?: number } | undefined;
+      const shared = await call(
+        b.page,
+        b.id,
+        "POST",
+        "/management-commands",
+        {
+          commands: [
+            {
+              kind: "replace_policy",
+              id: stream,
+              expected_version: mine?.policy_version,
+              policy: {
+                grants: [{ kind: "account", id: id.account_id, edit: false }],
+                exclude_accounts: [],
+              },
+            },
+          ],
+        },
+        crypto.randomUUID(),
+      );
+      expect(shared.status, JSON.stringify(shared.body)).toBe(200);
+      await expect
+        .poll(
+          async () => (await views(page, id, made.taskId, "personal")).length,
+          { timeout: 120_000 },
+        )
+        .toBe(2);
+      const next = (await views(page, id, made.taskId, "personal")).find(
+        (v) => v.id !== made.occurrenceId,
+      ) as OccurrenceView;
+      expect(next.data.slot.date).toBe(addDays(today(), 2));
+    } finally {
+      await bContext.close();
+    }
   });
 });
 

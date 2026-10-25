@@ -82,6 +82,13 @@ const UNSETTLED = new Set(["queued", "in_flight", "blocked", "acknowledged"]);
 /**
  * The sessions running on `occurrenceId` for me, from every source, a stop or discard on its way taking a session out (the draft's own
  * conflict blocks speak for a failed one). A finished session in a read is not running whatever the copy says.
+ *
+ * Which source wins (review R2): a COMPLETE read of the day's sessions lists every session of the day the server still has, and omits a
+ * cancelled one; so a copied session it does not list is not running when that read was ISSUED no earlier than the copy's (`readAt` ≥
+ * `copyAt`, both in ms): it was cancelled or stopped since the copy was taken, here or elsewhere. A copy taken after the read (a read
+ * kept from earlier, offline) may know a session the read could not, and stays. A partial or absent read (`read: null`) decides nothing,
+ * so offline the copy stands. This device's unsettled start stays until its draft settles: its read is asked again when the draft's state
+ * changes, and a read issued before the server applied the start cannot know it.
  */
 export function runningOn(
   occurrenceId: string,
@@ -89,6 +96,9 @@ export function runningOn(
     drafts: readonly DraftWithCommand[];
     read: readonly TimerSession[] | null;
     copy: readonly AccountTimerSession[] | null;
+    /** When the complete read was issued (ms), and when the copy's read was (ms); null when unknown (the copy then stands). */
+    readAt?: number | null;
+    copyAt?: number | null;
   },
 ): RunningSession[] {
   const out = new Map<string, RunningSession>();
@@ -100,13 +110,23 @@ export function runningOn(
     if (t.kind !== "start_timer" && UNSETTLED.has(draft.status))
       ending.add(t.session);
   }
+  const listed = new Set<string>();
   for (const s of input.read ?? []) {
     if (s.occurrence_id !== occurrenceId) continue;
+    listed.add(s.id);
     if (s.stopped_at !== null) finished.add(s.id);
   }
+  const readSupersedesCopy =
+    input.read !== null &&
+    input.readAt !== undefined &&
+    input.readAt !== null &&
+    input.copyAt !== undefined &&
+    input.copyAt !== null &&
+    input.readAt >= input.copyAt;
   for (const s of input.copy ?? []) {
     if (s.access !== "available" || s.occurrence_id !== occurrenceId) continue;
     if (s.stopped_at !== null || finished.has(s.id)) continue;
+    if (readSupersedesCopy && !listed.has(s.id)) continue;
     out.set(s.id, {
       id: s.id,
       occurrenceId,

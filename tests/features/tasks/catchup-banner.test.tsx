@@ -2,8 +2,12 @@ import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
 import type { MaterialiseSequenceRow } from "../../../src/data/model/types";
+import { createConflictHandlerRegistry } from "../../../src/data/outbox/registries";
 import type { TasksResult } from "../../../src/features/tasks/api";
-import { forgetCatchUp } from "../../../src/features/tasks/catchup/useCatchUp";
+import {
+  forgetCatchUp,
+  registerCatchUpConflicts,
+} from "../../../src/features/tasks/catchup/useCatchUp";
 import * as copy from "../../../src/features/tasks/copy";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import type {
@@ -12,8 +16,10 @@ import type {
 } from "../../../src/features/tasks/model/contract";
 import { CATCH_UP_COPY } from "../../../src/features/tasks/today/CatchUpBanner";
 import { installMatchMedia } from "../../helpers/match-media";
+import { draftRow } from "../../support/data/rows";
 import {
   fakeApi,
+  ME,
   mountTasks,
   type SeededTask,
   seededTask,
@@ -226,5 +232,121 @@ describe("paused: offline, or not compatible with the server", () => {
     await t.settle();
     expect(banner()).toBeNull();
     expect(calls.readTask).toBe(0);
+  });
+});
+
+/**
+ * Revision 1 (review R8): the catch-up SERVICE is held by every task screen, not only Today's banner and the streak, so a command refused
+ * with `materialisation_required` on a directly opened task detail starts a catch-up; and a STOPPED catch-up of the task is shown on its
+ * detail, where the waiting command is, with its reason and "Try again" (WEB-04 §5.8: never a silent rejection).
+ */
+describe("R8: the command path on a task's own detail", () => {
+  const detailPath = (task: SeededTask) =>
+    `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+
+  test("a directly opened detail holds a live service: a refused task command starts the task's catch-up", async () => {
+    const task = await seededTask({ title: "Water the plants" });
+    const { api, calls } = counted({
+      readTask: async () => position(task, TODAY, false),
+    });
+    const t = await mountTasks({
+      path: detailPath(task),
+      rows: task.rows,
+      api,
+    });
+    await t.until(() => document.querySelector("[data-task-detail]") !== null);
+    const registry = createConflictHandlerRegistry();
+    registerCatchUpConflicts(registry);
+    expect(
+      registry.decide({
+        draft: draftRow({
+          account_id: ME,
+          kind: "archive",
+          endpoint: "/task-commands",
+          command: {
+            command: {
+              kind: "archive",
+              id: task.taskId,
+              expected_version: 1,
+              archived: true,
+            },
+          },
+        }),
+        status: 409,
+        code: "materialisation_required",
+      }),
+    ).toEqual({ kind: "reclassify", as: "retry" });
+    await t.until(() => calls.readTask > 0);
+    expect(
+      calls.readTask,
+      "the catch-up read the task's position",
+    ).toBeGreaterThan(0);
+  });
+
+  test("the account's timers (no catch-up shown there) hold the service too: a refused task command starts the catch-up", async () => {
+    const task = await seededTask({ title: "Water the plants" });
+    const { api, calls } = counted({
+      readTask: async () => position(task, TODAY, false),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(() => document.querySelector("[data-timers-page]") !== null);
+    const registry = createConflictHandlerRegistry();
+    registerCatchUpConflicts(registry);
+    expect(
+      registry.decide({
+        draft: draftRow({
+          account_id: ME,
+          kind: "revise_task",
+          endpoint: "/task-commands",
+          command: { command: { kind: "revise_task", id: task.taskId } },
+        }),
+        status: 409,
+        code: "materialisation_required",
+      }),
+    ).toEqual({ kind: "reclassify", as: "retry" });
+    await t.until(() => calls.readTask > 0);
+    expect(calls.readTask).toBeGreaterThan(0);
+  });
+
+  test("a stopped catch-up of the task is shown on its detail with its reason; Try again carries on from the position", async () => {
+    const task = await seededTask({ title: "Water the plants" });
+    const { api, calls } = counted({
+      readTask: async () => position(task, TODAY, false),
+    });
+    const t = await mountTasks({
+      path: detailPath(task),
+      rows: task.rows,
+      api,
+      sequences: [stopped(task, "bound")],
+    });
+    await t.until(
+      () => document.querySelector("[data-catch-up-stopped]") !== null,
+    );
+    const notice = document.querySelector(
+      "[data-catch-up-stopped]",
+    ) as HTMLElement | null;
+    expect(notice, "the stop is shown on the task's detail").not.toBeNull();
+    if (notice === null) return;
+    expect(notice.dataset.catchUpStopped).toBe("bound");
+    expect(notice).toHaveTextContent(CATCH_UP_COPY.stopped("Water the plants"));
+    expect(notice).toHaveTextContent(CATCH_UP_COPY.reason.bound);
+    expect((await axe(notice)).violations).toEqual([]);
+    const before = calls.readTask;
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await t.until(() => calls.readTask > before);
+    expect(calls.readTask).toBeGreaterThan(before);
+  });
+
+  test("control: no stop of the task, nothing is shown; another task's stop is not this task's", async () => {
+    const task = await seededTask({ title: "Water the plants" });
+    const other = await seededTask({ title: "Feed the cat" });
+    const t = await mountTasks({
+      path: detailPath(task),
+      rows: [...task.rows, ...other.rows],
+      sequences: [stopped(other, "bound")],
+    });
+    await t.until(() => document.querySelector("[data-task-detail]") !== null);
+    await t.settle();
+    expect(document.querySelector("[data-catch-up-stopped]")).toBeNull();
   });
 });

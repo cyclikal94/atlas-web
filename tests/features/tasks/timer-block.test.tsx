@@ -345,3 +345,96 @@ describe("the conflict block (A13) and the day's sessions", () => {
     );
   });
 });
+
+/**
+ * Revision 1 (review R2): a current COMPLETE read of the day's sessions supersedes an older copy. The server omits a cancelled session, so
+ * a copied one the read does not list is not running: the block is idle and Start is offered (never a Stop or Discard of a cancelled
+ * session). The read listing it keeps it running, from the read.
+ */
+describe("R2: the day's complete read and the kept copy", () => {
+  test("online, a complete empty read issued after the copy: the copied (cancelled) session is not running and Start is offered", async () => {
+    const task = await seconds();
+    let reads = 0;
+    const api = fakeApi({
+      readTimers: async () => {
+        reads += 1;
+        return { ok: true, value: { items: [], next_after: null } };
+      },
+    });
+    const t = await mountTasks({
+      path: path(task),
+      rows: task.rows,
+      api,
+      timerCopy: copyOf([copied(task, nowSeconds() - 600)]),
+    });
+    await t.until(() => reads > 0 && block() !== null);
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe("idle");
+    expect(
+      within(block() as HTMLElement).getByRole("button", {
+        name: TIMER_COPY.start,
+      }),
+    ).toBeEnabled();
+    expect(
+      within(block() as HTMLElement).queryByRole("button", {
+        name: TIMER_COPY.stop,
+      }),
+    ).toBeNull();
+  });
+
+  test("control: the same copy, and a complete read that lists the session running: running, from the read", async () => {
+    const task = await seconds();
+    const started = nowSeconds() - 600;
+    const api = fakeApi({
+      readTimers: async () => ({
+        ok: true,
+        value: {
+          items: [
+            {
+              id: "cccccccc-0000-4000-8000-000000000001",
+              occurrence_id: task.occurrenceId,
+              started_at: started,
+              stopped_at: null,
+              version: 3,
+            },
+          ],
+          next_after: null,
+        },
+      }),
+    });
+    const t = await mountTasks({
+      path: path(task),
+      rows: task.rows,
+      api,
+      timerCopy: copyOf([copied(task, started)]),
+    });
+    await t.until(() => block()?.dataset.timerBlock === "running");
+    expect(
+      block()
+        ?.querySelector("[data-timer-source]")
+        ?.getAttribute("data-timer-source"),
+    ).toBe("read");
+  });
+
+  test("a read that is not complete (a further page) decides nothing: the copy stands", async () => {
+    const task = await seconds();
+    const api = fakeApi({
+      readTimers: async () => ({
+        ok: true,
+        value: { items: [], next_after: "more" },
+      }),
+    });
+    const t = await mountTasks({
+      path: path(task),
+      rows: task.rows,
+      api,
+      timerCopy: copyOf([copied(task, nowSeconds() - 600)]),
+    });
+    await t.until(() => block()?.dataset.timerBlock === "running");
+    expect(
+      block()
+        ?.querySelector("[data-timer-source]")
+        ?.getAttribute("data-timer-source"),
+    ).toBe("copy");
+  });
+});

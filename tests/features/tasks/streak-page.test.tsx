@@ -13,6 +13,7 @@ import type {
   TaskStreak,
 } from "../../../src/features/tasks/model/contract";
 import {
+  completionEntryId,
   occurrenceId,
   progressId,
 } from "../../../src/features/tasks/model/ids";
@@ -23,7 +24,7 @@ import {
 } from "../../../src/features/tasks/model/time";
 import { STREAK_COPY } from "../../../src/features/tasks/streak/StreakPage";
 import { installMatchMedia } from "../../helpers/match-media";
-import { cacheRow } from "../../support/data/rows";
+import { cacheRow, draftRow } from "../../support/data/rows";
 import {
   fakeApi,
   ME,
@@ -366,5 +367,97 @@ describe("offline and identity", () => {
     await t.settle();
     expect(scope("personal")?.dataset.streakState).toBe("loading");
     expect(page()).not.toHaveTextContent(STREAK_COPY.current(9, "days"));
+  });
+});
+
+/**
+ * Revision 1 (review R6): the strip layers MY pending evidence on each day's synced stream as the detail does, and a completion that has
+ * LANDED (the stream lists the server's own entry id) is not counted again. A minimum of 5 with 3 recorded by the completion is still open;
+ * the control (the 3 recorded by an ordinary entry, the completion still to land) is done.
+ */
+describe("R6: a landed completion is counted once on the strip", () => {
+  const OPERATION = "cccccccc-0000-4000-8000-000000000021";
+  async function numericToday(entryId: (occurrence: string) => string) {
+    const task = await repeating(["incomplete"], {
+      goal: { kind: "numeric", minimum: "5", maximum: null, unit: "cups" },
+    });
+    const occurrence = task.rows.find(
+      (r) => r.kind === "occurrence",
+    ) as CacheRow;
+    const stream = await progressId(occurrence.id, ME);
+    const happened = Math.floor(Date.now() / 1000) - 5;
+    const rows = task.rows.map((r) =>
+      r.id === stream
+        ? {
+            ...r,
+            value: {
+              ...(r.value as Record<string, unknown>),
+              action: { outcome: "incomplete", amount: "3", checked: [] },
+              period: { outcome: "incomplete", amount: "3", checked: [] },
+              recent_entries: [
+                {
+                  id: entryId(occurrence.id),
+                  evidence: { kind: "quantity", amount: "3" },
+                  happened_at: happened,
+                  recorded_by: ME,
+                },
+              ],
+              entry_count: 1,
+            } as never,
+          }
+        : r,
+    );
+    const draft = draftRow({
+      local_id: OPERATION,
+      created_seq: 1,
+      kind: "complete_dependencies",
+      endpoint: "/task-commands",
+      account_id: ME,
+      status: "acknowledged",
+      target_resource_ids: [occurrence.id],
+      index_targets: [occurrence.id, stream],
+      command: {
+        command: {
+          kind: "complete_dependencies",
+          occurrence_id: occurrence.id,
+          mode: "require_satisfied",
+          root_evidence: { kind: "quantity", amount: "3" },
+          happened_at: happened,
+        },
+      },
+    });
+    // Acknowledged, its overlay on my stream still standing (sync has not yet retired it): what the strip layers.
+    const effect = {
+      resource_id: stream,
+      local_id: OPERATION,
+      resource_version: null,
+      created_at: new Date().toISOString(),
+      submitted_at_page_seq: 0,
+      last_mentioned_page_seq: null,
+      display: null,
+      resolved: null,
+      no_publication_floor: null,
+      receipt_revision: 5,
+    };
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}/streak`,
+      rows,
+      drafts: [draft],
+      effects: [effect, { ...effect, resource_id: occurrence.id }],
+      api: fakeApi({ readStreak: async () => streak(0, 0) }),
+    });
+    await t.until(() => document.querySelector("[data-strip-state]") !== null);
+    return document.querySelector<HTMLElement>("[data-strip-state]")?.dataset
+      .stripState;
+  }
+  test("the completion's own entry in the stream: still open (3 of 5), never done", async () => {
+    expect(
+      await numericToday(
+        (occurrence) => completionEntryId(OPERATION, occurrence, ME) as string,
+      ),
+    ).toBe("open");
+  });
+  test("control: an ordinary entry of 3 and the completion still to land: done (3 + 3)", async () => {
+    expect(await numericToday(() => crypto.randomUUID())).toBe("done");
   });
 });

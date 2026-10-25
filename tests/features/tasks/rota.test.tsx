@@ -1,12 +1,21 @@
-import { cleanup, fireEvent, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  renderHook,
+  screen,
+  within,
+} from "@testing-library/react";
 import { axe } from "jest-axe";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, test } from "vitest";
 import type {
   RotaConsentCommand,
   SetRotaCommand,
   TasksResult,
 } from "../../../src/features/tasks/api";
-import { ROTA_COPY } from "../../../src/features/tasks/detail/Rota";
+import { ROTA_COPY, useRota } from "../../../src/features/tasks/detail/Rota";
+import { TasksEnvProvider } from "../../../src/features/tasks/env";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import type {
   RotaState,
@@ -31,6 +40,7 @@ import {
   OTHER,
   type SeededTask,
   seededTask,
+  tasksEnv,
 } from "../../support/tasks/world";
 
 /**
@@ -134,25 +144,62 @@ describe("the model (pure)", () => {
     expect(nextOrdinal(turns, { version: 3 })).toBe(0);
   });
 
-  test("next dates by cadence, the month's end kept", () => {
+  // Revision 1 (review R5): the dates are the server's (`schedule.rs` `slots`): each from the schedule's OWN start, a missing day skipped.
+  // The oracle is the backend's own test `date_only_month_end_leap_day_and_bounded_pagination` (`crates/core/tests/cases/tasks/domain.rs`
+  // at the pinned 4396c99): monthly from 31 January gives 31 March and 31 May; yearly from 29 February 2024 gives 29 February 2028. The
+  // earlier assertion here (28 February, then 28 March) encoded the defect: a clamped date taken as the next anchor drifts.
+  const cadence = (
+    start: string,
+    frequency: "daily" | "weekly" | "monthly" | "yearly",
+    interval = 1,
+  ): TaskDefinition => ({
+    ...daily,
+    schedule: {
+      ...daily.schedule,
+      start_date: start,
+      repeat: { frequency, interval },
+    },
+  });
+  test("next dates are the server's: from the schedule's own start, a day that does not exist skipped, never clamped", () => {
     expect(nextDates(daily, "2026-10-30", 3)).toEqual([
       "2026-10-31",
       "2026-11-01",
       "2026-11-02",
     ]);
     expect(
+      nextDates(cadence("2026-01-31", "monthly"), "2026-01-31", 3),
+    ).toEqual(["2026-03-31", "2026-05-31", "2026-07-31"]);
+    // A later known day keeps the anchor's day of the month (no drift after a short month).
+    expect(
+      nextDates(cadence("2026-01-31", "monthly"), "2026-05-31", 2),
+    ).toEqual(["2026-07-31", "2026-08-31"]);
+    expect(nextDates(cadence("2024-02-29", "yearly"), "2024-02-29", 2)).toEqual(
+      ["2028-02-29", "2032-02-29"],
+    );
+    expect(
+      nextDates(cadence("2026-01-31", "monthly", 2), "2026-01-31", 2),
+    ).toEqual(["2026-03-31", "2026-05-31"]);
+  });
+
+  test("next dates stay on the schedule's grid whatever the known day (interval > 1, weekly)", () => {
+    // Every other day from 1 October: after 2 October the server's next are 3 and 5 October (never 4 and 6).
+    expect(
+      nextDates(cadence("2026-10-01", "daily", 2), "2026-10-02", 2),
+    ).toEqual(["2026-10-03", "2026-10-05"]);
+    expect(nextDates(cadence("2026-10-01", "weekly"), "2026-10-09", 2)).toEqual(
+      ["2026-10-15", "2026-10-22"],
+    );
+    // Before the start, the start itself comes first; no repeat or no start date gives none.
+    expect(nextDates(cadence("2026-10-01", "daily"), "2026-09-20", 1)).toEqual([
+      "2026-10-01",
+    ]);
+    expect(
       nextDates(
-        {
-          ...daily,
-          schedule: {
-            ...daily.schedule,
-            repeat: { frequency: "monthly", interval: 1 },
-          },
-        },
-        "2026-01-31",
+        { ...daily, schedule: { ...daily.schedule, repeat: null } },
+        "2026-10-01",
         2,
       ),
-    ).toEqual(["2026-02-28", "2026-03-28"]);
+    ).toEqual([]);
   });
 
   test("the rota state parses exactly: at most 8 unique participants, versions at least 0", () => {
@@ -383,5 +430,138 @@ describe("the turn order dialog (A17)", () => {
     expect(document.querySelector("[data-rota-count]")).toHaveTextContent(
       ROTA_COPY.count(2),
     );
+  });
+});
+
+/**
+ * Revision 1 (review R7): for the person who may set the order (an execution editor) the server FILLS `eligible_participants`, so an empty
+ * list is a known answer: nobody has joined and agreed now, and every projected turn is left open (the server leaves it unassigned). Turns
+ * already set keep their person. The list is withheld (empty) only for other readers, who are never shown the order dialog.
+ */
+describe("R7: an empty eligibility list is known, not unknown", () => {
+  async function dialogWith(state: Partial<RotaState>) {
+    const task = await anyone();
+    const api = fakeApi({
+      readRota: async () => rota(state),
+      readEnrolment: async () => enrolled(true) as never,
+    });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: ROTA_COPY.order }) !== null &&
+        !(
+          screen.getByRole("button", {
+            name: ROTA_COPY.order,
+          }) as HTMLButtonElement
+        ).disabled,
+    );
+    fireEvent.click(screen.getByRole("button", { name: ROTA_COPY.order }));
+    await t.until(() => document.querySelector("[data-rota-dialog]") !== null);
+    return [...document.querySelectorAll("[data-rota-projected]")];
+  }
+
+  test("a saved roster and NO ONE eligible now: every projected turn is left open, none names a person", async () => {
+    const rows = await dialogWith({
+      participants: [ME],
+      eligible_participants: [],
+    });
+    expect(rows.length).toBeGreaterThan(0);
+    // "Left open", naming whose place it is; never the turn given to them.
+    for (const row of rows)
+      expect(row.querySelectorAll("td")[1]?.textContent).toBe(
+        `${ROTA_COPY.projected}: ${ROTA_COPY.leftOpen} (${ROTA_COPY.you})`,
+      );
+    // Turns already set keep their person (from the days this device holds).
+    expect(document.querySelector("[data-rota-set]")).not.toBeNull();
+  });
+
+  test("control: the same roster with me eligible projects my turns", async () => {
+    const rows = await dialogWith({
+      participants: [ME],
+      eligible_participants: [ME],
+    });
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows)
+      expect(row.querySelectorAll("td")[1]?.textContent).toBe(
+        `${ROTA_COPY.projected}: ${ROTA_COPY.you}`,
+      );
+  });
+});
+
+/**
+ * A18 (CM-384; review R9): a rota answer asked under one identity is never shown under another. The first identity's read is answered
+ * AFTER the displayed identity changed (same tree, same reader); the turn order it carried, and its consent, are not shown.
+ */
+describe("A18: a late rota answer across an identity change", () => {
+  test("the previous identity's answer, delivered after the change, is dropped; the new identity's own answer is shown", async () => {
+    const task = await anyone();
+    let release: (r: TasksResult<RotaState>) => void = () => undefined;
+    let asked = 0;
+    const api = fakeApi({
+      readRota: () => {
+        asked += 1;
+        return asked === 1
+          ? new Promise((resolve) => (release = resolve))
+          : Promise.resolve(rota({ accepted: false, participants: [] }));
+      },
+      readEnrolment: async () => enrolled(true) as never,
+    });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    await t.until(() => asked >= 1);
+    t.rerender(tasksEnv(api, { identity: `${ME}:2` }));
+    await t.until(() => asked >= 2);
+    await t.settle();
+    release(rota({ accepted: true, participants: [ME, OTHER] }));
+    await t.settle();
+    await t.settle();
+    const consent = screen.getByLabelText(
+      ROTA_COPY.takeTurns,
+    ) as HTMLInputElement;
+    expect(consent.checked, "the earlier identity's consent is not shown").toBe(
+      false,
+    );
+    // The new identity's own answer is still the one shown (the late answer neither shows nor replaces it).
+    expect(consent.disabled, "the new identity's rota is ready").toBe(false);
+    // Control: the new identity's read was made and answered.
+    expect(asked).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("A18 (hook): one reader across an identity change", () => {
+  test("the previous identity's rota, answered after the change under the SAME reader, is never applied; the new identity's is", async () => {
+    // The screens remount on another identity, so only the hook's own rule stands between a late answer and the screen here.
+    let release: (r: TasksResult<RotaState>) => void = () => undefined;
+    let calls = 0;
+    const api = fakeApi({
+      readRota: () => {
+        calls += 1;
+        return calls === 1
+          ? new Promise((resolve) => (release = resolve))
+          : Promise.resolve(rota({ accepted: false, participants: [] }));
+      },
+      readEnrolment: async () => enrolled(true) as never,
+    });
+    let env = tasksEnv(api);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <TasksEnvProvider value={env}>{children}</TasksEnvProvider>
+    );
+    const { result, rerender } = renderHook(() => useRota("t-1"), {
+      wrapper,
+    });
+    await act(async () => undefined);
+    expect(calls).toBe(1);
+    env = tasksEnv(api, { identity: `${ME}:2` });
+    rerender();
+    await act(async () => undefined);
+    expect(calls).toBe(2);
+    await act(async () => {
+      release(rota({ accepted: true, participants: [ME, OTHER] }));
+    });
+    expect(result.current.rota.kind).toBe("ready");
+    expect(
+      result.current.rota.kind === "ready" &&
+        result.current.rota.value.accepted,
+      "the earlier identity's answer is not applied",
+    ).toBe(false);
   });
 });

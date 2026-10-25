@@ -5,12 +5,14 @@ import {
   getPageDataHost,
   type Loadable,
   type MaterialiseSequenceRow,
+  readResourcesNow,
   useDataEnv,
   useMaterialiseSequences,
 } from "../../../data";
 import type { TasksApi } from "../api";
 import { type TasksEnv, useTasksEnv } from "../env";
 import { commandOf, QUEUED_KINDS } from "../model/commands";
+import { parseOccurrenceData } from "../model/contract";
 import { isContractDate } from "../model/primitives";
 import {
   type CatchUpRunner,
@@ -91,7 +93,13 @@ export interface CatchUp {
   records: Loadable<MaterialiseSequenceRow[]>;
 }
 
-export function useCatchUp(): CatchUp {
+/**
+ * The page's catch-up SERVICE for the displayed identity, held by every task screen (review R8): Today and the streak, and also the
+ * list, a task's detail, the editors and the account's timers, so a task command refused with `materialisation_required` finds a live
+ * runner bound to the current connectivity, compatibility and database whichever task screen the person opened. It registers the command
+ * path's handler with the page's registry and lets work wait for the database's binding.
+ */
+export function useCatchUpService(): CatchUpRunner {
   const env = useTasksEnv();
   const data = useDataEnv();
   const runner = runnerOf(env, data);
@@ -103,26 +111,71 @@ export function useCatchUp(): CatchUp {
     () => data.serviceStore.subscribe(() => runner.kick()),
     [data, runner],
   );
+  return runner;
+}
+
+export function useCatchUp(): CatchUp {
+  const runner = useCatchUpService();
   const state = useSyncExternalStore(runner.subscribe, runner.get, runner.get);
   const records = useMaterialiseSequences(null);
   return { runner, state, records };
 }
 
-/** The task a draft's command names directly, or null (an occurrence-level command names no task). */
-function taskOfDraft(
-  draft: Parameters<
-    Parameters<ConflictHandlerRegistry["register"]>[1]
-  >[0]["draft"],
-): string | null {
+type Draft = Parameters<
+  Parameters<ConflictHandlerRegistry["register"]>[1]
+>[0]["draft"];
+
+/**
+ * What a blocked task command needs caught up (WEB-04 §5.8, input derivation): the task it names, through the day it names (else today in
+ * the task's zone), or, for a command on one day (`occurrence_id`), that day's task through that day's own date, which this device holds
+ * in its cache. Null: not a task command this handler can derive from.
+ */
+type Target =
+  | { kind: "task"; taskId: string; throughDate?: string }
+  | { kind: "occurrence"; occurrenceId: string };
+function targetOfDraft(draft: Draft): Target | null {
   const command = commandOf(draft);
   if (command === null) return null;
-  if (typeof command.task_id === "string") return command.task_id;
+  const day = command.through_date;
+  const through = isContractDate(day) ? { throughDate: day } : {};
+  if (typeof command.task_id === "string")
+    return { kind: "task", taskId: command.task_id, ...through };
   if (
     (command.kind === "revise_task" || command.kind === "archive") &&
     typeof command.id === "string"
   )
-    return command.id;
+    return { kind: "task", taskId: command.id, ...through };
+  if (typeof command.occurrence_id === "string")
+    return { kind: "occurrence", occurrenceId: command.occurrence_id };
   return null;
+}
+
+/**
+ * Asks `runner` to catch up what `target` needs. A day's task and date come from this device's cache (the occurrence row): a day the
+ * cache does not hold cannot be derived here, and the command is retried under the back-off as before, with nothing asked.
+ */
+async function catchUpFor(runner: CatchUpRunner, target: Target) {
+  if (target.kind === "task") {
+    runner.ensure(
+      target.taskId,
+      "draft",
+      target.throughDate === undefined
+        ? {}
+        : { throughDate: target.throughDate },
+    );
+    return;
+  }
+  const data = held?.runner === runner ? held.data : null;
+  if (data === null) return;
+  const rows = await readResourcesNow(data, [target.occurrenceId]);
+  const row = rows?.get(target.occurrenceId)?.merged ?? null;
+  const day = row ? parseOccurrenceData(row.value) : null;
+  if (day === null || held?.runner !== runner) return;
+  runner.ensure(
+    day.task_id,
+    "draft",
+    day.slot.date === null ? {} : { throughDate: day.slot.date },
+  );
 }
 
 const TASK_KINDS = new Set<string>([
@@ -137,9 +190,13 @@ const registered = new WeakSet<ConflictHandlerRegistry>();
 
 /**
  * The command path (CM-432; fixture-only: the released backend raises `materialisation_required` on no command, §0.1 item 7). A queued
- * task command refused because its task must be caught up first is RETRIED with its own key under the dispatcher's back-off, and the
- * page's runner is asked to catch the task up (through the day the command names, when it names one). Any other draft, or one whose task
- * cannot be read from its command, keeps the generic rule. Registered once per registry.
+ * task command refused because its task must be caught up first is RETRIED with its own key under the dispatcher's back-off (at most a
+ * minute), and the page's catch-up service is asked to catch up what it needs (`targetOfDraft`: the task it names through the day it
+ * names, or a day's own task through that day's date). The resend follows the sequence: before it completes the command is refused again
+ * and asked again, which the runner absorbs (one sequence per task and day); after it completes the SAME key is sent and applied. A stop
+ * is never restarted by a resend: it is shown with its reason and "Try again" (Today's banner, the task's detail), and the command is
+ * kept, retried, until the person's "Try again" completes the catch-up or they discard it. Any other draft, or one whose need cannot be
+ * derived, keeps the generic rule. Registered once per registry.
  */
 export function registerCatchUpConflicts(
   registry: ConflictHandlerRegistry,
@@ -148,15 +205,12 @@ export function registerCatchUpConflicts(
   registered.add(registry);
   registry.register("materialisation_required", ({ draft }) => {
     if (!TASK_KINDS.has(draft.kind)) return { kind: "default" };
-    const taskId = taskOfDraft(draft);
-    if (taskId === null) return { kind: "default" };
-    const command = commandOf(draft);
-    const day = command?.through_date;
-    runnerForAccount(draft.account_id)?.ensure(
-      taskId,
-      "draft",
-      isContractDate(day) ? { throughDate: day } : {},
-    );
+    const target = targetOfDraft(draft);
+    if (target === null) return { kind: "default" };
+    const runner = runnerForAccount(draft.account_id);
+    // No task screen has held a catch-up service for this account on this page: nothing can be asked (the generic rule retries it).
+    if (runner === null) return { kind: "default" };
+    void catchUpFor(runner, target);
     return { kind: "reclassify", as: "retry" };
   });
 }

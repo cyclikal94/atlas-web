@@ -517,6 +517,162 @@ describe("conflicts (A11)", () => {
   });
 });
 
+/**
+ * Revision 1 (review R4): saving a list REPLACES every direct prerequisite (D-10c-7), and "Keep editing" of a refused set supersedes it on
+ * the version shown now. So both saves are admitted by the same current conditions: the editor reads the preview again when it opens, and
+ * Save is withheld until that answer (or a later one) shows nothing private, while the person may still edit the day, online. What was
+ * typed, or the submitted list, is kept meanwhile.
+ */
+describe("R4: one admission for a new and a replacing save", () => {
+  const conflicted = (
+    root: SeededTask,
+    pre: SeededTask,
+    local = "70000000-0000-4000-8000-000000000997",
+  ) =>
+    draftRow({
+      local_id: local,
+      created_seq: 1,
+      kind: "set_dependencies",
+      endpoint: "/task-commands",
+      account_id: ME,
+      status: "version_conflict",
+      target_resource_ids: [root.occurrenceId, pre.occurrenceId],
+      index_targets: [root.occurrenceId, pre.occurrenceId],
+      command: {
+        command: {
+          kind: "set_dependencies",
+          occurrence_id: root.occurrenceId,
+          expected_version: 1,
+          prerequisites: [pre.occurrenceId],
+          strict: false,
+        },
+      } as never,
+    });
+  const keepEditing = async (t: Awaited<ReturnType<typeof mount>>["t"]) => {
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.keepEditing }) !==
+        null,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: DEPENDENCY_COPY.keepEditing }),
+    );
+    await t.until(
+      () => document.querySelector("[data-dependency-editor]") !== null,
+    );
+    await t.settle();
+  };
+  const editor = () =>
+    document
+      .querySelector("[data-dependency-editor]")
+      ?.getAttribute("data-dependency-editor");
+
+  test("Keep editing on a day whose prerequisites became private: the submitted list is kept, Save is withheld with its reason", async () => {
+    const root = await seededTask({ title: "Hang the washing" });
+    const pre = await seededTask({ title: "Run the washing machine" });
+    const { t } = await mount({
+      root,
+      prerequisite: pre,
+      preview: (r) => answer(r, [], { unavailable: true }),
+      drafts: [conflicted(root, pre)],
+    });
+    await keepEditing(t);
+    expect(editor()).toBe("unavailable");
+    expect(
+      document.querySelector(`[data-editor-item="${pre.occurrenceId}"]`),
+    ).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+    ).toBeDisabled();
+    expect(document.body).toHaveTextContent(DEPENDENCY_COPY.editorUnavailable);
+    expect(t.drafts().map((d) => d.local_id)).toEqual([
+      "70000000-0000-4000-8000-000000000997",
+    ]);
+  });
+
+  test("control: Keep editing on a day with nothing private saves as a replacement of the refused set", async () => {
+    const root = await seededTask({ title: "Hang the washing" });
+    const pre = await seededTask({ title: "Run the washing machine" });
+    const { t } = await mount({
+      root,
+      prerequisite: pre,
+      preview: (r) => answer(r, []),
+      drafts: [conflicted(root, pre)],
+    });
+    await keepEditing(t);
+    expect(editor()).toBe("open");
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.save }));
+    await t.until(
+      () =>
+        t.drafts().length === 1 &&
+        t.drafts()[0]?.local_id !== "70000000-0000-4000-8000-000000000997",
+    );
+    expect(t.drafts()[0]?.kind).toBe("set_dependencies");
+    expect(t.bodies()[0]?.command.command).toMatchObject({
+      prerequisites: [pre.occurrenceId],
+    });
+  });
+
+  test("Keep editing on a day this person may no longer edit: withheld (denied), nothing replaced", async () => {
+    const base = await seededTask({ title: "Hang the washing" });
+    const root = {
+      ...base,
+      rows: base.rows.map((r) =>
+        r.id === base.occurrenceId ? { ...r, can_edit: false } : r,
+      ),
+    };
+    const pre = await seededTask({ title: "Run the washing machine" });
+    const { t } = await mount({
+      root,
+      prerequisite: pre,
+      preview: (r) => answer(r, []),
+      drafts: [conflicted(root, pre)],
+    });
+    await keepEditing(t);
+    expect(editor()).toBe("denied");
+    expect(
+      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+    ).toBeDisabled();
+  });
+
+  test("a NEW list opened from a preview that has since become private: Save waits for the editor's own fresh read, which withholds it", async () => {
+    const root = await seededTask({ title: "Hang the washing" });
+    let reads = 0;
+    let release: () => void = () => undefined;
+    const fresh = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const api = fakeApi({
+      readDependencies: async () => {
+        reads += 1;
+        if (reads > 1) await fresh;
+        return answer(root, [], { unavailable: reads > 1 });
+      },
+    });
+    const t = await mountTasks({ path: path(root), rows: root.rows, api });
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.set }) !== null,
+    );
+    const before = reads;
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.set }));
+    await t.until(() => editor() !== undefined && reads > before);
+    await t.settle();
+    // The re-read is outstanding: the preview the editor was opened from (nothing private then) admits nothing.
+    expect(reads, "the editor read the preview again").toBeGreaterThan(before);
+    expect(editor()).toBe("loading");
+    expect(
+      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+    ).toBeDisabled();
+    release();
+    await t.until(() => editor() === "unavailable");
+    expect(editor()).toBe("unavailable");
+    expect(
+      screen.getByRole("button", { name: DEPENDENCY_COPY.save }),
+    ).toBeDisabled();
+  });
+});
+
 describe("identity (A18)", () => {
   test("MU-10C-33: a preview asked under one identity is never shown under another", async () => {
     const root = await seededTask({ title: "Hang the washing" });

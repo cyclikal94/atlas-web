@@ -430,6 +430,8 @@ export async function mountTasks(options: {
   /** WEB-10c: rows of other stores seeded before the screens mount (catch-up sequences, a timer copy in `sync_state`). */
   sequences?: object[];
   timerCopy?: unknown;
+  /** WEB-10c revision 1: overlay rows (`pending_effects`) seeded with the drafts, so an acknowledged draft's effect still stands. */
+  effects?: object[];
 }): Promise<Mounted> {
   assertNoOpenActScope("mountTasks");
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
@@ -446,6 +448,8 @@ export async function mountTasks(options: {
       world.idb.seed(NAME, "drafts", options.drafts as never);
     if (options.sequences?.length)
       world.idb.seed(NAME, "materialise_sequences", options.sequences as never);
+    if (options.effects?.length)
+      world.idb.seed(NAME, "pending_effects", options.effects as never);
     if (options.timerCopy !== undefined) {
       const sync = world.idb.peek(NAME, "sync_state", "singleton") as
         | SyncStateRow

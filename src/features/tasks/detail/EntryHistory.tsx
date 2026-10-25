@@ -784,6 +784,8 @@ export function EntryHistory({
     }
   };
 
+  // Every pending entry, landed or not: a landed correction still says which entry it replaced. One that is shown already (synced) is
+  // not added again below, by its id, which for a completion is the server's own (review R6).
   const pending = row.drafts
     .flatMap((d) => pendingEvidenceListOf(d, env.accountId))
     .filter((p) => p.occurrenceId === row.id);

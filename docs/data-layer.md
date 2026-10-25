@@ -754,6 +754,15 @@ the current epoch is shown with no request, one persisted for another epoch is n
   `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).
 * **Retention.** Nothing new: a discarded or rejected timer draft's `timer_session` version record is removed by the existing recompute
   (no other draft targets it and nothing is cached for it); the wipe removes both records with the account's database.
+* **The defaults-review confirmation of a draft that seeded its target (WEB-10c revision 1; found by I-10C-TM5 against the released
+  backend).** `confirmDefaultsReview`'s supersession retires the refused draft's own contribution to the version records first, then
+  rebuilds its targets from the stored header (`model/review-confirmation.ts`, `targetsOf`). The rebuild re-seeded only primaries that are
+  not version-checked, so a draft that had SEEDED a version-checked target (the stream a first Anyone `record`, `start_timer` or
+  `complete_dependencies` creates: a checked primary or a side effect with `seedIfUntracked`) was refused `no_base`, and the reviewed command
+  could only be discarded; WEB-10a's first Anyone record had the same defect. Every rebuilt target now carries the draft's OWN recorded base
+  as its seed. `resolveTargets` uses a seed only when nothing tracks or caches the target, i.e. when this draft seeded it; a base tracked or
+  cached meanwhile wins, and the rebuild's `build` still refuses any base other than the stored one (`rebuild_refused`), so no command is
+  sent on a version it was not composed against (`tests/data/outbox-defaults-review.test.ts`, MU-3064/3065).
 
 ## Snapshot, production leadership and recovery (WEB-09b)
 

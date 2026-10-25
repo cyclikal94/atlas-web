@@ -104,6 +104,7 @@ async function setup(
   } as unknown as TasksApi;
   const waits: number[] = [];
   let online = true;
+  let writable = true;
   let ids = 0;
   const make = (
     over: {
@@ -118,7 +119,7 @@ async function setup(
       epoch: 1,
       service: over.service ?? (() => t.env.service()),
       online: () => online,
-      writable: () => true,
+      writable: () => writable,
       now: () => NOW,
       newId: () => {
         ids += 1;
@@ -155,6 +156,9 @@ async function setup(
     stored,
     setOnline: (value: boolean) => {
       online = value;
+    },
+    setWritable: (value: boolean) => {
+      writable = value;
     },
   };
 }
@@ -466,5 +470,149 @@ describe("one runner per account, and its identity", () => {
     await w.idle(runner);
     expect(w.sent).toHaveLength(1);
     expect(w.stored()).toBeUndefined();
+  });
+});
+
+/**
+ * Revision 1 (review R1): work that stopped PART-WAY (a pause that can clear, not a stop) resumes THE SAME sequence when what paused it
+ * clears: `kick` (connectivity, compatibility or the binding moved) or `ensure` of the task (Today's next read). The stored attempt is
+ * resent with its own key, an answered call has only its position read (CM-440), and a genuine stop is never restarted.
+ */
+describe("R1: paused work resumes the same sequence", () => {
+  const heldSend = () => {
+    let release: (value: TasksResult<{ revision: number }>) => void = () =>
+      undefined;
+    let asked = false;
+    return {
+      send: () =>
+        new Promise<TasksResult<{ revision: number }>>((resolve) => {
+          asked = true;
+          release = resolve;
+        }),
+      asked: () => asked,
+      release: (value: TasksResult<{ revision: number }>) => release(value),
+    };
+  };
+
+  for (const resume of ["kick", "ensure"] as const)
+    test(`offline between a successful send and its position read: online again (${resume}) the position alone is read and the sequence completes`, async () => {
+      const held = heldSend();
+      const w = await setup({
+        script: {
+          positions: [detail("2026-09-01", true), detail(TODAY, false)],
+          sends: [held.send],
+        },
+      });
+      const runner = w.make();
+      runner.ensure(TASK, "daily");
+      for (let i = 0; i < 100 && !held.asked(); i += 1) await w.t.settle();
+      expect(w.sent).toHaveLength(1);
+      expect(w.stored()?.phase).toBe("submitting");
+      w.setOnline(false);
+      held.release(OK);
+      await w.idle(runner);
+      // The answer was committed; the read it needs waits for the connection.
+      expect(w.stored()?.phase).toBe("awaiting_position_read");
+      expect(w.reads()).toBe(1);
+      w.setOnline(true);
+      if (resume === "kick") runner.kick();
+      else runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      expect(w.stored(), "the sequence completed").toBeUndefined();
+      expect(w.reads(), "exactly one more read: the position").toBe(2);
+      expect(w.sent, "no new materialise").toHaveLength(1);
+      expect(runner.get().finished).toBe(1);
+    });
+
+  test("the session held the send (not_sent): kicked, the stored attempt is resent with ITS key", async () => {
+    const w = await setup({
+      script: {
+        positions: [detail("2026-09-01", true), detail(TODAY, false)],
+        sends: [{ ok: false, kind: "not_sent" } as never, OK],
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.stored()?.phase).toBe("submitting");
+    expect(w.sent).toHaveLength(1);
+    runner.kick();
+    await w.idle(runner);
+    expect(w.sent).toHaveLength(2);
+    expect(w.sent[1]?.key, "the same key, never a fresh one").toBe(
+      w.sent[0]?.key,
+    );
+    expect(w.stored()).toBeUndefined();
+  });
+
+  test("compatibility lost after the first read: nothing is written past ready or sent; compatible again (kick) one attempt is written, sent once and the sequence completes", async () => {
+    const w = await setup({
+      script: {
+        positions: [
+          async () => {
+            // The read is answered; compatibility is lost before the attempt is sent.
+            w.setWritable(false);
+            return detail("2026-09-01", true);
+          },
+          detail(TODAY, false),
+        ],
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.sent).toHaveLength(0);
+    // The sequence was begun and left as it stood: ready, no attempt (it is written only when it is about to be sent).
+    expect(w.stored()?.phase).toBe("ready");
+    expect(w.stored()?.attempt).toBeNull();
+    w.setWritable(true);
+    runner.kick();
+    await w.idle(runner);
+    expect(w.sent).toHaveLength(1);
+    expect(w.stored()).toBeUndefined();
+  });
+
+  test("a read that throws part-way is a pause, not an end: kicked, only the position is read and the sequence completes", async () => {
+    const w = await setup({
+      script: {
+        positions: [
+          detail("2026-09-01", true),
+          async () => {
+            throw new Error("a thrown read");
+          },
+          detail(TODAY, false),
+        ],
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.stored()?.phase).toBe("awaiting_position_read");
+    expect(w.sent).toHaveLength(1);
+    runner.kick();
+    await w.idle(runner);
+    expect(w.stored()).toBeUndefined();
+    expect(w.sent).toHaveLength(1);
+  });
+
+  test("control: a genuine stop is not parked: kick and ensure restart nothing; the healthy two-call completion is unchanged", async () => {
+    const w = await setup({
+      script: {
+        positions: [detail("2026-09-01", true), detail("2026-09-01", true)],
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.stored()?.phase).toBe("stopped");
+    expect(w.stored()?.stop?.reason).toBe("no_progress");
+    const sent = w.sent.length;
+    const reads = w.reads();
+    runner.kick();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.sent).toHaveLength(sent);
+    expect(w.reads()).toBe(reads);
+    expect(w.stored()?.phase).toBe("stopped");
   });
 });

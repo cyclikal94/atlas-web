@@ -2,6 +2,7 @@ import { useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { useTaskActions } from "../actions";
+import { useCatchUpService } from "../catchup/useCatchUp";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import {
@@ -63,6 +64,8 @@ export function TodayPage({
   onChange(next: { day?: string; zone?: string }): void;
 }) {
   const env = useTasksEnv();
+  // The page's catch-up service, live on every task screen (review R8): the banner uses it only while tasks are pending.
+  useCatchUpService();
   const view = useTodayView(day, zone);
   const actions = useTaskActions();
   const [filter, setFilter] = useState<Filter>("all");

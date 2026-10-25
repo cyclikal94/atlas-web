@@ -21,7 +21,7 @@ import { useTasksEnv } from "../env";
 import { dayLabel } from "../format";
 import { useScopedRead } from "../local-read";
 import { noteIfRefused } from "../memory";
-import { pendingEvidenceListOf } from "../model/commands";
+import { pendingOn } from "../model/commands";
 import {
   type OccurrenceData,
   parseDefinition,
@@ -171,15 +171,15 @@ async function readLocal(
     latest.map((day, i) => {
       const stream = streams[i] as string;
       const row: CacheRow | null = rows.get(stream)?.merged ?? null;
-      const pending = ordered
-        .flatMap((d) => pendingEvidenceListOf(d, me))
-        .filter((p) => p.occurrenceId === day.id);
+      const state = row ? parseProgressState(row.value) : null;
+      // What has landed in the synced stream is not layered again (F4; review R6).
+      const pending = pendingOn(ordered, me, day.id, state);
       return {
         id: day.id,
         data: day.data,
         result: personalResult({
           occurrence: day.data,
-          stream: row ? parseProgressState(row.value) : null,
+          stream: state,
           pending,
           streamPending: pending.length > 0,
           me,

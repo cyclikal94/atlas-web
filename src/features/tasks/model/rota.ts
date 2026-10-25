@@ -81,44 +81,63 @@ export function nextOrdinal(
   return latest === undefined ? 0 : latest.ordinal + 1;
 }
 
-/** The next `count` dates of a repeating task after `after` (by its cadence; dates only, in the task's own calendar). */
+const ymd = (date: string) =>
+  date.split("-").map(Number) as [number, number, number];
+const dayNumber = (date: string) => {
+  const [y, m, d] = ymd(date);
+  return Date.UTC(y, m - 1, d) / 86_400_000;
+};
+const isoOf = (y: number, m: number, d: number) =>
+  `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+/**
+ * The next `count` dates of a repeating task after `after`, as the server generates them (`crates/core/src/tasks/schedule.rs`, `slots`):
+ * every candidate is derived from the schedule's OWN start date (`start + n × interval` days, weeks, months or years), never from the
+ * previous result, and a month or year whose day does not exist (31 April, 29 February outside a leap year) is SKIPPED, not clamped. The
+ * walk starts at the candidate the server would reach for `after` and is bounded as the server's is (4,096 probes).
+ */
 export function nextDates(
   definition: TaskDefinition,
   after: string,
   count: number,
 ): string[] {
-  const repeat = definition.schedule.repeat;
+  const { repeat, start_date: start } = definition.schedule;
   if (repeat === null || repeat.frequency === "after_completion") return [];
+  if (start === null) return [];
+  const [sy, sm, sd] = ymd(start);
+  const [ay, am] = ymd(after);
+  const n = repeat.interval;
+  let index = 0;
+  if (after > start) {
+    const distance =
+      repeat.frequency === "daily"
+        ? dayNumber(after) - dayNumber(start)
+        : repeat.frequency === "weekly"
+          ? Math.floor((dayNumber(after) - dayNumber(start)) / 7)
+          : repeat.frequency === "monthly"
+            ? (ay - sy) * 12 + am - sm
+            : ay - sy;
+    index = Math.floor(distance / n);
+  }
   const out: string[] = [];
-  let date = after;
-  for (let i = 0; i < count; i += 1) {
-    switch (repeat.frequency) {
-      case "daily":
-        date = addDays(date, repeat.interval);
-        break;
-      case "weekly":
-        date = addDays(date, 7 * repeat.interval);
-        break;
-      case "monthly":
-      case "yearly": {
-        const [y, m, d] = date.split("-").map(Number) as [
-          number,
-          number,
-          number,
-        ];
-        const months =
-          repeat.frequency === "monthly"
-            ? repeat.interval
-            : 12 * repeat.interval;
-        const total = y * 12 + (m - 1) + months;
-        const year = Math.floor(total / 12);
-        const month = (total % 12) + 1;
-        const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
-        date = `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(Math.min(d, last)).padStart(2, "0")}`;
-        break;
-      }
+  for (let probes = 0; out.length < count && probes < 4096; probes += 1) {
+    const step = index * n;
+    index += 1;
+    let candidate: string | null;
+    if (repeat.frequency === "daily") candidate = addDays(start, step);
+    else if (repeat.frequency === "weekly")
+      candidate = addDays(start, 7 * step);
+    else {
+      const total =
+        sy * 12 + (sm - 1) + (repeat.frequency === "yearly" ? 12 * step : step);
+      const year = Math.floor(total / 12);
+      const month = (total % 12) + 1;
+      if (year > 9999) break;
+      const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      candidate = sd > last ? null : isoOf(year, month, sd);
     }
-    out.push(date);
+    if (candidate === null || candidate <= after) continue;
+    out.push(candidate);
   }
   return out;
 }

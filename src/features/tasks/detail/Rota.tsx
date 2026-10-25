@@ -143,8 +143,11 @@ async function sendAccess(
   }
 }
 
-/** The rota of the task (`GET /tasks/{id}/rota`) and whether I take part now (`GET /tasks/{id}/enrolment`), online, per identity. */
-function useRota(taskId: string) {
+/**
+ * The rota of the task (`GET /tasks/{id}/rota`) and whether I take part now (`GET /tasks/{id}/enrolment`), online, per identity.
+ * Exported for its hook-level identity test (the screens remount on another identity, which hides this hook's own rule).
+ */
+export function useRota(taskId: string) {
   const env = useTasksEnv();
   const [state, setState] = useState<{
     scope: string;
@@ -337,10 +340,11 @@ export function RotaPanel({
           )}
         </span>
       ) : null}
-      {open && state !== null ? (
+      {open && state !== null && canEditOrder ? (
         <RotaDialog
           taskId={row.taskId}
           state={state}
+          editor={canEditOrder}
           days={days}
           definition={definition}
           names={names}
@@ -356,6 +360,7 @@ export function RotaPanel({
 function RotaDialog({
   taskId,
   state,
+  editor,
   days,
   definition,
   names,
@@ -364,6 +369,12 @@ function RotaDialog({
 }: {
   taskId: string;
   state: RotaState;
+  /**
+   * The reader may edit the execution (review R7): the server then fills `eligible_participants`, so an EMPTY list is a known answer
+   * (nobody has joined and agreed now) and every projected turn is left open. For any other reader the server withholds the list
+   * (always empty), which says nothing: eligibility is then unknown.
+   */
+  editor: boolean;
   days: ReadonlyArray<{ id: string; data: OccurrenceData }>;
   definition: TaskDefinition | null;
   names: ReadonlyMap<string, string>;
@@ -415,10 +426,7 @@ function RotaDialog({
     saved,
     ordinal: nextOrdinal(turns, state),
     count: upcoming.length,
-    eligible:
-      state.eligible_participants.length > 0
-        ? state.eligible_participants
-        : null,
+    eligible: editor ? state.eligible_participants : null,
   });
   const save = async (resend: boolean) => {
     const ticket = input.submit();

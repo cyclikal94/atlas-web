@@ -187,6 +187,26 @@ function classifyRead(
 
 const POSITION_READ = (taskId: string) => `task:${taskId}`;
 
+/** One task to bring up to date, as asked. `resume`: the item of a sequence this page paused, resumed (its day is known). */
+interface Item {
+  taskId: string;
+  trigger: Trigger;
+  throughDate?: string;
+  manual: boolean;
+  resume?: boolean;
+}
+
+/**
+ * How one task's work ended (review R1): `done` when nothing more is to happen without the person (complete, a stop recorded or shown,
+ * already handled on this page); `paused` when it stopped part-way for a reason that can clear (offline, not compatible, the session
+ * held, a write not applied, a thrown read or store), with the day of the sequence it was working on once that is known.
+ */
+type Outcome = { kind: "done" } | { kind: "paused"; throughDate?: string };
+const DONE: Outcome = { kind: "done" };
+const PAUSED: Outcome = { kind: "paused" };
+const keyed = (outcome: Outcome, throughDate: string): Outcome =>
+  outcome.kind === "paused" ? { kind: "paused", throughDate } : outcome;
+
 export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const sleep = deps.sleep ?? sleepFor;
   const locks =
@@ -194,12 +214,14 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       ? (globalThis.navigator?.locks ?? null)
       : deps.locks;
   const listeners = new Set<() => void>();
-  const queue: Array<{
-    taskId: string;
-    trigger: Trigger;
-    throughDate?: string;
-    manual: boolean;
-  }> = [];
+  const queue: Item[] = [];
+  /**
+   * Work paused part-way, by task (review R1): a durable sequence left `ready`, `submitting` or `awaiting_position_read` that this page
+   * must take up again when what paused it clears (`kick`: connectivity, compatibility or the binding moved; `ensure` of the task; "Try
+   * again"). It resumes THE SAME key: its stored attempt is resent with its own key, or only its position is read (CM-440); a genuine stop
+   * is never parked, so it is never restarted.
+   */
+  const parked = new Map<string, Item>();
   /** `task|day` of every automatic sequence this page began or found: never begun again automatically. */
   const attempted = new Set<string>();
   /** The day each task was last brought up to date (or found stopped) through, in its zone: Today asks again on every read. */
@@ -219,6 +241,28 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const set = (patch: Partial<RunnerState>) => {
     state = { ...state, ...patch };
     for (const listener of [...listeners]) listener();
+  };
+  const park = (item: Item, throughDate: string | undefined) => {
+    if (disposed) return;
+    const day = throughDate ?? item.throughDate;
+    parked.set(item.taskId, {
+      ...item,
+      ...(day === undefined ? {} : { throughDate: day }),
+      resume: day !== undefined,
+    });
+  };
+  /** Paused work back in the queue, first (it was asked first), unless the task is queued or worked on already. */
+  const unpark = (taskId?: string) => {
+    const items = [...parked.values()].filter(
+      (p) => taskId === undefined || p.taskId === taskId,
+    );
+    for (const item of items) parked.delete(item.taskId);
+    const fresh = items.filter(
+      (p) =>
+        !queue.some((q) => q.taskId === p.taskId) && state.current !== p.taskId,
+    );
+    if (fresh.length > 0) queue.unshift(...fresh);
+    return fresh.length > 0;
   };
   const publishQueue = (current: string | null = state.current) =>
     set({
@@ -276,7 +320,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const drive = async (
     start: Sequence,
     todayOf: () => string,
-  ): Promise<void> => {
+  ): Promise<Outcome> => {
     let row: Sequence | null = start;
     const key: SequenceKey = {
       task_id: start.task_id,
@@ -284,7 +328,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     };
     while (row !== null && row.phase !== "stopped") {
       const service = alive();
-      if (service === null || !mayRun()) return;
+      if (service === null || !mayRun()) return PAUSED;
       const step = recover(row);
       if (step === "continue") {
         // `ready`: the attempt is written BEFORE it is sent.
@@ -296,7 +340,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           row,
           next,
         );
-        if (out === null) return;
+        if (out === null) return PAUSED;
         row = out.stored;
         continue;
       }
@@ -308,10 +352,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           attempt.key,
         );
         const answer = classifySend(result);
-        if (answer.kind === "pause" || alive() === null) return;
+        if (answer.kind === "pause" || alive() === null) return PAUSED;
         const next = onSent(row, answer);
         const out = await commit(service, captured, key, row, next);
-        if (out === null) return;
+        if (out === null) return PAUSED;
         row = out.stored;
         if (
           answer.kind === "uncertain" &&
@@ -325,28 +369,29 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (step === "read") {
         const captured = service.capture(deps.epoch);
         const read = await readPosition(row.task_id);
-        if (read.answer.kind === "pause" || alive() === null) return;
+        if (read.answer.kind === "pause" || alive() === null) return PAUSED;
         const next = onRead(row, read.answer, todayOf());
         const out = await commit(service, captured, key, row, next);
-        if (out === null) return;
+        if (out === null) return PAUSED;
         row = out.stored;
         if (row === null) {
           set({ finished: state.finished + 1 });
-          return;
+          return DONE;
         }
         if (read.answer.kind === "uncertain" && row.phase !== "stopped")
           await sleep(RETRY_DELAYS_MS[row.read_failures - 1] ?? 4_000);
         continue;
       }
-      return;
+      return DONE;
     }
     if (row?.phase === "stopped") set({ stops: state.stops + 1 });
+    return DONE;
   };
 
   /** Finds or begins the sequence of one task through its day, then drives it. */
-  const work = async (item: (typeof queue)[number]): Promise<void> => {
+  const work = async (item: Item): Promise<Outcome> => {
     let service = alive();
-    if (service === null) return;
+    if (service === null) return PAUSED;
     // The first read: the task's zone (its day) and position. Uncertain answers are retried with the same pacing; a definite refusal or
     // no answer at all is a stop this page shows (nothing is recorded: there was nothing to send).
     let read: PositionRead | null = null;
@@ -359,11 +404,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       failures += 1;
       if (failures >= MAX_READ_FAILURES) break;
       await sleep(RETRY_DELAYS_MS[failures - 1] as number);
-      if (!mayRun()) return;
+      if (!mayRun()) return PAUSED;
     }
     service = alive();
     if (service === null || read === null || read.answer.kind === "pause")
-      return;
+      return PAUSED;
     if (read.answer.kind !== "ok" || read.zone === null) {
       const reason =
         read.answer.kind === "uncertain" ? "unreachable" : "rejected";
@@ -374,7 +419,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           : {}),
       });
       set({ stops: state.stops + 1 });
-      return;
+      return DONE;
     }
     const zone = read.zone;
     const today = () => todayIn(zone, deps.now());
@@ -384,29 +429,57 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       through_date: throughDate,
     };
     const mark = `${item.taskId}|${throughDate}`;
-    if (!item.manual && attempted.has(mark)) return;
+    if (!item.manual && !item.resume && attempted.has(mark)) return DONE;
     attempted.add(mark);
     settledThrough.set(item.taskId, { zone, day: throughDate });
+    // From here the work is this sequence's: a pause resumes THIS key (`park`), never a new day's or a fresh attempt's. A thrown read
+    // or store is such a pause too (its record says where it stands).
+    const paused: Outcome = { kind: "paused", throughDate };
+    try {
+      return await sequence(service, item, read.answer, {
+        key,
+        throughDate,
+        today,
+        captured,
+        paused,
+      });
+    } catch {
+      return paused;
+    }
+  };
+
+  /** The sequence of one task through its day: adopted as stored, or begun; then driven. */
+  const sequence = async (
+    service: AccountService,
+    item: Item,
+    answer: Extract<ReadAnswer, { kind: "ok" }>,
+    at: {
+      key: SequenceKey;
+      throughDate: string;
+      today: () => string;
+      captured: ReturnType<AccountService["capture"]>;
+      paused: Outcome;
+    },
+  ): Promise<Outcome> => {
+    const { key, throughDate, today, captured, paused } = at;
     const stored = await readMaterialiseSequenceNow(service, key);
-    if (stored === undefined) return;
+    if (stored === undefined) return paused;
     if (stored !== null) {
       // Adopted: a sequence another page began, or one this page left on a reload. A stop is shown, never resumed automatically.
-      if (stored.phase === "stopped") return;
+      if (stored.phase === "stopped") return DONE;
       if (stored.phase === "awaiting_position_read") {
         // Its call was answered before this page held the lock, so the read just made was asked after it: it is the sequence's position
         // read (one read, never another `materialise`; CM-440), admitted only over the row as found.
-        const next = onRead(stored, read.answer, today());
+        const next = onRead(stored, answer, today());
         const out = await commit(service, captured, key, stored, next);
-        if (out === null) return;
+        if (out === null) return paused;
         if (out.stored === null) {
           set({ finished: state.finished + 1 });
-          return;
+          return DONE;
         }
-        await drive(out.stored, today);
-        return;
+        return keyed(await drive(out.stored, today), throughDate);
       }
-      await drive(stored, today);
-      return;
+      return keyed(await drive(stored, today), throughDate);
     }
     const fresh = begin({
       taskId: item.taskId,
@@ -414,12 +487,12 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       trigger: item.trigger,
       generation: deps.newId(),
       nowMs: deps.now(),
-      position: read.answer.position,
+      position: answer.position,
       today: today(),
     });
     if (fresh === null) {
       set({ finished: state.finished + 1 });
-      return;
+      return DONE;
     }
     const created = await commit(
       service,
@@ -428,7 +501,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       null,
       fresh,
     );
-    if (created === null || created.stored === null) return;
+    if (created === null) return paused;
+    if (created.stored === null) return DONE;
     // Housekeeping: the task's earlier days that are not running.
     void pruneOlderSequences(service, service.capture(deps.epoch), {
       task_id: item.taskId,
@@ -436,20 +510,23 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     });
     if (created.stored.phase === "stopped") {
       set({ stops: state.stops + 1 });
-      return;
+      return DONE;
     }
-    await drive(created.stored, today);
+    return keyed(await drive(created.stored, today), throughDate);
   };
 
   const loop = async (): Promise<void> => {
     while (queue.length > 0 && mayRun()) {
-      const item = queue.shift() as (typeof queue)[number];
+      const item = queue.shift() as Item;
       publishQueue(item.taskId);
+      let outcome: Outcome;
       try {
-        await work(item);
+        outcome = await work(item);
       } catch {
-        // A thrown read or store: this task is left as its record says; the next ensure or "Try again" starts again.
+        // A thrown read or store: the work did not end, so it is kept as a pause (its record says where it stands).
+        outcome = PAUSED;
       }
+      if (outcome.kind === "paused") park(item, outcome.throughDate);
       publishQueue(null);
     }
   };
@@ -484,6 +561,12 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     identity: deps.identity,
     ensure(taskId, trigger, options = {}) {
       if (disposed) return;
+      // Work on this task that paused part-way is taken up again (review R1), whichever trigger asks.
+      if (unpark(taskId)) {
+        publishQueue();
+        pump();
+        return;
+      }
       if (queue.some((q) => q.taskId === taskId) || state.current === taskId)
         return;
       // Brought up to date (or found stopped) through this task's today already on this page: nothing to ask again.
@@ -529,6 +612,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
             if (out === null) return;
           }
         }
+        // The person's act supersedes paused work on the task: it is asked for again, once.
+        parked.delete(taskId);
         if (queue.some((q) => q.taskId === taskId) || state.current === taskId)
           return;
         queue.push({
@@ -541,7 +626,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         pump();
       })();
     },
-    kick: pump,
+    kick() {
+      if (disposed) return;
+      if (unpark()) publishQueue();
+      pump();
+    },
     get: () => state,
     subscribe(listener) {
       listeners.add(listener);
@@ -553,6 +642,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (disposed) return;
       disposed = true;
       queue.length = 0;
+      parked.clear();
       abort.abort();
       set({ active: [], current: null, waiting: false });
     },

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { type MaterialiseSequenceRow, useCachedResources } from "../../../data";
+import type { RunnerState } from "../catchup/runner";
 import { useCatchUp } from "../catchup/useCatchUp";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -33,7 +34,7 @@ export const CATCH_UP_COPY = {
 } as const;
 
 /** The latest day's sequence of each task (a task has at most a few: older ones are pruned when a later day begins). */
-function latestByTask(
+export function latestByTask(
   rows: readonly MaterialiseSequenceRow[],
 ): Map<string, MaterialiseSequenceRow> {
   const out = new Map<string, MaterialiseSequenceRow>();
@@ -43,6 +44,37 @@ function latestByTask(
       out.set(row.task_id, row);
   }
   return out;
+}
+
+/** A task's stopped catch-up, as this page knows it: its latest day's record when stopped, else a stop held in memory only. */
+export interface ShownStop {
+  taskId: string;
+  throughDate: string | undefined;
+  reason: StopReason;
+  requestId: string | undefined;
+}
+export function stopFor(
+  taskId: string,
+  latest: ReadonlyMap<string, MaterialiseSequenceRow>,
+  state: RunnerState,
+): ShownStop | null {
+  const row = latest.get(taskId);
+  if (row?.phase === "stopped" && row.stop !== null)
+    return {
+      taskId,
+      throughDate: row.through_date,
+      reason: row.stop.reason,
+      requestId: row.stop.request_id,
+    };
+  const memory = state.unrecorded.get(taskId);
+  return memory === undefined
+    ? null
+    : {
+        taskId,
+        throughDate: undefined,
+        reason: memory.reason,
+        requestId: memory.requestId,
+      };
 }
 
 /**
@@ -83,27 +115,8 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
     return row?.merged.label ?? CATCH_UP_COPY.untitled;
   };
   const stopped = pendingTasks.flatMap((taskId) => {
-    const row = latest.get(taskId);
-    if (row?.phase === "stopped" && row.stop !== null)
-      return [
-        {
-          taskId,
-          throughDate: row.through_date as string | undefined,
-          reason: row.stop.reason,
-          requestId: row.stop.request_id,
-        },
-      ];
-    const memory = state.unrecorded.get(taskId);
-    return memory === undefined
-      ? []
-      : [
-          {
-            taskId,
-            throughDate: undefined,
-            reason: memory.reason,
-            requestId: memory.requestId,
-          },
-        ];
+    const stop = stopFor(taskId, latest, state);
+    return stop === null ? [] : [stop];
   });
   const working = pendingTasks.filter(
     (taskId) =>

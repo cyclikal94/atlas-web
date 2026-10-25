@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { SyncStateRow } from "../../../src/data/model/types";
 import type { TasksResult } from "../../../src/features/tasks/api";
+import { TIMER_COPY } from "../../../src/features/tasks/detail/Timer";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import type { AccountTimerPage } from "../../../src/features/tasks/model/contract";
 import { TIMERS_COPY } from "../../../src/features/tasks/timers/TimersPage";
@@ -194,5 +195,124 @@ describe("offline: the copy (D-10c-4)", () => {
     expect(document.querySelector("[data-timers-history]")).toHaveTextContent(
       TIMERS_COPY.historyOffline,
     );
+  });
+});
+
+/**
+ * Revision 1 (review R3): the account's list applies the detail's stop rules at its own entry point. Beyond the server's 7-day cap a Stop
+ * asks first ("Record the first 7 days" or "Discard the session") and queues nothing until the person chooses; a closed day records up to
+ * its close; and a session whose stop or discard is on its way from this device shows its mark and offers no second one.
+ */
+describe("R3: the list's Stop asks as the detail's does", () => {
+  const seconds = (over: Parameters<typeof seededTask>[0] = {}) =>
+    seededTask({
+      title: "Practise piano",
+      ...over,
+      definition: {
+        goal: {
+          kind: "numeric",
+          minimum: "1800",
+          maximum: null,
+          unit: "seconds",
+        },
+        carry: "retain_one",
+        ...over.definition,
+      },
+    });
+  const stopOf = (id: string) =>
+    within(rowOf(id) as HTMLElement).queryByRole("button", { name: "Stop" });
+
+  for (const choice of ["Record the first 7 days", "Discard the session"])
+    test(`beyond 7 days, Stop queues nothing and asks; "${choice}" queues what it says`, async () => {
+      const task = await seconds();
+      const started = now() - 8 * 86_400;
+      const timer = available(task, { started_at: started });
+      const api = fakeApi({
+        readAccountTimers: async (q) =>
+          q.state === "running" ? page([timer]) : page([]),
+      });
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api,
+      });
+      await t.until(() => stopOf(timer.id) !== null);
+      fireEvent.click(stopOf(timer.id) as HTMLElement);
+      await t.until(
+        () =>
+          rowOf(timer.id)?.querySelector("[data-timer-seven-days]") !== null,
+      );
+      expect(t.drafts(), "nothing is queued before the choice").toEqual([]);
+      expect(rowOf(timer.id)).toHaveTextContent(TIMER_COPY.sevenDays);
+      fireEvent.click(
+        within(rowOf(timer.id) as HTMLElement).getByRole("button", {
+          name: choice,
+        }),
+      );
+      await t.until(() => t.drafts().length === 1);
+      expect(t.bodies()[0]?.command.command).toMatchObject(
+        choice === "Record the first 7 days"
+          ? {
+              kind: "stop_timer",
+              session_id: timer.id,
+              expected_version: 4,
+              stopped_at: started + 604_800,
+            }
+          : { kind: "cancel_timer", session_id: timer.id, expected_version: 4 },
+      );
+    });
+
+  test("a closed day (close_incomplete, on this device) records up to its close, and says so", async () => {
+    const closes = now() - 3600;
+    const task = await seconds({
+      definition: { carry: "close_incomplete" },
+      occurrence: { opens_at: closes - 86_400, closes_at: closes },
+    });
+    const timer = available(task, { started_at: closes - 7200 });
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        q.state === "running" ? page([timer]) : page([]),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(
+      () =>
+        stopOf(timer.id) !== null &&
+        (rowOf(timer.id)?.textContent ?? "").includes("This day closed at"),
+    );
+    fireEvent.click(stopOf(timer.id) as HTMLElement);
+    await t.until(() => t.drafts().length === 1);
+    expect(t.bodies()[0]?.command.command).toMatchObject({
+      kind: "stop_timer",
+      stopped_at: closes - 1,
+    });
+  });
+
+  test("a stop on its way: one is queued for two presses, and the row shows its mark with no second Stop while the read still lists it running", async () => {
+    const task = await seconds();
+    const timer = available(task);
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        q.state === "running" ? page([timer]) : page([]),
+    });
+    const t = await mountTasks({
+      path: "/tasks/timers",
+      rows: task.rows,
+      api,
+    });
+    await t.until(() => stopOf(timer.id) !== null);
+    const stop = stopOf(timer.id) as HTMLElement;
+    fireEvent.click(stop);
+    fireEvent.click(stop);
+    await t.until(
+      () => rowOf(timer.id)?.querySelector("[data-timer-pending]") !== null,
+    );
+    await t.settle();
+    expect(t.drafts().filter((d) => d.kind === "stop_timer")).toHaveLength(1);
+    expect(stopOf(timer.id)).toBeNull();
+    expect(
+      within(rowOf(timer.id) as HTMLElement).queryByRole("button", {
+        name: "Discard",
+      }),
+    ).toBeNull();
   });
 });

@@ -18,6 +18,7 @@ import {
   type TaskDefinition,
 } from "./contract";
 import type { PendingEvidence } from "./evaluate";
+import { completionEntryId } from "./ids";
 import { windows } from "./time";
 
 /**
@@ -865,8 +866,10 @@ export function pendingEvidenceOf(
 /**
  * Every piece of MY pending evidence a draft carries, by occurrence (WEB-10c): a `record` of my stream (`pendingEvidenceOf`), and a
  * `complete_dependencies`, which records on my stream of each occurrence it completes (its primary targets: the root, with the person's
- * root evidence or a tick, and in `complete_prerequisites` mode each incomplete prerequisite, with a tick). The server names those entries
- * from the operation's key; here each is named by the draft and occurrence, so it is layered once per draft.
+ * root evidence or a tick, and in `complete_prerequisites` mode each incomplete prerequisite, with a tick). Each completion entry carries
+ * the id the SERVER gives it (`completionEntryId`: from the operation's key, which is the draft's `local_id`, the occurrence and me), so a
+ * synced stream that already lists it shows it has landed (`pendingOn`; review R6, design assessment F4). A key that is not a UUID gives no
+ * entry (the server would refuse the command).
  */
 export function pendingEvidenceListOf(
   draft: Pick<
@@ -895,14 +898,44 @@ export function pendingEvidenceListOf(
       : parseEvidence(command.root_evidence);
   if (rootEvidence === null) return [];
   const happenedAt = command.happened_at;
-  return draft.target_resource_ids.map((occurrenceId) => ({
-    occurrenceId,
-    entryId: `${draft.local_id}:${occurrenceId}`,
-    evidence:
-      occurrenceId === root
-        ? rootEvidence
-        : ({ kind: "checkbox", complete: true } as Evidence),
-    happenedAt,
-    replaces: null,
-  }));
+  return draft.target_resource_ids.flatMap((occurrenceId) => {
+    const entryId = completionEntryId(draft.local_id, occurrenceId, me);
+    return entryId === null
+      ? []
+      : [
+          {
+            occurrenceId,
+            entryId,
+            evidence:
+              occurrenceId === root
+                ? rootEvidence
+                : ({ kind: "checkbox", complete: true } as Evidence),
+            happenedAt,
+            replaces: null,
+          },
+        ];
+  });
+}
+
+/**
+ * MY pending evidence on `occurrenceId`, in draft order, without what has LANDED: an entry the synced stream already lists is not pending
+ * any more, whatever the overlay read (a separate transaction) still says, so it is never counted twice (design assessment F4; review R6).
+ * The row's own result applies the same rule in `composeRow` (`view.ts`); the entry history keeps every pending entry (a landed
+ * correction still says what it replaced) and shows one already listed once, by its id.
+ */
+export function pendingOn(
+  drafts: ReadonlyArray<
+    Pick<
+      DraftWithCommand,
+      "command" | "kind" | "local_id" | "account_id" | "target_resource_ids"
+    >
+  >,
+  me: string,
+  occurrenceId: string,
+  stream: { recent_entries: ReadonlyArray<{ id: string }> } | null,
+): Array<PendingEvidence & { occurrenceId: string }> {
+  const landed = new Set((stream?.recent_entries ?? []).map((e) => e.id));
+  return drafts
+    .flatMap((d) => pendingEvidenceListOf(d, me))
+    .filter((p) => p.occurrenceId === occurrenceId && !landed.has(p.entryId));
 }

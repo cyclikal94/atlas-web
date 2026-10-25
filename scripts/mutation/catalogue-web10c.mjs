@@ -123,11 +123,11 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '      if (stored.phase === "stopped") return;\n',
+        '      if (stored.phase === "stopped") return DONE;\n',
         '      if (stored.phase === "stopped") {\n' +
           "        const again = await commit(service, captured, key, stored, freshBudget(stored));\n" +
           "        if (again?.stored) await drive(again.stored, today);\n" +
-          "        return;\n" +
+          "        return DONE;\n" +
           "      }\n",
       ),
   },
@@ -484,6 +484,301 @@ export const UNIT_10C = [
         t,
         '  if (draft.kind !== "complete_dependencies" || draft.account_id !== me)\n    return [];',
         "  if (true) return [];",
+      ),
+  },
+  // ---- revision 1 (review of 25 October 2026, R1–R9): one or more per correction, each caught by the test written for it --------------
+  {
+    id: "MU-3036",
+    title:
+      "R1: WEB-10c A3: work paused part-way is dropped, not parked for resumption",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /R1: paused work resumes/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (outcome.kind === "paused") park(item, outcome.throughDate);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3037",
+    title:
+      "R1: WEB-10c A3: a read or store that throws part-way ends the sequence's work on this page",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /a read that throws part-way/,
+    patch: (t) =>
+      sub(
+        t,
+        "    } catch {\n      return paused;\n    }",
+        "    } catch {\n      return DONE;\n    }",
+      ),
+  },
+  {
+    id: "MU-3062",
+    title:
+      "R1: WEB-10c A3: Today's next ensure does not take up the task's paused work",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /online again \(ensure\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (unpark(taskId)) {\n        publishQueue();\n        pump();\n        return;\n      }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3063",
+    title:
+      "R1: WEB-10c A3: a kick (connectivity, compatibility, binding) does not take up paused work",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /online again \(kick\)|not_sent|compatibility lost|throws part-way/,
+    patch: (t) => sub(t, "      if (unpark()) publishQueue();\n", ""),
+  },
+  {
+    id: "MU-3038",
+    title:
+      "R2: WEB-10c A15 (B6): a current complete read never supersedes an older copied session",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /R2/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (readSupersedesCopy && !listed.has(s.id)) continue;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3039",
+    title:
+      "R3: WEB-10c A12/A15: the account list's Stop beyond 7 days records the first 7 days without asking",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /beyond 7 days, Stop queues nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (choice.kind === "seven_days") {\n        setChoosing(row.id);\n        return;\n      }',
+        '      if (choice.kind === "seven_days") {\n        await actions.enqueue(\n          stopTimer({ ...input, stoppedAt: choice.capped }),\n          TIMER_COPY.saved,\n        );\n        setAgain((n) => n + 1);\n        return;\n      }',
+      ),
+  },
+  {
+    id: "MU-3040",
+    title:
+      "R3: WEB-10c A15: a session whose stop is on its way is offered another Stop on the account list",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /a stop on its way/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ...(ending.has(row.id) ? { pending: ending.get(row.id) } : {}),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3041",
+    title:
+      "R4: WEB-10c A10 (D-10c-7): Keep editing's save is admitted on connectivity alone",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/dependency-dialog.test.tsx"],
+    expect:
+      /Keep editing on a day whose prerequisites became private|Keep editing on a day this person may no longer edit/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const block = editorBlock({\n    online: env.online,",
+        '  const block = replacing\n    ? env.online\n      ? null\n      : ("offline" as const)\n    : editorBlock({\n    online: env.online,',
+      ),
+  },
+  {
+    id: "MU-3042",
+    title:
+      "R4: WEB-10c A10 (D-10c-7): the editor admits a save on the preview it was opened from, not a fresh one",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/dependency-dialog.test.tsx"],
+    expect: /a NEW list opened from a preview that has since become private/,
+    patch: (t) =>
+      sub(t, "    preview: refreshed ? preview : null,\n", "    preview,\n"),
+  },
+  {
+    id: "MU-3043",
+    title:
+      "R5: WEB-10c A17: a month without the anchor's day is clamped, not skipped",
+    file: "src/features/tasks/model/rota.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /next dates are the server's/,
+    patch: (t) =>
+      sub(
+        t,
+        "      candidate = sd > last ? null : isoOf(year, month, sd);",
+        "      candidate = isoOf(year, month, Math.min(sd, last));",
+      ),
+  },
+  {
+    id: "MU-3044",
+    title:
+      "R5: WEB-10c A17: daily dates are counted from the known day, not the schedule's start (off its grid)",
+    file: "src/features/tasks/model/rota.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /stay on the schedule's grid/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (repeat.frequency === "daily") candidate = addDays(start, step);',
+        '    if (repeat.frequency === "daily")\n      candidate = addDays(after, (out.length + 1) * n);',
+      ),
+  },
+  {
+    id: "MU-3045",
+    title:
+      "R6: WEB-10c A20 (F4): a completion's entries are named by the draft, not as the server names them",
+    file: "src/features/tasks/model/commands.ts",
+    tests: [
+      "tests/features/tasks/freshness-provenance.test.tsx",
+      "tests/features/tasks/streak-page.test.tsx",
+    ],
+    expect:
+      /F4 for a completion|the completion's own entry in the stream|R6 \(history\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const entryId = completionEntryId(draft.local_id, occurrenceId, me);",
+        // The draft-and-day name of the first version (the "$" is split only so the source text is not read as a placeholder).
+        "    const entryId: string | null = `$" +
+          "{draft.local_id}:$" +
+          "{occurrenceId}`;",
+      ),
+  },
+  {
+    id: "MU-3046",
+    title:
+      "R6: WEB-10c A6/A20 (F4): the streak strip layers evidence its synced stream already lists",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /the completion's own entry in the stream/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const pending = pendingOn(ordered, me, day.id, state);",
+        "      const pending = pendingOn(ordered, me, day.id, null);",
+      ),
+  },
+  {
+    id: "MU-3047",
+    title:
+      "R6: WEB-10c: the synchronous SHA-1 encodes the message length in bytes, not bits",
+    file: "src/features/tasks/model/ids.ts",
+    tests: ["tests/features/tasks/ids.test.ts"],
+    expect: /dependency completion entry ids/,
+    patch: (t) =>
+      sub(
+        t,
+        "  view.setUint32(padded.length - 4, (length * 8) >>> 0);",
+        "  view.setUint32(padded.length - 4, length >>> 0);",
+      ),
+  },
+  {
+    id: "MU-3048",
+    title:
+      "R7: WEB-10c A17 (TASK-15): an editor's empty eligibility list is taken as unknown",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /NO ONE eligible now/,
+    patch: (t) =>
+      sub(
+        t,
+        "    eligible: editor ? state.eligible_participants : null,",
+        "    eligible:\n      state.eligible_participants.length > 0\n        ? state.eligible_participants\n        : null,",
+      ),
+  },
+  {
+    id: "MU-3049",
+    title:
+      "R8: WEB-10c A7: the task screens other than Today and the streak hold no catch-up service",
+    file: "src/features/tasks/screens.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect:
+      /the account's timers \(no catch-up shown there\) hold the service too/,
+    patch: (t) =>
+      sub(
+        t,
+        "  // directly opened detail, the list or the account's timers finds a runner for the displayed identity.\n  useCatchUpService();\n",
+        "  // directly opened detail, the list or the account's timers finds a runner for the displayed identity.\n",
+      ),
+  },
+  {
+    id: "MU-3050",
+    title:
+      "R8: WEB-10c A7 (WEB-04 §5.8): a command on one day asks for no catch-up (its task and date are not derived)",
+    file: "src/features/tasks/catchup/useCatchUp.ts",
+    tests: ["tests/features/tasks/catchup-conflicts.test.ts"],
+    expect: /A7:|a day's command|the materialisation_required handler/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (typeof command.occurrence_id === "string")\n    return { kind: "occurrence", occurrenceId: command.occurrence_id };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3060",
+    title:
+      "R8: WEB-10c A7 (WEB-04 §5.8): a stopped catch-up is not shown on the task's detail",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /a stopped catch-up of the task is shown on its detail/,
+    patch: (t) =>
+      sub(
+        t,
+        "      <CatchUpNotice taskId={task.id} title={task.label} />\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3061",
+    title:
+      "R9 (A18; CM-384): a rota answer asked under one identity is applied under another",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /A18: a late rota answer|A18 \(hook\): one reader/,
+    // The guard alone is backed by the render-time scope check; the fault is an answer applied under the CURRENT scope.
+    patch: (t) =>
+      sub(
+        t,
+        "      if (current.current !== asked) return;\n      setState({\n        scope: asked,",
+        "      setState({\n        scope: current.current,",
+      ),
+  },
+  {
+    id: "MU-3064",
+    title:
+      "I-10C-TM5 (rev 1): a refused draft's rebuilt SIDE EFFECT loses the base it seeded (refused no_base)",
+    file: "src/data/model/review-confirmation.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect:
+      /confirmed by a supersession on the seeded base|the side effect version-checked with its recorded basis and its own base/,
+    patch: (t) => sub(t, "      seedIfUntracked: base,\n", ""),
+  },
+  {
+    id: "MU-3065",
+    title:
+      "I-10C-TM5 (rev 1): a refused draft's rebuilt version-checked PRIMARY loses the base it seeded (refused no_base)",
+    file: "src/data/model/review-confirmation.ts",
+    tests: ["tests/data/outbox-defaults-review.test.ts"],
+    expect: /a version-checked PRIMARY it seeded/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ...(base === undefined ? {} : { seedIfUntracked: base }),",
+        "      ...(versionChecked || base === undefined\n        ? {}\n        : { seedIfUntracked: base }),",
       ),
   },
 ];
