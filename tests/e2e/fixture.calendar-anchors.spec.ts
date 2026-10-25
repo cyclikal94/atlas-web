@@ -458,3 +458,79 @@ test.describe("E-ANC3: set_anchor (queued; case 1)", () => {
     }
   });
 });
+
+test.describe("E-ANC4: a section kept mounted through a departure and return (revision 3, review 3 R3c)", () => {
+  test("away and back in one turn: the binding is read for the visit going on, and a panel opened afterwards is kept by its sync control and saved once", async ({
+    context,
+  }) => {
+    test.setTimeout(120_000);
+    const a = buildTask({ n: 46, title: "Put the bins out" });
+    const { page, cal } = await taskPage(
+      context,
+      `/tasks/${a.taskId}`,
+      [a],
+      [source, event(true)],
+      (c) => {
+        c.binding = { binding: { anchor: ANCHOR, version: 2, active: true } };
+      },
+    );
+    await expect(section(page)).toHaveAttribute(
+      "data-anchor-section",
+      "anchored",
+      { timeout: 20_000 },
+    );
+    const reads = anchorReads(cal).length;
+    // The section element is marked, then the address goes away and comes back in one task: the browser's history, the router and the
+    // document all move, and React keeps the same section (asserted by the mark).
+    await section(page).evaluate((el) => {
+      (el as HTMLElement & { r3c?: boolean }).r3c = true;
+    });
+    await page.evaluate((to) => {
+      history.pushState(null, "", "/tasks");
+      dispatchEvent(new PopStateEvent("popstate"));
+      history.pushState(null, "", to);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/tasks/${a.taskId}`);
+    await expect(page).toHaveURL(new RegExp(`/tasks/${a.taskId}$`));
+    expect(
+      await section(page).evaluate(
+        (el) => (el as HTMLElement & { r3c?: boolean }).r3c === true,
+      ),
+      "React kept the section mounted",
+    ).toBe(true);
+    // A new visit: its own read, once.
+    await expect.poll(() => anchorReads(cal).length).toBe(reads + 1);
+    await expect(section(page)).toHaveAttribute(
+      "data-anchor-section",
+      "anchored",
+    );
+    // Typed only now, after the return.
+    await section(page).getByRole("button", { name: "Change anchor…" }).click();
+    let dialog = page.getByRole("dialog", { name: "Anchor to a calendar" });
+    await dialog.getByLabel("Days before (−) or after (+)").fill("-7");
+    await dialog.locator("[data-sync-tone]").click();
+    await expect(dialog).toBeHidden();
+    await expect(page).toHaveURL(/\/sync/);
+    await page.goBack();
+    await expect(section(page)).toBeVisible();
+    await section(page).getByRole("button", { name: "Change anchor…" }).click();
+    dialog = page.getByRole("dialog", { name: "Anchor to a calendar" });
+    await expect(dialog.getByLabel("Days before (−) or after (+)")).toHaveValue(
+      "-7",
+    );
+    await dialog.getByRole("button", { name: "Save anchor" }).click();
+    await expect(dialog).toBeHidden();
+    const bodies = (
+      (await rows(page, "draft_commands")) as Array<{
+        command: { command: { kind: string; anchor?: unknown } };
+      }>
+    ).filter((b) => b.command.command.kind === "set_anchor");
+    expect(bodies.map((b) => b.command.command.anchor)).toEqual([
+      {
+        ...ANCHOR,
+        offset: { kind: "calendar_days", days: -7, time: "18:00:00" },
+      },
+    ]);
+    expect(anchorReads(cal)).toHaveLength(reads + 1);
+  });
+});

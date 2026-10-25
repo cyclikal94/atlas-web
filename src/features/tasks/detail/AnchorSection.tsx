@@ -51,7 +51,13 @@ import {
 } from "../../calendars/copy-anchor";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { type TaskVisit, useTaskScreenAt, useTaskVisit } from "../visit";
+import {
+  onTaskVisitEnded,
+  type TaskVisit,
+  useTaskRouteMoved,
+  useTaskScreenAt,
+  useTaskVisit,
+} from "../visit";
 import {
   type BindingRead,
   bindingOf,
@@ -112,6 +118,7 @@ export function AnchorSection({
   const heading = useId();
   const visitOf = useTaskVisit();
   const screenAt = useTaskScreenAt();
+  const onRouteMoved = useTaskRouteMoved();
   const mountKey = useRef(`mount-${Math.random().toString(36).slice(2)}`);
   const [visit, setVisit] = useState<string | null>(null);
   // Whether the read may still be SENT (R6): while the person is at this task's screen (by its router and the document), or, outside any
@@ -119,16 +126,34 @@ export function AnchorSection({
   // React kept mounted while the address went away and came back in one turn is the screen the person is at again (R36), and a remount
   // (the session's re-check of a `403`) is at the same address.
   const live = useRef<() => boolean>(() => false);
-  // The visit the section is shown on (null outside any router): it owns a panel kept by the in-dialog sync control.
+  // The visit the section is shown on (null outside any router): its binding read is that visit's, and a panel opens on it.
   const owner = useRef<TaskVisit | null>(null);
   const [, changed] = useReducer((n: number) => n + 1, 0);
   useEffect(() => subscribeBinding(changed), []);
+  const bindTo = (going: TaskVisit) => {
+    owner.current = going;
+    const { address } = going;
+    live.current = () => screenAt(address);
+    setVisit(`visit-${going.generation}`);
+  };
+  // The visit going on for this section (revision 3, review 3 R3c). A section React kept mounted while the address went away and came back
+  // in one turn was shown on a visit that has ENDED (the departure let go of everything it owned). Once the person is at its address again
+  // (its router, its history and the document) it is the screen of the visit going on there, which it belongs to from then on: its binding
+  // is that visit's read, and a panel opened from it is that visit's. Asked as the route moves and again as a panel opens (so no ordering of
+  // the router's, the history's and the document's changes leaves a panel opening on the ended visit). Never a visit at another address.
+  const rebind = (): TaskVisit | null => {
+    const was = owner.current;
+    if (was === null || !was.ended() || !screenAt(was.address)) return was;
+    const next = visitOf(env.identity);
+    if (next !== null) bindTo(next);
+    return next;
+  };
   // The visit this section belongs to, asked once it is shown (a section outside any router keeps its read for its own mount only).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for the identity shown
   useEffect(() => {
     const going = visitOf(env.identity);
-    owner.current = going;
     if (going === null) {
+      owner.current = null;
       let mountedHere = true;
       live.current = () => mountedHere;
       setVisit(mountKey.current);
@@ -136,9 +161,10 @@ export function AnchorSection({
         mountedHere = false;
       };
     }
-    const { address } = going;
-    live.current = () => screenAt(address);
-    setVisit(`visit-${going.generation}`);
+    bindTo(going);
+    return onRouteMoved(() => {
+      rebind();
+    });
   }, [env.identity]);
   const read: BindingRead | undefined =
     visit === null ? undefined : bindingOf(env.identity, `${visit}:${task.id}`);
@@ -216,34 +242,57 @@ export function AnchorSection({
     observed: Observation | null;
     /** A save of the session was done while newer input stayed in it: the next save is checked against the task as it is NOW. */
     renewed: boolean;
+    /** The identities of the changes pressed and not yet stored, of the visit the session was opened on (`operationKeys`, R2/R3c). */
+    keys: Map<string, string>;
   };
-  // The session the panel shows (revision 2, R3a/R3b): owned by the task's visit, not by this section or the panel.
-  const [dialog, setDialog] = useState<AnchorEditor<PanelFor> | null>(null);
+  // The session the panel shows (revision 2, R3a/R3b), owned by the task's visit, not by this section or the panel; with the visit it was
+  // opened on (revision 3, R3c; null outside any router).
+  const [dialog, setDialog] = useState<{
+    editor: AnchorEditor<PanelFor>;
+    visit: TaskVisit | null;
+  } | null>(null);
   const panelKey = keptPanelKey(env.identity, task.id);
   // Outside any visit (a section outside a router): this mount's own change identities (`operationKeys`).
   const ownKeys = useRef(new Map<string, string>());
-  // The next panel opened while the visit goes on shows the session the visit kept or left (I1, R3a), else a new one opened for this.
+  // The next panel opened while the visit goes on shows the session the visit kept or left (I1, R3a), else a new one opened for this: on
+  // the visit going on NOW (R3c), never the one an earlier departure ended.
   const open = (from: CalendarAnchor | null, supersede: string | null) => {
-    setDialog(
-      openPanel<PanelFor>(
-        panelKey,
-        owner.current,
-        () => ({
-          draft: from === null ? EMPTY_ANCHOR : anchorDraftOf(from),
-          names: knownNames(from),
-          context: {
-            anchor: from,
-            supersede,
-            observed: view.status === "ready" ? view.value.observation : null,
-            renewed: false,
-          },
-        }),
-        // A stored change of the session ended any conflict it superseded: the next save is an ordinary one, after it in the queue,
-        // checked against the task as it is then.
-        (context) => ({ ...context, supersede: null, renewed: true }),
-      ),
+    const on = rebind();
+    const editor = openPanel<PanelFor>(
+      panelKey,
+      on,
+      () => ({
+        draft: from === null ? EMPTY_ANCHOR : anchorDraftOf(from),
+        names: knownNames(from),
+        context: {
+          anchor: from,
+          supersede,
+          observed: view.status === "ready" ? view.value.observation : null,
+          renewed: false,
+          keys: operationKeys(panelKey, on, ownKeys.current),
+        },
+      }),
+      // A stored change of the session ended any conflict it superseded: the next save is an ordinary one, after it in the queue,
+      // checked against the task as it is then.
+      (context) => ({ ...context, supersede: null, renewed: true }),
     );
+    if (editor !== null) setDialog({ editor, visit: on });
   };
+  // A panel shown when its visit ends (an ordinary departure, another identity) shows a session that ended with it: the panel closes, never
+  // left showing input it can no longer save, even where React keeps the section (R3c).
+  useEffect(() => {
+    const shown = dialog;
+    const on = shown?.visit ?? null;
+    if (on === null) return;
+    const close = () => setDialog((d) => (d === shown ? null : d));
+    if (on.ended()) {
+      close();
+      return;
+    }
+    return onTaskVisitEnded((ended) => {
+      if (ended === on) close();
+    });
+  }, [dialog]);
   const observedNow = view.status === "ready" ? view.value.observation : null;
 
   // `context`: what the saving session was opened for, as it is when the save is pressed (whichever panel or section shows it).
@@ -256,8 +305,8 @@ export function AnchorSection({
     if (outbox === null) return copy.NO_DATABASE;
     // The identity of each change pressed and not yet stored, so the same change pressed again after a refusal (or a failure that may
     // have stored it) is recognised; a STORED change's identity is retired (R2): pressing a change again later, even one equal to an earlier
-    // one (A, B, then A), is a new operation.
-    const keys = operationKeys(panelKey, owner.current, ownKeys.current);
+    // one (A, B, then A), is a new operation. The session's visit's, taken when it was opened (R3c).
+    const keys = context.keys;
     const what = JSON.stringify([next, context.supersede]);
     let key = keys.get(what);
     if (key === undefined) {
@@ -335,16 +384,18 @@ export function AnchorSection({
         <span className="flex">
           <Button
             variant="quiet"
-            onClick={() =>
-              visit !== null &&
+            onClick={() => {
+              if (visit === null) return;
+              // The visit going on (R3c): a section kept mounted through a departure and return reads as the visit it is shown on now.
+              const on = rebind();
               readBindingAgain(
                 env.identity,
-                visit,
+                on === null ? visit : `visit-${on.generation}`,
                 task.id,
                 env.api,
                 live.current,
-              )
-            }
+              );
+            }}
           >
             {TRY_AGAIN}
           </Button>
@@ -421,23 +472,23 @@ export function AnchorSection({
       </span>
       {dialog !== null ? (
         <AnchorDialog
-          editor={dialog}
+          editor={dialog.editor}
           repeats={repeats}
           onSave={(next, _names, _draft, context) => save(next, context)}
-          {...(dialog.context().anchor !== null || anchor !== null
+          {...(dialog.editor.context().anchor !== null || anchor !== null
             ? { onRemove: (context: PanelFor) => save(null, context) }
             : {})}
-          {...(owner.current === null
+          {...(dialog.visit === null
             ? {}
             : {
                 onRetain: () =>
-                  retainPanel(panelKey, dialog as AnchorEditor<unknown>),
+                  retainPanel(panelKey, dialog.editor as AnchorEditor<unknown>),
               })}
           // Cancel, Escape, the close icon: the session shown ends unless the sync control kept it; a consumed one has left already. Only
           // the session shown closes this panel (never an earlier one's late answer).
           onClose={() => {
-            if (!dialog.retained())
-              discardPanel(panelKey, dialog as AnchorEditor<unknown>);
+            if (!dialog.editor.retained())
+              discardPanel(panelKey, dialog.editor as AnchorEditor<unknown>);
             setDialog((d) => (d === dialog ? null : d));
           }}
         />

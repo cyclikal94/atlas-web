@@ -238,8 +238,8 @@ export const UNIT_13B_R1 = [
     patch: (t) =>
       sub(
         t,
-        "        (context) => ({ ...context, supersede: null, renewed: true }),\n",
-        "        (context) => ({ ...context, renewed: true }),\n",
+        "      (context) => ({ ...context, supersede: null, renewed: true }),\n",
+        "      (context) => ({ ...context, renewed: true }),\n",
       ),
   },
   {
@@ -341,10 +341,11 @@ export const UNIT_13B_R1 = [
   {
     id: "MU-2495",
     title:
-      "WEB-13b R6 (I-CAL-ANC1 finding): the read's lifetime is the FIRST visit's (a section kept mounted across away-and-back never reads again)",
+      "WEB-13b R6 (I-CAL-ANC1 finding): the read's lifetime is the visit's, not the task screen's (revision 3: a section kept mounted across away-and-back follows the visit going on, so the same patch now sends an unsent read from the sync screens, where the visit goes on but the person is not at the task)",
     file: SECTION,
     tests: [T_SECTION],
-    expect: /away from the task and back in one turn/,
+    expect:
+      /away from the task and back in one turn|while the person checks the sync screens/,
     patch: (t) =>
       sub(
         t,

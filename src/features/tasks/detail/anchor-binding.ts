@@ -10,7 +10,8 @@ import { forgetRefusal, noteIfRefused, refusalOf } from "../memory";
  *
  * A read is the visit's (R6): `live` (the visit going on) is asked before EVERY admission of the request, the first included and each
  * one after a `not_sent` wait, so a read never sent while the person was on the task is never sent once they have left it. What was
- * already sent is still answered and recorded (a refusal is the identity's, whatever became of the visit).
+ * already sent is still answered and recorded (a refusal is the identity's, whatever became of the visit). A read no longer kept (a
+ * newer visit's read replaced it, revision 3 R3c, or Try again started it again) is not admitted either: one request per read.
  */
 export type BindingRead =
   | { kind: "reading" }
@@ -81,7 +82,9 @@ export function readBinding(
   const token = tokens;
   own.reads.set(key, { read: { kind: "reading" }, token });
   notify();
-  void api.readAnchor(taskId, live).then((result) => {
+  const kept = () =>
+    live() && memory === own && own.reads.get(key)?.token === token;
+  void api.readAnchor(taskId, kept).then((result) => {
     noteIfRefused(identity, anchorReadKey(taskId), result);
     const now = memory;
     if (now === null || now.identity !== identity) return;

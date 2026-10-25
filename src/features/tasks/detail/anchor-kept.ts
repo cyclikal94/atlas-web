@@ -69,20 +69,24 @@ const holdsInput = (editor: AnchorEditor<unknown>): boolean => {
  * The session the panel opening now for `key` shows, on `owner`'s visit (null: a section outside any router, whose panels keep nothing):
  * the visit's kept or left session, else a new one from `fresh`. `renew` makes what the next save is checked against after a done save of
  * the session that left newer input.
+ *
+ * `owner` is the visit going on at the moment the panel opens (revision 3, review 3 R3c): a visit that has ended owns nothing from then on
+ * (its end has already let go of what it had), so no panel opens on it (null). The caller asks for the visit going on, not the one it was
+ * shown on: an ended visit is never taken for a section outside any router.
  */
 export function openPanel<C>(
   key: string,
   owner: TaskVisit | null,
   fresh: () => { draft: AnchorDraft; names: AnchorNames; context: C },
   renew: (context: C) => C,
-): AnchorEditor<C> {
+): AnchorEditor<C> | null {
+  if (owner?.ended()) return null;
   forgetOtherIdentities(key);
   const held = panels.get(key);
   if (
     held !== undefined &&
     owner !== null &&
     held.owner === owner &&
-    !owner.ended() &&
     !held.editor.ended() &&
     (held.editor.retained() || holdsInput(held.editor))
   ) {

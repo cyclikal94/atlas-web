@@ -753,7 +753,11 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
   holds the input, the save being made and its outcome, so a save settles on its own session whether the panel is shown, kept by its
   in-dialog sync control or shown again (before or after the save completes); Cancel ends only the session it showed, and an ended
   session's late save changes nothing; the visit's end ends them all. A change's identity (R2) is kept per task for the visit, apart from
-  the sessions. The new-task form keeps the panel's state in its session (`FormInput.panel`).
+  the sessions. A panel opens on the visit going on WHEN IT OPENS (revision 3, R3c): a section React kept mounted while the person went
+  away and came back in one turn follows the visit going on there once its router, its history and the document are at its address (as
+  the route moves, and again as a panel opens), so its binding is that visit's read and the next panel's input is that visit's; no panel
+  opens on an ended visit (`openPanel` answers null), a panel shown when its visit ends closes, and an unsent read a newer visit's read
+  replaced is not sent. The new-task form keeps the panel's state in its session (`FormInput.panel`).
 * **`?move=` (`model/move.ts`).** "Review this move…" links to `/tasks/<id>?occurrence=<id>&move=<YYYY-MM-DD[THH:MM:SS]>`. The value is read
   strictly in the lazy detail screen (the entry route's search validation is unchanged, for the first-load budget), consumed ONCE per value,
   and opens the day's correction only when it is the displayed day and I may correct it; the seed fills only a NEW session (a resumed one

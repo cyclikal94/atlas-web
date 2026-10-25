@@ -98,7 +98,7 @@ export const UNIT_13B_R2 = [
     file: KEPT,
     tests: [T_SECTION],
     expect:
-      /retried as the same operation|R3b: a cancelled panel's save completing/,
+      /retried as the same operation|R3b: a cancelled panel's save completing|the same change pressed in a NEW panel of a NEW section mount/,
     patch: (t) =>
       sub(
         t,
@@ -145,7 +145,7 @@ export const UNIT_13B_R2 = [
     patch: (t) =>
       sub(
         t,
-        "            if (!dialog.retained())\n              discardPanel(panelKey, dialog as AnchorEditor<unknown>);\n",
+        "            if (!dialog.editor.retained())\n              discardPanel(panelKey, dialog.editor as AnchorEditor<unknown>);\n",
         "",
       ),
   },

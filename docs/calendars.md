@@ -173,7 +173,8 @@ owns the input, the save being made (one at a time) and what it said; a save set
 cancelled panel's late save changes nothing) whichever panel shows it then. Told that the task changed, the person's next press saves the
 task as it is then (still checked when written). The in-dialog sync control keeps the session for the next panel opened while the task's
 visit goes on (ia.md §1.3.3, I1; `tasks/detail/anchor-kept.ts`, owned by the visit, for the task detail; a panel that left without Cancel
-leaves its input there too; the form's own session for the new-task form); the import dialog
+leaves its input there too; the panel belongs to the visit going on when it opens, even in a section React kept mounted through a departure
+and return, revision 3 R3c; the form's own session for the new-task form); the import dialog
 does not keep input there, as WEB-13a's calendar dialogs do not: the Calendars screen's visit ends at the sync screens (`visit.ts`). The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
@@ -207,6 +208,7 @@ Unit and component (jsdom, the production controller and plans over the IndexedD
 
 WEB-13b: `tests/features/calendars/{import-model,anchor-model}.test.ts`, `{import-ui,review-panel}.test.tsx`,
 `tests/features/tasks/{anchor-section,task-form-anchor}.test.tsx`, `tests/data/{outbox-calendar-extension,outbox-answers,pending-reads,plan-inventory}.test.ts`
-(the answers, the seam, E6 and the header read); native `tests/e2e/fixture.calendar-{import,anchors,reviews}.spec.ts` (E-IMP1–6, E-ANC1–3,
+(the answers, the seam, E6 and the header read); native `tests/e2e/fixture.calendar-{import,anchors,reviews}.spec.ts` (E-IMP1–6, E-ANC1–4,
 E-REV1–3; helpers in `calendar-13b-helpers.ts`); released backend I-CAL-IMP1–4, I-CAL-ANC1 and I-CAL-REV1 in the calendar integration spec; mutants
-MU-2437..MU-2469 (`scripts/mutation/catalogue-web13b.mjs`).
+MU-2437..MU-2469 (`scripts/mutation/catalogue-web13b.mjs`; revisions 1–3 in `catalogue-web13b-r{1,2,3}.mjs`, revision 3's owner alone in
+`tests/features/tasks/anchor-kept.test.ts`).

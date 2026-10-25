@@ -27,6 +27,7 @@ import {
   mountTasks,
   type SeededTask,
   seededTask,
+  tasksEnv,
 } from "../../support/tasks/world";
 
 /**
@@ -1046,6 +1047,76 @@ describe("revision 1: a binding read is the visit's; never sent after it ends (R
     expect(section()).toHaveTextContent(words.NOT_ANCHORED);
   });
 
+  test.each([
+    ["the person stays on the task (control)", false, 2],
+    [
+      "the person goes away and back in one turn (the section kept mounted)",
+      true,
+      2,
+    ],
+  ])(
+    "revision 3 (R3c): a held read answered not_sent while %s is admitted again only while it is still the read the section shows",
+    async (_, bounce, admissions) => {
+      const task = await seededTask();
+      const held = heldApi();
+      const t = await mounted(task, {
+        binding: (live) => held.api.readAnchor(task.taskId, live),
+      });
+      expect(held.counter.calls).toBe(1);
+      if (bounce) {
+        const before = section();
+        await act(async () => {
+          t.router.history.push("/tasks");
+          t.router.history.push(`/tasks/${task.taskId}`);
+        });
+        await t.settle();
+        expect(section()).toBe(before);
+        // The visit going on there reads for itself (one request).
+        expect(held.counter.calls).toBe(2);
+      }
+      // The API's own first not_sent wait (50 ms) is real: no timer is shortened.
+      await act(async () => {
+        held.release();
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      });
+      await t.settle();
+      // Stayed: the held read is sent again. Away and back: the ended visit's read is not sent beside the new visit's.
+      expect(held.counter.calls).toBe(admissions);
+      expect(section()).toHaveTextContent(words.NOT_ANCHORED);
+    },
+  );
+
+  test("revision 3: a held read answered not_sent while the person checks the sync screens (the visit goes on there) is not sent from there; back at the task, the visit reads", async () => {
+    const task = await seededTask();
+    const held = heldApi();
+    const t = await mounted(task, {
+      binding: (live) => held.api.readAnchor(task.taskId, live),
+    });
+    expect(held.counter.calls).toBe(1);
+    await act(async () => {
+      await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await t.settle();
+    expect(section()).toBeNull();
+    // The API's own first not_sent wait (50 ms) is real: no timer is shortened.
+    await act(async () => {
+      held.release();
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    });
+    await t.settle();
+    // The read is the task SCREEN's: the person is not at it, although the visit goes on.
+    expect(held.counter.calls).toBe(1);
+    await act(async () => {
+      t.router.history.back();
+    });
+    await t.settle();
+    await t.until(() => section() !== null);
+    await t.until(() => held.counter.calls >= 2);
+    await t.settle();
+    expect(held.counter.calls).toBe(2);
+    expect(section()).toHaveTextContent(words.NOT_ANCHORED);
+  });
+
   test("untilSentWhile asks live and connectivity before EVERY admission, the first included; an answer to a sent request is returned as it is", async () => {
     const notSent = { ok: false as const, kind: "not_sent" as const };
     let calls = 0;
@@ -1832,5 +1903,556 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
     expect(dialogNow()).toBeNull();
     // All three are real enqueues: their queue order is the store's own sequence.
     expect(offsets(t)).toEqual(dayOffsets(-2, -9, -3));
+  });
+});
+
+describe("revision 3: a panel opened from a section React kept mounted belongs to the visit going on (review 3 R3c)", () => {
+  /** The binding as the server shows it; `days` per read, in order (the last repeats). */
+  const reads = (...list: number[]) => {
+    let n = 0;
+    return {
+      rows: [sourceRow],
+      binding: async () => {
+        const days = list[Math.min(n, list.length - 1)] as number;
+        n += 1;
+        return {
+          ok: true as const,
+          value: {
+            binding: {
+              anchor: {
+                ...ANCHOR,
+                offset: {
+                  kind: "calendar_days" as const,
+                  days,
+                  time: "18:00:00",
+                },
+              },
+              version: 1,
+              active: true,
+            },
+          },
+        };
+      },
+    };
+  };
+  const dialogNow = () => screen.queryByRole("dialog");
+  /** Change anchor…: a panel opens (asserted, so a panel that does not open is an assertion's failure, not a query's). */
+  async function openChange(t: Mounted) {
+    fireEvent.click(
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.CHANGE_ANCHOR,
+        }),
+      ),
+    );
+    await t.settle();
+    return present(dialogNow());
+  }
+  async function viaSyncControl(t: Mounted, dialog: HTMLElement) {
+    const chip = present(
+      within(dialog)
+        .queryAllByRole("button")
+        .find((b) => b.hasAttribute("data-sync-tone")) ?? null,
+    );
+    await act(async () => {
+      fireEvent.click(chip);
+      await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+  }
+  async function backToTask(t: Mounted, task: SeededTask) {
+    await act(async () => {
+      await t.router.navigate({
+        to: "/tasks/$taskId",
+        params: { taskId: task.taskId },
+        search: {},
+      } as never);
+    });
+    await t.settle();
+    await t.until(() => section() !== null);
+  }
+  /** Shapes of an ordinary departure and return that React may not unmount the section through. */
+  const BOUNCES = {
+    "push away, push back": (t: Mounted, task: SeededTask) => {
+      t.router.history.push("/tasks");
+      t.router.history.push(`/tasks/${task.taskId}`);
+    },
+    "replace away, push back": (t: Mounted, task: SeededTask) => {
+      t.router.history.replace("/tasks");
+      t.router.history.push(`/tasks/${task.taskId}`);
+    },
+    "push away, Back": (t: Mounted) => {
+      t.router.history.push("/tasks");
+      t.router.history.back();
+    },
+  } as const;
+  type Bounce = keyof typeof BOUNCES;
+  /** Away from the task and back in one turn: the departure ends the visit, and the SAME section is still shown (asserted). */
+  async function bounce(
+    t: Mounted,
+    task: SeededTask,
+    shape: Bounce = "push away, push back",
+  ) {
+    const before = section();
+    expect(before).not.toBeNull();
+    await act(async () => {
+      BOUNCES[shape](t, task);
+    });
+    await t.settle();
+    expect(t.router.state.location.pathname).toBe(`/tasks/${task.taskId}`);
+    expect(section(), "React kept the section mounted").toBe(before);
+  }
+  const days = (dialog: HTMLElement) =>
+    (within(dialog).getByLabelText(words.DAYS_LABEL) as HTMLInputElement).value;
+  const setDays = (dialog: HTMLElement, value: string) =>
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value },
+    });
+  const press = (dialog: HTMLElement, name: string) =>
+    fireEvent.click(present(within(dialog).queryByRole("button", { name })));
+  const saveButton = (dialog: HTMLElement) =>
+    present(
+      within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+    ) as HTMLButtonElement;
+  const offsets = (t: Mounted) =>
+    anchorDrafts(t).map((d) =>
+      JSON.stringify(
+        (bodyOf(t, d.local_id)?.anchor as CalendarAnchor | null | undefined)
+          ?.offset ?? null,
+      ),
+    );
+  const dayOffsets = (...list: number[]) =>
+    list.map((n) =>
+      JSON.stringify({ kind: "calendar_days", days: n, time: "18:00:00" }),
+    );
+  /** Holds the delivery of the outbox's answer to the NEXT enqueue; the change itself is written first (it IS stored). */
+  function holdStored(t: Mounted) {
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = outbox.enqueue.bind(outbox);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(outbox, "enqueue").mockImplementationOnce(async (request) => {
+      const outcome = await original(request);
+      await gate;
+      return outcome;
+    });
+    return async () => {
+      await act(async () => release());
+      await t.settle();
+    };
+  }
+  /** Types newer input with a hidden value: −`n` days, a title filter, then the person-date reference (which hides that filter). */
+  function editWithHidden(dialog: HTMLElement, n: number, filter: string) {
+    setDays(dialog, `-${n}`);
+    fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
+      target: { value: filter },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+    );
+  }
+
+  test.each([
+    ["no departure (control)", "none"],
+    ["away and back in one turn, the section kept mounted", "bounce"],
+    [
+      "a completed departure and return, the section mounted again (control)",
+      "remount",
+    ],
+  ] as const)(
+    "input typed in a panel opened after %s is kept through the sync screens, resumed whole and saved once",
+    async (_, before) => {
+      const task = await seededTask();
+      const t = await mounted(task, reads(-1));
+      const first = section();
+      if (before === "bounce") await bounce(t, task);
+      if (before === "remount") {
+        await act(async () => {
+          await t.router.navigate({ to: "/tasks" });
+        });
+        await t.settle();
+        expect(section()).toBeNull();
+        await backToTask(t, task);
+        expect(section()).not.toBe(first);
+      }
+      // The input is typed only now, after any departure: nothing earlier is asked to survive it.
+      let dialog = await openChange(t);
+      expect(days(dialog)).toBe("-1");
+      editWithHidden(dialog, 7, "kept filter");
+      await viaSyncControl(t, dialog);
+      await backToTask(t, task);
+      dialog = await openChange(t);
+      expect(days(dialog), "the input typed after the return").toBe("-7");
+      expect(
+        within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+      ).toBeChecked();
+      fireEvent.click(
+        within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+      );
+      expect(within(dialog).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
+        "kept filter",
+      );
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+      expect(anchorDrafts(t)).toHaveLength(1);
+      expect(bodyOf(t, anchorDrafts(t)[0]?.local_id as string)?.anchor).toEqual(
+        {
+          ...ANCHOR,
+          offset: { kind: "calendar_days", days: -7, time: "18:00:00" },
+          title_contains: "kept filter",
+        },
+      );
+    },
+  );
+
+  test.each(Object.keys(BOUNCES) as Bounce[])(
+    "away and back in one turn by %s: a panel opened afterwards is kept by the sync control",
+    async (shape) => {
+      const task = await seededTask();
+      const t = await mounted(task, reads(-1));
+      await bounce(t, task, shape);
+      let dialog = await openChange(t);
+      setDays(dialog, "-6");
+      await viaSyncControl(t, dialog);
+      await backToTask(t, task);
+      dialog = await openChange(t);
+      expect(days(dialog)).toBe("-6");
+    },
+  );
+
+  test("the section shows the binding as the visit going on read it: away and back in one turn reads it again, once", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, reads(-1, -4));
+    expect(t.api.calls.readAnchor).toBe(1);
+    await bounce(t, task);
+    await t.until(() => (t.api.calls.readAnchor ?? 0) >= 2);
+    await t.settle();
+    expect(t.api.calls.readAnchor).toBe(2);
+    const dialog = await openChange(t);
+    expect(days(dialog), "the new visit's read").toBe("-4");
+    // Control: the same visit (a remount of the protected tree) reads nothing more.
+    press(dialog, "Cancel");
+    await t.settle();
+    await act(async () => t.remount());
+    await t.settle();
+    await t.until(() => section() !== null);
+    expect(t.api.calls.readAnchor).toBe(2);
+  });
+
+  test("an answer the ended visit's read receives after the new visit read never replaces what the section shows", async () => {
+    const task = await seededTask();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let n = 0;
+    const t = await mounted(task, {
+      rows: [sourceRow],
+      binding: async () => {
+        n += 1;
+        const days = n === 1 ? -3 : -4;
+        if (n === 1) await gate;
+        return {
+          ok: true as const,
+          value: {
+            binding: {
+              anchor: {
+                ...ANCHOR,
+                offset: {
+                  kind: "calendar_days" as const,
+                  days,
+                  time: "18:00:00",
+                },
+              },
+              version: 1,
+              active: true,
+            },
+          },
+        };
+      },
+    });
+    expect(section()?.getAttribute("data-anchor-section")).toBe("reading");
+    await bounce(t, task);
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    await act(async () => release());
+    await t.settle();
+    expect(n).toBe(2);
+    const dialog = await openChange(t);
+    expect(days(dialog)).toBe("-4");
+  });
+
+  test.each([
+    ["with nothing being saved", false],
+    ["with its save still being made", true],
+  ])(
+    "a panel open when the person goes away and back in one turn (%s) closes; the next panel starts from the binding and is the new visit's",
+    async (_, saving) => {
+      const task = await seededTask();
+      const t = await mounted(task, reads(-1));
+      const release = saving ? holdStored(t) : null;
+      let dialog = await openChange(t);
+      setDays(dialog, "-2");
+      if (saving) {
+        press(dialog, words.SAVE_ANCHOR);
+        await t.settle();
+        expect(anchorDrafts(t)).toHaveLength(1);
+        setDays(dialog, "-3");
+      }
+      await bounce(t, task);
+      // Its session ended with its visit: never left showing input it can no longer save.
+      expect(dialogNow()).toBeNull();
+      await t.until(
+        () => section()?.getAttribute("data-anchor-section") === "anchored",
+      );
+      dialog = await openChange(t);
+      expect(days(dialog)).toBe("-1");
+      setDays(dialog, "-7");
+      if (release !== null) await release();
+      // The ended session's late completion neither changes nor closes the new panel.
+      expect(dialogNow()).not.toBeNull();
+      expect(days(dialog)).toBe("-7");
+      expect(within(dialog).queryByText(words.ANCHOR_SAVED_NEWER)).toBeNull();
+      await viaSyncControl(t, dialog);
+      await backToTask(t, task);
+      dialog = await openChange(t);
+      expect(days(dialog)).toBe("-7");
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+      expect(offsets(t)).toEqual(saving ? dayOffsets(-2, -7) : dayOffsets(-7));
+    },
+  );
+
+  test("a panel open when another identity is shown closes; back to the first identity, the next panel starts from the binding", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, reads(-1));
+    const dialog = await openChange(t);
+    setDays(dialog, "-5");
+    await act(async () =>
+      t.rerender(
+        tasksEnv(t.api, {
+          identity: "22222222-2222-4222-8222-222222222222:1",
+        }),
+      ),
+    );
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    await act(async () => t.rerender(tasksEnv(t.api)));
+    await t.settle();
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    const again = await openChange(t);
+    expect(days(again)).toBe("-1");
+  });
+
+  test("a change of only the query keeps the visit: the open panel goes on and its save is the visit's", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, reads(-1));
+    const first = section();
+    let dialog = await openChange(t);
+    setDays(dialog, "-5");
+    await act(async () => {
+      t.router.history.push(`/tasks/${task.taskId}?from=today`);
+    });
+    await t.settle();
+    expect(section()).toBe(first);
+    expect(dialogNow()).not.toBeNull();
+    expect(days(dialog)).toBe("-5");
+    setDays(dialog, "-6");
+    await viaSyncControl(t, dialog);
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-6");
+    expect(t.api.calls.readAnchor).toBe(1);
+  });
+
+  test.each([
+    ["shown again before the earlier save completes", true],
+    ["shown again after it completes (control)", false],
+  ])(
+    "R3a after away and back in one turn: newer input kept while the earlier save was being made is saved next as a new change, %s",
+    async (_, early) => {
+      const task = await seededTask();
+      const t = await mounted(task, reads(-1));
+      await bounce(t, task);
+      const release = holdStored(t);
+      let dialog = await openChange(t);
+      setDays(dialog, "-2");
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(anchorDrafts(t)).toHaveLength(1);
+      editWithHidden(dialog, 3, "newer filter");
+      await viaSyncControl(t, dialog);
+      if (!early) await release();
+      await backToTask(t, task);
+      dialog = await openChange(t);
+      expect(days(dialog)).toBe("-3");
+      if (early) {
+        expect(saveButton(dialog)).toBeDisabled();
+        await release();
+      }
+      expect(
+        within(dialog).queryByText(words.ANCHOR_SAVED_NEWER),
+      ).not.toBeNull();
+      fireEvent.click(
+        within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+      );
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+      const all = anchorDrafts(t);
+      expect(new Set(all.map((d) => d.local_id)).size).toBe(2);
+      expect(offsets(t)).toEqual(dayOffsets(-2, -3));
+      expect(bodyOf(t, all[1]?.local_id as string)?.anchor).toMatchObject({
+        title_contains: "newer filter",
+      });
+    },
+  );
+
+  test("R3b after away and back in one turn: a cancelled panel's success never settles the next panel's refused save, which is kept and retried as the same change", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, reads(-1));
+    await bounce(t, task);
+    const releaseA = holdStored(t);
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    press(dialog, "Cancel");
+    await t.settle();
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    let refuse!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      refuse = resolve;
+    });
+    const asked: string[] = [];
+    vi.spyOn(outbox, "enqueue").mockImplementationOnce(async (request) => {
+      asked.push(String(request.localId));
+      await gate;
+      return { kind: "refused", reason: "storage" } as never;
+    });
+    dialog = await openChange(t);
+    setDays(dialog, "-5");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    await viaSyncControl(t, dialog);
+    await act(async () => refuse());
+    await t.settle();
+    await releaseA();
+    await backToTask(t, task);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-5");
+    expect(
+      within(dialog).queryByText("Couldn't save on this device. Try again."),
+    ).not.toBeNull();
+    // The same spy (its history kept): only the retry's own call is read.
+    const enqueue = vi.spyOn(outbox, "enqueue");
+    const earlier = enqueue.mock.calls.length;
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(
+      enqueue.mock.calls.slice(earlier).map(([r]) => String(r.localId)),
+    ).toEqual(asked);
+    expect(offsets(t)).toEqual(dayOffsets(-2, -5));
+  });
+
+  test("after away and back in one turn, a save that may have been stored is retried by a NEW section mount of the visit as the same operation (stored once)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, reads(-1));
+    await bounce(t, task);
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = outbox.enqueue.bind(outbox);
+    const enqueue = vi
+      .spyOn(outbox, "enqueue")
+      .mockImplementationOnce(async (request) => {
+        await original(request);
+        throw new Error("the completion was lost");
+      });
+    const first = section();
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(anchorDrafts(t)).toHaveLength(1);
+    await viaSyncControl(t, dialog);
+    await backToTask(t, task);
+    expect(section()).not.toBe(first);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    const keys = enqueue.mock.calls.map(([request]) => request.localId);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toBe(keys[1]);
+    expect(anchorDrafts(t)).toHaveLength(1);
+  });
+
+  test("a save that may have been stored, then Cancel: the same change pressed in a NEW panel of a NEW section mount of the visit is the same operation (stored once)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, reads(-1));
+    await bounce(t, task);
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = outbox.enqueue.bind(outbox);
+    const enqueue = vi
+      .spyOn(outbox, "enqueue")
+      .mockImplementationOnce(async (request) => {
+        await original(request);
+        throw new Error("the completion was lost");
+      });
+    let dialog = await openChange(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(anchorDrafts(t)).toHaveLength(1);
+    press(dialog, "Cancel");
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    // A remount of the protected tree: the same visit, a new section.
+    const first = section();
+    await act(async () => t.remount());
+    await t.settle();
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    expect(section()).not.toBe(first);
+    dialog = await openChange(t);
+    expect(days(dialog), "a new panel starts from the binding").toBe("-1");
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    const keys = enqueue.mock.calls.map(([request]) => request.localId);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+    expect(anchorDrafts(t)).toHaveLength(1);
+  });
+
+  test("after away and back in one turn: A, B, then A again queues three changes (a stored change's identity is retired)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, reads(-1));
+    await bounce(t, task);
+    for (const n of ["-2", "-3", "-2"]) {
+      const dialog = await openChange(t);
+      setDays(dialog, n);
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+    }
+    const all = anchorDrafts(t);
+    expect(new Set(all.map((d) => d.local_id)).size).toBe(3);
+    expect(offsets(t)).toEqual(dayOffsets(-2, -3, -2));
   });
 });
