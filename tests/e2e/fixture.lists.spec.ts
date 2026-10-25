@@ -13,7 +13,6 @@ import {
   pageText,
   type SyncStub,
   seedSettled,
-  startLeader,
   startOutbox,
   stubNetwork,
   untilTreeSettled,

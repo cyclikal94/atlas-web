@@ -2,10 +2,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import type { BrowserContext, Page } from "@playwright/test";
 import * as commands from "../../src/features/tasks/model/commands";
 import type { TaskDefinition } from "../../src/features/tasks/model/contract";
-import {
-  occurrenceId,
-  progressId,
-} from "../../src/features/tasks/model/ids";
+import { occurrenceId, progressId } from "../../src/features/tasks/model/ids";
 import * as lists from "../../src/features/tasks/model/lists";
 import { slotOn, todayIn } from "../../src/features/tasks/model/time";
 import {
@@ -89,7 +86,11 @@ async function reopenBound(page: Page, account: string, route: string) {
     await data.startSync(a);
   }, account);
 }
-async function bootAs(context: BrowserContext, who: Who, route = "/tasks/lists") {
+async function bootAs(
+  context: BrowserContext,
+  who: Who,
+  route = "/tasks/lists",
+) {
   const page = await bootHarness(context, "/tasks");
   const id = await signedIn(page, who);
   await leader(page, id.account_id);
@@ -203,7 +204,10 @@ async function serverList(
         `/lists?archived=${archived}&limit=200${after ? `&after=${after}` : ""}`,
       );
       expect(out.status).toBe(200);
-      const page_ = out.body as { items: ListProjection[]; next_after: string | null };
+      const page_ = out.body as {
+        items: ListProjection[];
+        next_after: string | null;
+      };
       const found = page_.items.find((l) => l.id === listId);
       if (found) return found;
       if (page_.next_after === null) break;
@@ -271,9 +275,8 @@ async function makeList(
   grants?: Array<{ kind: "account"; id: string; edit: boolean }>,
 ): Promise<string> {
   const listId = crypto.randomUUID();
-  const create = lists
-    .createList({ listId, name, defaults: null })
-    .build({}).command as { command: Record<string, unknown> };
+  const create = lists.createList({ listId, name, defaults: null }).build({})
+    .command as { command: Record<string, unknown> };
   if (grants)
     await post(page, id, "/task-access-commands", {
       command: {
@@ -298,23 +301,35 @@ async function makeList(
 }
 const accountIdOf = async (page: Page, id: Id, username: string) => {
   const found = (
-    await call(page, id, "GET", `/directory?username=${encodeURIComponent(username)}`)
+    await call(
+      page,
+      id,
+      "GET",
+      `/directory?username=${encodeURIComponent(username)}`,
+    )
   ).body as Array<{ id: string; username: string }>;
   const entry = (found ?? []).find((e) => e.username === username);
   if (!entry) throw new Error(`no directory entry for ${username}`);
   return entry.id;
 };
 const rowsOf = async (page: Page, account: string, store: string) =>
-  (await page.evaluate(
-    ({ a, s }) => window.__atlasData?.rows(a, s as never),
-    { a: account, s: store },
-  )) as Array<Record<string, unknown>>;
-async function untilCached(page: Page, account: string, rid: string, check: (row: Record<string, unknown>) => boolean = () => true) {
+  (await page.evaluate(({ a, s }) => window.__atlasData?.rows(a, s as never), {
+    a: account,
+    s: store,
+  })) as Array<Record<string, unknown>>;
+async function untilCached(
+  page: Page,
+  account: string,
+  rid: string,
+  check: (row: Record<string, unknown>) => boolean = () => true,
+) {
   await expect
     .poll(
       async () => {
         await page.evaluate(() => window.__atlasData?.nudgeSync());
-        const row = (await rowsOf(page, account, "cache")).find((r) => r.id === rid);
+        const row = (await rowsOf(page, account, "cache")).find(
+          (r) => r.id === rid,
+        );
         return row !== undefined && check(row);
       },
       { timeout: 60_000 },
@@ -322,11 +337,13 @@ async function untilCached(page: Page, account: string, rid: string, check: (row
     .toBe(true);
 }
 const queue = async (page: Page, account: string) =>
-  ((await rowsOf(page, account, "drafts")) as Array<{
-    kind: string;
-    status: string;
-    created_seq: number;
-  }>).sort((a, b) => a.created_seq - b.created_seq);
+  (
+    (await rowsOf(page, account, "drafts")) as Array<{
+      kind: string;
+      status: string;
+      created_seq: number;
+    }>
+  ).sort((a, b) => a.created_seq - b.created_seq);
 const pickerBox = (page: Page, taskId: string) =>
   page.getByRole("dialog").locator(`[data-picker-task="${taskId}"] input`);
 
@@ -340,37 +357,64 @@ test.describe("I-LS1: create, add, rename and remove through the UI (L2, L6, L7,
     const t2 = await makeTask(page, id, `I-LS1 two ${stamp}`);
     await untilCached(page, id.account_id, t1);
     await untilCached(page, id.account_id, t2);
-    await page.getByRole("button", { name: "+ New list" }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: "+ New list" })
+      .click({ timeout: 60_000 });
     await page.getByRole("dialog").getByLabel("Name").fill(`I-LS1 ${stamp}`);
-    await page.getByRole("dialog").getByRole("button", { name: "Create list" }).click();
-    await expect(page.locator("[data-list-detail]")).toBeVisible({ timeout: 30_000 });
-    const listId = (await page.locator("[data-list-detail]").getAttribute("data-list-detail")) as string;
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Create list" })
+      .click();
+    await expect(page.locator("[data-list-detail]")).toBeVisible({
+      timeout: 30_000,
+    });
+    const listId = (await page
+      .locator("[data-list-detail]")
+      .getAttribute("data-list-detail")) as string;
     await page.getByRole("button", { name: "Add task to list" }).click();
     await pickerBox(page, t1).check({ timeout: 30_000 });
     await pickerBox(page, t2).check();
-    await page.getByRole("dialog").getByRole("button", { name: "Add selected" }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Add selected" })
+      .click();
     await expect(page.getByRole("dialog")).toBeHidden({ timeout: 30_000 });
     await sendQueue(page);
     await expect
-      .poll(async () => (await serverList(page, id, listId))?.version, { timeout: 60_000 })
+      .poll(async () => (await serverList(page, id, listId))?.version, {
+        timeout: 60_000,
+      })
       .toBe(3);
     await untilCached(page, id.account_id, listId, (r) => r.version === 3);
     await page.getByRole("button", { name: "Rename" }).click();
-    await page.getByRole("dialog").getByLabel("Name").fill(`I-LS1 renamed ${stamp}`);
-    await page.getByRole("dialog").getByRole("button", { name: "Save" }).click();
+    await page
+      .getByRole("dialog")
+      .getByLabel("Name")
+      .fill(`I-LS1 renamed ${stamp}`);
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Save" })
+      .click();
     await expect(page.getByRole("dialog")).toBeHidden({ timeout: 30_000 });
     await sendQueue(page);
     await expect
-      .poll(async () => {
-        const l = await serverList(page, id, listId);
-        return l && [l.label, sorted(l.value.task_ids), l.version];
-      }, { timeout: 60_000 })
+      .poll(
+        async () => {
+          const l = await serverList(page, id, listId);
+          return l && [l.label, sorted(l.value.task_ids), l.version];
+        },
+        { timeout: 60_000 },
+      )
       .toEqual([`I-LS1 renamed ${stamp}`, sorted([t1, t2]), 4]);
     await untilCached(page, id.account_id, listId, (r) => r.version === 4);
-    await page.getByRole("button", { name: `Remove I-LS1 one ${stamp}` }).click({ timeout: 30_000 });
+    await page
+      .getByRole("button", { name: `Remove I-LS1 one ${stamp}` })
+      .click({ timeout: 30_000 });
     await sendQueue(page);
     await expect
-      .poll(async () => (await serverList(page, id, listId))?.value.task_ids, { timeout: 60_000 })
+      .poll(async () => (await serverList(page, id, listId))?.value.task_ids, {
+        timeout: 60_000,
+      })
       .toEqual([t2]);
   });
 });
@@ -392,43 +436,85 @@ test.describe("I-LS2: the access boundary (L11)", () => {
     // Shared with the reader for editing, through the shared sharing editor (WEB-12a) on the list.
     await untilCached(page, id.account_id, listId);
     await go(page, `/tasks/lists/${listId}`);
-    await page.getByRole("button", { name: "Sharing" }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: "Sharing" })
+      .click({ timeout: 60_000 });
     const editor = page.getByRole("dialog", { name: /^Sharing/ });
-    await expect(editor.locator("[data-audience]")).toBeVisible({ timeout: 30_000 });
+    await expect(editor.locator("[data-audience]")).toBeVisible({
+      timeout: 30_000,
+    });
     await editor.getByRole("button", { name: "+ Add account grant" }).click();
-    await editor.getByRole("textbox", { name: "Exact username" }).fill(ACCOUNTS[other].username);
+    await editor
+      .getByRole("textbox", { name: "Exact username" })
+      .fill(ACCOUNTS[other].username);
     await editor.getByRole("button", { name: "Look up" }).click();
-    await editor.getByRole("button", { name: `Choose: ${ACCOUNTS[other].username}` }).click();
-    await editor.locator('[data-grant="account"]').getByRole("radio", { name: "Edit" }).check();
+    await editor
+      .getByRole("button", { name: `Choose: ${ACCOUNTS[other].username}` })
+      .click();
+    await editor
+      .locator('[data-grant="account"]')
+      .getByRole("radio", { name: "Edit" })
+      .check();
     await editor.locator("[data-save]").click();
     await expect(editor).toBeHidden({ timeout: 30_000 });
     const readerContext = await browser.newContext();
     try {
-      const reader = await bootAs(readerContext, other, `/tasks/lists/${listId}`);
+      const reader = await bootAs(
+        readerContext,
+        other,
+        `/tasks/lists/${listId}`,
+      );
       await untilCached(reader.page, reader.id.account_id, listId);
       await untilCached(reader.page, reader.id.account_id, s);
-      await expect(reader.page.locator("[data-list-row]")).toHaveCount(1, { timeout: 30_000 });
-      await expect(reader.page.locator(`[data-list-task="${s}"]`)).toBeVisible();
+      await expect(reader.page.locator("[data-list-row]")).toHaveCount(1, {
+        timeout: 30_000,
+      });
+      await expect(
+        reader.page.locator(`[data-list-task="${s}"]`),
+      ).toBeVisible();
       // The reader's count is what they can see (1), not the list's two references.
-      await expect(reader.page.locator(`[data-list-link="${listId}"] [data-list-count]`)).toHaveAttribute("data-list-count", "1");
+      await expect(
+        reader.page.locator(`[data-list-link="${listId}"] [data-list-count]`),
+      ).toHaveAttribute("data-list-count", "1");
       // Nothing of P on the reader's device: no row, no id in the list value, nothing in the page or the picker.
-      for (const store of ["cache", "drafts", "draft_commands", "pending_effects", "resource_versions"]) {
-        const text = JSON.stringify(await rowsOf(reader.page, reader.id.account_id, store));
+      for (const store of [
+        "cache",
+        "drafts",
+        "draft_commands",
+        "pending_effects",
+        "resource_versions",
+      ]) {
+        const text = JSON.stringify(
+          await rowsOf(reader.page, reader.id.account_id, store),
+        );
         expect(text.includes(p), `P's id in ${store}`).toBe(false);
-        expect(text.includes(privateTitle), `P's title in ${store}`).toBe(false);
+        expect(text.includes(privateTitle), `P's title in ${store}`).toBe(
+          false,
+        );
       }
-      const listRow = (await rowsOf(reader.page, reader.id.account_id, "cache")).find((r) => r.id === listId) as unknown as ListProjection;
+      const listRow = (
+        await rowsOf(reader.page, reader.id.account_id, "cache")
+      ).find((r) => r.id === listId) as unknown as ListProjection;
       expect(listRow.value.task_ids).toEqual([s]);
       expect(await reader.page.content()).not.toContain(privateTitle);
-      await reader.page.getByRole("button", { name: "Add task to list" }).click();
+      await reader.page
+        .getByRole("button", { name: "Add task to list" })
+        .click();
       await expect(reader.page.getByRole("dialog")).toBeVisible();
-      await expect(reader.page.getByRole("dialog")).not.toContainText(privateTitle);
+      await expect(reader.page.getByRole("dialog")).not.toContainText(
+        privateTitle,
+      );
       await reader.page.keyboard.press("Escape");
       // The reader removes the task they can see: the owner's list keeps P.
-      await reader.page.getByRole("button", { name: `Remove I-LS2 shared ${stamp}` }).click();
+      await reader.page
+        .getByRole("button", { name: `Remove I-LS2 shared ${stamp}` })
+        .click();
       await sendQueue(reader.page);
       await expect
-        .poll(async () => (await serverList(page, id, listId))?.value.task_ids, { timeout: 60_000 })
+        .poll(
+          async () => (await serverList(page, id, listId))?.value.task_ids,
+          { timeout: 60_000 },
+        )
         .toEqual([p]);
     } finally {
       await readerContext.close();
@@ -448,41 +534,89 @@ test.describe("I-LS3: the cap counts a task the reader cannot see (L10)", () => 
     const bob = await accountIdOf(page, id, ACCOUNTS[other].username);
     const shared = [];
     for (let i = 0; i < 99; i += 1)
-      shared.push(await makeTask(page, id, `I-LS3 ${stamp} ${i}`, [{ kind: "account", id: bob, edit: false }]));
+      shared.push(
+        await makeTask(page, id, `I-LS3 ${stamp} ${i}`, [
+          { kind: "account", id: bob, edit: false },
+        ]),
+      );
     const hidden = await makeTask(page, id, `I-LS3 hidden ${stamp}`);
-    const listId = await makeList(page, id, `I-LS3 ${stamp}`, [...shared, hidden], [
-      { kind: "account", id: bob, edit: true },
-    ]);
+    const listId = await makeList(
+      page,
+      id,
+      `I-LS3 ${stamp}`,
+      [...shared, hidden],
+      [{ kind: "account", id: bob, edit: true }],
+    );
     const readerContext = await browser.newContext();
     try {
-      const reader = await bootAs(readerContext, other, `/tasks/lists/${listId}`);
-      const mine = await makeTask(reader.page, reader.id, `I-LS3 reader's ${stamp}`);
+      const reader = await bootAs(
+        readerContext,
+        other,
+        `/tasks/lists/${listId}`,
+      );
+      const mine = await makeTask(
+        reader.page,
+        reader.id,
+        `I-LS3 reader's ${stamp}`,
+      );
       await untilCached(reader.page, reader.id.account_id, listId);
       await untilCached(reader.page, reader.id.account_id, mine);
-      await expect(reader.page.locator("[data-list-row]")).toHaveCount(99, { timeout: 60_000 });
-      await reader.page.getByRole("button", { name: "Add task to list" }).click();
-      await reader.page.getByRole("dialog").getByLabel("Search your tasks").fill(`reader's ${stamp}`);
+      await expect(reader.page.locator("[data-list-row]")).toHaveCount(99, {
+        timeout: 60_000,
+      });
+      await reader.page
+        .getByRole("button", { name: "Add task to list" })
+        .click();
+      await reader.page
+        .getByRole("dialog")
+        .getByLabel("Search your tasks")
+        .fill(`reader's ${stamp}`);
       await pickerBox(reader.page, mine).check({ timeout: 30_000 });
-      await reader.page.getByRole("dialog").getByRole("button", { name: "Add selected" }).click();
-      await expect(reader.page.getByRole("dialog")).toBeHidden({ timeout: 30_000 });
+      await reader.page
+        .getByRole("dialog")
+        .getByRole("button", { name: "Add selected" })
+        .click();
+      await expect(reader.page.getByRole("dialog")).toBeHidden({
+        timeout: 30_000,
+      });
       await sendQueue(reader.page);
       await expect
-        .poll(async () => (await queue(reader.page, reader.id.account_id)).map((d) => [d.kind, d.status]), { timeout: 60_000 })
+        .poll(
+          async () =>
+            (await queue(reader.page, reader.id.account_id)).map((d) => [
+              d.kind,
+              d.status,
+            ]),
+          { timeout: 60_000 },
+        )
         .toEqual([["list_item", "blocked"]]);
-      await expect(reader.page.locator("[data-list-refused]")).toContainText("this list is full", { timeout: 30_000 });
+      await expect(reader.page.locator("[data-list-refused]")).toContainText(
+        "this list is full",
+        { timeout: 30_000 },
+      );
       await expect(reader.page.locator("[data-list-row]")).toHaveCount(99);
-      expect((await serverList(page, id, listId))?.value.task_ids).toHaveLength(100);
+      expect((await serverList(page, id, listId))?.value.task_ids).toHaveLength(
+        100,
+      );
       await go(reader.page, "/sync?tab=conflicts");
-      await expect(reader.page.getByRole("button", { name: /Retry/ }).first()).toBeVisible({ timeout: 30_000 });
-      await expect(reader.page.getByRole("button", { name: /Discard/ }).first()).toBeVisible();
+      await expect(
+        reader.page.getByRole("button", { name: /Retry/ }).first(),
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(
+        reader.page.getByRole("button", { name: /Discard/ }).first(),
+      ).toBeVisible();
     } finally {
       await readerContext.close();
     }
     // The owner sees all 100 and cannot add more.
     await untilCached(page, id.account_id, listId);
     await go(page, `/tasks/lists/${listId}`);
-    await expect(page.locator("[data-list-row]")).toHaveCount(100, { timeout: 60_000 });
-    await expect(page.getByRole("button", { name: "Add task to list" })).toBeDisabled();
+    await expect(page.locator("[data-list-row]")).toHaveCount(100, {
+      timeout: 60_000,
+    });
+    await expect(
+      page.getByRole("button", { name: "Add task to list" }),
+    ).toBeDisabled();
   });
 });
 
@@ -497,18 +631,38 @@ test.describe("I-LS4: offline create and add, the create's answer lost (L14)", (
     const t1 = await makeTask(page, id, `I-LS4 task ${stamp}`);
     await untilCached(page, id.account_id, t1);
     // The defaults are read online when the dialog mounts, then the act is offline.
-    await page.getByRole("button", { name: "+ New list" }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: "+ New list" })
+      .click({ timeout: 60_000 });
     await expect
-      .poll(() => page.evaluate((a) => window.__atlasData?.defaultsRecord(a).then((r) => r !== null), id.account_id), { timeout: 30_000 })
+      .poll(
+        () =>
+          page.evaluate(
+            (a) =>
+              window.__atlasData?.defaultsRecord(a).then((r) => r !== null),
+            id.account_id,
+          ),
+        { timeout: 30_000 },
+      )
       .toBe(true);
     await goOffline(page);
     await page.getByRole("dialog").getByLabel("Name").fill(`I-LS4 ${stamp}`);
-    await page.getByRole("dialog").getByRole("button", { name: "Create list" }).click();
-    await expect(page.locator("[data-list-projected]")).toBeVisible({ timeout: 30_000 });
-    const listId = (await page.locator("[data-list-detail]").getAttribute("data-list-detail")) as string;
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Create list" })
+      .click();
+    await expect(page.locator("[data-list-projected]")).toBeVisible({
+      timeout: 30_000,
+    });
+    const listId = (await page
+      .locator("[data-list-detail]")
+      .getAttribute("data-list-detail")) as string;
     await page.getByRole("button", { name: "Add task to list" }).click();
     await pickerBox(page, t1).check({ timeout: 30_000 });
-    await page.getByRole("dialog").getByRole("button", { name: "Add selected" }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Add selected" })
+      .click();
     await expect(page.getByRole("dialog")).toBeHidden({ timeout: 30_000 });
     const rule = await proxy.addRule({
       method: "POST",
@@ -519,12 +673,19 @@ test.describe("I-LS4: offline create and add, the create's answer lost (L14)", (
     await goOnline(page);
     await sendQueue(page);
     await expect
-      .poll(async () => (await serverList(page, id, listId))?.value.task_ids, { timeout: 60_000 })
+      .poll(async () => (await serverList(page, id, listId))?.value.task_ids, {
+        timeout: 60_000,
+      })
       .toEqual([t1]);
-    const all = (await call(page, id, "GET", "/lists?archived=false&limit=200")).body as { items: ListProjection[] };
-    expect(all.items.filter((l) => l.label === `I-LS4 ${stamp}`)).toHaveLength(1);
+    const all = (await call(page, id, "GET", "/lists?archived=false&limit=200"))
+      .body as { items: ListProjection[] };
+    expect(all.items.filter((l) => l.label === `I-LS4 ${stamp}`)).toHaveLength(
+      1,
+    );
     expect((await serverList(page, id, listId))?.version).toBe(2);
-    const log = (await proxy.log()).filter((e) => e.path === `${API}/task-commands`);
+    const log = (await proxy.log()).filter(
+      (e) => e.path === `${API}/task-commands`,
+    );
     expect(log.length).toBeGreaterThanOrEqual(3);
     await proxy.removeRule(rule.id);
   });
@@ -546,39 +707,78 @@ test.describe("I-LS5: another device's rename makes a queued add a version confl
     await untilCached(page, id.account_id, t2);
     await go(page, `/tasks/lists/${listId}`);
     await goOffline(page);
-    await page.getByRole("button", { name: "Add task to list" }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: "Add task to list" })
+      .click({ timeout: 60_000 });
     await pickerBox(page, t1).check({ timeout: 30_000 });
-    await page.getByRole("dialog").getByRole("button", { name: "Add selected" }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Add selected" })
+      .click();
     await expect(page.getByRole("dialog")).toBeHidden({ timeout: 30_000 });
     // Another device renames the list first (version 1 -> 2).
     const before = await serverList(page, id, listId);
-    await post(page, id, "/task-commands", lists.editList({ listId, name: `I-LS5 elsewhere ${stamp}`, policyVersion: before?.policy_version as number }).build({ [listId]: 1 }).command);
+    await post(
+      page,
+      id,
+      "/task-commands",
+      lists
+        .editList({
+          listId,
+          name: `I-LS5 elsewhere ${stamp}`,
+          policyVersion: before?.policy_version as number,
+        })
+        .build({ [listId]: 1 }).command,
+    );
     await goOnline(page);
     await sendQueue(page);
     await expect
-      .poll(async () => (await queue(page, id.account_id)).map((d) => [d.kind, d.status]), { timeout: 60_000 })
+      .poll(
+        async () =>
+          (await queue(page, id.account_id)).map((d) => [d.kind, d.status]),
+        { timeout: 60_000 },
+      )
       .toEqual([["list_item", "version_conflict"]]);
     await go(page, "/sync?tab=conflicts");
-    await page.getByRole("button", { name: /^Details: List change/ }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: /^Details: List change/ })
+      .click({ timeout: 60_000 });
     const item = page.getByRole("dialog");
-    const resend = item.getByRole("button", { name: /Resend as a new operation|Save as new/ }).first();
+    const resend = item
+      .getByRole("button", { name: /Resend as a new operation|Save as new/ })
+      .first();
     await expect(resend).toBeEnabled({ timeout: 30_000 });
     await resend.click();
     await expect(item).toBeHidden({ timeout: 30_000 });
     await sendQueue(page);
     await expect
-      .poll(async () => (await serverList(page, id, listId))?.value.task_ids, { timeout: 60_000 })
+      .poll(async () => (await serverList(page, id, listId))?.value.task_ids, {
+        timeout: 60_000,
+      })
       .toEqual([t1]);
     await untilCached(page, id.account_id, listId, (r) => r.version === 3);
     await go(page, `/tasks/lists/${listId}`);
-    await page.getByRole("button", { name: "Add task to list" }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: "Add task to list" })
+      .click({ timeout: 60_000 });
     await pickerBox(page, t2).check({ timeout: 30_000 });
-    await page.getByRole("dialog").getByRole("button", { name: "Add selected" }).click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Add selected" })
+      .click();
     await sendQueue(page);
     await expect
-      .poll(async () => sorted((await serverList(page, id, listId))?.value.task_ids ?? []), { timeout: 60_000 })
+      .poll(
+        async () =>
+          sorted((await serverList(page, id, listId))?.value.task_ids ?? []),
+        { timeout: 60_000 },
+      )
       .toEqual(sorted([t1, t2]));
-    expect((await queue(page, id.account_id)).filter((d) => d.status === "version_conflict")).toEqual([]);
+    expect(
+      (await queue(page, id.account_id)).filter(
+        (d) => d.status === "version_conflict",
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -595,9 +795,17 @@ test.describe("I-LS6: a sharing change makes a queued rename a Q1 conflict (L13)
     await untilCached(page, id.account_id, listId);
     await go(page, `/tasks/lists/${listId}`);
     await goOffline(page);
-    await page.getByRole("button", { name: "Rename" }).click({ timeout: 60_000 });
-    await page.getByRole("dialog").getByLabel("Name").fill(`I-LS6 renamed ${stamp}`);
-    await page.getByRole("dialog").getByRole("button", { name: "Save" }).click();
+    await page
+      .getByRole("button", { name: "Rename" })
+      .click({ timeout: 60_000 });
+    await page
+      .getByRole("dialog")
+      .getByLabel("Name")
+      .fill(`I-LS6 renamed ${stamp}`);
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Save" })
+      .click();
     await expect(page.getByRole("dialog")).toBeHidden({ timeout: 30_000 });
     const before = await serverList(page, id, listId);
     await post(page, id, "/management-commands", {
@@ -606,25 +814,38 @@ test.describe("I-LS6: a sharing change makes a queued rename a Q1 conflict (L13)
           kind: "replace_policy",
           id: listId,
           expected_version: before?.policy_version,
-          policy: { grants: [{ kind: "account", id: bob, edit: false }], exclude_accounts: [] },
+          policy: {
+            grants: [{ kind: "account", id: bob, edit: false }],
+            exclude_accounts: [],
+          },
         },
       ],
     });
     await goOnline(page);
     await sendQueue(page);
     await expect
-      .poll(async () => (await queue(page, id.account_id)).map((d) => [d.kind, d.status]), { timeout: 60_000 })
+      .poll(
+        async () =>
+          (await queue(page, id.account_id)).map((d) => [d.kind, d.status]),
+        { timeout: 60_000 },
+      )
       .toEqual([["edit_list", "version_conflict"]]);
     await go(page, "/sync?tab=conflicts");
-    await page.getByRole("button", { name: /^Details: List name change/ }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: /^Details: List name change/ })
+      .click({ timeout: 60_000 });
     const item = page.getByRole("dialog");
-    const resend = item.getByRole("button", { name: /Resend as a new operation|Save as new/ }).first();
+    const resend = item
+      .getByRole("button", { name: /Resend as a new operation|Save as new/ })
+      .first();
     await expect(resend).toBeEnabled({ timeout: 30_000 });
     await resend.click();
     await expect(item).toBeHidden({ timeout: 30_000 });
     await sendQueue(page);
     await expect
-      .poll(async () => (await serverList(page, id, listId))?.label, { timeout: 60_000 })
+      .poll(async () => (await serverList(page, id, listId))?.label, {
+        timeout: 60_000,
+      })
       .toBe(`I-LS6 renamed ${stamp}`);
   });
 });
@@ -636,20 +857,32 @@ test.describe("I-LS7: archive and restore through the UI (L12)", () => {
     const listId = await makeList(page, id, `I-LS7 ${stamp}`, []);
     await untilCached(page, id.account_id, listId);
     await go(page, `/tasks/lists/${listId}`);
-    await page.getByRole("button", { name: "Archive" }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: "Archive" })
+      .click({ timeout: 60_000 });
     await sendQueue(page);
     await expect
-      .poll(async () => (await serverList(page, id, listId))?.archived, { timeout: 60_000 })
+      .poll(async () => (await serverList(page, id, listId))?.archived, {
+        timeout: 60_000,
+      })
       .toBe(true);
-    const archived = (await call(page, id, "GET", "/lists?archived=true&limit=200")).body as { items: ListProjection[] };
+    const archived = (
+      await call(page, id, "GET", "/lists?archived=true&limit=200")
+    ).body as { items: ListProjection[] };
     expect(archived.items.map((l) => l.id)).toContain(listId);
     await untilCached(page, id.account_id, listId, (r) => r.archived === true);
-    await page.getByRole("button", { name: "Restore" }).click({ timeout: 30_000 });
+    await page
+      .getByRole("button", { name: "Restore" })
+      .click({ timeout: 30_000 });
     await sendQueue(page);
     await expect
-      .poll(async () => (await serverList(page, id, listId))?.archived, { timeout: 60_000 })
+      .poll(async () => (await serverList(page, id, listId))?.archived, {
+        timeout: 60_000,
+      })
       .toBe(false);
-    const active = (await call(page, id, "GET", "/lists?archived=false&limit=200")).body as { items: ListProjection[] };
+    const active = (
+      await call(page, id, "GET", "/lists?archived=false&limit=200")
+    ).body as { items: ListProjection[] };
     expect(active.items.map((l) => l.id)).toContain(listId);
   });
 });
@@ -662,15 +895,32 @@ test.describe("I-LS8: a real defaults_changed for a queued create (L2, L6)", () 
     provokes(409);
     const { page, id } = await bootAs(context, main);
     const stamp = Date.now() % 100_000;
-    await page.getByRole("button", { name: "+ New list" }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: "+ New list" })
+      .click({ timeout: 60_000 });
     await expect
-      .poll(() => page.evaluate((a) => window.__atlasData?.defaultsRecord(a).then((r) => r !== null), id.account_id), { timeout: 30_000 })
+      .poll(
+        () =>
+          page.evaluate(
+            (a) =>
+              window.__atlasData?.defaultsRecord(a).then((r) => r !== null),
+            id.account_id,
+          ),
+        { timeout: 30_000 },
+      )
       .toBe(true);
     await goOffline(page);
     await page.getByRole("dialog").getByLabel("Name").fill(`I-LS8 ${stamp}`);
-    await page.getByRole("dialog").getByRole("button", { name: "Create list" }).click();
-    await expect(page.locator("[data-list-projected]")).toBeVisible({ timeout: 30_000 });
-    const listId = (await page.locator("[data-list-detail]").getAttribute("data-list-detail")) as string;
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Create list" })
+      .click();
+    await expect(page.locator("[data-list-projected]")).toBeVisible({
+      timeout: 30_000,
+    });
+    const listId = (await page
+      .locator("[data-list-detail]")
+      .getAttribute("data-list-detail")) as string;
     const templates = await call(page, id, "GET", "/defaults/templates");
     await post(page, id, "/management-commands", {
       commands: [
@@ -678,7 +928,8 @@ test.describe("I-LS8: a real defaults_changed for a queued create (L2, L6)", () 
           kind: "set_defaults",
           household_id: null,
           resource_kind: "list",
-          expected_version: (templates.body as { list: { version: number } }).list.version,
+          expected_version: (templates.body as { list: { version: number } })
+            .list.version,
           template: { kind: "private" },
         },
       ],
@@ -686,14 +937,25 @@ test.describe("I-LS8: a real defaults_changed for a queued create (L2, L6)", () 
     await goOnline(page);
     await sendQueue(page);
     await go(page, "/sync?tab=conflicts");
-    await page.getByRole("button", { name: /^Review sharing/ }).click({ timeout: 60_000 });
+    await page
+      .getByRole("button", { name: /^Review sharing/ })
+      .click({ timeout: 60_000 });
     const review = page.getByRole("dialog", { name: "Review sharing" });
-    await expect(review).toContainText("Sharing defaults have changed", { timeout: 30_000 });
+    await expect(review).toContainText("Sharing defaults have changed", {
+      timeout: 30_000,
+    });
     await review.locator("[data-confirm]").click();
     await expect(review).toBeHidden({ timeout: 30_000 });
     await sendQueue(page);
-    await expect.poll(async () => (await serverList(page, id, listId))?.label, { timeout: 60_000 }).toBe(`I-LS8 ${stamp}`);
-    const all = (await call(page, id, "GET", "/lists?archived=false&limit=200")).body as { items: ListProjection[] };
-    expect(all.items.filter((l) => l.label === `I-LS8 ${stamp}`)).toHaveLength(1);
+    await expect
+      .poll(async () => (await serverList(page, id, listId))?.label, {
+        timeout: 60_000,
+      })
+      .toBe(`I-LS8 ${stamp}`);
+    const all = (await call(page, id, "GET", "/lists?archived=false&limit=200"))
+      .body as { items: ListProjection[] };
+    expect(all.items.filter((l) => l.label === `I-LS8 ${stamp}`)).toHaveLength(
+      1,
+    );
   });
 });
