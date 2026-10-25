@@ -168,7 +168,9 @@ after the day) reads the binding ONLINE once per visit and identity (`tasks/deta
 offline it says "Binding details need a connection." and the rest of the task stays as the cache shows it) and queues `set_anchor` on the
 task's version (`anchor: null` removes it), with its waiting, saving, conflict ("Review" supersedes it) and refused states. A change pressed
 again after a refusal (or a failure that may have stored it) keeps its identity; a STORED change's identity is retired, so A, B, then A
-again is three changes (R2). The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
+again is three changes (R2). The panel's in-dialog sync control keeps its whole state for the next panel opened while the task's visit goes
+on (ia.md §1.3.3, I1; `tasks/detail/anchor-kept.ts` for the task detail, the form's own session for the new-task form); the import dialog
+does not keep input there, as WEB-13a's calendar dialogs do not: the Calendars screen's visit ends at the sync screens (`visit.ts`). The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
 **Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the

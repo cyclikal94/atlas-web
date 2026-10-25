@@ -58,7 +58,21 @@ import { EventPicker, FieldPicker } from "./pickers";
  * was submitted (R3, PRODUCT-DECISIONS-20261011): the panel closes when nothing was changed in it while the save was being made; otherwise
  * it stays with the newer input (hidden fields' values included), says that the save was made as pressed, and tells the caller
  * (`onKept`), whose next save is a new operation.
+ *
+ * The in-dialog sync control is a deliberate check of sync state, not a discard (ia.md §1.3.3, task states I1; WEB-13b revision 1): with
+ * `onRetain`, the panel's whole state (every field, hidden ones included, and the names its summary shows) is handed to the caller, which
+ * keeps it for the next panel it opens while the person's visit goes on. A save still being made then settles through `onSettledKept`.
  */
+/** The panel's whole state as the in-dialog sync control hands it over. */
+export interface AnchorKept {
+  draft: AnchorDraft;
+  names: AnchorNames;
+  /** The panel's edit count when it was kept. */
+  revision: number;
+  /** The revision a save still being made submitted, or null. */
+  pending: number | null;
+}
+
 export function AnchorDialog({
   initial,
   initialNames = {},
@@ -66,6 +80,8 @@ export function AnchorDialog({
   onSave,
   onRemove,
   onKept,
+  onRetain,
+  onSettledKept,
   onClose,
 }: {
   initial: AnchorDraft;
@@ -81,6 +97,10 @@ export function AnchorDialog({
   onRemove?(): Promise<string | null>;
   /** A save or removal was done while newer input was kept in the panel (it stays open). */
   onKept?(): void;
+  /** The in-dialog sync control: keep this state for the next panel (the dialog closes, the sync screens open). */
+  onRetain?(kept: AnchorKept): void;
+  /** A save made before the panel was kept by the sync control is done: `revision` is what it submitted. */
+  onSettledKept?(revision: number): void;
   onClose(): void;
 }) {
   const formId = useId();
@@ -93,6 +113,8 @@ export function AnchorDialog({
   const acting = useRef(false);
   // Every edit moves it (a pick, a weekday, a hidden field's value included): a done save closes the panel only at the revision it submitted.
   const revision = useRef(0);
+  // The revision a save still being made submitted (null: none), for a panel kept by the sync control meanwhile.
+  const submittedNow = useRef<number | null>(null);
   const mounted = useRef(false);
   useEffect(() => {
     mounted.current = true;
@@ -109,11 +131,16 @@ export function AnchorDialog({
     if (acting.current) return;
     acting.current = true;
     const submitted = revision.current;
+    submittedNow.current = submitted;
     setBusy(true);
     setMessage(null);
     try {
       const refused = await run();
-      if (!mounted.current) return;
+      if (!mounted.current) {
+        // The panel left (the sync control kept it, or it was cancelled): a done save is the caller's to settle.
+        if (refused === null) onSettledKept?.(submitted);
+        return;
+      }
       if (refused !== null) setMessage(refused);
       else if (revision.current === submitted) onClose();
       else {
@@ -122,6 +149,7 @@ export function AnchorDialog({
       }
     } finally {
       acting.current = false;
+      submittedNow.current = null;
       if (mounted.current) setBusy(false);
     }
   };
@@ -151,6 +179,17 @@ export function AnchorDialog({
     <Dialog
       open
       onClose={onClose}
+      {...(onRetain === undefined
+        ? {}
+        : {
+            onRetainDraft: () =>
+              onRetain({
+                draft,
+                names,
+                revision: revision.current,
+                pending: submittedNow.current,
+              }),
+          })}
       title={ANCHOR_TITLE}
       footer={
         view === "main" ? (

@@ -12,13 +12,16 @@ const SOURCE_PAGES = "src/features/calendars/source-pages.tsx";
 const REVIEW_PANEL = "src/features/calendars/ReviewPanel.tsx";
 const SECTION = "src/features/tasks/detail/AnchorSection.tsx";
 const TASKS_API = "src/features/tasks/api.ts";
+const KEPT = "src/features/tasks/detail/anchor-kept.ts";
+const TASK_FORM = "src/features/tasks/form/TaskFormPage.tsx";
 const T_IMPORT_UI = "tests/features/calendars/import-ui.test.tsx";
 const T_ANCHOR_MODEL = "tests/features/calendars/anchor-model.test.ts";
 const T_REVIEWS = "tests/features/calendars/review-panel.test.tsx";
 const T_SECTION = "tests/features/tasks/anchor-section.test.tsx";
+const T_FORM = "tests/features/tasks/task-form-anchor.test.tsx";
 
 /**
- * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the model), MU-2471..MU-2495. Clear time's own
+ * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the model), MU-2471..MU-2504. Clear time's own
  * end of the kept time has no mutant: the time field's edit ends it too, so removing it changes nothing observable (an equivalent mutant,
  * recorded in the revision report).
  */
@@ -345,5 +348,108 @@ export const UNIT_13B_R1 = [
         "    live.current = () => screenAt(address);\n",
         "    live.current = () => !going.ended();\n",
       ),
+  },
+  {
+    id: "MU-2496",
+    title:
+      "WEB-13b I1 (R3's family): the anchor panel's in-dialog sync control keeps nothing (its input is lost at the sync screens)",
+    file: ANCHOR_DIALOG,
+    tests: [T_SECTION, T_FORM],
+    expect:
+      /kept through the sync screens and back|a save still being made when the panel was kept/,
+    patch: (t) =>
+      sub(t, "      {...(onRetain === undefined\n", "      {...(true\n"),
+  },
+  {
+    id: "MU-2497",
+    title:
+      "WEB-13b I1: the task detail does not resume a kept panel (the next panel starts from the binding)",
+    file: SECTION,
+    tests: [T_SECTION],
+    expect:
+      /kept through the sync screens and back: the next panel resumes every field|a save still being made when the panel was kept|Cancel discards/,
+    patch: (t) => sub(t, "      resumed !== null\n", "      false\n"),
+  },
+  {
+    id: "MU-2498",
+    title:
+      "WEB-13b I1: the visit's end does not drop a kept panel (another visit resumes it)",
+    file: KEPT,
+    tests: [T_SECTION],
+    expect: /an ordinary departure from the sync screens ends the visit/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    if (entry.owner === visit) kept.delete(key);\n",
+          "    void [key, entry, visit];\n",
+        ),
+        "  if (owner === null || entry.owner !== owner || entry.owner.ended())\n    return null;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2499",
+    title:
+      "WEB-13b I1: a resumed panel is not taken (a Cancel of it does not discard: the next panel resumes it again)",
+    file: KEPT,
+    tests: [T_SECTION],
+    expect: /Cancel discards/,
+    patch: (t) =>
+      sub(
+        t,
+        "  kept.delete(key);\n  if (owner === null || entry.owner !== owner || entry.owner.ended())\n",
+        "  if (owner === null || entry.owner !== owner || entry.owner.ended())\n",
+      ),
+  },
+  {
+    id: "MU-2500",
+    title:
+      "WEB-13b I1: a kept panel whose pending save stored exactly what it held is still resumed (offered to be saved twice)",
+    file: KEPT,
+    tests: [T_SECTION],
+    expect: /a save still being made when the panel was kept/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (entry.revision === revision) {\n    kept.delete(key);\n    return;\n  }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2501",
+    title:
+      "WEB-13b I1: a kept panel's newer input after its own save keeps the old context (its save is refused as changed by its own change)",
+    file: KEPT,
+    tests: [T_SECTION],
+    expect: /a save still being made when the panel was kept/,
+    patch: (t) => sub(t, "  entry.context = newer(entry.context as C);\n", ""),
+  },
+  {
+    id: "MU-2502",
+    title:
+      "WEB-13b I1: a save done after the panel was kept is never settled (the kept state of a saved change is resumed)",
+    file: ANCHOR_DIALOG,
+    tests: [T_SECTION],
+    expect: /a save still being made when the panel was kept/,
+    patch: (t) =>
+      sub(t, "        if (refused === null) onSettledKept?.(submitted);\n", ""),
+  },
+  {
+    id: "MU-2503",
+    title: "WEB-13b I1: the new-task form does not resume its kept panel",
+    file: TASK_FORM,
+    tests: [T_FORM],
+    expect: /kept through the sync screens and back: the next panel resumes it/,
+    patch: (t) => sub(t, "      panel ?? {\n", "      {\n"),
+  },
+  {
+    id: "MU-2504",
+    title:
+      "WEB-13b I1: the new-task form's resumed panel, cancelled, is resumed again (Cancel does not discard it)",
+    file: TASK_FORM,
+    tests: [T_FORM],
+    expect: /kept through the sync screens and back: the next panel resumes it/,
+    patch: (t) => sub(t, "    if (panel !== null) onPanel(null);\n", ""),
   },
 ];

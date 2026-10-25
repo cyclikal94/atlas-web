@@ -259,6 +259,11 @@ interface FormInput {
    * a save of a repeating task sends none and says nothing about it.
    */
   anchor?: FormAnchor | null;
+  /**
+   * WEB-13b revision 1: the anchor panel as its in-dialog sync control left it (every field, unsaved), so the next panel opened resumes it
+   * (ia.md §1.3.3, I1); part of the form's session, kept and dropped with it.
+   */
+  panel?: { draft: AnchorDraft; names: AnchorNames } | null;
 }
 
 /** The anchor a save sends: the new form's, only while the task does not repeat (the section is shown); else none. */
@@ -720,7 +725,11 @@ function TaskForm({
         {mode.kind === "new" && state.repeat === "none" ? (
           <AnchorSection
             anchor={kept.value.anchor ?? null}
-            onSave={(anchor) => kept.edit((input) => ({ ...input, anchor }))}
+            panel={kept.value.panel ?? null}
+            onSave={(anchor) =>
+              kept.edit((input) => ({ ...input, anchor, panel: null }))
+            }
+            onPanel={(panel) => kept.edit((input) => ({ ...input, panel }))}
           />
         ) : null}
         <fieldset className="flex flex-col gap-2">
@@ -1009,12 +1018,31 @@ function TaskForm({
  */
 function AnchorSection({
   anchor,
+  panel,
   onSave,
+  onPanel,
 }: {
   anchor: FormAnchor | null;
+  /** The panel kept by its in-dialog sync control, which the next panel resumes. */
+  panel: { draft: AnchorDraft; names: AnchorNames } | null;
   onSave(anchor: FormAnchor | null): void;
+  /** Keeps (or, with null, lets go of) the panel's unsaved state in the form's session. */
+  onPanel(panel: { draft: AnchorDraft; names: AnchorNames } | null): void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState<{
+    draft: AnchorDraft;
+    names: AnchorNames;
+  } | null>(null);
+  const openPanel = () => {
+    setOpen(
+      panel ?? {
+        draft: anchor?.draft ?? EMPTY_ANCHOR,
+        names: anchor?.names ?? {},
+      },
+    );
+    // The panel now holds it: a later Cancel discards it, as any panel's.
+    if (panel !== null) onPanel(null);
+  };
   return (
     <section
       aria-labelledby="task-form-anchor"
@@ -1030,7 +1058,7 @@ function AnchorSection({
           : describeAnchor(anchor.anchor, anchor.names)}
       </p>
       <div className="flex flex-wrap gap-2">
-        <Button onClick={() => setOpen(true)}>
+        <Button onClick={openPanel}>
           {anchor === null ? FORM_ANCHOR : FORM_CHANGE}
         </Button>
         {anchor !== null ? (
@@ -1039,17 +1067,18 @@ function AnchorSection({
           </Button>
         ) : null}
       </div>
-      {open ? (
+      {open !== null ? (
         <AnchorDialog
-          initial={anchor?.draft ?? EMPTY_ANCHOR}
-          initialNames={anchor?.names ?? {}}
+          initial={open.draft}
+          initialNames={open.names}
           repeats={false}
+          onRetain={({ draft, names }) => onPanel({ draft, names })}
           onSave={async (next, names, draft) => {
             // The panel's state is kept whole with the anchor, so it opens again as it was left.
             onSave({ draft, anchor: next, names });
             return null;
           }}
-          onClose={() => setOpen(false)}
+          onClose={() => setOpen(null)}
         />
       ) : null}
     </section>

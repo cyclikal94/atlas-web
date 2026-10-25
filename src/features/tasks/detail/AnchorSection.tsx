@@ -14,6 +14,8 @@ import {
 } from "../../../data";
 import {
   AnchorDialog,
+  type AnchorDraft,
+  type AnchorKept,
   type AnchorNames,
   anchorDraftOf,
   anchorOfCommand,
@@ -49,7 +51,7 @@ import {
 } from "../../calendars/copy-anchor";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { useTaskScreenAt, useTaskVisit } from "../visit";
+import { type TaskVisit, useTaskScreenAt, useTaskVisit } from "../visit";
 import {
   type BindingRead,
   bindingOf,
@@ -58,6 +60,12 @@ import {
   readBindingAgain,
   subscribeBinding,
 } from "./anchor-binding";
+import {
+  keepPanel,
+  keptPanelKey,
+  settleKeptPanel,
+  takeKeptPanel,
+} from "./anchor-kept";
 
 const SET_ANCHOR = "set_anchor";
 const KINDS = [SET_ANCHOR] as const;
@@ -110,12 +118,15 @@ export function AnchorSection({
   // React kept mounted while the address went away and came back in one turn is the screen the person is at again (R36), and a remount
   // (the session's re-check of a `403`) is at the same address.
   const live = useRef<() => boolean>(() => false);
+  // The visit the section is shown on (null outside any router): it owns a panel kept by the in-dialog sync control.
+  const owner = useRef<TaskVisit | null>(null);
   const [, changed] = useReducer((n: number) => n + 1, 0);
   useEffect(() => subscribeBinding(changed), []);
   // The visit this section belongs to, asked once it is shown (a section outside any router keeps its read for its own mount only).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the visit is asked for the identity shown
   useEffect(() => {
     const going = visitOf(env.identity);
+    owner.current = going;
     if (going === null) {
       let mountedHere = true;
       live.current = () => mountedHere;
@@ -197,24 +208,42 @@ export function AnchorSection({
       : { field: label };
   };
 
-  const [dialog, setDialog] = useState<{
+  type PanelFor = {
     anchor: CalendarAnchor | null;
     supersede: string | null;
     observed: Observation | null;
     /** A save from this panel was done while newer input stayed in it: the next save is checked against the task as it is NOW. */
     renewed: boolean;
-  } | null>(null);
+  };
+  const [dialog, setDialog] = useState<
+    | (PanelFor & {
+        /** A panel kept by the in-dialog sync control, resumed: its state as it was left. */
+        resumed?: { draft: AnchorDraft; names: AnchorNames };
+      })
+    | null
+  >(null);
+  const panelKey = keptPanelKey(env.identity, task.id);
   // The identity of each change pressed and not yet stored, so the same change pressed again after a refusal (or a failure that may
   // have stored it) is recognised; a STORED change's identity is retired (R2): pressing a change again later, even one equal to an earlier
   // one (A, B, then A), is a new operation.
   const keys = useRef(new Map<string, string>());
-  const open = (from: CalendarAnchor | null, supersede: string | null) =>
-    setDialog({
-      anchor: from,
-      supersede,
-      observed: view.status === "ready" ? view.value.observation : null,
-      renewed: false,
-    });
+  // The next panel opened while the visit goes on resumes one the in-dialog sync control kept (I1), with what it was opened for.
+  const open = (from: CalendarAnchor | null, supersede: string | null) => {
+    const resumed = takeKeptPanel<PanelFor>(panelKey, owner.current);
+    setDialog(
+      resumed !== null
+        ? {
+            ...resumed.context,
+            resumed: { draft: resumed.draft, names: resumed.names },
+          }
+        : {
+            anchor: from,
+            supersede,
+            observed: view.status === "ready" ? view.value.observation : null,
+            renewed: false,
+          },
+    );
+  };
   const observedNow = view.status === "ready" ? view.value.observation : null;
 
   const save = async (next: CalendarAnchor | null): Promise<string | null> => {
@@ -381,9 +410,12 @@ export function AnchorSection({
       {dialog !== null ? (
         <AnchorDialog
           initial={
-            dialog.anchor === null ? EMPTY_ANCHOR : anchorDraftOf(dialog.anchor)
+            dialog.resumed?.draft ??
+            (dialog.anchor === null
+              ? EMPTY_ANCHOR
+              : anchorDraftOf(dialog.anchor))
           }
-          initialNames={knownNames(dialog.anchor)}
+          initialNames={dialog.resumed?.names ?? knownNames(dialog.anchor)}
           repeats={repeats}
           onSave={(next) => save(next)}
           {...(dialog.anchor !== null || anchor !== null
@@ -396,6 +428,23 @@ export function AnchorSection({
               d === null ? d : { ...d, supersede: null, renewed: true },
             )
           }
+          {...(owner.current === null
+            ? {}
+            : {
+                onRetain: (kept: AnchorKept) => {
+                  const visit = owner.current;
+                  if (visit === null) return;
+                  const { resumed: _, ...context } = dialog;
+                  keepPanel<PanelFor>(panelKey, visit, { ...kept, context });
+                },
+                // A save done after the panel was kept with newer input: the next save is an ordinary, new change (as `onKept`).
+                onSettledKept: (revision: number) =>
+                  settleKeptPanel<PanelFor>(panelKey, revision, (context) => ({
+                    ...context,
+                    supersede: null,
+                    renewed: true,
+                  })),
+              })}
           onClose={() => setDialog(null)}
         />
       ) : null}

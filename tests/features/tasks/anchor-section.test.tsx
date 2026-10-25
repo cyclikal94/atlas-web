@@ -15,6 +15,7 @@ import {
   untilSentWhile,
 } from "../../../src/features/tasks/api";
 import { forgetBindings } from "../../../src/features/tasks/detail/anchor-binding";
+import { forgetKeptPanels } from "../../../src/features/tasks/detail/anchor-kept";
 import { forgetAllCorrections } from "../../../src/features/tasks/detail/CorrectionDialog";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import { StampedRequestError } from "../../../src/session";
@@ -45,6 +46,7 @@ afterEach(() => {
   forgetTaskMemory();
   forgetAllCorrections();
   forgetBindings();
+  forgetKeptPanels();
 });
 
 const SOURCE = "00000000-0000-4000-8000-0000000000a1";
@@ -1079,5 +1081,204 @@ describe("revision 1: a binding read is the visit's; never sent after it ends (R
       () => null,
     );
     expect(sent).toEqual({ ok: true, value: 1 });
+  });
+});
+
+describe("revision 1: the in-dialog sync control keeps the panel for the task's visit (ia.md §1.3.3, I1; R3's family)", () => {
+  const read = {
+    rows: [sourceRow],
+    binding: async () => ({
+      ok: true as const,
+      value: { binding: { anchor: ANCHOR, version: 1, active: true } },
+    }),
+  };
+  async function openChange(t: Mounted) {
+    fireEvent.click(
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.CHANGE_ANCHOR,
+        }),
+      ),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await t.settle();
+    return dialog;
+  }
+  /** The dialog's own sync control: the panel is kept, the dialog closes, then the queue opens. */
+  async function viaSyncControl(t: Mounted, dialog: HTMLElement) {
+    const chip = present(
+      within(dialog)
+        .queryAllByRole("button")
+        .find((b) => b.hasAttribute("data-sync-tone")) ?? null,
+    );
+    await act(async () => {
+      fireEvent.click(chip);
+      await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+  }
+  async function to(t: Mounted, path: string) {
+    await act(async () => {
+      await t.router.navigate({ to: path, search: {} } as never);
+    });
+    await t.settle();
+  }
+  const days = (dialog: HTMLElement) =>
+    (within(dialog).getByLabelText(words.DAYS_LABEL) as HTMLInputElement).value;
+  function edit(dialog: HTMLElement) {
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-5" },
+    });
+    fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
+      target: { value: "kept filter" },
+    });
+    // Hidden while the person-date reference is chosen: its value is kept too.
+    fireEvent.click(
+      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+    );
+  }
+
+  test("kept through the sync screens and back: the next panel resumes every field (hidden ones included) and saves them", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const dialog = await openChange(t);
+    edit(dialog);
+    await viaSyncControl(t, dialog);
+    await to(t, `/tasks/${task.taskId}`);
+    await t.until(() => section() !== null);
+    const again = await openChange(t);
+    expect(days(again)).toBe("-5");
+    expect(
+      within(again).getByRole("radio", { name: words.PERSON_DATE }),
+    ).toBeChecked();
+    fireEvent.click(
+      within(again).getByRole("radio", { name: words.EVENT_SERIES }),
+    );
+    expect(within(again).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
+      "kept filter",
+    );
+    fireEvent.click(
+      within(again).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(bodyOf(t, anchorDrafts(t)[0]?.local_id as string)?.anchor).toEqual({
+      ...ANCHOR,
+      offset: { kind: "calendar_days", days: -5, time: "18:00:00" },
+      title_contains: "kept filter",
+    });
+  });
+
+  test("an ordinary departure from the sync screens ends the visit: the next panel starts from the binding", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const dialog = await openChange(t);
+    edit(dialog);
+    await viaSyncControl(t, dialog);
+    await to(t, "/tasks");
+    await to(t, `/tasks/${task.taskId}`);
+    await t.until(() => section() !== null);
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    const again = await openChange(t);
+    expect(days(again)).toBe("-1");
+  });
+
+  test("control: Cancel discards — a resumed panel cancelled, the next one starts from the binding", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const dialog = await openChange(t);
+    edit(dialog);
+    await viaSyncControl(t, dialog);
+    await to(t, `/tasks/${task.taskId}`);
+    await t.until(() => section() !== null);
+    const resumed = await openChange(t);
+    expect(days(resumed)).toBe("-5");
+    fireEvent.click(within(resumed).getByRole("button", { name: "Cancel" }));
+    await t.settle();
+    const fresh = await openChange(t);
+    expect(days(fresh)).toBe("-1");
+  });
+
+  test("a save still being made when the panel was kept: nothing newer is dropped (never offered to be saved twice); newer input is resumed and saved as a NEW change", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const hold = () => {
+      const original = outbox.enqueue.bind(outbox);
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      vi.spyOn(outbox, "enqueue").mockImplementationOnce(async (request) => {
+        const outcome = await original(request);
+        await gate;
+        return outcome;
+      });
+      return () => release();
+    };
+    // Nothing edited after Save: the kept state is what was saved, so it is dropped.
+    let release = hold();
+    let dialog = await openChange(t);
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-2" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    await viaSyncControl(t, dialog);
+    await act(async () => release());
+    await t.settle();
+    await to(t, `/tasks/${task.taskId}`);
+    await t.until(() => section() !== null);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-1");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await t.settle();
+    // Edited after Save: the newer input is resumed, and its save is an ordinary new change (not refused as changed by its own).
+    release = hold();
+    dialog = await openChange(t);
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-3" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-4" },
+    });
+    await viaSyncControl(t, dialog);
+    await act(async () => release());
+    await t.settle();
+    await to(t, `/tasks/${task.taskId}`);
+    await t.until(() => section() !== null);
+    dialog = await openChange(t);
+    expect(days(dialog)).toBe("-4");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      anchorDrafts(t)
+        .map((d) =>
+          JSON.stringify(
+            (bodyOf(t, d.local_id)?.anchor as CalendarAnchor | undefined)
+              ?.offset,
+          ),
+        )
+        .sort(),
+    ).toEqual(
+      [-2, -3, -4]
+        .map((n) =>
+          JSON.stringify({ kind: "calendar_days", days: n, time: "18:00:00" }),
+        )
+        .sort(),
+    );
   });
 });

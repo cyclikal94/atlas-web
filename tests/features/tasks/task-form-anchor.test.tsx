@@ -185,6 +185,53 @@ describe("the new-task form's anchor", () => {
   });
 });
 
+describe("revision 1: the anchor panel's in-dialog sync control keeps it in the form's session (I1)", () => {
+  test("kept through the sync screens and back: the next panel resumes it; Cancel then discards it", async () => {
+    const t = await newForm();
+    repeats("none");
+    fireEvent.click(
+      within(anchorSection() as HTMLElement).getByRole("button", {
+        name: words.FORM_ANCHOR,
+      }),
+    );
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-3" },
+    });
+    const chip = within(dialog)
+      .queryAllByRole("button")
+      .find((b) => b.hasAttribute("data-sync-tone"));
+    expect(chip).toBeDefined();
+    await act(async () => {
+      fireEvent.click(chip as HTMLElement);
+      await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await t.settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    await act(async () => {
+      await t.router.navigate({ to: "/tasks/new", search: {} } as never);
+    });
+    await t.settle();
+    await t.until(() => anchorSection() !== null);
+    fireEvent.click(
+      within(anchorSection() as HTMLElement).getByRole("button", {
+        name: words.FORM_ANCHOR,
+      }),
+    );
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText(words.DAYS_LABEL)).toHaveValue("-3");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await t.settle();
+    fireEvent.click(
+      within(anchorSection() as HTMLElement).getByRole("button", {
+        name: words.FORM_ANCHOR,
+      }),
+    );
+    dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText(words.DAYS_LABEL)).toHaveValue("0");
+  });
+});
+
 describe("the new task's detail before it has synced", () => {
   test("online: the binding is not read while the task is only this device's pending create; the section says it will show once synced", async () => {
     const t = await mountTasks({
