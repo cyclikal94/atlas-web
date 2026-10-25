@@ -729,6 +729,32 @@ the current epoch is shown with no request, one persisted for another epoch is n
 * **Departure (D-10a-2).** WEB-04 D's `by_kind_date` stays empty: no key deriver is registered for tasks (one registered now would leave existing caches
   inconsistent without a backfill). The offline day is the bounded walk above.
 
+## The catch-up sequences and the running-timer copy (WEB-10c)
+
+*Added by WEB-10c, 25 October 2026. Generic records: the data layer stores and compares them and knows no task semantics. The consumer is
+`docs/tasks.md` (WEB-10c).*
+
+* **W27, `plans/materialise.ts`.** The reserved `materialise_sequences` store (created empty by WEB-08c, key `[task_id+through_date]`)
+  holds one row per task and day being caught up (`MaterialiseSequenceRow`: generation, phase, attempt `{key, body}`, counters, last known
+  position, stop). `writeMaterialiseSequence` is a COMPARE-AND-SET: it applies only while the stored row is the one the caller decided on
+  (`SequenceExpectation`: absent, or the row's generation, phase, `read_seq` and attempt key) and otherwise writes nothing and answers
+  `stale` with what is stored, so two runners, a reload or a late answer never overwrite a newer decision. The read is wrapped (`{ row }`)
+  so that `guardedPlan`'s "an undefined read is a drop" rule does not drop the write of a row that is absent. `pruneMaterialiseSequences`
+  removes a task's rows for earlier days that are not running. Read plans `readMaterialiseSequence` and `readMaterialiseSequences` (at most
+  `SEQUENCE_WINDOW` = 100). Every write goes through `AccountService.commit` with INC, CLS and EPO, the person's "Try again" included.
+  Rows are a few hundred bytes and pruned, so the write is classed fixed-size (like `claimFormWriter`), not admitted through the quota
+  ledger (`plan-inventory.test.ts`'s FIXED_SIZE).
+* **W28, `plans/timer-copy.ts`.** `sync_state.timer_copy` (optional, no migration; the precedent of W14's `sync_state.defaults`): ONE
+  record `{ format: 1, read_at, complete, running }` holding at most `TIMER_COPY_ROWS` = 50 opaque rows, the last COMPLETE first page of
+  `GET /timer-sessions?state=running`. Response-derived (INC, CLS, EPO); its growth is admitted like a cache page (the caller reserves the
+  record's bytes, `ADMITTED`), and a copy whose `read_at` is older than the stored one is not written over it. `parseTimerCopy` reads it
+  strictly; the task slice parses each row again.
+* **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `useMaterialiseSequences`, `useTimerCopy`,
+  `commitMaterialiseSequence`, `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve).
+  `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).
+* **Retention.** Nothing new: a discarded or rejected timer draft's `timer_session` version record is removed by the existing recompute
+  (no other draft targets it and nothing is cached for it); the wipe removes both records with the account's database.
+
 ## Snapshot, production leadership and recovery (WEB-09b)
 
 *Added by WEB-09b, 10 October 2026. Fixture evidence only where it says so; none of it is integration or release evidence.*

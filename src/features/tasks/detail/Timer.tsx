@@ -96,6 +96,32 @@ const MARK: Readonly<Record<string, PendingMark>> = {
   acknowledged: "waiting",
 };
 
+/**
+ * The last COMPLETE read of each day's sessions on this page, for the displayed identity only (page memory, never persisted): offline, a
+ * session this device saw running stays shown, marked with when it was read ("Last checked"), until the connection is back.
+ */
+const lastRead = new Map<string, { sessions: TimerSession[]; at: number }>();
+let lastReadFor = "";
+function remember(
+  identity: string,
+  occurrenceId: string,
+  sessions: TimerSession[] | null,
+  at: number,
+) {
+  if (lastReadFor !== identity) {
+    lastRead.clear();
+    lastReadFor = identity;
+  }
+  if (sessions === null) return lastRead.get(occurrenceId) ?? null;
+  lastRead.delete(occurrenceId);
+  lastRead.set(occurrenceId, { sessions, at });
+  if (lastRead.size > 200) {
+    const oldest = lastRead.keys().next().value;
+    if (oldest !== undefined) lastRead.delete(oldest);
+  }
+  return null;
+}
+
 /** The day's own sessions (`GET /occurrences/{id}/timers`, online, 50 a page): what tells a running session apart on this device. */
 function useDaySessions(occurrenceId: string, again: string) {
   const env = useTasksEnv();
@@ -112,6 +138,7 @@ function useDaySessions(occurrenceId: string, again: string) {
       setState({ scope, pages: [], next: null, status: "offline" });
       return;
     }
+    const asked = env.now();
     const result = await env.api.readTimers(occurrenceId, after ?? undefined);
     noteIfRefused(env.identity, `timers:${occurrenceId}`, result);
     setState((prev) => {
@@ -125,9 +152,12 @@ function useDaySessions(occurrenceId: string, again: string) {
             : {}),
         };
       const pages = after === null || prev.scope !== scope ? [] : prev.pages;
+      const all = [...pages, result.value.items];
+      if (result.value.next_after === null)
+        remember(env.identity, occurrenceId, all.flat(), asked);
       return {
         scope,
-        pages: [...pages, result.value.items],
+        pages: all,
         next: result.value.next_after,
         status: "ready",
       };
@@ -138,12 +168,20 @@ function useDaySessions(occurrenceId: string, again: string) {
     void load(null);
   }, [scope, env.online, again]);
   const current = state.scope === scope ? state : null;
+  const kept =
+    current?.status === "offline"
+      ? remember(env.identity, occurrenceId, null, 0)
+      : null;
   return {
     status: current?.status ?? "loading",
     requestId: current?.requestId,
-    sessions: current ? current.pages.flat() : [],
+    sessions:
+      kept !== null ? kept.sessions : current ? current.pages.flat() : [],
     complete:
-      current !== null && current.next === null && current.status === "ready",
+      kept !== null ||
+      (current !== null && current.next === null && current.status === "ready"),
+    /** When the sessions shown offline were read (ms), or null for a read now. */
+    keptAt: kept?.at ?? null,
     more: current?.next ? () => void load(current.next) : null,
     retry: () => void load(null),
   };
@@ -179,7 +217,7 @@ export function TimerBlock({
   const copied = useCopiedTimers();
   const running = runningOn(row.id, {
     drafts: timerDrafts,
-    read: day.status === "ready" && day.complete ? day.sessions : null,
+    read: day.complete ? day.sessions : null,
     copy: copied?.rows ?? null,
   });
   const now = useSecond(running.length > 0);
@@ -355,6 +393,10 @@ export function TimerBlock({
             {session.source === "copy" && copied ? (
               <p className="text-[12px] text-ink-2">
                 {TIMER_COPY.lastChecked(momentLabel(copied.readAt, now, zone))}
+              </p>
+            ) : session.source === "read" && day.keptAt !== null ? (
+              <p className="text-[12px] text-ink-2">
+                {TIMER_COPY.lastChecked(momentLabel(day.keptAt, now, zone))}
               </p>
             ) : null}
             {sevenDays === session.id ? (

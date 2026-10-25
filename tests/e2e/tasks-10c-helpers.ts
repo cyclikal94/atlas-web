@@ -115,7 +115,6 @@ export async function serveTasks10c(
         ...(body ? { body } : {}),
         from,
       });
-    let m: RegExpExecArray | null;
     if (method === "POST" && path === "/task-commands") {
       const body = JSON.parse(request.postData() ?? "{}") as {
         command?: Record<string, unknown>;
@@ -140,20 +139,26 @@ export async function serveTasks10c(
       );
     }
     if (method !== "GET") return route.fallback();
-    if ((m = /^\/tasks\/([^/]+)$/.exec(path))) {
+    const taskMatch = /^\/tasks\/([^/]+)$/.exec(path);
+    if (taskMatch) {
       note(`GET ${path}`);
-      return fulfil(route, reads.position({ taskId: m[1] as string }));
+      return fulfil(route, reads.position({ taskId: taskMatch[1] as string }));
     }
-    if ((m = /^\/occurrences\/([^/]+)\/dependencies$/.exec(path))) {
+    const previewMatch = /^\/occurrences\/([^/]+)\/dependencies$/.exec(path);
+    if (previewMatch) {
       note(`GET ${path}`);
-      return fulfil(route, reads.preview({ occurrenceId: m[1] as string }));
+      return fulfil(
+        route,
+        reads.preview({ occurrenceId: previewMatch[1] as string }),
+      );
     }
-    if ((m = /^\/occurrences\/([^/]+)\/timers$/.exec(path))) {
+    const timersMatch = /^\/occurrences\/([^/]+)\/timers$/.exec(path);
+    if (timersMatch) {
       note(`GET ${path}`);
       return fulfil(
         route,
         reads.timers({
-          occurrenceId: m[1] as string,
+          occurrenceId: timersMatch[1] as string,
           after: url.searchParams.get("after"),
         }),
       );
@@ -168,20 +173,26 @@ export async function serveTasks10c(
         }),
       );
     }
-    if ((m = /^\/tasks\/([^/]+)\/rota$/.exec(path))) {
+    const rotaMatch = /^\/tasks\/([^/]+)\/rota$/.exec(path);
+    if (rotaMatch) {
       note(`GET ${path}`);
-      return fulfil(route, reads.rota({ taskId: m[1] as string }));
+      return fulfil(route, reads.rota({ taskId: rotaMatch[1] as string }));
     }
-    if ((m = /^\/tasks\/([^/]+)\/enrolment$/.exec(path))) {
+    const enrolmentMatch = /^\/tasks\/([^/]+)\/enrolment$/.exec(path);
+    if (enrolmentMatch) {
       note(`GET ${path}`);
-      return fulfil(route, reads.enrolment({ taskId: m[1] as string }));
+      return fulfil(
+        route,
+        reads.enrolment({ taskId: enrolmentMatch[1] as string }),
+      );
     }
-    if ((m = /^\/tasks\/([^/]+)\/streak$/.exec(path))) {
+    const streakMatch = /^\/tasks\/([^/]+)\/streak$/.exec(path);
+    if (streakMatch) {
       note(`GET ${path}?scope=${url.searchParams.get("scope")}`);
       return fulfil(
         route,
         reads.streak({
-          taskId: m[1] as string,
+          taskId: streakMatch[1] as string,
           scope: url.searchParams.get("scope") ?? "joint",
         }),
       );

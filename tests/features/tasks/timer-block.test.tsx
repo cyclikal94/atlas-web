@@ -14,6 +14,7 @@ import {
   mountTasks,
   type SeededTask,
   seededTask,
+  tasksEnv,
 } from "../../support/tasks/world";
 
 /**
@@ -135,6 +136,9 @@ describe("start and stop (A12, A14)", () => {
       timerCopy: copyOf([copied(other, nowSeconds() - 600)]),
     });
     await t.until(() => block()?.dataset.timerBlock === "idle");
+    // The block is idle before the copy is read too: settle, so the copy's row is known when Start is judged.
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe("idle");
     expect(
       within(block() as HTMLElement).getByRole("button", {
         name: TIMER_COPY.start,
@@ -211,6 +215,39 @@ describe("start and stop (A12, A14)", () => {
     expect(t.bodies()[0]?.command.command).toMatchObject({
       stopped_at: closes - 1,
     });
+  });
+});
+
+describe("offline after a start was acknowledged (found by I-10C-TM3)", () => {
+  test("a session the day's read showed running stays running offline, marked with when it was read; Stop is still offered", async () => {
+    const task = await seconds();
+    const running: TasksResult<TimerPage> = {
+      ok: true,
+      value: {
+        items: [
+          {
+            id: "cccccccc-0000-4000-8000-000000000003",
+            occurrence_id: task.occurrenceId,
+            started_at: nowSeconds() - 120,
+            stopped_at: null,
+            version: 1,
+          },
+        ],
+        next_after: null,
+      },
+    };
+    const api = fakeApi({ readTimers: async () => running });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    await t.until(() => block()?.dataset.timerBlock === "running");
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe("running");
+    expect(block()).toHaveTextContent("Last checked");
+    expect(
+      within(block() as HTMLElement).getByRole("button", {
+        name: TIMER_COPY.stop,
+      }),
+    ).toBeEnabled();
   });
 });
 

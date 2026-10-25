@@ -1,8 +1,18 @@
-import { cleanup, fireEvent, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  renderHook,
+  screen,
+  within,
+} from "@testing-library/react";
 import { axe } from "jest-axe";
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, test } from "vitest";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import { DEPENDENCY_COPY } from "../../../src/features/tasks/detail/Dependencies";
+import { usePreview } from "../../../src/features/tasks/detail/usePreview";
+import { TasksEnvProvider } from "../../../src/features/tasks/env";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import type {
   DependencyItem,
@@ -484,13 +494,15 @@ describe("conflicts (A11)", () => {
     await t.until(() => document.querySelector("[data-set-conflict]") !== null);
     const block = document.querySelector("[data-set-conflict]") as HTMLElement;
     expect(block).toHaveTextContent(DEPENDENCY_COPY.setConflict);
-    expect(block).not.toHaveTextContent("Run the washing machine");
     await t.until(
       () =>
         within(block).queryByRole("button", {
           name: DEPENDENCY_COPY.keepEditing,
         }) !== null,
     );
+    // Nothing of what was submitted is named (no title, no id), with the draft itself loaded.
+    expect(block).not.toHaveTextContent("Run the washing machine");
+    expect(block).not.toHaveTextContent(pre.occurrenceId);
     fireEvent.click(
       within(block).getByRole("button", { name: DEPENDENCY_COPY.keepEditing }),
     );
@@ -530,5 +542,54 @@ describe("identity (A18)", () => {
     release(answer(root, [item(pre)]));
     await t.settle();
     expect(row()?.dataset.dependencies).toBe("loading");
+  });
+
+  test("MU-10C-33 (hook): an answer asked under one identity is dropped when the identity changes under the same reader", async () => {
+    // The screens remount on another identity (TasksEnv is keyed by it); this keeps one reader across the change, so only the hook's own
+    // rule stands between a late answer and the screen.
+    const occurrence = "aaaaaaaa-0000-4000-8000-000000000033";
+    let release: (r: TasksResult<DependencyPreview>) => void = () => undefined;
+    let calls = 0;
+    const api = fakeApi({
+      readDependencies: () => {
+        calls += 1;
+        return calls === 1
+          ? new Promise((resolve) => (release = resolve))
+          : new Promise(() => undefined);
+      },
+    });
+    let env = tasksEnv(api);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <TasksEnvProvider value={env}>{children}</TasksEnvProvider>
+    );
+    const { result, rerender } = renderHook(() => usePreview(occurrence, ""), {
+      wrapper,
+    });
+    await act(async () => undefined);
+    expect(calls).toBe(1);
+    env = tasksEnv(api, { identity: `${ME}:2` });
+    rerender();
+    await act(async () => undefined);
+    expect(calls).toBe(2);
+    await act(async () => {
+      release({
+        ok: true,
+        value: {
+          token: TOKEN,
+          items: [
+            {
+              occurrence_id: occurrence,
+              task_id: "aaaaaaaa-0000-4000-8000-0000000000ff",
+              complete: false,
+              can_complete: true,
+              progress_version: null,
+            },
+          ],
+          unavailable: false,
+          strict: false,
+        },
+      });
+    });
+    expect(result.current.read.kind).toBe("loading");
   });
 });

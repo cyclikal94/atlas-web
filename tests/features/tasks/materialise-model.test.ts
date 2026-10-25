@@ -6,7 +6,6 @@ import {
   beyondHorizon,
   expectationOf,
   LIMIT,
-  MAX_CALLS,
   MAX_READ_FAILURES,
   materialiseCommand,
   onRead,
@@ -218,7 +217,8 @@ describe("the position after a call", () => {
       position: { last_date: "2026-01-01", pending: true },
     });
     let date = 1;
-    for (let call = 1; call <= MAX_CALLS; call += 1) {
+    // Eight, written out: the constant itself is what is under test.
+    for (let call = 1; call <= 8; call += 1) {
       row = awaiting(row);
       date += 16;
       const last = `2026-${String(Math.ceil(date / 28)).padStart(2, "0")}-${String((date % 28) + 1).padStart(2, "0")}`;
@@ -228,7 +228,7 @@ describe("the position after a call", () => {
         TODAY,
       ) as Sequence;
       expect(row.successful_calls).toBe(call);
-      if (call < MAX_CALLS) expect(row.phase).toBe("ready");
+      if (call < 8) expect(row.phase).toBe("ready");
     }
     expect(row.phase).toBe("stopped");
     expect(row.stop).toEqual({ reason: "bound" });

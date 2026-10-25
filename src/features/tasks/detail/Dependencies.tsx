@@ -263,6 +263,9 @@ export function DependencyRow({
           ) : null}
           <span className="flex flex-wrap gap-2">
             <Button onClick={onSee}>{DEPENDENCY_COPY.see}</Button>
+            <Button variant="quiet" onClick={() => void state.refresh()}>
+              {DEPENDENCY_COPY.refresh}
+            </Button>
             {row.canEdit && env.writable && !preview?.unavailable ? (
               <Button variant="quiet" onClick={onSet}>
                 {DEPENDENCY_COPY.set}

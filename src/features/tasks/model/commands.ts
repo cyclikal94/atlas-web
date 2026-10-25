@@ -601,6 +601,7 @@ export function completeDependencies(
   input: CompleteDependenciesInput,
 ): EnqueueRequest {
   const captured = capture(input.defaults, ["progress"]);
+  const root = input.occurrenceId;
   const others =
     input.mode === "complete_prerequisites" ? input.prerequisites : [];
   const command: JsonObject = {
@@ -636,7 +637,8 @@ export function completeDependencies(
         basis: "progress_stream",
         versionChecked: true,
         requiresEdit: true,
-        joinRequiresEdit: input.occurrenceId,
+        // Creating my root stream (an Anyone root) needs the root's edit access.
+        joinRequiresEdit: root,
         ...(input.rootStream.known ? {} : { seedIfUntracked: 1 }),
       },
       ...others.flatMap((item): TargetSpec[] =>
@@ -684,7 +686,8 @@ export interface StartTimerInput {
  * item 3).
  */
 export function startTimer(input: StartTimerInput): EnqueueRequest {
-  const captured = input.firstAnyoneStream
+  const { occurrenceId } = input;
+  const capturedDefaults = input.firstAnyoneStream
     ? capture(input.defaults, ["progress"])
     : null;
   const command: JsonObject = {
@@ -709,24 +712,24 @@ export function startTimer(input: StartTimerInput): EnqueueRequest {
         basis: "progress_stream",
         versionChecked: true,
         requiresEdit: true,
-        joinRequiresEdit: input.occurrenceId,
+        joinRequiresEdit: occurrenceId,
         ...(input.firstAnyoneStream ? { seedIfUntracked: 1 } : {}),
       },
       {
-        resourceId: input.occurrenceId,
+        resourceId: occurrenceId,
         role: "primary",
         basis: "resource",
         versionChecked: false,
       },
     ],
     build: () =>
-      captured === null
+      capturedDefaults === null
         ? { command: body(command, null) }
         : {
-            command: body(command, captured.revision),
-            defaultsRevision: captured.defaultsRevision,
-            defaultsContext: captured.defaultsContext,
-            defaultsReview: captured.defaultsReview,
+            command: body(command, capturedDefaults.revision),
+            defaultsRevision: capturedDefaults.defaultsRevision,
+            defaultsContext: capturedDefaults.defaultsContext,
+            defaultsReview: capturedDefaults.defaultsReview,
           },
   };
 }

@@ -12,10 +12,7 @@ import {
   createCatchUpRunner,
 } from "../../../src/features/tasks/catchup/runner";
 import type { TaskDetail } from "../../../src/features/tasks/model/contract";
-import {
-  attemptBody,
-  MAX_CALLS,
-} from "../../../src/features/tasks/model/materialise";
+import { attemptBody } from "../../../src/features/tasks/model/materialise";
 import { addDays, todayIn } from "../../../src/features/tasks/model/time";
 import { ACCOUNT, DB, defaultsWorld } from "../../support/data/defaults-world";
 import { cacheRow } from "../../support/data/rows";
@@ -228,18 +225,18 @@ describe("A1/A2: a task is brought up to date, 16 slots a call", () => {
     const runner = w.make();
     runner.ensure(TASK, "daily");
     await w.idle(runner);
-    expect(w.sent).toHaveLength(MAX_CALLS);
+    expect(w.sent).toHaveLength(8);
     expect(w.stored()).toMatchObject({
       phase: "stopped",
       stop: { reason: "bound" },
-      successful_calls: MAX_CALLS,
+      successful_calls: 8,
       last_known_position: last,
     });
     const reached = last;
     runner.tryAgain(TASK, TODAY);
     await w.idle(runner);
-    expect(w.sent).toHaveLength(2 * MAX_CALLS);
-    expect(new Set(w.sent.map((s) => s.key)).size).toBe(2 * MAX_CALLS);
+    expect(w.sent).toHaveLength(16);
+    expect(new Set(w.sent.map((s) => s.key)).size).toBe(16);
     expect((w.stored()?.last_known_position ?? "") > reached).toBe(true);
     expect(w.stored()?.stop).toEqual({ reason: "bound" });
   });

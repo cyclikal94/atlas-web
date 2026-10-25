@@ -169,11 +169,12 @@ export const DEFAULT_STACKS = [
     oidc: false,
     mutates: "account data seeded for the snapshot; paced by its stack ledger",
   },
-  // WEB-10a: task journeys have their own backend, accounts and pacing state.
+  // WEB-10a: task journeys have their own backend, accounts and pacing state. WEB-10c's catch-up, dependency, timer, rota and streak
+  // journeys share it (the same accounts, paced against the same ledger).
   {
     name: "tasks",
     suffix: "-tasks",
-    files: [SPEC("tasks")],
+    files: [SPEC("tasks"), SPEC("tasks-10c")],
     oidc: false,
     mutates:
       "tasks, evidence, sharing and enrolment; paced by its stack ledger",
