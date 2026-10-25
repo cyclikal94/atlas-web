@@ -483,6 +483,10 @@ describe("L4: rebuilds on the reviewed list", () => {
       DRAFTS.archive_list(),
       reviewed(),
     ) as EnqueueRequest;
+    expect(
+      rebuilt,
+      "a list's archive is rebuilt on the reviewed list",
+    ).not.toBeNull();
     expect(withoutBuild(rebuilt)).toEqual(
       withoutBuild(archiveResource({ id: LIST, archived: true })),
     );

@@ -16,6 +16,22 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
 - **Commands.** `create_task`, `revise_task`, `record`, `exclude`, `resolve`, `revise_occurrence` and `archive` are queued through the
   outbox (`model/commands.ts`); `enrol` is online-only (`/task-access-commands`, one attempt per body).
 
+## Lists (WEB-10b)
+
+The Lists surface (`/tasks/lists`, `/tasks/lists/<id>`; `create_list`, `edit_list`, `list_item` and the list case of `archive`) is WEB-10b's
+and has its own consumer contract: **[docs/lists.md](lists.md)**. It lives under the Tasks destination (a "Lists" link on the Tasks pane), in
+the same lazy screens chunk. What WEB-10b changed in this slice's code:
+
+- **`archive` is now kind-neutral.** `archive({ taskId, archived })` delegates, unchanged, to `archiveResource({ id, archived })`, which a list
+  uses too. Its registration's authorised current read (`readArchiveCurrent`) reads `GET /tasks/{id}` first, exactly as before (a `200` is
+  the task's answer, byte for byte; any other non-`404` answer is that answer); only a `404` goes on to the list walk of `GET /lists`
+  (both `archived` collections), so an archive of a task that is no longer readable costs that walk and still ends `inaccessible`. Its
+  rebuild accepts a reviewed `task` or `list` row and nothing else.
+- **`registerTaskCommands` registers the list kinds** (descriptions "New list", "List name change", "List change"; the projection of an
+  outstanding `create_list`; `readListCurrent`; the rebuilds; the admissions), and `index.ts` exports `model/lists`, `model/list-view` and
+  `listPath`.
+- **The Tasks pane has a "Lists" link** beside "New task" (existing classes, no new CSS).
+
 ## Public interface (`src/features/tasks/index.ts`)
 
 Import only from the index.
@@ -31,6 +47,7 @@ Import only from the index.
 | `TasksBoundary`, `TasksEnvProvider`, `useTasksEnv` | The environment (the `SharingEnv` pattern): the stamped client for the displayed `(account, epoch)`, `identity`, `online`, `writable`, clock and ids. |
 | `useTaskActions`, `RecordCard`, `TodayRow`, `composeRow`, `RowModel` | The acts and the shared components. |
 | `taskPath(id, occurrence?)`, `todayPath(day?, zone?)` | Route helpers. |
+| `archiveResource({ id, archived })`, `model/lists`, `model/list-view`, `listPath(id?)` | WEB-10b's list builders, composition and route helper: [docs/lists.md](lists.md). |
 
 ### Obligations of a consumer
 

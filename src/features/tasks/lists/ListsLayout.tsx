@@ -97,7 +97,11 @@ function ListsPane({ selected }: { selected: string | null }) {
       {value !== null && value.attention > 0 ? (
         <p className="text-[12.5px] text-conflict-text" data-lists-attention="">
           {LISTS.attention}{" "}
-          <Link to="/sync" className="underline underline-offset-2">
+          <Link
+            to="/sync"
+            search={{ tab: "conflicts" }}
+            className="underline underline-offset-2"
+          >
             {LISTS.openSync}
           </Link>
         </p>

@@ -81,6 +81,7 @@ function NameField({
         id={id}
         value={value}
         data-field-edge=""
+        data-list-name=""
         {...(placeholder ? { placeholder } : {})}
         {...(problem
           ? { "aria-invalid": true, "aria-describedby": `${id}-error` }
@@ -167,6 +168,7 @@ export function CreateListDialog({
       onClose={onClose}
       onDiscard={discard}
       title={CREATE.title}
+      initialFocusSelector="[data-list-name]"
       {...(returnFocusRef ? { returnFocusRef } : {})}
       footer={
         <div className="flex flex-wrap justify-end gap-2">
@@ -217,6 +219,11 @@ export function CreateListDialog({
 interface RenameInput {
   name: string;
   localId: string;
+  /**
+   * The list's queued create as the person first saw it (its digest), kept with the session through a sync visit: a rename edits that
+   * create only while it is still that one, so another tab's newer edit is never overwritten from this dialog, even after a re-read.
+   */
+  seen: string | null;
 }
 
 /**
@@ -246,7 +253,12 @@ export function RenameListDialog({
   const kept = useKeptInput<RenameInput>(
     key,
     env.identity,
-    () => ({ name: list?.row.label ?? "", localId: env.newId() }),
+    () => ({
+      name: list?.row.label ?? "",
+      localId: env.newId(),
+      seen:
+        list?.create?.status === "queued" ? list.create.command_digest : null,
+    }),
     {
       consumed: () => {
         close.current();
@@ -289,6 +301,17 @@ export function RenameListDialog({
       return;
     }
     const create = now.create?.status === "queued" ? now.create : null;
+    if (
+      create !== null &&
+      kept.value.seen !== null &&
+      create.command_digest !== kept.value.seen
+    ) {
+      // Edited elsewhere since this dialog opened: what was typed stays; the next Save is the person's decision on what is there now.
+      const digest = create.command_digest;
+      kept.edit((value) => ({ ...value, seen: digest }));
+      setRefusal(RENAME.changedElsewhere);
+      return;
+    }
     const version = now.projected ? undefined : now.row.policy_version;
     const request =
       create !== null
@@ -320,7 +343,7 @@ export function RenameListDialog({
         renew<RenameInput>(
           key,
           ticket.session,
-          (value) => ({ ...value, localId: env.newId() }),
+          (value) => ({ ...value, localId: env.newId(), seen: null }),
           kept.edit,
         );
     }
@@ -339,6 +362,7 @@ export function RenameListDialog({
       onClose={onClose}
       onDiscard={discard}
       title={RENAME.title}
+      initialFocusSelector="[data-list-name]"
       {...(returnFocusRef ? { returnFocusRef } : {})}
       footer={
         <div className="flex flex-wrap justify-end gap-2">

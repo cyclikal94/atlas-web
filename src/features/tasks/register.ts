@@ -311,18 +311,19 @@ async function readListCurrent(
     let after: string | null = null;
     for (;;) {
       if (io.signal.aborted) return ended;
+      const cursor = after ? `&after=${encodeURIComponent(after)}` : "";
       const { status, body } = await readJson(
         io,
-        `/lists?archived=${archived}&limit=${LIST_PAGE}${
-          after === null ? "" : `&after=${encodeURIComponent(after)}`
-        }`,
+        `/lists?archived=${archived}&limit=${LIST_PAGE}${cursor}`,
       );
       if (io.signal.aborted) return ended;
-      if (status !== 200) return failedFor(status);
-      const page = parseListPage(body, archived, after);
+      // Any answer but a 200 is this page's answer (`failedFor`); a 200 that is not a page of the collection is `indeterminate`.
+      const page: ReturnType<typeof parseListPage> | undefined =
+        status === 200 ? parseListPage(body, archived, after) : undefined;
+      if (page === undefined) return failedFor(status);
       if (page === null) return { kind: "indeterminate" };
-      const row = page.items.find((item) => item.id === listId);
-      if (row !== undefined) return { kind: "loaded", value: row };
+      const found = page.items.find((item) => item.id === listId);
+      if (found) return { kind: "loaded", value: found };
       if (
         page.next_after === null ||
         page.items.some((item) => item.id > listId)
@@ -584,7 +585,7 @@ function rebuildEditList(
     current.id !== listId ||
     current.kind !== "list" ||
     current.policy_version === undefined ||
-    !current.can_edit ||
+    current.can_edit === false ||
     !isString(command.name)
   )
     return null;
@@ -616,7 +617,7 @@ function rebuildListItem(
     current.id !== listId ||
     command.list_id !== listId ||
     current.kind !== "list" ||
-    !current.can_edit ||
+    current.can_edit === false ||
     !isString(command.task_id) ||
     typeof command.included !== "boolean"
   )

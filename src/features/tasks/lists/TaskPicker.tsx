@@ -201,6 +201,7 @@ export function TaskPicker({
       onClose={onClose}
       onDiscard={discard}
       title={PICKER.title}
+      initialFocusSelector='input[type="search"]'
       {...(returnFocusRef ? { returnFocusRef } : {})}
       footer={
         <div className="flex w-full flex-wrap items-center justify-between gap-2">

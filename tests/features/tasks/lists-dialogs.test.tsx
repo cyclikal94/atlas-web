@@ -209,6 +209,10 @@ describe("L6: create", () => {
     await toSyncByChip(t);
     await back(t, "/tasks/lists");
     await t.until(() => dialog() !== null);
+    expect(
+      dialog(),
+      "the dialog is shown again with what was typed",
+    ).not.toBeNull();
     expect(nameField().value).toBe("  half typed ");
     fireEvent.keyDown(document.activeElement ?? document.body, {
       key: "Escape",
@@ -370,6 +374,61 @@ describe("L7: rename", () => {
     expect(nameField().value).toBe("Mine");
     expect(bodies(t).map((x) => x.body.command)).toEqual([
       { kind: "create_list", id, name: "Theirs" },
+    ]);
+  });
+
+  test("another tab's edit of the queued create, already shown here before Save, is still not overwritten: refused once, input kept", async () => {
+    const t = await mountTasks({
+      path: "/tasks/lists",
+      env: { online: false },
+    });
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("setup");
+    const id = listId();
+    await act(async () => {
+      await outbox.enqueue(
+        createList({ listId: id, name: "Old", defaults: null }),
+      );
+    });
+    await act(async () => {
+      await t.router.navigate({ to: `/tasks/lists/${id}` } as never);
+    });
+    await t.until(detailReady(id));
+    press(DETAIL.rename);
+    await t.settle();
+    typeName("Mine");
+    const { renameQueuedCreate } = await import(
+      "../../../src/features/tasks/model/lists"
+    );
+    const other = renameQueuedCreate(
+      {
+        ...(t.drafts()[0] as DraftRow),
+        command: t.bodies()[0]?.command,
+      } as DraftWithCommand,
+      "Theirs",
+    );
+    await act(async () => {
+      if (other !== null)
+        await outbox.editQueued(t.drafts()[0]?.local_id as string, other);
+    });
+    await t.until(
+      () =>
+        screen.queryByRole("heading", { level: 1, name: "Theirs" }) !== null,
+    );
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(
+      within(dialog() as HTMLElement).getByText(RENAME.changedElsewhere),
+    ).not.toBeNull();
+    expect(nameField().value).toBe("Mine");
+    expect(bodies(t).map((x) => x.body.command)).toEqual([
+      { kind: "create_list", id, name: "Theirs" },
+    ]);
+    // Having been told, the person saves again: now it is their decision on what is there.
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(bodies(t).map((x) => x.body.command)).toEqual([
+      { kind: "create_list", id, name: "Mine" },
     ]);
   });
 
@@ -676,7 +735,12 @@ describe("L9: the picker", () => {
     expect(
       screen.getByText(/Added 1 of 2\. The others weren't saved:/),
     ).not.toBeNull();
-    expect(screen.getByText(PICKER.selected(1))).not.toBeNull();
+    expect(
+      document
+        .querySelector("[data-picker-selected]")
+        ?.getAttribute("data-picker-selected"),
+      "the task not saved stays selected (1 selected)",
+    ).toBe("1");
     expect(bodies(t, "list_item")).toHaveLength(1);
     press(PICKER.submit, dialog() as HTMLElement);
     await t.until(() => dialog() === null);
@@ -744,6 +808,6 @@ describe("L10: a capacity refusal", () => {
       within(document.querySelector("[data-list-refused]") as HTMLElement)
         .getByRole("link")
         .getAttribute("href"),
-    ).toBe("/sync");
+    ).toBe("/sync?tab=conflicts");
   });
 });

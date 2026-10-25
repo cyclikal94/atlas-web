@@ -1,4 +1,10 @@
-import { cleanup, fireEvent, screen, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  screen,
+  within,
+} from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
 import * as copy from "../../../src/features/tasks/copy";
@@ -131,6 +137,37 @@ describe("L5: the pane", () => {
     );
   });
 
+  test("a list created here and not received yet is listed first, marked Not sent yet (first page only)", async () => {
+    const cached = listId();
+    const t = await mountTasks({
+      path: "/tasks/lists",
+      rows: [listRow(cached, "Already here", [])],
+      env: { online: false },
+    });
+    await t.until(paneReady);
+    const { createList } = await import(
+      "../../../src/features/tasks/model/lists"
+    );
+    const fresh = listId();
+    await act(async () => {
+      await t.data
+        .outbox()
+        ?.enqueue(
+          createList({ listId: fresh, name: "Zzz made here", defaults: null }),
+        );
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-link="${fresh}"]`) !== null,
+    );
+    const links = [...document.querySelectorAll("[data-list-link]")].map((l) =>
+      l.getAttribute("data-list-link"),
+    );
+    expect(links).toEqual([fresh, cached]);
+    expect(
+      document.querySelector(`[data-list-link="${fresh}"]`)?.textContent,
+    ).toContain(copy.PENDING.queued);
+  });
+
   test("the Tasks pane links to the Lists", async () => {
     const t = await mountTasks({ path: "/tasks", rows: [] });
     await t.until(() => document.querySelector("[data-lists-link]") !== null);
@@ -172,7 +209,8 @@ describe("L8: the detail", () => {
     expect(withheld.textContent).toContain(DETAIL.withheld);
     expect(withheld.textContent).not.toContain(t3);
     expect(
-      within(withheld).getByRole("button", { name: DETAIL.removeWithheld }),
+      within(withheld).queryByRole("button", { name: DETAIL.removeWithheld }),
+      "a withheld row keeps Remove",
     ).not.toBeNull();
     expect(screen.getByText(DETAIL.caption)).not.toBeNull();
     expect((await axe(document.body)).violations).toEqual([]);

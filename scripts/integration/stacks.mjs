@@ -178,6 +178,15 @@ export const DEFAULT_STACKS = [
     mutates:
       "tasks, evidence, sharing and enrolment; paced by its stack ledger",
   },
+  // WEB-10b: list journeys (100 tasks seeded in I-LS3) have their own backend, accounts and pacing state.
+  {
+    name: "lists",
+    suffix: "-lists",
+    files: [SPEC("lists")],
+    oidc: false,
+    mutates:
+      "tasks, lists, sharing and list defaults; paced by its stack ledger",
+  },
 ];
 
 /** Discovered by Playwright but NOT run by the default suite: a separate, mandatory command. Never counted as passed by it. */

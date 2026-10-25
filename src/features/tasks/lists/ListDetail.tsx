@@ -177,7 +177,11 @@ export function ListDetail({ listId }: { listId: string }) {
       {conflicted ? (
         <p className="text-[12.5px] text-conflict-text" data-list-attention="">
           {DETAIL.attention}{" "}
-          <Link to="/sync" className="underline underline-offset-2">
+          <Link
+            to="/sync"
+            search={{ tab: "conflicts" }}
+            className="underline underline-offset-2"
+          >
             {DETAIL.openSync}
           </Link>
         </p>
@@ -192,7 +196,11 @@ export function ListDetail({ listId }: { listId: string }) {
             data-list-refused={draft.local_id}
           >
             {DETAIL.refused(task?.label ?? null)}{" "}
-            <Link to="/sync" className="underline underline-offset-2">
+            <Link
+              to="/sync"
+              search={{ tab: "conflicts" }}
+              className="underline underline-offset-2"
+            >
               {DETAIL.openSync}
             </Link>
           </p>
