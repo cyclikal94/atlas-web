@@ -45,7 +45,9 @@ import {
  * picker (a task not sent yet included) and the chained adds sent in order after the create; E-LS4 remove, rename (queued create and
  * synced list), read-only controls; E-LS5 capacity (Add disabled at 100, the picker capped, a 503 slice_capacity refused); E-LS6 archive
  * and restore offline; E-LS7 input kept through the in-dialog sync control, Escape, reload, and a save answered while away; E-LS8 two tabs
- * (a denial committed after the screen was drawn, the queued create edited in the other tab, both adding); E-LS9 keyboard only.
+ * (a denial committed after the screen was drawn, the queued create edited in the other tab, both adding); E-LS9 keyboard only; E-LS10
+ * the detail's heading; E-LS11 an answer lost after the write (a labelled test-only fault): the retry settled on the dialog Back mounted
+ * again, and an add re-chosen after another tab's remove (review 2 R1, R2), each with its control.
  */
 const LISTS_ROUTE = "/tasks/lists";
 const detailRoute = (id: string) => `/tasks/lists/${id}`;
@@ -1400,4 +1402,202 @@ test.describe("E-LS9: keyboard only (L17)", () => {
     const kinds = (await queued(page)).map((x) => x.body.command.kind);
     expect(kinds).toEqual(["create_list", "list_item", "list_item", "archive"]);
   });
+});
+
+/**
+ * TEST-ONLY FAULT, ARTIFICIAL (revision 2, review 2 R1/R2; design assessment Q4): the answer of ONE committed draft write is lost. Installed
+ * before any page opens its database (Dexie takes the method when it opens). Armed on a page (`loseNextAnswer`), the next readwrite
+ * transaction over `draft_commands` COMMITS for real; Dexie is then told it ABORTED (its own `onabort`, with no error), never that it
+ * completed, so the app sees a failed write whose data is stored: a store that failed after the write committed. Its notification is lost
+ * with it, as a real lost answer's would be. Unarmed it passes every transaction through untouched (each case's control).
+ */
+async function loseCommittedAnswers(context: BrowserContext): Promise<void> {
+  await context.addInitScript(() => {
+    const w = window as unknown as {
+      __loseAnswer: boolean;
+      __lost: number;
+    };
+    w.__loseAnswer = false;
+    w.__lost = 0;
+    // The armed transactions, and those of them that wrote a draft body (a round that writes nothing, such as an enqueue re-admitted at its
+    // measured size, is passed through: only a committed draft write loses its answer).
+    const armed = new WeakSet<IDBTransaction>();
+    const wrote = new WeakSet<IDBTransaction>();
+    for (const method of ["put", "add"] as const) {
+      const write = IDBObjectStore.prototype[method];
+      IDBObjectStore.prototype[method] = function (
+        this: IDBObjectStore,
+        ...args: Parameters<IDBObjectStore["put"]>
+      ) {
+        if (this.name === "draft_commands" && armed.has(this.transaction))
+          wrote.add(this.transaction);
+        return write.apply(this, args);
+      } as IDBObjectStore["put"];
+    }
+    const original = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function (
+      this: IDBDatabase,
+      ...args: Parameters<IDBDatabase["transaction"]>
+    ) {
+      const tx = original.apply(this, args);
+      const scope = args[0];
+      const stores = typeof scope === "string" ? [scope] : [...scope];
+      if (
+        !w.__loseAnswer ||
+        args[1] !== "readwrite" ||
+        !stores.includes("draft_commands")
+      )
+        return tx;
+      armed.add(tx);
+      let aborted: ((event: Event) => void) | null = null;
+      let completed: ((event: Event) => void) | null = null;
+      Object.defineProperty(tx, "onabort", {
+        configurable: true,
+        get: () => aborted,
+        set: (handler: ((event: Event) => void) | null) => {
+          aborted = handler;
+        },
+      });
+      Object.defineProperty(tx, "oncomplete", {
+        configurable: true,
+        get: () => completed,
+        set: (handler: ((event: Event) => void) | null) => {
+          completed = handler;
+        },
+      });
+      tx.addEventListener("complete", (event) => {
+        if (!wrote.has(tx) || !w.__loseAnswer) {
+          completed?.(event);
+          return;
+        }
+        w.__loseAnswer = false;
+        w.__lost += 1;
+        aborted?.(new Event("abort"));
+      });
+      return tx;
+    } as IDBDatabase["transaction"];
+  });
+}
+const loseNextAnswer = (page: Page) =>
+  page.evaluate(() => {
+    (window as unknown as { __loseAnswer: boolean }).__loseAnswer = true;
+  });
+const answersLost = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __lost: number }).__lost);
+const bySeq = <T extends { draft: { created_seq: number } }>(rows: T[]) =>
+  [...rows].sort((x, y) => x.draft.created_seq - y.draft.created_seq);
+const STORAGE_REFUSED = "Couldn't save on this device";
+
+test.describe("E-LS11: an answer lost after the write (review 2 R1, R2)", () => {
+  for (const remount of [true, false])
+    test(`create: the earlier request's retry settles ${remount ? "on the dialog mounted again by Sync and Back" : "on the same dialog (control)"}; the next Save creates the newer name once`, async ({
+      context,
+    }) => {
+      await loseCommittedAnswers(context);
+      const { page } = await setup(context, LISTS_ROUTE, [], []);
+      await goOfflineAtBoundary(page);
+      await page.getByRole("button", { name: "+ New list" }).click();
+      await dialog(page).getByLabel("Name").fill("Original");
+      await loseNextAnswer(page);
+      await dialog(page).getByRole("button", { name: "Create list" }).click();
+      // Written, its answer lost: the dialog does not say it saved.
+      await expect(dialog(page)).toContainText(STORAGE_REFUSED);
+      expect(await answersLost(page)).toBe(1);
+      expect(
+        (await queued(page, "create_list")).map((x) => x.body.command.name),
+      ).toEqual(["Original"]);
+      await dialog(page).getByLabel("Name").fill("Newer");
+      // The retry of the earlier request (the dialog's next Save) is held at its write.
+      const release = await holdDraftWrites(page);
+      await dialog(page).getByRole("button", { name: "Create list" }).click();
+      await expect(dialog(page).getByLabel("Name")).toBeDisabled();
+      if (remount) {
+        await toSyncFromDialog(page);
+        await expect(dialog(page)).toHaveCount(0);
+        await page.goBack();
+        await expect(dialog(page).getByLabel("Name")).toBeDisabled();
+      }
+      await release();
+      await expect(dialog(page).getByLabel("Name")).toBeEnabled();
+      await expect(dialog(page).getByLabel("Name")).toHaveValue("Newer");
+      await expect(dialog(page)).toContainText(
+        "Your earlier save created “Original”.",
+      );
+      await expect(page).toHaveURL(/\/tasks\/lists$/);
+      await dialog(page).getByRole("button", { name: "Create list" }).click();
+      await expect(dialog(page)).toHaveCount(0);
+      const creates = bySeq(await queued(page, "create_list"));
+      expect(creates.map((x) => x.body.command.name)).toEqual([
+        "Original",
+        "Newer",
+      ]);
+      await expect(page).toHaveURL(
+        new RegExp(`/tasks/lists/${creates[1]?.body.command.id as string}$`),
+      );
+    });
+
+  for (const lost of [true, false])
+    test(`picker: ${lost ? "A's add written but its answer lost (B not sent)" : "A and B added (control, no lost answer)"}; A removed in another tab, then chosen again: a new add after the remove`, async ({
+      context,
+    }) => {
+      await loseCommittedAnswers(context);
+      const a = buildTask({ n: 31, title: "First" });
+      const b = buildTask({ n: 32, title: "Second" });
+      const list = listUpsert(31, "Errands", []);
+      const { page } = await setup(
+        context,
+        detailRoute(list.id),
+        [a, b],
+        [list],
+      );
+      await goOfflineAtBoundary(page);
+      const box = (t: BuiltTask) =>
+        dialog(page).locator(`[data-picker-task="${t.taskId}"] input`);
+      await page.getByRole("button", { name: "Add task to list" }).click();
+      await box(a).check();
+      await box(b).check();
+      if (lost) await loseNextAnswer(page);
+      await dialog(page).getByRole("button", { name: "Add selected" }).click();
+      if (lost) {
+        await expect(dialog(page)).toContainText(STORAGE_REFUSED);
+        expect(await answersLost(page)).toBe(1);
+        expect(await queued(page, "list_item")).toHaveLength(1);
+      } else {
+        await expect(dialog(page)).toHaveCount(0);
+        expect(await answersLost(page)).toBe(0);
+      }
+      const other = await context.newPage();
+      await other.goto(
+        `/__session?route=${encodeURIComponent(detailRoute(list.id))}`,
+      );
+      await other.waitForFunction(() => window.__atlasData !== undefined);
+      await untilTreeSettled(other);
+      await goOfflineAtBoundary(other);
+      await other.getByRole("button", { name: "Remove First" }).click();
+      await expect
+        .poll(async () => (await queued(page, "list_item")).length)
+        .toBe(lost ? 2 : 3);
+      if (!lost)
+        await page.getByRole("button", { name: "Add task to list" }).click();
+      // A is offered again; an earlier selection of it, if shown, is cleared, then A is chosen: a new selection.
+      await expect(box(a)).toBeVisible();
+      if (await box(a).isChecked()) await box(a).uncheck();
+      await box(a).check();
+      await dialog(page).getByRole("button", { name: "Add selected" }).click();
+      await expect(dialog(page)).toHaveCount(0);
+      const items = bySeq(await queued(page, "list_item"));
+      const ops = items.map(
+        (x) =>
+          `${x.body.command.included ? "+" : "-"}${x.body.command.task_id as string}`,
+      );
+      expect(ops).toEqual(
+        lost
+          ? [`+${a.taskId}`, `-${a.taskId}`, `+${b.taskId}`, `+${a.taskId}`]
+          : [`+${a.taskId}`, `+${b.taskId}`, `-${a.taskId}`, `+${a.taskId}`],
+      );
+      const addsOfA = items.filter(
+        (x) => x.body.command.task_id === a.taskId && x.body.command.included,
+      );
+      expect(new Set(addsOfA.map((x) => x.draft.local_id)).size).toBe(2);
+    });
 });

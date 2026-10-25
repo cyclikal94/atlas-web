@@ -13,7 +13,7 @@ import {
   PICKER,
   RENAME,
 } from "../../../src/features/tasks/lists/copy";
-import { listItem } from "../../../src/features/tasks/model/lists";
+import { createList, listItem } from "../../../src/features/tasks/model/lists";
 import { installMatchMedia } from "../../helpers/match-media";
 import {
   forgetLists,
@@ -125,6 +125,38 @@ async function createFirst(t: Mounted, name: string) {
   typeName(name);
   press(CREATE.submit, dialog() as HTMLElement);
   await t.settle();
+}
+const box = (id: string) =>
+  document.querySelector(
+    `[data-picker-task="${id}"] input`,
+  ) as HTMLInputElement | null;
+/** The task a `list_item` request names (its body, built on a stand-in base). */
+const taskOf = (request: EnqueueRequest) =>
+  (
+    request.build({ [request.targets[0]?.resourceId as string]: 1 }) as {
+      command: { command: { task_id?: string } };
+    }
+  ).command.command.task_id;
+const adds = (t: Mounted) =>
+  commands(t, "list_item").map((c) => `${c.included ? "+" : "-"}${c.task_id}`);
+/** The in-dialog sync control, then the sync screens (the dialog is removed); `back` returns (Back mounts it again). */
+async function toSync(t: Mounted) {
+  const chip = within(dialog() as HTMLElement)
+    .getAllByRole("button")
+    .find((x) => x.hasAttribute("data-sync-tone"));
+  expect(chip, "the in-dialog sync control").toBeDefined();
+  await act(async () => {
+    fireEvent.click(chip as HTMLElement);
+    await t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+  });
+  await t.settle();
+  expect(dialog(), "the dialog is removed at the sync screens").toBeNull();
+}
+async function back(t: Mounted) {
+  await act(async () => {
+    t.router.history.back();
+  });
+  await t.until(() => dialog() !== null);
 }
 const sameIds = (a?: EnqueueRequest, b?: EnqueueRequest) =>
   a !== undefined &&
@@ -332,21 +364,6 @@ describe("R2: the picker retires a saved add's id", () => {
     expect(commands(t, "list_item")).toHaveLength(1);
     return { t, id, a, b, asked, real };
   }
-  const box = (id: string) =>
-    document.querySelector(
-      `[data-picker-task="${id}"] input`,
-    ) as HTMLInputElement | null;
-  /** The task a `list_item` request names (its body, built on a stand-in base). */
-  const taskOf = (request: EnqueueRequest) =>
-    (
-      request.build({ [request.targets[0]?.resourceId as string]: 1 }) as {
-        command: { command: { task_id?: string } };
-      }
-    ).command.command.task_id;
-  const adds = (t: Mounted) =>
-    commands(t, "list_item").map(
-      (c) => `${c.included ? "+" : "-"}${c.task_id}`,
-    );
 
   test("removed elsewhere, then chosen again in the same session: a NEW add, after the remove; the unsaved task keeps its id", async () => {
     const { t, id, a, b, asked, real } = await partialSave();
@@ -435,4 +452,541 @@ describe("R2: the picker retires a saved add's id", () => {
       }
       expect(adds(t)).toEqual([`+${a}`]);
     });
+});
+
+/**
+ * Review 2 R1 (revision 2): the settlement of an earlier, unsettled request reaches the editor holding the session WHEN it settles, with
+ * what it leaves (new ids, the binding gone): on the mount that took the save, while the dialog is away at the sync screens, and on the
+ * dialog Back mounted again while the retry was pending (the review's failing schedule). The next explicit Save then saves the newer input
+ * once, under new ids: never the earlier request again, never an extra Save that does nothing.
+ */
+describe("R1 (review 2): the earlier request's settlement reaches the editor holding the session", () => {
+  type Kind = "create" | "rename";
+  type Schedule =
+    | "same mount"
+    | "remounted while pending"
+    | "settled while away";
+  const label = (kind: Kind) =>
+    kind === "create" ? CREATE.submit : RENAME.submit;
+  const stored = (t: Mounted, kind: Kind) =>
+    names(t, kind === "create" ? "create_list" : "edit_list");
+  async function retryHeld(kind: Kind) {
+    const id = listId();
+    const t = await mountTasks({
+      path: kind === "create" ? "/tasks/lists" : `/tasks/lists/${id}`,
+      rows: [listRow(id, "Initial", [])],
+      env: { online: false },
+    });
+    await t.until(() =>
+      kind === "create"
+        ? document.querySelector("[data-new-list]") !== null
+        : document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const gate = held();
+    const { asked } = answers(t, {
+      1: "lost-after-commit",
+      2: { hold: gate.promise },
+    });
+    press(kind === "create" ? "+ New list" : DETAIL.rename);
+    await t.settle();
+    typeName("Original");
+    press(label(kind), dialog() as HTMLElement);
+    await t.settle();
+    expect(stored(t, kind)).toEqual(["Original"]);
+    typeName("Newer");
+    press(label(kind), dialog() as HTMLElement);
+    await t.settle();
+    expect(asked, "the retry of the earlier request is pending").toHaveLength(
+      2,
+    );
+    expect(asked[1]).toBe(asked[0]);
+    return { t, id, gate, asked };
+  }
+
+  for (const kind of ["create", "rename"] as const)
+    for (const schedule of [
+      "same mount",
+      "remounted while pending",
+      "settled while away",
+    ] as Schedule[])
+      test(`${kind}, ${schedule}: the next Save saves the newer name once, under new ids`, async () => {
+        const { t, gate, asked } = await retryHeld(kind);
+        const at = t.router.state.location.pathname;
+        if (schedule !== "same mount") await toSync(t);
+        if (schedule === "remounted while pending") await back(t);
+        await act(async () => {
+          gate.resolve();
+        });
+        await t.settle();
+        if (schedule === "settled while away") {
+          expect(
+            t.router.state.location.pathname,
+            "no navigation while away",
+          ).toBe("/sync");
+          await back(t);
+        }
+        expect(t.router.state.location.pathname).toBe(at);
+        expect(nameField().value, "the newer input stays").toBe("Newer");
+        const earlier =
+          kind === "create"
+            ? CREATE.earlier("Original")
+            : RENAME.earlier("Original");
+        expect(
+          within(dialog() as HTMLElement).queryByText(earlier),
+          "the earlier save's note",
+        ).not.toBeNull();
+        expect(saveButton(label(kind)).disabled).toBe(false);
+        press(label(kind), dialog() as HTMLElement);
+        await t.until(() => dialog() === null);
+        expect(stored(t, kind)).toEqual(["Original", "Newer"]);
+        expect(asked, "no Save that does nothing").toHaveLength(3);
+        expect(
+          asked[2]?.localId,
+          "the newer name under a new local id",
+        ).not.toBe(asked[0]?.localId);
+        if (kind === "create") {
+          expect(sameIds(asked[2], asked[0])).toBe(false);
+          const id = commands(t, "create_list")[1]?.id as string;
+          expect(t.router.state.location.pathname).toBe(`/tasks/lists/${id}`);
+          expect(asked[2]?.targets[0]?.resourceId).toBe(id);
+        }
+      });
+
+  for (const kind of ["create", "rename"] as const)
+    test(`${kind}, abandoned while the retry is pending (Cancel): its settlement opens, navigates and binds nothing; the next dialog starts afresh`, async () => {
+      const { t, gate, asked } = await retryHeld(kind);
+      const at = t.router.state.location.pathname;
+      press(
+        kind === "create" ? CREATE.cancel : RENAME.cancel,
+        dialog() as HTMLElement,
+      );
+      await t.settle();
+      expect(dialog()).toBeNull();
+      await act(async () => {
+        gate.resolve();
+      });
+      await t.settle();
+      expect(dialog(), "nothing reopens").toBeNull();
+      expect(t.router.state.location.pathname).toBe(at);
+      press(kind === "create" ? "+ New list" : DETAIL.rename);
+      await t.settle();
+      expect(nameField().value, "a fresh session").toBe(
+        kind === "create" ? "" : "Original",
+      );
+      expect(
+        within(dialog() as HTMLElement).queryByText(/earlier save/),
+      ).toBeNull();
+      typeName("Third");
+      press(label(kind), dialog() as HTMLElement);
+      await t.until(() => dialog() === null);
+      expect(stored(t, kind)).toEqual(["Original", "Third"]);
+      expect(asked).toHaveLength(3);
+      expect(asked[2]?.localId).not.toBe(asked[0]?.localId);
+    });
+
+  test("rename of a list whose create is queued, its in-place edit's answer lost after it was written: never shown as saved, the input kept; the digest still guards a later edit (no edit_list)", async () => {
+    const t = await mountTasks({
+      path: "/tasks/lists",
+      env: { online: false },
+    });
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const id = listId();
+    await act(async () => {
+      await outbox.enqueue(
+        createList({ listId: id, name: "Old", defaults: null }),
+      );
+    });
+    await act(async () => {
+      await t.router.navigate({ to: `/tasks/lists/${id}` } as never);
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const real = outbox.editQueued.bind(outbox);
+    let edits = 0;
+    outbox.editQueued = async (localId, request) => {
+      edits += 1;
+      const result = await real(localId, request);
+      if (edits === 1) throw new Error("lost after the edit was written");
+      return result;
+    };
+    press(DETAIL.rename);
+    await t.settle();
+    typeName("Renamed");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    // Written after all: the queued create carries the name; the dialog never says it saved, and keeps what was typed (P2: the refusal
+    // stays visible). With the list already so named there is nothing to save, so Save says why.
+    expect(names(t, "create_list")).toEqual(["Renamed"]);
+    expect(dialog(), "not shown as saved").not.toBeNull();
+    expect(nameField().value).toBe("Renamed");
+    expect(
+      within(dialog() as HTMLElement).queryByText(RENAME.saved),
+    ).toBeNull();
+    expect(saveButton(RENAME.submit).disabled).toBe(true);
+    // A later edit meets the digest this dialog saw (`seen`): the lost edit is never silently overwritten as if unseen.
+    typeName("Again");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(
+      within(dialog() as HTMLElement).queryByText(RENAME.changedElsewhere),
+    ).not.toBeNull();
+    expect(names(t, "create_list")).toEqual(["Renamed"]);
+    expect(nameField().value).toBe("Again");
+    press(RENAME.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(names(t, "create_list")).toEqual(["Again"]);
+    expect(commands(t, "edit_list")).toEqual([]);
+    expect(edits).toBe(2);
+  });
+});
+
+/**
+ * Review 2 R2 (revision 2): a SELECTION, not the task, names an add. The review's failing schedule: A's add stored but its answer lost (B
+ * not sent), the list then holds A, another actor removes A, and the person chooses A again: a NEW add after the remove. A selection whose
+ * add was lost is settled by what is stored under its id, never by the list's membership: found, it is done (and the person is told); not
+ * found, the same add is sent again. FIXTURE evidence over the production outbox; the lost answers are controlled simulations.
+ */
+describe("R2 (review 2): a lost add, then a remove, then the task chosen again", () => {
+  async function lostThenSeen(
+    answer: Record<number, Answer> = { 1: "lost-after-commit" },
+  ) {
+    const id = listId();
+    const [a, b] = [taskId(1), taskId(2)];
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [
+        listRow(id, "Errands", []),
+        taskRow(a, "First"),
+        taskRow(b, "Second"),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const { asked, real } = answers(t, answer);
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    fireEvent.click(box(b) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(dialog(), "the uncertain add keeps the picker").not.toBeNull();
+    const remove = () =>
+      act(async () => {
+        await real(listItem({ listId: id, taskId: a, included: false }));
+      });
+    return { t, id, a, b, asked, real, remove };
+  }
+  const requested = (asked: EnqueueRequest[], task: string) =>
+    asked.filter((r) => taskOf(r) === task);
+
+  test("the review's schedule: A seen in the list, removed elsewhere, chosen again: +A, -A, +B, +A; the second A a new add", async () => {
+    const { t, a, b, asked, remove } = await lostThenSeen();
+    await t.until(() => box(a) === null);
+    expect(adds(t)).toEqual([`+${a}`]);
+    await remove();
+    await t.until(() => box(a) !== null);
+    if ((box(a) as HTMLInputElement).checked)
+      fireEvent.click(box(a) as HTMLInputElement);
+    expect((box(a) as HTMLInputElement).checked).toBe(false);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
+    const ofA = requested(asked, a);
+    expect(ofA).toHaveLength(2);
+    expect(ofA[1]?.localId, "a new add").not.toBe(ofA[0]?.localId);
+    expect(requested(asked, b), "B sent once").toHaveLength(1);
+  });
+
+  test("the earlier selection shown again and Add pressed: it is found saved, not made again, and the person is told; chosen again, a new add", async () => {
+    const { t, a, b, asked, remove } = await lostThenSeen();
+    await t.until(() => box(a) === null);
+    await remove();
+    await t.until(() => box(a) !== null);
+    expect((box(a) as HTMLInputElement).checked, "the earlier selection").toBe(
+      true,
+    );
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(dialog(), "not closed as if A were added").not.toBeNull();
+    expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`]);
+    expect(
+      within(dialog() as HTMLElement).queryByText(PICKER.earlier(1)),
+    ).not.toBeNull();
+    // B is a member now: the offered page is read again before A's row is back.
+    await t.until(() => box(a) !== null);
+    expect((box(a) as HTMLInputElement).checked, "that selection is done").toBe(
+      false,
+    );
+    expect(requested(asked, a), "nothing sent again for A").toHaveLength(1);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
+    const ofA = requested(asked, a);
+    expect(ofA[1]?.localId).not.toBe(ofA[0]?.localId);
+  });
+
+  test("the add and the remove both while the picker is at the sync screens (no membership ever seen): chosen again on return, a new add", async () => {
+    const { t, a, b, asked, remove } = await lostThenSeen();
+    await toSync(t);
+    await remove();
+    await back(t);
+    await t.until(() => box(a) !== null);
+    if ((box(a) as HTMLInputElement).checked)
+      fireEvent.click(box(a) as HTMLInputElement);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${b}`, `+${a}`]);
+    const ofA = requested(asked, a);
+    expect(ofA[1]?.localId).not.toBe(ofA[0]?.localId);
+  });
+
+  test("control, no remove: the lost add is seen made; B alone is added, once", async () => {
+    const { t, a, b, asked } = await lostThenSeen();
+    await t.until(() => box(a) === null);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
+    expect(requested(asked, a)).toHaveLength(1);
+  });
+
+  test("another actor adds and removes A while this add was NOT stored: membership settles nothing; Add sends the same add again", async () => {
+    const { t, id, a, b, asked, real } = await lostThenSeen({
+      1: "lost-before-commit",
+    });
+    expect(adds(t)).toEqual([]);
+    await act(async () => {
+      await real(listItem({ listId: id, taskId: a, included: true }));
+    });
+    await t.until(() => box(a) === null);
+    await act(async () => {
+      await real(listItem({ listId: id, taskId: a, included: false }));
+    });
+    await t.until(() => box(a) !== null);
+    expect((box(a) as HTMLInputElement).checked, "still this selection").toBe(
+      true,
+    );
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(adds(t)).toEqual([`+${a}`, `-${a}`, `+${a}`, `+${b}`]);
+    const ofA = requested(asked, a);
+    expect(ofA).toHaveLength(2);
+    expect(ofA[1]?.localId, "the same add, sent again").toBe(ofA[0]?.localId);
+    const stored = t.drafts().map((d) => d.local_id);
+    expect(stored).toContain(ofA[0]?.localId);
+  });
+
+  test("a partial save settled on the picker mounted again on Back: A done, B kept (its add retried under its id), the search typed meanwhile kept", async () => {
+    const id = listId();
+    const [a, b] = [taskId(1), taskId(2)];
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [
+        listRow(id, "Errands", []),
+        taskRow(a, "First"),
+        taskRow(b, "Second"),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const gate = held();
+    const { asked } = answers(t, {
+      2: { hold: gate.promise, after: "lost-before-commit" },
+    });
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    fireEvent.click(box(b) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => asked.length === 2);
+    fireEvent.change(screen.getByLabelText(PICKER.searchLabel), {
+      target: { value: "Sec" },
+    });
+    await toSync(t);
+    await back(t);
+    await act(async () => {
+      gate.resolve();
+    });
+    await t.settle();
+    expect(
+      (screen.getByLabelText(PICKER.searchLabel) as HTMLInputElement).value,
+    ).toBe("Sec");
+    await t.until(() => box(b) !== null);
+    expect((box(b) as HTMLInputElement).checked, "B still selected").toBe(true);
+    expect(screen.queryByText(PICKER.selected(1))).not.toBeNull();
+    expect(screen.queryByText(/Added 1 of 2\./)).not.toBeNull();
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
+    const ofB = requested(asked, b);
+    expect(ofB).toHaveLength(2);
+    expect(ofB[1]?.localId, "B's add retried under its id").toBe(
+      ofB[0]?.localId,
+    );
+  });
+
+  test("every add saved while the search changed, settled on the picker mounted again on Back: the search and the note stay, nothing is selected", async () => {
+    const id = listId();
+    const a = taskId(1);
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [
+        listRow(id, "Errands", []),
+        taskRow(a, "First"),
+        taskRow(taskId(2), "Second"),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    const gate = held();
+    const { asked } = answers(t, { 1: { hold: gate.promise } });
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => asked.length === 1);
+    fireEvent.change(screen.getByLabelText(PICKER.searchLabel), {
+      target: { value: "Sec" },
+    });
+    await toSync(t);
+    await back(t);
+    await act(async () => {
+      gate.resolve();
+    });
+    await t.settle();
+    expect(dialog(), "newer input keeps the picker").not.toBeNull();
+    expect(
+      (screen.getByLabelText(PICKER.searchLabel) as HTMLInputElement).value,
+    ).toBe("Sec");
+    expect(
+      within(dialog() as HTMLElement).queryByText(PICKER.newer),
+    ).not.toBeNull();
+    expect(screen.queryByText(PICKER.selected(0))).not.toBeNull();
+    expect(adds(t)).toEqual([`+${a}`]);
+  });
+});
+
+/**
+ * Review 2 R2, the design assessment's matrix rows for the picker that the schedules above leave: a save settled while the picker is away at
+ * the sync screens, a picker abandoned while its save is pending, and an exact read of the stored draft that FAILS (no answer is not "not
+ * stored", and certainly not "stored": the same add is sent again, as before revision 2).
+ */
+describe("R2 (review 2): the picker's other settlement and evidence paths", () => {
+  async function pickerOf(titles: string[]) {
+    const id = listId();
+    const tasks = titles.map((title, n) => ({ id: taskId(n + 1), title }));
+    const t = await mountTasks({
+      path: `/tasks/lists/${id}`,
+      rows: [
+        listRow(id, "Errands", []),
+        ...tasks.map((x) => taskRow(x.id, x.title)),
+      ],
+      env: { online: false },
+    });
+    await t.until(
+      () => document.querySelector(`[data-list-detail="${id}"]`) !== null,
+    );
+    return { t, id, ids: tasks.map((x) => x.id) };
+  }
+
+  test("a partial save settled while the picker is at the sync screens: on Back, A is done and B kept with its add's id", async () => {
+    const { t, ids } = await pickerOf(["First", "Second"]);
+    const [a, b] = ids as [string, string];
+    const gate = held();
+    const { asked } = answers(t, {
+      2: { hold: gate.promise, after: "lost-before-commit" },
+    });
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    fireEvent.click(box(b) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => asked.length === 2);
+    await toSync(t);
+    await act(async () => {
+      gate.resolve();
+    });
+    await t.settle();
+    expect(t.router.state.location.pathname, "no navigation while away").toBe(
+      "/sync",
+    );
+    await back(t);
+    await t.until(() => box(b) !== null);
+    expect((box(b) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByText(PICKER.selected(1))).not.toBeNull();
+    expect(screen.queryByText(/Added 1 of 2\./)).not.toBeNull();
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(adds(t)).toEqual([`+${a}`, `+${b}`]);
+    const ofB = asked.filter((r) => taskOf(r) === b);
+    expect(ofB[1]?.localId).toBe(ofB[0]?.localId);
+  });
+
+  test("abandoned (Escape) while its save is pending: the settlement opens nothing, and the picker opened again starts afresh", async () => {
+    const { t, ids } = await pickerOf(["First"]);
+    const [a] = ids as [string];
+    const gate = held();
+    const { asked } = answers(t, { 1: { hold: gate.promise } });
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => asked.length === 1);
+    fireEvent.keyDown(document.activeElement ?? document.body, {
+      key: "Escape",
+    });
+    await t.settle();
+    expect(dialog()).toBeNull();
+    await act(async () => {
+      gate.resolve();
+    });
+    await t.settle();
+    expect(dialog(), "nothing reopens").toBeNull();
+    expect(adds(t)).toEqual([`+${a}`]);
+    press(DETAIL.add);
+    await t.until(() => dialog() !== null);
+    expect(screen.queryByText(PICKER.selected(0))).not.toBeNull();
+    expect(
+      within(dialog() as HTMLElement).queryByText(PICKER.newer),
+    ).toBeNull();
+  });
+
+  test("the exact read of a lost add's draft fails: no answer is taken as neither stored nor absent; the same add is sent again", async () => {
+    const { t, ids } = await pickerOf(["First"]);
+    const [a] = ids as [string];
+    const { asked } = answers(t, { 1: "lost-before-commit" });
+    press(DETAIL.add);
+    await t.until(() => box(a) !== null);
+    fireEvent.click(box(a) as HTMLInputElement);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.settle();
+    expect(dialog()).not.toBeNull();
+    const service = t.data.service();
+    if (service === null) throw new Error("no service");
+    const run = service.store.run.bind(service.store);
+    let failedReads = 0;
+    service.store.run = (async (plan: { name: string }, ...rest: unknown[]) => {
+      if (plan.name === "data.readDraftHeader") {
+        failedReads += 1;
+        throw new Error("the read failed");
+      }
+      return (run as (...args: unknown[]) => unknown)(plan, ...rest);
+    }) as typeof service.store.run;
+    expect((box(a) as HTMLInputElement).checked).toBe(true);
+    press(PICKER.submit, dialog() as HTMLElement);
+    await t.until(() => dialog() === null);
+    expect(failedReads, "the read was asked, and failed").toBe(1);
+    expect(adds(t)).toEqual([`+${a}`]);
+    expect(asked[1]?.localId, "the same add again").toBe(asked[0]?.localId);
+  });
 });

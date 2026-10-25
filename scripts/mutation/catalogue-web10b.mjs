@@ -7,9 +7,12 @@
 // rebuild that refuses a list row). N-LS1 (the certificate) and N-LS2 (list_item without `requiresEdit`) are unit mutants (MU-2535; MU-2506
 // and MU-2536 for `edit_list`) AND, since revision 1 (review R5), real-engine mutants (MU-2547, MU-2548) caught by E-LS8 (a)/(b), which
 // order a real commit of the fixture leader between two stages of one read, and behind a stale admission, by transaction creation order.
-// The real-engine mutants are MU-2534 (N-LS3), MU-2537, MU-2538, MU-2547 (N-LS1) and MU-2548 (N-LS2). Revision 1 re-expressed MU-2518,
+// The real-engine mutants are MU-2534 (N-LS3), MU-2537, MU-2538, MU-2547 (N-LS1), MU-2548 (N-LS2), and (revision 2) MU-2560 and MU-2561
+// over E-LS11. Revision 1 re-expressed MU-2518,
 // MU-2526 and MU-2534 against the save settlement that replaced their anchors (R1), and added MU-2539..MU-2546, MU-2549 and MU-2550
-// for R1-R4.
+// for R1-R4. Revision 2 (review 2 R1/R2, design assessment Q5) re-anchors MU-2515..MU-2517, MU-2526, MU-2534, MU-2539..MU-2541 and
+// MU-2544 (same intents) on the one-transition settlement and the picker's selections, and adds MU-2551..MU-2559 and MU-2562 for their mechanisms and
+// the real-engine MU-2560 (MU-2551's patch) and MU-2561 (MU-2544's).
 import { sub } from "./data-catalogue.mjs";
 
 const LISTS = "src/features/tasks/model/lists.ts";
@@ -18,6 +21,8 @@ const REGISTER = "src/features/tasks/register.ts";
 const READS = "src/features/tasks/lists/reads.ts";
 const DIALOGS = "src/features/tasks/lists/dialogs.tsx";
 const PICKER = "src/features/tasks/lists/TaskPicker.tsx";
+const KEPT = "src/features/tasks/kept-input.ts";
+const DRAFT_READ = "src/data/ui/draft-read.ts";
 const DETAIL = "src/features/tasks/lists/ListDetail.tsx";
 const LAYOUT = "src/features/tasks/lists/ListsLayout.tsx";
 const T = (name) => `tests/features/tasks/${name}`;
@@ -29,6 +34,7 @@ const DIALOGS_TEST = T("lists-dialogs.test.tsx");
 const READS_TEST = T("lists-reads.test.tsx");
 const ATTEMPTS_TEST = T("lists-attempts.test.tsx");
 const ROUTES_TEST = T("lists-routes.test.tsx");
+const SETTLEMENT_TEST = T("kept-settlement.test.tsx");
 const ACTIONS = "src/features/tasks/actions.ts";
 const LIST_ITEM_TARGETS =
   "    targets: [primary(input.listId)],\n    ...(input.after ? { dependsOnExtra: [input.after] } : {}),\n";
@@ -54,11 +60,29 @@ const pickerOffersMembers = (t) =>
     "        !row.archived &&\n        !options.excluded.has(row.id) &&\n",
     "",
   );
+/** Review 2 R1: the editor mounted when a save settles keeps its own (stale) value; only its busy state and note follow the session. */
+const staleSettledValue = (t) =>
+  sub(
+    t,
+    "            : { key, value: entry.value, busy: false, note: entry.note },",
+    "            : { ...s, busy: false, note: entry.note },",
+  );
+/** Review 2 R2: an add's id belongs to the task for the session (the revision-1 lifetime), not to the selection. */
+const idPerTask = (t) =>
+  sub(
+    sub(
+      t,
+      "  const latest = useRef(list);\n",
+      "  const latest = useRef(list);\n  const ids = useRef<Record<string, string>>({});\n",
+    ),
+    "        localId: env.newId(),\n",
+    "        localId: (ids.current[task] ??= env.newId()),\n",
+  );
 const createNavigatesUngated = (t) =>
   sub(
     t,
-    "      settleSave<CreateInput>(\n        key,\n        ticket,",
-    '      if (outcome.ok) void navigate({ to: "/tasks/lists/$listId", params: { listId } });\n      settleSave<CreateInput>(\n        key,\n        ticket,',
+    "      settleSave<CreateInput>(\n        ticket,",
+    '      if (outcome.ok) void navigate({ to: "/tasks/lists/$listId", params: { listId } });\n      settleSave<CreateInput>(\n        ticket,',
   );
 
 export const UNIT_WEB10B = [
@@ -249,11 +273,7 @@ export const UNIT_WEB10B = [
     tests: [DIALOGS_TEST],
     expect: /waits for its create/,
     patch: (t) =>
-      sub(
-        t,
-        "            after: input.after[taskId] ?? null,",
-        "            after: null,",
-      ),
+      sub(t, "            after: choice.after,", "            after: null,"),
   },
   {
     id: "MU-2516",
@@ -265,8 +285,8 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "        if (queued.size > 0) editSession(key, ticket.session, leave, kept.edit);",
-        "        if (queued.size > 0)\n          editSession(key, ticket.session, (v) => ({ ...v, selected: [] }), kept.edit);",
+        "          .filter((c) => !queued.has(c.localId) && !earlier.has(c.localId))",
+        "          .filter(() => false)",
       ),
   },
   {
@@ -279,7 +299,7 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "            localId: input.attempts[taskId] as string,",
+        "            localId: choice.localId,",
         "            localId: crypto.randomUUID(),",
       ),
   },
@@ -398,12 +418,12 @@ export const UNIT_WEB10B = [
     file: DIALOGS,
     tests: [DIALOGS_TEST, ATTEMPTS_TEST],
     expect: /ticket acknowledgement|edits while the save is pending/,
-    // Re-expressed in revision 1 against `settleSave`, which both dialogs now settle through.
+    // Re-expressed in revision 1 against `settleSave`, which both dialogs now settle through; re-anchored in revision 2 (one transition).
     patch: (t) =>
       sub(
         t,
-        "    const settled = completeKept(ticket, current, {",
-        "    const settled = completeKept({ ...ticket, revision: keptEntry<T>(key)?.revision ?? ticket.revision }, current, {",
+        "    completeKept<T>(ticket, current, {",
+        "    completeKept<T>({ ...ticket, revision: keptEntry<T>(ticket.key)?.revision ?? ticket.revision }, current, {",
       ),
   },
   {
@@ -520,8 +540,8 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "      (value) => ({ ...value, unsettled: value.unsettled ?? sent }),",
-        "      (value) => value,",
+        "      uncertain ? { ...value, unsettled: value.unsettled ?? sent } : value,",
+        "      value,",
       ),
   },
   {
@@ -534,8 +554,8 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        "    const settled = completeKept(ticket, current, {",
-        "    const settled = completeKept(ticket, true, {",
+        "    completeKept<T>(ticket, current, {",
+        "    completeKept<T>(ticket, true, {",
       ),
   },
   {
@@ -548,8 +568,8 @@ export const UNIT_WEB10B = [
     patch: (t) =>
       sub(
         t,
-        '  if (settled === "kept" && outcome.uncertain === true)',
-        '  if (settled === "kept")',
+        "  const uncertain = outcome.uncertain === true;",
+        "  const uncertain = true;",
       ),
   },
   {
@@ -582,16 +602,12 @@ export const UNIT_WEB10B = [
   {
     id: "MU-2544",
     title:
-      "WEB-10b R2: a saved add keeps its id in the picker's session (a later add of the same task is deduplicated against it)",
+      "WEB-10b R2: an add's id belongs to the task for the session (a later add of the same task is deduplicated against an earlier one)",
     file: PICKER,
     tests: [ATTEMPTS_TEST],
-    expect: /R2: .*(chosen again|retires it too)/,
-    patch: (t) =>
-      sub(
-        t,
-        "        attempts: without(value.attempts, queued),",
-        "        attempts: value.attempts,",
-      ),
+    expect: /R2.*(chosen again|retires it too)/,
+    // Re-expressed in revision 2 (same intent): the selection, not the task, names the add; the mutant restores an id per task.
+    patch: idPerTask,
   },
   {
     id: "MU-2545",
@@ -647,6 +663,135 @@ export const UNIT_WEB10B = [
         t,
         '      data-list-detail={state === "loading" ? undefined : state}',
         "      data-list-detail={state}",
+      ),
+  },
+  {
+    id: "MU-2551",
+    title:
+      "WEB-10b R1 (review 2): a settled save updates the busy state and note of the editor mounted now, not its value (a dialog mounted again on Back keeps the earlier request's ids)",
+    file: KEPT,
+    tests: [SETTLEMENT_TEST, ATTEMPTS_TEST],
+    expect:
+      /editor mounted after the save was taken|the editor that took the save|remounted while pending/,
+    patch: staleSettledValue,
+  },
+  {
+    id: "MU-2552",
+    title:
+      "WEB-10b R1 (review 2): the settlement is told to the editors before what the save leaves is in the session",
+    file: KEPT,
+    tests: [SETTLEMENT_TEST, ATTEMPTS_TEST],
+    expect:
+      /before the editors are told|editor mounted after the save was taken|the editor that took the save|same mount|remounted while pending/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (outcome.change !== undefined)\n    held.value = outcome.change(held.value as T);\n  held.submitting = null;\n  held.note = outcome.note ?? null;\n  publish(ticket.key, { kind: "settled", session: ticket.session });\n',
+        '  held.submitting = null;\n  held.note = outcome.note ?? null;\n  publish(ticket.key, { kind: "settled", session: ticket.session });\n  if (outcome.change !== undefined)\n    held.value = outcome.change(held.value as T);\n',
+      ),
+  },
+  {
+    id: "MU-2553",
+    title:
+      "WEB-10b R1 (review 2): what a save leaves is evaluated twice (its new ids allocated twice)",
+    file: KEPT,
+    tests: [SETTLEMENT_TEST],
+    expect: /the change runs once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    held.value = outcome.change(held.value as T);\n",
+        "    held.value = outcome.change(outcome.change(held.value as T));\n",
+      ),
+  },
+  {
+    id: "MU-2554",
+    title:
+      "WEB-10b R1 (review 2): a ticket that is not the session's pending save settles it (a late completion ends a newer flight)",
+    file: KEPT,
+    tests: [SETTLEMENT_TEST],
+    expect: /a ticket that is not the pending save settles nothing/,
+    patch: (t) =>
+      sub(t, '  if (held.flight !== ticket.flight) return "gone";\n', ""),
+  },
+  {
+    id: "MU-2555",
+    title:
+      "WEB-10b R1 (review 2): a second submit is taken while a save of the session is pending",
+    file: KEPT,
+    tests: [SETTLEMENT_TEST],
+    expect: /a second submit while a save is pending is refused/,
+    patch: (t) => sub(t, "  if (held.flight !== null) return null;\n", ""),
+  },
+  {
+    id: "MU-2556",
+    title:
+      "WEB-10b R1 (review 2): what a save leaves in the session counts as an edit by the person (it moves the revision)",
+    file: KEPT,
+    tests: [SETTLEMENT_TEST],
+    expect: /it does not move the revision/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (outcome.change !== undefined)\n    held.value = outcome.change(held.value as T);\n",
+        "  if (outcome.change !== undefined) {\n    held.value = outcome.change(held.value as T);\n    held.revision += 1;\n  }\n",
+      ),
+  },
+  {
+    id: "MU-2557",
+    title:
+      "WEB-10b R2 (review 2): an add whose answer was lost is not marked so (its retry is never settled by what is stored)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect: /the earlier selection shown again and Add pressed/,
+    patch: (t) =>
+      sub(
+        t,
+        "          .map((c) => (uncertain.has(c.localId) ? { ...c, issued: true } : c)),",
+        "          .map((c) => c),",
+      ),
+  },
+  {
+    id: "MU-2558",
+    title:
+      "WEB-10b R2 (review 2): an add whose answer was lost is taken as saved without asking what is stored (one never stored is never sent)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect:
+      /NOT stored: membership settles nothing|lost-before-commit: the add is retried/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (choice.issued && (await actions.stored(choice.localId)) === true) {",
+        "        if (choice.issued) {",
+      ),
+  },
+  {
+    id: "MU-2562",
+    title:
+      "WEB-10b R2 (review 2): an exact read of a lost add's draft that failed is taken as finding it stored (the add is never sent)",
+    file: PICKER,
+    tests: [ATTEMPTS_TEST],
+    expect: /the exact read of a lost add's draft fails/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (choice.issued && (await actions.stored(choice.localId)) === true) {",
+        "        if (choice.issued && (await actions.stored(choice.localId)) !== false) {",
+      ),
+  },
+  {
+    id: "MU-2559",
+    title:
+      "WEB-10b R2 (review 2): the exact read of a stored draft answers that none is stored",
+    file: DRAFT_READ,
+    tests: [ATTEMPTS_TEST],
+    expect: /the earlier selection shown again and Add pressed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return { ok: true, value: draft };",
+        "    return { ok: true, value: null };",
       ),
   },
 ];
@@ -711,5 +856,25 @@ export const ENGINE_WEB10B = [
         LIST_ITEM_TARGETS,
         "    targets: [{ ...primary(input.listId), requiresEdit: false }],\n    ...(input.after ? { dependsOnExtra: [input.after] } : {}),\n",
       ),
+  },
+  {
+    id: "MU-2560",
+    title:
+      "WEB-10b R1 (review 2): (REAL ENGINE) the dialog Back mounts again keeps its own value when the earlier request's retry settles (the next Save sends it again)",
+    file: KEPT,
+    spec: SPEC,
+    grep: "E-LS11: .* create: .* mounted again by Sync and Back",
+    expect: /E-LS11:/,
+    patch: staleSettledValue,
+  },
+  {
+    id: "MU-2561",
+    title:
+      "WEB-10b R2 (review 2): (REAL ENGINE) an add's id belongs to the task: A chosen again after another tab's remove is deduplicated against its lost add",
+    file: PICKER,
+    spec: SPEC,
+    grep: "E-LS11: .* picker: A's add written but its answer lost",
+    expect: /E-LS11:/,
+    patch: idPerTask,
   },
 ];

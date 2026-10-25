@@ -129,4 +129,9 @@ export const PICKER = {
     `Added ${n} ${n === 1 ? "task" : "tasks"} to ${list}. Not sent yet.`,
   partial: (k: number, n: number, reason: string) =>
     `Added ${k} of ${n}. The others weren't saved: ${reason}`,
+  /** An earlier add whose answer was lost was found saved, so it was not made again (R2, revision 2). */
+  earlier: (n: number) =>
+    n === 1
+      ? "One task you chose had already been added by an earlier save, so it wasn't added again. If it isn't in the list now, choose it again to add it."
+      : `${n} tasks you chose had already been added by an earlier save, so they weren't added again. If one isn't in the list now, choose it again to add it.`,
 } as const;

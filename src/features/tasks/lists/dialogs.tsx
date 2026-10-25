@@ -9,7 +9,6 @@ import { useTasksEnv } from "../env";
 import {
   completeKept,
   disownKept,
-  editKept,
   type KeptTicket,
   keptEntry,
   keptKey,
@@ -35,6 +34,8 @@ import { CREATE, DETAIL, NAME_PROBLEM, RENAME } from "./copy";
  * A save whose outcome is not known (`SaveOutcome.uncertain`: it may have been stored) binds the session's local id to that exact request
  * (R1): every later Save sends it again, unchanged, until it is saved (the outbox recognises a stored one: never a second list or rename).
  * Only then is what the person typed since saved, by a new Save under new ids; it is never consumed by the earlier request's success.
+ * What a save leaves in the session (its request bound, or new ids) is part of its settlement (`completeKept`'s one transition, revision
+ * 2): the dialog mounted when it settles shows it, whichever mount took the save, so the next Save acts on what the person sees.
  */
 export const CREATE_EDITOR = "list-create";
 
@@ -60,55 +61,33 @@ interface CreateInput {
   unsettled: Unsettled | null;
 }
 
-/** Applies `change` to the session `session` of `key`, wherever its editor is (mounted or not), and to the mounted editor's view. */
-export function editSession<T>(
-  key: string,
-  session: number,
-  change: (value: T) => T,
-  edit: (change: (value: T) => T) => void,
-): void {
-  const entry = keptEntry<T>(key);
-  if (entry !== null && entry.session === session)
-    editKept(key, session, change(entry.value));
-  edit(change);
-}
-
 /**
- * What a save leaves in its session (R1). A success of what the session shows consumes it at the submitted revision; a success of an
- * earlier, unsettled request settles that request and keeps what was typed since, under new ids (`fresh`: the next save is a new list or
- * rename, not a duplicate). A save that may have been stored binds the session to its request; a refusal leaves the session as it was.
+ * What a save leaves in its session (R1), settled in ONE transition of the session (`completeKept`). A success of what the session shows
+ * consumes it at the submitted revision; a success of an earlier, unsettled request settles that request and keeps what was typed since,
+ * under new ids (`fresh`, allocated once: the next save is a new list or rename, not a duplicate). A save that may have been stored binds
+ * the session to its request; a definite refusal leaves the session as it was.
  */
 function settleSave<T extends { unsettled: Unsettled | null }>(
-  key: string,
   ticket: KeptTicket,
   sent: Unsettled,
   current: boolean,
   outcome: SaveOutcome,
   notes: { newer: string; earlier: string },
   fresh: (value: T) => T,
-  edit: (change: (value: T) => T) => void,
 ): void {
   if (outcome.ok) {
-    const settled = completeKept(ticket, current, {
+    completeKept<T>(ticket, current, {
       note: current ? notes.newer : notes.earlier,
+      change: (value) => ({ ...fresh(value), unsettled: null }),
     });
-    if (settled === "kept")
-      editSession<T>(
-        key,
-        ticket.session,
-        (value) => ({ ...fresh(value), unsettled: null }),
-        edit,
-      );
     return;
   }
-  const settled = completeKept(ticket, false, { note: outcome.message });
-  if (settled === "kept" && outcome.uncertain === true)
-    editSession<T>(
-      key,
-      ticket.session,
-      (value) => ({ ...value, unsettled: value.unsettled ?? sent }),
-      edit,
-    );
+  const uncertain = outcome.uncertain === true;
+  completeKept<T>(ticket, false, {
+    note: outcome.message,
+    change: (value) =>
+      uncertain ? { ...value, unsettled: value.unsettled ?? sent } : value,
+  });
 }
 
 function NameField({
@@ -208,14 +187,12 @@ export function CreateListDialog({
       outcome = await actions.enqueue(sent.request, sent.announce);
     } finally {
       settleSave<CreateInput>(
-        key,
         ticket,
         sent,
         sent.name === name,
         outcome,
         { newer: RENAME.newer, earlier: CREATE.earlier(sent.name) },
         (value) => ({ ...value, listId: env.newId(), localId: env.newId() }),
-        kept.edit,
       );
     }
   };
@@ -406,14 +383,12 @@ export function RenameListDialog({
           : await actions.enqueue(request, sent.announce);
     } finally {
       settleSave<RenameInput>(
-        key,
         ticket,
         sent,
         sent.name === name,
         outcome,
         { newer: RENAME.newer, earlier: RENAME.earlier(sent.name) },
         (value) => ({ ...value, localId: env.newId(), seen: null }),
-        kept.edit,
       );
     }
   };

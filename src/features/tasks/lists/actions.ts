@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
-import { type EnqueueRequest, useDataEnv } from "../../../data";
+import { type EnqueueRequest, readDraftNow, useDataEnv } from "../../../data";
 import { type SaveOutcome, useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -22,6 +22,11 @@ export interface ListActions {
     request: EnqueueRequest,
     announce: string,
   ): Promise<SaveOutcome>;
+  /**
+   * Whether a save made under `localId` is stored now (R2, revision 2): `true` (found, whatever its state), `false` (nothing is under that
+   * id now, which is not proof that nothing ever was), `null` (no answer: no database, or the read failed).
+   */
+  stored(localId: string): Promise<boolean | null>;
 }
 
 export function useListActions(): ListActions {
@@ -60,6 +65,10 @@ export function useListActions(): ListActions {
               ? RENAME.waitSync
               : copy.refusalMessage(edited.reason),
         );
+      },
+      async stored(localId) {
+        const read = await readDraftNow(data, localId);
+        return read.ok ? read.value !== null : null;
       },
     };
   }, [env.writable, data, announcer, actions]);

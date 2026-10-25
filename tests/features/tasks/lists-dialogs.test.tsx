@@ -299,6 +299,9 @@ describe("L7: rename", () => {
       () =>
         screen.queryByRole("heading", { level: 1, name: "Groceries" }) !== null,
     );
+    expect(
+      screen.queryByRole("heading", { level: 1, name: "Groceries" }),
+    ).not.toBeNull();
   });
 
   test("a list whose create is still queued: the create is edited in place (one body, no edit_list)", async () => {
@@ -411,9 +414,13 @@ describe("L7: rename", () => {
       if (other !== null)
         await outbox.editQueued(t.drafts()[0]?.local_id as string, other);
     });
-    await t.until(
-      () =>
-        screen.queryByRole("heading", { level: 1, name: "Theirs" }) !== null,
+    // The page behind the open (modal) dialog is outside the accessibility tree, so its heading is read from the DOM (revision 2: a role
+    // query here could never match, and the wait spun out its rounds unchecked).
+    const heading = () =>
+      document.querySelector("main h1[data-page-heading]")?.textContent;
+    await t.until(() => heading() === "Theirs");
+    expect(heading(), "the other tab's edit is shown here before Save").toBe(
+      "Theirs",
     );
     press(RENAME.submit, dialog() as HTMLElement);
     await t.settle();

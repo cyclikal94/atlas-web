@@ -16,40 +16,44 @@ import { type ComposedList, roomFor } from "../model/list-view";
 import { listItem } from "../model/lists";
 import { useListActions } from "./actions";
 import { PICKER } from "./copy";
-import { editSession } from "./dialogs";
 import { ReadNotice } from "./ReadNotice";
 import { usePickerPage } from "./reads";
 
 export const pickerEditor = (listId: string) => `list-picker:${listId}`;
 
+/**
+ * One selection of a task: an INTENTION to add it, whose add is named by the local id chosen when it was selected (R2, revision 2). The
+ * task identifies the member, not the add: a task deselected and selected again is a new selection, a new add under a new id, never
+ * deduplicated against an earlier one, whatever became of that one. A retry of the same selection after an answer that was lost sends the
+ * same add again (`duplicate`, never a second add).
+ */
+interface Choice {
+  task: string;
+  localId: string;
+  /** The outstanding create of a task not sent yet, as it was when selected: the add waits for it (D-10b-11). */
+  after: string | null;
+  /** Sent, and the answer did not say whether it was stored (`SaveOutcome.uncertain`); it stays so after a later definite refusal. */
+  issued: boolean;
+}
+
 interface PickerInput {
   query: string;
   /** In the order selected. A selection the search hides stays selected and counted (PRODUCT-DECISIONS-20261011). */
-  selected: string[];
-  /**
-   * The local id of each selected task's add, chosen when it is selected: a retry after an uncertain save reuses it (`duplicate`, never a
-   * second add). With the outstanding create of a task not sent yet, the add waits for it (D-10b-11). A saved add retires its id (R2):
-   * choosing that task again later is a new add, never deduplicated against the saved one.
-   */
-  attempts: Record<string, string>;
-  after: Record<string, string>;
+  selected: Choice[];
 }
 
-const without = (record: Record<string, string>, gone: ReadonlySet<string>) =>
-  Object.fromEntries(Object.entries(record).filter(([id]) => !gone.has(id)));
-
-const empty = (): PickerInput => ({
-  query: "",
-  selected: [],
-  attempts: {},
-  after: {},
-});
+const empty = (): PickerInput => ({ query: "", selected: [] });
 
 /**
  * "Add task to list" (plan §4.6, D-10b-10..12): the tasks this device can offer (its cached tasks and the ones it created and has not
  * sent, never another person's), searched, a page of 100 at a time. Selection is capped by the room the composed list has; "Add selected"
  * checks that room again against the LATEST composition, then saves one `list_item` per task, in the order selected. A partial save keeps
  * the rest selected. The session is the screen visit's (`kept-input.ts`).
+ *
+ * A selection whose add was sent and its answer lost is settled by what is STORED, not by the list's membership (R2, revision 2): Add
+ * selected first asks whether a draft is stored under its id; if so that selection is done (it leaves the selection, and the person is
+ * told: if the task is not in the list now, choosing it again is a new add), else the same add is sent again. Membership is never taken as
+ * proof of which add made it, and no add is made that the person did not choose.
  */
 export function TaskPicker({
   list,
@@ -88,7 +92,7 @@ export function TaskPicker({
     after: cursors[cursors.length - 1] ?? null,
     excluded: members,
   });
-  const selected = kept.value.selected.filter((id) => !members.has(id));
+  const selected = kept.value.selected.filter((c) => !members.has(c.task));
   const room = roomFor(list);
   const full = selected.length >= room;
   // The count of results is announced once a search settles (politely).
@@ -98,30 +102,28 @@ export function TaskPicker({
     if (items === null || page.reading) return;
     announcer.announce(PICKER.results(items.length, more), "polite");
   }, [items, more, page.reading, announcer]);
-  const toggle = (id: string, after: string | null) =>
+  const toggle = (task: string, after: string | null) =>
     kept.edit((value) => {
-      if (value.selected.includes(id))
+      if (value.selected.some((c) => c.task === task))
         return {
           ...value,
-          selected: value.selected.filter((s) => s !== id),
+          selected: value.selected.filter((c) => c.task !== task),
         };
-      return {
-        ...value,
-        selected: [...value.selected, id],
-        attempts: {
-          ...value.attempts,
-          [id]: value.attempts[id] ?? env.newId(),
-        },
-        after: after === null ? value.after : { ...value.after, [id]: after },
+      // A new selection, a new add: never the id of an earlier selection of this task (R2).
+      const choice: Choice = {
+        task,
+        localId: env.newId(),
+        after,
+        issued: false,
       };
+      return { ...value, selected: [...value.selected, choice] };
     });
   const discard = () => disownKept(key);
   const save = async () => {
     if (kept.busy) return;
     const now = latest.current;
-    const input = kept.value;
-    const chosen = input.selected.filter(
-      (id) => !(now.members ?? []).includes(id),
+    const chosen = kept.value.selected.filter(
+      (c) => !(now.members ?? []).includes(c.task),
     );
     if (chosen.length === 0) return;
     if (!now.row.can_edit) {
@@ -137,48 +139,60 @@ export function TaskPicker({
     setNote(null);
     const ticket = kept.submit();
     if (ticket === null) return;
+    // By local id (the selection), never by task: a later selection of the same task is another add.
     const queued = new Set<string>();
+    const earlier = new Set<string>();
+    const uncertain = new Set<string>();
+    let refused = false;
     let reason: string | null = null;
     try {
-      for (const taskId of chosen) {
+      for (const choice of chosen) {
+        // An add whose answer was lost and that is stored after all: this selection is done, not made again (R2). Not found, or no
+        // answer: the same add is sent again (the outbox recognises it if it is stored).
+        if (choice.issued && (await actions.stored(choice.localId)) === true) {
+          earlier.add(choice.localId);
+          continue;
+        }
         const outcome = await actions.enqueue(
           listItem({
             listId,
-            taskId,
+            taskId: choice.task,
             included: true,
-            after: input.after[taskId] ?? null,
-            localId: input.attempts[taskId] as string,
+            after: choice.after,
+            localId: choice.localId,
           }),
           "",
         );
-        if (outcome.ok) queued.add(taskId);
+        if (outcome.ok) queued.add(choice.localId);
         else {
+          if (outcome.uncertain === true) uncertain.add(choice.localId);
+          refused = true;
           reason = outcome.message ?? copy.refusalMessage("storage");
           break;
         }
       }
     } finally {
-      const all = queued.size === chosen.length;
-      // The tasks saved leave the selection and retire their adds' ids (newer edits stay): never added twice, never lost.
+      // ONE settlement of the session (`kept-input.ts`): the selections done leave, the ones that may have been stored are marked so;
+      // what was typed meanwhile (the search) stays. Never added twice, never lost.
       const leave = (value: PickerInput): PickerInput => ({
         ...value,
-        selected: value.selected.filter((id) => !queued.has(id)),
-        attempts: without(value.attempts, queued),
-        after: without(value.after, queued),
+        selected: value.selected
+          .filter((c) => !queued.has(c.localId) && !earlier.has(c.localId))
+          .map((c) => (uncertain.has(c.localId) ? { ...c, issued: true } : c)),
       });
-      if (all) {
+      const notes = [
+        refused && queued.size > 0
+          ? PICKER.partial(queued.size, chosen.length, reason ?? "")
+          : reason,
+        earlier.size > 0 ? PICKER.earlier(earlier.size) : null,
+      ].filter((n): n is string => n !== null && n !== "");
+      if (!refused && queued.size > 0)
         announcer.announce(PICKER.added(queued.size, now.row.label), "polite");
-        if (completeKept(ticket, true, { note: PICKER.newer }) === "kept")
-          editSession(key, ticket.session, leave, kept.edit);
-      } else {
-        if (queued.size > 0) editSession(key, ticket.session, leave, kept.edit);
-        completeKept(ticket, false, {
-          note:
-            queued.size > 0
-              ? PICKER.partial(queued.size, chosen.length, reason ?? "")
-              : reason,
-        });
-      }
+      completeKept<PickerInput>(ticket, queued.size === chosen.length, {
+        note:
+          notes.length > 0 ? notes.join(" ") : refused ? null : PICKER.newer,
+        change: leave,
+      });
     }
   };
   const shownNote = note ?? kept.note;
@@ -270,7 +284,9 @@ export function TaskPicker({
           <fieldset className="flex flex-col" disabled={kept.busy}>
             <legend className="sr-only">{PICKER.group}</legend>
             {items.map((item) => {
-              const checked = kept.value.selected.includes(item.id);
+              const checked = kept.value.selected.some(
+                (c) => c.task === item.id,
+              );
               return (
                 <label
                   key={item.id}
