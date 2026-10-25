@@ -49,19 +49,23 @@ export function ImportDropZone() {
             ref={input}
             type="file"
             accept=".ics,text/calendar"
-            tabIndex={-1}
-            aria-hidden="true"
-            className="sr-only"
+            // Not rendered (no 1 px target, nothing in the tab order): the button beside it opens it.
+            hidden
+            // Cleared just before the picker opens, never after a choice (WebKit fails reading a File whose input was cleared).
             onChange={(event) => {
               const file = event.target.files?.[0];
-              event.target.value = "";
               if (file !== undefined) open?.(null, file);
             }}
           />
           {available ? (
             <Button
               aria-describedby={labelId}
-              onClick={() => input.current?.click()}
+              onClick={() => {
+                const control = input.current;
+                if (control === null) return;
+                control.value = "";
+                control.click();
+              }}
             >
               {BROWSE}
             </Button>

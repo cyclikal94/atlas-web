@@ -1,5 +1,5 @@
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -122,10 +122,13 @@ export function TaskDetail({
       (state.location.search as Record<string, unknown> | undefined)?.move,
   });
   const [seed, setSeed] = useState<MoveSeed | null>(null);
+  // The `move` value this screen has consumed (once each): a value the address still shows is never applied twice.
+  const consumed = useRef<unknown>(undefined);
   const day = view.row;
   useEffect(() => {
-    if (rawMove === undefined) return;
+    if (rawMove === undefined || rawMove === consumed.current) return;
     if (view.status === "loading" || view.selection === "loading") return;
+    consumed.current = rawMove;
     const move = parseMove(rawMove);
     if (
       move !== null &&
@@ -311,14 +314,6 @@ export function TaskDetail({
       {view.readError !== null ? (
         <ReadError error={view.readError} stale retry={view.retry} />
       ) : null}
-      {view.definition !== null ? (
-        // WEB-13b: the task's calendar anchor (a task that repeats on its own schedule has none).
-        <AnchorSection
-          task={task}
-          repeats={view.definition.schedule.repeat !== null}
-          canEdit={editable(task, view.execution)}
-        />
-      ) : null}
       {view.occurrences.length > 1 ||
       view.days.more ||
       view.days.previous ||
@@ -488,6 +483,15 @@ export function TaskDetail({
           ) : null}
         </>
       )}
+      {view.definition !== null ? (
+        // WEB-13b: the task's calendar anchor, after the day (a task that repeats on its own schedule has none). Placed last so that the
+        // day's controls keep their places (WEB-10a's layout, E-T13 at phone widths).
+        <AnchorSection
+          task={task}
+          repeats={view.definition.schedule.repeat !== null}
+          canEdit={editable(task, view.execution)}
+        />
+      ) : null}
       {sharing !== null ? (
         <ResourcePolicyEditor
           resourceId={sharing}

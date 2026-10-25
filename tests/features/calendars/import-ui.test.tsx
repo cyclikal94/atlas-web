@@ -187,6 +187,23 @@ describe("the dialog", () => {
     expect(announced()).toContain(words.IMPORT_QUEUED);
   });
 
+  test("two submissions in the same task enqueue once (the synchronous latch: Enter's implicit submission and a press before the busy state renders)", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, ICS);
+    const outbox = w.env.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const enqueue = vi.spyOn(outbox, "enqueue");
+    const form = dialog.querySelector("form") as HTMLFormElement;
+    act(() => {
+      form.requestSubmit();
+      form.requestSubmit();
+    });
+    await w.settle();
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(drafts(w)).toHaveLength(1);
+  });
+
   test("no file, a reversed window, a span over 730 days: inline messages, typed values kept, nothing stored", async () => {
     const w = await calendarWorld({ cache: [sourceRow()] });
     const dialog = await openFromRow(w);

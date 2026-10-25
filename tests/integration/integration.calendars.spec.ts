@@ -999,3 +999,557 @@ test.describe("I-CAL10: turned off while refreshing (cause 6a)", () => {
     ).toBeDisabled({ timeout: 30_000 });
   });
 });
+
+// =====================================================================================================================================
+// WEB-13b: local ICS import, task anchors and review items, against the released backend pinned now (v0.29.0-rc.1, 4396c99), on the
+// same stack (its loopback feed, accounts and paced sign-ins). FOCUSED EVIDENCE FOR A FIXTURE-STAGE TASK, not integration acceptance:
+// BE-Q22, BE-B8 and BE-CH3 have no completion record. Not exercised here, with the reason (plan §9.6): `409 stale_refresh` for an import
+// (needs a generation change inside the parse window: not schedulable from the client), `503 slice_capacity` (10,000 installation
+// resources), a `context_unavailable` review (a second account sharing setup), a `403` to a queued command (finding F-13b-1: the queued
+// command is resent in a loop; `.agtx/execute.md`). Each is covered at unit and fixture level.
+
+const day = (offset: number) =>
+  new Date(Date.now() + offset * 86_400_000).toISOString().slice(0, 10);
+/** A calendar of all-day events (one per `[uid, date, title]`), `sequence` on each. */
+const calendar = (events: Array<[string, string, string]>, sequence = 0) =>
+  [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//atlas-web//integration WEB-13b//EN",
+    ...events.flatMap(([uid, date, title]) => [
+      "BEGIN:VEVENT",
+      `UID:${uid}`,
+      `DTSTAMP:${day(0).replaceAll("-", "")}T000000Z`,
+      `DTSTART;VALUE=DATE:${date.replaceAll("-", "")}`,
+      `SEQUENCE:${sequence}`,
+      `SUMMARY:${title}`,
+      "END:VEVENT",
+    ]),
+    "END:VCALENDAR",
+    "",
+  ].join("\r\n");
+
+const accountOf = async (page: Page) =>
+  (
+    (await page.evaluate(() => window.__s.identity.get())) as {
+      account_id: string;
+    }
+  ).account_id;
+const harnessRows = async (page: Page, store: string) =>
+  (await page.evaluate(({ a, s }) => window.__atlasData?.rows(a, s as never), {
+    a: await accountOf(page),
+    s: store,
+  })) as Array<Record<string, unknown>>;
+
+/** "Add source" through the screen; returns its id (the draft's target). The leader sends it when begun. */
+async function addSource(page: Page, label: string): Promise<string> {
+  await page.getByRole("button", { name: "Add source" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add source" });
+  await dialog.getByLabel("Label").fill(label);
+  await dialog.getByLabel("Timezone").fill("UTC");
+  await dialog.getByRole("button", { name: "Create source" }).click();
+  await expect(dialog).toBeHidden();
+  const drafts = (await harnessRows(page, "drafts")) as Array<{
+    kind: string;
+    target_resource_ids: string[];
+    created_seq: number;
+  }>;
+  const create = drafts
+    .filter((d) => d.kind === "create_source")
+    .sort((a, b) => b.created_seq - a.created_seq)[0];
+  return create?.target_resource_ids[0] as string;
+}
+
+/** "Import events" for `label` through the dialog (a real file control), queued; the leader sends it when woken. */
+async function importFile(
+  page: Page,
+  label: string,
+  text: string,
+  window_ = { from: day(0), through: day(60) },
+) {
+  await page
+    .getByRole("button", { name: `Import events into ${label}` })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Import events" });
+  await dialog.locator('input[type="file"]').setInputFiles({
+    name: "import.ics",
+    mimeType: "text/calendar",
+    buffer: Buffer.from(text, "utf8"),
+  });
+  await expect(dialog.locator("[data-import-file]")).toContainText(
+    "import.ics",
+  );
+  await dialog.getByLabel("From").fill(window_.from);
+  await dialog.getByLabel("Through").fill(window_.through);
+  await dialog.getByRole("button", { name: "Import", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await wakeLeader(page);
+}
+const imports = (wire: Wire[], id: string) =>
+  wire.filter((w) => w.path === `/calendar-sources/${id}/import`);
+const importStatuses = async (id: string) =>
+  (await proxy.log())
+    .filter((e) => e.path === `${API}/calendar-sources/${id}/import`)
+    .map((e) => e.status);
+const cachedEvents = async (page: Page, sourceId: string) => {
+  await page.evaluate(() => window.__atlasData?.nudgeSync());
+  return (await harnessRows(page, "cache")).filter(
+    (r) => r.kind === "event" && r.parent_id === sourceId,
+  );
+};
+
+test.describe("I-IMP1: an import into a pending source (cases 1 and 2)", () => {
+  test("composed offline behind its create; online: the create, then the import at its address; a lost answer resent byte-identically; the events arrive by a real delta page", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context, { begin: false });
+    await context.setOffline(true);
+    const id = await addSource(page, "I-IMP1 Chores");
+    const text = calendar([
+      [`imp1-a-${crypto.randomUUID()}`, day(3), "Bins"],
+      [`imp1-b-${crypto.randomUUID()}`, day(10), "Recycling"],
+    ]);
+    await importFile(page, "I-IMP1 Chores", text);
+    expect(wire).toEqual([]);
+    await context.setOffline(false);
+    await proxy.addRule({
+      method: "POST",
+      path: `${API}/calendar-sources/${id}/import`,
+      ordinal: 1,
+      action: "drop_after_forward",
+    });
+    await page.evaluate(() => window.__atlasData?.beginOutbox());
+    await expect
+      .poll(() => imports(wire, id).length, { timeout: 60_000 })
+      .toBe(2);
+    expect(wire[0]?.path).toBe("/calendar-commands");
+    const [first, second] = imports(wire, id);
+    expect(second?.key).toBe(first?.key);
+    expect(second?.body).toBe(first?.body);
+    expect(JSON.parse(first?.body ?? "")).toEqual({
+      ics: text,
+      from: day(0),
+      through: day(60),
+    });
+    expect(await importStatuses(id)).toEqual([200, 200]);
+    await expect
+      .poll(async () => (await events(page, id)).length, { timeout: 30_000 })
+      .toBe(2);
+    await expect
+      .poll(async () => (await cachedEvents(page, id)).length, {
+        timeout: 30_000,
+      })
+      .toBe(2);
+  });
+});
+
+test.describe("I-IMP2: refused imports (cases 4 and 7(e))", () => {
+  test("a title over 300 characters is 502 fetch_failed and an unsupported repeat rule 422: each sent once, terminal, and the first import's events are kept", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const id = await addSource(page, "I-IMP2 Kept");
+    await wakeLeader(page);
+    await expect(row(page, id)).toBeVisible({ timeout: 30_000 });
+    await importFile(
+      page,
+      "I-IMP2 Kept",
+      calendar([[`imp2-${crypto.randomUUID()}`, day(5), "Kept"]]),
+    );
+    await expect
+      .poll(async () => (await events(page, id)).length, { timeout: 30_000 })
+      .toBe(1);
+    await importFile(
+      page,
+      "I-IMP2 Kept",
+      calendar([[`imp2-long-${crypto.randomUUID()}`, day(6), "x".repeat(301)]]),
+    );
+    const entries = page.locator("[data-import-draft]");
+    await expect(
+      entries.filter({ hasText: "such as an event title over 300 characters" }),
+    ).toHaveCount(1, {
+      timeout: 60_000,
+    });
+    const rule = calendar([
+      [`imp2-rule-${crypto.randomUUID()}`, day(7), "Hourly"],
+    ]).replace("SUMMARY:Hourly", "SUMMARY:Hourly\r\nRRULE:FREQ=HOURLY");
+    await importFile(page, "I-IMP2 Kept", rule);
+    await expect(
+      entries.filter({
+        hasText: "it uses a repeat rule Atlas doesn't support",
+      }),
+    ).toHaveCount(1, {
+      timeout: 60_000,
+    });
+    await page.waitForTimeout(5_000);
+    expect(imports(wire, id)).toHaveLength(3);
+    expect(await importStatuses(id)).toEqual([200, 502, 422]);
+    expect(await events(page, id)).toHaveLength(1);
+  });
+});
+
+test.describe("I-IMP3: an import meets a refresh in progress (case 6(b))", () => {
+  test("the linked source's refresh is held at the feed: the import meets 409 refresh_in_progress, stays uncertain under the same key, and is receipted after the release", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const path = await newFeed("imp3");
+    const id = await link(page, wire, "I-IMP3 Feed", path);
+    await untilQuiet(page, id);
+    await feedCtl("hold", { path });
+    await row(page, id)
+      .getByRole("button", { name: /^Refresh/ })
+      .click();
+    await expect.poll(() => heldAt(path), { timeout: 20_000 }).toBe(1);
+    await importFile(
+      page,
+      "I-IMP3 Feed",
+      calendar([[`imp3-${crypto.randomUUID()}`, day(4), "Imported"]]),
+    );
+    await expect
+      .poll(() => importStatuses(id), { timeout: 30_000 })
+      .toContain(409);
+    await expect(page.locator("[data-import-draft]")).toHaveAttribute(
+      "data-import-status",
+      "sent",
+    );
+    await feedCtl("release", { path });
+    await expect
+      .poll(async () => (await importStatuses(id)).at(-1), { timeout: 120_000 })
+      .toBe(200);
+    expect(new Set(imports(wire, id).map((w) => w.key)).size).toBe(1);
+    expect(new Set(imports(wire, id).map((w) => w.body)).size).toBe(1);
+  });
+});
+
+test.describe("I-IMP4: the calendar permits are busy (CH3, 7(f))", () => {
+  test("two held refreshes take both calendar permits: an import is 503 temporarily_unavailable, retried, and receipted after the permits free", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const paths = [await newFeed("imp4-a"), await newFeed("imp4-b")];
+    const ids: string[] = [];
+    for (const [i, path] of paths.entries())
+      ids.push(await link(page, wire, `I-IMP4 Feed ${i}`, path));
+    for (const id of ids) await untilQuiet(page, id);
+    const target = await addSource(page, "I-IMP4 Target");
+    await wakeLeader(page);
+    await expect(row(page, target)).toBeVisible({ timeout: 30_000 });
+    for (const path of paths) await feedCtl("hold", { path });
+    for (const id of ids)
+      await row(page, id)
+        .getByRole("button", { name: /^Refresh/ })
+        .click();
+    await expect
+      .poll(
+        async () =>
+          (await heldAt(paths[0] as string)) +
+          (await heldAt(paths[1] as string)),
+        {
+          timeout: 20_000,
+        },
+      )
+      .toBe(2);
+    await importFile(
+      page,
+      "I-IMP4 Target",
+      calendar([[`imp4-${crypto.randomUUID()}`, day(4), "Imported"]]),
+    );
+    await expect
+      .poll(() => importStatuses(target), { timeout: 30_000 })
+      .toContain(503);
+    for (const path of paths) await feedCtl("release", { path });
+    await expect
+      .poll(async () => (await importStatuses(target)).at(-1), {
+        timeout: 120_000,
+      })
+      .toBe(200);
+    expect(new Set(imports(wire, target).map((w) => w.key)).size).toBe(1);
+  });
+});
+
+/** The new-task form with an anchor to the cached event `title`, saved "Only me"; returns the create's task id. */
+async function anchoredTask(
+  page: Page,
+  name: string,
+  eventTitle: string,
+  days: string,
+) {
+  await page.evaluate((p) => {
+    history.pushState(null, "", p);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, "/tasks/new");
+  await page
+    .getByRole("button", { name: "Start from scratch instead" })
+    .click();
+  await expect(
+    page.getByRole("radio", { name: /Use my defaults/ }),
+  ).toBeVisible({ timeout: 30_000 });
+  await page.getByLabel("Name", { exact: true }).fill(name);
+  await page.getByLabel("Repeats").selectOption("none");
+  await page
+    .locator("[data-task-form-anchor]")
+    .getByRole("button", { name: "Anchor…" })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Anchor to a calendar" });
+  await dialog.getByRole("button", { name: "Change event…" }).click();
+  await dialog
+    .getByLabel("Calendar")
+    .selectOption({ label: eventTitle.split(" / ")[0] as string });
+  await dialog
+    .getByText(eventTitle.split(" / ")[1] as string, { exact: true })
+    .click();
+  await dialog.getByLabel("Days before (−) or after (+)").fill(days);
+  await dialog.getByRole("button", { name: "Save anchor" }).click();
+  await expect(dialog).toBeHidden();
+  await page.getByRole("radio", { name: "Only me" }).check();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await wakeLeader(page);
+  await expect(page.locator("[data-task-detail]")).toBeVisible({
+    timeout: 30_000,
+  });
+  return new URL(page.url()).pathname.split("/").at(-1) as string;
+}
+const anchoredOccurrences = async (page: Page, taskId: string) => {
+  await page.evaluate(() => window.__atlasData?.nudgeSync());
+  return (await harnessRows(page, "cache")).filter(
+    (r) =>
+      r.kind === "occurrence" &&
+      (r.value as { task_id?: string } | null)?.task_id === taskId &&
+      String(
+        (r.value as { slot?: { key?: string } }).slot?.key ?? "",
+      ).startsWith("anchor:"),
+  ) as Array<{ id: string; value: { slot: { date: string } } }>;
+};
+
+test.describe("I-ANC1: a task anchored to an imported event series (cases 1 and 3)", () => {
+  test("created with its anchor: anchored occurrences appear from the reference; the binding is read online and says so offline; set_anchor (lost answer resent) and remove", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const id = await addSource(page, "I-ANC1 Bins");
+    await wakeLeader(page);
+    await expect(row(page, id)).toBeVisible({ timeout: 30_000 });
+    await importFile(
+      page,
+      "I-ANC1 Bins",
+      calendar([[`anc1-${crypto.randomUUID()}`, day(2), "Bin day"]]),
+    );
+    await expect
+      .poll(async () => (await cachedEvents(page, id)).length, {
+        timeout: 60_000,
+      })
+      .toBe(1);
+    const taskId = await anchoredTask(
+      page,
+      "I-ANC1 Put the bins out",
+      "I-ANC1 Bins / Bin day",
+      "-1",
+    );
+    await expect
+      .poll(
+        async () =>
+          (await anchoredOccurrences(page, taskId)).map(
+            (o) => o.value.slot.date,
+          ),
+        {
+          timeout: 60_000,
+        },
+      )
+      .toEqual([day(1)]);
+    const section = page.locator("[data-anchor-section]");
+    await expect(section).toContainText(
+      "Anchored to I-ANC1 Bins · a calendar event · 1 day before",
+      {
+        timeout: 30_000,
+      },
+    );
+    // Offline after leaving and coming back (a new visit): the binding needs a connection, the day is still shown.
+    await context.setOffline(true);
+    await page.evaluate((p) => {
+      history.pushState(null, "", "/tasks");
+      dispatchEvent(new PopStateEvent("popstate"));
+      history.pushState(null, "", p);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/tasks/${taskId}`);
+    await expect(section).toContainText("Binding details need a connection.", {
+      timeout: 20_000,
+    });
+    await context.setOffline(false);
+    // set_anchor (two days before), its first answer dropped after the backend committed it.
+    await proxy.addRule({
+      method: "POST",
+      path: `${API}/calendar-commands`,
+      ordinal: 1,
+      action: "drop_after_forward",
+    });
+    const before = wire.filter((w) => w.path === "/calendar-commands").length;
+    await section
+      .getByRole("button", { name: /Anchor…|Change anchor…/ })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Anchor to a calendar" });
+    await dialog.getByRole("button", { name: "Change event…" }).click();
+    await dialog.getByLabel("Calendar").selectOption({ label: "I-ANC1 Bins" });
+    await dialog.getByText("Bin day", { exact: true }).click();
+    await dialog.getByLabel("Days before (−) or after (+)").fill("-2");
+    await dialog.getByRole("button", { name: "Save anchor" }).click();
+    await expect(dialog).toBeHidden();
+    await wakeLeader(page);
+    await expect
+      .poll(
+        () =>
+          wire.filter((w) => w.path === "/calendar-commands").length - before,
+        { timeout: 60_000 },
+      )
+      .toBe(2);
+    const anchors = wire
+      .filter((w) => w.path === "/calendar-commands")
+      .slice(before);
+    expect(anchors[1]?.key).toBe(anchors[0]?.key);
+    expect(anchors[1]?.body).toBe(anchors[0]?.body);
+    expect(JSON.parse(anchors[0]?.body ?? "").command).toMatchObject({
+      kind: "set_anchor",
+      id: taskId,
+    });
+    await expect
+      .poll(
+        async () =>
+          (await anchoredOccurrences(page, taskId)).map(
+            (o) => o.value.slot.date,
+          ),
+        {
+          timeout: 60_000,
+        },
+      )
+      .toContain(day(0));
+    // Remove: automation stops, the occurrences stay.
+    await section
+      .getByRole("button", { name: /Anchor…|Change anchor…/ })
+      .click();
+    await page
+      .getByRole("dialog", { name: "Anchor to a calendar" })
+      .getByRole("button", { name: "Remove anchor" })
+      .click();
+    await wakeLeader(page);
+    await expect(section).toContainText("Automation is off", {
+      timeout: 60_000,
+    });
+    expect((await anchoredOccurrences(page, taskId)).length).toBeGreaterThan(0);
+  });
+});
+
+test.describe("I-REV1: a review item (work started, the event moved)", () => {
+  test("progress recorded on the anchored day; the series re-imported with the event moved: a work_started review syncs; Review this move… saves the correction; Acknowledge (lost answer resent) resolves it", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const id = await addSource(page, "I-REV1 Bins");
+    await wakeLeader(page);
+    await expect(row(page, id)).toBeVisible({ timeout: 30_000 });
+    const uid = `rev1-${crypto.randomUUID()}`;
+    await importFile(page, "I-REV1 Bins", calendar([[uid, day(1), "Bin day"]]));
+    await expect
+      .poll(async () => (await cachedEvents(page, id)).length, {
+        timeout: 60_000,
+      })
+      .toBe(1);
+    const taskId = await anchoredTask(
+      page,
+      "I-REV1 Put the bins out",
+      "I-REV1 Bins / Bin day",
+      "-1",
+    );
+    await expect
+      .poll(async () => (await anchoredOccurrences(page, taskId)).length, {
+        timeout: 60_000,
+      })
+      .toBe(1);
+    const [occurrence] = await anchoredOccurrences(page, taskId);
+    await page.evaluate((p) => {
+      history.pushState(null, "", p);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/tasks/${taskId}?occurrence=${occurrence?.id}`);
+    await page
+      .locator("[data-record-card]")
+      .getByRole("button", { name: "Mark done" })
+      .click();
+    await wakeLeader(page);
+    await expect
+      .poll(
+        async () =>
+          (
+            (await harnessRows(page, "drafts")) as Array<{
+              kind: string;
+              status: string;
+            }>
+          ).filter((d) => d.kind === "record" && d.status !== "acknowledged")
+            .length,
+        { timeout: 60_000 },
+      )
+      .toBe(0);
+    // The series is re-imported with the event moved two days on (the backend reconciles the anchor in the import's transaction).
+    await page.evaluate(() => {
+      history.pushState(null, "", "/settings/calendars");
+      dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await importFile(
+      page,
+      "I-REV1 Bins",
+      calendar([[uid, day(3), "Bin day"]], 1),
+    );
+    const card = page.locator('[data-review-reason="work_started"]');
+    await expect(card).toBeVisible({ timeout: 90_000 });
+    await expect(card).toContainText(
+      "Started work exists on the current occurrence",
+    );
+    await card.getByRole("link", { name: "Review this move…" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByLabel("The date it counts for")).toHaveValue(
+      day(2),
+      { timeout: 30_000 },
+    );
+    await dialog.getByRole("button", { name: "Save" }).click();
+    await wakeLeader(page);
+    await expect
+      .poll(
+        async () =>
+          (await proxy.log()).filter(
+            (e) => e.path === `${API}/task-commands` && e.status === 200,
+          ).length,
+        {
+          timeout: 60_000,
+        },
+      )
+      .toBeGreaterThanOrEqual(2);
+    await page.goBack();
+    await expect(card).toBeVisible({ timeout: 30_000 });
+    await proxy.addRule({
+      method: "POST",
+      path: `${API}/calendar-commands`,
+      ordinal: 1,
+      action: "drop_after_forward",
+    });
+    const before = wire.filter((w) => w.path === "/calendar-commands").length;
+    await card
+      .getByRole("button", { name: "Acknowledge (keep current timing)" })
+      .click();
+    await wakeLeader(page);
+    await expect
+      .poll(
+        () =>
+          wire.filter((w) => w.path === "/calendar-commands").length - before,
+        { timeout: 60_000 },
+      )
+      .toBe(2);
+    const acks = wire
+      .filter((w) => w.path === "/calendar-commands")
+      .slice(before);
+    expect(acks[1]?.key).toBe(acks[0]?.key);
+    expect(JSON.parse(acks[0]?.body ?? "").command).toMatchObject({
+      kind: "resolve_review",
+      resolved: true,
+    });
+    await page.evaluate(() => window.__atlasData?.nudgeSync());
+    await expect(card).toHaveCount(0, { timeout: 60_000 });
+  });
+});

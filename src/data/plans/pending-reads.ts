@@ -169,12 +169,10 @@ export const readDraftHeaders = readPlan<
       if (rows.length < WINDOW || tail === undefined) break;
       cursor = tail.created_seq;
     }
-    const last = kept[kept.length - 1];
-    return {
-      drafts: kept,
-      total,
-      next: later > kept.length && last !== undefined ? last.created_seq : null,
-    };
+    // The window's last header continues the walk only when drafts of the kind lie beyond it.
+    const end = kept.at(-1);
+    const more = later > kept.length;
+    return { drafts: kept, total, next: more && end ? end.created_seq : null };
   },
   decide: ({ reads }) => reads,
 });

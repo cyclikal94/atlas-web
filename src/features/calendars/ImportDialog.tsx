@@ -410,18 +410,21 @@ export function ImportDialog({
             id={fileInputId}
             type="file"
             accept=".ics,text/calendar"
-            tabIndex={-1}
-            aria-hidden="true"
-            className="sr-only"
-            onChange={(event) => {
-              void choose(event.target.files?.[0]);
-              event.target.value = "";
-            }}
+            // Not rendered (no 1 px target, nothing in the tab order): the button beside it opens it.
+            hidden
+            // The value is cleared just before the picker opens (so the same file can be chosen again), never right after a choice:
+            // WebKit fails the read of a File whose input was cleared while it is still being read.
+            onChange={(event) => void choose(event.target.files?.[0])}
           />
           <span className="flex">
             <Button
               aria-describedby={`${fileInputId}-label`}
-              onClick={() => fileInput.current?.click()}
+              onClick={() => {
+                const input = fileInput.current;
+                if (input === null) return;
+                input.value = "";
+                input.click();
+              }}
             >
               {file === null ? CHOOSE_FILE : CHANGE_FILE}
             </Button>

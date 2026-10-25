@@ -302,3 +302,37 @@ export function calendarText(events = 1, bytes?: number): string {
   }
   return text;
 }
+
+/**
+ * Every control a person can press in `main` or an open dialog is at least 44 x 44; a native radio or checkbox is measured by the label
+ * that activates it (the WEB-10a task form's pattern). A visually hidden file control behind "browse" is not a target.
+ */
+export const smallTargets = (page: Page, only?: string) =>
+  page.evaluate((selector) => {
+    const out: string[] = [];
+    const scopes = (
+      selector === null
+        ? [
+            document.querySelector("main"),
+            ...document.querySelectorAll('[role="dialog"]'),
+          ]
+        : [...document.querySelectorAll(selector)]
+    ).filter(Boolean) as Element[];
+    for (const scope of scopes)
+      for (const element of scope.querySelectorAll<HTMLElement>(
+        'button, a[href], input:not([type="file"]), select, textarea, [role="button"]',
+      )) {
+        const target =
+          element instanceof HTMLInputElement &&
+          (element.type === "radio" || element.type === "checkbox")
+            ? (element.closest("label") ?? element)
+            : element;
+        const rect = target.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) continue;
+        if (rect.width < 43.5 || rect.height < 43.5)
+          out.push(
+            `${element.tagName.toLowerCase()} "${(element.getAttribute("aria-label") ?? target.textContent ?? "").trim().slice(0, 40)}" ${Math.round(rect.width)}x${Math.round(rect.height)}`,
+          );
+      }
+    return out;
+  }, only ?? null);
