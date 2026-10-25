@@ -32,12 +32,20 @@ const CURRENT = `${V1}/browser-sessions/current`;
 const ME = `${V1}/me`;
 const SESSIONS = `${V1}/sessions`;
 /**
+ * WEB-14a revision 36: the shell merged with accepted WEB-10a shows Today at `/`, whose readers ask for the day (`/daily`, joint and
+ * personal: the proxy matches the path, so one gate holds both) and the defaults snapshot as soon as the display lifts. They are
+ * background readers like `/me`: an undelivered gate keeps their answers (a 401 with a revoked cookie) from closing the display before
+ * the schedule's chosen order. Found by the revision-36 qualification (I-04 "list first": the list was `closed`, not `auth_state`).
+ */
+const TODAY_READERS = [`${V1}/daily`, `${V1}/defaults/snapshot`];
+/**
  * Every endpoint a fresh I-04 page reaches (WEB-14a revision 18, review R25). After settlement the production composition reads `/me`
  * (the profile source) and, once the schedule has made it eligible (revision 35, below), `/browser-sessions/current` (the resume
  * verification); nothing else in this boundary reads with the new cookie: the device mirror needs an open account database (none
  * exists in a fresh context), the sharing defaults are read on demand, no settings screen is mounted, and the harness starts no
  * production leader. A change that adds a reader fails the inventory assertion instead of silently deciding which request sees the
- * dead cookie first.
+ * dead cookie first. Revision 36: the merge of accepted WEB-10a added Today's readers (`TODAY_READERS`, above), which this inventory
+ * found; they are listed here and held by the schedule like `/me`.
  */
 const I04_ENDPOINTS = new Set([
   "/health",
@@ -47,6 +55,7 @@ const I04_ENDPOINTS = new Set([
   CURRENT,
   ME,
   SESSIONS,
+  ...TODAY_READERS,
 ]);
 /** The proxy events after which a response can no longer reach the page. */
 const FINAL = new Set([
@@ -204,6 +213,7 @@ async function lateActivation(
   });
   await gates.hold(CURRENT);
   await gates.hold(ME);
+  for (const path of TODAY_READERS) await gates.hold(path);
   // The backend redeems the grant and creates a session; the proxy holds the answer.
   await startSignIn(page, "alice");
   await untilHeld(activation.id);
@@ -304,7 +314,7 @@ async function lateActivation(
   }
 
   // The chosen background reader takes its answer first; with `revoked`, its 401 is recorded before the list is made.
-  let held = [CURRENT, ME];
+  let held = [CURRENT, ME, ...TODAY_READERS];
   if (first !== "list") {
     const path = first === "verification" ? CURRENT : ME;
     held = held.filter((p) => p !== path);

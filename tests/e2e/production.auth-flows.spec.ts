@@ -1355,6 +1355,252 @@ test.describe("revision 22, R28: the completion boundary of concurrent sign-ins"
 });
 
 /**
+ * WEB-14a revision 36, review R39 (family attempt-owner-lock-publication-race; design assessment S1/S2/S11, Q4): `begin` commits the
+ * second sign-in's epoch and only then takes its owner lock, both under `atlas-auth`. The review's S05 failure lost that epoch to an
+ * evaluator that read it in between and saw the owner lock free. These cases hold the REAL owner-lock request of tab 1 (the second
+ * sign-in, epoch 2) either before the platform admits it (the name is free: another request on it is granted) or after the platform
+ * granted it but before its callback runs (the name is held), and let one evaluator, tab 2's (a peer) or tab 1's own, look in that
+ * interval through a real focus. Nothing is fabricated: no lock answer, no record write, no shortened timer; the gate only delays.
+ * The original S05 assertions then hold: the second activation is issued and refused or aborted, and the final identity is the last
+ * DELIVERED success. (The reviewer's diagnostic expected the fault on the uncorrected source; that observation stays archived in
+ * `.agtx/evidence/review-r35-20261025/ownership`.)
+ */
+interface OwnerGateWindow {
+  __ownerGate: {
+    entered: boolean;
+    probes: boolean[];
+    log: Array<Record<string, unknown>>;
+    release: () => void;
+  };
+}
+async function installOwnerGate(
+  page: Page,
+  tag: "A" | "B",
+  gateMode: "before-native" | "native-held",
+): Promise<void> {
+  await page.evaluate(
+    ({ tag, gateMode }) => {
+      const log: Array<Record<string, unknown>> = [];
+      const add = (kind: string, data: Record<string, unknown>) =>
+        log.push({ tag, t: performance.now(), kind, ...data });
+      let release = () => {};
+      const opened = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const state = { entered: false, probes: [] as boolean[], log, release };
+      (window as unknown as OwnerGateWindow).__ownerGate = state;
+      const realPut = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (
+        this: IDBObjectStore,
+        ...args: Parameters<IDBObjectStore["put"]>
+      ) {
+        if (
+          this.transaction.db.name === "atlas-auth" &&
+          args[1] === "auth_state"
+        ) {
+          const v = args[0] as {
+            latest_epoch: number;
+            attempt: { epoch: number; phase: string } | null;
+            settled: { epoch: number } | null;
+          };
+          const meta = {
+            latest: v.latest_epoch,
+            attempt: v.attempt
+              ? { epoch: v.attempt.epoch, phase: v.attempt.phase }
+              : null,
+            settled: v.settled?.epoch ?? null,
+          };
+          this.transaction.addEventListener(
+            "complete",
+            () => add("commit", meta),
+            { once: true },
+          );
+        }
+        return realPut.apply(this, args);
+      };
+      const original = LockManager.prototype.request as (
+        ...args: unknown[]
+      ) => Promise<unknown>;
+      LockManager.prototype.request = function (
+        this: LockManager,
+        ...args: unknown[]
+      ) {
+        const name = String(args[0]);
+        const options = (args.length === 3 ? args[1] : {}) as LockOptions;
+        const callback = args[args.length - 1] as (
+          lock: Lock | null,
+        ) => unknown;
+        if (!/^atlas-(auth$|attempt-)/.test(name))
+          return original.apply(this, args);
+        const owner =
+          tag === "A" && name === "atlas-attempt-2" && !options.ifAvailable;
+        add("lock-request", {
+          name,
+          ifAvailable: options.ifAvailable === true,
+        });
+        const wrapped = (lock: Lock | null) => {
+          add("lock-callback", {
+            name,
+            granted: lock !== null,
+            ifAvailable: options.ifAvailable === true,
+          });
+          if (name === "atlas-attempt-2" && options.ifAvailable)
+            state.probes.push(lock !== null);
+          if (owner && gateMode === "native-held") {
+            state.entered = true;
+            add("gate-entered", { mode: gateMode });
+            return opened.then(() => callback(lock));
+          }
+          return callback(lock);
+        };
+        const run = () => original.apply(this, [...args.slice(0, -1), wrapped]);
+        if (owner && gateMode === "before-native") {
+          state.entered = true;
+          add("gate-entered", { mode: gateMode });
+          return opened.then(run);
+        }
+        return run();
+      } as LockManager["request"];
+    },
+    { tag, gateMode },
+  );
+}
+const ownerGate = (page: Page) =>
+  page.evaluate(() => {
+    const { entered, probes, log } = (window as unknown as OwnerGateWindow)
+      .__ownerGate;
+    return { entered, probes, log };
+  });
+
+test.describe("revision 36, R39: a second sign-in's epoch is published before its owner lock is held", () => {
+  for (const result of ["refused", "aborted"] as const)
+    for (const gateMode of ["before-native", "native-held"] as const)
+      for (const evaluator of ["peer", "own"] as const)
+        test(`R39 owner publication [${result}/${gateMode}/${evaluator}]: an evaluator looking in the interval leaves the live attempt to activate`, async ({
+          context,
+          provokes,
+        }, testInfo) => {
+          provokes(result === "refused" ? 503 : "abort");
+          const stub = await newStub(context);
+          let activations = 0;
+          stub.answerNext(
+            (r) => isActivate(r) && ++activations === 2,
+            result === "aborted"
+              ? "abort"
+              : {
+                  status: 503,
+                  body: {
+                    code: "device_capacity",
+                    message: "capacity",
+                    request_id: "req-capacity",
+                    details: [],
+                  },
+                },
+          );
+          const [a, b] = await twoTabs(context);
+          await installOwnerGate(a, "A", gateMode);
+          await installOwnerGate(b, "B", gateMode);
+          const looker = evaluator === "peer" ? b : a;
+          try {
+            await delayDigest(a);
+            expect(await offerSignIn(a, "kieran", "pw")).toBe("submitted");
+            expect(await offerSignIn(b, "sam", "pw2")).toBe("submitted");
+            await expect
+              .poll(async () => (await workOf(b)).dom, { timeout: 20_000 })
+              .toBe("displaying");
+            await releaseDigest(a);
+            await expect
+              .poll(async () => (await ownerGate(a)).entered, {
+                message: "tab 1's owner-lock request reached the gate",
+              })
+              .toBe(true);
+            // Tab 1 holds atlas-auth across the whole interval; a real focus starts the looking tab's ordinary evaluator. Only probes
+            // made after the gate was reached count, and any single `ifAvailable` answer can be "held" because another evaluator (tab 1's
+            // own, say) is probing at that instant (revision-36 qualification attempt 1, WebKit): so before admission the proof is that
+            // some focused look found the name free (focus again until one does), and once natively granted that every look found it held.
+            expect((await workOf(a)).held).toContain("atlas-auth");
+            const before = (await ownerGate(looker)).probes.length;
+            const focus = () =>
+              looker.evaluate(() => window.dispatchEvent(new Event("focus")));
+            const looks = async () =>
+              (await ownerGate(looker)).probes.slice(before);
+            if (gateMode === "before-native")
+              await expect
+                .poll(
+                  async () => {
+                    await focus();
+                    return (await looks()).some(Boolean);
+                  },
+                  {
+                    message:
+                      "a focused look found the owner lock free before admission",
+                  },
+                )
+                .toBe(true);
+            else {
+              await focus();
+              await expect
+                .poll(async () => (await looks()).length, {
+                  message: "the evaluator probed the second epoch's owner lock",
+                })
+                .toBeGreaterThan(0);
+              expect(
+                await looks(),
+                "every look found the natively granted owner lock held",
+              ).not.toContain(true);
+            }
+            if (gateMode === "before-native")
+              // A free lock seen outside atlas-auth is not acted on: the decision waits for atlas-auth, which tab 1 still holds.
+              await expect
+                .poll(async () => (await workOf(looker)).pending)
+                .toContain("atlas-auth");
+            await a.evaluate(() =>
+              (window as unknown as OwnerGateWindow).__ownerGate.release(),
+            );
+            const boundary = await settleAuth(stub, [a, b]);
+            expect(
+              stub.deliveries
+                .filter((d) => d.path === ACTIVATE)
+                .map((d) => [d.state, d.status ?? null]),
+              "the second sign-in's activation is issued",
+            ).toEqual([
+              ["fulfilled", 200],
+              result === "refused" ? ["fulfilled", 503] : ["aborted", null],
+            ]);
+            expect(lastArrivedActivationAccount(stub)).toBe("kieran");
+            await expectFinalIdentity(stub, [a, b], boundary, {
+              otherwise: ["different_account", "neutral"],
+            });
+            expect(
+              stub.usernameOf(
+                stub.deliveredActivations().at(-1)?.account ?? "",
+              ),
+            ).toBe("sam");
+          } finally {
+            const metadata = await Promise.all(
+              [a, b].map((page) =>
+                page
+                  .evaluate(
+                    () =>
+                      (window as unknown as Partial<OwnerGateWindow>)
+                        .__ownerGate?.log ?? null,
+                  )
+                  .catch(() => null),
+              ),
+            );
+            await testInfo.attach("owner-publication-metadata", {
+              body: JSON.stringify(
+                { result, gateMode, evaluator, metadata },
+                null,
+                2,
+              ),
+              contentType: "application/json",
+            });
+          }
+        });
+});
+
+/**
  * WEB-14a revision 22, review R28 (design assessment C3, schedule S08): the Settings navigation. The retained Firefox T3 trace
  * (revision 19) and the accepted-main T15 trace show the same thing: `shownAs` pressed the shell's Settings link, and between the press
  * and the release the tree was CLOSED by the other tab's leased verification read (1e "interrupted": matrix 3.6 forbids a display while

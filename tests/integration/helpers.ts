@@ -530,6 +530,17 @@ export async function freshHarnessDocument(
   expected: SettledLike,
   route = "/today",
 ): Promise<void> {
+  // WEB-14a revision 36: the shell merged with accepted WEB-10a shows Today, whose readers (`/daily`, `/defaults/snapshot`) ask as soon as
+  // the display lifts. A document replaced while one of them is in flight leaves its request lease unretired, and the new document must
+  // then verify that lease before it displays: a different premise from the one these callers state (the new document's ONLY identity
+  // read is its own resume verification). So the replaced document finishes its own requests first, within a bound, or the setup fails.
+  await untilRecord(
+    page,
+    (state) =>
+      Object.values(state.leases).every((lease) => lease.class === "exposure"),
+    "setup: the replaced document's own requests have finished (no request lease is left for the new document to verify)",
+    15_000,
+  );
   await page.goto(`/__session?route=${encodeURIComponent(route)}`);
   // A document without the fixture bridge (the app route itself, as `reload()` of a harness page loads) is a setup failure named as
   // such, within a bound, before anything is read from it.

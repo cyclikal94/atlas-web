@@ -147,9 +147,11 @@ export class AttemptService implements Attempts {
         void this.resolve();
         return { kind: "resolving" };
       }
-      // D-16: taken INSIDE the critical section, so "free" always means "owner gone".
+      // D-16: taken INSIDE the critical section, so "free" always means "owner gone" to a reader that also holds `atlas-auth`
+      // (`sweep`, R39). Without the owner nothing has started: the epoch is an orphan, which `sweep` clears.
       const owner = await k.ports.locks.acquire(LOCKS.attempt(allocated.epoch));
-      if (owner) this.owned.set(allocated.epoch, owner);
+      if (!owner) throw new Error("no owner lock");
+      this.owned.set(allocated.epoch, owner);
       k.ports.hints.post({ type: "auth_state_changed" });
       return {
         kind: "started",
@@ -925,26 +927,76 @@ export class AttemptService implements Attempts {
   // ---- expiry, liveness ------------------------------------------------------------------------------------------
   /**
    * Phase-specific expiry (matrix 3.4.3). Only `exchanging` and `redirected` are cleared by time (or, for
-   * `exchanging`, by a free owner lock); a gating attempt is NEVER cleared by time. Runs under `atlas-auth`.
+   * `exchanging`, by a free owner lock); a gating attempt is NEVER cleared by time.
+   *
+   * R39 (review of 25 October 2026): `record` is the evaluator's snapshot, read without `atlas-auth`, so it only says where to look.
+   * `begin` commits a new epoch and only then takes its owner lock, both under `atlas-auth`: a free owner lock seen outside that lock
+   * can be an owner that has not taken it yet. So the decision is taken again under `atlas-auth` from the record as it is then, and
+   * the clearing transaction checks that its reason still holds, because a redirect is written without `atlas-auth`: an orphan must
+   * still be `exchanging` (a redirected attempt has no owner by design), an expiry must still be past (a redirect renews it).
    */
   async sweep(record: AuthRecords): Promise<void> {
     const { k } = this;
-    const attempt = record.auth_state.attempt;
-    if (!attempt || isGating(attempt)) return;
-    if (this.owned.has(attempt.epoch)) return;
-    const expired = Date.parse(attempt.expires_at) <= k.ports.clock.now();
-    let orphaned = false;
-    if (attempt.phase === "exchanging")
-      orphaned = await k.ports.locks.probe(LOCKS.attempt(attempt.epoch));
-    if (!expired && !orphaned) {
-      const remaining = Date.parse(attempt.expires_at) - k.ports.clock.now();
-      k.ports.clock.setTimeout(
-        () => void k.hooks.evaluate("attempt_expiry"),
-        Math.max(0, remaining) + 1,
+    const seen = record.auth_state.attempt;
+    // This page's own live attempt is bounded by its own steps (the exchange's request time-out, the visibility wait of
+    // `exchangingExpiryMs`), each of which ends it; every other page still applies the phase's expiry to it.
+    if (!seen || isGating(seen) || this.owned.has(seen.epoch)) return;
+    // Outside `atlas-auth` a deadline still ahead or a held owner lock is only "not yet": look again at the expiry.
+    if (
+      Date.parse(seen.expires_at) > k.ports.clock.now() &&
+      !(
+        seen.phase === "exchanging" &&
+        (await k.ports.locks.probe(LOCKS.attempt(seen.epoch)))
+      )
+    )
+      return this.sweepAt(seen.expires_at);
+    const auth = await k.ports.locks.acquire(LOCKS.auth, {
+      signal: k.ports.clock.abortAfter(k.config.lockWaitMs),
+    });
+    if (auth === null) return this.sweepAt();
+    let cleared: "CLEARED" | "NOT_ALLOWED" | "SUPERSEDED";
+    try {
+      const attempt = await k.transact(
+        (records) => readAttempt(records),
+        "read",
+        false,
       );
-      return;
+      if (!attempt || isGating(attempt) || this.owned.has(attempt.epoch))
+        return;
+      const now = k.ports.clock.now();
+      const reason =
+        Date.parse(attempt.expires_at) <= now
+          ? { epoch: attempt.epoch, expiredAt: now }
+          : attempt.phase === "exchanging" &&
+              (await k.ports.locks.probe(LOCKS.attempt(attempt.epoch)))
+            ? { epoch: attempt.epoch, phase: attempt.phase }
+            : null;
+      if (reason === null) return this.sweepAt(attempt.expires_at);
+      cleared = await k.transact(
+        (records) => clearNonGating(records, reason),
+        "clear_attempt",
+      );
+    } catch {
+      // Nothing is cleared on a failure to look: look again later.
+      return this.sweepAt();
+    } finally {
+      auth.release();
     }
-    await this.clearUnderAuth(attempt.epoch);
+    if (cleared === "CLEARED") {
+      k.ports.hints.post({ type: "auth_state_changed" });
+      void k.hooks.evaluate("attempt_cleared");
+    } else if (cleared === "NOT_ALLOWED") this.sweepAt();
+  }
+
+  /** Evaluate again at `expiresAt` (just after it), or after the first back-off when there is no deadline to wait for. */
+  private sweepAt(expiresAt?: string): void {
+    const { k } = this;
+    k.ports.clock.setTimeout(
+      () => void k.hooks.evaluate("attempt_expiry"),
+      expiresAt === undefined
+        ? k.backoff(0)
+        : Math.max(0, Date.parse(expiresAt) - k.ports.clock.now()) + 1,
+    );
   }
 
   private async clearOwn(epoch: Epoch): Promise<ClearResult> {
