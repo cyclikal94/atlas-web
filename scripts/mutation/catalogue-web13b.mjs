@@ -480,11 +480,18 @@ export const ENGINE_13B = [
   {
     id: "MU-2469",
     title:
-      "WEB-13b D-13b-9: (REAL ENGINE) the binding is read again after the session's 403 re-check remounts the tree",
+      "WEB-13b D-13b-9: (REAL ENGINE) the binding is read again after the session's 403 re-check remounts the tree (neither the visit's read nor the refusal is kept)",
     file: "src/features/tasks/detail/anchor-binding.ts",
     spec: "tests/e2e/fixture.calendar-anchors.spec.ts",
     grep: "E-ANC2: .*a 403 on the read",
     expect: /E-ANC2:/,
-    patch: readEveryMount,
+    // Two independent guards stop a re-read after a 403 (the visit's read, the refusal noted on arrival): the unit MU-2462 removes the
+    // first with a successful read; natively a 403's remount needs both gone (one alone was equivalent: run 2 of the author's driver).
+    patch: (t) =>
+      sub(
+        readEveryMount(t),
+        "  if (refusalOf(identity, anchorReadKey(taskId)) !== null) {\n",
+        "  if (refusalOf(identity, anchorReadKey(taskId)) !== null && (false as boolean)) {\n",
+      ),
   },
 ];
