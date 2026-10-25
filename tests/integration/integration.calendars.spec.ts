@@ -1001,7 +1001,8 @@ test.describe("I-CAL10: turned off while refreshing (cause 6a)", () => {
 });
 
 // =====================================================================================================================================
-// WEB-13b: local ICS import, task anchors and review items, against the released backend pinned now (v0.29.0-rc.1, 4396c99), on the
+// WEB-13b (I-CAL-IMP1-4, I-CAL-ANC1, I-CAL-REV1; prefixed I-CAL so that every historical schedule keeps them in the calendar stack):
+// local ICS import, task anchors and review items, against the released backend pinned now (v0.29.0-rc.1, 4396c99), on the
 // same stack (its loopback feed, accounts and paced sign-ins). FOCUSED EVIDENCE FOR A FIXTURE-STAGE TASK, not integration acceptance:
 // BE-Q22, BE-B8 and BE-CH3 have no completion record. Not exercised here, with the reason (plan §9.6): `409 stale_refresh` for an import
 // (needs a generation change inside the parse window: not schedulable from the client), `503 slice_capacity` (10,000 installation
@@ -1098,7 +1099,7 @@ const cachedEvents = async (page: Page, sourceId: string) => {
   );
 };
 
-test.describe("I-IMP1: an import into a pending source (cases 1 and 2)", () => {
+test.describe("I-CAL-IMP1: an import into a pending source (cases 1 and 2)", () => {
   test("composed offline behind its create; online: the create, then the import at its address; a lost answer resent byte-identically; the events arrive by a real delta page", async ({
     context,
   }) => {
@@ -1143,7 +1144,7 @@ test.describe("I-IMP1: an import into a pending source (cases 1 and 2)", () => {
   });
 });
 
-test.describe("I-IMP2: refused imports (cases 4 and 7(e))", () => {
+test.describe("I-CAL-IMP2: refused imports (cases 4 and 7(e))", () => {
   test("a title over 300 characters is 502 fetch_failed and an unsupported repeat rule 422: each sent once, terminal, and the first import's events are kept", async ({
     context,
   }) => {
@@ -1188,7 +1189,7 @@ test.describe("I-IMP2: refused imports (cases 4 and 7(e))", () => {
   });
 });
 
-test.describe("I-IMP3: an import meets a refresh in progress (case 6(b))", () => {
+test.describe("I-CAL-IMP3: an import meets a refresh in progress (case 6(b))", () => {
   test("the linked source's refresh is held at the feed: the import meets 409 refresh_in_progress, stays uncertain under the same key, and is receipted after the release", async ({
     context,
   }) => {
@@ -1222,7 +1223,7 @@ test.describe("I-IMP3: an import meets a refresh in progress (case 6(b))", () =>
   });
 });
 
-test.describe("I-IMP4: the calendar permits are busy (CH3, 7(f))", () => {
+test.describe("I-CAL-IMP4: the calendar permits are busy (CH3, 7(f))", () => {
   test("two held refreshes take both calendar permits: an import is 503 temporarily_unavailable, retried, and receipted after the permits free", async ({
     context,
   }) => {
@@ -1274,6 +1275,8 @@ async function anchoredTask(
   name: string,
   eventTitle: string,
   days: string,
+  /** An amount goal (at least `minimum` of `unit`), so that recorded progress need not complete the day. */
+  amount?: { minimum: string; unit: string },
 ) {
   await page.evaluate((p) => {
     history.pushState(null, "", p);
@@ -1287,6 +1290,11 @@ async function anchoredTask(
   ).toBeVisible({ timeout: 30_000 });
   await page.getByLabel("Name", { exact: true }).fill(name);
   await page.getByLabel("Repeats").selectOption("none");
+  if (amount) {
+    await page.getByRole("radio", { name: "An amount" }).check();
+    await page.getByLabel("At least", { exact: true }).fill(amount.minimum);
+    await page.getByLabel("Unit", { exact: true }).fill(amount.unit);
+  }
   await page
     .locator("[data-task-form-anchor]")
     .getByRole("button", { name: "Anchor…" })
@@ -1322,7 +1330,7 @@ const anchoredOccurrences = async (page: Page, taskId: string) => {
   ) as Array<{ id: string; value: { slot: { date: string } } }>;
 };
 
-test.describe("I-ANC1: a task anchored to an imported event series (cases 1 and 3)", () => {
+test.describe("I-CAL-ANC1: a task anchored to an imported event series (cases 1 and 3)", () => {
   test("created with its anchor: anchored occurrences appear from the reference; the binding is read online and says so offline; set_anchor (lost answer resent) and remove", async ({
     context,
   }) => {
@@ -1357,11 +1365,12 @@ test.describe("I-ANC1: a task anchored to an imported event series (cases 1 and 
         },
       )
       .toEqual([day(1)]);
+    // Read once the task is synced (the anchored occurrence's page published it too); before that the section says it will show it.
     const section = page.locator("[data-anchor-section]");
     await expect(section).toContainText(
       "Anchored to I-ANC1 Bins · a calendar event · 1 day before",
       {
-        timeout: 30_000,
+        timeout: 60_000,
       },
     );
     // Offline after leaving and coming back (a new visit): the binding needs a connection, the day is still shown.
@@ -1438,7 +1447,7 @@ test.describe("I-ANC1: a task anchored to an imported event series (cases 1 and 
   });
 });
 
-test.describe("I-REV1: a review item (work started, the event moved)", () => {
+test.describe("I-CAL-REV1: a review item (work started, the event moved)", () => {
   test("progress recorded on the anchored day; the series re-imported with the event moved: a work_started review syncs; Review this move… saves the correction; Acknowledge (lost answer resent) resolves it", async ({
     context,
   }) => {
@@ -1458,6 +1467,7 @@ test.describe("I-REV1: a review item (work started, the event moved)", () => {
       "I-REV1 Put the bins out",
       "I-REV1 Bins / Bin day",
       "-1",
+      { minimum: "2", unit: "bags" },
     );
     await expect
       .poll(async () => (await anchoredOccurrences(page, taskId)).length, {
@@ -1469,10 +1479,10 @@ test.describe("I-REV1: a review item (work started, the event moved)", () => {
       history.pushState(null, "", p);
       dispatchEvent(new PopStateEvent("popstate"));
     }, `/tasks/${taskId}?occurrence=${occurrence?.id}`);
-    await page
-      .locator("[data-record-card]")
-      .getByRole("button", { name: "Mark done" })
-      .click();
+    // Work started but not complete (the backend makes no review for a complete day): one of two bags.
+    const card_ = page.locator("[data-record-card]");
+    await card_.getByLabel("Amount (bags)").fill("1");
+    await card_.getByRole("button", { name: "Record" }).click();
     await wakeLeader(page);
     await expect
       .poll(

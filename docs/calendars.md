@@ -29,7 +29,8 @@ The route is chosen **per command, never per connectivity** (D-13a-2). A queued 
 ```ts
 outbox.enqueue(importRequest({ sourceId, ics, from, through, localId }))
 // endpoint "/calendar-sources/{id}/import", targetId = sourceId,
-// targets: [{ resourceId: sourceId, role: "primary", basis: "resource", versionChecked: false, seedIfUntracked: 1 }],
+// targets: [{ resourceId: sourceId, role: "primary", basis: "resource", versionChecked: false, seedIfUntracked: 1,
+//             requiresEdit: true /* WEB-13b: a known view-only source refuses the save as `denied` */ }],
 // build: () => ({ command: { ics, from, through } })
 ```
 
@@ -117,6 +118,61 @@ An Atlas `401` or `403` is classified by the session, which closes the protected
 * Evidence (revision 6): `refresh-ownership.test.ts` (both result orders, running, finished, offline, forgotten and unmounted successors, an older late live read, other sources, the same-key **Check again** ticket, another identity), the revision-6 cases of `visit.test.ts` (departures attached and detached, leaving and returning, terminal visits, ownership untouched), `tests/lib/route-changes.test.ts` (raw and router writes, Back/Forward, routers made after the record and torn down) and of `visit-screen.test.tsx` (the production screen through the document's real history: a press refused `403`, the tree closed, Back to Settings while closed, then Calendars, with its same-address control; Back/Forward, raw writes and same-path controls while unmounted; mounted Back; the late-answer orders), native E-CAL15 in Chromium, Firefox and WebKit, and the revision-6 unit and real-engine mutants.
 * Evidence (revision 5): `tests/features/calendars/visit.test.ts` (the visit and the capability read), the revision-5 cases of `observation.test.ts` (remounts while a read is out, in either cleanup order and with Strict Mode; answers while detached; no admission while detached; limits not restarted; re-listing by the same and by a new screen; a yield kept), `visit-screen.test.tsx` (the production screen remounted at the same address and navigated away and back), native E-CAL14 in Chromium, Firefox and WebKit through the real session and protected tree (first read refused `403` with its `200` and `503` controls, a poll refused `403` with Manage edited or Replace's URL typed and its `503`/idle controls, the capability refused `403`, a manual Refresh refused while the screen's read is held, leaving and returning, and an invalidating `403`), unit mutants MU-1414 to MU-1425, MU-1429 to MU-1437 and real-engine mutants MU-1426 to MU-1428.
 
+## WEB-13b: local ICS import, task anchors and review items
+
+*WEB-13b, 25 October 2026. Fixture-stage work (`integration_passed: false`; BE-Q22, BE-B8 and BE-CH3 still have no completion record). The
+current pin is **`0.29.0-rc.1`** (backend `4396c99`, `contract-pin.json`; the WEB-13a paragraph above records its own, older pin). Copy
+marked "provisional" in `copy-import.ts`, `copy-anchor.ts` and `copy-review.ts` is collected for the working-app checkpoint and WEB-15.*
+
+**Import** (`model/import.ts`, `ImportDialog.tsx`, `ImportDropZone.tsx`, `ImportsPanel.tsx`, `import-action.tsx`, the one row-action entry).
+"Import events" on a source row (cached or pending; unavailable on a view-only or turned-off source, with the reason) or the page's drop
+zone ("browse" is a real file control; dropping is an enhancement) opens the dialog: the file is read and checked **on this device**
+(UTF-8 bytes ≤ 1 MiB, Rust `str::lines` before unfolding ≤ 20,000, `VEVENT`s with overrides ≤ 256, a fatal UTF-8 decode, a
+`YYYY-MM-DD` window with years 1900–9999 and `0 ≤ through − from ≤ 730` days inclusive, the JSON body ≤ 2 MiB), and Import stores ONE
+draft (`importRequest`; offline included; a synchronous latch; the same press after a local refusal reuses its identity). The file's text
+lives in the dialog's memory only. The **Imports** panel lists this device's outstanding imports from draft HEADERS only
+(`useDraftHeaders` / `readDraftHeaders`; an import's body is never read for a list, and `readOutstanding` asked for a kind no longer
+loads a newer draft of another kind: E6): Queued, Sent (trying again), Sent — couldn't confirm yet (link to the queue), Import accepted,
+refused with its reason (Dismiss), or the capacity words (link to the queue). No count of imported events is ever claimed.
+
+**The import's answers on the current wire** (`answers.ts`, the dispatcher's seam in `src/data/engine/outbox-dispatcher.ts`):
+
+| Answer | Treatment |
+| --- | --- |
+| `200 {revision}` | receipt |
+| `409 refresh_in_progress`, `503 temporarily_unavailable` (the two calendar permits are taken first, before the receipt lookup), `500`, `429`, a gateway `5xx` without an Atlas body, network | the generic same-key retry (uncertain; reload-safe) |
+| `409 stale_refresh` (`generation_changed`, `lease_expired`), `502 fetch_failed` with an Atlas body (the parser's `InvalidValue`: a title over 300 characters, a bad window date) | **terminal** (`rejected`), by the two handlers `registerImportAnswers` adds for import drafts only |
+| `422` (`invalid_ics`, `unsupported_calendar_rule`, `unsupported_calendar_timezone`, `calendar_limit`, `invalid_value` for a turned-off source), `403`, `404`, `400` | the generic rejection |
+| `503 slice_capacity` | blocked for the person (never "your account is full") |
+
+The seam: in the dispatcher's generic-retry branch an Atlas-coded answer consults the conflict registry, and only `reclassify` as
+`rejected` is honoured. The handlers are registered into the PAGE HOST's registry by `appCommands()`, which `createProtectedTree` calls
+before boot starts the page's leader, and into the fixture harness's own registry. A rejected import rejects the source's later queued
+drafts (`dependency_rejected`), the foundation's chain rule; the panel says so and nothing is resent.
+
+**Anchors** (`model/anchor.ts`, `AnchorDialog.tsx`, `pickers.tsx`; the surface for other slices is `anchors.ts`). The panel edits a
+reference (an event series chosen from the source's cached events, or a person's date field from the cache), an offset (whole days
+−366..366 at an optional `HH:MM` sent as `HH:MM:SS`, or ±31,622,400 seconds for a TIMED event series only), weekdays (1 = Monday) and, for
+an event series, a title filter (1–100 bytes). Every field keeps its value while hidden; Save sends only what applies; a year-less date
+field always repeats annually; a task that repeats on its own schedule cannot be anchored. A new task carries its anchor in `create_task`
+(no projected first occurrence: the server makes none from the schedule). An existing task's "Calendar anchor" section (task detail,
+after the day) reads the binding ONLINE once per visit and identity (`tasks/detail/anchor-binding.ts`; a refusal is kept when it arrives;
+offline it says "Binding details need a connection." and the rest of the task stays as the cache shows it) and queues `set_anchor` on the
+task's version (`anchor: null` removes it), with its waiting, saving, conflict ("Review" supersedes it) and refused states.
+
+**Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the
+binding's author), read strictly (`{reason, resolved, slot}`; a slot only for `moved`, the previous slot, and `work_started`, the proposed
+one). Acknowledge queues `resolve_review` on the review's version with the observation of the card's one read (a review that changed
+between showing and pressing is refused as changed); "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
+which the task screen reads strictly and consumes once to fill a NEW correction session (it never resolves the review); a
+`context_unavailable` review shows no date, title or task; one that leaves the cache while shown is "no longer available".
+
+**Known finding (F-13b-1, pre-existing at `b9fd602`, not fixed here):** an ordinary `403` to ANY queued command sent by the production
+leader makes the session re-check the display; the leader stops and restarts its dispatcher, the answer is dropped and the draft is resent
+at once under the same key, in a loop (31 sends in 0.4 s against a stub, for a settings change as for an import). A `403` to an import is
+therefore classified `rejected` by the dispatcher (unit evidence) but is not recorded through the production composition. See
+`.agtx/execute.md` of the WEB-13b worktree.
+
 ## Limits and what is not claimed
 
 * **Refreshes publish new versions.** A refresh (the worker's, every 15 minutes for a linked source, or a manual one) publishes the source's new health as a new version, and a queued settings change is built on the version the outbox assumes, the cache's. A change saved before the cache has caught up with a refresh is therefore answered `409 conflict` and shown as needing a decision (**Review**, which supersedes it). This is the contract's `expected_version` rule, not a client defect; it is listed for Kieran's review because offline settings changes to a linked source will often meet it (a backend change would be needed to exempt health from the version).
@@ -129,3 +185,9 @@ An Atlas `401` or `403` is classified by the session, which closes the protected
 ## Tests
 
 Unit and component (jsdom, the production controller and plans over the IndexedDB double): `tests/features/calendars/*` (builders and validation, the refresh classifier and reducer, the controller, submissions, the status table, the client, the screen, the connection forms), `tests/data/pending-reads.test.ts`, `tests/data/outbox-calendar-extension.test.ts`, `tests/data/outbox-model.test.ts` (`commandKindOf`), `tests/features/sync/screens.test.tsx` (the queue's calendar descriptions) and the Settings registry tests. Real engines: `tests/e2e/fixture.calendars.spec.ts` (E-CAL1 to E-CAL13, network stubbed; E-CAL12 is R9's live read, E-CAL13 two tabs of the same origin saving the same source, the second tab's observation of the first held through Dexie's cross-tab channel). Released backend: `tests/integration/integration.calendars.spec.ts` (I-CAL1 to I-CAL10, `-calendar` stack with a loopback feed).
+
+WEB-13b: `tests/features/calendars/{import-model,anchor-model}.test.ts`, `{import-ui,review-panel}.test.tsx`,
+`tests/features/tasks/{anchor-section,task-form-anchor}.test.tsx`, `tests/data/{outbox-calendar-extension,outbox-answers,pending-reads,plan-inventory}.test.ts`
+(the answers, the seam, E6 and the header read); native `tests/e2e/fixture.calendar-{import,anchors,reviews}.spec.ts` (E-IMP1–6, E-ANC1–3,
+E-REV1–3; helpers in `calendar-13b-helpers.ts`); released backend I-CAL-IMP1–4, I-CAL-ANC1 and I-CAL-REV1 in the calendar integration spec; mutants
+MU-2437..MU-2469 (`scripts/mutation/catalogue-web13b.mjs`).

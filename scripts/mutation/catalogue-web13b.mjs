@@ -29,10 +29,9 @@ const staleRetried = (t) =>
     '  for (const code of ["fetch_failed"])\n',
   );
 /** The binding is read again on every mount (the visit's read is not kept). */
-const readEveryMount = (t) =>
-  sub(t, "  if (own.reads.has(key)) return;\n", "");
+const readEveryMount = (t) => sub(t, "  if (own.reads.has(key)) return;\n", "");
 
-/** Unit mutants (layers L1a pure, L1b the production composition over the IndexedDB double), MU-2437..MU-2468. */
+/** Unit mutants (layers L1a pure, L1b the production composition over the IndexedDB double), MU-2437..MU-2465 and MU-2470. */
 export const UNIT_13B = [
   {
     id: "MU-2437",
@@ -56,7 +55,11 @@ export const UNIT_13B = [
     tests: [T_IMPORT_MODEL],
     expect: /multibyte text is measured in bytes/,
     patch: (t) =>
-      sub(t, "  const bytes = utf8Bytes(ics);\n", "  const bytes = ics.length;\n"),
+      sub(
+        t,
+        "  const bytes = utf8Bytes(ics);\n",
+        "  const bytes = ics.length;\n",
+      ),
   },
   {
     id: "MU-2439",
@@ -148,7 +151,8 @@ export const UNIT_13B = [
       "WEB-13b §5.2 (the seam): the generic retry never consults a handler (an import's 502 fetch_failed is retried)",
     file: DISPATCHER,
     tests: [T_ANSWERS, T_EXTENSION],
-    expect: /may make it terminal|502 fetch_failed \(the server could not read the file\) is terminal/,
+    expect:
+      /may make it terminal|502 fetch_failed \(the server could not read the file\) is terminal/,
     patch: (t) =>
       sub(
         t,
@@ -317,7 +321,8 @@ export const UNIT_13B = [
     file: "src/features/calendars/ReviewPanel.tsx",
     tests: [T_REVIEWS],
     expect: /refused as changed/,
-    patch: (t) => sub(t, "      view.value.observation,\n", "      undefined,\n"),
+    patch: (t) =>
+      sub(t, "      view.value.observation,\n", "      undefined,\n"),
   },
   {
     id: "MU-2459",
@@ -325,7 +330,8 @@ export const UNIT_13B = [
       "WEB-13b D-13b-12: the private generic review looks its task up and names it",
     file: "src/features/calendars/ReviewPanel.tsx",
     tests: [T_REVIEWS],
-    expect: /the private generic review shows no date, no title and no task name/,
+    expect:
+      /the private generic review shows no date, no title and no task name/,
     // Both lookups are gated (the occurrence, then its task and reference): a leak needs both gates gone, so the mutant removes both.
     patch: (t) =>
       sub(
@@ -366,7 +372,7 @@ export const UNIT_13B = [
     patch: (t) =>
       sub(
         t,
-        "    void navigate({\n      to: \"/tasks/$taskId\",\n      params: { taskId },\n      search: occurrence === undefined ? {} : { occurrence },\n      replace: true,\n    });\n",
+        '    void navigate({\n      to: "/tasks/$taskId",\n      params: { taskId },\n      search: occurrence === undefined ? {} : { occurrence },\n      replace: true,\n    });\n',
         "",
       ),
   },
@@ -385,7 +391,8 @@ export const UNIT_13B = [
       "WEB-13b §4.2: Import events is offered on a view-only source (the server answers 403)",
     file: "src/features/calendars/import-action.tsx",
     tests: [T_IMPORT_UI],
-    expect: /a view-only source and a turned-off source cannot be imported into/,
+    expect:
+      /a view-only source and a turned-off source cannot be imported into/,
     patch: (t) =>
       sub(
         t,
@@ -416,6 +423,21 @@ export const UNIT_13B = [
     expect: /makes no first occurrence|KEEPS it|Remove takes it away/,
     patch: (t) => sub(t, "            event.stopPropagation();\n", ""),
   },
+  {
+    id: "MU-2470",
+    title:
+      "WEB-13b (I-ANC1 finding): the binding is read for a task the server does not have yet (the 404 is kept for the visit)",
+    file: "src/features/tasks/detail/AnchorSection.tsx",
+    tests: [T_FORM],
+    expect:
+      /the binding is not read while the task is only this device's pending create/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (visit === null || repeats || !synced || !env.online || !env.writable)\n",
+        "    if (visit === null || repeats || !env.online || !env.writable)\n",
+      ),
+  },
 ];
 
 /** Real-engine mutants (one isolated whole-mutant job each, all three browsers, its own unmutated control), MU-2466..MU-2469. */
@@ -431,8 +453,8 @@ export const ENGINE_13B = [
     patch: (t) =>
       sub(
         t,
-        "        resourceId: sourceId,\n        role: \"primary\",\n        basis: \"resource\",\n        versionChecked: false,\n        seedIfUntracked: 1,\n        requiresEdit: true,\n",
-        "        resourceId: crypto.randomUUID(),\n        role: \"primary\",\n        basis: \"resource\",\n        versionChecked: false,\n        seedIfUntracked: 1,\n        requiresEdit: true,\n",
+        '        resourceId: sourceId,\n        role: "primary",\n        basis: "resource",\n        versionChecked: false,\n        seedIfUntracked: 1,\n        requiresEdit: true,\n',
+        '        resourceId: crypto.randomUUID(),\n        role: "primary",\n        basis: "resource",\n        versionChecked: false,\n        seedIfUntracked: 1,\n        requiresEdit: true,\n',
       ),
   },
   {

@@ -490,6 +490,7 @@ export function TaskDetail({
           task={task}
           repeats={view.definition.schedule.repeat !== null}
           canEdit={editable(task, view.execution)}
+          synced={view.synced}
         />
       ) : null}
       {sharing !== null ? (

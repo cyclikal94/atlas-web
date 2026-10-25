@@ -185,6 +185,41 @@ describe("the new-task form's anchor", () => {
   });
 });
 
+describe("the new task's detail before it has synced", () => {
+  test("online: the binding is not read while the task is only this device's pending create; the section says it will show once synced", async () => {
+    const t = await mountTasks({
+      path: "/tasks/new",
+      rows,
+      env: { online: true },
+    });
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: PRESET_COPY.scratch }) !== null,
+    );
+    fireEvent.click(screen.getByRole("button", { name: PRESET_COPY.scratch }));
+    await t.until(() => document.querySelector("[data-task-form]") !== null);
+    fireEvent.change(screen.getByLabelText(FORM_COPY.name), {
+      target: { value: "Put the bins out" },
+    });
+    fireEvent.click(
+      screen.getByRole("radio", { name: FORM_COPY.sharingOnlyMe }),
+    );
+    repeats("none");
+    await anchorIt(t);
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    await t.until(
+      () => document.querySelector("[data-anchor-section]") !== null,
+    );
+    await t.settle();
+    const section = document.querySelector(
+      "[data-anchor-section]",
+    ) as HTMLElement;
+    expect(section.getAttribute("data-anchor-section")).toBe("unsynced");
+    expect(section).toHaveTextContent(words.BINDING_UNSYNCED);
+    expect(t.api.calls.readAnchor ?? 0).toBe(0);
+  });
+});
+
 describe("Review this move… (the seeded correction)", () => {
   test("?move= opens the day's correction with the proposed date and time, once, and leaves the address", async () => {
     const task = await seededTask();

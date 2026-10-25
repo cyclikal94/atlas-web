@@ -40,6 +40,9 @@ Every outcome type is a closed union. A refusal is a value, never an exception, 
 * **Register once, into the page host.** Feature slices register command kinds and conflict handlers into `getPageDataHost().commands` / `.conflicts` (the leader's
   dispatcher and every screen read the same registries), not into a registry of their own. `CommandSpec.rebuild(draft, current)` offers "Resend as a new operation" /
   "Review and save as a new attempt" in WF-QUEUE-02 (nothing is offered without it); `CommandSpec.onlineOnly` selects the dialog's online-only variant.
+  WEB-13b: a conflict handler is also consulted for an Atlas-coded answer the generic rule would RETRY (a `5xx`, a `429`); only `reclassify` as
+  `rejected` is honoured there (the import's `502 fetch_failed`), anything else keeps the retry. Register such handlers before the page's
+  leader starts (`createProtectedTree` calls `appCommands()` first).
   `CommandSpec.readCurrent(draft, io)` (review cycle 1, R7) is the kind's AUTHORISED current-state read for the dialog's "Currently saved": the slice knows its resource's
   endpoint (`io.get("/tasks/<id>")`, an ordinary stamped `GET` of the displayed account and epoch) and answers `loaded` (a `CacheRow`), `indeterminate` or `failed`. A kind
   without it has no authorised read: the dialog says so and asks before a new attempt. `rebuild` receives the value that read returned (or `null` when the person continued

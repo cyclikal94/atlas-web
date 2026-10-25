@@ -14,7 +14,11 @@ import {
   DESCRIBE_CONFIGURE,
   DESCRIBE_CREATE,
 } from "../../../src/features/calendars/copy";
+import { DESCRIBE_SET_ANCHOR } from "../../../src/features/calendars/copy-anchor";
+import { DESCRIBE_IMPORT } from "../../../src/features/calendars/copy-import";
+import { DESCRIBE_RESOLVE_REVIEW } from "../../../src/features/calendars/copy-review";
 import { registerCalendarCommands } from "../../../src/features/calendars/register";
+import { registerCalendarExtensions } from "../../../src/features/calendars/register-13b";
 import { CacheGate } from "../../../src/features/sync/CacheGate";
 import * as copy from "../../../src/features/sync/copy";
 import { NoticeList } from "../../../src/features/sync/NoticeBanners";
@@ -733,6 +737,58 @@ describe("the queue panel (WF-QUEUE-01)", () => {
     expect(screen.getByText(DESCRIBE_CREATE)).toBeInTheDocument();
     expect(screen.getByText(DESCRIBE_CONFIGURE)).toBeInTheDocument();
     expect(screen.queryByText(/Private label/)).toBeNull();
+  });
+
+  test("WEB-13b: a queued import, anchor change and review acknowledgement are described content-free; an import's text is never shown", () => {
+    const env = stubEnv({
+      drafts: [
+        draftRow({
+          local_id: "imp",
+          created_seq: 1,
+          endpoint: "/calendar-sources/{id}/import",
+          target_id: "00000000-0000-4000-8000-0000000000c1",
+          command: {
+            ics: "BEGIN:VCALENDAR\r\nSUMMARY:Secret dentist appointment\r\nEND:VCALENDAR\r\n",
+            from: "2026-01-01",
+            through: "2026-12-31",
+          },
+        }),
+        draftRow({
+          local_id: "anc",
+          created_seq: 2,
+          endpoint: "/calendar-commands",
+          command: {
+            command: {
+              kind: "set_anchor",
+              id: "t",
+              expected_version: 1,
+              anchor: null,
+            },
+          },
+        }),
+        draftRow({
+          local_id: "rev",
+          created_seq: 3,
+          endpoint: "/calendar-commands",
+          command: {
+            command: {
+              kind: "resolve_review",
+              id: "r",
+              expected_version: 1,
+              resolved: true,
+            },
+          },
+        }),
+      ],
+    });
+    registerCalendarExtensions(env.commands);
+    // Idempotent per registry.
+    registerCalendarExtensions(env.commands);
+    mountPanel(env);
+    expect(screen.getByText(DESCRIBE_IMPORT)).toBeInTheDocument();
+    expect(screen.getByText(DESCRIBE_SET_ANCHOR)).toBeInTheDocument();
+    expect(screen.getByText(DESCRIBE_RESOLVE_REVIEW)).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/dentist|VCALENDAR/);
   });
 
   test("offline, a queued change says it will send when connected", () => {

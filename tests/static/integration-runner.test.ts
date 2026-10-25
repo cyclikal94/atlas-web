@@ -430,7 +430,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         i14e: 4,
         i14d: 2,
         data: 32,
-        calendar: 13,
+        // WEB-13b: I-CAL-IMP1-4, I-CAL-ANC1 and I-CAL-REV1 join the calendar stack (13 + 6).
+        calendar: 19,
         traces: 16,
         registration: 20,
         oidc: 10,
@@ -443,7 +444,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10a revision 27 (R39): I-T12's supersession case is the 22nd task case.
         tasks: 22,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(222);
+      expect(inBrowser(whole, browser)).toHaveLength(228);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -614,8 +615,9 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 222,
-        passed: 216,
+        // WEB-13b: six calendar cases more (222 + 6; the designed skips are unchanged).
+        planned_cases: 228,
+        passed: 222,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,

@@ -39,6 +39,7 @@ import {
   BINDING_OFFLINE,
   BINDING_OFFLINE_EDIT,
   BINDING_READING,
+  BINDING_UNSYNCED,
   CHANGE_ANCHOR,
   DISMISS_ANCHOR,
   NOT_ANCHORED,
@@ -84,10 +85,16 @@ export function AnchorSection({
   task,
   repeats,
   canEdit,
+  synced,
 }: {
   task: CacheRow;
   repeats: boolean;
   canEdit: boolean;
+  /**
+   * The task is in the cache, not only this device's pending create: until then the server has no binding to read (a read would be
+   * refused `404` and that refusal kept for the visit), so nothing is read and the section says it will show the anchor once synced.
+   */
+  synced: boolean;
 }) {
   const env = useTasksEnv();
   const data = useDataEnv();
@@ -107,13 +114,15 @@ export function AnchorSection({
   }, [env.identity]);
   const read: BindingRead | undefined =
     visit === null ? undefined : bindingOf(env.identity, `${visit}:${task.id}`);
-  // Online and compatible only (an ordinary stamped read); never while the task repeats.
+  // Online and compatible only (an ordinary stamped read), for a task the server has (synced); never while the task repeats.
   useEffect(() => {
-    if (visit === null || repeats || !env.online || !env.writable) return;
+    if (visit === null || repeats || !synced || !env.online || !env.writable)
+      return;
     readBinding(env.identity, visit, task.id, env.api);
   }, [
     visit,
     repeats,
+    synced,
     env.online,
     env.writable,
     env.identity,
@@ -222,24 +231,28 @@ export function AnchorSection({
 
   if (repeats) return null;
   const offline = !env.online;
-  const statusLine = offline
-    ? BINDING_OFFLINE
-    : read === undefined || read.kind === "reading"
-      ? BINDING_READING
-      : read.kind === "failed"
-        ? BINDING_FAILED
-        : anchor === null
-          ? NOT_ANCHORED
-          : anchoredTo(describeAnchor(anchor, knownNames(anchor)));
-  const state = offline
-    ? "offline"
-    : read === undefined
-      ? "reading"
-      : read.kind === "read"
-        ? anchor === null
-          ? "none"
-          : "anchored"
-        : read.kind;
+  const statusLine = !synced
+    ? BINDING_UNSYNCED
+    : offline
+      ? BINDING_OFFLINE
+      : read === undefined || read.kind === "reading"
+        ? BINDING_READING
+        : read.kind === "failed"
+          ? BINDING_FAILED
+          : anchor === null
+            ? NOT_ANCHORED
+            : anchoredTo(describeAnchor(anchor, knownNames(anchor)));
+  const state = !synced
+    ? "unsynced"
+    : offline
+      ? "offline"
+      : read === undefined
+        ? "reading"
+        : read.kind === "read"
+          ? anchor === null
+            ? "none"
+            : "anchored"
+          : read.kind;
   const conflictAnchor =
     conflictBody.status === "ready" && conflictBody.value !== null
       ? anchorOfCommand(conflictBody.value.command)

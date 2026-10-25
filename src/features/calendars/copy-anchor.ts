@@ -101,6 +101,9 @@ export const BINDING_OFFLINE = "Binding details need a connection.";
 export const BINDING_OFFLINE_EDIT =
   "The current anchor couldn't be read without a connection.";
 export const BINDING_READING = "Reading the anchor…";
+/** Provisional: a task this device created that the server has not published yet (its anchor travels with the create). */
+export const BINDING_UNSYNCED =
+  "The anchor is shown once this task has synced.";
 export const BINDING_FAILED = "Couldn't load the anchor";
 export const TRY_AGAIN = "Try again";
 /** Verbatim (the Manage source / anchor states, capitalised as a status line). */

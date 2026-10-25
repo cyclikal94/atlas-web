@@ -734,6 +734,23 @@ No fixed-recurrence task gets a second occurrence until WEB-10c's `materialise` 
 are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal catch-up here by a scope change). Nothing here adds
 `materialise`.
 
+## Calendar anchors and review moves (WEB-13b)
+
+* **`create_task` with an anchor.** `CreateTaskInput.anchor` (the contract's `CalendarAnchor`) is sent only when present (never `null`);
+  an anchored create passes `occurrenceId: null, progressId: null`, because the server makes no first occurrence from an anchored task's
+  schedule (its occurrences come from the reference). The new-task form shows "Anchor to a calendar event" only while Repeats is "Doesn't
+  repeat"; the anchor (with the panel's whole state) is kept in the form's input while Repeats hides it, and a repeating task is saved
+  without it and without a warning (PRODUCT-DECISIONS-20261011). Editing a queued anchored create keeps its anchor while the task still
+  does not repeat. The panel is the calendar slice's (`features/calendars/anchors.ts`); its submission never submits the form around it.
+* **The task's "Calendar anchor"** (`detail/AnchorSection.tsx`, after the day, for a task that does not repeat): `TasksApi.readAnchor`
+  (`GET /tasks/{id}/anchor`, strict `parseBinding`) once per visit and identity (`detail/anchor-binding.ts`: a remount reads nothing more,
+  a refusal is noted on arrival, a read never sent leaves nothing, a receipted `set_anchor` reads once more); offline "Binding details need
+  a connection."; the queued `set_anchor` (`setAnchorRequest`, version-checked on the task, `requiresEdit`) with its states.
+* **`?move=` (`model/move.ts`).** "Review this move…" links to `/tasks/<id>?occurrence=<id>&move=<YYYY-MM-DD[THH:MM:SS]>`. The value is read
+  strictly in the lazy detail screen (the entry route's search validation is unchanged, for the first-load budget), consumed ONCE per value,
+  and opens the day's correction only when it is the displayed day and I may correct it; the seed fills only a NEW session (a resumed one
+  keeps what was typed); the value is then removed with `replace`. The dialog says the review is not resolved by saving.
+
 ## Limits
 
 - **The journal endpoint has no snapshot or reverse cursor (revision 4).** Pages are read by `sequence` from remembered starts, so an earlier page
