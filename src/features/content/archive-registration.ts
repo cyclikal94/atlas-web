@@ -25,6 +25,7 @@ import type {
 export type ArchiveReader = (
   id: string,
   io: CurrentReadIo,
+  draft: DraftWithCommand,
 ) => Promise<CurrentRead | null>;
 
 const readers: ArchiveReader[] = [];
@@ -73,7 +74,7 @@ export async function readArchiveTarget(
   const target = archiveOf(draft);
   if (target === null) return { kind: "indeterminate" };
   for (const reader of readers) {
-    const answer = await reader(target.id, io);
+    const answer = await reader(target.id, io, draft);
     if (answer !== null) return answer;
   }
   return { kind: "indeterminate" };

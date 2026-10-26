@@ -443,8 +443,10 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         snapshot: 6,
         // WEB-10a revision 27 (R39): I-T12's supersession case is the 22nd task case.
         tasks: 22,
+        // WEB-10b: I-LS1..I-LS8 on a stack of their own.
+        lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(238);
+      expect(inBrowser(whole, browser)).toHaveLength(246);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -505,6 +507,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       "password-path": 24,
       people: 48,
       tasks: 66,
+      lists: 24,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
@@ -633,8 +636,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 238,
-        passed: 232,
+        planned_cases: 246,
+        passed: 240,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -1253,6 +1256,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-sharing",
     "-snapshot",
     "-tasks",
+    "-lists",
   ]);
   expect(DEFAULT_STACKS.filter((s) => s.oidc).map((s) => s.name)).toEqual([
     "oidc",

@@ -395,12 +395,20 @@ export function archive(input: {
   taskId: string;
   archived: boolean;
 }): EnqueueRequest {
+  return archiveResource({ id: input.taskId, archived: input.archived });
+}
+
+/** `archive` of any resource the server archives (`person`, `field`, `task`, `list`: WEB-10b reuses it for a list, D-10b-7). */
+export function archiveResource(input: {
+  id: string;
+  archived: boolean;
+}): EnqueueRequest {
   return {
     endpoint: TASK_ENDPOINT,
-    // Archiving needs write access to the task (DA-A3): a known denial refuses it in the writing transaction.
+    // Archiving needs write access to the resource (DA-A3): a known denial refuses it in the writing transaction.
     targets: [
       {
-        resourceId: input.taskId,
+        resourceId: input.id,
         role: "primary",
         basis: "resource",
         versionChecked: true,
@@ -411,13 +419,13 @@ export function archive(input: {
       command: body(
         {
           kind: "archive",
-          id: input.taskId,
-          expected_version: bases[input.taskId] as number,
+          id: input.id,
+          expected_version: bases[input.id] as number,
           archived: input.archived,
         },
         null,
       ),
-      displayPatch: { [input.taskId]: { archived: input.archived } },
+      displayPatch: { [input.id]: { archived: input.archived } },
     }),
   };
 }

@@ -168,6 +168,11 @@ export {
 export { useAppliedRevision } from "./ui/applied-revision";
 export { useDraftWithCommand } from "./ui/draft-body";
 export {
+  type DraftEvidence,
+  readResourceViewNow,
+  readSaveEvidence,
+} from "./ui/draft-read";
+export {
   createDataEnv,
   type DataActions,
   type DataEnv,

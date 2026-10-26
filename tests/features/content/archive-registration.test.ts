@@ -9,7 +9,7 @@ import { cacheRow, draftRow, uuid } from "../../support/data/rows";
 
 const ID = uuid(1);
 const revision = "a".repeat(64);
-const draft = () =>
+const draft = (archived = true) =>
   draftRow({
     endpoint: "/task-commands",
     target_resource_ids: [ID],
@@ -17,13 +17,13 @@ const draft = () =>
     defaults_revision: revision,
     command: {
       defaults_revision: revision,
-      command: { kind: "archive", id: ID, expected_version: 1, archived: true },
+      command: { kind: "archive", id: ID, expected_version: 1, archived },
     },
   });
-const row = (kind: "person" | "task") =>
+const row = (kind: "person" | "task" | "list") =>
   cacheRow({ id: ID, kind, version: 7, policy_version: 2 });
 function reader(
-  kind: "person" | "task",
+  kind: "person" | "task" | "list",
   status = 200,
 ): CurrentReadIo & { asked: string[] } {
   const asked: string[] = [];
@@ -32,15 +32,19 @@ function reader(
     signal: new AbortController().signal,
     get: async (path) => {
       asked.push(path);
+      const collection = path.startsWith("/lists?");
       const matches =
-        path === `/${kind === "person" ? "people" : "tasks"}/${ID}`;
+        kind === "list"
+          ? collection
+          : path === `/${kind === "person" ? "people" : "tasks"}/${ID}`;
       const { kind_date: _date, ...projection } = row(kind);
-      const body =
-        kind === "person"
+      const body = collection
+        ? { items: kind === "list" ? [projection] : [], next_after: null }
+        : kind === "person"
           ? { person: projection, linked_account_id: null }
           : { task: projection, execution: null, materialisation: null };
       return new Response(JSON.stringify(body), {
-        status: matches ? status : 404,
+        status: matches ? status : collection ? 200 : 404,
       });
     },
   };
@@ -74,7 +78,7 @@ describe.each(["people-first", "tasks-first"] as const)(
       );
     });
 
-    test.each(["person", "task"] as const)(
+    test.each(["person", "task", "list"] as const)(
       "reads the authorised %s after another slice's 404",
       async (kind) => {
         const io = reader(kind);
@@ -83,59 +87,99 @@ describe.each(["people-first", "tasks-first"] as const)(
           value: row(kind),
         });
         expect(io.asked.at(-1)).toBe(
-          `/${kind === "person" ? "people" : "tasks"}/${ID}`,
+          kind === "list"
+            ? "/lists?archived=false&limit=200"
+            : `/${kind === "person" ? "people" : "tasks"}/${ID}`,
         );
-        expect(io.asked).toHaveLength(
-          (order === "people-first") === (kind === "person") ? 1 : 2,
-        );
+        const expected =
+          order === "people-first"
+            ? { person: 1, task: 2, list: 3 }
+            : { person: 4, task: 1, list: 2 };
+        expect(io.asked).toHaveLength(expected[kind]);
       },
     );
 
-    test("task replacement retains the reviewed base, permission, captured defaults and draft identity", () => {
-      const commands = registry();
-      const stored = draft();
-      const replacement = commands.rebuild(stored, row("task"));
-      expect(replacement).not.toBeNull();
-      expect(replacement?.targets).toEqual([
-        expect.objectContaining({
-          resourceId: ID,
-          reviewedBase: 7,
-          requiresEdit: true,
-          versionChecked: true,
-        }),
-      ]);
-      expect(replacement?.build({ [ID]: 7 })).toMatchObject({
-        command: {
-          defaults_revision: revision,
+    test.each(["task", "list"] as const)(
+      "%s replacement retains the reviewed base, permission, captured defaults and draft identity",
+      (kind) => {
+        const commands = registry();
+        const stored = draft();
+        const replacement = commands.rebuild(stored, row(kind));
+        expect(replacement).not.toBeNull();
+        expect(replacement?.targets).toEqual([
+          expect.objectContaining({
+            resourceId: ID,
+            reviewedBase: 7,
+            requiresEdit: true,
+            versionChecked: true,
+          }),
+        ]);
+        expect(replacement?.build({ [ID]: 7 })).toMatchObject({
+          command: {
+            defaults_revision: revision,
+            command: {
+              kind: "archive",
+              id: ID,
+              expected_version: 7,
+              archived: true,
+            },
+          },
+          defaultsRevision: revision,
+        });
+        expect(replacement?.expectDraft?.(stored)).toBe(true);
+        expect(
+          replacement?.expectDraft?.({ ...stored, command_digest: "changed" }),
+        ).toBe(false);
+        expect(
+          commands.rebuild(stored, { ...row(kind), can_edit: false }),
+        ).toBeNull();
+        expect(commands.admission(stored)).toEqual({
+          [ID]: { requiresEdit: true },
+        });
+        expect(
+          commands.rebuild(stored, row("person"))?.build({}).command,
+        ).toEqual({
           command: {
             kind: "archive",
             id: ID,
             expected_version: 7,
             archived: true,
           },
-        },
-        defaultsRevision: revision,
+        });
+      },
+    );
+
+    test("a list permission refusal stops the shared read", async () => {
+      const io = reader("list", 403);
+      expect(await registry().readCurrent(draft(), io)).toEqual({
+        kind: "failed",
+        reason: "inaccessible",
       });
-      expect(replacement?.expectDraft?.(stored)).toBe(true);
-      expect(
-        replacement?.expectDraft?.({ ...stored, command_digest: "changed" }),
-      ).toBe(false);
-      expect(
-        commands.rebuild(stored, { ...row("task"), can_edit: false }),
-      ).toBeNull();
-      expect(commands.admission(stored)).toEqual({
-        [ID]: { requiresEdit: true },
+      expect(io.asked.at(-1)).toBe("/lists?archived=false&limit=200");
+      expect(io.asked).not.toContain("/lists?archived=true&limit=200");
+    });
+
+    test("restoring a list checks its archived collection first", async () => {
+      const stored = draft(false);
+      const io = reader("task", 404);
+      const get = io.get;
+      io.get = async (path) => {
+        if (!path.startsWith("/lists?")) return get(path);
+        io.asked.push(path);
+        const { kind_date: _date, ...projection } = row("list");
+        return new Response(
+          JSON.stringify({
+            items: [{ ...projection, archived: true }],
+            next_after: null,
+          }),
+        );
+      };
+      expect(await registry().readCurrent(stored, io)).toMatchObject({
+        kind: "loaded",
+        value: { id: ID, kind: "list", archived: true },
       });
-      expect(
-        commands.rebuild(stored, row("person"))?.build({}).command,
-      ).toEqual({
-        command: {
-          kind: "archive",
-          id: ID,
-          expected_version: 7,
-          archived: true,
-        },
-      });
+      expect(io.asked.at(-1)).toBe("/lists?archived=true&limit=200");
+      expect(io.asked).not.toContain("/lists?archived=false&limit=200");
     });
 
     test("a task permission refusal is retained and an unknown target stays indeterminate", async () => {

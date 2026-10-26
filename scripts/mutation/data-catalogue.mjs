@@ -17,6 +17,7 @@ import { ENGINE_R23, UNIT_R23 } from "./catalogue-web10a-r23.mjs";
 import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
 import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
+import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
 
 export class PatchError extends Error {}
 
@@ -22742,7 +22743,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2501",
+    id: "MU-2756",
     title:
       "WEB-11a F8: a superseded walk reads on (neither the check before a page nor the one after its answer stops it)",
     file: "src/features/people/summaries.tsx",
@@ -22760,7 +22761,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2502",
+    id: "MU-2757",
     title:
       "WEB-11a F8: an answer older than the applied preferences_version is applied",
     file: "src/features/people/summaries.tsx",
@@ -22774,7 +22775,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2503",
+    id: "MU-2758",
     title:
       "WEB-11a F8: a newer preferences_version leaves every other summary standing",
     file: "src/features/people/summaries.tsx",
@@ -22788,7 +22789,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2504",
+    id: "MU-2759",
     title:
       "WEB-11a F8: a row may be replaced by one with a lower policy version",
     file: "src/features/people/summaries.tsx",
@@ -22803,7 +22804,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2505",
+    id: "MU-2760",
     title:
       "WEB-11a F8: an answer is applied to the memory of an identity no longer displayed",
     file: "src/features/people/summaries.tsx",
@@ -22817,7 +22818,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2506",
+    id: "MU-2761",
     title: "WEB-11a F8: a summary read is made again while one is on its way",
     file: "src/features/people/summaries.tsx",
     tests: ["tests/features/people/summaries.test.ts"],
@@ -22825,7 +22826,7 @@ export const UNIT = [
     patch: (t) => sub(t, "  if (known !== undefined) {", "  if (false) {"),
   },
   {
-    id: "MU-2507",
+    id: "MU-2762",
     title: "WEB-11a F8: an invalidation keeps the reads it superseded",
     file: "src/features/people/memory.ts",
     tests: ["tests/features/people/summaries.test.ts"],
@@ -22834,7 +22835,7 @@ export const UNIT = [
     patch: (t) => sub(t, "    this.summaries.clear();\n", ""),
   },
   {
-    id: "MU-2508",
+    id: "MU-2763",
     title:
       "WEB-11a F8: an online command's receipt does not invalidate the summaries",
     file: "src/features/people/online.ts",
@@ -22848,7 +22849,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2509",
+    id: "MU-2764",
     title:
       "WEB-11a F8: a command that never left (offline) invalidates the summaries",
     file: "src/features/people/online.ts",
@@ -22857,7 +22858,7 @@ export const UNIT = [
     patch: (t) => sub(t, '  (result.kind !== "offline" &&', "  (true &&"),
   },
   {
-    id: "MU-2510",
+    id: "MU-2765",
     title:
       "WEB-11a F8: a synced change (the applied revision) does not re-read the summaries",
     file: "src/features/people/summaries.tsx",
@@ -22872,7 +22873,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2511",
+    id: "MU-2766",
     title:
       "WEB-11a F8: a households or primary household change does not re-read the summaries",
     file: "src/features/people/summaries.tsx",
@@ -22887,7 +22888,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2512",
+    id: "MU-2767",
     title:
       "WEB-11a F8: the summaries shown are refreshed every ten minutes, not every minute",
     file: "src/features/people/summaries.tsx",
@@ -22897,7 +22898,7 @@ export const UNIT = [
       sub(t, "    }, SUMMARY_REFRESH_MS);", "    }, SUMMARY_REFRESH_MS * 10);"),
   },
   {
-    id: "MU-2513",
+    id: "MU-2768",
     title: "WEB-11a F8: the minute's refresh reads while the page is hidden",
     file: "src/features/people/summaries.tsx",
     tests: ["tests/features/people/summary-views.test.tsx"],
@@ -22910,7 +22911,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2514",
+    id: "MU-2769",
     title: "WEB-11a F8: reconnecting does not re-read the summaries",
     file: "src/features/people/summaries.tsx",
     tests: ["tests/features/people/summary-views.test.tsx"],
@@ -22919,7 +22920,7 @@ export const UNIT = [
       sub(t, "      !before.online &&\n      env.online", "      false"),
   },
   {
-    id: "MU-2515",
+    id: "MU-2770",
     title: "WEB-11a F8: a summary read earlier is shown offline",
     file: "src/features/people/summaries.tsx",
     tests: ["tests/features/people/summary-views.test.tsx"],
@@ -22928,7 +22929,7 @@ export const UNIT = [
       sub(t, "  if (key === null || !env.online) {", "  if (key === null) {"),
   },
   {
-    id: "MU-2516",
+    id: "MU-2771",
     title:
       "WEB-11a F8: a server scope reads every person and so lists them all",
     file: "src/features/people/list/PeopleList.tsx",
@@ -22942,7 +22943,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2517",
+    id: "MU-2772",
     title: "WEB-11a F8: In Home without a primary household is not explained",
     file: "src/features/people/list/PeopleList.tsx",
     tests: ["tests/features/people/summary-views.test.tsx"],
@@ -22951,7 +22952,7 @@ export const UNIT = [
       sub(t, '  if (scope === "in_home" && home === null)', "  if (false)"),
   },
   {
-    id: "MU-2518",
+    id: "MU-2773",
     title:
       "WEB-11a F8: a field summary older than the cached field is shown as its tag",
     file: "src/features/people/detail/PersonDetail.tsx",
@@ -22965,7 +22966,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2519",
+    id: "MU-2774",
     title:
       "WEB-11a F8: a person summary older than the cached person is shown beside it",
     file: "src/features/people/list/PeopleList.tsx",
@@ -22980,7 +22981,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2520",
+    id: "MU-2775",
     title:
       "WEB-11a F8: a partial rail does not say the owner may have shared it more widely",
     file: "src/features/people/detail/SharedWith.tsx",
@@ -22994,7 +22995,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2521",
+    id: "MU-2776",
     title: "WEB-11a F8: the owner's rail does not name the excluded accounts",
     file: "src/features/people/detail/SharedWith.tsx",
     tests: ["tests/features/people/summary-views.test.tsx"],
@@ -23007,7 +23008,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2522",
+    id: "MU-2777",
     title: "WEB-11a F8: a field's tag never says who can actually see it",
     file: "src/features/people/detail/PersonDetail.tsx",
     tests: ["tests/features/people/summary-views.test.tsx"],
@@ -23020,7 +23021,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2523",
+    id: "MU-2778",
     title:
       "WEB-11a F8: the list never says that partial audiences may be shared more widely",
     file: "src/features/people/list/PeopleList.tsx",
@@ -23034,7 +23035,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2524",
+    id: "MU-2779",
     title:
       "WEB-11a F8: the owner is named by username even when the reader can see their person",
     file: "src/features/people/model/summary.ts",
@@ -23044,7 +23045,7 @@ export const UNIT = [
       sub(t, "  owner.person?.label ?? owner.username;", "  owner.username;"),
   },
   {
-    id: "MU-2525",
+    id: "MU-2780",
     title:
       "WEB-11a F8: the applied revision is never read (a synced change is no signal)",
     file: "src/data/plans/applied-revision.ts",
@@ -23059,7 +23060,7 @@ export const UNIT = [
   },
   // ---- WEB-11a review 2 of 22 October 2026: one causal mutant per corrected mechanism (design assessment C1–C5) ----------------
   {
-    id: "MU-2526",
+    id: "MU-2781",
     title: "WEB-11a R2 F5: summary labels are measured in UTF-16 units again",
     file: "src/features/people/model/summary.ts",
     tests: ["tests/features/people/summary.test.ts"],
@@ -23072,7 +23073,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2527",
+    id: "MU-2782",
     title:
       "WEB-11a R2 F4: the held-copy read gives no continuation at its scan bound",
     file: "src/data/plans/form-copies.ts",
@@ -23086,7 +23087,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2528",
+    id: "MU-2783",
     title: "WEB-11a R2 F4: terminal rows do not move the held-copy cursor",
     file: "src/data/plans/form-copies.ts",
     tests: ["tests/data/form-copies.test.ts"],
@@ -23099,7 +23100,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2529",
+    id: "MU-2784",
     title: "WEB-11a R2 F4: the held list offers no way past its first page",
     file: "src/features/people/detail/HeldChanges.tsx",
     tests: ["tests/features/people/review-findings.test.tsx"],
@@ -23112,7 +23113,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2530",
+    id: "MU-2785",
     title:
       "WEB-11a R2 F2: a hold is taken for ended whatever the store answered",
     file: "src/features/people/field/held.ts",
@@ -23127,7 +23128,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2531",
+    id: "MU-2786",
     title: "WEB-11a R2 F2: a terminal write that fails is reported as ended",
     file: "src/data/ports/conditional-form.ts",
     tests: ["tests/data/conditional-form.test.ts"],
@@ -23140,7 +23141,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2532",
+    id: "MU-2787",
     title:
       "WEB-11a R2 F2: a conditional write no longer compares the stored state",
     file: "src/data/plans/form-recovery.ts",
@@ -23170,7 +23171,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2534",
+    id: "MU-2788",
     title:
       "WEB-11a R2 F2: a failed write of the confirmed audience does not stop the content step",
     file: "src/features/people/field/held.ts",
@@ -23179,7 +23180,7 @@ export const UNIT = [
     patch: (t) => sub(t, "    if (!progressed) return refused();\n", ""),
   },
   {
-    id: "MU-2535",
+    id: "MU-2789",
     title: "WEB-11a R2 F2: a run does not read the hold again under the lock",
     file: "src/features/people/field/held.ts",
     tests: ["tests/features/people/held-run.test.ts"],
@@ -23194,7 +23195,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2536",
+    id: "MU-2790",
     title: "WEB-11a R2 F2/D1: a recovered hold runs by itself again",
     file: "src/features/people/detail/HeldChanges.tsx",
     tests: ["tests/features/people/review-findings.test.tsx"],
@@ -23202,7 +23203,7 @@ export const UNIT = [
     patch: (t) => sub(t, "      !authorised ||\n", ""),
   },
   {
-    id: "MU-2537",
+    id: "MU-2791",
     title:
       "WEB-11a R2 F3: an edit in place no longer compares the body it read",
     file: "src/features/people/model/snapshot.ts",
@@ -23220,7 +23221,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2538",
+    id: "MU-2792",
     title:
       "WEB-11a R2 F3: a refused field edit falls back to queuing the older form",
     file: "src/features/people/field/FieldEditorDialog.tsx",
@@ -23241,7 +23242,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2539",
+    id: "MU-2793",
     title:
       "WEB-11a R2 F3: a refused rename edit falls back to queuing the older form",
     file: "src/features/people/detail/IdentityHeader.tsx",
@@ -23261,7 +23262,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2540",
+    id: "MU-2794",
     title:
       "WEB-11a R2 F3: an unsent create is edited without comparing the body the editor read (both sites)",
     file: "src/features/people/field/FieldEditorDialog.tsx",
@@ -23280,7 +23281,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2541",
+    id: "MU-2795",
     title:
       "WEB-11a R2 F1: a generic rebuild re-binds a field change to the current audience",
     file: "src/features/people/register.ts",
@@ -23298,7 +23299,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2542",
+    id: "MU-2796",
     title:
       "WEB-11a R2 F1: the dialog's review never withholds a resend under a moved audience",
     file: "src/features/people/register.ts",
@@ -23315,7 +23316,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2543",
+    id: "MU-2797",
     title:
       "WEB-11a R2 F1: the generic dialog ignores the slice's reason to withhold a resend",
     file: "src/features/sync/ItemDetailDialog.tsx",
@@ -23329,7 +23330,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2544",
+    id: "MU-2798",
     title:
       "WEB-11a R2 F1: 'save as new' replaces a draft whose body changed since the dialog showed it",
     file: "src/data/ui/env.ts",
@@ -23343,7 +23344,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2545",
+    id: "MU-2799",
     title:
       "WEB-11a R2 F2/F4: a new hold no longer ends the earlier holds of its field",
     file: "src/features/people/field/held.ts",
@@ -23359,7 +23360,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2546",
+    id: "MU-2800",
     title:
       "WEB-11a R2 F2: a run that found the field's lock taken waits for the env to change, not for the lock",
     file: "src/features/people/detail/HeldChanges.tsx",
@@ -23373,7 +23374,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2547",
+    id: "MU-2801",
     title:
       "WEB-11a R3 F1: leaving the page ends the hold (suspension routed back to the terminal discard)",
     file: "src/features/people/field/held.ts",
@@ -23391,7 +23392,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2548",
+    id: "MU-2802",
     title:
       "WEB-11a R3 F2: 'Hold as draft' writes the new hold without the field's lock (create before lock)",
     file: "src/features/people/field/held.ts",
@@ -23409,7 +23410,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2549",
+    id: "MU-2803",
     title:
       "WEB-11a R3 F2 (re-expressed in revision 4 for the field's head): a run no longer checks that it is its field's current hold (an earlier hold runs)",
     file: "src/features/people/field/held.ts",
@@ -23427,7 +23428,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2550",
+    id: "MU-2804",
     title:
       "WEB-11a R3 F2: a refused retirement of an earlier hold is reported as complete",
     file: "src/features/people/field/held.ts",
@@ -23441,7 +23442,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2551",
+    id: "MU-2805",
     title:
       "WEB-11a R3 H7: a retry of the same attempt is sent without checking that the hold is still stored as read",
     file: "src/features/people/field/held.ts",
@@ -23451,7 +23452,7 @@ export const UNIT = [
       sub(t, "            ? await unchanged()\n", "            ? true\n"),
   },
   {
-    id: "MU-2552",
+    id: "MU-2806",
     title:
       "WEB-11a R3 C3c: a discard ends a hold whose policy attempt is unresolved (the attempt is kept only in page memory)",
     file: "src/features/people/field/held.ts",
@@ -23470,7 +23471,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2553",
+    id: "MU-2807",
     title:
       "WEB-11a R3 C3c (the assessment's outstanding fresh-key mutant): a retry of an unchanged attempt gets a fresh key",
     file: "src/features/sharing/model/submission.ts",
@@ -23485,7 +23486,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2554",
+    id: "MU-2808",
     title:
       "WEB-11a R3 C3c: a new hold of exactly the same change does not take the earlier hold's unresolved attempt over",
     file: "src/features/people/field/held.ts",
@@ -23499,7 +23500,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2555",
+    id: "MU-2809",
     title:
       "WEB-11a R3 C3c: a retired hold (a reconciliation record) can run again",
     file: "src/features/people/field/held.ts",
@@ -23514,7 +23515,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2556",
+    id: "MU-2810",
     title:
       "WEB-11a R3 C3c: a direct audience change ignores the unresolved attempt kept on the device",
     file: "src/features/people/field/FieldEditorDialog.tsx",
@@ -23529,7 +23530,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2557",
+    id: "MU-2811",
     title:
       "WEB-11a R3 H11: a run writes progress after another identity is displayed",
     file: "src/features/people/field/held.ts",
@@ -23543,7 +23544,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2558",
+    id: "MU-2812",
     title:
       "WEB-11a R3 F3: a field's audience is named from a page's policy read whatever later policy version is known",
     file: "src/features/people/detail/PersonDetail.tsx",
@@ -23558,7 +23559,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2559",
+    id: "MU-2813",
     title: "WEB-11a R3 F3: a late, older policy read replaces a later one kept",
     file: "src/features/people/memory.ts",
     tests: ["tests/features/people/memory.test.ts"],
@@ -23571,7 +23572,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2560",
+    id: "MU-2814",
     title:
       "WEB-11a R3 F3: the policy version a summary applied (the floor) is not compared",
     file: "src/features/people/model/summary.ts",
@@ -23581,7 +23582,7 @@ export const UNIT = [
       sub(t, "    read.version >= (floor?.policyVersion ?? 0)\n", "    true\n"),
   },
   {
-    id: "MU-2561",
+    id: "MU-2815",
     title:
       "WEB-11a R3 F3: closing the shared policy editor keeps the page's own read of the field's policy",
     file: "src/features/people/detail/PersonDetail.tsx",
@@ -23591,7 +23592,7 @@ export const UNIT = [
       sub(t, "              env.memory.policies.delete(row.id);\n", ""),
   },
   {
-    id: "MU-2562",
+    id: "MU-2816",
     title:
       "WEB-11a R3 C6: the page's own policy read is named without when it was read",
     file: "src/features/people/detail/PersonDetail.tsx",
@@ -23605,7 +23606,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2563",
+    id: "MU-2817",
     title:
       "WEB-11a R3 B1: an edit in place is not judged against the draft as stored inside its transaction (expectDraft ignored)",
     file: "src/data/model/outbox.ts",
@@ -23619,7 +23620,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2564",
+    id: "MU-2818",
     title:
       "WEB-11a R4 F1: the hand-off plan ignores whether the copy (and the head) are as read",
     file: "src/data/plans/outbox.ts",
@@ -23633,7 +23634,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2565",
+    id: "MU-2819",
     title:
       "WEB-11a R4 F1: the hand-off adopts a draft that already has the local id",
     file: "src/data/plans/outbox.ts",
@@ -23647,7 +23648,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2566",
+    id: "MU-2820",
     title:
       "WEB-11a R4 F1: the hand-off writes the draft but does not end the copy (no tombstone)",
     file: "src/data/plans/outbox.ts",
@@ -23664,7 +23665,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2567",
+    id: "MU-2821",
     title:
       "WEB-11a R4 F1: the facade runs a hand-off as a plain enqueue (the copy is not checked or ended)",
     file: "src/data/outbox/outbox.ts",
@@ -23678,7 +23679,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2568",
+    id: "MU-2822",
     title:
       "WEB-11a R4 F2: a new hold's generation comes from the live holds only (the head is ignored: the generation goes back)",
     file: "src/features/people/field/held.ts",
@@ -23687,7 +23688,7 @@ export const UNIT = [
     patch: (t) => sub(t, "          head?.seq ?? 0,\n", "          0,\n"),
   },
   {
-    id: "MU-2569",
+    id: "MU-2823",
     title:
       "WEB-11a R4 F3: automatic cleanup ends a reconciliation record its successor does not carry",
     file: "src/features/people/field/held.ts",
@@ -23701,7 +23702,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2570",
+    id: "MU-2824",
     title:
       "WEB-11a R4 C9: a lookup that could not read every hold of the field answers `none`",
     file: "src/features/people/field/held.ts",
@@ -23715,7 +23716,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2571",
+    id: "MU-2825",
     title:
       "WEB-11a R4 C9: an attempt is matched by policy version and audience only, not by its body",
     file: "src/features/people/field/held.ts",
@@ -23729,7 +23730,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2572",
+    id: "MU-2826",
     title:
       "WEB-11a R4 F1: a run that hears no answer from its hand-off retries it instead of reading the copy's tombstone",
     file: "src/features/people/field/held.ts",
@@ -23743,7 +23744,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2573",
+    id: "MU-2827",
     title:
       "WEB-11a R4 F4: 'Check now' ends the reconciliation record after its read",
     file: "src/features/people/field/held.ts",
@@ -23761,7 +23762,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2574",
+    id: "MU-2828",
     title:
       "WEB-11a R4 F4: 'Check now' reports the version as moved when it is the guarded one",
     file: "src/features/people/field/held.ts",
@@ -23778,7 +23779,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2575",
+    id: "MU-2829",
     title:
       "WEB-11a R4 C9: the direct editor makes a fresh attempt when the device's lookup could not be completed",
     file: "src/features/people/field/FieldEditorDialog.tsx",
@@ -23792,7 +23793,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2576",
+    id: "MU-2830",
     title:
       "WEB-11a R4 C9: the page's attempt of another change hides the device's attempt of this one (a fresh key)",
     file: "src/features/people/field/FieldEditorDialog.tsx",
@@ -23806,7 +23807,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2577",
+    id: "MU-2831",
     title:
       "WEB-11a R4 C10: a run's store is not pinned to one binding (a later call reaches the database displayed then)",
     file: "src/features/people/field/held.ts",
@@ -23820,7 +23821,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2578",
+    id: "MU-2832",
     title:
       "WEB-11a R4 C10: 'Hold as draft' is not pinned to one binding (it can write into another account's database)",
     file: "src/features/people/field/held.ts",
@@ -23834,7 +23835,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2579",
+    id: "MU-2833",
     title:
       "WEB-11a R4 C10: a pinned port follows whichever service is displayed",
     file: "src/data/ports/conditional-form.ts",
@@ -23848,7 +23849,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2580",
+    id: "MU-2834",
     title:
       "WEB-11a R4 F5: a failed archive read is a settled step (the reviewer's defect: 'Nothing archived')",
     file: "src/features/people/archived/ArchivedItems.tsx",
@@ -23862,7 +23863,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2581",
+    id: "MU-2835",
     title:
       "WEB-11a R4 F5: a failed read of the outstanding drafts does not make the inventory incomplete",
     file: "src/features/people/archived/ArchivedItems.tsx",
@@ -23876,7 +23877,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2582",
+    id: "MU-2836",
     title:
       "WEB-11a R4 F5: a field whose person could not be read is taken as not visible (the inventory claims to be complete)",
     file: "src/features/people/archived/ArchivedItems.tsx",
@@ -23890,7 +23891,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2583",
+    id: "MU-2837",
     title:
       "WEB-11a R4 F5: 'Try again' clears the reports but does not read again",
     file: "src/features/people/archived/ArchivedItems.tsx",
@@ -23905,7 +23906,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2584",
+    id: "MU-2838",
     title:
       "WEB-11a R4: a held row that waited for another row's run never looks again when that run ends",
     file: "src/features/people/detail/HeldChanges.tsx",
@@ -23919,7 +23920,7 @@ export const UNIT = [
       ),
   },
   {
-    id: "MU-2585",
+    id: "MU-2839",
     title:
       "WEB-11a R4 C10: a legacy copy (an earlier shape) can be written again as a runnable hold",
     file: "src/features/people/field/held-store.ts",
@@ -25789,6 +25790,7 @@ export const UNIT = [
         "  useStatusInputs,\n  useResourceList,\n",
       ),
   },
+  ...UNIT_WEB10B,
 ];
 
 /**
@@ -25995,19 +25997,19 @@ export const RETIRED = [
     id: "MU-2716",
     why: "(WEB-11a revision 4, review 4 finding 1) a stop inside the content step leaves its admission (queued) standing: there is no separate content admission any more. The content is handed off in ONE transaction with the end of the hold's copy (`transferDraft`), so nothing is admitted before the draft is written and nothing is left to withdraw; the anchor (`write({ ...copy.change, queued: false })`) does not exist",
     replacedBy:
-      "MU-2738 (the hand-off writes no tombstone), MU-2740 (the run queues without a hand-off) and MU-2564 (the plan ignores the copy's state)",
+      "MU-2738 (the hand-off writes no tombstone), MU-2740 (the run queues without a hand-off) and MU-2818 (the plan ignores the copy's state)",
   },
   {
     id: "MU-2717",
     why: "(WEB-11a revision 4, review 4 finding 2) a save retires the earlier holds although its own new hold was ended elsewhere meanwhile: the new hold and the field's head are one commit now, and the head (not the new hold's survival) says no earlier hold may run, so retiring them after the new hold ended is correct and the re-read it mutated was removed",
     replacedBy:
-      "MU-2568 (the generation is taken from the live holds, not the head) and MU-2549 re-expressed (a run no longer checks the head)",
+      "MU-2822 (the generation is taken from the live holds, not the head) and MU-2803 re-expressed (a run no longer checks the head)",
   },
   {
     id: "MU-2718",
     why: "(WEB-11a revision 4, review 4 finding 4) 'Check now' says the attempt was made whenever the policy version moved: a check no longer says whether the attempt was made at all (it says what the audience IS now) and no longer ends the record; the claim it mutated does not exist",
     replacedBy:
-      "MU-2573 (a check ends the record) and MU-2574 (a check says the version moved when it did not)",
+      "MU-2827 (a check ends the record) and MU-2828 (a check says the version moved when it did not)",
   },
 ];
 
@@ -29817,4 +29819,5 @@ export const ENGINE = [
         "      rebind();\n",
       ),
   },
+  ...ENGINE_WEB10B,
 ];

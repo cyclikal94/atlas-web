@@ -10,7 +10,7 @@ import { peopleRoute } from "../features/people/route";
 import { settingsRoute } from "../features/settings/route";
 import { sharingRoute } from "../features/sharing/route";
 import { syncRoute } from "../features/sync/route";
-import { tasksRoute } from "../features/tasks/route";
+import { listsRoute, tasksRoute } from "../features/tasks/route";
 import { todayRoute } from "../features/today/route";
 import { rootRoute } from "./root-route";
 
@@ -32,6 +32,7 @@ export function createAppRouter(
     home,
     todayRoute(rootRoute),
     tasksRoute(rootRoute),
+    listsRoute(rootRoute),
     peopleRoute(rootRoute),
     sharingRoute(rootRoute),
     settingsRoute(rootRoute),
