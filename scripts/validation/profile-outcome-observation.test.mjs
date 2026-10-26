@@ -25,6 +25,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -310,10 +311,10 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 12; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 14; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 12);
+  assert.equal(evidence.CONTRACT_VERSION, 14);
   assert.equal(device.DEVICE_SCHEMA, 4);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
@@ -1579,8 +1580,8 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 
 // Revision 16 (adapted): version 10 (revision 15) joins the list and the current version is 11. Revision 17 (adapted, version literals
 // only): version 11 (revision 16) joins the list and the current version is 12.
-test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12), 8 (revision 13), 9 (revision 14), 10 (revision 15) and 11 (revision 16) are not evidence of version 12", (t) => {
-  for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11]) {
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12), 8 (revision 13), 9 (revision 14), 10 (revision 15), 11 (revision 16), 12 (revision 17) and 13 (revision 18 before A18-T2) are not evidence of version 14", (t) => {
+  for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1593,7 +1594,7 @@ test("case: stages recorded under contract versions 3 (review 9's Air request), 
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 12`),
+          .includes(`recorded under contract ${version}, not 14`),
       ),
     );
   }
@@ -1646,56 +1647,92 @@ const unsatisfied = (r) =>
     .map((c) => c.id)
     .sort();
 
+/** Revision 18: the P-2 support's binding to its trace (line count and SHA-256) regenerated, as the writer would have written it. */
+const rebindP2 = (dir, engine) => {
+  const text = readFileSync(p2Trace(dir, engine), "utf8");
+  editJson(p2Support(dir, engine), (v) => {
+    v.trace = { lines: text.split("\n").length, sha256: sha(text) };
+  });
+};
+/** Edits the P-2 trace file (`editTrace` above is the live W2 trace's). */
+const editP2Trace = (dir, engine, change) => {
+  const lines = readFileSync(p2Trace(dir, engine), "utf8").split("\n");
+  writeFileSync(p2Trace(dir, engine), change(lines).join("\n"));
+};
+/** The support entry of `shape` iteration `index` (warm-ups included). */
+const p2Entry = (dir, engine, shape, index) => {
+  const e = readJson(p2Support(dir, engine)).iterations.find(
+    (x) => x.shape === shape && x.index === index,
+  );
+  assert.ok(e, `no iteration ${shape} ${index}`);
+  return e;
+};
+/** Review 18's schedule on one iteration: its commit applied/lease_lapsed and its step ending running; the binding regenerated. */
+const lapseP2 = (dir, engine, shape, index) => {
+  const e = p2Entry(dir, engine, shape, index);
+  editP2Trace(dir, engine, (lines) => {
+    const commit = lines[e.selected.commit];
+    assert.match(commit, /"value":"committed"/);
+    lines[e.selected.commit] = commit.replace(
+      '"value":"committed"',
+      '"value":"lease_lapsed"',
+    );
+    lines[e.selected.end] = lines[e.selected.end].replace(
+      '"state":"idle"',
+      '"state":"running"',
+    );
+    return lines;
+  });
+  rebindP2(dir, engine);
+};
+/** Every P-2 cell of an engine: the 32 series or capability cells and the trace cell. */
+const p2Cells = (r, engine) =>
+  r.cells
+    .filter((c) => c.item === "P-2" && c.engine === engine)
+    .map((c) => c.id)
+    .sort();
+
 test("case R12-M1 (DA-M1): a P-2 sample whose own commit wrote no page (a lapsed hold, its step ending running) is invalid in both series, and the package withholds support", (t) => {
+  // REVISION 18 ADAPTATION (labelled; contract 13, design assessment invariant 7): the same schedule on dense-100's first measured
+  // iteration (index 5, after its five warm-ups), its trace binding regenerated. One collection verdict now governs every P-2 cell of the
+  // engine, so all 33 of WebKit's P-2 cells are invalid (revision 12 named the two series that rest on that commit), for the same reason.
   const dir = scratch(t);
   writeComplete(dir);
-  const support = readJson(p2Support(dir, "webkit"));
-  const e = support.shapes["dense-100"][0];
-  const lines = readFileSync(p2Trace(dir, "webkit"), "utf8").split("\n");
-  const commit = payloadOf(lines[e.commit]);
-  lines[e.commit] =
-    `${lines[e.commit].split(" ")[0]} data.sync_commit ${JSON.stringify({ ...commit, value: "lease_lapsed" })}`;
-  lines[e.end] =
-    `${lines[e.end].split(" ")[0]} data.sync_next ${JSON.stringify({ when: "after", state: "running" })}`;
-  writeFileSync(p2Trace(dir, "webkit"), lines.join("\n"));
+  lapseP2(dir, "webkit", "dense-100", 5);
   const r = contract.resolveEvidence(dir);
-  assert.deepEqual(unsatisfied(r), [
-    `${P2_COMMIT}[webkit]`,
-    `${P2_SCAN}[webkit]`,
-  ]);
-  assert.match(
-    reasons(cell(r, `${P2_SCAN}[webkit]`)),
-    /sample 0: its commit wrote no page/,
-  );
+  assert.deepEqual(unsatisfied(r), p2Cells(r, "webkit"));
+  assert.equal(p2Cells(r, "webkit").length, 33);
+  for (const id of [`${P2_SCAN}[webkit]`, `${P2_COMMIT}[webkit]`])
+    assert.match(
+      reasons(cell(r, id)),
+      /dense-100 iteration 5: its page is invalid: its commit wrote no page \(applied\/lease_lapsed\)/,
+    );
   assert.equal(r.complete, false);
   refusedEndToEnd(dir);
 });
 
 test("case R12-M2 (DA-M1): revision 11's selection (a sample's figures taken from a LATER commit, its support moved there and its series rebound) is invalid", (t) => {
+  // REVISION 18 ADAPTATION (labelled; `p2-sample/2`): the first measured dense-100 iteration now cites the NEXT iteration's commit and
+  // end (its read extended over them) and its scan value is that commit's. Revision 12 refused it as "not the first commit after the
+  // sample began"; the rule now re-derives the first commit from the iteration's own slice and refuses the recorded selection.
   const dir = scratch(t);
   writeComplete(dir);
-  const support = readJson(p2Support(dir, "webkit"));
-  const [first, second] = support.shapes["dense-100"];
-  const lines = readFileSync(p2Trace(dir, "webkit"), "utf8").split("\n");
-  const later = payloadOf(lines[second.commit]);
-  // Sample 0 now cites sample 1's commit and end, and its series values are that commit's.
-  first.commit = second.commit;
-  first.end = second.end;
-  support.shapes["dense-100"].splice(1, 1, {
-    ...second,
-    from: second.end + 1,
-    commit: second.end + 2,
-    end: second.end + 3,
-  });
-  writeFileSync(
-    p2Support(dir, "webkit"),
-    `${JSON.stringify(support, null, 2)}\n`,
+  const file = p2Support(dir, "webkit");
+  const support = readJson(file);
+  const at = support.iterations.findIndex(
+    (x) => x.shape === "dense-100" && x.index === 5,
   );
+  const [first, second] = support.iterations.slice(at, at + 2);
+  const lines = readFileSync(p2Trace(dir, "webkit"), "utf8").split("\n");
+  const later = payloadOf(lines[second.selected.commit]);
+  first.selected = { ...second.selected };
+  first.read = { ...first.read, to: second.read.to };
+  writeFileSync(file, `${JSON.stringify(support, null, 2)}\n`);
   rewriteSeries(dir, P2_SCAN, "webkit", (s) => [later.scan_ms, ...s.slice(1)]);
   const r = contract.resolveEvidence(dir);
   assert.match(
     reasons(cell(r, `${P2_SCAN}[webkit]`)),
-    /sample 0: its commit is not the first after the sample began/,
+    /dense-100 iteration 5: its recorded selection is not the commit its trace shows/,
   );
   assert.equal(r.complete, false);
 });
@@ -1901,7 +1938,7 @@ test("control R13-K1: the complete programme's sync and draft witnesses resolve 
   writeComplete(dir);
   const p4 = readJson(syncFile(dir, "webkit"));
   // Revision 16 (adapted): version 3.
-  assert.equal(p4.method, "sync-request-sample/3");
+  assert.equal(p4.method, "sync-request-sample/4");
   assert.ok(
     p4.samples.some((e) => e.lines.some((l) => l.includes('"coalesced":true'))),
   );
@@ -1910,7 +1947,7 @@ test("control R13-K1: the complete programme's sync and draft witnesses resolve 
   // Revision 15 (adapted again): version 3, whose completion read records its start. Revision 16 (adapted): version 4. Revision 17
   // (adapted, version literal only): version 5.
   const drafts = readJson(draftFile(dir, "webkit"));
-  assert.equal(drafts.method, "draft-request-sample/5");
+  assert.equal(drafts.method, "draft-request-sample/6");
   assert.ok(
     drafts.samples.some(
       (e) => e.completion.row.kind === "absent" && e.records[5].removed,
@@ -2154,11 +2191,12 @@ test("case R13-C4 (invariant 1): identity and binding: a reloaded page, an engin
       /sample 4: its operation is invalid: the page was reloaded or replaced during the sample/,
     ],
     [
-      "time origin",
+      // Revision 18 (A18-T2, adapted): the time origin is recorded, not compared; a moved one is the drift control below, a missing one is refused.
+      "no time origin",
       (v) => {
-        v.samples[4].read.time_origin += 1;
+        v.samples[4].read.time_origin = null;
       },
-      /sample 4: its operation is invalid: the page was reloaded or replaced during the sample/,
+      /sample 4: its operation is invalid: its mark or its read records no time origin/,
     ],
     [
       "engine started",
@@ -2213,9 +2251,10 @@ test("case R13-C4 (invariant 1): identity and binding: a reloaded page, an engin
     [
       "old method",
       (v) => {
-        v.method = "sync-request-sample/1";
+        // Revision 18 (A18-T2, adapted): the previous method, which compared the time origin, is history.
+        v.method = "sync-request-sample/3";
       },
-      /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/3/, // revision 16 (adapted): the current method is /3
+      /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/4/, // revision 18 (adapted): the current method is /4
     ],
     [
       "failure recorded",
@@ -2244,6 +2283,74 @@ test("case R13-C4 (invariant 1): identity and binding: a reloaded page, an engin
       label,
     );
   }
+});
+
+test("control (revision 18, A18-T2; the measurement identity decision): a time origin that moves on one page instance - inside a sync sample, across a sync file, between a draft's awaits and across a draft file - keeps every selection and value: sync and draft resolve ok end to end; a missing one in a draft identity is refused", (t) => {
+  // macOS WebKit moves `performance.timeOrigin` with the disciplined wall clock on an unchanged document (+1 ms every 92 s, measured).
+  const dir = scratch(t);
+  writeComplete(dir);
+  const before = readFileSync(join(dir, "measurements.jsonl"), "utf8");
+  let edited = 0;
+  for (const engine of ENGINES)
+    for (const which of ["P-4", "P-10"]) {
+      const file = syncFile(dir, engine, which);
+      if (!existsSync(file)) continue;
+      editJson(file, (v) => {
+        for (const [k, e] of v.samples.entries()) {
+          e.mark.time_origin += k;
+          e.read.time_origin += k + 1;
+        }
+      });
+      edited += 1;
+    }
+  const moved = (id, by) => id && { ...id, time_origin: id.time_origin + by };
+  for (const engine of ENGINES) {
+    editJson(draftFile(dir, engine), (v) => {
+      for (const [k, e] of v.samples.entries()) {
+        e.mark.time_origin += k;
+        for (const key of Object.keys(e.identities))
+          e.identities[key] = moved(e.identities[key], k);
+        e.timing.identity = moved(e.timing.identity, k + 1);
+        e.completion.identity_before = moved(
+          e.completion.identity_before,
+          k + 1,
+        );
+        e.completion.identity_after = moved(e.completion.identity_after, k + 2);
+      }
+    });
+    edited += 1;
+  }
+  assert.ok(edited >= 6, `${edited} support files edited`);
+  assert.equal(readFileSync(join(dir, "measurements.jsonl"), "utf8"), before);
+  // Every cell ok: the contract re-derived every edited sample's selection and values and found the writer's.
+  supportedEndToEnd(dir, "a moved time origin");
+  // Malformed data is still refused: a draft identity without a time origin.
+  const missing = `${scratch(t)}-no-origin`;
+  t.after(() => rmSync(missing, { recursive: true, force: true }));
+  writeComplete(missing);
+  editFirstDrafts(missing, "no time origin", (e) => {
+    e.completion.identity_after = {
+      ...e.completion.identity_after,
+      time_origin: Number.NaN,
+    };
+  });
+  draftsRefusedEndToEnd(
+    missing,
+    "no time origin",
+    /the witness's dispatch identity records no time origin after the completion read/,
+  );
+  // ... and the binding before the first await without one.
+  const unbound = `${scratch(t)}-no-origin-before`;
+  t.after(() => rmSync(unbound, { recursive: true, force: true }));
+  writeComplete(unbound);
+  editFirstDrafts(unbound, "no time origin before", (e) => {
+    e.identities.before = { ...e.identities.before, time_origin: null };
+  });
+  draftsRefusedEndToEnd(
+    unbound,
+    "no time origin before",
+    /the witness's dispatch identity records no time origin(?! (after|before|at) )/,
+  );
 });
 
 test("case R13-D1 (DA-N1): a draft whose first send got no answer and was sent again: revision 12's first-send stamping (92 ms longer) is invalid in every draft series; the package withholds support and both validator modes refuse it", (t) => {
@@ -2523,7 +2630,8 @@ test("case R14-C1 (review 14 R2): the review's schedules with their timing value
         };
         e.completion.row = { kind: "absent" };
       },
-      /the page was reloaded or replaced during the sample \(after the completion read: page, time_origin\)/,
+      // Revision 18 (A18-T2, adapted): the time origin is recorded, not compared, so the change names the page instance only.
+      /the page was reloaded or replaced during the sample \(after the completion read: page\)/,
     ],
     [
       "retry after answer",
@@ -2827,7 +2935,7 @@ test("case R14-C3: version-8 draft support (`draft-request-sample/1`) is refused
   assert.match(
     reasons(cell(r, "P-4 draft claim_ms[firefox]")),
     // Revision 16 (adapted): the current method was /4; revision 17 (adapted, version literal only): it is /5.
-    /samples\/P-4\.draft\.firefox\.json is not draft-request-sample\/5/,
+    /samples\/P-4\.draft\.firefox\.json is not draft-request-sample\/6/,
   );
   dir = `${scratch(t)}-overlap`;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -3121,7 +3229,7 @@ test("case R15-C3: version-9 draft support (`draft-request-sample/2`) is refused
   assert.match(
     reasons(cell(r, "P-4 draft claim_ms[webkit]")),
     // Revision 16 (adapted): the current method was /4; revision 17 (adapted, version literal only): it is /5.
-    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/5/,
+    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/6/,
   );
   dir = `${scratch(t)}-overlap`;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -3424,7 +3532,7 @@ test("case R16-C3 (DA16-D1): a draft whose request, its result and its entry agr
   );
   assert.match(
     reasons(cell(r, "P-4 sync page request_ms[chromium]")),
-    /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/3/,
+    /samples\/P-4\.sync\.chromium\.json is not sync-request-sample\/4/,
   );
   dir = `${scratch(t)}-old-draft`;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -3436,8 +3544,8 @@ test("case R16-C3 (DA16-D1): a draft whose request, its result and its entry agr
   assert.deepEqual(unsatisfied(r), draftIds("chromium"));
   assert.match(
     reasons(cell(r, "P-4 draft request_ms[chromium]")),
-    // Revision 17 (adapted, version literal only): the current draft method is `/5`.
-    /samples\/P-4\.draft\.chromium\.json is not draft-request-sample\/5/,
+    // Revision 18 (adapted, version literal only): the current draft method is `/6`.
+    /samples\/P-4\.draft\.chromium\.json is not draft-request-sample\/6/,
   );
 });
 
@@ -3669,6 +3777,375 @@ test("control R17-C3 (DA17-RQ/BF/HR, Q3/Q6/Q7/Q12): a call beginning exactly at 
   assert.deepEqual(unsatisfied(r), draftIds("webkit"));
   assert.match(
     reasons(cell(r, "P-4 draft request_ms[webkit]")),
-    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/5/,
+    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/6/,
+  );
+  // Revision 18 (A18-T2): version-13 draft support (`/5`, which compared the time origin) is history too.
+  const five = `${scratch(t)}-old-draft-5`;
+  t.after(() => rmSync(five, { recursive: true, force: true }));
+  writeComplete(five);
+  editJson(draftFile(five, "webkit"), (v) => {
+    v.method = "draft-request-sample/5";
+  });
+  const r5 = contract.resolveEvidence(five);
+  assert.deepEqual(unsatisfied(r5), draftIds("webkit"));
+  assert.match(
+    reasons(cell(r5, "P-4 draft request_ms[webkit]")),
+    /samples\/P-4\.draft\.webkit\.json is not draft-request-sample\/6/,
+  );
+});
+
+// ---- revision 18 (review 18 R18-P2, design assessment invariants 1-7, C3/C4, schedule matrix): the whole P-2 collection ------------------
+//
+// Review 18: a failed WARM-UP (its admission rounds all lapsed, its step ending running; the engine's empty retry then reaching idle) was
+// skipped by the writer, absent from `p2-sample/1`, and the package resolved 758 ok + 38 unavailable with desktop support. Each case below
+// changes one thing and regenerates every other representation as the writer would have written it (the support's trace binding, the
+// series, the assembled hashes), so only the P-2 collection rule can refuse it.
+
+test("case R18-C1 (review 18 R18-P2): a failed first warm-up in every engine's trace (the review's schedule), a failed first measured iteration and a failed later-shape warm-up are each refused in every P-2 cell, end to end; desktop support is withheld and both validator modes refuse", (t) => {
+  for (const [label, edit, where] of [
+    [
+      "first warm-up, all engines",
+      (dir) => {
+        for (const engine of programme.ENGINES)
+          lapseP2(dir, engine, "ordinary-100", 0);
+      },
+      /ordinary-100 iteration 0 \(a warm-up\): its page is invalid: its commit wrote no page \(applied\/lease_lapsed\)/,
+    ],
+    [
+      "first measured",
+      (dir) => lapseP2(dir, "chromium", "ordinary-100", 20),
+      /ordinary-100 iteration 20: its page is invalid: its commit wrote no page/,
+    ],
+    [
+      "later shape's warm-up",
+      (dir) => lapseP2(dir, "chromium", "dense-400", 2),
+      /dense-400 iteration 2 \(a warm-up\): its page is invalid: its commit wrote no page/,
+    ],
+  ]) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    edit(dir);
+    const r = contract.resolveEvidence(dir);
+    const engines = label.endsWith("all engines")
+      ? programme.ENGINES
+      : ["chromium"];
+    assert.deepEqual(
+      unsatisfied(r),
+      engines.flatMap((e) => p2Cells(r, e)).sort(),
+      label,
+    );
+    for (const engine of engines)
+      for (const id of p2Cells(r, engine)) {
+        assert.equal(cell(r, id).status, "invalid", `${label}: ${id}`);
+        assert.match(reasons(cell(r, id)), where, `${label}: ${id}`);
+      }
+    // The other P-2 stages and every non-P-2 cell are untouched: no checksum or stage problem explains the refusal.
+    assert.ok(
+      r.cells
+        .filter((c) => c.item !== "P-2")
+        .every((c) => ["ok", "unavailable"].includes(c.status)),
+      label,
+    );
+    refusedEndToEnd(dir);
+  }
+});
+
+test("control R18-K1 (review 18's other schedule, no new rule): a step that ended running without a commit before an iteration's own commit, and a zero-duration commit, keep the collection complete; the package supports the desktop decision and both modes pass", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const engine = "firefox";
+  const file = p2Support(dir, engine);
+  const support = readJson(file);
+  const at = support.iterations.findIndex(
+    (x) => x.shape === "ordinary-100" && x.index === 20,
+  );
+  const pos = support.iterations[at].mark.from;
+  editP2Trace(dir, engine, (lines) => {
+    const ms = Number(lines[pos].split("ms ")[0]);
+    lines.splice(
+      pos,
+      0,
+      `${ms}ms data.sync_tick {"why":"now","coalesced":false}`,
+      `${ms}ms data.sync_next {"when":"after","state":"running"}`,
+    );
+    return lines;
+  });
+  for (const [k, e] of support.iterations.entries()) {
+    if (k > at) e.mark.from += 2;
+    if (k >= at) {
+      e.read.to += 2;
+      e.selected.commit += 2;
+      e.selected.end += 2;
+    }
+  }
+  writeFileSync(file, `${JSON.stringify(support, null, 2)}\n`);
+  rebindP2(dir, engine);
+  const r = contract.resolveEvidence(dir);
+  assert.deepEqual(unsatisfied(r), []);
+  const results = assemble(dir);
+  assert.equal(results.acceptance_scope.desktop_decision.supports, true);
+  assert.equal(validate(dir).status, 0);
+  assert.equal(validate(dir, "--allow-partial").status, 0);
+});
+
+test("case R18-C2 (design assessment C2/C3, invariants 1, 3, 6): the support's own integrity: a warm-up deleted, reordered or duplicated, a shape omitted, a prefix with no failure, a failure that is not the next iteration's, another engine's or the old method, an unbound trace, a secondary error, the body not served or another left queued, and another page or engine start in the sequence are each refused with their own reason", (t) => {
+  const iterationsOf = (v) => v.iterations;
+  const at = (v, shape, index) =>
+    v.iterations.findIndex((x) => x.shape === shape && x.index === index);
+  for (const [label, change, reason] of [
+    [
+      "warm-up deleted",
+      (v) => iterationsOf(v).splice(at(v, "ordinary-200", 3), 1),
+      /entry \d+ is not ordinary-200 iteration 3 \(a warm-up\): the iterations are not the schedule's, in order/,
+    ],
+    [
+      "warm-ups reordered",
+      (v) => {
+        const i = at(v, "dense-100", 1);
+        const [a, b] = v.iterations.slice(i, i + 2);
+        v.iterations.splice(i, 2, b, a);
+      },
+      /is not dense-100 iteration 1 \(a warm-up\)/,
+    ],
+    [
+      "warm-up duplicated",
+      (v) => {
+        const i = at(v, "dense-200", 0);
+        // The count is kept (the last iteration dropped), so only the order can refuse it.
+        v.iterations.splice(i, 0, structuredClone(v.iterations[i]));
+        v.iterations.pop();
+      },
+      /is not dense-200 iteration 1 \(a warm-up\)/,
+    ],
+    [
+      "shape omitted",
+      (v) => {
+        v.schedule = v.schedule.filter((s) => s.shape !== "dense-400");
+        v.iterations = v.iterations.filter((x) => x.shape !== "dense-400");
+      },
+      /declares another schedule than the programme's/,
+    ],
+    [
+      "fewer warm-ups declared",
+      (v) => {
+        v.schedule[0].warmup = 2;
+        v.iterations.splice(2, 18);
+        for (const x of v.iterations)
+          if (x.shape === "ordinary-100") x.index -= x.index >= 20 ? 18 : 0;
+      },
+      /declares another schedule than the programme's/,
+    ],
+    [
+      "prefix, no failure",
+      (v) => v.iterations.splice(at(v, "dense-800-W1", 0)),
+      /keeps 1418 of the 1436 scheduled iterations and records no failure/,
+    ],
+    [
+      "failure not the next iteration's",
+      (v) => {
+        v.iterations.splice(at(v, "dense-100", 0));
+        v.failure = {
+          shape: "dense-100",
+          index: 3,
+          warmup: true,
+          phase: "selection",
+          problem: "x",
+        };
+      },
+      /records a failure that is not its next iteration's/,
+    ],
+    [
+      "failure at the next iteration",
+      (v) => {
+        v.iterations.splice(at(v, "dense-100", 0));
+        v.failure = {
+          shape: "dense-100",
+          index: 0,
+          warmup: true,
+          phase: "settle",
+          problem: "no commit and idle engine followed the nudge",
+        };
+      },
+      /the P-2 collection failed at dense-100 iteration 0 \(a warm-up\) \(settle\): no commit and idle engine followed the nudge/,
+    ],
+    [
+      "another engine's",
+      (v) => {
+        v.engine = "firefox";
+      },
+      /is firefox's support, not chromium's/,
+    ],
+    [
+      "old method",
+      (v) => {
+        // Revision 18 (A18-T1/A18-T2, adapted): `/2` compared the time origin and is history, like `/1`.
+        v.method = "p2-sample/2";
+      },
+      /is not p2-sample\/3/,
+    ],
+    [
+      "unbound trace",
+      (v) => {
+        v.trace.sha256 = "0".repeat(64);
+      },
+      /is not bound to raw\/P-2\.trace\.chromium\.txt/,
+    ],
+    [
+      "secondary error",
+      (v) => {
+        v.secondary = ["the trace could not be written"];
+      },
+      /records a secondary error: the trace could not be written/,
+    ],
+    [
+      "body not served",
+      (v) => {
+        v.iterations[at(v, "ordinary-400", 0)].served = 0;
+      },
+      /ordinary-400 iteration 0 \(a warm-up\): its page is invalid: its body was answered 0 times/,
+    ],
+    [
+      "another answer queued",
+      (v) => {
+        v.iterations[at(v, "ordinary-400", 7)].pending = 1;
+      },
+      /ordinary-400 iteration 7 \(a warm-up\): its page is invalid: 1 scripted answer/,
+    ],
+    [
+      "another page",
+      (v) => {
+        const i = at(v, "ordinary-800", 30);
+        v.iterations[i].mark.page = "other";
+        v.iterations[i].read.page = "other";
+      },
+      /ordinary-800 iteration 30: the page was replaced between iterations/,
+    ],
+    [
+      "engine started again",
+      (v) => {
+        const i = at(v, "dense-200", 9);
+        for (const x of v.iterations.slice(i)) {
+          x.mark.generation = 2;
+          x.read.generation = 2;
+          x.mark.epochs = 2;
+          x.read.epochs = 2;
+        }
+      },
+      /dense-200 iteration 9: the engine was started again between iterations/,
+    ],
+  ]) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    editJson(p2Support(dir, "chromium"), (v) => {
+      change(v);
+    });
+    const r = contract.resolveEvidence(dir);
+    assert.deepEqual(unsatisfied(r), p2Cells(r, "chromium"), label);
+    assert.match(reasons(cell(r, "P-2:trace[chromium]")), reason, label);
+    assert.match(reasons(cell(r, `${P2_SCAN}[chromium]`)), reason, label);
+  }
+});
+
+test("case R18-C3 (design assessment C3, invariant 7): a failed collection that published NO series (the writer's own failure path) is invalid at the trace cell, never a harmless missing-only package; a capability record does not stand in for it; both validator modes refuse", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  const engine = "firefox";
+  // The writer's failure path: support with the failure and the iterations before it, the trace, and no P-2 series row; Firefox's
+  // long-task capability values are kept (a capability shortcut).
+  editJson(p2Support(dir, engine), (v) => {
+    v.iterations = v.iterations.slice(0, 1);
+    v.failure = {
+      shape: "ordinary-100",
+      index: 1,
+      warmup: true,
+      phase: "selection",
+      problem: "its commit wrote no page (applied/lease_lapsed)",
+      witness: null,
+    };
+  });
+  writeFileSync(
+    join(dir, "measurements.jsonl"),
+    `${measurementRows(dir)
+      .filter((r) => !(r.name.startsWith("P-2 ") && r.engine === engine))
+      .map((r) => JSON.stringify(r))
+      .join("\n")}\n`,
+  );
+  const r = contract.resolveEvidence(dir);
+  const trace = cell(r, `P-2:trace[${engine}]`);
+  assert.equal(trace.status, "invalid");
+  assert.match(
+    reasons(trace),
+    /the P-2 collection failed at ordinary-100 iteration 1 \(a warm-up\) \(selection\): its commit wrote no page/,
+  );
+  const long = cell(r, `P-2 dense-100 long_task_ms_per_page[${engine}]`);
+  assert.equal(long.status, "invalid");
+  assert.match(reasons(long), /the P-2 collection failed/);
+  assert.equal(cell(r, `${P2_SCAN}[${engine}]`).status, "missing");
+  assert.equal(r.complete, false);
+  refusedEndToEnd(dir);
+});
+
+test("case R18-C4 (design assessment C3): the stamp binds the support to its rows and its case; a row's warm-up count must be its collection's; strict mode never accepts a shortened schedule, the relaxed writer qualification accepts its declared prefix", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  editJson(p2Support(dir, "webkit"), (v) => {
+    v.evidence.invocation = "another-invocation";
+  });
+  let r = contract.resolveEvidence(dir);
+  assert.match(
+    reasons(cell(r, `${P2_SCAN}[webkit]`)),
+    /was not written by this series' stage, invocation and test/,
+  );
+  assert.match(
+    reasons(cell(r, "P-2:trace[webkit]")),
+    /written by invocation another-invocation/,
+  );
+  const dir2 = `${scratch(t)}-rows`;
+  t.after(() => rmSync(dir2, { recursive: true, force: true }));
+  writeComplete(dir2);
+  const rows = measurementRows(dir2);
+  for (const row of rows)
+    if (row.name === "P-2 dense-200 wall_ms" && row.engine === "chromium")
+      row.warmup = 0;
+  writeFileSync(
+    join(dir2, "measurements.jsonl"),
+    `${rows.map((x) => JSON.stringify(x)).join("\n")}\n`,
+  );
+  r = contract.resolveEvidence(dir2);
+  assert.deepEqual(unsatisfied(r), ["P-2 dense-200 wall_ms[chromium]"]);
+  assert.match(
+    reasons(cell(r, "P-2 dense-200 wall_ms[chromium]")),
+    /its row records 0 warm-ups, its collection 5/,
+  );
+  // A shortened writer qualification: the first shape, two warm-ups and three samples, declared as such.
+  const dir3 = `${scratch(t)}-short`;
+  t.after(() => rmSync(dir3, { recursive: true, force: true }));
+  writeComplete(dir3);
+  editJson(p2Support(dir3, "chromium"), (v) => {
+    v.schedule = [{ shape: "ordinary-100", warmup: 2, samples: 3 }];
+    v.iterations = v.iterations.slice(0, 5);
+  });
+  const trace = (rr) => cell(rr, "P-2:trace[chromium]");
+  assert.match(
+    reasons(trace(contract.resolveEvidence(dir3))),
+    /declares another schedule than the programme's/,
+  );
+  // Relaxed: positions and bytes still checked; ordinary-100's iterations 0-4 were its warm-ups 0-4 here, so iterations 2-4 serve the
+  // bytes of ordinary iterations 2-4 and their selections stand.
+  assert.equal(
+    trace(contract.resolveEvidence(dir3, { relaxed: true })).status,
+    "ok",
+  );
+  editJson(p2Support(dir3, "chromium"), (v) => {
+    v.schedule = [
+      { shape: "dense-100", warmup: 2, samples: 3 },
+      { shape: "ordinary-100", warmup: 2, samples: 3 },
+    ];
+  });
+  assert.match(
+    reasons(trace(contract.resolveEvidence(dir3, { relaxed: true }))),
+    /declares a schedule the programme does not take/,
   );
 });

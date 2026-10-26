@@ -7,7 +7,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import type { Page } from "@playwright/test";
-import { tracePayload } from "../../scripts/lib/profile-outcome-rules.mjs";
 import {
   allWorkloads,
   denseChecklistPage,
@@ -35,13 +34,8 @@ import {
   sleep,
   writeEvidence,
 } from "./profile-helpers";
-import {
-  P2_SAMPLE_METHOD,
-  type P2Sample,
-  type P2Support,
-  p2SampleProblems,
-  selectP2Sample,
-} from "./profile-samples";
+import { p2PortOf } from "./profile-p2-port";
+import { collectP2Iterations, P2_SAMPLE_METHOD } from "./profile-samples";
 
 /**
  * WEB-09a profiling, fixture layer (plan 7.2): P-2, P-3, P-5, P-11 and P-Q in real Chromium, Firefox and WebKit through the production
@@ -69,6 +63,10 @@ const observeLongTasks = (page: Page) =>
   page.evaluate(() => {
     const w = window as unknown as { __long: number[] };
     w.__long = [];
+    // Revision 18: `observe` ignores an entry type the engine lacks without throwing (Firefox 155 and WebKit 26.6 do), which published
+    // an all-zero series for an observer that never ran; the engine's own list decides.
+    if (!PerformanceObserver.supportedEntryTypes?.includes("longtask"))
+      return false;
     try {
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) w.__long.push(entry.duration);
@@ -132,78 +130,72 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
   const supportsLong = await observeLongTasks(page);
   await startLeader(page);
   await waitForState(page, "idle");
-  const p2Samples: Record<string, P2Sample[]> = {};
-  for (const shape of SHAPES) {
-    if (QUICK > 0) {
+  if (QUICK > 0)
+    for (const shape of SHAPES) {
       shape.samples = Math.min(shape.samples, QUICK);
       shape.warmup = Math.min(shape.warmup, 2);
     }
-    const wall: number[] = [];
-    const scan: number[] = [];
-    const commit: number[] = [];
-    const long: number[] = [];
-    const samples: P2Sample[] = [];
-    let bytes = 0;
-    for (let i = 0; i < shape.warmup + shape.samples; i += 1) {
-      const body = shape.body(i);
-      bytes = new TextEncoder().encode(body).length;
-      net.script.push(() => ({ status: 200, body }));
-      const before = await page.evaluate(() => {
-        const w = window as unknown as { __long: number[] };
-        w.__long = [];
-        return (window.__atlasData?.engineTrace ?? []).length;
+  // Revision 18 (review 18 R18-P2, design assessment C1/C2): every iteration, warm-ups included, is validated as its own written page by
+  // the shared collector before a warm-up's timings are dropped; the first failure stops the collection. Wall time is unchanged (the
+  // nudge to the same idle wait); scan and commit are the engine's own monotonic timings of that iteration's first commit.
+  const port = p2PortOf(page, net);
+  const c = await collectP2Iterations(port, SHAPES, {
+    longTasks: supportsLong,
+    timeout: 30_000,
+    polling: 5,
+  });
+  // The whole collection is kept BEFORE anything is asserted: the raw engine trace of the run (create-once) and the stamped support
+  // (`p2-sample/3`: the schedule, every attempted iteration and the first failure, bound to that trace by its line count and SHA-256),
+  // from which the contract re-derives every iteration and the scan and commit series. A secondary error never replaces the failure.
+  const secondary: string[] = [];
+  let trace: string | null = null;
+  try {
+    trace = (
+      await page.evaluate(() => window.__atlasData?.engineTrace ?? [])
+    ).join("\n");
+  } catch (error) {
+    secondary.push(`the trace could not be read (${String(error)})`);
+  }
+  if (trace !== null)
+    try {
+      mkdirSync(`${PROFILE_OUT}/raw`, { recursive: true });
+      writeFileSync(`${PROFILE_OUT}/raw/P-2.trace.${engine}.txt`, trace, {
+        flag: "wx",
       });
-      const started = Date.now();
-      await page.evaluate(() => window.__atlasData?.nudgeSync());
-      await expect
-        .poll(
-          () =>
-            page.evaluate(
-              (n) =>
-                (window.__atlasData?.engineTrace ?? [])
-                  .slice(n)
-                  .some((line) => line.includes("data.sync_commit")) &&
-                window.__atlasData?.engineState()?.kind === "idle",
-              before,
-            ),
-          { timeout: 120_000, intervals: [5, 10, 25] },
-        )
-        .toBe(true);
-      const elapsed = Date.now() - started;
-      if (i < shape.warmup) continue;
-      // Revision 12 (review 12, design assessment DA-M1): the sample's scan and commit times are those of ITS page: the first commit after
-      // the sample's trace start, of the bytes it served, applied and committed, and ended by its idle step end. (Revision 11 took the
-      // LAST commit of a later read: after a lapsed hold, the engine's retry of an empty page supplied them.) Anything else fails the
-      // sample; no sample is dropped or replaced.
-      const found = await page.waitForFunction(selectP2Sample, before, {
-        timeout: 30_000,
-        polling: 5,
-      });
-      const support = (await found.jsonValue()) as P2Support;
-      expect(
-        p2SampleProblems(support, bytes),
-        `P-2 ${shape.name} sample ${i}: the sample's own page`,
-      ).toEqual([]);
-      const measured = tracePayload(support.commit.line);
-      wall.push(elapsed);
-      scan.push(Number(measured?.scan_ms));
-      commit.push(Number(measured?.commit_ms));
-      samples.push({
-        index: i,
-        from: before,
-        commit: support.commit.trace,
-        end: support.end.trace,
-        bytes,
-      });
-      long.push(
-        await page.evaluate(() =>
-          (window as unknown as { __long: number[] }).__long.reduce(
-            (a, b) => a + b,
-            0,
-          ),
-        ),
-      );
+    } catch (error) {
+      secondary.push(`the trace could not be written (${String(error)})`);
     }
+  writeEvidence(`raw/P-2.samples.${engine}.json`, {
+    method: P2_SAMPLE_METHOD,
+    engine,
+    schedule: SHAPES.map((shape) => ({
+      shape: shape.name,
+      warmup: shape.warmup,
+      samples: shape.samples,
+    })),
+    iterations: c.iterations,
+    failure: c.failure,
+    trace:
+      trace === null
+        ? null
+        : {
+            lines: trace.split("\n").length,
+            sha256: createHash("sha256").update(trace).digest("hex"),
+          },
+    secondary,
+  });
+  expect(
+    c.failure,
+    "P-2: every iteration, warm-ups included, is its own written page",
+  ).toBeNull();
+  expect(secondary).toEqual([]);
+  // Only a complete collection publishes its series.
+  for (const shape of SHAPES) {
+    const v = c.series[shape.name];
+    if (!v) throw new Error(`P-2 ${shape.name}: no series`);
+    const bytes = new TextEncoder().encode(
+      shape.body(shape.warmup + shape.samples - 1),
+    ).length;
     const extra = {
       shape: shape.name,
       bytes,
@@ -212,12 +204,11 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
       method:
         "wall = nudge to idle through the stubbed network (includes the stub's own transfer); scan and commit are the engine's own monotonic timings",
     };
-    p2Samples[shape.name] = samples;
-    record(`P-2 ${shape.name} wall_ms`, engine, wall, extra);
-    record(`P-2 ${shape.name} scan_ms`, engine, scan, extra);
-    record(`P-2 ${shape.name} commit_ms`, engine, commit, extra);
+    record(`P-2 ${shape.name} wall_ms`, engine, v.wall, extra);
+    record(`P-2 ${shape.name} scan_ms`, engine, v.scan, extra);
+    record(`P-2 ${shape.name} commit_ms`, engine, v.commit, extra);
     if (supportsLong)
-      record(`P-2 ${shape.name} long_task_ms_per_page`, engine, long, extra);
+      record(`P-2 ${shape.name} long_task_ms_per_page`, engine, v.long, extra);
     // A typed capability record: the engine has no long-task observer (the evidence contract accepts this, and only this, in place
     // of the series; an omitted series is missing).
     else
@@ -226,17 +217,6 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
         reason: "this engine has no longtask observer",
       });
   }
-  // The raw engine trace of the whole run is kept.
-  const trace = await page.evaluate(
-    () => window.__atlasData?.engineTrace ?? [],
-  );
-  mkdirSync(`${PROFILE_OUT}/raw`, { recursive: true });
-  writeFileSync(`${PROFILE_OUT}/raw/P-2.trace.${engine}.txt`, trace.join("\n"));
-  // Each recorded sample's operation in that trace (revision 12): the contract re-derives the scan and commit series from it.
-  writeFileSync(
-    `${PROFILE_OUT}/raw/P-2.samples.${engine}.json`,
-    `${JSON.stringify({ method: P2_SAMPLE_METHOD, engine, shapes: p2Samples }, null, 2)}\n`,
-  );
 });
 
 // ---- P-3: durability ------------------------------------------------------------------------------------------------------------------

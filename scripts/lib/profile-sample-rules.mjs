@@ -37,10 +37,24 @@
 // clears it between the timing and completion reads) never shrinking, nor losing entries other than the retained requests. Revision 16's
 // `/4` accepted a call that began after its entry ended, a missing or zero timing total and a later total below its retained entries.
 //
+// Revision 18 (review 18 R18-P2, design assessment invariants 1-4, C1-C3): P-2's page-commit collection is judged here too, one iteration at a
+// time and warm-ups included (`p2IterationSelection`, `p2SequenceProblem`, `p2-sample/2`; `/3` after A18-T1). Revision 17's P-2 writer skipped a warm-up before it
+// selected that iteration's commit, so a warm-up whose admission rounds all lapsed (`applied/lease_lapsed`) was followed by the engine's empty
+// retry reaching idle, and the collection carried on; its support named measured samples only, so no reader could see the failure.
+//
+// Revision 18 (A18-T1/A18-T2; Kieran's measurement identity decision of 25 October 2026): a page lifetime is the page instance (`page`, the
+// harness's fresh id per document load) and, where the witness has one, its engine or dispatcher starts, compared exactly. The time origin is
+// recorded in every frame and identity, and a missing or non-finite one is refused, but it is never compared: macOS WebKit derives
+// `performance.timeOrigin` from the disciplined wall clock and moves it on a still page (+1 ms every 92 s under a 10.84 ppm NTP frequency
+// correction, measured), so an equality refused unchanged documents as replaced ones. A reload or replacement always brings a new page id.
+// Methods `sync-request-sample/4`, `draft-request-sample/6` and `p2-sample/3`; the earlier versions compared the time origin and stay history.
+//
 // Pending (the operation has not finished) is distinct from invalid (it finished, or the witness shows it cannot be the sample's).
 
-export const SYNC_WITNESS_METHOD = "sync-request-sample/3";
-export const DRAFT_WITNESS_METHOD = "draft-request-sample/5";
+export const SYNC_WITNESS_METHOD = "sync-request-sample/4";
+export const DRAFT_WITNESS_METHOD = "draft-request-sample/6";
+/** P-2's collection support (revision 18): every attempted iteration of every shape, warm-ups included, and the first failure. */
+export const P2_SAMPLE_METHOD = "p2-sample/3";
 /**
  * The pathnames the measurement writers store for their requests (`new URL(entry.name).pathname`): `apiUrl("/sync")` and
  * `apiUrl("/commands")` under `API_BASE` (src/lib/api-client/wire.ts; tests/profiling/profile-samples.test.ts checks the route). A query
@@ -123,13 +137,11 @@ function frameProblem(w) {
   if (!Array.isArray(w.lines) || !w.lines.every((l) => typeof l === "string"))
     return "the witness retains no trace slice";
   if (!Array.isArray(w.resources)) return "the witness retains no requests";
-  if (
-    !isText(w.mark.page) ||
-    w.read.page !== w.mark.page ||
-    !fin(w.mark.time_origin) ||
-    w.read.time_origin !== w.mark.time_origin
-  )
+  if (!isText(w.mark.page) || w.read.page !== w.mark.page)
     return "the page was reloaded or replaced during the sample";
+  // Recorded, not compared (the page instance is the identity; see the head of this module).
+  if (!fin(w.mark.time_origin) || !fin(w.read.time_origin))
+    return "its mark or its read records no time origin";
   if (!isCount(w.mark.from) || w.read.to !== w.mark.from + w.lines.length)
     return "its trace slice is not contiguous from the mark to the read";
   if (!isPageTime(w.mark.at))
@@ -229,9 +241,11 @@ function oneRequest(resources, from, to, end, endpoint, observed) {
 }
 
 /**
- * The operation of a `sync-request-sample/3` witness: `{ status: "complete" | "pending" | "invalid", problem, selected, values }`.
+ * The operation of a `sync-request-sample/4` witness: `{ status: "complete" | "pending" | "invalid", problem, selected, values }`.
  * `selected` holds absolute trace positions (`start`, `commit`, `end`) and the request's index in `resources`. Revision 16: the frame's
- * observation interval, the engine's start and the whole slice's chronology are judged first; the selection is unchanged.
+ * observation interval, the engine's start and the whole slice's chronology are judged first; the selection is unchanged. Revision 18
+ * (`sync-request-sample/4`; A18-T2): the page instance and the engine start bind the sample; the time origin is recorded and finite, never
+ * compared.
  */
 export function syncWitnessSelection(w) {
   const frame = frameProblem(w);
@@ -315,10 +329,12 @@ const OUTBOX = [
   "data.outbox_answer",
   "data.outbox_step_failed",
 ];
-/** The fields of a dispatch identity (`DataHarness.dispatchIdentity` plus the page's time origin), compared across every await. */
+/**
+ * The fields of a dispatch identity (`DataHarness.dispatchIdentity` plus the page's time origin) compared across every await. The time
+ * origin is recorded in each identity and must be finite, but it is not compared (the page instance is the identity).
+ */
 const IDENTITY = [
   "page",
-  "time_origin",
   "account",
   "identity_account",
   "epoch",
@@ -494,8 +510,10 @@ function intervalProblem(w) {
 /** Why the first identity is not a complete binding of an observed, running dispatcher to the sample's account (null: it is). */
 function bindingProblem(w, id) {
   if (!isObj(id)) return "the witness records no dispatch identity";
-  if (id.page !== w.mark.page || id.time_origin !== w.mark.time_origin)
+  if (id.page !== w.mark.page)
     return "the page was reloaded or replaced during the sample";
+  if (!fin(id.time_origin))
+    return "the witness's dispatch identity records no time origin";
   if (id.observing !== true) return "the sample's dispatcher was not observed";
   if (
     id.running !== true ||
@@ -526,10 +544,12 @@ export function draftBindingChange(a, b, where) {
 }
 function changeProblem(a, b, where) {
   if (!isObj(b)) return `the witness records no dispatch identity ${where}`;
+  if (!fin(b.time_origin))
+    return `the witness's dispatch identity records no time origin ${where}`;
   const changed = IDENTITY.filter((k) => a[k] !== b[k]);
   if (changed.length === 0) return null;
   const any = (...keys) => keys.some((k) => changed.includes(k));
-  const what = any("page", "time_origin")
+  const what = any("page")
     ? "the page was reloaded or replaced"
     : any("dispatcher", "run", "running", "observing")
       ? "the dispatcher was rebuilt, restarted or stopped"
@@ -540,7 +560,7 @@ function changeProblem(a, b, where) {
 }
 
 /**
- * The operation of a `draft-request-sample/5` witness (WEB-09c revision 15; review 15 R2, design assessment DA15-R2a/R2b; revision 14's
+ * The operation of a `draft-request-sample/6` witness (WEB-09c revision 15; review 15 R2, design assessment DA15-R2a/R2b; revision 14's
  * DA-R14-A/B/C kept): `{ status, problem, selected, values }`. `selected` holds the absolute outbox trace positions of the send and the
  * answer, the request's index in `resources` and the sequence numbers of the dispatcher's claim, request, receipt call and receipt result.
  *
@@ -556,6 +576,7 @@ function changeProblem(a, b, where) {
  * dispatcher's request is to the `/commands` pathname, and every retained entry is that pathname and lies inside [t0, completion.at].
  * Revision 17 (`/5`; DA17-RQ/BF): the dispatcher's call began no later than its entry started and returned no earlier than the entry's
  * request was sent; both buffer snapshots are typed, below the buffer and contain their counts, and the buffer never shrank between them.
+ * Revision 18 (`/6`; A18-T2): the page instance binds the identity; each identity's time origin is recorded and finite, never compared.
  */
 export function draftWitnessSelection(w) {
   if (
@@ -964,4 +985,130 @@ export function draftWitnessSelection(w) {
       total_ms: timing.done - mark.t0,
     },
   };
+}
+
+// ---- P-2: one iteration of the page-commit collection (revision 18; review 18 R18-P2) ---------------------------------------------------
+
+/**
+ * A P-2 mark or read: the page instance, its time origin, its engine starts (count and current generation), a trace position and a time.
+ * The page instance (`page`, a fresh id per document load) is the lifetime's identity; the time origin is recorded, never compared. WebKit
+ * derives `performance.timeOrigin` from the disciplined wall clock, so on one still page it moves (macOS WebKit 26.6: +1 ms every 92 s under
+ * a 10.84 ppm NTP frequency correction), and an equality would refuse every WebKit collection longer than that.
+ */
+function p2FrameProblem(f, position, what) {
+  if (
+    !isObj(f) ||
+    !isText(f.page) ||
+    !fin(f.time_origin) ||
+    !isCount(f.epochs) ||
+    !isCount(f.generation) ||
+    !isCount(f[position]) ||
+    !isPageTime(f.at)
+  )
+    return `its ${what} is malformed`;
+  return null;
+}
+
+/**
+ * One P-2 iteration (warm-ups included) as a page commit of `bytes` (revision 18, design assessment invariants 2 and 3). The witness is
+ * `{ mark, read, lines, served, pending }`: the mark and the read of one page lifetime (`page`, `time_origin` (recorded), `epochs` = engine starts
+ * recorded, `generation` = the current start's), `lines` = the engine trace from `mark.from` to `read.to` exactly, `served` = how often
+ * the iteration's own scripted body was answered (the Node side counts it) and `pending` = scripted answers still queued at the read.
+ *
+ * Complete: one lifetime (the page instance and engine starts unchanged; the engine started), the read after the mark in position and
+ * time, the body served once with nothing else queued, the FIRST `data.sync_commit` from the mark on applied and committed of exactly
+ * `bytes` with finite, non-negative scan and commit times, and the first step end after it `data.sync_next` recording idle. Its values are
+ * that commit's own timings; its selection, the two absolute trace positions. Pending: no commit yet, or no end after it yet. Admission
+ * rounds that lapse inside the request and are retried leave one committed result: valid. Three exhausted rounds are this iteration's
+ * failed page, whatever a later retry does (it can never be selected: only the first commit is).
+ */
+export function p2IterationSelection(w, bytes) {
+  if (!isObj(w)) return invalid("its witness is malformed");
+  const problem =
+    p2FrameProblem(w.mark, "from", "mark") ??
+    p2FrameProblem(w.read, "to", "read");
+  if (problem) return invalid(problem);
+  const { mark, read } = w;
+  if (read.page !== mark.page)
+    return invalid("the page was replaced during the iteration");
+  if (read.epochs !== mark.epochs || read.generation !== mark.generation)
+    return invalid("the engine was started again during the iteration");
+  if (!(read.at >= mark.at) || !(read.to >= mark.from))
+    return invalid("its read does not follow its mark");
+  if (
+    !Array.isArray(w.lines) ||
+    !w.lines.every((l) => typeof l === "string") ||
+    w.lines.length !== read.to - mark.from
+  )
+    return invalid(
+      "its trace slice is not the trace from its mark to its read",
+    );
+  if (!isCount(w.served) || !isCount(w.pending) || !isCount(bytes))
+    return invalid("its served-body observation is malformed");
+  let commit = -1;
+  let end = -1;
+  for (const [k, line] of w.lines.entries()) {
+    const event = eventOf(line);
+    if (commit < 0) {
+      if (event === "data.sync_commit") commit = k;
+    } else if (STEP_ENDS.includes(event)) {
+      end = k;
+      break;
+    }
+  }
+  if (commit < 0)
+    return w.served === 0
+      ? pending("its body has not been served")
+      : pending("its page has not been committed");
+  if (w.served !== 1)
+    return invalid(
+      `its body was answered ${w.served} times, not once: the commit is not its page's`,
+    );
+  if (w.pending !== 0)
+    return invalid(
+      `${w.pending} scripted answer(s) are still queued: another request took this iteration's place`,
+    );
+  const c = payloadOf(w.lines[commit]);
+  // `pageCommitted` (scripts/lib/profile-outcome-rules.mjs): kept inline, this module has no dependencies.
+  if (c?.kind !== "applied" || c?.value !== "committed")
+    return invalid(
+      `its commit wrote no page (${String(c?.kind)}/${String(c?.value ?? "no value")})`,
+    );
+  if (c.bytes !== bytes)
+    return invalid(
+      `its commit is ${String(c.bytes)} bytes, not the served ${bytes}`,
+    );
+  for (const key of ["scan_ms", "commit_ms"])
+    if (!isPageTime(c[key])) return invalid(`its commit records no ${key}`);
+  if (end < 0) return pending("its step has not ended");
+  if (
+    eventOf(w.lines[end]) !== "data.sync_next" ||
+    payloadOf(w.lines[end])?.state !== "idle"
+  )
+    return invalid(`its step did not end idle (${w.lines[end]})`);
+  return {
+    status: "complete",
+    problem: null,
+    selected: { commit: mark.from + commit, end: mark.from + end },
+    values: { scan_ms: c.scan_ms, commit_ms: c.commit_ms },
+  };
+}
+
+/**
+ * One serial collector (revision 18, invariant 3): each P-2 iteration's mark (warm-ups and shape boundaries included) is taken on the same
+ * page lifetime and engine start as the previous iteration's read, and follows it in trace position and page time. Null, or the problem.
+ */
+export function p2SequenceProblem(previous, mark) {
+  if (!isObj(previous) || !isObj(mark))
+    return "its mark or the previous read is malformed";
+  if (mark.page !== previous.page)
+    return "the page was replaced between iterations";
+  if (
+    mark.epochs !== previous.epochs ||
+    mark.generation !== previous.generation
+  )
+    return "the engine was started again between iterations";
+  if (!(mark.from >= previous.to && mark.at >= previous.at))
+    return "its mark does not follow the previous iteration's read";
+  return null;
 }

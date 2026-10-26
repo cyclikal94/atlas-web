@@ -1,5 +1,6 @@
-export const SYNC_WITNESS_METHOD: "sync-request-sample/3";
-export const DRAFT_WITNESS_METHOD: "draft-request-sample/5";
+export const SYNC_WITNESS_METHOD: "sync-request-sample/4";
+export const DRAFT_WITNESS_METHOD: "draft-request-sample/6";
+export const P2_SAMPLE_METHOD: "p2-sample/3";
 export const SYNC_PATH: "/api/experimental/v1/sync";
 export const COMMANDS_PATH: "/api/experimental/v1/commands";
 export const TRACE_ROUNDING_MS: number;
@@ -73,3 +74,32 @@ export function draftBindingChange(
 export function draftWitnessSelection(
   witness: unknown,
 ): WitnessSelection<DraftSelected, DraftValues>;
+
+/** A P-2 mark (`from`) or read (`to`): one page lifetime and engine start, a trace position and the page time (revision 18). */
+export interface P2Frame {
+  page: string;
+  time_origin: number;
+  /** Engine starts recorded on the page (`engineEpochs.length`). */
+  epochs: number;
+  /** The current engine start's generation. */
+  generation: number;
+  at: number;
+}
+export type P2MarkFrame = P2Frame & { from: number };
+export type P2ReadFrame = P2Frame & { to: number };
+export interface P2Selected {
+  commit: number;
+  end: number;
+}
+export interface P2Values {
+  scan_ms: number;
+  commit_ms: number;
+}
+export function p2IterationSelection(
+  witness: unknown,
+  bytes: number,
+): WitnessSelection<P2Selected, P2Values>;
+export function p2SequenceProblem(
+  previous: unknown,
+  mark: unknown,
+): string | null;

@@ -47,6 +47,12 @@
 // Revision 17 (review 17 R17-REQUEST/R17-BUFFER; contract version 12): `draft-request-sample/5`. The generated draft witnesses already
 // satisfy its relations (each call begins before its entry starts and returns after its body ends; both buffer totals 1), so only the
 // method and contract literals change.
+// Revision 18 (review 18 R18-P2; contract version 13): P-2's support is `p2-sample/2`, the whole collection as the writer keeps it: the
+// programme's schedule and EVERY iteration, warm-ups included (its mark and read of one page lifetime, its body served once with nothing
+// queued, its first commit and idle end), no failure, bound to the trace by line count and SHA-256. Revision 17's `/1` had entries for
+// measured samples only (warm-up lines were traced, never supported).
+// Revision 18 (A18-T1/A18-T2; contract version 14): `p2-sample/3`, `sync-request-sample/4` and `draft-request-sample/6`, the same documents;
+// the page instance is the identity and the (constant) time origin is recorded, not compared.
 //
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
@@ -113,6 +119,17 @@ const p2Bytes = (shape, index) => {
   return P2_BYTES.get(key);
 };
 export const ENGINES = ["chromium", "firefox", "webkit"];
+/** P-2's programme, stated here independently of the contract: shape, measured samples, warm-ups (collection order). */
+const P2_SCHEDULE = [
+  ["ordinary-100", 300, 20],
+  ["ordinary-200", 300, 20],
+  ["ordinary-400", 300, 20],
+  ["ordinary-800", 300, 20],
+  ["dense-100", 60, 5],
+  ["dense-200", 40, 5],
+  ["dense-400", 25, 3],
+  ["dense-800-W1", 15, 3],
+];
 const STAGE_ORDER = [
   "bundle",
   "fixture",
@@ -626,7 +643,16 @@ export function writeProgramme(
     // P-2 (revision 12, DA-M1): the page's engine trace as the harness writes it (per sample a tick, the sample's commit of its served
     // bytes, applied and committed, and its idle end), warm-ups included, and each recorded sample's operation in it.
     const p2Trace = [];
-    const p2Shapes = {};
+    const p2Iterations = [];
+    const P2_PAGE = `p2-page-${engine}`;
+    const p2Frame = (key, position, at) => ({
+      page: P2_PAGE,
+      time_origin: 1_700_000_000_000.5,
+      epochs: 1,
+      generation: 1,
+      [key]: position,
+      at,
+    });
     let ms = 1_000;
     const traced = (event, data) => {
       ms += 3;
@@ -634,21 +660,12 @@ export function writeProgramme(
         `${ms}ms ${event} ${data === undefined ? "" : JSON.stringify(data)}`,
       );
     };
-    for (const [shape, n, warmup] of [
-      ["ordinary-100", 300, 20],
-      ["ordinary-200", 300, 20],
-      ["ordinary-400", 300, 20],
-      ["ordinary-800", 300, 20],
-      ["dense-100", 60, 5],
-      ["dense-200", 40, 5],
-      ["dense-400", 25, 3],
-      ["dense-800-W1", 15, 3],
-    ]) {
+    for (const [shape, n, warmup] of P2_SCHEDULE) {
       const scan = distinct(`P-2 ${shape} scan_ms`, engine, n);
       const commitMs = distinct(`P-2 ${shape} commit_ms`, engine, n);
-      const support = [];
       for (let i = 0; i < warmup + n; i += 1) {
         const from = p2Trace.length;
+        const markAt = ms + 1;
         traced("data.sync_tick", { why: "now", coalesced: false });
         const k = i - warmup;
         traced("data.sync_commit", {
@@ -659,16 +676,17 @@ export function writeProgramme(
           value: "committed",
         });
         traced("data.sync_next", { when: "after", state: "idle" });
-        if (k >= 0)
-          support.push({
-            index: i,
-            from,
-            commit: from + 1,
-            end: from + 2,
-            bytes: p2Bytes(shape, i),
-          });
+        p2Iterations.push({
+          shape,
+          index: i,
+          bytes: p2Bytes(shape, i),
+          mark: p2Frame("from", from, markAt),
+          read: p2Frame("to", from + 3, ms + 1),
+          served: 1,
+          pending: 0,
+          selected: { commit: from + 1, end: from + 2 },
+        });
       }
-      p2Shapes[shape] = support;
       const extra = { shape, warmup };
       series(
         "fixture",
@@ -689,12 +707,14 @@ export function writeProgramme(
       );
       const longTasks = `P-2 ${shape} long_task_ms_per_page`;
       if (engine === "chromium")
+        // Revision 18: with the writer's own row fields (its warm-up count), as for the other P-2 series.
         series(
           "fixture",
           engine,
           "P-2:",
           longTasks,
           distinct(longTasks, engine, n, 0),
+          extra,
         );
       else
         value("fixture", engine, "P-2:", longTasks, {
@@ -702,11 +722,24 @@ export function writeProgramme(
           reason: "this engine has no longtask observer",
         });
     }
-    put(`raw/P-2.trace.${engine}.txt`, p2Trace.join("\n"));
+    const p2Text = p2Trace.join("\n");
+    put(`raw/P-2.trace.${engine}.txt`, p2Text);
     json(`raw/P-2.samples.${engine}.json`, {
-      method: "p2-sample/1",
+      method: "p2-sample/3",
       engine,
-      shapes: p2Shapes,
+      schedule: P2_SCHEDULE.map(([shape, samples, warmup]) => ({
+        shape,
+        warmup,
+        samples,
+      })),
+      iterations: p2Iterations,
+      failure: null,
+      trace: {
+        lines: p2Trace.length,
+        sha256: createHash("sha256").update(p2Text).digest("hex"),
+      },
+      secondary: [],
+      evidence: stamp("fixture", engine, "P-2:"),
     });
     for (const kind of ["draft", "fence", "form_recovery"])
       for (const d of ["strict", "default"]) {
@@ -1393,7 +1426,7 @@ export function writeProgramme(
     );
     const post = p4.map((e) => commitOf(e) - e.resources[0].responseEnd);
     json(`samples/P-4.sync.${engine}.json`, {
-      method: "sync-request-sample/3",
+      method: "sync-request-sample/4",
       engine,
       warmup: 20,
       samples: p4,
@@ -1598,7 +1631,7 @@ export function writeProgramme(
       }
     }
     json(`samples/P-4.draft.${engine}.json`, {
-      method: "draft-request-sample/5",
+      method: "draft-request-sample/6",
       engine,
       warmup: 20,
       samples: drafts,
@@ -1644,7 +1677,7 @@ export function writeProgramme(
     );
     const p10 = syncWitnesses(100, 0, "P-10", 250);
     json(`samples/P-10.sync.${engine}.json`, {
-      method: "sync-request-sample/3",
+      method: "sync-request-sample/4",
       engine,
       warmup: 0,
       samples: p10,
@@ -2121,7 +2154,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 12,
+      contract_version: 14,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

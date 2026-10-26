@@ -8,7 +8,8 @@
  * ResourceTiming entry of another, so a second request before or between them paired two operations. Here a sample is one operation:
  *
  *   P-2   the first commit at or after the sample's trace start and the first step end after it; the commit must be of the sample's served
- *         bytes, applied AND committed, and the end `data.sync_next` recording idle (`p2SampleProblems`), else the sample fails;
+ *         bytes, applied AND committed, and the end `data.sync_next` recording idle, else the sample fails (revision 18: every iteration,
+ *         warm-ups included, by the shared `p2IterationSelection`, collected by `collectP2Iterations` below);
  *   P-4   (revision 13, review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1) a sync sample is the FIRST real step after a mark that one
  *         page call set and triggered while no step was open, closed by that step's own end; a draft sample is the first send after the
  *         enqueue and the first answer after it, and (revision 14, review 14 R2, DA-R14-A/B/C) its completion is the observed dispatcher's
@@ -25,16 +26,17 @@
  */
 
 import {
-  pageCommitted,
-  traceEvent,
-  tracePayload,
-} from "../../scripts/lib/profile-outcome-rules.mjs";
-import {
   DRAFT_WITNESS_METHOD,
   type DraftSelected,
   type DraftValues,
   draftBindingChange,
   draftWitnessSelection,
+  P2_SAMPLE_METHOD,
+  type P2MarkFrame,
+  type P2ReadFrame,
+  type P2Selected,
+  p2IterationSelection,
+  p2SequenceProblem,
   type RequestEntry,
   SYNC_WITNESS_METHOD,
   type SyncSelected,
@@ -46,65 +48,284 @@ import type {
   DispatchRecord,
 } from "../../src/fixture/data-harness/main";
 
-export const P2_SAMPLE_METHOD = "p2-sample/1";
+export { P2_SAMPLE_METHOD };
 export const SYNC_SAMPLE_METHOD = SYNC_WITNESS_METHOD;
 export const DRAFT_SAMPLE_METHOD = DRAFT_WITNESS_METHOD;
 
-/** One recorded P-2 sample's operation: its index (warm-ups included), its trace start, its commit and its step end (trace positions). */
-export interface P2Sample {
+// ---- P-2: every iteration of the page-commit collection, warm-ups included (revision 18; review 18 R18-P2) ----------------------------
+// Revision 17's writer skipped each warm-up before it selected that iteration's commit, and its support (`p2-sample/1`) named measured
+// samples only: a warm-up whose admission rounds all lapsed was followed by the engine's empty retry reaching idle, the collection went
+// on, and the package claimed an intact programme. Here every iteration is one mark, one served body, the existing nudge-to-idle wait and
+// one read, judged by the shared rule (`p2IterationSelection`) BEFORE a warm-up's timings are dropped; the first failure stops the whole
+// collection (later shapes included) and is returned with its phase and witness, never skipped, replaced or retried.
+
+/** The P-2 shapes: a fresh body for iteration `i` (warm-ups included), and the counts. */
+export interface P2Shape {
+  name: string;
+  body: (i: number) => string;
+  samples: number;
+  warmup: number;
+}
+/** What the page read for one iteration, in one evaluation: its frames and the trace from the mark to the read. */
+export interface P2PageRead {
+  mark: P2MarkFrame;
+  read: P2ReadFrame;
+  lines: string[];
+}
+export type P2Witness = P2PageRead & { served: number; pending: number };
+/** One attempted iteration as the support keeps it (its trace lines are the trace file's, from `mark.from` to `read.to`). */
+export interface P2Iteration {
+  shape: string;
   index: number;
-  from: number;
-  commit: number;
-  end: number;
   bytes: number;
+  mark: P2MarkFrame;
+  read: P2ReadFrame;
+  served: number;
+  pending: number;
+  selected: P2Selected;
 }
-export interface P2Support {
-  commit: { trace: number; line: string };
-  end: { trace: number; line: string };
+export type P2Phase =
+  | "mark"
+  | "sequence"
+  | "nudge"
+  | "settle"
+  | "read"
+  | "selection"
+  | "long_tasks";
+/** The first iteration that did not complete: where, in which phase, why, and its witness as far as it could be read. */
+export interface P2Failure {
+  shape: string;
+  index: number;
+  warmup: boolean;
+  phase: P2Phase;
+  problem: string;
+  witness: unknown;
+}
+export interface P2Series {
+  wall: number[];
+  scan: number[];
+  commit: number[];
+  long: number[];
+}
+export interface P2Collection {
+  iterations: P2Iteration[];
+  series: Record<string, P2Series>;
+  failure: P2Failure | null;
 }
 
-/** In the page: the sample's first commit at or after `from` and the first step end after it, once that end is traced (else null). */
-export function selectP2Sample(from: number): P2Support | null {
-  const trace =
-    (window as unknown as { __atlasData?: { engineTrace: string[] } })
-      .__atlasData?.engineTrace ?? [];
-  let commit = -1;
-  for (let t = from; t < trace.length; t += 1) {
+/** In the page: empties the long-task sum and marks the iteration (its page, engine start and trace position). Nothing is triggered. */
+export function markP2Iteration(_?: unknown): P2MarkFrame | null {
+  const data = window.__atlasData;
+  if (!data) return null;
+  (window as unknown as { __long: number[] }).__long = [];
+  return {
+    page: data.page,
+    time_origin: performance.timeOrigin,
+    epochs: data.engineEpochs.length,
+    generation: data.engineEpochs.at(-1)?.generation ?? null,
+    from: data.engineTrace.length,
+    at: performance.now(),
+  } as P2MarkFrame;
+}
+
+/** In the page: nudges the engine once. */
+export function nudgeP2Iteration(_?: unknown): boolean {
+  window.__atlasData?.nudgeSync();
+  return true;
+}
+
+/**
+ * In the page: the iteration's read once its first commit from the mark on and a step end after it are traced, at once on a page or
+ * engine change, or whenever `force` is set (the time-out). Else null. The frames and the trace slice are copied together.
+ */
+export function readP2Iteration(arg: {
+  mark: P2MarkFrame;
+  force: boolean;
+}): P2PageRead | null {
+  const { mark } = arg;
+  const data = window.__atlasData;
+  const trace = data?.engineTrace ?? [];
+  const epochs = data?.engineEpochs ?? [];
+  // The page instance, not its time origin (which WebKit moves with the wall clock; scripts/lib/profile-sample-rules.mjs).
+  let ready =
+    arg.force ||
+    !data ||
+    data.page !== mark.page ||
+    epochs.length !== mark.epochs ||
+    trace.length < mark.from;
+  let committed = false;
+  for (let t = mark.from; !ready && t < trace.length; t += 1) {
     const name = (trace[t] ?? "").split(" ")[1];
-    if (commit < 0) {
-      if (name === "data.sync_commit") commit = t;
-      continue;
-    }
-    if (name === "data.sync_next" || name === "data.sync_step_failed")
-      return {
-        commit: { trace: commit, line: trace[commit] ?? "" },
-        end: { trace: t, line: trace[t] ?? "" },
-      };
+    if (!committed) committed = name === "data.sync_commit";
+    else if (name === "data.sync_next" || name === "data.sync_step_failed")
+      ready = true;
   }
-  return null;
+  if (!ready) return null;
+  return {
+    mark,
+    read: {
+      page: data?.page ?? null,
+      time_origin: performance.timeOrigin,
+      epochs: epochs.length,
+      generation: epochs.at(-1)?.generation ?? null,
+      to: trace.length,
+      at: performance.now(),
+    } as P2ReadFrame,
+    lines: trace.slice(mark.from),
+  };
 }
 
-/** Why the selected operation is not a sample of a written page of `bytes` ending idle (empty: it is one). */
-export function p2SampleProblems(support: P2Support, bytes: number): string[] {
-  const commit = tracePayload(support.commit.line);
-  const problems: string[] = [];
-  if (!pageCommitted(commit))
-    problems.push(
-      `its commit wrote no page (${String(commit?.kind)}/${String(commit?.value ?? "no value")})`,
-    );
-  if (commit?.bytes !== bytes)
-    problems.push(
-      `its commit is ${String(commit?.bytes)} bytes, not the served ${bytes}`,
-    );
-  for (const key of ["scan_ms", "commit_ms"])
-    if (typeof commit?.[key] !== "number")
-      problems.push(`its commit records no ${key}`);
-  if (
-    traceEvent(support.end.line) !== "data.sync_next" ||
-    tracePayload(support.end.line)?.state !== "idle"
-  )
-    problems.push(`its step did not end idle (${support.end.line})`);
-  return problems;
+/** In the page: the long-task time observed since the mark. */
+export function readP2LongTasks(_?: unknown): number {
+  return (window as unknown as { __long: number[] }).__long.reduce(
+    (a, b) => a + b,
+    0,
+  );
+}
+
+/** The P-2 page as the collector uses it: the shared page port, the stubbed network's script, the writer's own idle wait and clock. */
+export interface P2Port extends SamplePage {
+  /** Queues `body` as the next scripted `/sync` answer; `served()` counts how often it has been answered. */
+  enqueue(body: string): { served(): number };
+  /** Scripted `/sync` answers still queued. */
+  pending(): number;
+  /** The existing nudge-to-idle wait: a commit traced at or after `from` and the engine idle; rejects at its time-out. */
+  settle(from: number): Promise<void>;
+  /** The wall clock the existing wall time is taken with (`Date.now()`). */
+  now(): number;
+}
+
+const why = (error: unknown) => String(error).slice(0, 300);
+
+/**
+ * The P-2 collector (revision 18). For each shape and each iteration (warm-ups first): mark, queue the iteration's body, take the wall
+ * start, nudge, the existing idle wait (the wall end, unchanged), then the read and the shared rule. A failure in any phase stops the
+ * collection there; a warm-up's timings are dropped only after it completed. Measured iterations add their wall time, their commit's own
+ * scan and commit times and (where the engine has a long-task observer) the long-task time since their mark.
+ */
+export async function collectP2Iterations(
+  page: P2Port,
+  shapes: P2Shape[],
+  o: { longTasks: boolean; timeout: number; polling: number },
+): Promise<P2Collection> {
+  const iterations: P2Iteration[] = [];
+  const series: Record<string, P2Series> = {};
+  let previous: P2ReadFrame | null = null;
+  for (const shape of shapes) {
+    const v: P2Series = { wall: [], scan: [], commit: [], long: [] };
+    series[shape.name] = v;
+    for (let i = 0; i < shape.warmup + shape.samples; i += 1) {
+      const failed = (phase: P2Phase, problem: string, witness: unknown) => ({
+        iterations,
+        series,
+        failure: {
+          shape: shape.name,
+          index: i,
+          warmup: i < shape.warmup,
+          phase,
+          problem,
+          witness,
+        },
+      });
+      const body = shape.body(i);
+      const bytes = new TextEncoder().encode(body).length;
+      let mark: P2MarkFrame | null;
+      try {
+        mark = await page.run(markP2Iteration, null);
+      } catch (error) {
+        return failed("mark", `no mark could be set (${why(error)})`, null);
+      }
+      if (!mark) return failed("mark", "the page has no data harness", null);
+      if (previous) {
+        const problem = p2SequenceProblem(previous, mark);
+        if (problem) return failed("sequence", problem, { previous, mark });
+      }
+      const served = page.enqueue(body);
+      const started = page.now();
+      const forced = async () => {
+        try {
+          const r = await page.run(readP2Iteration, { mark, force: true });
+          return (
+            r && { ...r, served: served.served(), pending: page.pending() }
+          );
+        } catch {
+          return { mark };
+        }
+      };
+      try {
+        await page.run(nudgeP2Iteration, null);
+      } catch (error) {
+        return failed("nudge", `the nudge failed (${why(error)})`, { mark });
+      }
+      try {
+        await page.settle(mark.from);
+      } catch (error) {
+        return failed(
+          "settle",
+          `no commit and idle engine followed the nudge (${why(error)})`,
+          await forced(),
+        );
+      }
+      const elapsed = page.now() - started;
+      let r: P2PageRead | null;
+      try {
+        r = await page.poll(readP2Iteration, { mark, force: false }, o);
+      } catch {
+        try {
+          r = await page.run(readP2Iteration, { mark, force: true });
+        } catch (error) {
+          return failed(
+            "read",
+            `the iteration could not be read (${why(error)})`,
+            { mark },
+          );
+        }
+      }
+      if (!r) return failed("read", "the page has no data harness", { mark });
+      const w: P2Witness = {
+        ...r,
+        served: served.served(),
+        pending: page.pending(),
+      };
+      previous = w.read;
+      const s = p2IterationSelection(w, bytes);
+      if (s.status !== "complete" || !s.selected || !s.values)
+        return failed(
+          "selection",
+          s.status === "pending"
+            ? `${s.problem} within ${o.timeout} ms`
+            : String(s.problem),
+          w,
+        );
+      iterations.push({
+        shape: shape.name,
+        index: i,
+        bytes,
+        mark: w.mark,
+        read: w.read,
+        served: w.served,
+        pending: w.pending,
+        selected: s.selected,
+      });
+      if (i < shape.warmup) continue;
+      let long = 0;
+      if (o.longTasks)
+        try {
+          long = await page.run(readP2LongTasks, null);
+        } catch (error) {
+          return failed(
+            "long_tasks",
+            `its long tasks could not be read (${why(error)})`,
+            w,
+          );
+        }
+      v.wall.push(elapsed);
+      v.scan.push(s.values.scan_ms);
+      v.commit.push(s.values.commit_ms);
+      if (o.longTasks) v.long.push(long);
+    }
+  }
+  return { iterations, series, failure: null };
 }
 
 // ---- P-4/P-10: one request per sample, with its bounded witness (revision 13) ---------------------------------------------------------
@@ -192,11 +413,11 @@ export function readSyncSample(arg: {
   const sync = entries.filter((e) =>
     new URL(e.name).pathname.endsWith("/sync"),
   );
+  // The page instance, not its time origin (revision 18, A18-T2; scripts/lib/profile-sample-rules.mjs).
   let ready =
     arg.force ||
     !data ||
     data.page !== mark.page ||
-    performance.timeOrigin !== mark.time_origin ||
     epochs.length !== mark.epochs ||
     trace.length < mark.from;
   let tick = Number.NaN;
@@ -477,7 +698,11 @@ export async function prepareDraftSample(arg: {
     ...data.dispatchIdentity(),
     time_origin: performance.timeOrigin,
   };
-  if (JSON.stringify(queued) !== JSON.stringify(before))
+  // The binding, its time origin recorded but not compared (revision 18, A18-T2: WebKit's moves with the wall clock).
+  if (
+    JSON.stringify({ ...queued, time_origin: 0 }) !==
+    JSON.stringify({ ...before, time_origin: 0 })
+  )
     return {
       refused:
         "the dispatch binding changed during the queue read: nothing was enqueued",
@@ -547,12 +772,9 @@ export function readDraftSample(arg: {
   const commands = entries.filter((e) =>
     new URL(e.name).pathname.endsWith("/commands"),
   );
+  // The page instance, not its time origin (revision 18, A18-T2; scripts/lib/profile-sample-rules.mjs).
   let ready =
-    arg.force ||
-    !data ||
-    data.page !== mark.page ||
-    performance.timeOrigin !== mark.time_origin ||
-    trace.length < mark.from;
+    arg.force || !data || data.page !== mark.page || trace.length < mark.from;
   let send = Number.NaN;
   for (let t = mark.from; !ready && t < trace.length; t += 1) {
     const line = trace[t] ?? "";
@@ -598,7 +820,12 @@ export function draftCompletionReady(arg: {
     ...data.dispatchIdentity(),
     time_origin: performance.timeOrigin,
   };
-  if (JSON.stringify(now) !== JSON.stringify(arg.expected)) return true;
+  // The binding, its time origin recorded but not compared (revision 18, A18-T2: WebKit's moves with the wall clock).
+  if (
+    JSON.stringify({ ...now, time_origin: 0 }) !==
+    JSON.stringify({ ...arg.expected, time_origin: 0 })
+  )
+    return true;
   const first = data.dispatchFirst();
   if (first > arg.mark.log_from) return true;
   const log = data.dispatchLog;

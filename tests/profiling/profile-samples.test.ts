@@ -5,6 +5,9 @@ import {
   COMMANDS_PATH,
   DRAFT_WITNESS_METHOD,
   draftWitnessSelection,
+  type P2MarkFrame,
+  p2IterationSelection,
+  p2SequenceProblem,
   SYNC_PATH,
   SYNC_WITNESS_METHOD,
   syncWitnessSelection,
@@ -13,18 +16,25 @@ import { apiUrl } from "../../src/lib/api-client/wire";
 import {
   closeDraftSample,
   collectDraftSamples,
+  collectP2Iterations,
   collectSyncSamples,
   type DraftWitness,
   draftCompletionReady,
-  p2SampleProblems,
+  markP2Iteration,
+  nudgeP2Iteration,
+  type P2Phase,
+  type P2Port,
+  type P2Shape,
+  type P2Witness,
   prepareDraftSample,
   prepareSyncSample,
   readDraftSample,
+  readP2Iteration,
+  readP2LongTasks,
   readSyncSample,
   type SamplePage,
   type SyncMark,
   type SyncWitness,
-  selectP2Sample,
 } from "../e2e/profile-samples";
 
 /**
@@ -198,79 +208,6 @@ const committed = (ms: number, bytes: number, scan: number, commit: number) =>
     kind: "applied",
     value: "committed",
   });
-
-describe("P-2: the sample's own page (selectP2Sample, p2SampleProblems)", () => {
-  it("control: the first commit after the sample's start, committed, of the served bytes, ending idle, is the sample", () => {
-    line(1, "data.sync_next", { when: "after", state: "idle" });
-    const from = trace.length;
-    line(2, "data.sync_tick", { why: "now", coalesced: false });
-    committed(10, 5_000, 3, 7);
-    line(11, "data.sync_next", { when: "after", state: "idle" });
-    const s = selectP2Sample(from);
-    expect(s).toEqual({
-      commit: { trace: 2, line: trace[2] },
-      end: { trace: 3, line: trace[3] },
-    });
-    expect(p2SampleProblems(s as never, 5_000)).toEqual([]);
-  });
-
-  it("control: the end not yet traced is no sample yet (polled again)", () => {
-    line(2, "data.sync_tick", { why: "now", coalesced: false });
-    committed(10, 5_000, 3, 7);
-    expect(selectP2Sample(0)).toBeNull();
-  });
-
-  it("case (review 12, DA-M1): a lapsed measured page retried into an empty one: the sample is the lapsed commit and fails; the retry's timings are never taken", () => {
-    line(2, "data.sync_tick", { why: "now", coalesced: false });
-    line(10, "data.sync_commit", {
-      bytes: 5_000,
-      scan_ms: 3,
-      commit_ms: 7,
-      kind: "applied",
-      value: "lease_lapsed",
-    });
-    line(11, "data.sync_next", { when: "after", state: "running" });
-    line(400, "data.sync_tick", { why: "timer", coalesced: false });
-    committed(402, 80, 0.1, 0.9);
-    line(403, "data.sync_next", { when: "after", state: "idle" });
-    const s = selectP2Sample(0);
-    expect(s?.commit.trace).toBe(1);
-    expect(p2SampleProblems(s as never, 5_000)).toEqual([
-      "its commit wrote no page (applied/lease_lapsed)",
-      `its step did not end idle (${trace[2]})`,
-    ]);
-    // What revision 11 recorded for this sample: the LAST commit (the empty retry), labelled with the 5,000-byte shape.
-    const last = trace.filter((l) => l.includes("data.sync_commit")).at(-1);
-    expect(JSON.parse(last?.slice(last.indexOf("{")) ?? "{}")).toMatchObject({
-      bytes: 80,
-      scan_ms: 0.1,
-    });
-  });
-
-  it("case: two commits of different sizes and times: the first is selected; another page's bytes, or a missing value, fail the sample", () => {
-    line(2, "data.sync_tick", { why: "now", coalesced: false });
-    committed(10, 4_000, 3, 7);
-    line(11, "data.sync_next", { when: "after", state: "idle" });
-    committed(20, 5_000, 30, 70);
-    line(21, "data.sync_next", { when: "after", state: "idle" });
-    const s = selectP2Sample(0);
-    expect(s?.commit.trace).toBe(1);
-    expect(p2SampleProblems(s as never, 5_000)).toEqual([
-      "its commit is 4000 bytes, not the served 5000",
-    ]);
-    trace = [];
-    line(10, "data.sync_commit", {
-      bytes: 5_000,
-      scan_ms: 3,
-      commit_ms: 7,
-      kind: "applied",
-    });
-    line(11, "data.sync_next", { when: "after", state: "idle" });
-    expect(p2SampleProblems(selectP2Sample(0) as never, 5_000)).toEqual([
-      "its commit wrote no page (applied/no value)",
-    ]);
-  });
-});
 
 // ---- P-4/P-10 (revision 13; review 13 R2, design assessment DA-R2-A/DA-R2-B/DA-N1, Q1/Q2/Q4) ----------------------------------------------
 // The page functions (`prepareSyncSample`, `readSyncSample`, `prepareDraftSample`, `readDraftSample`, `draftCompletionReady`,
@@ -535,7 +472,7 @@ describe("P-4/P-10 sync: the mark, the page read and the rule (Q1)", () => {
     expect(select(m).status).toBe("complete");
   });
 
-  it("case: a reload (another page instance or time origin) or an engine start since the mark makes the read return at once, invalid", () => {
+  it("case: a reload (another page instance) or an engine start since the mark makes the read return at once, invalid; a moved time origin on the same page does not (revision 18, A18-T2)", () => {
     const m = mark();
     line(100, "data.sync_tick", { why: "now", coalesced: false });
     harness.engineEpochs.push({ generation: 2, run: 1, trace: 1 });
@@ -550,10 +487,13 @@ describe("P-4/P-10 sync: the mark, the page read and the rule (Q1)", () => {
       "the page was reloaded or replaced during the sample",
     );
     harness.page = "page-1";
-    expect(
-      syncWitnessSelection(witnessOf({ ...m, time_origin: m.time_origin + 1 }))
-        .problem,
-    ).toBe("the page was reloaded or replaced during the sample");
+    // REVISION 18 ADAPTATION (A18-T2): the page instance is the identity; a time origin that moved on it (WebKit's follows the wall clock)
+    // neither makes the read return at once nor refuses the sample as a reload.
+    const drifted = { ...m, time_origin: m.time_origin + 1 };
+    expect(witnessOf(drifted)).toBeNull();
+    expect(syncWitnessSelection(witnessOf(drifted, true)).problem).not.toBe(
+      "the page was reloaded or replaced during the sample",
+    );
   });
 });
 
@@ -646,6 +586,37 @@ describe("P-4/P-10 sync: the shared collector both writers call (Q2)", () => {
         );
       expect(syncWitnessSelection(e).selected).toEqual(e.selected);
     }
+  });
+
+  it("control (revision 18, A18-T2): a time origin that moves on the same page instance, inside each sample and between samples, keeps the collection complete with the same values and selections", async () => {
+    // macOS WebKit moves `performance.timeOrigin` with the disciplined wall clock (+1 ms every 92 s on one still page, measured).
+    let origin = 2_000_000;
+    vi.spyOn(performance, "timeOrigin", "get").mockImplementation(() => origin);
+    harness.onNudge = () => {
+      origin += 1;
+      actions.push(...healthyStep());
+    };
+    const c = await collectSyncSamples(scripted(), {
+      ...OPTIONS,
+      warmup: 2,
+      samples: 3,
+    });
+    expect(c.failure).toBeNull();
+    expect(c.samples.map((e) => e.index)).toEqual([2, 3, 4]);
+    expect(c.values).toEqual(
+      [3, 2, 2.5].map((pre) => ({
+        pre_issue_ms: pre,
+        request_ms: 10.5 - pre,
+        post_response_ms: 4.5,
+        total_ms: 15,
+        duration_ms: expect.closeTo(9.3, 9),
+      })),
+    );
+    for (const e of c.samples) {
+      expect(e.read.time_origin).toBe(e.mark.time_origin + 1);
+      expect(syncWitnessSelection(e).selected).toEqual(e.selected);
+    }
+    expect(c.samples[2]?.mark.time_origin).toBe(2_000_004);
   });
 
   it("case: a step open at the mark (a timer step already running) is waited for, never marked over; the sample is the next step", async () => {
@@ -896,10 +867,10 @@ describe("P-4/P-10 sync `sync-request-sample/3`: the observation interval and th
     expect(SYNC_PATH).toBe(PATH);
     expect(apiUrl("/commands").pathname).toBe(COMMANDS_PATH);
     expect(new URL(SYNC).pathname).toBe(PATH);
-    // Revision 17 (adapted, version literal only): the draft method's successor is `/5`.
+    // Revision 18 (adapted, version literal only; A18-T2): the successors are `/4` and `/6`.
     expect([SYNC_WITNESS_METHOD, DRAFT_WITNESS_METHOD]).toEqual([
-      "sync-request-sample/3",
-      "draft-request-sample/5",
+      "sync-request-sample/4",
+      "draft-request-sample/6",
     ]);
     // The page read stores exactly that pathname from a full URL with its query.
     resources = [{ name: SYNC, startTime: 1, requestStart: 2, responseEnd: 3 }];
@@ -1654,6 +1625,54 @@ describe("P-4 draft: one send, its answer, its request and its own completion pe
       }
     }
     expect(enqueues).toBe(4);
+  });
+
+  it("control (revision 18, A18-T2): a time origin that moves on the same page instance between a draft's awaits and between samples keeps every sample complete with the same values and selections", async () => {
+    // macOS WebKit moves `performance.timeOrigin` with the disciplined wall clock (+1 ms every 92 s on one still page, measured).
+    let origin = 3_000_000;
+    vi.spyOn(performance, "timeOrigin", "get").mockImplementation(() => origin);
+    // Also during each queue read (between the binding before it and the binding after it).
+    const data = (
+      window as unknown as { __atlasData: { queue: () => Promise<unknown> } }
+    ).__atlasData;
+    const queue = data.queue;
+    data.queue = async () => {
+      origin += 1;
+      return queue();
+    };
+    enqueueWith((id, base) =>
+      healthy(id, base).map((step, k) =>
+        k === 2
+          ? () => {
+              origin += 1;
+              step();
+            }
+          : step,
+      ),
+    );
+    const c = await collectDraftSamples(driven(), {
+      ...OPT,
+      warmup: 1,
+      samples: 3,
+    });
+    expect(c.failure).toBeNull();
+    for (const [k, e] of c.samples.entries()) {
+      expect(c.values[k]).toEqual({
+        enqueue_ms: 1,
+        claim_ms: 8,
+        stamping_ms: 2,
+        request_ms: 8,
+        record_ms: 1,
+        total_ms: 21,
+      });
+      expect(
+        e.completion.identity_after?.time_origin ?? Number.NaN,
+      ).toBeGreaterThan(e.mark.time_origin);
+      expect(draftWitnessSelection(e).selected).toEqual(e.selected);
+    }
+    // Four samples, each moved once during its queue read and once between its awaits.
+    expect(origin).toBe(3_000_008);
+    data.queue = queue;
   });
 
   it("Q1 case: a receipt still running at the time-out is pending (never complete); the witness keeps the call; nothing further is enqueued", async () => {
@@ -3361,5 +3380,691 @@ describe("P-4 draft `draft-request-sample/3`: schema, pairing and the closed int
         bufferLifetimeProblem(earlier, later),
         JSON.stringify([earlier, later]),
       ).toBe(problem);
+  });
+});
+
+// ---- P-2 (revision 18; review 18 R18-P2, design assessment invariants 1-4, C1/C2, schedule matrix) ---------------------------------------
+// REVISION 18 ADAPTATION (labelled): revision 12's four selector cases (`selectP2Sample`, `p2SampleProblems`, both removed) are kept here
+// with their schedules unchanged, judged by the shared iteration rule over the witness the writer now reads (`markP2Iteration`,
+// `readP2Iteration`). The rule reports the FIRST problem only, so the lapsed case expects its first reason (no page written) where
+// revision 12 listed it and the running end together; the running end is asserted on its own below.
+
+const P2_PAGES = {
+  markP2Iteration: isolated(markP2Iteration),
+  readP2Iteration: isolated(readP2Iteration),
+  readP2LongTasks: isolated(readP2LongTasks),
+};
+/** The witness of an iteration marked at `from`: the page read (forced) and a body served once with nothing queued, unless stated. */
+const p2WitnessAt = (
+  from: number,
+  o: { served?: number; pending?: number } = {},
+): P2Witness => {
+  const m = { ...P2_PAGES.markP2Iteration(), from } as P2MarkFrame;
+  const r = P2_PAGES.readP2Iteration({ mark: m, force: true });
+  if (!r) throw new Error("no read");
+  return { ...r, served: o.served ?? 1, pending: o.pending ?? 0 };
+};
+
+describe("P-2: one iteration's own page (p2IterationSelection over the page read)", () => {
+  it("control: the first commit after the iteration's start, committed, of the served bytes, ending idle, is the iteration", () => {
+    line(1, "data.sync_next", { when: "after", state: "idle" });
+    const from = trace.length;
+    line(2, "data.sync_tick", { why: "now", coalesced: false });
+    committed(10, 5_000, 3, 7);
+    line(11, "data.sync_next", { when: "after", state: "idle" });
+    const s = p2IterationSelection(p2WitnessAt(from), 5_000);
+    expect(s).toEqual({
+      status: "complete",
+      problem: null,
+      selected: { commit: 2, end: 3 },
+      values: { scan_ms: 3, commit_ms: 7 },
+    });
+  });
+
+  it("control: the end not yet traced, or no commit yet, is pending (polled again); the page read waits for both", () => {
+    line(2, "data.sync_tick", { why: "now", coalesced: false });
+    expect(
+      p2IterationSelection(p2WitnessAt(0, { served: 0 }), 5_000),
+    ).toMatchObject({
+      status: "pending",
+      problem: "its body has not been served",
+    });
+    committed(10, 5_000, 3, 7);
+    const m = { ...P2_PAGES.markP2Iteration(), from: 0 } as P2MarkFrame;
+    expect(P2_PAGES.readP2Iteration({ mark: m, force: false })).toBeNull();
+    expect(p2IterationSelection(p2WitnessAt(0), 5_000)).toMatchObject({
+      status: "pending",
+      problem: "its step has not ended",
+    });
+  });
+
+  it("case (review 12, DA-M1): a lapsed page retried into an empty one: the iteration is the lapsed commit and fails; the retry's timings are never taken", () => {
+    line(2, "data.sync_tick", { why: "now", coalesced: false });
+    line(10, "data.sync_commit", {
+      bytes: 5_000,
+      scan_ms: 3,
+      commit_ms: 7,
+      kind: "applied",
+      value: "lease_lapsed",
+    });
+    line(11, "data.sync_next", { when: "after", state: "running" });
+    line(400, "data.sync_tick", { why: "timer", coalesced: false });
+    committed(402, 80, 0.1, 0.9);
+    line(403, "data.sync_next", { when: "after", state: "idle" });
+    expect(p2IterationSelection(p2WitnessAt(0), 5_000)).toMatchObject({
+      status: "invalid",
+      problem: "its commit wrote no page (applied/lease_lapsed)",
+    });
+    // A committed page of the served bytes whose own step ended running is refused for its end.
+    restartTrace();
+    committed(10, 5_000, 3, 7);
+    line(11, "data.sync_next", { when: "after", state: "running" });
+    expect(p2IterationSelection(p2WitnessAt(0), 5_000).problem).toBe(
+      `its step did not end idle (${trace[1]})`,
+    );
+  });
+
+  it("case: two commits of different sizes and times: the first is selected; another page's bytes, or a missing value, fail the iteration", () => {
+    line(2, "data.sync_tick", { why: "now", coalesced: false });
+    committed(10, 4_000, 3, 7);
+    line(11, "data.sync_next", { when: "after", state: "idle" });
+    committed(20, 5_000, 30, 70);
+    line(21, "data.sync_next", { when: "after", state: "idle" });
+    expect(p2IterationSelection(p2WitnessAt(0), 5_000).problem).toBe(
+      "its commit is 4000 bytes, not the served 5000",
+    );
+    restartTrace();
+    line(10, "data.sync_commit", {
+      bytes: 5_000,
+      scan_ms: 3,
+      commit_ms: 7,
+      kind: "applied",
+    });
+    line(11, "data.sync_next", { when: "after", state: "idle" });
+    expect(p2IterationSelection(p2WitnessAt(0), 5_000).problem).toBe(
+      "its commit wrote no page (applied/no value)",
+    );
+  });
+
+  it("case (revision 18, invariants 2/3): the lifetime, the served body, the slice and the timings each refuse the iteration with their own reason; zero-duration timings are valid", () => {
+    line(2, "data.sync_tick", { why: "now", coalesced: false });
+    committed(10, 5_000, 0, 0);
+    line(11, "data.sync_next", { when: "after", state: "idle" });
+    const w = p2WitnessAt(0);
+    const sel = (edit: (x: P2Witness) => void, bytes = 5_000) => {
+      const x = structuredClone(w);
+      edit(x);
+      return p2IterationSelection(x, bytes);
+    };
+    expect(sel(() => {}).status).toBe("complete");
+    expect(sel((x) => (x.read.page = "page-2")).problem).toBe(
+      "the page was replaced during the iteration",
+    );
+    // REVISION 18 ADAPTATION (A18-T1): the page instance is the lifetime; a time origin that moved on it (WebKit's follows the wall clock)
+    // is the same page.
+    expect(sel((x) => (x.read.time_origin += 1)).status).toBe("complete");
+    expect(
+      sel((x) => {
+        x.read.page = "page-2";
+        x.read.time_origin += 1;
+      }).problem,
+    ).toBe("the page was replaced during the iteration");
+    expect(sel((x) => (x.read.epochs += 1)).problem).toBe(
+      "the engine was started again during the iteration",
+    );
+    expect(sel((x) => (x.read.generation += 1)).problem).toBe(
+      "the engine was started again during the iteration",
+    );
+    expect(sel((x) => (x.read.at = x.mark.at - 0.001)).problem).toBe(
+      "its read does not follow its mark",
+    );
+    expect(sel((x) => x.lines.pop()).problem).toBe(
+      "its trace slice is not the trace from its mark to its read",
+    );
+    expect(sel((x) => (x.served = 0)).problem).toBe(
+      "its body was answered 0 times, not once: the commit is not its page's",
+    );
+    expect(sel((x) => (x.served = 2)).problem).toMatch(/answered 2 times/);
+    expect(sel((x) => (x.pending = 1)).problem).toBe(
+      "1 scripted answer(s) are still queued: another request took this iteration's place",
+    );
+    expect(
+      sel((x) => ((x.mark as { generation: unknown }).generation = null))
+        .problem,
+    ).toBe("its mark is malformed");
+    for (const bad of [-1, Number.NaN, "3"]) {
+      const x = structuredClone(w);
+      x.lines[1] = `10ms data.sync_commit ${JSON.stringify({ bytes: 5_000, scan_ms: bad, commit_ms: 0, kind: "applied", value: "committed" })}`;
+      expect(p2IterationSelection(x, 5_000).problem).toBe(
+        "its commit records no scan_ms",
+      );
+    }
+  });
+
+  it("control: a step that ended without a commit (a stop) before the iteration's commit does not move its selection (review 18's boundary question; no new rule)", () => {
+    line(2, "data.sync_tick", { why: "now", coalesced: false });
+    line(3, "data.sync_next", { when: "after", state: "running" });
+    line(4, "data.sync_tick", { why: "now", coalesced: false });
+    committed(10, 5_000, 3, 7);
+    line(11, "data.sync_next", { when: "after", state: "idle" });
+    expect(p2IterationSelection(p2WitnessAt(0), 5_000)).toMatchObject({
+      status: "complete",
+      selected: { commit: 3, end: 4 },
+    });
+  });
+
+  it("control: the sequence rule: a mark on the same lifetime at or after the previous read is valid; a replaced page, a restarted engine or an earlier mark is not", () => {
+    const read = {
+      page: "page-1",
+      time_origin: 5,
+      epochs: 1,
+      generation: 1,
+      to: 10,
+      at: 20,
+    };
+    const mark = {
+      page: "page-1",
+      time_origin: 5,
+      epochs: 1,
+      generation: 1,
+      from: 10,
+      at: 20,
+    };
+    expect(p2SequenceProblem(read, mark)).toBeNull();
+    expect(p2SequenceProblem(read, { ...mark, page: "page-2" })).toBe(
+      "the page was replaced between iterations",
+    );
+    expect(
+      p2SequenceProblem(read, { ...mark, time_origin: mark.time_origin + 1 }),
+    ).toBeNull();
+    expect(p2SequenceProblem(read, { ...mark, epochs: 2, generation: 2 })).toBe(
+      "the engine was started again between iterations",
+    );
+    expect(p2SequenceProblem(read, { ...mark, from: 9 })).toBe(
+      "its mark does not follow the previous iteration's read",
+    );
+    expect(p2SequenceProblem(read, { ...mark, at: 19.999 })).toBe(
+      "its mark does not follow the previous iteration's read",
+    );
+  });
+});
+
+/**
+ * The P-2 writer's port over the harness double (revision 18): the scripted page above, a scripted `/sync` queue the steps serve from, the
+ * writer's idle wait (a commit at or after the mark and the engine's last step end idle; the scripted engine takes one action per poll) and
+ * the page clock as the wall clock. `p2Step` is one nudge's engine work: its tick, its request (serving the next queued body: its bytes;
+ * none queued: the empty page's 72), its commit and its end; `lapsed` exhausts its admission rounds (applied/lease_lapsed, ending running),
+ * then the engine's paced retry asks again, is answered empty and commits idle.
+ */
+let p2Queue: Array<{ body: string; served: number }> = [];
+let p2Enqueues = 0;
+const p2Port = (limit = 60): P2Port => ({
+  ...scripted(limit),
+  enqueue(body) {
+    p2Enqueues += 1;
+    const entry = { body, served: 0 };
+    p2Queue.push(entry);
+    return { served: () => entry.served };
+  },
+  pending: () => p2Queue.length,
+  async settle(from) {
+    for (let n = 0; n < limit; n += 1) {
+      // The engine's state as the trace shows it: running from a step's tick until its end publishes the next state.
+      const steps = trace.filter((l) =>
+        /^\d+ms data\.sync_(tick|next|step_failed) /.test(l),
+      );
+      if (
+        trace.slice(from).some((l) => l.includes("data.sync_commit")) &&
+        steps.at(-1)?.includes('"state":"idle"')
+      )
+        return;
+      await Promise.resolve();
+      actions.shift()?.();
+    }
+    throw new Error(`expect.poll: Timeout ${limit} polls exceeded`);
+  },
+  now: () => pageClock,
+});
+let p2Scan = 0;
+const p2Serve = () => {
+  const next = p2Queue.shift();
+  if (next) next.served += 1;
+  return next ? new TextEncoder().encode(next.body).length : 72;
+};
+const p2Step = (o: { lapsed?: boolean } = {}) => {
+  at += 100;
+  const t = at;
+  let bytes = 0;
+  p2Scan += 1;
+  const scan = p2Scan;
+  const tail = o.lapsed
+    ? [
+        () =>
+          line(t + 400, "data.sync_tick", { why: "timer", coalesced: false }),
+        () => {
+          const empty = p2Serve();
+          committed(t + 402, empty, 0.1, 0.9);
+        },
+        () => line(t + 403, "data.sync_next", { when: "after", state: "idle" }),
+      ]
+    : [];
+  return [
+    () => line(t, "data.sync_tick", { why: "now", coalesced: false }),
+    () => {
+      bytes = p2Serve();
+    },
+    () =>
+      line(t + 10, "data.sync_commit", {
+        bytes,
+        scan_ms: scan,
+        commit_ms: scan + 0.5,
+        kind: "applied",
+        value: o.lapsed ? "lease_lapsed" : "committed",
+      }),
+    () =>
+      line(t + 11, "data.sync_next", {
+        when: "after",
+        state: o.lapsed ? "running" : "idle",
+      }),
+    ...tail,
+  ];
+};
+const P2_OPTIONS = { longTasks: true, timeout: 30_000, polling: 5 };
+/** Two shapes as the writer has them (shape A's body grows with the iteration, shape B's is repeated). */
+const P2_SCHEDULE = (): P2Shape[] => [
+  {
+    name: "A",
+    body: (i) => `{"a":${"x".repeat(100 + i)}}`,
+    warmup: 2,
+    samples: 3,
+  },
+  {
+    name: "B",
+    body: () => `{"b":"${"y".repeat(500)}"}`,
+    warmup: 1,
+    samples: 2,
+  },
+];
+
+describe("P-2: the shared collector the writer calls, every iteration (revision 18; review 18 R18-P2, design assessment schedule matrix)", () => {
+  beforeEach(() => {
+    actions = [];
+    at = 1_000;
+    p2Queue = [];
+    p2Enqueues = 0;
+    p2Scan = 0;
+    (window as unknown as { __long: number[] }).__long = [];
+  });
+
+  it("control: every warm-up and sample of every shape is validated and kept, in order; only the measured iterations give values, each its own commit's timings, each mark after the previous read", async () => {
+    harness.onNudge = () => actions.push(...p2Step());
+    const c = await collectP2Iterations(p2Port(), P2_SCHEDULE(), P2_OPTIONS);
+    expect(c.failure).toBeNull();
+    expect(c.iterations.map((e) => [e.shape, e.index])).toEqual([
+      ["A", 0],
+      ["A", 1],
+      ["A", 2],
+      ["A", 3],
+      ["A", 4],
+      ["B", 0],
+      ["B", 1],
+      ["B", 2],
+    ]);
+    expect([harness.nudges, p2Enqueues, p2Queue.length]).toEqual([8, 8, 0]);
+    // Steps 1-2 and 6 were warm-ups: their scan times (1, 2, 6) are in no series.
+    expect(c.series.A?.scan).toEqual([3, 4, 5]);
+    expect(c.series.A?.commit).toEqual([3.5, 4.5, 5.5]);
+    expect(c.series.B?.scan).toEqual([7, 8]);
+    expect(c.series.A?.wall).toHaveLength(3);
+    expect(c.series.A?.long).toEqual([0, 0, 0]);
+    for (const [k, e] of c.iterations.entries()) {
+      expect(e.served).toBe(1);
+      expect(e.bytes).toBe(
+        new TextEncoder().encode(
+          P2_SCHEDULE()
+            .find((x) => x.name === e.shape)
+            ?.body(e.index) ?? "",
+        ).length,
+      );
+      const previous = c.iterations[k - 1];
+      if (previous) expect(p2SequenceProblem(previous.read, e.mark)).toBeNull();
+      expect(
+        p2IterationSelection(
+          {
+            mark: e.mark,
+            read: e.read,
+            lines: trace.slice(e.mark.from, e.read.to),
+            served: e.served,
+            pending: e.pending,
+          },
+          e.bytes,
+        ).selected,
+      ).toEqual(e.selected);
+    }
+  });
+
+  it("control: a wall time is the nudge to the idle wait, unchanged (the clock read after the body is queued and before the nudge, then after the wait); an engine without a long-task observer is never read for one", async () => {
+    harness.onNudge = () => actions.push(...p2Step());
+    const port = p2Port();
+    const events: string[] = [];
+    let wall = 0;
+    const { run, enqueue, settle } = port;
+    port.run = async (fn, arg) => {
+      events.push(
+        fn.toString() === markP2Iteration.toString()
+          ? "mark"
+          : fn.toString() === nudgeP2Iteration.toString()
+            ? "nudge"
+            : fn.toString() === readP2Iteration.toString()
+              ? "read"
+              : "other",
+      );
+      return run(fn, arg);
+    };
+    port.poll = async (fn, arg, o) => {
+      events.push("poll");
+      return scripted().poll(fn, arg, o);
+    };
+    port.enqueue = (body) => {
+      events.push("enqueue");
+      return enqueue(body);
+    };
+    port.settle = async (from) => {
+      events.push("settle");
+      await settle(from);
+      wall += 7;
+    };
+    port.now = () => {
+      events.push("now");
+      wall += 1_000;
+      return wall;
+    };
+    const c = await collectP2Iterations(port, P2_SCHEDULE().slice(0, 1), {
+      ...P2_OPTIONS,
+      longTasks: false,
+    });
+    expect(c.failure).toBeNull();
+    const iteration = [
+      "mark",
+      "enqueue",
+      "now",
+      "nudge",
+      "settle",
+      "now",
+      "poll",
+    ];
+    expect(events).toEqual(Array.from({ length: 5 }, () => iteration).flat());
+    // Each measured wall time is the second clock reading less the first: the wait's own 7 plus the second reading's 1,000.
+    expect(c.series.A?.wall).toEqual([1_007, 1_007, 1_007]);
+    // No long-task read ("other") ever ran.
+    expect(c.series.A?.long).toEqual([]);
+    expect(events).not.toContain("other");
+  });
+
+  for (const [title, failing, warmup] of [
+    ["the FIRST warm-up (review 18's schedule)", 1, true],
+    ["the LAST warm-up of the first shape", 2, true],
+    ["the first measured iteration", 3, false],
+    ["a measured iteration after healthy ones", 5, false],
+    ["the later shape's warm-up (its index restarts at 0)", 6, true],
+  ] as const)
+    it(`case (R18-P2): a lapsed page at ${title}, retried empty into idle, stops the WHOLE collection there with its witness and phase; nothing further is enqueued or nudged`, async () => {
+      let n = 0;
+      harness.onNudge = () => {
+        n += 1;
+        actions.push(...p2Step({ lapsed: n === failing }));
+      };
+      const c = await collectP2Iterations(p2Port(), P2_SCHEDULE(), P2_OPTIONS);
+      const order = [
+        ["A", 0],
+        ["A", 1],
+        ["A", 2],
+        ["A", 3],
+        ["A", 4],
+        ["B", 0],
+        ["B", 1],
+        ["B", 2],
+      ];
+      const [shape, index] = order[failing - 1] ?? [];
+      expect(c.iterations.map((e) => [e.shape, e.index])).toEqual(
+        order.slice(0, failing - 1),
+      );
+      expect(c.failure).toMatchObject({
+        shape,
+        index,
+        warmup,
+        phase: "selection",
+        problem: "its commit wrote no page (applied/lease_lapsed)",
+      });
+      expect([harness.nudges, p2Enqueues]).toEqual([failing, failing]);
+      const w = c.failure?.witness as P2Witness;
+      expect(w.served).toBe(1);
+      expect(w.lines.map((l) => l.split(" ")[1])).toContain("data.sync_commit");
+      // The empty retry reached idle, so the idle wait was satisfied; it never repaired the iteration and no measured value came from it.
+      expect(trace.at(-1)).toContain('"state":"idle"');
+      const values = [...(c.series.A?.scan ?? []), ...(c.series.B?.scan ?? [])];
+      expect(values).not.toContain(failing);
+      expect(values.every((x) => x < failing)).toBe(true);
+    });
+
+  it("case: each awaited phase that rejects or times out stops the collection with its phase and the support so far: mark, nudge, the idle wait, the read and the long-task read", async () => {
+    const phases: Array<[P2Phase, (port: P2Port, n: number) => void, RegExp]> =
+      [
+        [
+          "mark",
+          (port, n) => {
+            const run = port.run;
+            port.run = async (fn, arg) => {
+              if (fn.toString() === markP2Iteration.toString() && n === 0)
+                throw new Error("Target closed");
+              return run(fn, arg);
+            };
+          },
+          /^no mark could be set \(Error: Target closed\)$/,
+        ],
+        [
+          "nudge",
+          (port) => {
+            const run = port.run;
+            port.run = async (fn, arg) => {
+              if (fn.toString() === nudgeP2Iteration.toString())
+                throw new Error("Execution context was destroyed");
+              return run(fn, arg);
+            };
+          },
+          /^the nudge failed/,
+        ],
+        [
+          "settle",
+          (port) => {
+            port.settle = async () => {
+              throw new Error("expect.poll: Timeout 120000ms exceeded");
+            };
+          },
+          /^no commit and idle engine followed the nudge/,
+        ],
+        [
+          "read",
+          (port) => {
+            port.poll = async () => {
+              throw new Error("Timeout");
+            };
+            const run = port.run;
+            port.run = async (fn, arg) => {
+              if (fn.toString() === readP2Iteration.toString())
+                throw new Error("Target closed");
+              return run(fn, arg);
+            };
+          },
+          /^the iteration could not be read/,
+        ],
+        [
+          "long_tasks",
+          (port) => {
+            const run = port.run;
+            port.run = async (fn, arg) => {
+              if (fn.toString() === readP2LongTasks.toString())
+                throw new Error("Target closed");
+              return run(fn, arg);
+            };
+          },
+          /^its long tasks could not be read/,
+        ],
+      ];
+    for (const [phase, sabotage, problem] of phases) {
+      restartTrace();
+      actions = [];
+      p2Queue = [];
+      p2Enqueues = 0;
+      harness.nudges = 0;
+      harness.onNudge = () => actions.push(...p2Step());
+      const port = p2Port();
+      sabotage(port, 0);
+      const c = await collectP2Iterations(port, P2_SCHEDULE(), P2_OPTIONS);
+      expect(c.failure?.phase, phase).toBe(phase);
+      expect(c.failure?.problem, phase).toMatch(problem);
+      expect(c.failure?.shape).toBe("A");
+      // The mark fails before anything is queued; the long-task read only follows a measured iteration's own validation.
+      expect(c.failure?.index, phase).toBe(phase === "long_tasks" ? 2 : 0);
+      expect(p2Enqueues, phase).toBe(
+        phase === "mark" ? 0 : phase === "long_tasks" ? 3 : 1,
+      );
+      expect(c.iterations).toHaveLength(phase === "long_tasks" ? 3 : 0);
+    }
+  });
+
+  it("case: an iteration whose step never ends is read once more at the time-out and fails as pending; its witness keeps the commit", async () => {
+    harness.onNudge = () => actions.push(...p2Step().slice(0, 3));
+    const port = p2Port();
+    port.settle = async () => {};
+    const c = await collectP2Iterations(port, P2_SCHEDULE(), P2_OPTIONS);
+    expect(c.failure).toMatchObject({
+      index: 0,
+      warmup: true,
+      phase: "selection",
+      problem: "its step has not ended within 30000 ms",
+    });
+    expect(harness.nudges).toBe(1);
+  });
+
+  it("case (invariant 3): a replaced page or a restarted engine during an iteration, or between two, is a failure, never spliced into the collection", async () => {
+    const during = async (change: () => void, problem: string) => {
+      restartTrace();
+      actions = [];
+      p2Queue = [];
+      p2Enqueues = 0;
+      harness.page = "page-1";
+      harness.engineEpochs = [{ generation: 1, run: 1, trace: 0 }];
+      let n = 0;
+      harness.onNudge = () => {
+        n += 1;
+        const step = p2Step();
+        // The second iteration's page or engine changes after its commit and before its end.
+        actions.push(
+          ...(n === 2 ? [...step.slice(0, 3), change, ...step.slice(3)] : step),
+        );
+      };
+      const c = await collectP2Iterations(p2Port(), P2_SCHEDULE(), P2_OPTIONS);
+      expect(c.failure).toMatchObject({
+        index: 1,
+        phase: "selection",
+        problem,
+      });
+      expect(c.iterations).toHaveLength(1);
+      expect(p2Enqueues).toBe(2);
+    };
+    await during(() => {
+      harness.page = "page-2";
+    }, "the page was replaced during the iteration");
+    await during(() => {
+      harness.engineEpochs.push({ generation: 2, run: 2, trace: trace.length });
+    }, "the engine was started again during the iteration");
+    // Between iterations: the engine starts again after the first read; the second mark is not on the previous read's engine.
+    restartTrace();
+    actions = [];
+    p2Queue = [];
+    p2Enqueues = 0;
+    harness.engineEpochs = [{ generation: 1, run: 1, trace: 0 }];
+    harness.onNudge = () => actions.push(...p2Step());
+    const port = p2Port();
+    const run = port.run;
+    let marks = 0;
+    port.run = async (fn, arg) => {
+      if (fn.toString() === markP2Iteration.toString() && ++marks === 2)
+        harness.engineEpochs.push({
+          generation: 2,
+          run: 2,
+          trace: trace.length,
+        });
+      return run(fn, arg);
+    };
+    const c = await collectP2Iterations(port, P2_SCHEDULE(), P2_OPTIONS);
+    expect(c.failure).toMatchObject({
+      index: 1,
+      phase: "sequence",
+      problem: "the engine was started again between iterations",
+    });
+    expect(c.iterations).toHaveLength(1);
+    // The failed mark queued nothing.
+    expect(p2Enqueues).toBe(1);
+    // REVISION 18 (A18-T1): the lifetime is the page instance. A time origin that moves on it during an iteration and between two (macOS
+    // WebKit's follows the disciplined wall clock: +1 ms every 92 s on one still page, measured) is the same lifetime; the collection completes.
+    restartTrace();
+    actions = [];
+    p2Queue = [];
+    p2Enqueues = 0;
+    harness.page = "page-1";
+    harness.engineEpochs = [{ generation: 1, run: 1, trace: 0 }];
+    let origin = 1_000_000;
+    vi.spyOn(performance, "timeOrigin", "get").mockImplementation(() => origin);
+    let drifts = 0;
+    harness.onNudge = () => {
+      drifts += 1;
+      const step = p2Step();
+      actions.push(
+        ...(drifts === 2
+          ? [...step.slice(0, 3), () => (origin += 1), ...step.slice(3)]
+          : step),
+      );
+    };
+    const drifting = p2Port();
+    const drift = drifting.run;
+    let driftMarks = 0;
+    drifting.run = async (fn, arg) => {
+      if (fn.toString() === markP2Iteration.toString() && ++driftMarks === 4)
+        origin += 1;
+      return drift(fn, arg);
+    };
+    const moved = await collectP2Iterations(
+      drifting,
+      P2_SCHEDULE(),
+      P2_OPTIONS,
+    );
+    expect(moved.failure).toBeNull();
+    expect(moved.iterations).toHaveLength(8);
+    expect(
+      [
+        moved.iterations[1]?.mark,
+        moved.iterations[1]?.read,
+        moved.iterations[3]?.mark,
+      ].map((f) => f?.time_origin),
+    ).toEqual([1_000_000, 1_000_001, 1_000_002]);
+  });
+
+  it("case (design assessment: another request takes the scripted body): a body served to no step, or a stale body still queued, fails the iteration", async () => {
+    // A request before the mark took the queued body and left the step an empty page: the commit is not this iteration's body.
+    let n = 0;
+    harness.onNudge = () => {
+      n += 1;
+      if (n === 2) p2Queue.unshift({ body: "{}", served: 0 });
+      actions.push(...p2Step());
+    };
+    const c = await collectP2Iterations(p2Port(), P2_SCHEDULE(), P2_OPTIONS);
+    expect(c.failure).toMatchObject({
+      index: 1,
+      phase: "selection",
+      problem:
+        "its body was answered 0 times, not once: the commit is not its page's",
+    });
   });
 });

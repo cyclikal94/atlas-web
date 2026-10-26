@@ -151,6 +151,12 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > decision in an otherwise complete synthetic package (all three engines). Revision 17 binds the entry to its call causally and validates both buffer
 > snapshots as one uninterrupted buffer (`draft-request-sample/5`, contract version 12, below). No measurement was taken under version 11, and no figure
 > here changes.
+>
+> **Status after review 18 (revision 18, 24 October 2026).** Review 18 found that P-2 skipped each WARM-UP before validating that iteration's own page: a
+> warm-up whose admission rounds all lapsed (`applied/lease_lapsed`) was followed by the engine's empty retry reaching idle, and the collection carried on.
+> Its support named measured samples only, so an otherwise complete package (all three engines) still resolved 796 cells and supported the desktop
+> decision. Revision 18 validates every iteration, warm-ups included, and keeps the whole collection with its first failure (`p2-sample/2`, contract
+> version 13, below). No measurement was taken under version 12, and no figure here changes.
 
 ## Read this first
 
@@ -597,7 +603,8 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   wrote, and a W2 run whose capture is itself invalid leaves that defect to the capture cell (the programme is incomplete either way).
 * **Each timed sample is one operation (revision 12).** P-2: a sample's scan and commit times are those of the FIRST commit after its start, of its served
   bytes, written, and ended idle; anything else fails the sample (none is dropped or replaced). `raw/P-2.samples.<engine>.json` names each sample's trace
-  start, commit and end in `raw/P-2.trace.<engine>.txt`, and the contract recomputes both series from them. P-4/P-10 (sync): one page evaluation after the
+  start, commit and end in `raw/P-2.trace.<engine>.txt`, and the contract recomputes both series from them. (Revision 18 extends this to every warm-up and
+  keeps the whole collection: `p2-sample/2`, below.) P-4/P-10 (sync): one page evaluation after the
   step's end reads the trace and the `/sync` ResourceTiming entries; the step start is the first non-coalesced `data.sync_tick`, the commit the first after
   it, and the request the ONE `/sync` entry between them (1 ms trace rounding). A latency sample does not need a written page. The support
   (`samples/P-4.sync.<engine>.json`, `samples/P-10.sync.<engine>.json`) is retained and the segments are recomputed from it.
@@ -674,6 +681,35 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   clamps to 0.1 ms and Firefox and WebKit to 1 ms, so a call and its entry often share a millisecond there (ties); no inversion has been observed. Every
   metric definition, sample count, workload, throttle and timer is unchanged; sync support stays `sync-request-sample/3`; version-11 support resolves
   incomplete and stays history.
+* **Every P-2 iteration, warm-ups included, is its own written page, and the whole collection is kept (revision 18; contract version 13).** One collector
+  (`collectP2Iterations`, tests/e2e/profile-samples.ts) runs every iteration of every shape: mark, queue the iteration's own body, take the wall start,
+  nudge, the unchanged nudge-to-idle wait (the wall end), then one page read. The shared rule (`p2IterationSelection`) judges the iteration before any
+  warm-up timing is dropped. It requires one page lifetime and engine start, the body served once with nothing else queued, and the FIRST commit from the
+  mark on, applied and committed, of the served bytes, with finite, non-negative scan and commit times. That commit's own step must end idle. Each mark must
+  follow the previous read on the same lifetime (`p2SequenceProblem`). Admission rounds that lapse and are retried inside the request leave one committed
+  result and remain valid. Three exhausted rounds fail that iteration whatever the engine's later retry does. The first failure in any phase (mark, nudge,
+  idle wait, read, selection, long-task read) stops the whole collection, later shapes included; nothing is skipped, replaced or retried. The writer first
+  writes the raw trace (create-once) and the stamped `raw/P-2.samples.<engine>.json` (`p2-sample/2`), then asserts. That file holds the schedule, every
+  attempted iteration's mark, read, served-body observation and selection, the first failure, any secondary error, and the trace's line count and
+  SHA-256. The writer publishes series only after a complete collection. The contract re-derives every iteration from the trace with the same rules. In
+  strict mode it takes the schedule from the programme (four ordinary shapes 20 + 300; dense 5 + 60, 5 + 40, 3 + 25, 3 + 15), never from a row. One
+  collection verdict governs every P-2 cell (all four metric families, long-task capability values and the trace cell), so a failed collection with no
+  series is invalid, never merely missing. Wall, scan, commit and long-task definitions, sample counts and timers are unchanged. `p2-sample/1` support
+  resolves incomplete and stays history. The long-task observer is installed only where the engine lists `longtask` in
+  `PerformanceObserver.supportedEntryTypes`. `observe` ignores an unknown type without throwing (Firefox 155 and WebKit 26.6 list none), so the earlier
+  writer published an all-zero long-task series there. Those engines now carry the typed `unavailable` capability record. The P-2 lifetime is
+  the page instance (the harness's per-load id) plus the engine starts and generation. The time origin is recorded, never compared: macOS
+  WebKit derives `performance.timeOrigin` from the disciplined wall clock and moves it on a still page (+1 ms every 92 s under a 10.84 ppm NTP
+  frequency correction, measured), so equality would refuse every WebKit collection longer than that.
+* **One page lifetime is the page instance, for every sample method (revision 18, A18-T2; contract version 14; Kieran's measurement
+  identity decision of 25 October 2026).** `sync-request-sample/4`, `draft-request-sample/6` and `p2-sample/3` bind a sample to the harness's
+  per-load page id and, exactly as before, to its engine starts and generation (sync, P-2) or its dispatcher, run, service, account and epoch
+  (draft). Every mark, read and dispatch identity still records `performance.timeOrigin`, and a missing or non-finite one is refused, but it
+  is never compared: within a sample, across a support file, or in the writer's own early-read and binding checks. A reload or replacement
+  always brings a new page id and is refused as before; an engine or dispatcher restart is refused as before. Values, selections, sample
+  counts, warm-ups, workloads, timers and thresholds are unchanged: no figure is derived from the time origin (they rest on the page clock,
+  ResourceTiming and the engine trace). Version-13 support (`sync-request-sample/3`, `draft-request-sample/5`, `p2-sample/2`) compared the
+  time origin, so it resolves incomplete and stays history.
 * **Device results are schema 4 (revision 12; schema 3 below is its predecessor).** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
   admitted run's figures must equal; W5 and killed attempts carry none. Schema 4 adds the run's own observation (made by the page with the same cold

@@ -1,12 +1,17 @@
 import { createHash } from "node:crypto";
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import {
   COMMANDS_PATH,
   draftWitnessSelection,
+  p2IterationSelection,
   SYNC_PATH,
   syncWitnessSelection,
 } from "../../scripts/lib/profile-sample-rules.mjs";
-import { w4 } from "../../scripts/lib/profile-workloads.mjs";
+import {
+  denseChecklistPage,
+  ordinaryPage,
+  w4,
+} from "../../scripts/lib/profile-workloads.mjs";
 import {
   ACCOUNT,
   bootSession,
@@ -17,19 +22,25 @@ import {
   waitForState,
 } from "./data-sync-helpers";
 import { oneColdRun } from "./profile-cold-run";
+import { p2PortOf } from "./profile-p2-port";
 import {
   collectDraftSamples,
+  collectP2Iterations,
   collectSyncSamples,
   type DraftWitness,
-  p2SampleProblems,
+  markP2Iteration,
+  nudgeP2Iteration,
+  type P2Port,
+  type P2Shape,
+  prepareDraftSample,
   prepareSyncSample,
   readDraftSample,
+  readP2Iteration,
   readSyncSample,
   type SamplePage,
   type SyncMark,
   type SyncWitness,
   samplePageOf,
-  selectP2Sample,
 } from "./profile-samples";
 
 /**
@@ -122,32 +133,36 @@ test("P-2 and P-4 selectors: a lapsed sample is refused as no written page; heal
   await waitForState(page, "idle");
   const body = W4;
   const bytes = Buffer.byteLength(body);
+  // REVISION 18 ADAPTATION (labelled; review 18 R18-P2): revision 12's `selectP2Sample`/`p2SampleProblems` are replaced by the writer's
+  // page functions and the shared iteration rule; the schedule (three lapses, then none, on the same page) and its intent are unchanged.
+  const port = p2PortOf(page, net);
   for (const lapses of [3, 0]) {
     await page.evaluate(() => performance.clearResourceTimings());
-    net.script.push(() => ({ status: 200, body }));
-    const before = await page.evaluate((n) => {
+    const mark = await port.run(markP2Iteration, null);
+    if (!mark) throw new Error("no data harness");
+    const served = port.enqueue(body);
+    await page.evaluate((n) => {
       (
         globalThis as { __fixtureLapseReservations?: number }
       ).__fixtureLapseReservations = n;
-      return (window.__atlasData?.engineTrace ?? []).length;
     }, lapses);
-    await page.evaluate(() => window.__atlasData?.nudgeSync());
-    const support = await (
-      await page.waitForFunction(selectP2Sample, before, {
-        timeout: 60_000,
-        polling: 10,
-      })
-    ).jsonValue();
-    const problems = p2SampleProblems(support as never, bytes);
+    await port.run(nudgeP2Iteration, null);
+    const read = await port.poll(
+      readP2Iteration,
+      { mark, force: false },
+      { timeout: 60_000, polling: 10 },
+    );
+    const s = p2IterationSelection(
+      { ...read, served: served.served(), pending: port.pending() },
+      bytes,
+    );
     if (lapses) {
-      expect(problems[0]).toBe(
-        "its commit wrote no page (applied/lease_lapsed)",
-      );
+      expect(s.problem).toBe("its commit wrote no page (applied/lease_lapsed)");
       // The retry's empty page then commits and the engine goes idle: the next sample starts from there.
       await waitForState(page, "idle");
       continue;
     }
-    expect(problems).toEqual([]);
+    expect(s.status, String(s.problem)).toBe("complete");
   }
   // Revision 13: the P-4/P-10 collector (one mark per sample, its bounded witness and the shared rule) over the real engine and its
   // real ResourceTiming entries.
@@ -254,6 +269,107 @@ const setOnline = (page: import("@playwright/test").Page, on: boolean) =>
     });
     if (online) window.dispatchEvent(new Event("online"));
   }, on);
+
+/**
+ * Revision 18 (review 18 R18-P2, design assessment schedule matrix rows 1-5): the P-2 writer's own collector and port over the real engine.
+ * Short LABELLED schedules (two ordinary-100 warm-ups and two samples, then one dense-100 warm-up and sample): they qualify the control
+ * flow, never a measurement. The lapses are the labelled fixture fault (`__fixtureLapseReservations`), set before the chosen iteration's
+ * nudge: one lapse per iteration is retried within its request (valid); three exhaust its rounds (applied/lease_lapsed, the engine asks
+ * again and its empty retry reaches idle), which must stop the collection AT that iteration, warm-up or not, later shape included.
+ */
+test("P-2 collector natively (revision 18): healthy and one-lapse iterations complete; three lapses at the first warm-up, a measured iteration or the later shape's warm-up stop the collection there, with nothing further queued", async ({
+  context,
+}) => {
+  test.setTimeout(240_000);
+  const net = await stubNetwork(context);
+  await seedSettled(context);
+  const page = await bootSession(context);
+  await startLeader(page);
+  await waitForState(page, "idle");
+  let round = 1_000;
+  const shapes = (): P2Shape[] => {
+    round += 10;
+    const base = round;
+    return [
+      {
+        name: "ordinary-100",
+        body: (i) => ordinaryPage(100, base + i),
+        warmup: 2,
+        samples: 2,
+      },
+      {
+        name: "dense-100",
+        body: () => denseChecklistPage(100),
+        warmup: 1,
+        samples: 1,
+      },
+    ];
+  };
+  const lapsing = (lapses: Record<number, number>) => {
+    const base = p2PortOf(page, net);
+    let nudges = 0;
+    const port: P2Port = {
+      ...base,
+      run: async (fn, arg) => {
+        if ((fn as unknown) === nudgeP2Iteration) {
+          const n = lapses[nudges] ?? 0;
+          nudges += 1;
+          if (n)
+            await page.evaluate((k) => {
+              (
+                globalThis as { __fixtureLapseReservations?: number }
+              ).__fixtureLapseReservations = k;
+            }, n);
+        }
+        return base.run(fn, arg);
+      },
+    };
+    return { port, nudges: () => nudges };
+  };
+  const options = { longTasks: false, timeout: 60_000, polling: 10 };
+  for (const lapses of [{}, { 0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 5: 1 }] as Record<
+    number,
+    number
+  >[]) {
+    const p = lapsing(lapses);
+    const c = await collectP2Iterations(p.port, shapes(), options);
+    expect(c.failure, JSON.stringify(c.failure)).toBeNull();
+    expect(c.iterations.map((e) => [e.shape, e.index])).toEqual([
+      ["ordinary-100", 0],
+      ["ordinary-100", 1],
+      ["ordinary-100", 2],
+      ["ordinary-100", 3],
+      ["dense-100", 0],
+      ["dense-100", 1],
+    ]);
+    expect(c.series["ordinary-100"]?.scan).toHaveLength(2);
+    expect(c.series["dense-100"]?.commit).toHaveLength(1);
+    expect(p.nudges()).toBe(6);
+    expect(net.script).toHaveLength(0);
+  }
+  for (const [at, shape, index, warmup] of [
+    [0, "ordinary-100", 0, true],
+    [2, "ordinary-100", 2, false],
+    [4, "dense-100", 0, true],
+  ] as const) {
+    const p = lapsing({ [at]: 3 });
+    const c = await collectP2Iterations(p.port, shapes(), options);
+    expect(c.failure).toMatchObject({
+      shape,
+      index,
+      warmup,
+      phase: "selection",
+      problem: "its commit wrote no page (applied/lease_lapsed)",
+    });
+    expect(c.iterations).toHaveLength(at);
+    // No further body was queued and no further nudge sent after the failed iteration.
+    expect(p.nudges()).toBe(at + 1);
+    expect(net.script).toHaveLength(0);
+    const w = c.failure?.witness as { served: number; lines: string[] };
+    expect(w.served).toBe(1);
+    await waitForState(page, "idle");
+  }
+});
 
 test("P-4/P-10 natively: a step that ended with no request is the sample's failure, also on a late read; a lapsed step is a complete latency sample; an engine restart since the mark is refused", async ({
   context,
@@ -381,6 +497,127 @@ test("P-4/P-10 natively: a step that ended with no request is the sample's failu
   expect(syncWitnessSelection(restarted).problem).toBe(
     "the engine was started again during the sample",
   );
+});
+
+// ---- revision 18 (A18-T2; Kieran's measurement identity decision of 25 October 2026): the page instance, not the time origin ----------
+// macOS WebKit moves `performance.timeOrigin` with the disciplined wall clock on an unchanged document (+1 ms every 92 s, measured), too
+// slowly to wait for here. The page's own `performance.timeOrigin` is shadowed (+1 ms each time) right after each sample's mark: the real
+// engine, dispatcher, ResourceTiming and page clock are untouched. LABELLED DIAGNOSTIC SEAM: no timer, count or assertion of the writer changed.
+const shiftTimeOrigin = () => {
+  const moved = performance.timeOrigin + 1;
+  Object.defineProperty(performance, "timeOrigin", {
+    configurable: true,
+    get: () => moved,
+  });
+  return moved;
+};
+/** The writer's page, with the time origin moved once after each mark that `marks` produces. */
+const drifting = (page: Page, marks: unknown): SamplePage => {
+  const base = samplePageOf(page);
+  const after = async <T>(fn: unknown, out: T): Promise<T> => {
+    if (fn === marks && out !== null) await page.evaluate(shiftTimeOrigin);
+    return out;
+  };
+  return {
+    poll: async (fn, arg, o) => after(fn, await base.poll(fn, arg, o)),
+    run: async (fn, arg) => after(fn, await base.run(fn, arg)),
+  };
+};
+
+test("P-4/P-10 natively (revision 18, A18-T2): a time origin that moves on the unchanged document keeps every sync sample complete with the same selection and figures; a real reload during a sample is refused", async ({
+  context,
+}) => {
+  test.setTimeout(180_000);
+  await stubNetwork(context);
+  await seedSettled(context);
+  const page = await bootSession(context);
+  await startLeader(page);
+  await waitForState(page, "idle");
+  const c = await collectSyncSamples(drifting(page, prepareSyncSample), {
+    warmup: 1,
+    samples: 3,
+    timeout: 60_000,
+    polling: 10,
+  });
+  expect(c.failure).toBeNull();
+  expect(c.samples).toHaveLength(3);
+  for (const e of c.samples) {
+    expect(e.read.time_origin).toBeGreaterThan(e.mark.time_origin);
+    const s = syncWitnessSelection(e);
+    expect(s.status, String(s.problem)).toBe("complete");
+    expect(s.selected).toEqual(e.selected);
+    // Timing accuracy: the selection and figures rest on the page clock, ResourceTiming and the trace, not on the time origin.
+    expect(
+      syncWitnessSelection({
+        ...e,
+        read: { ...e.read, time_origin: e.mark.time_origin },
+      }),
+    ).toEqual(s);
+  }
+  // A real reload between the mark and the read: a new document, so a new page id; refused whatever its time origin.
+  await waitForState(page, "idle");
+  const mark = (await (
+    await page.waitForFunction(prepareSyncSample, undefined, {
+      timeout: 60_000,
+      polling: 10,
+    })
+  ).jsonValue()) as SyncMark;
+  await page.reload();
+  const reloaded = (await page.evaluate(readSyncSample, {
+    mark,
+    force: true,
+  })) as SyncWitness;
+  expect(reloaded.read.page).not.toBe(mark.page);
+  expect(syncWitnessSelection(reloaded).problem).toBe(
+    "the page was reloaded or replaced during the sample",
+  );
+});
+
+test("P-4 draft natively (revision 18, A18-T2): a time origin that moves on the unchanged document keeps every draft sample complete with the same selection and figures", async ({
+  context,
+}) => {
+  test.setTimeout(180_000);
+  await stubNetwork(context);
+  await seedSettled(context);
+  const page = await bootSession(context);
+  await startOutbox(page, ACCOUNT, { observeDispatch: true });
+  const c = await collectDraftSamples(drifting(page, prepareDraftSample), {
+    timeout: 30_000,
+    polling: 10,
+    account: ACCOUNT,
+    person: () => crypto.randomUUID(),
+    warmup: 1,
+    samples: 3,
+  });
+  expect(c.failure).toBeNull();
+  expect(c.samples).toHaveLength(3);
+  for (const e of c.samples) {
+    expect(
+      e.completion.identity_after?.time_origin ?? Number.NaN,
+    ).toBeGreaterThan(e.mark.time_origin);
+    const s = draftWitnessSelection(e);
+    expect(s.status, String(s.problem)).toBe("complete");
+    expect(s.selected).toEqual(e.selected);
+    // Timing accuracy: every identity's time origin set back to the mark's gives the same selection and figures.
+    const origin = e.mark.time_origin;
+    const unmoved = <T extends { time_origin: number } | null>(id: T): T =>
+      id === null ? id : { ...id, time_origin: origin };
+    const still: DraftWitness = {
+      ...e,
+      identities: {
+        before: unmoved(e.identities.before),
+        queued: unmoved(e.identities.queued),
+        enqueued: unmoved(e.identities.enqueued),
+      },
+      timing: { ...e.timing, identity: unmoved(e.timing.identity) },
+      completion: {
+        ...e.completion,
+        identity_before: unmoved(e.completion.identity_before),
+        identity_after: unmoved(e.completion.identity_after),
+      },
+    };
+    expect(draftWitnessSelection(still)).toEqual(s);
+  }
 });
 
 test("P-4 draft natively: healthy drafts are one send, its answer and its request; a draft whose first request was aborted and sent again fails as sent again", async ({
@@ -875,7 +1112,23 @@ test("P-4 draft natively (revision 17): every healthy call begins no later than 
       "the resource-timing buffer shrank between the timing and completion reads: it was cleared or lost entries",
     ],
   ] as const) {
-    const copy = structuredClone(healthy.samples[0]) as DraftWitness;
+    // REVISION 18 HARNESS CORRECTION: the late begin is applied to a sample whose later records and reads all follow its entry's end by
+    // 0.05 ms. Under a 1 ms clock the first sample's return can tie `responseEnd`, and the moved begin then broke the records' order first.
+    const base = label.startsWith("the call begun")
+      ? healthy.samples.find((e) => {
+          const begin = e.records.find((r) => r.event === "request_begin");
+          const late = (e.resources[0]?.responseEnd ?? Number.NaN) + 0.05;
+          return (
+            begin !== undefined &&
+            e.records.every((r) => r.seq <= begin.seq || r.at >= late) &&
+            [e.timing.done, e.completion.started_at, e.completion.at].every(
+              (at) => at >= late,
+            )
+          );
+        })
+      : healthy.samples[0];
+    expect(base, `${label}: a healthy sample to edit`).toBeDefined();
+    const copy = structuredClone(base) as DraftWitness;
     edit(copy);
     expect(draftWitnessSelection(copy).problem, label).toBe(problem);
   }

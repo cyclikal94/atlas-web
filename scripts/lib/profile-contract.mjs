@@ -52,13 +52,13 @@ import {
   coldObservationRules,
   commitsOfTrace,
   liveObservationRules,
-  pageCommitted,
-  traceEvent,
-  tracePayload,
 } from "./profile-outcome-rules.mjs";
 import {
   DRAFT_WITNESS_METHOD,
   draftWitnessSelection,
+  P2_SAMPLE_METHOD,
+  p2IterationSelection,
+  p2SequenceProblem,
   SYNC_WITNESS_METHOD,
   syncWitnessSelection,
   TRACE_ROUNDING_MS,
@@ -89,15 +89,16 @@ export const RECORDED = JSON.parse(
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 // ---- the required set -----------------------------------------------------------------------------------------------------------------
+/** P-2's shapes in collection order: the measured samples and (revision 18) the warm-ups the programme takes before them. */
 export const P2_SHAPES = [
-  ["ordinary-100", 300],
-  ["ordinary-200", 300],
-  ["ordinary-400", 300],
-  ["ordinary-800", 300],
-  ["dense-100", 60],
-  ["dense-200", 40],
-  ["dense-400", 25],
-  ["dense-800-W1", 15],
+  ["ordinary-100", 300, 20],
+  ["ordinary-200", 300, 20],
+  ["ordinary-400", 300, 20],
+  ["ordinary-800", 300, 20],
+  ["dense-100", 60, 5],
+  ["dense-200", 40, 5],
+  ["dense-400", 25, 3],
+  ["dense-800-W1", 15, 3],
 ];
 export const DENSE_SIZES = {
   "dense-100": 100,
@@ -247,6 +248,8 @@ export function requiredCells(engines = ENGINES) {
         capability: "longtask",
       });
     }
+    // Revision 18 (R18-P2, design assessment C3): the trace cell carries the P-2 collection verdict, so a failed collection is invalid
+    // even when no series row was written.
     add({
       id: `P-2:trace[${engine}]`,
       item: "P-2",
@@ -254,6 +257,8 @@ export function requiredCells(engines = ENGINES) {
       engine,
       kind: "text-file",
       path: `raw/P-2.trace.${engine}.txt`,
+      case: CASE.p2,
+      collection: p2TraceProblems,
     });
     // P-3
     for (const kind of ["draft", "fence", "form_recovery"])
@@ -1151,8 +1156,10 @@ function crossChecks(ev, cell, samples, row) {
       ? []
       : [`its samples are not the per-run ${m[3]} of ${path}, in run order`];
   }
-  m = /^P-2 (\S+) (scan_ms|commit_ms)$/.exec(name);
-  if (m) return p2SupportProblems(ev, engine, m[1], m[2], samples, row);
+  m = /^P-2 (\S+) (wall_ms|scan_ms|commit_ms|long_task_ms_per_page)$/.exec(
+    name,
+  );
+  if (m) return p2SeriesProblems(ev, engine, m[1], m[2], samples, row);
   m =
     /^(?:P-4 sync page (pre_issue_ms|request_ms|post_response_ms|total_ms)|P-10 sync page (request_ms) \(unthrottled loopback\)|P-10 sync page (duration_ms) \(proxy delay 250 ms\))$/.exec(
       name,
@@ -1247,84 +1254,232 @@ function p2Bytes(shape, index) {
 }
 
 /**
- * P-2's scan and commit series against their per-sample operations (revision 12, review 12, design assessment DA-M1; contract version 7).
- * `raw/P-2.samples.<engine>.json` names each recorded sample's trace start, commit and step end in `raw/P-2.trace.<engine>.txt`; the
- * commit must be the FIRST after its start, of the sample's served bytes (regenerated here), applied and committed, followed by an idle
- * step end, the samples in order without overlap, and the series value that commit's own timing. A later commit (the retry of an empty
- * page after a lapsed hold) can never supply a sample.
+ * P-2's collection (revision 18; review 18 R18-P2, design assessment invariants 1-7, C3; contract version 13, and 14 after A18-T1/A18-T2).
+ * `raw/P-2.samples.<engine>.json` (`p2-sample/3`; the page instance, not the time origin, is the lifetime) declares the schedule and keeps EVERY attempted iteration, warm-ups included, with its mark, read, served-body observation
+ * and selection, and the first failure; it is bound to `raw/P-2.trace.<engine>.txt` by line count and SHA-256. Each iteration is re-derived
+ * from the trace with the writer's own rule (`p2IterationSelection`: one lifetime, the first commit from its mark on, applied and committed
+ * of its served bytes, regenerated here, ending idle) and the sequence rule (each mark follows the previous read, warm-ups and shape
+ * boundaries included). Strict mode takes the schedule from the programme (`P2_SHAPES`), never from a row; the shortened writer
+ * qualification (relaxed) may declare fewer shapes and iterations, never a different outcome rule. A recorded failure, an unrun iteration or
+ * a missing one makes the whole collection invalid, whichever P-2 cell asks. Revision 12's `p2-sample/1` named measured samples only, so a
+ * failed warm-up followed by a successful retry was invisible.
  */
-function p2SupportProblems(ev, engine, shape, metric, samples, row) {
-  const key = `p2support:${engine}`;
-  if (!ev[key]) {
-    const support = ev.readJson(`raw/P-2.samples.${engine}.json`);
-    const tracePath = `raw/P-2.trace.${engine}.txt`;
-    ev[key] = {
-      support,
-      lines: ev.exists(tracePath)
-        ? ev.bytes(tracePath).toString("utf8").split("\n")
-        : null,
-    };
-  }
-  const { support, lines } = ev[key];
-  if (!support.present || support.error || !isObj(support.value))
-    return ["its per-sample support (raw/P-2.samples) is missing or malformed"];
-  if (support.value.method !== "p2-sample/1" || support.value.engine !== engine)
-    return ["its per-sample support is not this engine's p2-sample/1"];
-  if (!lines) return ["its trace (raw/P-2.trace) is missing"];
-  const entries = support.value.shapes?.[shape];
-  if (!Array.isArray(entries) || entries.length !== samples.length)
-    return ["its per-sample support does not name one operation per sample"];
-  const warmup = row?.warmup;
-  for (const [k, e] of entries.entries()) {
-    const where = `sample ${k}`;
-    if (
-      !isObj(e) ||
-      !isCount(e.from) ||
-      !isCount(e.commit) ||
-      !isCount(e.end) ||
-      !(e.from <= e.commit && e.commit < e.end)
+function p2Collection(ev, engine) {
+  const key = `p2collection:${engine}`;
+  ev[key] ??= p2CollectionOf(ev, engine);
+  return ev[key];
+}
+
+function p2CollectionOf(ev, engine) {
+  const file = `raw/P-2.samples.${engine}.json`;
+  const tracePath = `raw/P-2.trace.${engine}.txt`;
+  const entry = ev.readJson(file);
+  const fail = (problem) => ({
+    present: entry.present || ev.exists(tracePath),
+    problems: [problem],
+  });
+  if (!entry.present)
+    return fail(`its collection support (${file}) is missing`);
+  if (entry.error || !isObj(entry.value)) return fail(`${file} is malformed`);
+  const v = entry.value;
+  if (v.method !== P2_SAMPLE_METHOD)
+    return fail(`${file} is not ${P2_SAMPLE_METHOD}`);
+  if (v.engine !== engine)
+    return fail(`${file} is ${String(v.engine)}'s support, not ${engine}'s`);
+  const programme = P2_SHAPES.map(([shape, samples, warmup]) => ({
+    shape,
+    warmup,
+    samples,
+  }));
+  const schedule = Array.isArray(v.schedule) ? v.schedule : null;
+  if (
+    !schedule ||
+    schedule.length === 0 ||
+    !schedule.every(
+      (s) =>
+        isObj(s) && isCount(s.warmup) && isCount(s.samples) && s.samples > 0,
     )
-      return [`${where}: its support is malformed`];
-    if (!isCount(warmup) || e.index !== warmup + k)
-      return [`${where}: its support is not the sample after the warm-ups`];
-    if (k > 0 && !(e.from > entries[k - 1].end))
-      return [`${where}: it overlaps the previous sample's operation`];
-    const commits = [];
-    for (let t = e.from; t <= e.commit; t += 1)
-      if (traceEvent(lines[t]) === "data.sync_commit") commits.push(t);
-    if (commits[0] !== e.commit)
-      return [`${where}: its commit is not the first after the sample began`];
-    const commit = tracePayload(lines[e.commit]);
-    if (!pageCommitted(commit)) return [`${where}: its commit wrote no page`];
-    const bytes = p2Bytes(shape, e.index);
-    if (commit.bytes !== bytes || e.bytes !== bytes)
-      return [
-        `${where}: its commit is ${commit.bytes} bytes, not the served ${bytes}`,
-      ];
-    for (let t = e.commit + 1; t < e.end; t += 1)
+  )
+    return fail(`${file} declares no schedule`);
+  if (ev.relaxed) {
+    // A shortened qualification run: the programme's shapes in order (a prefix of them is enough), each with no more iterations.
+    const names = programme.map((p) => p.shape);
+    let at = -1;
+    for (const s of schedule) {
+      const next = names.indexOf(s.shape);
+      const full = programme[next];
       if (
-        ["data.sync_next", "data.sync_step_failed"].includes(
-          traceEvent(lines[t]),
-        )
+        !(next > at) ||
+        !(s.warmup <= full.warmup && s.samples <= full.samples)
       )
-        return [`${where}: its step end is not the first after its commit`];
+        return fail(`${file} declares a schedule the programme does not take`);
+      at = next;
+    }
+  } else if (canonical(schedule) !== canonical(programme))
+    return fail(
+      `${file} declares another schedule than the programme's (${P2_SHAPES.length} shapes, their warm-ups and samples)`,
+    );
+  if (!ev.exists(tracePath)) return fail(`its trace (${tracePath}) is missing`);
+  const bytes = ev.bytes(tracePath);
+  const lines = bytes.toString("utf8").split("\n");
+  if (
+    !isObj(v.trace) ||
+    v.trace.lines !== lines.length ||
+    v.trace.sha256 !== sha256(bytes)
+  )
+    return fail(
+      `${file} is not bound to ${tracePath} (line count and SHA-256)`,
+    );
+  if (!Array.isArray(v.secondary) || v.secondary.length > 0)
+    return fail(
+      `${file} records a secondary error: ${String(v.secondary?.[0] ?? "none declared")}`,
+    );
+  const expected = schedule.flatMap((s) =>
+    Array.from({ length: s.warmup + s.samples }, (_, index) => ({
+      shape: s.shape,
+      index,
+      warmup: index < s.warmup,
+    })),
+  );
+  if (!Array.isArray(v.iterations) || v.iterations.length > expected.length)
+    return fail(`${file} does not keep one entry per scheduled iteration`);
+  const values = Object.fromEntries(schedule.map((s) => [s.shape, []]));
+  let previous = null;
+  for (const [k, e] of v.iterations.entries()) {
+    const x = expected[k];
+    const where = `${x.shape} iteration ${x.index}${x.warmup ? " (a warm-up)" : ""}`;
+    if (!isObj(e) || e.shape !== x.shape || e.index !== x.index)
+      return fail(
+        `${file}'s entry ${k} is not ${where}: the iterations are not the schedule's, in order`,
+      );
+    const served = p2Bytes(x.shape, x.index);
+    if (e.bytes !== served)
+      return fail(
+        `${where}: its support records ${e.bytes} bytes, not the served ${served}`,
+      );
     if (
-      traceEvent(lines[e.end]) !== "data.sync_next" ||
-      tracePayload(lines[e.end])?.state !== "idle"
+      !isObj(e.mark) ||
+      !isObj(e.read) ||
+      !isCount(e.read.to) ||
+      !isCount(e.mark.from)
     )
-      return [`${where}: its step did not end idle`];
-    if (samples[k] !== commit[metric])
-      return [
-        `${where}: ${samples[k]} is not its commit's ${metric} (${commit[metric]})`,
-      ];
+      return fail(`${where}: its support is malformed`);
+    if (e.read.to > lines.length)
+      return fail(`${where}: its read lies beyond the retained trace`);
+    if (previous) {
+      const problem = p2SequenceProblem(previous, e.mark);
+      if (problem) return fail(`${where}: ${problem}`);
+    }
+    const selection = p2IterationSelection(
+      {
+        mark: e.mark,
+        read: e.read,
+        lines: lines.slice(e.mark.from, e.read.to),
+        served: e.served,
+        pending: e.pending,
+      },
+      served,
+    );
+    if (selection.status !== "complete")
+      return fail(
+        `${where}: its page is ${selection.status}: ${selection.problem}`,
+      );
+    if (canonical(e.selected) !== canonical(selection.selected))
+      return fail(
+        `${where}: its recorded selection is not the commit its trace shows`,
+      );
+    previous = e.read;
+    if (!x.warmup) values[x.shape].push(selection.values);
   }
+  if (v.failure !== null) {
+    const f = v.failure;
+    const x = expected[v.iterations.length];
+    if (
+      !isObj(f) ||
+      !x ||
+      f.shape !== x.shape ||
+      f.index !== x.index ||
+      f.warmup !== x.warmup ||
+      !isText(f.phase) ||
+      !isText(f.problem)
+    )
+      return fail(`${file} records a failure that is not its next iteration's`);
+    return fail(
+      `the P-2 collection failed at ${x.shape} iteration ${x.index}${x.warmup ? " (a warm-up)" : ""} (${f.phase}): ${f.problem}`,
+    );
+  }
+  if (v.iterations.length !== expected.length)
+    return fail(
+      `${file} keeps ${v.iterations.length} of the ${expected.length} scheduled iterations and records no failure`,
+    );
+  return { present: true, problems: [], v, schedule, values };
+}
+
+/** A P-2 row (a series or a capability value) against its engine's collection: valid, and written by the same stage, invocation and test. */
+function p2RowProblems(ev, engine, row) {
+  const c = p2Collection(ev, engine);
+  if (c.problems.length) return c.problems;
+  const stamp = c.v.evidence;
+  if (
+    !ev.relaxed &&
+    (!isObj(stamp) ||
+      stamp.stage !== row?.stage ||
+      stamp.invocation !== row?.invocation ||
+      !isObj(stamp.collection) ||
+      stamp.collection.test !== row?.collection?.test)
+  )
+    return [
+      `raw/P-2.samples.${engine}.json was not written by this series' stage, invocation and test`,
+    ];
   return [];
+}
+
+/**
+ * A P-2 series against its collection: the collection valid (every iteration, warm-ups included), one value per measured iteration of its
+ * shape and the row's warm-up count the schedule's; the scan and commit series also equal their iterations' own commit timings, in order.
+ */
+function p2SeriesProblems(ev, engine, shape, metric, samples, row) {
+  const problems = p2RowProblems(ev, engine, row);
+  if (problems.length) return problems;
+  const { schedule, values } = p2Collection(ev, engine);
+  const declared = schedule.find((s) => s.shape === shape);
+  if (!declared) return [`its collection did not schedule ${shape}`];
+  if (row?.warmup !== declared.warmup)
+    return [
+      `its row records ${row?.warmup} warm-ups, its collection ${declared.warmup}`,
+    ];
+  if (samples.length !== declared.samples)
+    return ["its collection does not name one measured iteration per sample"];
+  if (metric !== "scan_ms" && metric !== "commit_ms") return [];
+  for (const [k, value] of values[shape].entries())
+    if (samples[k] !== value[metric])
+      return [
+        `sample ${k}: ${samples[k]} is not its commit's ${metric} (${value[metric]})`,
+      ];
+  return [];
+}
+
+/** The P-2 trace cell: missing only when neither the trace nor its support exists; otherwise the collection's verdict, stamp and window. */
+function p2TraceProblems(ev, cell) {
+  const c = p2Collection(ev, cell.engine);
+  if (!c.present) return result(cell, "missing", [`${cell.path} is missing`]);
+  const window = caseWindow(ev, cell);
+  const problems = [...c.problems];
+  if (!problems.length) {
+    problems.push(...windowProblems(ev, cell, c.v.evidence ?? {}, window));
+    if (!window && !ev.relaxed)
+      problems.push(`its case "${cell.case}" is not collected exactly once`);
+  }
+  return problems.length
+    ? result(cell, "invalid", problems)
+    : result(cell, "ok");
 }
 
 /**
  * The common frame of a per-sample support file (revision 13, review 13 R2; contract version 8): its method, its engine (the series'), its
  * stamp (the series row's stage, invocation and collection test), no recorded failure, one entry per sample after the warm-ups, in order,
- * each mark at or after the previous sample's read, and one page instance and time origin for the whole file. `closeOf` names the read that
+ * each mark at or after the previous sample's read, and one page instance for the whole file (revision 18, A18-T2: the time origin is
+ * recorded, never compared). `closeOf` names the read that
  * ends a sample: a sync sample's read; a draft sample's completion read (revision 14, contract version 9), whose dispatch record position
  * the next mark must also follow.
  */
@@ -1384,10 +1539,9 @@ function supportFrameProblems(
       !isObj(closeOf(e))
     )
       return { problems: [`${where}: its support is malformed`] };
-    if (
-      e.mark.page !== v.samples[0].mark.page ||
-      e.mark.time_origin !== v.samples[0].mark.time_origin
-    )
+    // Revision 18 (A18-T2): one page instance for the whole file. The time origin is recorded, never compared; the sample rules refuse a
+    // mark without a finite one.
+    if (e.mark.page !== v.samples[0].mark.page)
       return {
         problems: [`${where}: it was collected on another page instance`],
       };
@@ -1738,12 +1892,13 @@ function resolveMeasurement(ev, cell) {
         (cell.capability !== "heap" || cell.engine !== "chromium") &&
         (cell.capability !== "longtask" || cell.engine !== "chromium")
       ) {
-        const problems = windowProblems(
-          ev,
-          cell,
-          declared[0],
-          declared[0].collection,
-        );
+        const problems = [
+          ...windowProblems(ev, cell, declared[0], declared[0].collection),
+          // Revision 18 (R18-P2): a capability record never stands in for a P-2 collection that failed.
+          ...(cell.item === "P-2"
+            ? p2RowProblems(ev, cell.engine, declared[0])
+            : []),
+        ];
         return problems.length
           ? result(cell, "invalid", problems)
           : result(cell, "unavailable", [declared[0].reason]);
@@ -1858,6 +2013,7 @@ function resolveJsonFile(ev, cell) {
 }
 
 function resolveTextFile(ev, cell) {
+  if (cell.collection) return cell.collection(ev, cell);
   if (!ev.exists(cell.path))
     return result(cell, "missing", [`${cell.path} is missing`]);
   return ev.bytes(cell.path).length > 0

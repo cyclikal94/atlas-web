@@ -98,9 +98,19 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * returned no earlier than the entry's request was sent; both ResourceTiming snapshots typed, below the buffer and containing their counts,
  * the buffer never shrinking between them). Sync support stays `sync-request-sample/3`. Version 11's draft support accepted a call that
  * began after its entry ended and missing, zero or shrinking buffer totals; version 11 evidence (no Air request was recorded under it)
- * resolves incomplete and stays history, unchanged.
+ * resolves incomplete and stays history, unchanged. Version 13 (WEB-09c revision 18, review 18 R18-P2, design assessment invariants 1-7,
+ * C1-C4): P-2's support is `p2-sample/2`, the whole collection of every engine (the schedule, EVERY attempted iteration with warm-ups, each
+ * one's mark, read, served-body observation and selection, the first failure, and the trace's line count and SHA-256), re-derived iteration
+ * by iteration; one collection verdict governs every P-2 cell, including the trace cell and capability values, and strict mode takes the
+ * schedule from the programme. Version 12's `p2-sample/1` named measured samples only, so a failed warm-up was invisible; version 12
+ * evidence (no Air request was recorded under it) resolves incomplete and stays history, unchanged. Version 14 (WEB-09c revision 18,
+ * A18-T1/A18-T2, Kieran's measurement identity decision of 25 October 2026): a page lifetime is the page instance (the harness's per-load
+ * id) and the engine or dispatcher starts, compared exactly; the time origin is recorded and must be finite, but is never compared, because
+ * macOS WebKit moves it with the disciplined wall clock on an unchanged document. Supports `sync-request-sample/4`,
+ * `draft-request-sample/6` and `p2-sample/3`; values, selections, counts and timers are unchanged. Version 13 evidence (no Air request was
+ * recorded under it) compared the time origin, resolves incomplete and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 12;
+export const CONTRACT_VERSION = 14;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [
