@@ -31,7 +31,7 @@ const ICONS: Record<string, LucideIcon> = {
 export function SettingsHome() {
   const openedByLink = useOpenedByLink();
   return (
-    <div className="atlas-enter flex max-w-[620px] flex-col gap-4 tablet:gap-5">
+    <div className="atlas-enter flex max-w-[620px] flex-col gap-3 tablet:gap-5">
       <PageHeading>Settings</PageHeading>
       <AccountCard />
       <List className="atlas-stagger overflow-hidden rounded-xl border bg-card p-0.5 shadow-sm tablet:p-1">

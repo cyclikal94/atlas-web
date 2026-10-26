@@ -45,7 +45,7 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
       id="main"
       tabIndex={-1}
       // isolate: nothing a screen positions inside main can be stacked above the sticky chrome.
-      className="isolate min-w-0 flex-1 px-4 py-4 tablet:px-9 tablet:py-8 desktop:px-12 desktop:py-10"
+      className="isolate min-w-0 flex-1 px-4 py-3 tablet:px-9 tablet:py-8 desktop:px-12 desktop:py-10"
     >
       {children}
     </main>

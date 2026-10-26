@@ -61,11 +61,11 @@ export function AccountCard() {
     <section
       aria-labelledby="account-heading"
       data-account-card=""
-      className="flex flex-col gap-2.5 rounded-xl border bg-card p-3 shadow-sm tablet:gap-3 tablet:p-4"
+      className="flex flex-col gap-2 rounded-xl border bg-card p-3 shadow-sm tablet:gap-3 tablet:p-4"
     >
       <h2
         id="account-heading"
-        className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+        className="sr-only text-xs font-semibold uppercase tracking-wider text-muted-foreground tablet:not-sr-only"
       >
         {ACCOUNT_HEADING}
       </h2>
@@ -98,7 +98,7 @@ export function AccountCard() {
           <div className="flex min-w-0 flex-1 basis-48 flex-col gap-0.5">
             <p
               data-account-username=""
-              className="break-words text-base font-medium text-foreground"
+              className="break-words text-sm font-medium text-foreground tablet:text-base"
             >
               <span className="sr-only">Signed in as username </span>
               {account.value.username}
