@@ -111,6 +111,18 @@ export default defineConfig(({ mode }) => {
     build: {
       target: "es2022",
       outDir: fixture ? "dist-fixture" : "dist",
+      // WEB-08c revision 2 (HF-11): a lazy chunk never asks the browser to preload the ENTRY chunk (`index` for the app, `fixture` for the
+      // fixture shell). The entry is the page's own script, always already executed when a dynamic import runs, so its `modulepreload`
+      // was never consumed and WebKit reported it ("preloaded using link preload but not used within a few seconds", campaign
+      // 2026-10-13T22-29-49.133Z-3960efcb). Every other dependency is preloaded as before.
+      modulePreload: {
+        resolveDependencies: (_filename, deps, { hostType }) =>
+          hostType === "js"
+            ? deps.filter(
+                (dep) => !/(^|\/)assets\/(index|fixture)-[^/]+\.js$/.test(dep),
+              )
+            : deps,
+      },
       rollupOptions: {
         ...(fixture ? { input: "fixture.html" } : {}),
         // `src/data` modules have no import-time effect the application depends on (the plan registry is filled by the plans that

@@ -10,6 +10,8 @@ import type { Message } from "./outcome-copy";
 export type FeedbackBody =
   | { kind: "superseded" }
   | { kind: "lock_wait" }
+  /** WEB-08c (D-8c-04, `attempt-end.ts`): an indeterminate sign-in was resolved and nothing settled: "That sign-in didn't finish". */
+  | { kind: "ended" }
   /** `info` is good news ("linked"); `problem` is something that did not work. */
   | { kind: "message"; tone: "info" | "problem"; message: Message };
 

@@ -8,6 +8,7 @@ import {
   KEY_PATHS,
   parseSchema,
   SCHEMA_VERSION,
+  SPLIT_BODIES_VERSION,
   STORE_NAMES,
 } from "../../src/data/model/schema";
 import {
@@ -31,10 +32,16 @@ describe("F-A1: the schema constants equal plan 5.0.1", () => {
         "sync_state",
       ].sort(),
     );
-    expect(SCHEMA_VERSION).toBe(2);
+    // Adapted (WEB-10a revision 3): the version that introduced `draft_commands` is still 2; the current version is 3 (next test).
+    expect(SPLIT_BODIES_VERSION).toBe(2);
     expect(accountDatabaseName("0f9f5a1e-aaaa-4bbb-8ccc-123456789abc")).toBe(
       "atlas-0f9f5a1e-aaaa-4bbb-8ccc-123456789abc",
     );
+  });
+
+  test("version 3 (WEB-10a revision 3) is the composition-generation barrier: it changes no store", () => {
+    expect(SCHEMA_VERSION).toBe(3);
+    expect(SPLIT_BODIES_VERSION).toBeLessThan(SCHEMA_VERSION);
   });
 
   test("the Dexie strings and the design's index names (table of 5.0.1)", () => {

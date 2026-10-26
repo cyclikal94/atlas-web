@@ -97,8 +97,16 @@ export const D_INDEX_NAMES: Readonly<Record<string, string>> = Object.freeze({
   "form_recovery.by_form": "form_context",
 });
 
-/** The Dexie schema's version. Version 1 created the nine stores; version 2 splits the draft body out (see above). */
-export const SCHEMA_VERSION = 2;
+/**
+ * The Dexie schema's version. Version 1 created the nine stores; version 2 splits the draft body out (see above). Version 3 (WEB-10a
+ * revision 3) changes no store: it is the upgrade barrier for the local composition generation (`model/composition.ts`). Every writer of
+ * this build advances it, a build before it did not, and opening version 3 delivers `versionchange` to an older build's connections,
+ * which latch the account `upgrade_pending` and close (an older build cannot open a version-3 database at all), so no writer that leaves
+ * the generation alone can commit beside a page that relies on it.
+ */
+export const SCHEMA_VERSION = 3;
+/** The version that moved the command bodies to `draft_commands` (its upgrade runs for a version-1 database). */
+export const SPLIT_BODIES_VERSION = 2;
 
 /** The version 1 schema, kept so a database created by it is upgraded (the command bodies move to `draft_commands`). */
 export const DEXIE_SCHEMA_V1: Readonly<Record<string, string>> = Object.freeze({

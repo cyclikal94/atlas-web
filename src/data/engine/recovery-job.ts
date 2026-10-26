@@ -274,6 +274,17 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
   let handle: RecoveryHandle | null = null;
   /** Recovery mode reported a phase to the session; `null` is reported when it ends. */
   let reported: "catching_up" | "failed" | null = null;
+  /** The phase and the (account, epoch) of the last report (WEB-08c revision 4: a report is scoped; the same phase of another epoch is news). */
+  let reportedKey: string | null = null;
+  /**
+   * WEB-08c revision 4 (DA-N1 of the design assessment of 14 October 2026; WEB08C-T24D-QUOTA-20261014): a recovery-mode QUOTA stop of
+   * this binding at this epoch. Only the person's "Try again" (or a new binding, identity or epoch) ends it: a wake, `online`, a hint or a
+   * status question never re-enters the job while it stands. The failed page's own stop is ALSO recorded in the account's write-failure
+   * marker (`quotaStop`), so a reload or another page's takeover finds it at the capture gate; a marker that cannot be written leaves a
+   * stop held in this tab's memory only (RECOVERY-NAVIGATION-ENROLMENT-20261014, D2).
+   */
+  let quotaStop: { readonly binding: number; readonly epoch: number } | null =
+    null;
   /** A page load permits ONE attempt while blocked (reconciliation trace 6); "Try again" permits another. */
   let permitBlocked = true;
   /** The person's "Try again" from a blocking state: the version of the whole-attempt failure it ends. */
@@ -321,11 +332,45 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
   const alive = (b: Binding): boolean =>
     binding !== null && binding.id === b.id && !b.ownership.signal.aborted;
 
-  const report = (phase: "catching_up" | "failed" | null): void => {
-    if (reported === phase) return;
+  /**
+   * The job's report, SCOPED to the binding's account and the epoch of the run it describes (WEB-08c revision 4, R9): `epoch` when the
+   * caller names it, else the run's handle, else the identity of the step. A delayed callback therefore cannot describe another identity.
+   */
+  const report = (
+    phase: "catching_up" | "failed" | null,
+    epoch?: number,
+  ): void => {
+    const b = binding;
+    const at = epoch ?? handle?.epoch ?? deps.identity.get()?.epoch;
+    const scope =
+      b !== null && at !== undefined
+        ? { account: b.service.account, epoch: at }
+        : undefined;
+    const key =
+      phase === null
+        ? null
+        : JSON.stringify([phase, scope?.account ?? null, scope?.epoch ?? null]);
+    if (reportedKey === key && reported === phase) return;
     reported = phase;
+    reportedKey = key;
     deps.trace?.emit("data.recovery_report", { phase: phase ?? "none" });
-    deps.recovery.report(phase);
+    deps.recovery.report(phase, scope);
+  };
+  /** A quota stop of the current binding, identity and epoch stands, over an account that is not displayed (DA-N1). */
+  const quotaHeld = (): boolean => {
+    const b = binding;
+    const stop = quotaStop;
+    if (b === null || stop === null || stop.binding !== b.id) return false;
+    const now = state.get();
+    if (now.kind !== "stopped" || now.cause !== "storage_full") return false;
+    const identity = deps.identity.get();
+    const view = deps.view.get();
+    return (
+      identity !== null &&
+      identity.account_id === b.service.account &&
+      identity.epoch === stop.epoch &&
+      !(view.kind === "displaying" && view.account_id === b.service.account)
+    );
   };
 
   const clearTimer = (): void => {
@@ -439,6 +484,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     // the fingerprint reads, so the next step PROBES the session's admission revision, a read that sends and writes nothing (R3).
     if (eligibility() === lastEligibility && !waiting) return;
     if (timer !== null && state.get().kind === "backing_off") return;
+    // WEB-08c revision 4 (DA-N1): a quota stop is left only by "Try again"; a change of connectivity, view or visibility is no retry.
+    if (quotaHeld()) return;
     void tick();
   };
 
@@ -469,7 +516,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       mode = "ordinary";
     } else {
       if (!deps.online()) {
-        if (handle !== null || reported !== null) report("failed");
+        if (handle !== null || reported !== null)
+          report("failed", identity.epoch);
         return waitOffline();
       }
       if (handle === null || handle.epoch !== identity.epoch) {
@@ -482,7 +530,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         });
         if (!alive(b)) return { when: "event" };
         if (begun.kind === "ineligible")
-          return ineligible(b, identity.epoch, begun.reason);
+          return ineligible(b, identity.epoch, begun.reason, begun.revision);
         beginWaits = 0;
         handle = begun.handle;
         trigger ??= "reauthenticated";
@@ -553,8 +601,11 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       maxResponseBytesFor(capture.limit, config),
     );
     if (!mayIssue(issued)) return { when: alive(b) ? "now" : "event" };
-    if (verdict === "refuse")
+    if (verdict === "refuse") {
+      // No request was sent: nothing is recorded, but in recovery mode the stop is still left only by "Try again" (DA-N1).
+      if (mode === "recovery") quotaStop = { binding: b.id, epoch };
       return stop({ kind: "stopped", cause: "storage_full" }, mode);
+    }
     // The one attempt a page load (or "Try again") permits while blocked is used by a request that is SENT: never by a capture whose
     // request was then withheld here, and it is returned when the session refuses the call before sending it (`not_sent`,
     // `not_covered`, below; found in WebKit by E-B13: the post-display verification's detection hold refused the load's request, and a
@@ -687,12 +738,19 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
    * exactly as they were when any of these ends, so the job does not wait for the fingerprint: it stands in an explicit wait whose steps
    * PROBE the session's admission revision (a read: no capture, no request, no write) on every notification and, paced, without one (a
    * hint can be lost). The wait is installed BEFORE the first probe, so a change that came first is seen by it.
+   *
+   * A `begin` refusal brings the admission revision of the read it was decided on (`baseline`), and the wait starts from it (WEB-08c
+   * K-2, R3 of the review of 11 October 2026). Without it the first probe was the baseline: a gate that ended between `begin`'s read and
+   * that probe (an activation refused at once, an operation's outcome) left a blocked record that never changed again (in recovery mode
+   * an account with nothing fenced stays blocked), and the job stood in the wait with `failed` reported, keeping state 3 over an account
+   * that had nothing to catch up.
    */
   function awaitAdmission(
     b: Binding,
     mode: RecoveryMode,
     epoch: number,
     cause: AdmissionEpisode["cause"],
+    baseline?: string,
   ): Next {
     const episode = admission;
     if (
@@ -713,6 +771,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         retryAt: null,
       };
     else episode.cause = cause;
+    if (baseline !== undefined && admission !== null)
+      admission.revision = baseline;
     waiting = true;
     return { when: "now" };
   }
@@ -815,7 +875,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     exclusive.set(true);
     if (state.get().kind !== "eligible_wait")
       setState({ kind: "admission_wait", mode });
-    if (mode === "recovery") report("failed");
+    if (mode === "recovery") report("failed", epoch);
     let ms = Math.min(
       config.recoveryBeginRetryMaxMs,
       config.recoveryBeginRetryMs * 2 ** Math.min(episode.probes - 1, 8),
@@ -854,8 +914,16 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     b: Binding,
     epoch: number,
     reason: Exclude<RecoveryBegin, { kind: "eligible" }>["reason"],
+    revision?: string,
   ): Next {
-    if (reason === "no_fence") return quiet();
+    if (reason === "no_fence") {
+      // WEB-08c K-2: nothing is fenced, so nothing is left to recover. A failure this job reported while a gate stood (an attempt that
+      // was gating, an operation pending) is not true any longer and is withdrawn: otherwise the session kept state 3 ("Couldn't finish
+      // catching up") over an account that has nothing to catch up, and a failed switch, an in-place re-authentication or a stale
+      // retirement left the page stranded there (the job reports `null` only once the account displays, which state 3 prevents).
+      if (reported !== null) report(null);
+      return quiet();
+    }
     exclusive.set(true);
     setState({ kind: "eligible_wait", reason });
     // A lease or a record that is not settled yet is asked again, paced; offline waits for `online`. A gate of the durable record (a
@@ -872,8 +940,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       };
     }
     if (reason === "offline") return { when: "event" };
-    report("failed");
-    return awaitAdmission(b, "recovery", epoch, "begin");
+    report("failed", epoch);
+    return awaitAdmission(b, "recovery", epoch, "begin", revision);
   }
   function stop(
     next: Extract<RecoveryJobState, { kind: "stopped" }>,
@@ -1000,7 +1068,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
           handle = null;
           commitProof = null;
           endEpisode();
-          if (issued.mode === "recovery") report("failed");
+          if (issued.mode === "recovery") report("failed", issued.epoch);
           setState({ kind: "eligible_wait", reason: "current_epoch_entry" });
           return awaitAdmission(
             issued.binding,
@@ -1200,7 +1268,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       }
       if (reservation.verdict === "refuse") {
         if (reservation.unestablished === true) return paced();
-        return stop({ kind: "stopped", cause: "storage_full" }, issued.mode);
+        return quotaStopped(issued);
       }
       let written = false;
       let attempt: string | null = null;
@@ -1352,7 +1420,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         // The record is no longer eligible at `finish` (a gate another page added): `begin` again once it changes (R3).
         handle = null;
         commitProof = null;
-        report("failed");
+        report("failed", current.epoch);
         setState({ kind: "eligible_wait", reason: "current_epoch_entry" });
         return awaitAdmission(b, "recovery", current.epoch, "begin");
       }
@@ -1399,7 +1467,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     const service = issued.binding.service;
     if (failure.cause === "quota") {
       await recordSizing(service, { kind: "quota" });
-      return stop({ kind: "stopped", cause: "storage_full" }, issued.mode);
+      if (!alive(issued.binding)) return { when: "event" };
+      return quotaStopped(issued);
     }
     if (failure.cause === "closed") return quiet();
     if (failure.cause === "plan_rejected") {
@@ -1431,6 +1500,41 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
         ? (issued.capture.activateOperation as string)
         : issued.capture.operation,
       issued.mode,
+    );
+  }
+
+  /**
+   * WEB-08c revision 4 (DA-N1; WEB08C-T24D-QUOTA-20261014): a page that could not be committed for want of space. Stopped at once and
+   * not counted (a counter would need the very space that is missing). In recovery mode the stop of the page's operation is recorded in
+   * the account's write-failure marker, exactly as WEB-09a records the quota stop of an admitted invalidation: it survives a reload and
+   * another page's takeover (the capture gate reads it, so nothing is asked again) and only "Try again" retires it. A marker that cannot
+   * be written is held in this tab's memory and says so (D2 of RECOVERY-NAVIGATION-ENROLMENT-20261014). Nothing of the page was
+   * committed, the cursor and the fence stand.
+   */
+  function quotaStopped(issued: Issued): Next {
+    if (issued.mode !== "recovery")
+      return stop({ kind: "stopped", cause: "storage_full" }, issued.mode);
+    const service = issued.binding.service;
+    const operation = issued.capture.operation;
+    const recorded = recordStop(
+      deps.markers,
+      service,
+      operation,
+      () => service.live,
+      { hold: () => memoryStops.add(memoryKey(service, operation)) },
+    );
+    if (recorded === "obsolete") return quiet();
+    stoppedOperation = operation;
+    stoppedVersion = null;
+    quotaStop = { binding: issued.binding.id, epoch: issued.epoch };
+    deps.trace?.emit("data.recovery_quota_stop", { recorded });
+    return stop(
+      {
+        kind: "stopped",
+        cause: "storage_full",
+        ...(recorded === "memory" ? { memoryOnly: true as const } : {}),
+      },
+      "recovery",
     );
   }
 
@@ -1621,6 +1725,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       bindings += 1;
       handle = null;
       commitProof = null;
+      quotaStop = null;
       endEpisode();
       failures = 0;
       notSent = 0;
@@ -1654,7 +1759,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
             })
             .catch(() => undefined)
             .then(() => {
-              if (alive(b)) {
+              // DA-N1: connectivity returning is no "Try again" for a quota stop.
+              if (alive(b) && !quotaHeld()) {
                 // Connectivity returned: a new opportunity, with its immediate retries (an admission episode ends with it).
                 failures = 0;
                 notSent = 0;
@@ -1708,7 +1814,9 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
             });
           if (
             current.kind === "stopped" &&
-            current.cause === "local_storage" &&
+            (current.cause === "local_storage" ||
+              // WEB-08c revision 4 (DA-N1): a recovery quota stop names the page's operation, whose marker this retry retires.
+              current.cause === "storage_full") &&
             stoppedOperation !== null
           ) {
             const operation = stoppedOperation;
@@ -1729,6 +1837,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
           // Best effort: the next step reads the record again.
         }
         failures = 0;
+        quotaStop = null;
         if (alive(b)) {
           // The person's act ends an admission episode too: one fresh attempt, with its immediate retries.
           notSent = 0;

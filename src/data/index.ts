@@ -29,6 +29,7 @@ export type {
   Bases,
   BuildResult,
   EnqueueRequest,
+  TargetNeeds,
   TargetSpec,
 } from "./model/outbox";
 export { OutboxRequestError } from "./model/outbox";
@@ -119,6 +120,15 @@ export type {
   QueuePage,
   ResourcePage,
 } from "./plans/outbox";
+// ---- outstanding work, reads by id and the whole-kind walk (WEB-10a) ------------------------------------------------------------------
+export type {
+  CachePosition,
+  LocalBasis,
+  OutstandingByKindPage,
+  OutstandingCursor,
+  OutstandingForResource,
+  OutstandingPage,
+} from "./plans/outstanding-reads";
 export type {
   Outstanding,
   PendingCreatesPage,
@@ -129,12 +139,32 @@ export {
   type DeletionPortsOptions,
 } from "./ports/deletion-ports";
 export type { Loadable } from "./store/port";
+// ---- the retained-account directory (WEB-08c, WF-SWITCH-01): only the switcher's lazy chunk imports it ---------------------------
+export {
+  listRetainedAccounts,
+  type RetainedAccount,
+  type RetainedListing,
+} from "./store/retained-accounts";
+export {
+  type DraftEvidence,
+  readResourceViewNow,
+  readSaveEvidence,
+} from "./ui/draft-read";
 export {
   createDataEnv,
   type DataActions,
   type DataEnv,
   type DataEnvDeps,
 } from "./ui/env";
+export {
+  useAllOutstanding,
+  useAllOutstandingByKind,
+  useCachedResources,
+  useCachePosition,
+  useDraftWithCommand,
+  useOutstanding as useOutstandingResources,
+  useOutstandingByKind,
+} from "./ui/outstanding";
 export {
   type ConflictRow,
   DataEnvProvider,
@@ -158,3 +188,16 @@ export {
   useStatusInputs,
   useSyncStatusModel,
 } from "./ui/react";
+export {
+  type LocalRead,
+  readAllOutstandingByKindNow,
+  readAllOutstandingNow,
+  readCacheRevisionNow,
+  readCoherently,
+  readLocalBasisNow,
+  readResourcePageNow,
+  readResourcesNow,
+  type ScanEnd,
+  type Stage,
+  scanResources,
+} from "./ui/scan";

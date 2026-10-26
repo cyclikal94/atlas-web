@@ -1,16 +1,20 @@
-import { mkdirSync } from "node:fs";
 import type { Page } from "@playwright/test";
-import { test } from "./auth-helpers";
+import { provokedIdbWarnings, test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
 import { expect, pressTab, runAxe } from "./helpers";
-import { expectPaintedContrast } from "./surface-checks";
+import {
+  expectPaintedContrast,
+  recordPaintedContrast,
+  surfaceScreenshot,
+} from "./surface-checks";
 
 /**
  * WEB-08b, A2 / A3 / A4 (Layer A, rendered): the PUBLIC surfaces (sign-in, join) in the production build, in a real engine, with
  * a stubbed network, at 320, 390, 768 and 1280 px in dark and light: no horizontal scroll, axe clean INCLUDING colour contrast in
- * real layout, 44 px targets, a visible focus ring, the heading as the focus target. Screenshots (Chromium) go to
- * .agtx/evidence/WEB-08b/design/. This is design and accessibility evidence only: it is not Kieran's visual or copy sign-off,
- * not assistive-technology evidence and not integration evidence.
+ * real layout, 44 px targets, a visible focus ring, the heading as the focus target. Screenshots (Chromium) and the painted-contrast
+ * records belong to this invocation and test (`surfaceScreenshot`, `recordPaintedContrast`: review 14's R27); the historical
+ * `.agtx/evidence/WEB-08b/design/` folder is no longer written. This is design and accessibility evidence only: it is not Kieran's
+ * visual or copy sign-off, not assistive-technology evidence and not integration evidence.
  */
 const WIDTHS: Array<[number, number]> = [
   [320, 640],
@@ -18,7 +22,6 @@ const WIDTHS: Array<[number, number]> = [
   [768, 1024],
   [1280, 800],
 ];
-const EVIDENCE = ".agtx/evidence/WEB-08b/design";
 const PASSWORD = "correct-horse-battery-9271";
 
 interface Surface {
@@ -29,7 +32,26 @@ interface Surface {
   open(page: Page, stub: AuthStub): Promise<void>;
   /** The heading that should hold focus once the surface has settled. */
   focusHeading?: boolean;
+  /** Exact engine messages that this surface's OWN actions cause (`toleratesNavigationAbort`: one engine, one message each). */
+  tolerates?: Array<[engine: string, message: RegExp]>;
 }
+
+/**
+ * WEB-08c (HF-8, a flake of the accepted base: 3 of 30 base runs, 2 of 30 candidate runs, Firefox only, the same two warnings). Going
+ * offline right after the sign-in heading can fail the lazily loaded sync leader's module, which the product retries on `online`; the
+ * next width's `setOffline(false)` then fires `online`, and the test's own `about:blank` navigation aborts the retried leader's first
+ * transaction (an aborted transaction commits nothing). WebKit reports the same cut module loads (traced once: `browser-leader`, `browser-env`,
+ * `dexie-adapter`) as "Failed to load resource: WebKit encountered an internal error", a console text that names no URL; it is tolerated for
+ * this one surface, which goes offline on purpose, and in WebKit only.
+ */
+// Revision 1 (campaign 2026-10-11T12-25-06.329Z-f3732be4): Firefox cut `browser-env`, the next module of the SAME lazy chain (its warning names
+// `browser-leader` as the importer). The chain's three modules, as the WebKit trace named them, and nothing else, are tolerated here.
+const LEADER_MODULE_FAILED_OFFLINE =
+  /^\[JavaScript Warning: "Loading failed for the module with source “http:\/\/127\.0\.0\.1:\d+\/assets\/(browser-leader|browser-env|dexie-adapter)-[\w-]+\.js”\."/;
+const OFFLINE_LOAD_CUT_WEBKIT =
+  /^Failed to load resource: WebKit encountered an internal error$/;
+const TRANSACTION_ABORTED_BY_NAVIGATION =
+  /^\[JavaScript Warning: "An IndexedDB transaction that was not yet complete has been aborted due to page navigation\."/;
 
 const heading = (page: Page, name: string | RegExp) =>
   page.getByRole("heading", { level: 1, name }).waitFor();
@@ -76,6 +98,11 @@ const SURFACES: Surface[] = [
   },
   {
     name: "sign-in-offline",
+    tolerates: [
+      ["firefox", LEADER_MODULE_FAILED_OFFLINE],
+      ["firefox", TRANSACTION_ABORTED_BY_NAVIGATION],
+      ["webkit", OFFLINE_LOAD_CUT_WEBKIT],
+    ],
     open: async (page) => {
       await page.goto("/");
       await heading(page, "Sign in to Atlas");
@@ -204,98 +231,242 @@ for (const scheme of ["dark", "light"] as const) {
   test.describe(`public surfaces, rendered checks, ${scheme}`, () => {
     test.use({ colorScheme: scheme });
     for (const surface of SURFACES) {
-      test(surface.name, async ({ page, context, provokes }, testInfo) => {
-        provokes(...(surface.provokes ?? []));
-        const engine = testInfo.project.name.replace("production-", "");
-        const stub = new AuthStub();
-        await stub.install(context);
-        for (const [width, height] of WIDTHS) {
-          // A FRESH document each time: a fragment-only navigation does not reload the page.
-          await context.setOffline(false);
-          await page.goto("about:blank");
-          await page.setViewportSize({ width, height });
-          await surface.open(page, stub);
-          const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
+      test(
+        surface.name,
+        async ({
+          page,
+          context,
+          provokes,
+          toleratesNavigationAbort,
+        }, testInfo) => {
+          provokes(...(surface.provokes ?? []));
+          for (const [engine, message] of surface.tolerates ?? [])
+            toleratesNavigationAbort(engine, message);
+          const engine = testInfo.project.name.replace("production-", "");
+          const stub = new AuthStub();
+          await stub.install(context);
+          for (const [width, height] of WIDTHS) {
+            // A FRESH document each time: a fragment-only navigation does not reload the page. WEB-08c revision 2 (HF-12, campaign
+            // 2026-10-13T22-48-14.169Z-f76783ae, Firefox "join-offline"): leave the page BEFORE going back online. Online first, the `online`
+            // event made the offline page's session start its re-check read, which the navigation 2 ms later aborted, and Firefox reported the
+            // aborted transaction. `about:blank` needs no network; every check below is unchanged.
+            await page.goto("about:blank");
+            await context.setOffline(false);
+            await page.setViewportSize({ width, height });
+            await surface.open(page, stub);
+            const label = `${surface.name} at ${width}px, ${scheme}, ${engine}`;
 
-          // 1. No horizontal scrolling.
-          expect(
-            await page.evaluate(
-              () =>
-                document.documentElement.scrollWidth <=
-                document.documentElement.clientWidth,
-            ),
-            `${label}: horizontal scroll`,
-          ).toBe(true);
-
-          // 2. axe, including colour contrast in the real layout.
-          const violations = await runAxe(page);
-          expect(
-            violations.map(
-              (v) =>
-                `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`,
-            ),
-            `${label}: axe`,
-          ).toEqual([]);
-
-          // 3. Targets are at least 44 px high.
-          const small = await page.evaluate(() =>
-            Array.from(
-              document.querySelectorAll<HTMLElement>(
-                "main button, main a[href], main input",
-              ),
-            )
-              .filter((el) => el.getBoundingClientRect().height > 0)
-              .filter((el) => el.getBoundingClientRect().height < 43.5)
-              .map(
-                (el) =>
-                  `${el.tagName.toLowerCase()} "${(el.textContent ?? "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`,
-              ),
-          );
-          expect(small, `${label}: targets under 44px`).toEqual([]);
-
-          // 4. The page's heading is the programmatic focus target for a state that has just appeared.
-          if (surface.focusHeading)
+            // 1. No horizontal scrolling.
             expect(
-              await page.evaluate(() => document.activeElement?.tagName),
-              `${label}: focus target`,
-            ).toBe("H1");
+              await page.evaluate(
+                () =>
+                  document.documentElement.scrollWidth <=
+                  document.documentElement.clientWidth,
+              ),
+              `${label}: horizontal scroll`,
+            ).toBe(true);
 
-          // 5. A visible focus ring on the first control reached by keyboard.
-          if (
-            (await page
-              .locator("main :is(button, a[href], input):visible:enabled")
-              .count()) > 0
-          ) {
-            await pressTab(page);
-            const ring = await page.evaluate(() => {
-              const active = document.activeElement as HTMLElement | null;
-              if (!active || active === document.body) return null;
-              const style = getComputedStyle(active);
-              return {
-                outline:
-                  style.outlineStyle !== "none" &&
-                  Number.parseFloat(style.outlineWidth) >= 2,
-                shadow: style.boxShadow !== "none",
-              };
-            });
+            // 2. axe, including colour contrast in the real layout.
+            const violations = await runAxe(page);
             expect(
-              ring && (ring.outline || ring.shadow),
-              `${label}: focus ring`,
-            ).toBeTruthy();
-          }
+              violations.map(
+                (v) =>
+                  `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`,
+              ),
+              `${label}: axe`,
+            ).toEqual([]);
 
-          if (engine === "chromium") {
-            mkdirSync(`${EVIDENCE}/chromium`, { recursive: true });
-            await page.screenshot({
-              path: `${EVIDENCE}/chromium/${surface.name}-${width}-${scheme}.png`,
-              fullPage: true,
-            });
+            // 3. Targets are at least 44 px high.
+            const small = await page.evaluate(() =>
+              Array.from(
+                document.querySelectorAll<HTMLElement>(
+                  "main button, main a[href], main input",
+                ),
+              )
+                .filter((el) => el.getBoundingClientRect().height > 0)
+                .filter((el) => el.getBoundingClientRect().height < 43.5)
+                .map(
+                  (el) =>
+                    `${el.tagName.toLowerCase()} "${(el.textContent ?? "").trim().slice(0, 30)}" ${Math.round(el.getBoundingClientRect().height)}px`,
+                ),
+            );
+            expect(small, `${label}: targets under 44px`).toEqual([]);
+
+            // 4. The page's heading is the programmatic focus target for a state that has just appeared.
+            if (surface.focusHeading)
+              expect(
+                await page.evaluate(() => document.activeElement?.tagName),
+                `${label}: focus target`,
+              ).toBe("H1");
+
+            // 5. A visible focus ring on the first control reached by keyboard.
+            if (
+              (await page
+                .locator("main :is(button, a[href], input):visible:enabled")
+                .count()) > 0
+            ) {
+              await pressTab(page);
+              const ring = await page.evaluate(() => {
+                const active = document.activeElement as HTMLElement | null;
+                if (!active || active === document.body) return null;
+                const style = getComputedStyle(active);
+                return {
+                  outline:
+                    style.outlineStyle !== "none" &&
+                    Number.parseFloat(style.outlineWidth) >= 2,
+                  shadow: style.boxShadow !== "none",
+                };
+              });
+              expect(
+                ring && (ring.outline || ring.shadow),
+                `${label}: focus ring`,
+              ).toBeTruthy();
+            }
+
+            if (engine === "chromium")
+              await surfaceScreenshot(page, testInfo, {
+                name: surface.name,
+                width,
+                scheme,
+              });
           }
-        }
-      });
+        },
+      );
     }
   });
 }
+
+/**
+ * WEB-10a revision 7 (review 7's retained Firefox join-offline warning; Kieran's decision of 15 October 2026): the interruption the
+ * width loop used to cause by accident, made deliberate and deterministic. On `online` the join page re-checks the sign-in record
+ * (`evaluate` → `readRecords`, a `readwrite` transaction of `atlas-auth` that writes nothing). Here that transaction is HELD OPEN (the
+ * test keeps issuing `count()` reads on it) and the page is left at once: the transaction is aborted by the navigation, it made no write
+ * request (so, IndexedDB being atomic, nothing durable changed), and the next page boots and shows the form. Firefox's console warning
+ * for exactly that abort is declared as provoked; any other warning still fails.
+ */
+test.describe("join-offline: going online and leaving at once", () => {
+  test("the interrupted online re-check is a read: no write request, and the next page boots normally", async ({
+    page,
+    context,
+    provokes,
+  }, info) => {
+    provokes("idb-navigation-abort");
+    // Reported as they happen (a binding called during `pagehide` is lost in Chromium): created, each write request, completed/aborted.
+    const reports: Array<{ kind: string; id: number; held?: boolean }> = [];
+    await context.exposeBinding("__authTxReport", (_source, report) => {
+      reports.push(report);
+    });
+    await context.addInitScript(() => {
+      const w = window as unknown as {
+        __authTxReport?: (report: object) => void;
+        __holdNextAuthTx?: boolean;
+      };
+      const ids = new Map<IDBTransaction, number>();
+      let next = 0;
+      const transaction = IDBDatabase.prototype.transaction;
+      IDBDatabase.prototype.transaction = function (
+        this: IDBDatabase,
+        ...args: Parameters<typeof transaction>
+      ) {
+        const tx = transaction.apply(this, args);
+        if (this.name !== "atlas-auth") return tx;
+        const held = w.__holdNextAuthTx === true;
+        if (held) w.__holdNextAuthTx = false;
+        next += 1;
+        const id = next;
+        ids.set(tx, id);
+        const done = () => w.__authTxReport?.({ kind: "done", id });
+        tx.addEventListener("complete", done);
+        tx.addEventListener("abort", done);
+        if (held) {
+          // Kept active by reads of its own: the test's hold, not the application's.
+          const store = tx.objectStore(tx.objectStoreNames[0] as string);
+          const spin = () => {
+            store.count().onsuccess = spin;
+          };
+          spin();
+        }
+        w.__authTxReport?.({ kind: "created", id, held });
+        return tx;
+      } as typeof transaction;
+      for (const name of ["put", "add", "delete", "clear"] as const) {
+        const original = IDBObjectStore.prototype[name] as (
+          ...a: unknown[]
+        ) => IDBRequest;
+        (IDBObjectStore.prototype as unknown as Record<string, unknown>)[name] =
+          function (this: IDBObjectStore, ...a: unknown[]) {
+            const id = ids.get(this.transaction);
+            if (id !== undefined) w.__authTxReport?.({ kind: "write", id });
+            return original.apply(this, a);
+          };
+      }
+    });
+    const stub = new AuthStub();
+    await stub.install(context);
+    await readyJoin(page, stub, null);
+    const offlineReason = page.getByText(
+      "Creating an account needs a connection.",
+    );
+    await context.setOffline(true);
+    await offlineReason.waitFor();
+    // Ordinary going online (no navigation; the positive control the hand-off keeps): the explanation goes, the form can be sent again,
+    // and every sign-in-record transaction the page made since completes with no write request.
+    const sinceOnline = reports.length;
+    await context.setOffline(false);
+    await expect(offlineReason).toBeHidden();
+    await expect(
+      page.getByRole("button", { name: "Create account" }),
+    ).toBeEnabled();
+    await expect
+      .poll(() => {
+        const made = reports
+          .slice(sinceOnline)
+          .filter((r) => r.kind === "created");
+        return (
+          made.length > 0 &&
+          made.every((c) =>
+            reports.some((r) => r.kind === "done" && r.id === c.id),
+          )
+        );
+      })
+      .toBe(true);
+    expect(
+      reports.slice(sinceOnline).filter((r) => r.kind === "write"),
+    ).toEqual([]);
+    await context.setOffline(true);
+    await offlineReason.waitFor();
+    await page.evaluate(() => {
+      (window as unknown as { __holdNextAuthTx?: boolean }).__holdNextAuthTx =
+        true;
+    });
+    await context.setOffline(false);
+    // Barrier: the online re-check's transaction exists and is held open.
+    await expect
+      .poll(() => reports.some((r) => r.kind === "created" && r.held))
+      .toBe(true);
+    const held = reports.find((r) => r.kind === "created" && r.held)
+      ?.id as number;
+    const before = reports.length;
+    await page.goto("about:blank");
+    const atLeave = reports.slice(0, before);
+    const open = atLeave
+      .filter((r) => r.kind === "created")
+      .map((r) => r.id)
+      .filter((id) => !atLeave.some((r) => r.kind === "done" && r.id === id));
+    // The held transaction was still open when the page was left, and no transaction open then had made a write request.
+    expect(open).toContain(held);
+    expect(
+      reports.filter((r) => r.kind === "write" && open.includes(r.id)),
+    ).toEqual([]);
+    // The next page boots and works: the form, and offline the same explanation.
+    await readyJoin(page, stub, null);
+    await context.setOffline(true);
+    await page.getByText("Creating an account needs a connection.").waitFor();
+    await context.setOffline(false);
+    if (info.project.name === "production-firefox")
+      expect(provokedIdbWarnings(info.testId)).toBeGreaterThan(0);
+  });
+});
 
 test.describe("modes the design pass checks beyond width and theme", () => {
   test("forced colours and reduced motion keep the sign-in and join surfaces usable", async ({
@@ -398,7 +569,7 @@ for (const scheme of ["dark", "light"] as const) {
     test("sign-in and join: the input border is field-edge at 3:1 or better, and the primary action text is 4.5:1 or better", async ({
       page,
       context,
-    }) => {
+    }, info) => {
       const stub = new AuthStub();
       await stub.install(context);
       await page.goto("/");
@@ -416,12 +587,11 @@ for (const scheme of ["dark", "light"] as const) {
         scheme,
         `join (${scheme})`,
       );
-      mkdirSync(EVIDENCE, { recursive: true });
-      const { appendFileSync } = await import("node:fs");
-      appendFileSync(
-        `${EVIDENCE}/painted-contrast.jsonl`,
-        `${JSON.stringify({ scheme, engine: test.info().project.name, signIn, join })}\n`,
-      );
+      recordPaintedContrast(info, scheme, {
+        engine: info.project.name,
+        signIn,
+        join,
+      });
     });
   });
 }

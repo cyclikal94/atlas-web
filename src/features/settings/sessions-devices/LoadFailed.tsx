@@ -21,7 +21,9 @@ export function LoadFailed({
   const announcer = useAnnouncer();
   const message = loadFailedMessage(what, error);
   // biome-ignore lint/correctness/useExhaustiveDependencies: announce once per error, not per announcer identity
-  useEffect(() => announcer.announce(message, "assertive"), [message]);
+  useEffect(() => {
+    announcer.announce(message, "assertive");
+  }, [message]);
   return (
     <div
       data-load-error=""

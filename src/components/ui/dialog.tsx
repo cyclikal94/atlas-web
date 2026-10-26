@@ -34,6 +34,11 @@ export interface DialogProps {
    */
   returnFocusRef?: RefObject<HTMLElement | null>;
   /**
+   * Whether the header carries the in-dialog sync control (default true). WF-SWITCH-02 is the one documented exception: it is a
+   * credential step for a DIFFERENT account, so it reports no sync state (`wireframes/switch/states.md`, the I1 exception).
+   */
+  syncControl?: boolean;
+  /**
    * Where the full-screen sheet gives way to the centred dialog. `tablet` (the default): from 768 px, the generic rule (ia.md §3 and
    * design-coverage §6). `desktop`: from 1280 px, for a dialog whose accepted tablet frames draw it as a full-bleed sheet at both
    * tablet orientations (the sharing editors: WEB-05.5 `tablet/sharing-portrait.html` and `sharing-landscape.html`, Q14; WEB-12a R6).
@@ -48,6 +53,26 @@ const PANEL: Readonly<Record<"tablet" | "desktop", string>> = {
   desktop:
     "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[440px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-dialog desktop:border desktop:border-hairline-strong desktop:shadow-modal",
 };
+
+/**
+ * A control that takes focus inside the dialog's scrolling body is revealed WHOLE (WCAG 2.4.11, as `chrome-insets.ts` does for the
+ * shell's bars). WebKit reveals a text field's caret rather than the field, so a field can stay half under the footer: measured in
+ * WEB-10a revision 2 (the correction dialog's lower fields, WebKit, keyboard traversal). Block "nearest": nothing moves when the control
+ * is already wholly in view, so engines that reveal it themselves are unchanged.
+ */
+function revealInBody(body: HTMLElement): () => void {
+  const reveal = (event: FocusEvent) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const box = target.getBoundingClientRect();
+    const port = body.getBoundingClientRect();
+    if (box.height > port.height) return;
+    if (box.top >= port.top && box.bottom <= port.bottom) return;
+    target.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
+  body.addEventListener("focusin", reveal);
+  return () => body.removeEventListener("focusin", reveal);
+}
 
 /**
  * The dialog pattern (ia.md 3). Header: title, the in-dialog sync control (inside the focus trap, because the
@@ -66,6 +91,7 @@ export function Dialog({
   onCloseAutoFocus,
   initialFocusSelector,
   returnFocusRef,
+  syncControl = true,
   sheetBelow = "tablet",
 }: DialogProps) {
   const container = useRequiredPortalContainer();
@@ -89,6 +115,11 @@ export function Dialog({
     if (!content) return;
     return enterFocusLoop(content);
   }, [content]);
+  const [body, setBody] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!body) return;
+    return revealInBody(body);
+  }, [body]);
   if (!container) return null;
 
   const discard = () => {
@@ -150,13 +181,15 @@ export function Dialog({
               ) : null}
             </div>
             <div className="ml-auto flex min-w-0 items-center gap-2">
-              <SyncStatusChip
-                variant="dialog"
-                onBeforeOpen={() => {
-                  onRetainDraft?.();
-                  onClose();
-                }}
-              />
+              {syncControl ? (
+                <SyncStatusChip
+                  variant="dialog"
+                  onBeforeOpen={() => {
+                    onRetainDraft?.();
+                    onClose();
+                  }}
+                />
+              ) : null}
               <DialogPrimitive.Close
                 aria-label="Close"
                 onClick={(event) => {
@@ -169,7 +202,9 @@ export function Dialog({
               </DialogPrimitive.Close>
             </div>
           </header>
-          <div className="flex-1 overflow-y-auto p-[18px]">{children}</div>
+          <div ref={setBody} className="flex-1 overflow-y-auto p-[18px]">
+            {children}
+          </div>
           {footer ? (
             <footer className="flex items-center gap-2 border-t border-hairline bg-inset px-[18px] py-3.5">
               {footer}

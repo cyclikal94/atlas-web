@@ -68,12 +68,23 @@ async function fillMain(page: Page, count: number) {
   }, count);
 }
 
-async function openWithLongContent(page: Page, layout: Layout, count = ROWS) {
-  await page.setViewportSize({ width: layout.width, height: layout.height });
-  await page.goto(LONG_PAGE);
+/**
+ * Today has rendered: its heading AND its screen. Labelled adaptation (WEB-10a revision 2): Today's heading is now the route's and shows at
+ * once, before the lazy screen below it, so the heading alone no longer says the page has laid out; content added before the screen arrives
+ * is pushed down by it (WebKit, 13 of 15). The checks after it are unchanged.
+ */
+async function todayRendered(page: Page) {
   await expect(
     page.getByRole("heading", { level: 1, name: "Today" }),
   ).toBeVisible();
+  await expect(page.locator("[data-today-page]")).toBeVisible();
+  await expect(page.locator("[data-today-loading]")).toHaveCount(0);
+}
+
+async function openWithLongContent(page: Page, layout: Layout, count = ROWS) {
+  await page.setViewportSize({ width: layout.width, height: layout.height });
+  await page.goto(LONG_PAGE);
+  await todayRendered(page);
   await fillMain(page, count);
   // The stress content must be what makes the page long, or every check below is vacuous.
   const { scrollHeight, innerHeight } = await page.evaluate(() => ({
@@ -450,9 +461,7 @@ async function openWithFields(
   await page.setViewportSize({ width: layout.width, height: layout.height });
   const classes = await sharedInputClasses(page);
   await page.goto(LONG_PAGE);
-  await expect(
-    page.getByRole("heading", { level: 1, name: "Today" }),
-  ).toBeVisible();
+  await todayRendered(page);
   await fillFields(page, FIELDS, tag, classes);
   const field = page.getByLabel(`Field ${START}`, { exact: true });
   await expect(field).toBeVisible();

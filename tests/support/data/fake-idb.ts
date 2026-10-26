@@ -1,4 +1,8 @@
 import {
+  advanceComposition,
+  advancesComposition,
+} from "../../../src/data/model/composition";
+import {
   accountDatabaseName,
   KEY_PATHS,
   type RowOf,
@@ -6,7 +10,7 @@ import {
   type StoreName,
 } from "../../../src/data/model/schema";
 import { initialSyncState } from "../../../src/data/model/sync-state";
-import type { AccountId } from "../../../src/data/model/types";
+import type { AccountId, SyncStateRow } from "../../../src/data/model/types";
 import { classifyFailure } from "../../../src/data/store/failure";
 import type { DatabaseHost, ProbeResult } from "../../../src/data/store/host";
 import type { EngineOpener } from "../../../src/data/store/open";
@@ -1032,6 +1036,14 @@ export class FakeIdb {
         }
         if (plan.apply)
           result = await plan.apply(sink, decision, reads, tx.input, reader);
+        // The local composition generation, as the Dexie adapter advances it (`model/composition.ts`, WEB-10a revision 3): in THIS
+        // transaction, after every write of the plan, when it wrote a store a screen composes from.
+        if (advancesComposition(touched, plan.scope)) {
+          const sync = (await reader.get("sync_state", "singleton")) as
+            | SyncStateRow
+            | undefined;
+          if (sync !== undefined) doPut("sync_state", advanceComposition(sync));
+        }
       }
       // Commit: atomic. From here a signal is too late: the transaction is committing.
       checkpoint();

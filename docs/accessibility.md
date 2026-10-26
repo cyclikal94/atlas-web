@@ -15,7 +15,7 @@ The target is WCAG 2.2 AA, with the accepted Atlas rules on top (`accessibility.
 | Reflow | 320 CSS px, a 320 px viewport at 400% zoom, text-spacing overrides (WCAG 1.4.12): no horizontal scrolling | `fixture.shell.spec.ts` |
 | Long pages | content taller than the viewport at 390, 834 and 1440 px and in short windows (844x390, 1280x480, 667x375): navigation and the sync chip stay inside the viewport, topmost and clickable at the top, middle and bottom; content is not left under a bar; Tab and Shift+Tab never park focus under the mobile bars; the skip link and route focus stay clear of them | `tests/e2e/fixture.scroll.spec.ts` |
 | Live regions | one registry; a lint rule (R6) rejects any other `aria-live`, `status`, `alert` or `log` (`neutral-status.tsx` was added by WEB-08b for the public surfaces; see `docs/lint-rules.md`) | `lint/live-region-registry.grit` |
-| Public surfaces (sign-in, join) and the Settings account card and "Signing in" dialog (WEB-08b) | every state, at 320, 390, 768 and 1280 px, dark and light, in Chromium, Firefox and WebKit: no horizontal scroll, axe **including contrast**, 44 px targets, a visible focus ring, the heading as the focus target where a state has just appeared; forced colours and reduced motion; 400% zoom; keyboard-only completion of sign-in and registration. Screenshots (Chromium) are in `.agtx/evidence/WEB-08b/design/` | `tests/e2e/production.auth-public.spec.ts`, `tests/e2e/fixture.auth-settings.spec.ts` |
+| Public surfaces (sign-in, join) and the Settings account card and "Signing in" dialog (WEB-08b) | every state, at 320, 390, 768 and 1280 px, dark and light, in Chromium, Firefox and WebKit: no horizontal scroll, axe **including contrast**, 44 px targets, a visible focus ring, the heading as the focus target where a state has just appeared; forced colours and reduced motion; 400% zoom; keyboard-only completion of sign-in and registration. Screenshots (Chromium) and painted-contrast records are written per invocation and test: `<evidence run>/<project>/<test id>-repeat<n>-retry<n>/` holds `chromium%2F<surface>-<width>-<scheme>%2Epng.artifact/<surface>-<width>-<scheme>.png` and `painted-contrast-<scheme>.json` (the run is `.agtx/evidence/browser/runs/run-*/`, or under `ATLAS_EVIDENCE_DIR`; Playwright prints it as "Browser evidence:" and the JSON report carries each test's `evidence` annotation and screenshot attachments). `.agtx/evidence/WEB-08b/design/` is historical and no longer written | `tests/e2e/production.auth-public.spec.ts`, `tests/e2e/fixture.auth-settings.spec.ts` |
 
 A green layer 1 does not mean the product is accessible. It means the failures a machine can find are absent.
 
@@ -56,6 +56,46 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Remove is described by its consequence.** The "signs you out everywhere" paragraph has an id and every Remove control (enabled, "Removing…", or disabled with its reason) lists it in `aria-describedby`, on the mobile sheet and the desktop dialog. A disabled control's own reason is read first. axe does not check this association, so `tests/e2e/fixture.auth-settings.spec.ts` asserts the accessible description at 320 and 1280 px.
 - **A refusal that arrives after "Finishing sign-in"** is shown by the sign-in form that mounts next (the heading is focused as for any new state, and the message is a `role="alert"` inserted after the form appears, so it is announced once).
 
+
+## Today and tasks (WEB-10a)
+
+- Every page has one `h1` (Today, Tasks, the task's title, New task / Edit task); sections are labelled by their `h2`.
+- The Today filters are a native radio group (`fieldset`/`legend`: arrow keys move and select); the day and zone are labelled native controls.
+- A disabled action always states why beside it (`Button`'s `reason`): "Not open until …", "This day is closed", "Only participants can record this",
+  "Wait for this task to finish syncing before editing it".
+- A result shown from saved, unsent work is named "provisional" in its text; pending marks are words, never colour alone (the pill tone is decoration).
+- Saves and refusals are announced through the announcer only (lint R6); nothing new is a live region.
+- Radio choices with a consequence line are named by both, separated (found by the component tests: the names ran together).
+- The correction dialog uses the shared `Dialog` (focus trap, Escape discards, focus return, in-dialog sync control keeps the draft).
+- Automated: jest-axe in the component tests; axe with real layout and contrast in Chromium, Firefox and WebKit at 390×844, 834×1112, 1112×834,
+  1180×820 and 1440×900 in light and dark (`fixture.tasks.spec.ts` E-T1; theme set before load), no horizontal overflow, and a keyboard-only journey
+  (E-T8). This is browser emulation: physical devices and manual screen readers are WEB-09d's (collected by WEB-15).
+- Revision 1 (R7): axe with real layout in all three engines for the task detail, the correction dialog and the task form at 390×844 and 1440×900,
+  light and dark (E-T13). E-T8b is **keyboard activation and focus return only**: each control is focused by the test itself and then operated
+  by keys (the correction dialog opens by Enter with focus inside, closes by Escape and saves by Enter, focus returning to "Correct this day"; the
+  task form is filled and saved by keys). It does not show reachability or tab order and is kept as an activation control. A day named in the
+  address that is not available says so in text (no control is offered for it).
+- Revision 2 (R7): **keyboard traversal** (E-T8d), Chromium, Firefox and WebKit at 1280×720. From the start of the page (nothing focused) the
+  person moves by Tab, in WebKit by Option+Tab (Safari's default settings move by Tab between text fields only; the dialog's focus loop honours
+  either). The correction dialog: "Correct this day" is reached and opened by Enter; Tab then visits every control of the dialog (the in-dialog
+  sync control, Close, each field, Cancel, Save correction) and comes back round without leaving it, and Shift+Tab visits the same stops back to
+  the first; at each stop the control is visibly focused, on screen and not covered; a field is edited by keys and Enter on "Save correction"
+  saves and returns focus to "Correct this day"; Escape discards and returns focus there too. The task form: "Start from scratch instead", the
+  name, the sharing choice (arrow keys to "Only me") and Save are reached by Tab, each visibly focused and uncovered, and Enter saves. E-T8e adds
+  the queue visit by keys while a save's acknowledgement is held (the newer edit survives the older save). Date and time fields have several
+  stops of their own whose focus the BROWSER draws (the focused part of the value is highlighted): WebKit never applies `:focus-visible` to these
+  fields and Chromium's picker stop is inside the field, so the app's ring is not what shows there; this is recorded, not claimed as the ring.
+  **Found and fixed:** WebKit revealed a text field's caret rather than the field, so the dialog's lower fields stayed half under its footer
+  (9 of 10 runs); the dialog now reveals a focused control whole (`dialog.tsx`, block "nearest"; 10 of 10 clear afterwards). Browser emulation,
+  not physical devices or a screen reader (WEB-09d, collected by WEB-15).
+
+## What WEB-08c built in (the account switcher's focus)
+
+- **Closing the switcher returns focus to an entry control that is still there.** From the rail's account control or Settings' "Switch account", focus returns to that control. On mobile the account control sits in the More sheet, which closes as the switcher opens (two sheets are never stacked), so the switcher returns focus to **More** instead (R10 of the review of 15 October 2026; the shell hands the sheet's own return target to the slot, `ShellSlotState.returnFocus`).
+- **Moving between the switcher's steps keeps focus in the step that follows.** Choosing a row puts focus in the credential step's first empty field; "Cancel — stay as …" puts it back on the list. The step that closed returns focus only when the whole flow has closed, so it never pulls focus out of its successor, whether or not the page behind is already inert.
+- **When the control that opened the switcher is gone, focus goes to the same entry in the page as it is now** (DA-F1 of the design assessment of 15 October 2026; the destination is Kieran's decision of that day). The window can cross the 768 px breakpoint while the switcher is open, replacing More with the rail or the reverse, and a switch refused at its activation returns the same account in a new tree with the credential step kept. On close, focus goes to the opening control while it is still usable. Otherwise it goes to Settings' "Switch account" for a flow opened there, then to the account entry of the current layout (the rail's account control, or More on mobile), then to the page heading. The switcher never reopens More and never navigates. Nothing is restored while another account is displayed, a gate covers the page, or the person has signed out: the session owns focus then (`SwitchFlow.tsx`, `returnTargets`).
+- Automated in `tests/app/switcher-focus-return.test.tsx` (jsdom, the production composition), `tests/e2e/production.switcher-focus.spec.ts` and `tests/e2e/production.switcher-focus-lifetime.spec.ts` (production build, three engines, desktop and a 390 × 844 viewport; the second changes the layout while the switcher is open and refuses a switch at its activation). None of them is evidence from a physical phone or a screen reader.
+
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 
 For each core journey (open the app, move between destinations, open Appearance and change it, open the More sheet, read the sync status, reach a compatibility screen):
@@ -64,6 +104,7 @@ For each core journey (open the app, move between destinations, open Appearance 
 - [ ] Focus is always visible and never lost to `<body>` after an action.
 - [ ] Every control has a name, role and state that match what is shown.
 - [ ] Dialogs announce their title, keep focus inside, close on Escape and return focus.
+- [ ] The account switcher, opened from the rail, from Settings and from the More sheet on a phone: Escape, Close and "Cancel — stay as …" each leave focus on a visible control (More, on a phone), never on `<body>`.
 - [ ] Sync changes are announced once, at the right politeness, and a new conflict interrupts.
 - [ ] A locked or gated screen announces nothing about any account (WEB-08).
 - [ ] WEB-08b journeys: sign in with a wrong and then the right password; reach "Reconnect to keep going" and sign in again; open an invitation link, read the preview, create an account, and read the lost-response state; start single sign-on and return from the provider; open "Signing in", change the password and read the unconfirmed state; with "Signing in" open, switch the device offline and back, and read the reason beside each of Change password, Remove and Link single sign-on; open "Signing in" within a minute of signing in, leave it open for five minutes and note what a screen reader and keyboard focus do when Remove and Link become unavailable; the refusal on each form is announced once and focus lands on the right field.
@@ -80,3 +121,57 @@ For each core journey (open the app, move between destinations, open Appearance 
 
 The three combinations, a manual pass through the core journeys, and the recorded results are required before release. A keyboard-only walkthrough of the fixture shell,
 run by hand on the host, is informational and does not satisfy Q13.
+
+## T22: the resume gate with a screen reader (WEB-08c script; Q13 release evidence collected by WEB-15)
+
+Matrix T22 (`account-lifecycle-matrix.md`, lines 3464–3487) is a **working-client check with real assistive technology**. WEB-08c writes this script and an automated
+counterpart; the manual runs need a person and the devices below and are **not run** until an operator runs them against a WEB-08c candidate (or reassigns them, OD-1 in
+the WEB-08c report). The automated counterpart (`tests/e2e/production.lifecycle-a11y.spec.ts`, three engines) checks the accessibility tree, focus, Tab order and the polite
+status that a screen reader would be given; it is **not** assistive-technology evidence.
+
+**Combinations (each one run, plus one run with an open protected modal dialog):** NVDA with Firefox and with Chrome (Windows); VoiceOver with Safari on iOS and on iPadOS,
+in the browser and as the installed app; TalkBack with Chrome (Android).
+
+**Setup.** Sign in as account C on a build of the candidate. Open Settings → "Signing in" (a protected modal dialog: this is the open-modal run; for the other runs, close
+it and focus a link in the navigation instead). Put the cursor in "Current password" (it carries `data-focus-key="password-current"`) and type some characters without
+submitting. Open the same site in a second tab or window (on a phone: a second tab) and sign in there only when a branch says so.
+
+**Delaying the local check (test-only, nothing ships).** Before each return to the tab, run this snippet in the developer tools console of the tab under test (on iOS
+and Android use the remote inspector). It holds exactly the display check's record read: the first `atlas-auth` transaction created after the tab becomes visible again,
+which the application creates inside its `visibilitychange` handler (the same transaction the automated counterpart holds and checks). Its completion is delivered **5 s
+after that transaction was created** (the matrix's 5 s), then the snippet disarms itself. The display check waits up to 6 s for its read before treating the store as
+stalled (human decision T22-READ-BOUND-20261012, 12 October 2026; every other store wait keeps its hard 5 s), so a 5 s hold is the approved t4 branch. A hold longer than
+6 s is a stalled store that fails closed (finding O-3), which is a different branch.
+
+```js
+(() => { const t = IDBDatabase.prototype.transaction; let armed = false, used = false;
+  window.addEventListener("visibilitychange", () => { if (!used && document.visibilityState === "visible") armed = true; }, { capture: true });
+  IDBDatabase.prototype.transaction = function (...a) { const tx = t.apply(this, a);
+    if (!armed || this.name !== "atlas-auth") return tx; armed = false; used = true; let h = null;
+    const until = performance.now() + 5000;
+    const go = (e) => { const left = until - performance.now(); if (left > 0) setTimeout(() => go(e), Math.ceil(left)); else if (h) h.call(tx, e); };
+    tx.addEventListener("complete", go);
+    Object.defineProperty(tx, "oncomplete", { configurable: true, get: () => h, set: (f) => { h = f; } });
+    return tx; }; })();
+```
+
+**Steps.**
+
+| Step | Do | Pass criteria |
+| --- | --- | --- |
+| t0 | Switch to another tab or app (the tab is hidden) | The screen reader announces nothing about C; the focused field is no longer reachable; find-in-page finds nothing of C |
+| t1 | Wait long enough for the platform to suspend the tab where it does (a minute or more; on mobile, lock the screen) | — |
+| t2 | In the second tab: **(i)** sign in as another account Y; **(ii)** end C's session (sign out of C everywhere, or change C's password) and use the second tab once so it notices; **(iii)** do nothing | — |
+| t3 | Run the snippet, then return to the tab | The first thing presented is the gate: heading "Checking your account". Tab, Shift+Tab, the virtual cursor, the rotor and swipe navigation reach nothing but the gate. Nothing of C is spoken |
+| t4 | During the 5 s hold, try to reach the form | Still only the gate, for the whole 5 s. "Checking your account" is announced once, politely (it does not interrupt) |
+| t5 (i) | Wait | Y's shell is shown; "This window now shows a different account." is announced, no name is spoken; focus is on Y's main heading; nothing points into C's form, and the typed characters are gone |
+| t5 (ii) | Wait | "Reconnect to keep going" (state 1b) is shown and announced as an alert; focus is on its heading; nothing of C is reachable |
+| t5 (iii) | Wait | The page comes back as it was: focus is back in "Current password" with the typed characters, and nothing extra is announced. In a run without the open dialog (the Settings page scrolled down, focus on a link), the scroll position is back where it was |
+
+**Fails:** any protected text or control reachable by keyboard, virtual cursor, rotor, swipe or find-in-page during t3–t4; after t5 (i) or (ii), any restored focus that
+points into the old account; any account name spoken by the gate or a neutral state.
+
+**Recording template (one row per run; WEB-15 collects them):**
+
+| Date | Tester | Device / OS version | Browser / version (installed app?) | Screen reader / version | Branch (i/ii/iii, open modal?) | t3–t4 result | t5 result | Notes / recording link |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |

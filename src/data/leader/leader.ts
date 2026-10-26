@@ -18,7 +18,11 @@ import {
   type RecoveryJob,
   type RecoveryJobDeps,
 } from "../engine/recovery-job";
-import type { SyncChannel } from "../engine/sync-channel";
+import type {
+  RecoveryPhase,
+  SyncChannel,
+  SyncMessage,
+} from "../engine/sync-channel";
 import {
   createSyncEngine,
   type SyncEngine,
@@ -90,12 +94,21 @@ export interface SyncLeaderDeps {
   markers: WriteFailureMarkers;
   conflicts: ConflictHandlerRegistry;
   ids: { uuid(): string };
+  /**
+   * Whether the page is visible (WEB-08c revision 4): a hidden page neither asks for nor applies the recovery report (absent: visible).
+   * `subscribe` fires when it changes.
+   */
+  visible?(): boolean;
   /** Publishes the page's leadership for the status model (the page host). */
   publish(attachment: LeaderAttachment): void;
   elapsed?: () => number;
   trace?: Trace;
   config?: Partial<typeof DATA_CONFIG>;
 }
+
+/** WEB-08c revision 4 (R9): the paced recovery-report question of a page that does not lead: first after 1 s, doubling to 30 s. */
+export const STATUS_ASK_MS = 1_000;
+export const STATUS_ASK_MAX_MS = 30_000;
 
 export interface LeaderBinding {
   readonly account: AccountId;
@@ -166,11 +179,229 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
   const service = (): AccountService | null =>
     bound?.service.live === true ? bound.service : null;
 
+  /**
+   * WEB-08c revision 3 (R5 of the review of 14 October 2026, T24 D; design assessment S9): the recovery job's report ("Catching up",
+   * state 2; "Couldn't finish catching up", state 3) was the page memory of the LEADING page only, so every other page of the account kept
+   * saying "Catching up" after the recovery had stopped, and offered no "Try again" (which already reaches the leading page on
+   * `atlas-sync`). The leading page announces each report for the identity it serves, as a HINT; it changes only which neutral card is
+   * shown: what may be displayed is decided by the record and the exposure protocol.
+   *
+   * WEB-08c revision 4 (R9 of the review of 14 October 2026; design assessment P2/P3, S1-S11): a one-shot hint is not reliable state.
+   *  - Completion is never learned from a hint: the session withdraws a report at its own record read once the fence is gone (R9), and a
+   *    page that shows state 2 or 3 reads its record again, paced. A lost "none" therefore cannot keep a page gated.
+   *  - Every report carries its PRODUCER (this leader) and a sequence: a page ignores an older or repeated report of the same producer, so a
+   *    late "failed" or "none" cannot replace a newer one. A producer that no longer leads, or is unbinding, announces nothing: an old owner
+   *    never withdraws its successor's report.
+   *  - A page that does not lead ASKS for the standing report while it shows state 2 or 3 and is visible, paced (`STATUS_ASK_MS` doubling
+   *    to `STATUS_ASK_MAX_MS`), and the leading page answers every matching question with its current report, "none" included. A lost
+   *    report, question or answer only delays it. With no working channel at all a follower cannot learn of the failure, nor send its
+   *    retry: the accepted limit D1 of RECOVERY-NAVIGATION-ENROLMENT-20261014.
+   *  - A report is applied only while the page SHOWS state 2 or 3 and is visible, and only when it changes the card (3 or not 3). A page
+   *    that is gated, hidden, frozen or displaying is never woken by one (T22 (i), revision 3); it takes the kept report when it comes to
+   *    show the card.
+   *  - "failed" names its failure (`failure`); a retry pressed on a follower names the failure it saw, and the leading page applies it only
+   *    while that same failure stands (S11).
+   */
+  const producer = deps.ids.uuid();
+  let producerSeq = 0;
+  let failureSeq = 0;
+  let announced: {
+    account: AccountId;
+    epoch: number;
+    phase: RecoveryPhase;
+    failure: string | null;
+  } | null = null;
+  const postStatus = (): void => {
+    const standing = announced;
+    if (standing === null) return;
+    producerSeq += 1;
+    deps.channel.post({
+      type: "recovery_state",
+      account: standing.account,
+      epoch: standing.epoch,
+      phase: standing.phase,
+      producer,
+      seq: producerSeq,
+      ...(standing.failure === null ? {} : { failure: standing.failure }),
+    });
+  };
+  /** The latest report of the leading page for THIS page's identity, ordered per producer (a page that does not lead). */
+  let status: {
+    account: AccountId;
+    epoch: number;
+    phase: RecoveryPhase;
+    failure: string | null;
+    producer: string;
+    seq: number;
+  } | null = null;
+  const visible = (): boolean => deps.visible?.() ?? true;
+  const showingRecoveryCard = (): boolean => {
+    const view = deps.view.get();
+    return (
+      view.kind === "neutral" && (view.state === "2" || view.state === "3")
+    );
+  };
+  const ownStatus = (): typeof status => {
+    const identity = deps.identity.get();
+    const kept = status;
+    return kept !== null &&
+      identity !== null &&
+      kept.account === identity.account_id &&
+      kept.epoch === identity.epoch
+      ? kept
+      : null;
+  };
+  /**
+   * What this page last gave its session (phase and identity), while it shows a recovery card: a report is given once, and again only
+   * when the card it shows contradicts it (the session withdrew it at its own read). Forgotten when the page shows something else.
+   */
+  let given: {
+    failed: boolean;
+    key: string;
+  } | null = null;
+  /** Gives the session the kept report when it changes the card this visible page shows (3, or not 3). */
+  const applyStatus = (): void => {
+    if (leading() || !showingRecoveryCard() || !visible()) return;
+    const identity = deps.identity.get();
+    if (identity === null) return;
+    const kept = ownStatus();
+    const failed = kept?.phase === "failed";
+    const view = deps.view.get();
+    const showsFailed = view.kind === "neutral" && view.state === "3";
+    if (failed === showsFailed) return;
+    const phase = failed
+      ? "failed"
+      : kept?.phase === "catching_up"
+        ? "catching_up"
+        : null;
+    const key = JSON.stringify([phase, identity.account_id, identity.epoch]);
+    // Given already and its evaluation not yet shown: nothing more (an identical report is applied once).
+    if (given?.key === key) return;
+    given = { failed, key };
+    deps.recovery.report(phase, {
+      account: identity.account_id,
+      epoch: identity.epoch,
+    });
+  };
+  const recovery: SyncLeaderDeps["recovery"] = {
+    begin: (account) => deps.recovery.begin(account),
+    finish: (handle) => deps.recovery.finish(handle),
+    report(phase, scope) {
+      deps.recovery.report(phase, scope);
+      // Only the producer that leads AND is bound announces: an unbinding or superseded one withdraws nothing on the channel.
+      const b = bound;
+      if (!leading() || b === null || scope === undefined) return;
+      if (scope.account !== b.account) return;
+      const same =
+        announced !== null &&
+        announced.account === scope.account &&
+        announced.epoch === scope.epoch;
+      let failure: string | null = null;
+      if (phase === "failed") {
+        // The same failure while it stands; a new one after any other report (a retry, a new run) or identity.
+        if (same && announced?.phase === "failed" && announced.failure !== null)
+          failure = announced.failure;
+        else {
+          failureSeq += 1;
+          failure = `${producer}:${failureSeq}`;
+        }
+      }
+      announced = {
+        account: scope.account,
+        epoch: scope.epoch,
+        phase: phase ?? "none",
+        failure,
+      };
+      postStatus();
+    },
+  };
+  const adoptReport = (
+    message: Extract<SyncMessage, { type: "recovery_state" }>,
+  ): void => {
+    if (leading()) return;
+    const identity = deps.identity.get();
+    if (
+      identity === null ||
+      identity.account_id !== message.account ||
+      identity.epoch !== message.epoch
+    )
+      return;
+    const kept = ownStatus();
+    if (
+      kept !== null &&
+      kept.producer === message.producer &&
+      message.seq <= kept.seq
+    )
+      return;
+    status = {
+      account: message.account,
+      epoch: message.epoch,
+      phase: message.phase,
+      failure: message.failure ?? null,
+      producer: message.producer,
+      seq: message.seq,
+    };
+    deps.trace?.emit("data.recovery_status", { phase: message.phase });
+    applyStatus();
+  };
+  /** The paced question of a page that does not lead (one chain at a time, per identity). */
+  let asking: { key: string; timer: unknown } | null = null;
+  const stopAsking = (): void => {
+    if (asking !== null) deps.clock.clearTimeout(asking.timer);
+    asking = null;
+  };
+  const askChain = (key: string, delay: number): void => {
+    const identity = deps.identity.get();
+    if (identity === null) return;
+    deps.channel.post({
+      type: "recovery_state_query",
+      account: identity.account_id,
+      epoch: identity.epoch,
+    });
+    asking = {
+      key,
+      timer: deps.clock.setTimeout(() => {
+        if (asking?.key !== key) return;
+        asking = null;
+        followStatus(Math.min(delay * 2, STATUS_ASK_MAX_MS));
+      }, delay),
+    };
+  };
+  /**
+   * A page that does not lead: apply the kept report, and ask (paced) while it shows state 2 or 3 and is visible. Stops asking when it
+   * leads, its identity changes, the card goes or it is hidden.
+   */
+  const followStatus = (delay = STATUS_ASK_MS): void => {
+    if (disposed) return;
+    const identity = deps.identity.get();
+    if (!showingRecoveryCard()) given = null;
+    else if (given !== null) {
+      // The card now shows what was given (or the session withdrew it): a later contradiction is news again.
+      const view = deps.view.get();
+      const showsFailed = view.kind === "neutral" && view.state === "3";
+      if (showsFailed === given.failed) given = null;
+    }
+    if (
+      leading() ||
+      identity === null ||
+      !showingRecoveryCard() ||
+      !visible()
+    ) {
+      stopAsking();
+      return;
+    }
+    applyStatus();
+    const key = `${identity.account_id}:${identity.epoch}`;
+    if (asking !== null && asking.key === key) return;
+    stopAsking();
+    askChain(key, delay);
+  };
+
   const job = createRecoveryJob({
     identity: deps.identity,
     view: deps.view,
     fetchFor: deps.fetchFor,
-    recovery: deps.recovery,
+    recovery,
     admission: deps.admission,
     apiUrl: deps.apiUrl,
     online: deps.online,
@@ -233,6 +464,7 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
   const retryHere = (target: {
     account: AccountId;
     epoch: number;
+    failure?: string;
   }): boolean => {
     const b = bound;
     const identity = deps.identity.get();
@@ -246,6 +478,14 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
       identity.epoch !== target.epoch
     )
       return false;
+    // WEB-08c revision 4 (S11): a retry pressed against a recovery failure acts only while that failure stands (an older one is spent).
+    if (
+      target.failure !== undefined &&
+      (announced === null ||
+        announced.phase !== "failed" ||
+        announced.failure !== target.failure)
+    )
+      return true;
     const state = job.state.get();
     if (
       state.kind === "stopped" ||
@@ -443,6 +683,15 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
 
   const follow = (): void => {
     if (disposed) return;
+    if (leading()) {
+      // The page leads now: its own job reports; a card adopted from the previous leader is no longer this page's to keep.
+      stopAsking();
+      const adopted = status !== null;
+      status = null;
+      const view = deps.view.get();
+      if (adopted && view.kind === "neutral" && view.state === "3")
+        deps.recovery.report(null);
+    } else followStatus();
     if (!leading()) {
       attempt += 1;
       opening = null;
@@ -480,10 +729,22 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
     retryUpdates(target) {
       if (disposed) return;
       if (retryHere(target)) return;
+      // A follower's retry on state 3 names the failure it saw (S11).
+      const kept = ownStatus();
+      const failure =
+        kept !== null &&
+        kept.account === target.account &&
+        kept.epoch === target.epoch &&
+        kept.phase === "failed" &&
+        kept.failure !== null &&
+        showingRecoveryCard()
+          ? kept.failure
+          : undefined;
       deps.channel.post({
         type: "retry_requested",
         account: target.account,
         epoch: target.epoch,
+        ...(failure === undefined ? {} : { failure }),
       });
     },
     binding,
@@ -504,8 +765,45 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
         // is woken by its own facade only, so the hint is what makes it look now rather than at some unrelated wake.
         deps.channel.subscribe((message) => {
           // Another page's person asked for a retry of updates: this page applies it only if it leads that account at that epoch.
+          if (message.type === "recovery_state") {
+            adoptReport(message);
+            return;
+          }
+          if (message.type === "recovery_state_query") {
+            // Every matching question is answered with the current report, "none" included (R9): only the page that leads and is bound
+            // to the account, for its own identity.
+            const identity = deps.identity.get();
+            if (
+              !leading() ||
+              bound === null ||
+              bound.account !== message.account ||
+              identity === null ||
+              identity.account_id !== message.account ||
+              identity.epoch !== message.epoch
+            )
+              return;
+            if (
+              announced === null ||
+              announced.account !== message.account ||
+              announced.epoch !== message.epoch
+            )
+              announced = {
+                account: message.account,
+                epoch: message.epoch,
+                phase: "none",
+                failure: null,
+              };
+            postStatus();
+            return;
+          }
           if (message.type === "retry_requested") {
-            retryHere({ account: message.account, epoch: message.epoch });
+            retryHere({
+              account: message.account,
+              epoch: message.epoch,
+              ...(message.failure === undefined
+                ? {}
+                : { failure: message.failure }),
+            });
             return;
           }
           if (
@@ -527,6 +825,7 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
       for (const off of offs) off();
       offs = [];
       cancelRetry();
+      stopAsking();
       unbind();
       deps.election.dispose();
       deps.publish({ role: "none" });

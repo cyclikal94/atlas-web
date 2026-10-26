@@ -69,6 +69,14 @@ Recorded honestly, with what each result does and does not prove.
   and the level-0 gate with real `inert` and the real top layer; the screens in both themes at 320, 390, 768 and 1280 px with axe including contrast; and the integration set against the released backend
   (`pnpm test:integration`). **Limitations:** visibility is driven by overriding `document.visibilityState` and dispatching `visibilitychange`, not by the engine's own event; Playwright contexts are ephemeral
   profiles, so `durability: 'strict'` is not measured against a real on-disk profile; real freeze, bfcache and assistive technology are WEB-08c; real Safari and devices are WEB-15.
+- **WEB-08c, lifecycle and Web Locks** (`docs/lifecycle-evidence.md`). On the production build with a stubbed network, in Chromium, Firefox and WebKit (one Playwright
+  version each): the resume gate's first frame after a hide (and, in **Chromium only**, a CDP freeze with `Page.setWebLifecycleState`) is inert and hidden from assistive
+  technology; a page frozen inside its `atlas-auth` callback makes another page's sign-in wait the full 20 s and nothing steals the lock; a `401` is recorded while that lock
+  is held; another page's request for a closed owner's `atlas-lease-<id>` is granted (P-lock-a, close). **Limitations:** a frozen page exists in Chromium only (CDP), so
+  P-lock-c is Chromium-only; Playwright's CDP `Page.crash` disposes or hangs the shared context, so P-lock-a after a crash is **not observable here**; the back/forward
+  cache did not restore these pages under Playwright (recorded per engine, not passed); headless Firefox and WebKit cannot background a page natively. These are environment
+  limits, not acceptance waivers: native backgrounding, real Safari and devices are WEB-09d's. Two engine artefacts of a test's OWN navigation are tolerated by exact
+  message only: WebKit's page error for a fetch the departing document's reload cancelled (HF-4) and Firefox's warning that a transaction was aborted by the navigation (HF-2).
 - **Not exercised:** previous-major versions of any browser, real Android and iOS devices, the installed web app, HTTPS with a real certificate (so the `__Host-` cookie
   was observed only through the documented loopback variant, `atlas_session`).
 

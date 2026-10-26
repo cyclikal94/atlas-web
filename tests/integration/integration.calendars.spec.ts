@@ -1,14 +1,13 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import {
   bootHarness,
   expect,
   exposeSession,
-  ORIGIN,
+  paceSignIn,
   proxy,
   signIn as signInUnpaced,
+  stackFile,
   test,
   untilView,
   type Who,
@@ -35,39 +34,10 @@ const FEED = process.env.ATLAS_INTEGRATION_FEED ?? "";
 const ROUTE = "/settings/calendars";
 
 // The released backend allows 10 password attempts per account in a fixed 60 s window: every sign-in waits until fewer than 8 of that
-// account's attempts are less than a minute old (a ledger file keyed by the stack's port), and the main account rotates.
-const LEDGER = join(
-  tmpdir(),
-  `atlas-signin-ledger-${new URL(ORIGIN || "http://x").port}.json`,
-);
-async function budget(who: Who): Promise<void> {
-  for (;;) {
-    let all: Record<string, number[]> = {};
-    try {
-      all = JSON.parse(readFileSync(LEDGER, "utf8")) as Record<
-        string,
-        number[]
-      >;
-    } catch {
-      all = {};
-    }
-    const now = Date.now();
-    const recent = (all[who] ?? []).filter((t) => now - t < 60_000);
-    if (recent.length < 8) {
-      all[who] = [...recent, now];
-      writeFileSync(LEDGER, JSON.stringify(all));
-      return;
-    }
-    await new Promise((resolve) =>
-      setTimeout(resolve, 60_000 - (now - (recent[0] ?? now)) + 250),
-    );
-  }
-}
+// account's attempts are less than a minute old (helpers.ts `paceSignIn`: the stack's own ledger file), and the main account rotates.
+const budget = (who: Who) => paceSignIn(who);
 const ROTATION: Who[] = ["alice", "carol", "dave", "erin", "bob"];
-const ROTATION_FILE = join(
-  tmpdir(),
-  `atlas-calendar-rotation-${new URL(ORIGIN || "http://x").port}.txt`,
-);
+const ROTATION_FILE = stackFile("atlas-calendar-rotation.txt");
 let main: Who = "alice";
 test.beforeEach(async ({ context }, info) => {
   void context;

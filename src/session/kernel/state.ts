@@ -110,6 +110,11 @@ export class PageMemory {
   mountedAccount: AccountId | null = null;
   /** Where this page last decided a foreign lease was unresolved, so the flag is re-derived after a new settlement. */
   unresolvedKnownFor: { account: AccountId; epoch: Epoch } | null = null;
+  /**
+   * WEB-08c revision 4 (R9): the (account, epoch) the recovery report in `neutral.recovery` was made for. A report never outlives it:
+   * `evaluate` withdraws it when the settled identity differs, or when the account has no fence entry at all (the recovery is over).
+   */
+  recoveryFor?: { account: AccountId; epoch: Epoch } | null;
   activitySeq = 0;
   /** Numbers the release checks of this page (`checkAtTheRecord`), so the trace can pair a check with its release. */
   responseChecks = 0;
@@ -286,7 +291,14 @@ export class Kernel {
     );
   }
 
-  /** Race a promise against the stall interval. Resolves the string "stalled" when no answer came in time. */
+  /**
+   * Race a promise against the stall interval. Resolves the string "stalled" when no answer came in time.
+   *
+   * The bound is HARD (matrix §3.6.2 step 1, Ex5; WEB-08c R4 of the review of 11 October 2026): whichever the page observes first decides.
+   * An answer delivered after the bound's timer has run is late, however close it was due; a later completion never revives the activity
+   * the caller has already ended (an ordinary cover is then not sent, a recording is retried). No grace, and nothing is backdated from a
+   * requested timer delay.
+   */
   async withStall<T>(work: Promise<T>, ms: number): Promise<T | "stalled"> {
     return new Promise<T | "stalled">((resolve, reject) => {
       const timer = this.ports.clock.setTimeout(() => resolve("stalled"), ms);

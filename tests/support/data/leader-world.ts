@@ -59,12 +59,25 @@ export interface LeaderPage {
     move(account: AccountId | null, epoch?: number): void;
   };
   begins: Array<RecoveryBegin>;
+  /** Every report this page's session was given (its own job's, or one adopted from another page: WEB-08c revision 3). */
+  reports: Array<"catching_up" | "failed" | null>;
+  /** The scope each report was given with (WEB-08c revision 4: reports are scoped), aligned with `reports`. */
+  scopes: Array<{ account: AccountId; epoch: number } | undefined>;
+  /** Whether the page is visible (`visible()` of the leader; `subscribe` fires when it changes). */
+  setVisible(visible: boolean): void;
 }
 
 export interface LeaderWorld {
   env: DataTestWorld;
   /** Posts a message on `atlas-sync` as a page that is not one of the leader pages (another facade, another tab). */
   hint(message: SyncMessage): void;
+  /**
+   * WEB-08c revision 4 (R9): a message of `atlas-sync` from `from` to `to` for which this returns true is LOST (counted in `dropped`); every
+   * other one is delivered. `posted` is every message posted, in order, with its sender.
+   */
+  drop: ((message: SyncMessage, from: string, to: string) => boolean) | null;
+  dropped: Array<{ from: string; to: string; message: SyncMessage }>;
+  posted: Array<{ from: string; message: SyncMessage }>;
   /** Answers each request; the default answers `/sync` with an empty delta page that keeps the cursor. */
   server: (request: ServerRequest) => Answer;
   requests: ServerRequest[];
@@ -86,9 +99,15 @@ export function leaderWorld(): LeaderWorld {
   const bus = new Map<string, Set<(message: SyncMessage) => void>>();
   const channelFor = (page: string) => ({
     post(message: SyncMessage) {
+      out.posted.push({ from: page, message });
       for (const [other, listeners] of bus)
-        if (other !== page)
+        if (other !== page) {
+          if (out.drop?.(message, page, other) === true) {
+            out.dropped.push({ from: page, to: other, message });
+            continue;
+          }
           for (const listener of [...listeners]) listener(message);
+        }
     },
     subscribe(listener: (message: SyncMessage) => void) {
       let set = bus.get(page);
@@ -109,6 +128,9 @@ export function leaderWorld(): LeaderWorld {
   const out: LeaderWorld = {
     env,
     requests: [],
+    drop: null,
+    dropped: [],
+    posted: [],
     pages,
     hint: (message) => channelFor("outside").post(message),
     leaderName: DATA_CONFIG.syncLeaderLock,
@@ -175,6 +197,10 @@ export function leaderWorld(): LeaderWorld {
         subscribe: () => () => undefined,
       };
       const begins: RecoveryBegin[] = [];
+      const reports: Array<"catching_up" | "failed" | null> = [];
+      const scopes: Array<{ account: AccountId; epoch: number } | undefined> =
+        [];
+      let visible = true;
       const attachments: LeaderAttachment[] = [];
       const leader = createSyncLeader({
         election: createLeaderElection({
@@ -218,7 +244,24 @@ export function leaderWorld(): LeaderWorld {
               handle: { account: a, epoch: pageEnv.identity.epoch, s: 1 },
             },
           finish: async () => "cleared",
-          report: () => undefined,
+          report: (phase, scope) => {
+            reports.push(phase);
+            scopes.push(scope);
+            // The session models what a report does to a page that shows a recovery card (WEB-08c revision 4): it re-evaluates, and the
+            // card is 3 for "failed" and 2 otherwise (older-epoch fences stand while the test shows card 2 or 3).
+            world.schedule("misc", id, { what: "evaluate" }, () => {
+              if (
+                view.kind === "neutral" &&
+                (view.state === "2" || view.state === "3")
+              ) {
+                const next = phase === "failed" ? "3" : "2";
+                if (view.state !== next) {
+                  view = { kind: "neutral", state: next as never };
+                  notify();
+                }
+              }
+            });
+          },
         },
         // Nothing in this world refuses a request before it is sent: the admission probe always finds it open (R3's waits are the
         // recovery world's and the native cases').
@@ -273,6 +316,7 @@ export function leaderWorld(): LeaderWorld {
         markers: pageMarkers(markerStorage.page(id)),
         conflicts: createConflictHandlerRegistry(),
         ids: { uuid: () => crypto.randomUUID() },
+        visible: () => visible,
         publish: (attachment) => attachments.push(attachment),
         elapsed: () => world.time,
       });
@@ -291,6 +335,12 @@ export function leaderWorld(): LeaderWorld {
         },
         identity,
         begins,
+        reports,
+        scopes,
+        setVisible(next) {
+          visible = next;
+          notify();
+        },
       };
       pages.set(id, page);
       leader.start();

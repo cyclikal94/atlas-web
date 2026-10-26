@@ -301,6 +301,45 @@ describe("U-5 to U-8 WF-QUEUE-02, the generic item-detail dialog", () => {
     ).toBeInTheDocument();
   });
 
+  test("U-6b (WEB-10a revision 16, DA-A1) the other rows the read returned go with the reviewed value to the rebuild, for its checks", async () => {
+    const server = cacheRow({ id: "r1", label: "Fed at 08:02", version: 4 });
+    const details = cacheRow({ id: "r2", can_edit: false });
+    const env = withRead(stubEnv(), {
+      kind: "loaded",
+      value: server,
+      related: [details],
+    });
+    env.commands.register("edit", {
+      describe: () => "Feed cat",
+      rebuild: () => null,
+    });
+    mount(
+      env,
+      <ItemDetailDialog
+        draft={conflict("version_conflict")}
+        title="Feed cat"
+        variant="version_conflict"
+        open
+        onClose={() => {}}
+        onRemoved={() => {}}
+      />,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: copy.DETAIL_RESEND }),
+      ).toBeEnabled(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: copy.DETAIL_RESEND }));
+    await waitFor(() =>
+      expect(env.calls).toEqual([
+        {
+          action: "saveAsNew",
+          args: [conflict("version_conflict").local_id, server, [details]],
+        },
+      ]),
+    );
+  });
+
   test("U-7 an operation conflict: the corrected copy and the honest limit; the new attempt waits for the read, or an explicit choice when it fails", async () => {
     const env = withRead(
       stubEnv(),

@@ -7,6 +7,7 @@ import {
 } from "../support/session/properties";
 import {
   fencesOf,
+  forceResumeVerification,
   holdAnswers,
   leaseIds,
   newWorld,
@@ -29,15 +30,24 @@ describe("headers, stamps and tokens", () => {
       .at(-1);
     expect(stamped?.headers["x-csrf-token"]).toBe(`csrf.${l.sessionId}`);
     expect(stamped?.headers["x-atlas-session"]).toBeUndefined();
-    // A second page obtains ITS OWN token from a leased identity read (never from another page).
+    // ADAPTED (WEB-08c revision 2, human decision HF1-SHARED-CONFIRMATION-20261013): was "a second page obtains ITS OWN token from a leased
+    // identity read (never from another page)". The settled session's token is now shared through the record: a second page adopts it for
+    // the same (account, epoch, session) and makes NO identity read for it. Its identity read, when it makes one (its resume verification
+    // once the shared confirmation is older than the interval), still carries X-Atlas-Session: 1 and no CSRF header.
     const n = f.addPage();
     await f.boot(n);
     await f.runWith(ordinaryGet(n, l.account, l.epoch));
-    const identityRead = f.server.requests
-      .filter(
+    const readsOf = () =>
+      f.server.requests.filter(
         (r) => r.path.endsWith("/browser-sessions/current") && r.page === n.id,
-      )
-      .at(0);
+      );
+    expect(readsOf()).toEqual([]);
+    expect(
+      f.server.requests.filter((r) => r.path.endsWith("/probe")).at(-1)
+        ?.headers["x-csrf-token"],
+    ).toBe(`csrf.${l.sessionId}`);
+    await forceResumeVerification(f, n);
+    const identityRead = readsOf().at(0);
     expect(identityRead?.headers["x-atlas-session"]).toBe("1");
     expect(identityRead?.headers["x-csrf-token"]).toBeUndefined();
     expect(
