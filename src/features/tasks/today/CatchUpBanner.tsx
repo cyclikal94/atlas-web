@@ -1,7 +1,11 @@
 import { useEffect, useId, useRef } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
-import { type MaterialiseSequenceRow, useCachedResources } from "../../../data";
+import {
+  type MaterialiseDiscovery,
+  type MaterialiseSequenceRow,
+  useCachedResources,
+} from "../../../data";
 import type { RunnerState } from "../catchup/runner";
 import { useCatchUp } from "../catchup/useCatchUp";
 import * as copy from "../copy";
@@ -46,7 +50,10 @@ export function latestByTask(
   return out;
 }
 
-/** A task's stopped catch-up, as this page knows it: its latest day's record when stopped, else a stop held in memory only. */
+/**
+ * A task's stopped catch-up, as this page knows it: its latest day's record when stopped, else its stopped discovery (the first read; any
+ * page's record, review R13), else a discovery stop held in this page's memory only (its record could not be written).
+ */
 export interface ShownStop {
   taskId: string;
   throughDate: string | undefined;
@@ -57,6 +64,7 @@ export function stopFor(
   taskId: string,
   latest: ReadonlyMap<string, MaterialiseSequenceRow>,
   state: RunnerState,
+  discovery: Readonly<Record<string, MaterialiseDiscovery>> = {},
 ): ShownStop | null {
   const row = latest.get(taskId);
   if (row?.phase === "stopped" && row.stop !== null)
@@ -65,6 +73,14 @@ export function stopFor(
       throughDate: row.through_date,
       reason: row.stop.reason,
       requestId: row.stop.request_id,
+    };
+  const found = discovery[taskId]?.stop;
+  if (found)
+    return {
+      taskId,
+      throughDate: undefined,
+      reason: found.reason,
+      requestId: found.request_id,
     };
   const memory = state.unrecorded.get(taskId);
   return memory === undefined
@@ -88,7 +104,7 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
   const env = useTasksEnv();
   const announcer = useAnnouncer();
   const heading = useId();
-  const { runner, state, records } = useCatchUp();
+  const { runner, state, records, discovery } = useCatchUp();
   const titles = useCachedResources(pendingTasks);
   const key = pendingTasks.join(",");
   const reachable = env.online && env.writable;
@@ -115,7 +131,7 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
     return row?.merged.label ?? CATCH_UP_COPY.untitled;
   };
   const stopped = pendingTasks.flatMap((taskId) => {
-    const stop = stopFor(taskId, latest, state);
+    const stop = stopFor(taskId, latest, state, discovery);
     return stop === null ? [] : [stop];
   });
   const working = pendingTasks.filter(

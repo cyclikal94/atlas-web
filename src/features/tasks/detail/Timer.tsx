@@ -1,7 +1,8 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import {
+  commitTimerCorrection,
   useDataEnv,
   useDraftWithCommand,
   useSharingDefaults,
@@ -15,6 +16,7 @@ import { cancelTimer, startTimer, stopTimer } from "../model/commands";
 import type { TimerSession } from "../model/contract";
 import { progressOf } from "../model/dependencies";
 import {
+  copyCorrection,
   elapsed,
   isTimerGoal,
   type RunningSession,
@@ -25,7 +27,11 @@ import {
   stopChoice,
   timerCommandOf,
 } from "../model/timers";
-import { useCopiedTimers } from "../timers/copy";
+import {
+  type IssuedRead,
+  issueTimerRead,
+  useCopiedTimers,
+} from "../timers/copy";
 import type { PendingMark, RowModel } from "../view";
 import type { DependencyState } from "./Dependencies";
 
@@ -98,34 +104,64 @@ export const MARK: Readonly<Record<string, PendingMark>> = {
 };
 
 /**
- * The last COMPLETE read of each day's sessions on this page, for the displayed identity only (page memory, never persisted): offline, a
- * session this device saw running stays shown, marked with when it was read ("Last checked"), until the connection is back.
+ * The last read of each day's sessions this page ACCEPTED (page memory, never persisted), for the displayed identity only: offline, a
+ * session this device saw running stays shown, marked with when it was read ("Last checked"), until the connection is back. A read that
+ * had not reached the end of the day's list is kept as well, marked incomplete: what it lists is known (review R11), what it omits is
+ * not. `issued` orders two readers of one day on this page (a remounted block): an earlier one never replaces a later one's entry.
  */
-const lastRead = new Map<string, { sessions: TimerSession[]; at: number }>();
+interface Kept {
+  sessions: TimerSession[];
+  /** ms, when the read's first page was issued. */
+  at: number;
+  /** Its place in the observation order (W28), or null. */
+  order: number | null;
+  complete: boolean;
+  issued: number;
+}
+const lastRead = new Map<string, Kept>();
 let lastReadFor = "";
-function remember(
-  identity: string,
-  occurrenceId: string,
-  sessions: TimerSession[] | null,
-  at: number,
-) {
+let issuedSeq = 0;
+function keptOf(identity: string) {
   if (lastReadFor !== identity) {
     lastRead.clear();
     lastReadFor = identity;
   }
-  if (sessions === null) return lastRead.get(occurrenceId) ?? null;
-  lastRead.delete(occurrenceId);
-  lastRead.set(occurrenceId, { sessions, at });
-  if (lastRead.size > 200) {
-    const oldest = lastRead.keys().next().value;
-    if (oldest !== undefined) lastRead.delete(oldest);
+  return lastRead;
+}
+function remember(identity: string, occurrenceId: string, entry: Kept) {
+  const kept = keptOf(identity);
+  const held = kept.get(occurrenceId);
+  if (held !== undefined && held.issued > entry.issued) return;
+  kept.delete(occurrenceId);
+  kept.set(occurrenceId, entry);
+  if (kept.size > 200) {
+    const oldest = kept.keys().next().value;
+    if (oldest !== undefined) kept.delete(oldest);
   }
-  return null;
 }
 
-/** The day's own sessions (`GET /occurrences/{id}/timers`, online, 50 a page): what tells a running session apart on this device. */
+/** The pages one read has accepted, and whether its next page is on its way (one at a time). */
+interface Chain {
+  owner: number;
+  pages: TimerSession[][];
+  next: string | null;
+  loading: boolean;
+  askedAt: number;
+  issued: number;
+  read: IssuedRead | null;
+}
+
+/**
+ * The day's own sessions (`GET /occurrences/{id}/timers`, online, 50 a page): what tells a running session apart on this device.
+ *
+ * ONE read owns what this shows (review R10): a new read (mount, another identity, day, connection or answered draft, Retry) takes over
+ * at once, so an answer to an earlier one, success or failure, is dropped before it reaches the screen, the page memory or the copy; and
+ * a further page is accepted only for the chain and cursor that asked for it, one at a time. Each accepted page corrects the copy (W28)
+ * under the read's place in the observation order: a session it lists finished, and, once complete, one it does not list.
+ */
 function useDaySessions(occurrenceId: string, again: string) {
   const env = useTasksEnv();
+  const data = useDataEnv();
   const [state, setState] = useState<{
     scope: string;
     pages: TimerSession[][];
@@ -134,66 +170,128 @@ function useDaySessions(occurrenceId: string, again: string) {
     requestId?: string;
     /** When the read's FIRST page was issued (ms): a later page cannot make it newer than that. */
     askedAt?: number;
+    order?: number | null;
   }>({ scope: "", pages: [], next: null, status: "loading" });
   const scope = `${env.identity}\u0000${occurrenceId}`;
+  const owner = useRef(0);
+  const chain = useRef<Chain | null>(null);
   const load = async (after: string | null) => {
-    if (!env.online) {
-      setState({ scope, pages: [], next: null, status: "offline" });
+    const identity = env.identity;
+    let link: Chain;
+    if (after === null) {
+      owner.current += 1;
+      const mine = owner.current;
+      chain.current = null;
+      if (!env.online) {
+        setState({ scope, pages: [], next: null, status: "offline" });
+        return;
+      }
+      issuedSeq += 1;
+      link = {
+        owner: mine,
+        pages: [],
+        next: null,
+        loading: true,
+        askedAt: env.now(),
+        issued: issuedSeq,
+        read: null,
+      };
+      chain.current = link;
+      link.read = await issueTimerRead(data, identity);
+      if (owner.current !== mine) return;
+    } else {
+      const held = chain.current;
+      if (
+        held === null ||
+        held.owner !== owner.current ||
+        held.next !== after ||
+        held.loading
+      )
+        return;
+      held.loading = true;
+      link = held;
+    }
+    const result = await env.api.readTimers(occurrenceId, after ?? undefined);
+    noteIfRefused(identity, `timers:${occurrenceId}`, result);
+    if (owner.current !== link.owner || chain.current !== link) return;
+    link.loading = false;
+    if (!result.ok) {
+      const requestId =
+        "requestId" in result && result.requestId
+          ? { requestId: result.requestId }
+          : {};
+      // What was accepted before stays known (positive rows); the read is not complete.
+      setState((prev) => ({
+        ...(after === null
+          ? prev.scope === scope
+            ? prev
+            : { pages: [], next: null }
+          : { pages: link.pages, next: link.next }),
+        scope,
+        status: "error",
+        ...requestId,
+      }));
       return;
     }
-    const asked = env.now();
-    const result = await env.api.readTimers(occurrenceId, after ?? undefined);
-    noteIfRefused(env.identity, `timers:${occurrenceId}`, result);
-    setState((prev) => {
-      if (!result.ok)
-        return {
-          ...(prev.scope === scope ? prev : { pages: [], next: null }),
-          scope,
-          status: "error",
-          ...("requestId" in result && result.requestId
-            ? { requestId: result.requestId }
-            : {}),
-        };
-      const fresh = after === null || prev.scope !== scope;
-      const pages = fresh ? [] : prev.pages;
-      const all = [...pages, result.value.items];
-      const askedAt = fresh ? asked : (prev.askedAt ?? asked);
-      if (result.value.next_after === null)
-        remember(env.identity, occurrenceId, all.flat(), askedAt);
-      return {
-        scope,
-        pages: all,
-        next: result.value.next_after,
-        status: "ready",
-        askedAt,
-      };
+    link.pages = [...link.pages, result.value.items];
+    link.next = result.value.next_after;
+    const sessions = link.pages.flat();
+    const complete = link.next === null;
+    const order = link.read?.order ?? null;
+    setState({
+      scope,
+      pages: link.pages,
+      next: link.next,
+      status: "ready",
+      askedAt: link.askedAt,
+      order,
     });
+    remember(identity, occurrenceId, {
+      sessions,
+      at: link.askedAt,
+      order,
+      complete,
+      issued: link.issued,
+    });
+    const read = link.read;
+    if (read !== null && data.service() === read.service)
+      void commitTimerCorrection(read.service, read.captured, {
+        order: read.order,
+        drop: copyCorrection(occurrenceId, sessions, complete),
+      });
   };
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for another identity, day, connection or answered draft
   useEffect(() => {
     void load(null);
+    return () => {
+      owner.current += 1;
+    };
   }, [scope, env.online, again]);
   const current = state.scope === scope ? state : null;
   const kept =
     current?.status === "offline"
-      ? remember(env.identity, occurrenceId, null, 0)
+      ? (keptOf(env.identity).get(occurrenceId) ?? null)
       : null;
   return {
     status: current?.status ?? "loading",
     requestId: current?.requestId,
+    /** Every session accepted (the kept read's offline): positive knowledge, complete or not. */
     sessions:
       kept !== null ? kept.sessions : current ? current.pages.flat() : [],
     complete:
-      kept !== null ||
-      (current !== null && current.next === null && current.status === "ready"),
+      kept !== null
+        ? kept.complete
+        : current !== null &&
+          current.next === null &&
+          current.status === "ready",
     /** When the sessions shown offline were read (ms), or null for a read now. */
     keptAt: kept?.at ?? null,
-    /** When the complete read shown was issued (ms; the kept one's offline), or null while there is none. */
-    readAt:
+    /** The shown read's place in the observation order (W28), or null. */
+    order:
       kept !== null
-        ? kept.at
-        : current?.status === "ready" && current.next === null
-          ? (current.askedAt ?? null)
+        ? kept.order
+        : current?.status === "ready"
+          ? (current.order ?? null)
           : null,
     more: current?.next ? () => void load(current.next) : null,
     retry: () => void load(null),
@@ -230,10 +328,11 @@ export function TimerBlock({
   const copied = useCopiedTimers();
   const running = runningOn(row.id, {
     drafts: timerDrafts,
-    read: day.complete ? day.sessions : null,
+    read: day.sessions,
+    complete: day.complete,
     copy: copied?.rows ?? null,
-    readAt: day.readAt,
-    copyAt: copied?.readAt ?? null,
+    readOrder: day.order,
+    copyOrder: copied?.order ?? null,
   });
   const now = useSecond(running.length > 0);
   const [showSessions, setShowSessions] = useState(false);

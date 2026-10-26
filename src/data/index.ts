@@ -92,6 +92,7 @@ export type {
   Epoch,
   JsonObject,
   LocalId,
+  MaterialiseDiscovery,
   MaterialiseSequenceRow,
   ProjectionPatch,
   ResourceId,
@@ -201,16 +202,22 @@ export {
 } from "./ui/scan";
 // ---- WEB-10c: the catch-up sequences (W27) and the running-timer copy (W28); only the lazy task screens import them ----------------
 export {
+  commitMaterialiseDiscovery,
   commitMaterialiseSequence,
   commitTimerCopy,
+  commitTimerCorrection,
+  type DiscoveryWrite,
+  issueTimerOrderNow,
   pruneOlderSequences,
   type RecordCommit,
+  readMaterialiseDiscoveryNow,
   readMaterialiseSequenceNow,
   type SequenceExpectation,
   type SequenceKey,
   type SequenceWrite,
   TIMER_COPY_ROWS,
   type TimerCopyRecord,
+  useMaterialiseDiscovery,
   useMaterialiseSequences,
   useTimerCopy,
 } from "./ui/task-records";

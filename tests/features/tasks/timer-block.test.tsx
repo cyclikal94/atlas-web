@@ -1,10 +1,16 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
+import { accountDatabaseName } from "../../../src/data/model/schema";
+import type { SyncStateRow } from "../../../src/data/model/types";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import { TIMER_COPY } from "../../../src/features/tasks/detail/Timer";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
-import type { TimerPage } from "../../../src/features/tasks/model/contract";
+import {
+  parseTimerPage,
+  type TimerPage,
+  type TimerSession,
+} from "../../../src/features/tasks/model/contract";
 import { SEVEN_DAYS } from "../../../src/features/tasks/model/timers";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
@@ -416,13 +422,29 @@ describe("R2: the day's complete read and the kept copy", () => {
     ).toBe("read");
   });
 
-  test("a read that is not complete (a further page) decides nothing: the copy stands", async () => {
+  /**
+   * Revision 2 (design assessment DA-H1): this case supplied `{ items: [], next_after: "more" }`, a page the released endpoint never
+   * answers (a further page is named only after a FULL page, by its last id; `parseTimerPage` refuses it). Its intent, "a read that is not
+   * complete decides nothing by absence: the copy stands", is kept over a contract-valid full first page that omits the copied session;
+   * a later page that fails changes nothing; the empty last page then completes the read, which retires it.
+   */
+  test("a read that is not complete (a further page) decides nothing by absence: the copy stands, also when the next page fails; completed, it retires it", async () => {
     const task = await seconds();
+    const first = fullPage(task, 100);
+    let more = 0;
     const api = fakeApi({
-      readTimers: async () => ({
-        ok: true,
-        value: { items: [], next_after: "more" },
-      }),
+      readTimers: async (_id, after) => {
+        if (after === undefined) return { ok: true, value: first };
+        more += 1;
+        expect(after).toBe(first.next_after);
+        const last = { items: [], next_after: null };
+        expect(parseTimerPage(last, task.occurrenceId, after, 50)).toEqual(
+          last,
+        );
+        return more === 1
+          ? { ok: false, kind: "uncertain" }
+          : { ok: true, value: last };
+      },
     });
     const t = await mountTasks({
       path: path(task),
@@ -431,10 +453,299 @@ describe("R2: the day's complete read and the kept copy", () => {
       timerCopy: copyOf([copied(task, nowSeconds() - 600)]),
     });
     await t.until(() => block()?.dataset.timerBlock === "running");
+    await t.settle();
+    expect(sourceOf(COPIED_ID)).toBe("copy");
+    fireEvent.click(screen.getByRole("button", { name: TIMER_COPY.sessions }));
+    fireEvent.click(screen.getByRole("button", { name: TIMER_COPY.loadMore }));
+    await t.until(() => more === 1);
+    await t.settle();
+    expect(sourceOf(COPIED_ID)).toBe("copy");
+    fireEvent.click(screen.getByRole("button", { name: TIMER_COPY.loadMore }));
+    await t.until(() => block()?.dataset.timerBlock === "idle");
+    expect(more).toBe(2);
+    expect(sourceOf(COPIED_ID)).toBeNull();
+  });
+});
+
+const COPIED_ID = "cccccccc-0000-4000-8000-000000000001";
+const sid = (n: number) =>
+  `cccccccc-0000-4000-8000-${String(n).padStart(12, "0")}`;
+const sessionOf = (
+  task: SeededTask,
+  n: number,
+  over: Partial<TimerSession> = {},
+): TimerSession => ({
+  id: sid(n),
+  occurrence_id: task.occurrenceId,
+  started_at: nowSeconds() - 600,
+  stopped_at: null,
+  version: 3,
+  ...over,
+});
+/**
+ * A FULL first page as the released endpoint answers one with more to come: 50 sessions in id order, the last id as its cursor (checked
+ * with the production parser). `from` numbers the first; `over` replaces rows by number.
+ */
+function fullPage(
+  task: SeededTask,
+  from: number,
+  over: Record<number, Partial<TimerSession>> = {},
+): TimerPage {
+  const items = Array.from({ length: 50 }, (_, i) =>
+    sessionOf(task, from + i, {
+      stopped_at: nowSeconds() - 300,
+      ...over[from + i],
+    }),
+  );
+  const page = { items, next_after: items[49]?.id ?? null };
+  expect(parseTimerPage(page, task.occurrenceId, null, 50)).toEqual(page);
+  return page;
+}
+const sourceOf = (id: string) =>
+  block()
+    ?.querySelector(`[data-timer-session="${id}"]`)
+    ?.getAttribute("data-timer-source") ?? null;
+const syncOf = (t: { world: { idb: { peek: (...a: never[]) => unknown } } }) =>
+  (t.world.idb.peek as (n: string, s: string, k: string) => unknown)(
+    accountDatabaseName(ME),
+    "sync_state",
+    "singleton",
+  ) as SyncStateRow;
+
+describe("R11: what a partial page lists is known", () => {
+  test.each([false, true])(
+    "REVIEW2 T1 (ported): a running session on a contract-valid page (partial %s) is running; Start withheld, Stop and Discard offered",
+    async (partial) => {
+      const task = await seconds();
+      const page: TimerPage = partial
+        ? fullPage(task, 1, { 1: { stopped_at: null } })
+        : { items: [sessionOf(task, 1)], next_after: null };
+      expect(parseTimerPage(page, task.occurrenceId, null, 50)).toEqual(page);
+      const api = fakeApi({
+        readTimers: async () => ({ ok: true, value: page }),
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      expect(sourceOf(sid(1))).toBe("read");
+      const here = within(block() as HTMLElement);
+      expect(here.queryByRole("button", { name: TIMER_COPY.start })).toBeNull();
+      expect(here.getByRole("button", { name: TIMER_COPY.stop })).toBeEnabled();
+      expect(
+        here.getByRole("button", { name: TIMER_COPY.discard }),
+      ).toBeEnabled();
+    },
+  );
+
+  test("a partial page listing the copied session STOPPED ends it at once; a copied session it does not list stays", async () => {
+    const task = await seconds();
+    const other = sid(900);
+    const api = fakeApi({
+      readTimers: async () => ({
+        ok: true,
+        value: fullPage(task, 1, { 1: { stopped_at: nowSeconds() - 30 } }),
+      }),
+    });
+    const t = await mountTasks({
+      path: path(task),
+      rows: task.rows,
+      api,
+      timerCopy: copyOf([
+        copied(task, nowSeconds() - 600, sid(1)),
+        copied(task, nowSeconds() - 500, other),
+      ]),
+    });
+    await t.until(() => api.calls.readTimers !== undefined);
+    await t.settle();
+    expect(sourceOf(sid(1))).toBeNull();
+    expect(sourceOf(other)).toBe("copy");
+  });
+});
+
+describe("R10: one read owns what the timer block shows", () => {
+  test("REVIEW2 T2 (ported): an older read answering after a newer one (reconnect) cannot resurrect a cancelled session, on screen or offline", async () => {
+    const task = await seconds();
+    let release: (v: TasksResult<TimerPage>) => void = () => undefined;
+    let calls = 0;
+    const api = fakeApi({
+      readTimers: async () => {
+        calls += 1;
+        return calls === 1
+          ? new Promise<TasksResult<TimerPage>>((r) => {
+              release = r;
+            })
+          : { ok: true, value: { items: [], next_after: null } };
+      },
+    });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    await t.until(() => calls === 1);
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: true }));
+    await t.until(() => calls === 2);
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe("idle");
+    release({
+      ok: true,
+      value: { items: [sessionOf(task, 1)], next_after: null },
+    });
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe("idle");
+    // The page memory kept the newer read: offline it is still idle.
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe("idle");
+  }, 20_000);
+
+  test("an older read's FAILURE after a newer success changes nothing; control: the same read alone publishes normally", async () => {
+    const task = await seconds();
+    let release: (v: TasksResult<TimerPage>) => void = () => undefined;
+    let calls = 0;
+    const running = { items: [sessionOf(task, 1)], next_after: null };
+    const api = fakeApi({
+      readTimers: async () => {
+        calls += 1;
+        return calls === 1
+          ? new Promise<TasksResult<TimerPage>>((r) => {
+              release = r;
+            })
+          : { ok: true, value: running };
+      },
+    });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    await t.until(() => calls === 1);
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: true }));
+    await t.until(() => block()?.dataset.timerBlock === "running");
+    fireEvent.click(screen.getByRole("button", { name: TIMER_COPY.sessions }));
+    release({ ok: false, kind: "uncertain" } as never);
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe("running");
     expect(
-      block()
-        ?.querySelector("[data-timer-source]")
-        ?.getAttribute("data-timer-source"),
-    ).toBe("copy");
+      document
+        .querySelector("[data-timer-sessions]")
+        ?.getAttribute("data-timer-sessions"),
+    ).toBe("ready");
+    cleanup();
+    forgetTaskMemory();
+    const alone = await seconds();
+    const control = fakeApi({
+      readTimers: async () => ({
+        ok: true,
+        value: { items: [sessionOf(alone, 1)], next_after: null },
+      }),
+    });
+    const c = await mountTasks({
+      path: path(alone),
+      rows: alone.rows,
+      api: control,
+    });
+    await c.until(() => block()?.dataset.timerBlock === "running");
+  });
+
+  test("Load more: an old chain's page is never merged into a newer read; a second press asks for one page", async () => {
+    const task = await seconds();
+    let release: (v: TasksResult<TimerPage>) => void = () => undefined;
+    const pages: string[] = [];
+    let firsts = 0;
+    const api = fakeApi({
+      readTimers: async (_id, after) => {
+        if (after === undefined) {
+          firsts += 1;
+          return { ok: true, value: fullPage(task, firsts === 1 ? 1 : 101) };
+        }
+        pages.push(after);
+        return new Promise<TasksResult<TimerPage>>((r) => {
+          release = r;
+        });
+      },
+    });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    await t.until(() => firsts === 1);
+    await t.settle();
+    fireEvent.click(screen.getByRole("button", { name: TIMER_COPY.sessions }));
+    const more = screen.getByRole("button", { name: TIMER_COPY.loadMore });
+    fireEvent.click(more);
+    fireEvent.click(more);
+    await t.settle();
+    expect(pages).toEqual([sid(50)]);
+    // A newer read (reconnect) takes over; then the old chain's page arrives.
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: true }));
+    await t.until(() => firsts === 2);
+    await t.settle();
+    release({
+      ok: true,
+      value: { items: [sessionOf(task, 51)], next_after: null },
+    });
+    await t.settle();
+    const listed = [...document.querySelectorAll("[data-day-session]")].map(
+      (e) => e.getAttribute("data-day-session"),
+    );
+    expect(listed).toHaveLength(50);
+    expect(listed).not.toContain(sid(51));
+    expect(listed[0]).toBe(sid(101));
+    // Control: the current chain's next page is accepted.
+    fireEvent.click(screen.getByRole("button", { name: TIMER_COPY.loadMore }));
+    await t.settle();
+    expect(pages).toEqual([sid(50), sid(150)]);
+    release({
+      ok: true,
+      value: { items: [sessionOf(task, 151)], next_after: null },
+    });
+    await t.settle();
+    expect(document.querySelectorAll("[data-day-session]")).toHaveLength(51);
+  }, 20_000);
+});
+
+describe("DA-T1: a complete day read corrects the kept copy itself", () => {
+  test("the cancelled session leaves the copy (so no reload, tab or offline list brings it back); another day's copied session stays", async () => {
+    const task = await seconds();
+    const elsewhere = "aaaaaaaa-0000-4000-8000-0000000000ff";
+    const api = fakeApi({
+      readTimers: async () => ({
+        ok: true,
+        value: { items: [], next_after: null },
+      }),
+    });
+    const t = await mountTasks({
+      path: path(task),
+      rows: task.rows,
+      api,
+      timerCopy: copyOf([
+        copied(task, nowSeconds() - 600),
+        {
+          ...copied(task, nowSeconds() - 600, sid(700)),
+          occurrence_id: elsewhere,
+        },
+      ]),
+    });
+    await t.until(() => block()?.dataset.timerBlock === "idle");
+    await t.until(
+      () =>
+        (syncOf(t).timer_copy as { running: unknown[] } | undefined)?.running
+          .length === 1,
+    );
+    const sync = syncOf(t);
+    expect(
+      (sync.timer_copy as { running: Array<{ id: string }> }).running.map(
+        (r) => r.id,
+      ),
+    ).toEqual([sid(700)]);
+    expect(sync.timer_fence).toBeGreaterThan(0);
+    // Offline, the account's list (which shows the copy) no longer has it.
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.router.navigate({ to: "/tasks/timers" });
+    await t.until(
+      () =>
+        document.querySelector(`[data-account-timer="${sid(700)}"]`) !== null,
+    );
+    expect(
+      document.querySelector(`[data-account-timer="${COPIED_ID}"]`),
+    ).toBeNull();
+    expect(
+      document.querySelector(`[data-account-timer="${sid(700)}"]`),
+    ).not.toBeNull();
   });
 });

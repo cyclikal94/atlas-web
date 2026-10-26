@@ -83,22 +83,27 @@ const UNSETTLED = new Set(["queued", "in_flight", "blocked", "acknowledged"]);
  * The sessions running on `occurrenceId` for me, from every source, a stop or discard on its way taking a session out (the draft's own
  * conflict blocks speak for a failed one). A finished session in a read is not running whatever the copy says.
  *
- * Which source wins (review R2): a COMPLETE read of the day's sessions lists every session of the day the server still has, and omits a
- * cancelled one; so a copied session it does not list is not running when that read was ISSUED no earlier than the copy's (`readAt` ≥
- * `copyAt`, both in ms): it was cancelled or stopped since the copy was taken, here or elsewhere. A copy taken after the read (a read
- * kept from earlier, offline) may know a session the read could not, and stays. A partial or absent read (`read: null`) decides nothing,
- * so offline the copy stands. This device's unsettled start stays until its draft settles: its read is asked again when the draft's state
- * changes, and a read issued before the server applied the start cannot know it.
+ * What a read SAYS always counts (review R11): every session the page accepted from the day's read, on a first page or a later one, is
+ * known running or known finished, whether or not the list was read to its end. What a read does NOT say is evidence only when the read
+ * is COMPLETE (review R2): it lists every session of the day the server still has and omits a cancelled one, so a copied session it does
+ * not list is not running when that read was issued AFTER the copy's in this database's observation order (`readOrder` > `copyOrder`,
+ * W28's `issueTimerOrder`; never the clock, design assessment DA-T2): it was cancelled or stopped since the copy was taken, here or
+ * elsewhere. A copy taken after the read (a read kept from earlier, offline) may know a session the read could not, and stays; so does
+ * any copied session when either order is unknown. This device's unsettled start stays until its draft settles: its read is asked again
+ * when the draft's state changes, and a read issued before the server applied the start cannot know it.
  */
 export function runningOn(
   occurrenceId: string,
   input: {
     drafts: readonly DraftWithCommand[];
+    /** The day's sessions the page accepted (every page so far), or null for none. */
     read: readonly TimerSession[] | null;
+    /** The read was taken to the end of the day's list: absence in it is evidence. */
+    complete?: boolean;
     copy: readonly AccountTimerSession[] | null;
-    /** When the complete read was issued (ms), and when the copy's read was (ms); null when unknown (the copy then stands). */
-    readAt?: number | null;
-    copyAt?: number | null;
+    /** The read's and the copy's places in the observation order (W28); null when unknown (the copy then stands). */
+    readOrder?: number | null;
+    copyOrder?: number | null;
   },
 ): RunningSession[] {
   const out = new Map<string, RunningSession>();
@@ -118,11 +123,12 @@ export function runningOn(
   }
   const readSupersedesCopy =
     input.read !== null &&
-    input.readAt !== undefined &&
-    input.readAt !== null &&
-    input.copyAt !== undefined &&
-    input.copyAt !== null &&
-    input.readAt >= input.copyAt;
+    input.complete === true &&
+    input.readOrder !== undefined &&
+    input.readOrder !== null &&
+    input.copyOrder !== undefined &&
+    input.copyOrder !== null &&
+    input.readOrder > input.copyOrder;
   for (const s of input.copy ?? []) {
     if (s.access !== "available" || s.occurrence_id !== occurrenceId) continue;
     if (s.stopped_at !== null || finished.has(s.id)) continue;
@@ -238,4 +244,27 @@ export function stopChoice(
   if (stoppedAt - session.startedAt > SEVEN_DAYS)
     return { kind: "seven_days", capped: session.startedAt + SEVEN_DAYS };
   return closed ? { kind: "closed", stoppedAt } : { kind: "now", stoppedAt };
+}
+
+/**
+ * Which rows of the copy (W28, opaque until parsed) a read of `occurrenceId`'s sessions retires (design assessment DA-T1): a session it
+ * lists finished, always (a stopped session never runs again); one it does not list, only when the read is complete and was issued after
+ * the copy (`newer`, decided by the plan from the observation order). Other occurrences' rows, and restricted ones, are never touched.
+ */
+export function copyCorrection(
+  occurrenceId: string,
+  sessions: readonly TimerSession[],
+  complete: boolean,
+): (row: Record<string, unknown>, newer: boolean) => boolean {
+  const listed = new Set<string>();
+  const finished = new Set<string>();
+  for (const s of sessions) {
+    if (s.occurrence_id !== occurrenceId) continue;
+    listed.add(s.id);
+    if (s.stopped_at !== null) finished.add(s.id);
+  }
+  return (row, newer) =>
+    row.occurrence_id === occurrenceId &&
+    typeof row.id === "string" &&
+    (finished.has(row.id) || (complete && newer && !listed.has(row.id)));
 }

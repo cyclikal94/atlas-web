@@ -129,13 +129,14 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
     durability: "default",
   },
   // WEB-10c: the catch-up sequences (a compare-and-set of the reserved store) and the running-timer copy (one record, a cache write).
+  // Revision 2: the discovery entries (W27, in the singleton) and the timer observation order and its corrections (W28, fixed-size).
   W27: {
-    name: "writeMaterialiseSequence / pruneMaterialiseSequences",
+    name: "writeMaterialiseSequence / pruneMaterialiseSequences / writeMaterialiseDiscovery",
     guards: ["INC", "CLS", "EPO"],
     durability: "strict",
   },
   W28: {
-    name: "writeTimerCopy",
+    name: "writeTimerCopy / issueTimerOrder / reconcileTimerCopy",
     guards: ["INC", "CLS", "EPO"],
     durability: "default",
   },

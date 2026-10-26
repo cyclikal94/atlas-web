@@ -32,7 +32,7 @@ import {
 } from "../model/timers";
 import { taskPath } from "../route";
 import type { PendingMark } from "../view";
-import { useCopiedTimers } from "./copy";
+import { type IssuedRead, issueTimerRead, useCopiedTimers } from "./copy";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const TIMERS_COPY = {
@@ -77,7 +77,12 @@ const merge = (
   return [...rows.filter((r) => !ids.has(r.id)), ...page];
 };
 
-function useSection(state: "running" | "stopped", again: number) {
+/**
+ * One state of the account's sessions, paged. ONE read owns what it shows (review R10): a new read (mount, identity, connection, a change
+ * of mine, Retry) takes over at once, so an earlier read's answer, success or failure, is dropped before it reaches the screen or the
+ * copy, and a further page is accepted only for the read and cursor that asked for it, one at a time. Running and stopped are separate.
+ */
+function useSection(state: "running" | "stopped", again: string) {
   const env = useTasksEnv();
   const data = useDataEnv();
   const [section, setSection] = useState<{ scope: string; value: Section }>({
@@ -85,33 +90,58 @@ function useSection(state: "running" | "stopped", again: number) {
     value: { kind: "loading" },
   });
   const scope = `${env.identity}\u0000${state}`;
-  const current = useRef(scope);
-  current.current = scope;
+  const owner = useRef(0);
+  const chain = useRef<{
+    owner: number;
+    next: string | null;
+    loading: boolean;
+  } | null>(null);
   const load = async (after: string | null) => {
-    if (!env.online) {
-      setSection({ scope, value: { kind: "offline" } });
-      return;
-    }
-    const service = data.service();
-    // The stamp of the read's ISSUE: the copy it writes belongs to the binding it was asked under (W28).
-    const captured = service?.capture(
-      Number(env.identity.slice(env.identity.lastIndexOf(":") + 1)),
-    );
+    const identity = env.identity;
+    let link: { owner: number; next: string | null; loading: boolean };
+    // The running list's first page is the copy this device keeps (W28): its place in the observation order is taken at ISSUE.
+    let issued: IssuedRead | null = null;
     const readAt = env.now();
-    const asked = scope;
+    if (after === null) {
+      owner.current += 1;
+      const mine = owner.current;
+      chain.current = null;
+      if (!env.online) {
+        setSection({ scope, value: { kind: "offline" } });
+        return;
+      }
+      link = { owner: mine, next: null, loading: true };
+      chain.current = link;
+      if (state === "running") {
+        issued = await issueTimerRead(data, identity);
+        if (owner.current !== mine) return;
+      }
+    } else {
+      const held = chain.current;
+      if (
+        held === null ||
+        held.owner !== owner.current ||
+        held.next !== after ||
+        held.loading
+      )
+        return;
+      held.loading = true;
+      link = held;
+    }
     const result = await env.api.readAccountTimers({
       state,
       limit: PAGE,
       ...(after === null ? {} : { after }),
     });
-    noteIfRefused(env.identity, `timer-sessions:${state}`, result);
-    if (current.current !== asked) return;
+    noteIfRefused(identity, `timer-sessions:${state}`, result);
+    if (owner.current !== link.owner || chain.current !== link) return;
+    link.loading = false;
     if (!result.ok) {
       setSection((prev) =>
-        after !== null && prev.scope === asked && prev.value.kind === "ready"
-          ? { scope: asked, value: { ...prev.value, more: "error" } }
+        after !== null && prev.scope === scope && prev.value.kind === "ready"
+          ? { scope, value: { ...prev.value, more: "error" } }
           : {
-              scope: asked,
+              scope,
               value: {
                 kind: "error",
                 ...("requestId" in result && result.requestId
@@ -122,29 +152,24 @@ function useSection(state: "running" | "stopped", again: number) {
       );
       return;
     }
+    link.next = result.value.next_after;
     setSection((prev) => ({
-      scope: asked,
+      scope,
       value: {
         kind: "ready",
         rows:
-          after === null || prev.value.kind !== "ready"
+          after === null || prev.scope !== scope || prev.value.kind !== "ready"
             ? result.value.items
             : merge(prev.value.rows, result.value.items),
         next: result.value.next_after,
         more: "idle",
       },
     }));
-    // Every successful FIRST page of the running list is the copy this device keeps (bounded), for a reload offline.
-    if (
-      state === "running" &&
-      after === null &&
-      service !== null &&
-      service !== undefined &&
-      captured !== undefined &&
-      data.service() === service
-    )
-      void commitTimerCopy(data, service, captured, {
-        format: 1,
+    // Every accepted FIRST page of the running list is the copy this device keeps (bounded), for a reload offline.
+    if (issued !== null && data.service() === issued.service)
+      void commitTimerCopy(data, issued.service, issued.captured, {
+        format: 2,
+        order: issued.order,
         read_at: readAt,
         complete: result.value.next_after === null,
         running: result.value.items.slice(0, TIMER_COPY_ROWS) as never,
@@ -153,6 +178,9 @@ function useSection(state: "running" | "stopped", again: number) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for another identity, a connection or a change of mine
   useEffect(() => {
     void load(null);
+    return () => {
+      owner.current += 1;
+    };
   }, [scope, env.online, again]);
   const value =
     section.scope === scope ? section.value : { kind: "loading" as const };
@@ -161,12 +189,14 @@ function useSection(state: "running" | "stopped", again: number) {
     more:
       value.kind === "ready" && value.next !== null
         ? () => {
+            const next = value.next;
+            if (chain.current?.next !== next || chain.current.loading) return;
             setSection((prev) =>
               prev.value.kind === "ready"
                 ? { ...prev, value: { ...prev.value, more: "loading" } }
                 : prev,
             );
-            void load(value.next);
+            void load(next);
           }
         : null,
     retry: () => void load(null),
@@ -344,7 +374,11 @@ export function TimersPage() {
   const actions = useTaskActions();
   const heading = useId();
   const historyHeading = useId();
-  const [again, setAgain] = useState(0);
+  const [asked, setAgain] = useState(0);
+  // A stop or discard of mine (this tab's or another's) moving on its way, or leaving the outbox, is a change of mine: read again.
+  const outstanding = useAllOutstandingByKind(TIMER_KINDS);
+  const drafts = outstanding.status === "ready" ? outstanding.value.drafts : [];
+  const again = `${asked}|${drafts.map((d) => `${d.local_id}:${d.status}`).join(",")}`;
   const running = useSection("running", again);
   const history = useSection("stopped", again);
   const copied = useCopiedTimers();
@@ -381,11 +415,8 @@ export function TimersPage() {
     return day ? row.task_title : null;
   };
   // A stop or discard this device has on its way (review R3): the session shows its mark and is not offered another, as on the detail.
-  const outstanding = useAllOutstandingByKind(TIMER_KINDS);
   const ending = new Map<string, PendingMark>();
-  for (const d of outstanding.status === "ready"
-    ? outstanding.value.drafts
-    : []) {
+  for (const d of drafts) {
     const t = timerCommandOf(d);
     const mark = MARK[d.status];
     if (t !== null && t.kind !== "start_timer" && mark !== undefined)

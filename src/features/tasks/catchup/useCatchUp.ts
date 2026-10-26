@@ -4,9 +4,11 @@ import {
   type DataEnv,
   getPageDataHost,
   type Loadable,
+  type MaterialiseDiscovery,
   type MaterialiseSequenceRow,
   readResourcesNow,
   useDataEnv,
+  useMaterialiseDiscovery,
   useMaterialiseSequences,
 } from "../../../data";
 import type { TasksApi } from "../api";
@@ -86,11 +88,16 @@ export function forgetCatchUp(): void {
 export const runnerForAccount = (account: string): CatchUpRunner | null =>
   held?.runner.identity.startsWith(`${account}:`) ? held.runner : null;
 
+const NONE: Readonly<Record<string, MaterialiseDiscovery>> = {};
+
 export interface CatchUp {
   runner: CatchUpRunner;
   state: RunnerState;
   /** The durable sequences of the account (every page's), live. */
   records: Loadable<MaterialiseSequenceRow[]>;
+  /** The account's failed discoveries by task (every page's; review R13), live; empty until read (`discoveryRead` false). */
+  discovery: Readonly<Record<string, MaterialiseDiscovery>>;
+  discoveryRead: boolean;
 }
 
 /**
@@ -118,7 +125,15 @@ export function useCatchUp(): CatchUp {
   const runner = useCatchUpService();
   const state = useSyncExternalStore(runner.subscribe, runner.get, runner.get);
   const records = useMaterialiseSequences(null);
-  return { runner, state, records };
+  const found = useMaterialiseDiscovery();
+  const discovery = found.status === "ready" ? found.value : NONE;
+  return {
+    runner,
+    state,
+    records,
+    discovery,
+    discoveryRead: found.status === "ready",
+  };
 }
 
 type Draft = Parameters<

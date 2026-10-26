@@ -454,8 +454,9 @@ export const UNIT_10C = [
       // The guard and the scope stamp are two defences of one rule; the fault removes both (the answer is kept as the current scope's).
       sub(
         t,
-        "    if (latest.current === mine && current.current === asked)\n      setState({ scope: asked, read });\n",
-        "    setState({ scope: current.current, read });\n",
+        // Re-anchored by revision 2 (the published read now carries its number, `seq`).
+        "    if (latest.current === mine && current.current === asked)\n      setState({ scope: asked, read, seq: mine });\n",
+        "    setState({ scope: current.current, read, seq: mine });\n",
       ),
   },
   {
@@ -779,6 +780,270 @@ export const UNIT_10C = [
         t,
         "      ...(base === undefined ? {} : { seedIfUntracked: base }),",
         "      ...(versionChecked || base === undefined\n        ? {}\n        : { seedIfUntracked: base }),",
+      ),
+  },
+
+  // ---- revision 2 (review R10–R13; design assessment DA-T1, DA-T2, DA-M1) ---------------------------------------------------------
+  {
+    id: "MU-3066",
+    title:
+      "R10: WEB-10c A12/A15: the detail publishes an earlier read's answer (success or failure) over a newer one",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /REVIEW2 T2 \(ported\)|older read's FAILURE|old chain's page/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (owner.current !== link.owner || chain.current !== link) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3067",
+    title:
+      "R10: WEB-10c A15: the detail's Load more asks for the same further page twice",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /a second press asks for one page/,
+    patch: (t) =>
+      sub(
+        t,
+        "        held.next !== after ||\n        held.loading\n",
+        "        held.next !== after\n",
+      ),
+  },
+  {
+    id: "MU-3068",
+    title:
+      "R11: WEB-10c A12/A13: a running session on a page that is not the last is not known (the pre-revision rule)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /REVIEW2 T1 \(ported\)|STOPPED ends it/,
+    patch: (t) =>
+      sub(
+        t,
+        "    read: day.sessions,\n",
+        "    read: day.complete ? day.sessions : null,\n",
+      ),
+  },
+  {
+    id: "MU-3069",
+    title:
+      "DA-T1: WEB-10c A15 (D-10c-4): a complete day read retires the cancelled session on screen only, never in the kept copy",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /the cancelled session leaves the copy/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (read !== null && data.service() === read.service)\n      void commitTimerCorrection(",
+        "    if (false as boolean)\n      void commitTimerCorrection(",
+      ),
+  },
+  {
+    id: "MU-3070",
+    title:
+      "DA-T1: WEB-10c W28: a replacement is compared with the copy alone, not the fence a day's correction moved",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /DA-T1: a day's correction|removes it on null/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (copy !== null && copy.order <= floor)\n",
+        "    if (copy !== null && copy.order <= (stored?.order ?? 0))\n",
+      ),
+  },
+  {
+    id: "MU-3071",
+    title:
+      "DA-T2: WEB-10c W28: two reads are ordered by the device clock of their issue (the pre-revision rule)",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /DA-T2|keeps a copy of a LATER order/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (copy !== null && copy.order <= floor)\n",
+        "    if (copy !== null && stored !== null && stored.read_at > copy.read_at)\n",
+      ),
+  },
+  {
+    id: "MU-3072",
+    title:
+      "DA-T2: WEB-10c A15: a complete read of the copy's own order (a tie) retires a copied session",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /no tie decides/,
+    patch: (t) =>
+      sub(
+        t,
+        "    input.readOrder > input.copyOrder;",
+        "    input.readOrder >= input.copyOrder;",
+      ),
+  },
+  {
+    id: "MU-3073",
+    title:
+      "R10: WEB-10c A15: the account list publishes an earlier read's answer over a newer one (and keeps it)",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /REVIEW2 T3 \(ported\)|reconnect and Retry|old read's further page/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (owner.current !== link.owner || chain.current !== link) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3074",
+    title:
+      "R10: WEB-10c A15: the account list is not read again when a stop of mine moves on or leaves the outbox",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /leaving the outbox/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const again = `${asked}|${drafts.map((d) => `${d.local_id}:${d.status}`).join(",")}`;',
+        "  const again = String(asked);",
+      ),
+  },
+  {
+    id: "MU-3075",
+    title:
+      "R12: WEB-10c A9/A11: the remembered mode is offered as chosen, whatever the current preview allows",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/dependency-dialog.test.tsx"],
+    expect:
+      /REVIEW2 D1 \(ported\)|REVIEW2 D2 \(ported\)|remembered plain completion/,
+    patch: (t) =>
+      sub(
+        t,
+        '      : (admittedMode(preview, row.id, rootCompletable, mode) ?? "wait");',
+        "      : mode;",
+      ),
+  },
+  {
+    id: "MU-3076",
+    title:
+      "R12: WEB-10c A9: the send does not check again after its own awaits",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/dependency-dialog.test.tsx"],
+    expect: /the preview changing while the send prepares \((strict|token)\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        after.seq !== at.seq ||\n        after.identity !== at.identity ||\n        after.service !== at.service ||\n        !admits(after, chosen)\n",
+        "        false as boolean\n",
+      ),
+  },
+  {
+    id: "MU-3077",
+    title:
+      "R12: WEB-10c A9: a newer preview answer during the send's preparation is not noticed when it still admits the mode",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/dependency-dialog.test.tsx"],
+    expect: /the preview changing while the send prepares \(token\)/,
+    patch: (t) => sub(t, "        after.seq !== at.seq ||\n", ""),
+  },
+  {
+    id: "MU-3078",
+    title:
+      "R12: WEB-10c A9: the dialog acts on the preview shown before its own opening read answered",
+    file: "src/features/tasks/detail/Dependencies.tsx",
+    tests: ["tests/features/tasks/dependency-dialog.test.tsx"],
+    expect: /the read it asked when it opened/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const fresh = opening !== null && state.seq >= opening;",
+        "  const fresh = opening === opening;",
+      ),
+  },
+  {
+    id: "MU-3079",
+    title:
+      "R13: WEB-10c A19: a recorded discovery stop admits automatic reads again",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect:
+      /REVIEW2 M1 \(ported\)|definite refusal of the first read|a reload \(another runner/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (entry?.stop) return { kind: "end", outcome: DONE };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3080",
+    title:
+      "DA-M1: WEB-10c A19: a discovery taken up again (a pause, a reload) does not carry on from its recorded count",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /a pause between uncertain reads|a reload \(another runner/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (entry?.stop) return { kind: "end", outcome: DONE };\n',
+        '    if (entry?.stop) return { kind: "end", outcome: DONE };\n    if (entry !== null) entry = null;\n',
+      ),
+  },
+  {
+    id: "MU-3081",
+    title:
+      "R13: WEB-10c A19: Try again does not move the retry generation, so a second press admits a second budget",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /two Try again presses/,
+    patch: (t) =>
+      sub(
+        t,
+        "          next: { retry: seen.retry + 1, failures: 0, stop: null },\n",
+        "          next: { retry: seen.retry, failures: 0, stop: null },\n",
+      ),
+  },
+  {
+    id: "MU-3082",
+    title:
+      "R13: WEB-10c A19: a stop kept in page memory (its record failed) admits automatic work",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /cannot be written/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '    if (state.unrecorded.has(item.taskId))\n      return { kind: "end", outcome: DONE };\n',
+          "",
+        ),
+        "      if (state.unrecorded.has(taskId)) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3083",
+    title:
+      "R13: WEB-10c A5: the streak reads past a stopped discovery as if the catch-up had finished",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /the streak shows the recorded stop/,
+    patch: (t) => sub(t, "      discovery[taskId]?.stop != null ||\n", ""),
+  },
+  {
+    id: "MU-3084",
+    title:
+      "R13: WEB-10c A1/A19: a recorded discovery stop is not shown (another page's, or after a reload)",
+    file: "src/features/tasks/today/CatchUpBanner.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /Today shows another page's stop|the task's detail shows it too/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const found = discovery[taskId]?.stop;\n  if (found)",
+        "  const found = discovery[taskId]?.stop;\n  if (false as boolean && found)",
       ),
   },
 ];

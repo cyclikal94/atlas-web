@@ -1,7 +1,11 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
 import type { AccountService } from "../../../src/data/engine/account-service";
-import type { MaterialiseSequenceRow } from "../../../src/data/model/types";
+import type {
+  MaterialiseDiscovery,
+  MaterialiseSequenceRow,
+  SyncStateRow,
+} from "../../../src/data/model/types";
 import type {
   MaterialiseCommand,
   TasksApi,
@@ -110,6 +114,7 @@ async function setup(
     over: {
       locks?: LockManager | null;
       service?: () => AccountService | null;
+      sleep?: () => Promise<void>;
     } = {},
   ) =>
     createCatchUpRunner({
@@ -127,6 +132,7 @@ async function setup(
       },
       sleep: async (ms) => {
         waits.push(ms);
+        await over.sleep?.();
       },
       locks: over.locks === undefined ? null : over.locks,
     });
@@ -145,10 +151,17 @@ async function setup(
     t.world.idb.peek(DB, "materialise_sequences", [TASK, through]) as
       | MaterialiseSequenceRow
       | undefined;
+  const discovery = (task = TASK) =>
+    (
+      t.world.idb.peek(DB, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined
+    )?.materialise_discovery?.[task] as MaterialiseDiscovery | undefined;
   return {
     t,
     script,
     sent,
+    discovery,
     reads: () => reads,
     waits,
     make,
@@ -337,21 +350,28 @@ describe("A19: uncertain answers resend the SAME key, paced and bounded", () => 
     expect(w.stored()).toBeUndefined();
   });
 
-  test("a first read that never answers is a stop this page shows (nothing is recorded or sent); Try again reads again", async () => {
+  /**
+   * Adaptation (revision 2, review R13/DA-M1): this case expected the stop in page memory only (`unrecorded`). Its intent (a stop shown,
+   * no sequence row, nothing sent; Try again reads again) is kept; the stop is now the task's durable discovery entry, shown from there.
+   */
+  test("a first read that never answers is a stop (its discovery entry; no sequence, nothing sent); Try again reads again", async () => {
     const w = await setup({
       script: { positions: [UNCERTAIN, UNCERTAIN, UNCERTAIN] as never },
     });
     const runner = w.make();
     runner.ensure(TASK, "daily");
     await w.idle(runner);
-    expect(runner.get().unrecorded.get(TASK)).toEqual({
-      reason: "unreachable",
+    expect(w.discovery()).toEqual({
+      retry: 0,
+      failures: 3,
+      stop: { reason: "unreachable" },
     });
+    expect(runner.get().unrecorded.size).toBe(0);
     expect(w.sent).toEqual([]);
     expect(w.stored()).toBeUndefined();
     runner.tryAgain(TASK);
     await w.idle(runner);
-    expect(runner.get().unrecorded.has(TASK)).toBe(false);
+    expect(w.discovery()).toBeUndefined();
     expect(w.reads()).toBe(4);
   });
 });
@@ -616,3 +636,239 @@ describe("R1: paused work resumes the same sequence", () => {
     expect(w.stored()?.phase).toBe("stopped");
   });
 });
+
+/**
+ * Revision 2 (review R13, design assessment DA-M1): the DISCOVERY (the first read of a task, before its day is known) owns a durable budget
+ * and stop in W27's discovery entry. A stop admits no automatic read or send again, whichever trigger asks, across a reload or another
+ * runner; a pause keeps the count reached; only "Try again" admits a fresh budget, once, however often or wherever it is pressed.
+ */
+describe("R13: a stopped discovery stays stopped until Try again", () => {
+  test("REVIEW2 M1 (ported): three uncertain first reads stop it; Today, the streak, a command's retry and a kick read and send nothing more", async () => {
+    const w = await setup({
+      script: {
+        positions: [
+          UNCERTAIN,
+          UNCERTAIN,
+          UNCERTAIN,
+          detail("2026-09-01", true),
+          detail(TODAY, false),
+        ] as never,
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.reads()).toBe(3);
+    expect(w.waits).toEqual([1_000, 2_000]);
+    expect(w.discovery()?.stop).toEqual({ reason: "unreachable" });
+    runner.ensure(TASK, "daily");
+    runner.ensure(TASK, "streak");
+    runner.ensure(TASK, "draft");
+    runner.kick();
+    await w.idle(runner);
+    expect(w.reads()).toBe(3);
+    expect(w.sent).toHaveLength(0);
+    expect(w.discovery()?.stop).toEqual({ reason: "unreachable" });
+  });
+
+  test("control: Try again owns a fresh budget, catches up and leaves no stop (nor a stale one in memory)", async () => {
+    const w = await setup({
+      script: {
+        positions: [
+          UNCERTAIN,
+          UNCERTAIN,
+          UNCERTAIN,
+          detail("2026-09-01", true),
+          detail(TODAY, false),
+        ] as never,
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    runner.tryAgain(TASK);
+    await w.idle(runner);
+    expect(w.sent).toHaveLength(1);
+    expect(w.reads()).toBe(5);
+    expect(w.discovery()).toBeUndefined();
+    expect(runner.get().unrecorded.size).toBe(0);
+    expect(w.stored()).toBeUndefined();
+  });
+
+  test("a definite refusal of the first read is a stop (with its request id); automatic triggers do nothing; control: healthy catches up", async () => {
+    const w = await setup({
+      script: {
+        positions: [
+          { ok: false, kind: "forbidden", requestId: "req-1" },
+        ] as never,
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.discovery()?.stop).toEqual({
+      reason: "rejected",
+      request_id: "req-1",
+    });
+    runner.ensure(TASK, "streak");
+    runner.kick();
+    await w.idle(runner);
+    expect(w.reads()).toBe(1);
+    expect(w.sent).toHaveLength(0);
+    const healthy = await setup({
+      script: { positions: [detail("2026-09-01", true), detail(TODAY, false)] },
+    });
+    const control = healthy.make();
+    control.ensure(TASK, "daily");
+    await healthy.idle(control);
+    expect(healthy.sent).toHaveLength(1);
+    expect(healthy.discovery()).toBeUndefined();
+  });
+
+  test("a pause between uncertain reads keeps the count: online again only the REMAINING budget is read", async () => {
+    const w = await setup({
+      script: {
+        positions: [UNCERTAIN, UNCERTAIN, UNCERTAIN, UNCERTAIN] as never,
+      },
+    });
+    let paused = false;
+    const runner = createCatchUpRunnerWithSleep(w, async () => {
+      if (!paused) {
+        paused = true;
+        w.setOnline(false);
+      }
+    });
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.reads()).toBe(1);
+    expect(w.discovery()?.failures).toBe(1);
+    w.setOnline(true);
+    runner.kick();
+    await w.idle(runner);
+    expect(w.reads()).toBe(3);
+    expect(w.discovery()?.stop).toEqual({ reason: "unreachable" });
+  });
+
+  test("a reload (another runner on the same database) adopts the count and the stop before any extra read", async () => {
+    let hold: (value: unknown) => void = () => undefined;
+    const w = await setup({
+      script: {
+        positions: [
+          UNCERTAIN,
+          UNCERTAIN,
+          () => new Promise((resolve) => (hold = resolve)),
+          UNCERTAIN,
+          UNCERTAIN,
+        ] as never,
+      },
+    });
+    const first = w.make();
+    first.ensure(TASK, "daily");
+    for (let i = 0; i < 100 && w.reads() < 3; i += 1) await w.t.settle();
+    expect(w.discovery()?.failures).toBe(2);
+    first.dispose();
+    hold(UNCERTAIN);
+    await w.t.settle();
+    const second = w.make();
+    second.ensure(TASK, "daily");
+    await w.idle(second);
+    // One more read reached the bound (2 + 1); the held answer of the ended page wrote nothing.
+    expect(w.reads()).toBe(4);
+    expect(w.discovery()).toEqual({
+      retry: 0,
+      failures: 3,
+      stop: { reason: "unreachable" },
+    });
+    const third = w.make();
+    third.ensure(TASK, "daily");
+    await w.idle(third);
+    expect(w.reads()).toBe(4);
+    // Another task's success does not lift it.
+    expect(w.discovery()?.stop).not.toBeNull();
+  });
+
+  test("two Try again presses on one stop (two pages sharing the lock) admit ONE fresh budget", async () => {
+    let holder: Promise<unknown> = Promise.resolve();
+    const locks = {
+      request: (
+        _name: string,
+        _options: unknown,
+        run: () => Promise<unknown>,
+      ) => {
+        const mine = holder.then(() => run());
+        holder = mine.catch(() => undefined);
+        return mine;
+      },
+    } as unknown as LockManager;
+    const w = await setup({
+      script: {
+        positions: Array.from({ length: 9 }, () => UNCERTAIN) as never,
+      },
+    });
+    const a = w.make({ locks });
+    const b = w.make({ locks });
+    a.ensure(TASK, "daily");
+    await w.idle(a);
+    expect(w.reads()).toBe(3);
+    a.tryAgain(TASK);
+    b.tryAgain(TASK);
+    await w.idle(a);
+    await w.idle(b);
+    // One budget (three more reads), not two; the stop stands again under the ONE new retry.
+    expect(w.reads()).toBe(6);
+    expect(w.discovery()).toEqual({
+      retry: 1,
+      failures: 3,
+      stop: { reason: "unreachable" },
+    });
+  });
+
+  test("a stop whose record cannot be written is kept in this page's memory and refuses automatic work alike; Try again reads again", async () => {
+    const w = await setup({
+      script: {
+        positions: [
+          UNCERTAIN,
+          detail("2026-09-01", true),
+          detail(TODAY, false),
+        ] as never,
+      },
+    });
+    let failing = true;
+    const real = () => w.t.env.service() as AccountService;
+    const service = () =>
+      new Proxy(real(), {
+        get(target, key, receiver) {
+          if (key !== "commit") return Reflect.get(target, key, receiver);
+          return (plan: { name: string }, input: unknown) =>
+            failing && plan.name === "data.writeMaterialiseDiscovery"
+              ? Promise.resolve({ kind: "failed" })
+              : target.commit(plan as never, input as never);
+        },
+      }) as AccountService;
+    const runner = w.make({ service });
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.reads()).toBe(1);
+    expect(runner.get().unrecorded.get(TASK)).toEqual({
+      reason: "unreachable",
+    });
+    expect(w.discovery()).toBeUndefined();
+    runner.ensure(TASK, "daily");
+    runner.kick();
+    await w.idle(runner);
+    expect(w.reads()).toBe(1);
+    failing = false;
+    runner.tryAgain(TASK);
+    await w.idle(runner);
+    expect(runner.get().unrecorded.size).toBe(0);
+    expect(w.sent).toHaveLength(1);
+  });
+});
+
+/** A runner of the world `w` whose waits run `onSleep` (the pause test sets the connection from inside a wait). */
+function createCatchUpRunnerWithSleep(
+  w: Awaited<ReturnType<typeof setup>>,
+  onSleep: () => Promise<void>,
+) {
+  return w.make({ sleep: onSleep });
+}

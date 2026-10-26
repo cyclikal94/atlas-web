@@ -1,4 +1,8 @@
-import type { Captured, MaterialiseSequenceRow } from "../model/types";
+import type {
+  Captured,
+  MaterialiseDiscovery,
+  MaterialiseSequenceRow,
+} from "../model/types";
 import { range, w } from "../store/port";
 import { guardedPlan, readPlan } from "./builders";
 
@@ -163,4 +167,111 @@ export const readMaterialiseSequences = readPlan<
           SEQUENCE_WINDOW,
         ),
   decide: ({ reads }) => reads,
+});
+
+/**
+ * WEB-10c revision 2 (review R13, design assessment DA-M1): the DISCOVERY of a task's catch-up (its first read, before its day is known,
+ * so before any sequence row can exist) in `sync_state.materialise_discovery`, by task. A COMPARE-AND-SET like the rows: it applies only
+ * while the stored entry is the one the caller decided on (absent, or its `retry`, `failures` and whether it is stopped), so a reload,
+ * another tab or a late answer of an earlier "Try again" never overwrites a newer decision; a loss writes nothing and says what is
+ * stored. Response-derived (the person's "Try again" included), so INC, CLS and EPO. At most `SEQUENCE_WINDOW` entries: one that would
+ * add another is refused (`full`), and the caller keeps its stop in page memory instead; a success removes its entry. A few dozen bytes
+ * in the singleton, so not admitted through the quota ledger.
+ */
+export type DiscoveryWrite =
+  | { kind: "written"; stored: MaterialiseDiscovery | null }
+  | { kind: "stale"; stored: MaterialiseDiscovery | null }
+  | { kind: "full"; stored: null };
+
+const isDiscovery = (value: unknown): value is MaterialiseDiscovery => {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  return (
+    Number.isSafeInteger(v.retry) &&
+    Number.isSafeInteger(v.failures) &&
+    (v.stop === null ||
+      (typeof v.stop === "object" &&
+        v.stop !== null &&
+        ((v.stop as { reason?: unknown }).reason === "unreachable" ||
+          (v.stop as { reason?: unknown }).reason === "rejected")))
+  );
+};
+
+/** One task's entry as stored (`null`: none, or one that does not read). */
+export const discoveryOf = (
+  entries: unknown,
+  taskId: string,
+): MaterialiseDiscovery | null => {
+  if (typeof entries !== "object" || entries === null) return null;
+  const value = (entries as Record<string, unknown>)[taskId];
+  return isDiscovery(value) ? value : null;
+};
+
+const sameDiscovery = (
+  a: MaterialiseDiscovery | null,
+  b: MaterialiseDiscovery | null,
+) =>
+  a === null || b === null
+    ? a === b
+    : a.retry === b.retry &&
+      a.failures === b.failures &&
+      (a.stop === null) === (b.stop === null);
+
+export const writeMaterialiseDiscovery = guardedPlan<
+  {
+    captured: Captured;
+    task_id: string;
+    expected: MaterialiseDiscovery | null;
+    /** The replacement entry, or `null` to remove it (the discovery succeeded). */
+    next: MaterialiseDiscovery | null;
+  },
+  null,
+  DiscoveryWrite
+>({
+  name: "data.writeMaterialiseDiscovery",
+  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: null },
+  scope: [],
+  durability: "strict",
+  read: async () => null,
+  decide: ({ sync, input }) => {
+    const entries = { ...(sync.materialise_discovery ?? {}) };
+    const stored = discoveryOf(entries, input.task_id);
+    if (!sameDiscovery(stored, input.expected))
+      return { result: { kind: "stale", stored } };
+    if (input.next === null) {
+      if (!(input.task_id in entries))
+        return { result: { kind: "written", stored: null } };
+      delete entries[input.task_id];
+    } else {
+      if (
+        !(input.task_id in entries) &&
+        Object.keys(entries).length >= SEQUENCE_WINDOW
+      )
+        return { result: { kind: "full", stored: null } };
+      entries[input.task_id] = input.next;
+    }
+    return {
+      sync: { ...sync, materialise_discovery: entries },
+      result: { kind: "written", stored: input.next },
+    };
+  },
+});
+
+/** Every task's discovery entry (or one task's), as stored. */
+export const readMaterialiseDiscovery = readPlan<
+  { incarnationId: string },
+  null,
+  Record<string, MaterialiseDiscovery>
+>({
+  name: "data.readMaterialiseDiscovery",
+  scope: [],
+  read: async () => null,
+  decide: ({ sync }) => {
+    const out: Record<string, MaterialiseDiscovery> = {};
+    for (const taskId of Object.keys(sync?.materialise_discovery ?? {})) {
+      const entry = discoveryOf(sync?.materialise_discovery, taskId);
+      if (entry !== null) out[taskId] = entry;
+    }
+    return out;
+  },
 });

@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
@@ -36,6 +36,7 @@ import {
   parseOccurrenceData,
 } from "../model/contract";
 import {
+  admittedMode,
   causeOf,
   editorBlock,
   MAX_PREREQUISITES,
@@ -105,6 +106,8 @@ export const DEPENDENCY_COPY = {
     changed: "What it waits for changed.",
   },
   checking: "Checking what it waits for…",
+  changedWhileSaving:
+    "What this waits for changed while saving. Check it and choose again.",
   review: "Review and send again",
   discard: "Discard",
   unmet: (title: string) => `This can't be marked done until “${title}” is.`,
@@ -172,6 +175,9 @@ function useLabels(
 // ---- the detail's row ----------------------------------------------------------------------------------------------------------------
 export interface DependencyState {
   read: PreviewRead;
+  /** The number of the read shown, and of the latest asked (`usePreview`). */
+  seq: number;
+  asked(): number;
   refresh(): Promise<PreviewRead>;
 }
 
@@ -374,6 +380,11 @@ function DependencyList({
  * conflicted `complete_dependencies` this send replaces (its durable draft), so "Review and send again" supersedes it rather than adding
  * another. The root evidence (a numeric or checklist root, from the record card) is KEPT while hidden ("Wait") and settled only by a
  * successful save of exactly what was submitted (PRODUCT-DECISIONS-20261011; WEB-10a's acknowledgement rule).
+ *
+ * Admission (review R12): the dialog acts only on the answer of the read it asked when it opened (or a later one), and ONE rule
+ * (`admittedMode`) decides the choice shown, the button and the send, so a mode remembered from a refused draft, or chosen before the
+ * preview changed, is shown as Wait and never sent. The send checks again after its own awaits: if the preview, the identity or the
+ * connection moved meanwhile nothing is queued or replaced, and what the person entered and the refused draft stay.
  */
 export function DependencyDialog({
   row,
@@ -401,11 +412,18 @@ export function DependencyDialog({
   const [mode, setMode] = useState<Mode | "wait">(initialMode ?? "wait");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  // Opening the dialog reads the preview again: what it shows is fresh.
+  // Opening the dialog reads the preview again: it acts only on that answer or a later one.
+  const [opening, setOpening] = useState<number | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read once when it opens
   useEffect(() => {
-    if (open) void state.refresh();
+    if (!open) {
+      setOpening(null);
+      return;
+    }
+    void state.refresh();
+    setOpening(state.asked());
   }, [open]);
+  const sending = useRef(false);
   const read = state.read;
   const preview = read.kind === "ready" ? read.preview : null;
   const title = row.title ?? copy.UNTITLED;
@@ -418,35 +436,73 @@ export function DependencyDialog({
     ? modesOf(preview, row.id, rootCompletable)
     : null;
   const satisfied = preview ? satisfiedPreview(preview, row.id) : false;
+  const fresh = opening !== null && state.seq >= opening;
+  // What may be sent now for the person's choice (Wait when the preview forbids it), and the same for the choice shown.
+  const effective =
+    preview === null || satisfied
+      ? "wait"
+      : (admittedMode(preview, row.id, rootCompletable, mode) ?? "wait");
+  // The latest render's facts, for the send's check after its awaits.
+  const now = {
+    preview: fresh ? preview : null,
+    seq: state.seq,
+    identity: env.identity,
+    service: data.service(),
+    online: env.online,
+    writable: env.writable,
+    rootCompletable,
+  };
+  const latest = useRef(now);
+  latest.current = now;
+  const admits = (at: typeof now, chosen: Mode) =>
+    at.preview !== null &&
+    at.online &&
+    at.writable &&
+    admittedMode(at.preview, row.id, at.rootCompletable, chosen) === chosen;
   const send = async (chosen: Mode) => {
-    if (preview === null || busy) return;
+    const at = latest.current;
+    if (sending.current || at.preview === null || !admits(at, chosen)) return;
+    const shown = at.preview;
+    sending.current = true;
     setBusy(true);
     setMessage(null);
-    const me = env.accountId;
-    const others = prerequisitesOf(preview, row.id).filter((i) => !i.complete);
-    const streams = await Promise.all(
-      others.map((item) => progressId(item.occurrence_id, me)),
-    );
-    const held = await readResourcesNow(data, streams);
-    const request = completeDependencies({
-      occurrenceId: row.id,
-      previewToken: preview.token,
-      mode: chosen,
-      happenedAt: Math.floor(env.now() / 1000),
-      rootEvidence:
-        goal.kind === "checkbox" ? null : (rootEvidence?.evidence ?? null),
-      rootStream: {
-        id: row.progressId,
-        known: row.streamPresent || row.streamPending,
-      },
-      prerequisites: others.map((item, i) => ({
-        occurrenceId: item.occurrence_id,
-        stream: held?.has(streams[i] as string) ? (streams[i] as string) : null,
-      })),
-      defaults,
-    });
     let ok = false;
     try {
+      const me = env.accountId;
+      const others = prerequisitesOf(shown, row.id).filter((i) => !i.complete);
+      const streams = await Promise.all(
+        others.map((item) => progressId(item.occurrence_id, me)),
+      );
+      const held = await readResourcesNow(data, streams);
+      const after = latest.current;
+      if (
+        after.seq !== at.seq ||
+        after.identity !== at.identity ||
+        after.service !== at.service ||
+        !admits(after, chosen)
+      ) {
+        setMessage(DEPENDENCY_COPY.changedWhileSaving);
+        return;
+      }
+      const request = completeDependencies({
+        occurrenceId: row.id,
+        previewToken: shown.token,
+        mode: chosen,
+        happenedAt: Math.floor(env.now() / 1000),
+        rootEvidence:
+          goal.kind === "checkbox" ? null : (rootEvidence?.evidence ?? null),
+        rootStream: {
+          id: row.progressId,
+          known: row.streamPresent || row.streamPending,
+        },
+        prerequisites: others.map((item, i) => ({
+          occurrenceId: item.occurrence_id,
+          stream: held?.has(streams[i] as string)
+            ? (streams[i] as string)
+            : null,
+        })),
+        defaults,
+      });
       if (replacing !== null) {
         const outbox = data.outbox();
         const out = outbox
@@ -471,7 +527,10 @@ export function DependencyDialog({
         ok = out.ok;
         if (!out.ok) setMessage(out.message);
       }
+    } catch {
+      setMessage(DEPENDENCY_COPY.failed);
     } finally {
+      sending.current = false;
       setBusy(false);
       if (rootEvidence?.ticket) completeKept(rootEvidence.ticket, ok);
     }
@@ -488,7 +547,9 @@ export function DependencyDialog({
       ? DEPENDENCY_COPY.offline
       : busy
         ? DEPENDENCY_COPY.sending
-        : null;
+        : !fresh
+          ? DEPENDENCY_COPY.checking
+          : null;
   const options = [
     { value: "wait" as const, label: DEPENDENCY_COPY.wait },
     ...(availability?.complete_prerequisites === null
@@ -538,15 +599,15 @@ export function DependencyDialog({
                   {DEPENDENCY_COPY.markDone}
                 </Button>
               )
-            ) : mode === "wait" ? null : disabledReason ? (
+            ) : effective === "wait" ? null : disabledReason ? (
               <Button disabled reason={disabledReason}>
-                {mode === "complete_prerequisites"
+                {effective === "complete_prerequisites"
                   ? DEPENDENCY_COPY.completeAll
                   : DEPENDENCY_COPY.startAnyway}
               </Button>
             ) : (
-              <Button variant="primary" onClick={() => void send(mode)}>
-                {mode === "complete_prerequisites"
+              <Button variant="primary" onClick={() => void send(effective)}>
+                {effective === "complete_prerequisites"
                   ? DEPENDENCY_COPY.completeAll
                   : DEPENDENCY_COPY.startAnyway}
               </Button>
@@ -555,7 +616,12 @@ export function DependencyDialog({
         </div>
       }
     >
-      <div className="flex flex-col gap-3" data-dependency-dialog={read.kind}>
+      <div
+        className="flex flex-col gap-3"
+        data-dependency-dialog={
+          read.kind === "ready" && !fresh ? "checking" : read.kind
+        }
+      >
         {read.kind === "loading" ? (
           <div aria-busy="true" className="flex flex-col gap-1.5">
             <span className="sr-only">{DEPENDENCY_COPY.loading}</span>
@@ -579,7 +645,7 @@ export function DependencyDialog({
               rootId={row.id}
               rootTitle={title}
             />
-            {rootEvidence !== null && mode === "wait" ? (
+            {rootEvidence !== null && effective === "wait" ? (
               <p className="text-[12px] text-ink-2">
                 {DEPENDENCY_COPY.evidenceKept}
               </p>
@@ -588,7 +654,7 @@ export function DependencyDialog({
               <div className="flex flex-col gap-1.5">
                 <RadioCardGroup<Mode | "wait">
                   label={DEPENDENCY_COPY.modesName}
-                  value={mode}
+                  value={effective}
                   onValueChange={setMode}
                   options={options}
                 />
@@ -949,19 +1015,19 @@ export function DependencyEditor({
   // Opening the editor reads the preview again, and a save is admitted only on that answer or a later one (review R4): what it may replace
   // is judged on what the server says NOW, for a new list and for "Keep editing" alike. A replacement is no exception: saving it
   // supersedes the whole direct list on the version shown now, so a day whose prerequisites have become private, an edit right that has
-  // gone or a preview not yet answered withholds Save. What was typed (or the submitted list) is kept meanwhile.
-  const [refreshed, setRefreshed] = useState(false);
+  // gone or a preview not yet answered withholds Save. What was typed (or the submitted list) is kept meanwhile. "That answer" is the
+  // one SHOWN for the read asked at opening or a later one (review R12's rule): a resolved re-read whose answer was overtaken is not it.
+  const [opening, setOpening] = useState<number | null>(null);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read once when it opens
   useEffect(() => {
-    if (!open) return;
-    let live = true;
-    void state.refresh().then(() => {
-      if (live) setRefreshed(true);
-    });
-    return () => {
-      live = false;
-    };
+    if (!open) {
+      setOpening(null);
+      return;
+    }
+    void state.refresh();
+    setOpening(state.asked());
   }, [open]);
+  const refreshed = opening !== null && state.seq >= opening;
   const block = editorBlock({
     online: env.online,
     canEdit: row.canEdit,

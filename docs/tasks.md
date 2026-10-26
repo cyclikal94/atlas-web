@@ -821,7 +821,8 @@ are focused evidence, never integration acceptance.*
 3. **D-10c-3** One runner per account: Web Lock `atlas-materialise:<account>`, REQUESTED AND WAITED FOR (not `ifAvailable`): a page that does
    not hold it shows the durable records and takes over when the holder goes. Never `locks.query()`. Note (found natively): the session layer
    answers one window's requests while another window's request is in flight, so a held `materialise` also holds another tab's reads.
-4. **D-10c-4** The running-timer copy (W28) is the last complete FIRST page of `GET /timer-sessions?state=running`, per account database.
+4. **D-10c-4** The running-timer copy (W28) is the last complete FIRST page of `GET /timer-sessions?state=running`, per account database
+   (revision 2: ordered by the database's observation order, not the clock, and corrected by a day's own read; see below).
    Running added: the detail also keeps, in page memory per identity and day, the last complete read of the day's own sessions, so a session
    seen running stays shown offline ("Last checked …") after its start was acknowledged (found by I-10C-TM3; jsdom regression test).
 5. **D-10c-5** Today catches up automatically; "Later" is not offered; at most one automatic sequence per `(task, day)` per page; offline
@@ -875,6 +876,46 @@ own registry, so the command path has jsdom evidence only (its journey over the 
   discarded (present at the accepted base for WEB-10a's first Anyone record too). Each rebuilt target now carries the draft's own base as its
   seed (`docs/data-layer.md`).
 
+### Revision 2 (independent Review 2 of 25 October 2026, R10–R13; the design assessment's DA-T1, DA-T2, DA-M1, DA-H1)
+
+- **R10, one read owns what a timer screen shows.** The detail's day sessions (`useDaySessions`) and each section of "Your timers"
+  (`useSection`, running and earlier sessions separately) have an owner: a new read (mount, another identity, day or connection, an answered
+  draft, Retry, a change of mine) takes over at once, so an earlier read's answer, success or failure, is dropped before it reaches the
+  screen, the detail's page memory or the copy; a further page (Load more) is accepted only for the read and cursor that asked for it, one
+  at a time. The page memory keeps the read issued last on the page (a remounted block cannot displace it). "Your timers" also reads again
+  when a timer draft of mine moves on or leaves the outbox (this tab's or another's).
+- **R11, what a partial page lists is known.** Every session the detail accepted, on a first page or a later one, counts at once: one listed
+  running withholds Start and offers Stop and Discard; one listed finished is not running whatever the copy says. Only ABSENCE needs the
+  complete list (R2's rule). Offline the page memory keeps the last accepted read, complete or not, with "Last checked".
+- **DA-T2 / R10, an order that is not the clock.** Every timer read that may change the kept copy (W28) is given its place in the database's
+  observation order before it is sent (`issueTimerOrder`, a counter in its own transaction), and the copy carries its read's place, so two
+  tabs never tie and a clock that goes back decides nothing. `read_at` is shown ("Last checked"), never compared. A complete day read
+  supersedes the copy only when it was issued after it (R2 now compares these places).
+- **DA-T1, the kept copy is corrected by the day's read.** Each accepted page of the detail's read corrects W28 under its place: a session it
+  lists finished leaves the copy; once complete and later than the copy, a session of that day it does not list leaves it too; and the
+  copy's fence moves to the read's place, so an account read issued earlier can no longer restore it (in this tab, another or after a
+  reload). A copy written before revision 2 (format 1) reads as place 0: the first ordered read replaces or corrects it.
+- **R12, the completion's mode is admitted on the current preview.** One rule (`admittedMode`) decides the choice shown, the button and
+  the send: a mode remembered from a refused draft ("Start anyway" now strict, "Tick the others off as well" now private or not completable,
+  a plain completion once something is open again) is shown as "Wait" with its reason and never sent. The dialog acts only on the answer of
+  the read it asked when it opened (before it: "Checking what it waits for…"), and the send checks again after its own awaits: a newer
+  preview, another identity or binding, or the connection lost meanwhile queues and replaces nothing ("What this waits for changed while
+  saving. Check it and choose again."), keeping the entered evidence and the refused draft. The editor's "answer of the opening read" uses
+  the same comparison.
+- **R13 / DA-M1, a stopped discovery stays stopped.** The first read of a task's catch-up (its zone and position, before a day is known)
+  keeps its failures and its stop in W27's discovery entry (`sync_state.materialise_discovery`), written before the next read: a pause, a
+  reload or another tab's turn carries on from the count reached, and a stop (three uncertain answers, or a definite refusal) admits no
+  automatic read or send, whichever trigger asks (Today's list, the streak, a command's retry, a kick). "Try again" alone admits a fresh
+  budget, once: it is made under the account's lock against the stop it was pressed on, so a second press (here or in another tab) adds
+  nothing. A stop whose record cannot be written is kept in this page's memory and refuses automatic work alike. The stop is shown on Today,
+  the task's detail and its streak from the record (any page's); the streak does not read past it as if the catch-up had finished. A
+  genuine pause (offline, not compatible, the session held) is not a stop: it resumes (R1).
+- **Retry policy (for the product/design owner, not decided here).** WEB-04 §5.11 lets a genuine `online` event resume a transient-duration
+  pause; this card keeps the stricter rule the review requires: three uncertain first reads (network, 5xx or an unreadable answer alike) stop
+  until Try again. Whether those three should be told apart is open.
+- **DA-H1, harness.** The maintained "a read that is not complete decides nothing" case used a page the released endpoint never answers
+  (an empty page with a cursor); it now uses a contract-valid full page (checked by `parseTimerPage`), then a failed and a completed last page.
+
 ## Tests
 
 jsdom: `materialise-model`, `catchup-runner` (bound, no progress, horizon, uncertain with one key, a reload in each phase, two runners and
@@ -884,7 +925,11 @@ one lock, an identity that ends, offline), `catchup-banner`, `catchup-conflicts`
 E-M2 (two), E-M4, E-S1, E-S2 (390, 1180, 1440), E-D1 (1440, 390, 1180), E-TM1, E-R1, and (revision 1) E-D1/E-R1 identity with their two
 controls. Released backend: `integration.tasks-10c.spec.ts` (20 cases, in the `tasks` stack: revision 1 adds I-10C-TM5's two and I-10C-SU1
 check 6). Mutants: `scripts/mutation/catalogue-web10c.mjs` (MU-3001…MU-3035 unit, MU-3051/3052/3054 real-engine; revision 1 adds
-MU-3036…MU-3050 and MU-3060…MU-3065, one or more per correction; MU-10C-25, MU-10C-30 and N-10C-03 retired with their reasons).
+MU-3036…MU-3050 and MU-3060…MU-3065, one or more per correction; revision 2 adds MU-3066…MU-3084; MU-10C-25, MU-10C-30 and N-10C-03 retired
+with their reasons). Revision 2: the reviewer's T1/T2/T3/D1/D2/M1 ported into `timer-block`, `timers-page`, `dependency-dialog` and
+`catchup-runner` with their controls, the caller schedules of the design assessment (partial pages, old continuations and failures, the
+copy's order and corrections, the opening read and the send's preparation, discovery pauses, reloads, two Try agains, a failed record), and
+native E-M5 and E-TM2.
 
 ## Limits (WEB-10c)
 
@@ -907,6 +952,7 @@ MU-3036…MU-3050 and MU-3060…MU-3065, one or more per correction; MU-10C-25, 
 | "What needs doing first" row, mode labels, disabled reasons, "A task not on this device yet", the strict line | `/tasks/<id>` with a preview (jsdom `dependency-dialog.test.tsx`, native E-D1) |
 | The editor's replace wording, "Don't allow starting early", "n of 32" | `/tasks/<id>` → Set what this waits for |
 | Timer words ("Not used for this task…", the 7-day and closed-day choices, the conflict block, "Last checked …") | `/tasks/<id>` of a seconds task (jsdom `timer-block.test.tsx`) |
+| Revision 2: the dependency dialog's "Checking what it waits for…" until its opening read answers, and "What this waits for changed while saving. Check it and choose again." | `/tasks/<id>` → See what needs doing first (jsdom `dependency-dialog.test.tsx`) |
 | "Your timers" in the task list and the timer block; "Restricted — sharing changed since this session" | `/tasks/timers` (native E-TM1) |
 | Rota labels ("You", usernames, "Someone (abcd…)"), "Take turns on this task", the conflict without the other person's name, "Left open", "Projected" | `/tasks/<id>` of an Anyone task (jsdom `rota.test.tsx`, native E-R1) |
 | Streak tiles "Shared" and "You", unit words, five strip states including "Skipped", no run dates, "On this device" offline | `/tasks/<id>/streak` (jsdom `streak-page.test.tsx`, native E-S2) |

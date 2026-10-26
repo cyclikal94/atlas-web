@@ -111,8 +111,8 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
-| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key; through `AccountService.commit`, the person's "Try again" included) | INC, CLS, EPO |
-| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write) | INC, CLS, EPO |
+| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop) | INC, CLS, EPO |
+| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; fixed-size) | INC, CLS, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -745,10 +745,26 @@ the current epoch is shown with no request, one persisted for another epoch is n
   Rows are a few hundred bytes and pruned, so the write is classed fixed-size (like `claimFormWriter`), not admitted through the quota
   ledger (`plan-inventory.test.ts`'s FIXED_SIZE).
 * **W28, `plans/timer-copy.ts`.** `sync_state.timer_copy` (optional, no migration; the precedent of W14's `sync_state.defaults`): ONE
-  record `{ format: 1, read_at, complete, running }` holding at most `TIMER_COPY_ROWS` = 50 opaque rows, the last COMPLETE first page of
+  record `{ format: 1, read_at, complete, running }` (format 2 adds `order` since revision 2) holding at most `TIMER_COPY_ROWS` = 50 opaque rows, the last COMPLETE first page of
   `GET /timer-sessions?state=running`. Response-derived (INC, CLS, EPO); its growth is admitted like a cache page (the caller reserves the
-  record's bytes, `ADMITTED`), and a copy whose `read_at` is older than the stored one is not written over it. `parseTimerCopy` reads it
+  record's bytes, `ADMITTED`), and a copy of an earlier read than the one applied is not written over it (revision 2: by the
+  observation order below, no longer by `read_at`). `parseTimerCopy` reads it
   strictly; the task slice parses each row again.
+* **Revision 2: order, fence and correction (W28; Review 2's R10, design assessment DA-T1/DA-T2).** `issueTimerOrder` hands a timer read
+  its place in the database's observation order BEFORE it is sent (`sync_state.timer_order`, moved in its own transaction: two tabs never
+  share a place, and no clock decides). The copy is format 2 (`{ format: 2, order, read_at, complete, running }`): `order` is its read's place
+  and `read_at` is display only. `sync_state.timer_fence` is the latest place applied to the copy: `writeTimerCopy` refuses a replacement of
+  that place or an earlier one (removal keeps the fence). `reconcileTimerCopy` is a day read's correction: it removes the rows the slice's
+  `drop(row, newer)` names (`newer`: the read was issued after the copy's own) and moves the fence to its place (a later page of the same
+  read, which keeps its first page's place, may still correct). It only removes rows, so it is not admitted through the quota ledger. A
+  format-1 copy (or an order that does not read) is place 0, older than every ordered read. A read given no place (no service, another
+  identity, a store failure) neither replaces nor corrects the copy.
+* **Revision 2: the discovery entries (W27; Review 2's R13, design assessment DA-M1).** `sync_state.materialise_discovery[task]` =
+  `{ retry, failures, stop }` for a catch-up whose first read (before a day, so before any sequence row) has failed: written before the next
+  read, so a pause, a reload or another tab carries on from the count; a stop is read by every caller. `writeMaterialiseDiscovery` is a
+  compare-and-set on the entry decided on (absent, or its `retry`, `failures` and whether it is stopped; `stale` otherwise); the person's
+  "Try again" moves `retry`. At most `SEQUENCE_WINDOW` entries: one that would add another is refused (`full`; the slice then keeps the stop
+  in page memory); a success removes its entry. Read by `readMaterialiseDiscovery` (`useMaterialiseDiscovery`, `readMaterialiseDiscoveryNow`).
 * **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `useMaterialiseSequences`, `useTimerCopy`,
   `commitMaterialiseSequence`, `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve).
   `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).

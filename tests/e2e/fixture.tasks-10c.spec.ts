@@ -49,7 +49,9 @@ import {
  * E-S1 the streak's `409 materialisation_required` → catch-up → figures; E-S2 the streak at 390 px, tablet and desktop (axe);
  * E-D1 the dependency dialog's modes and focus return at desktop, 390 px (sheet) and tablet; E-TM1 the account's timers, then offline
  * after a reload from the kept copy; E-R1 the rota's consent and order; and (revision 1, review R9) E-D1/E-R1 identity: a preview and a
- * rota answer held across an account switch, with their positive controls. E-M3 (the command path) is not here: the fixture outbox
+ * rota answer held across an account switch, with their positive controls; (revision 2) E-M5 a first read that never answers stays
+ * stopped across a reload until Try again (R13, DA-M1), and E-TM2 a complete day read retires a cancelled session from the kept copy, so a
+ * reload offline does not show it (DA-T1). E-M3 (the command path) is not here: the fixture outbox
  * decides `409`s with its own registry, so the page's handler is never asked natively. Its journey (`409 materialisation_required` →
  * catch-up through the day → the SAME key resent → applied) runs in jsdom over the PRODUCTION dispatcher and registry
  * (`catchup-conflicts.test.ts`, revision 1); the first version's claim that the jsdom file covered it was of classification only.
@@ -953,5 +955,154 @@ test.describe("E-R1 identity (A18; CM-384): a rota answer held across an account
     hold.release();
     await page.waitForTimeout(1_500);
     await expect(consent).not.toBeChecked();
+  });
+});
+
+test.describe("E-M5: a first read that never answers stays stopped across a reload (revision 2: R13, DA-M1)", () => {
+  test("three uncertain first reads stop it; after a reload Today reads nothing more for it; Try again reads again and it is caught up", async ({
+    context,
+  }, info) => {
+    const task = repeating(405, "Sweep the porch");
+    let answering = false;
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      (reads, r) => {
+        reads.respond = (q) =>
+          dailyPage(
+            [view(task)],
+            q.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+          );
+        r.position = () =>
+          answering
+            ? detailOf(task, { last_date: TODAY, pending: false })
+            : refusal(503, "unavailable");
+      },
+    );
+    const stop = page.locator("[data-catch-up-stopped]");
+    await expect(stop).toHaveAttribute("data-catch-up-stopped", "unreachable", {
+      timeout: 20_000,
+    });
+    expect(positionReads(r10c, task)).toHaveLength(3);
+    // The stop is the task's record, not this page's memory: a reload shows it and asks nothing.
+    await reboot(page);
+    await expect(page.locator("[data-catch-up-stopped]")).toHaveAttribute(
+      "data-catch-up-stopped",
+      "unreachable",
+      { timeout: 15_000 },
+    );
+    await page.waitForTimeout(3_000);
+    expect(positionReads(r10c, task)).toHaveLength(3);
+    expect(posts(r10c)).toHaveLength(0);
+    answering = true;
+    await page
+      .locator("[data-pending-tasks]")
+      .getByRole("button", { name: "Try again" })
+      .click();
+    await expect(page.locator("[data-catch-up-stopped]")).toHaveCount(0, {
+      timeout: 15_000,
+    });
+    // The stop leaves as soon as Try again lifts it (under the lock); its fresh read follows: wait for it, then nothing more.
+    await expect
+      .poll(() => positionReads(r10c, task).length, { timeout: 15_000 })
+      .toBe(4);
+    await page.waitForTimeout(1_000);
+    expect(positionReads(r10c, task)).toHaveLength(4);
+    expect(posts(r10c)).toHaveLength(0);
+    recordEvidence(info, "e-m5", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+});
+
+test.describe("E-TM2: a complete day read corrects the kept copy (revision 2: DA-T1)", () => {
+  test("a session the account list kept, then not listed by its day's complete read (cancelled), is not shown offline after a reload", async ({
+    context,
+  }, info) => {
+    const task = buildTask({
+      n: 410,
+      title: "Practise piano",
+      goal: {
+        kind: "numeric",
+        minimum: "1800",
+        maximum: null,
+        unit: "seconds",
+      },
+    });
+    const id = "cccccccc-0000-4000-8000-000000000111";
+    const started = Math.floor(Date.now() / 1000) - 600;
+    const { page, r10c } = await setup(
+      context,
+      "/tasks/timers",
+      [task],
+      (_reads, r) => {
+        r.accountTimers = (q) => ({
+          status: 200,
+          body: {
+            items:
+              q.state === "running"
+                ? [
+                    {
+                      access: "available",
+                      id,
+                      occurrence_id: task.occurrenceId,
+                      task_id: task.taskId,
+                      task_title: "Practise piano",
+                      slot_date: TODAY,
+                      started_at: started,
+                      stopped_at: null,
+                      version: 2,
+                      can_modify: true,
+                    },
+                  ]
+                : [],
+            next_after: null,
+          },
+        });
+        // The day's own read: the session was cancelled elsewhere since (the server omits it).
+        r.timers = () => ({
+          status: 200,
+          body: { items: [], next_after: null },
+        });
+      },
+    );
+    const copied = () =>
+      page.evaluate(async (acct) => {
+        const rows = (await window.__atlasData?.rows(
+          acct,
+          "sync_state",
+        )) as Array<{ timer_copy?: { running?: Array<{ id: string }> } }>;
+        return (rows?.[0]?.timer_copy?.running ?? []).map((r) => r.id);
+      }, ACCOUNT);
+    await expect.poll(copied).toEqual([id]);
+    await page.evaluate((path) => {
+      history.pushState(null, "", path);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`);
+    await expect(page.locator("[data-timer-block]")).toHaveAttribute(
+      "data-timer-block",
+      "idle",
+    );
+    await expect.poll(copied).toEqual([]);
+    await reboot(page);
+    await goOfflineAtBoundary(page);
+    await page.evaluate(() => {
+      history.pushState(null, "", "/tasks");
+      dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await expect(page.locator("[data-task-list]")).toBeVisible();
+    await page.evaluate(() => {
+      history.pushState(null, "", "/tasks/timers");
+      dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await expect(page.locator("[data-timers-running=offline]")).toBeVisible();
+    await expect(page.locator("[data-timers-running]")).toContainText(
+      "Nothing is running.",
+    );
+    await expect(page.locator(`[data-account-timer="${id}"]`)).toHaveCount(0);
+    recordEvidence(info, "e-tm2", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
   });
 });

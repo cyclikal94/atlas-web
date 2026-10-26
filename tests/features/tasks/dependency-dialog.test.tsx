@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import { axe } from "jest-axe";
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import { DEPENDENCY_COPY } from "../../../src/features/tasks/detail/Dependencies";
 import { usePreview } from "../../../src/features/tasks/detail/usePreview";
@@ -747,5 +747,306 @@ describe("identity (A18)", () => {
       });
     });
     expect(result.current.read.kind).toBe("loading");
+  });
+});
+
+/**
+ * Revision 2 (review R12): ONE rule (`admittedMode`) decides the choice shown, the button and the send, on the answer of the read the
+ * dialog asked when it opened (or a later one). A mode remembered from a refused draft or chosen before the preview changed is shown as
+ * Wait and never sent; the send checks again after its own awaits, and on any change queues and replaces nothing, keeping the evidence
+ * and the refused draft.
+ */
+describe("R12: the completion's mode is admitted on the current preview", () => {
+  const conflicted = (root: SeededTask, local: string, mode: string) =>
+    draftRow({
+      local_id: local,
+      created_seq: 1,
+      kind: "complete_dependencies",
+      endpoint: "/task-commands",
+      account_id: ME,
+      status: "version_conflict",
+      target_resource_ids: [root.occurrenceId],
+      index_targets: [root.occurrenceId],
+      command: {
+        command: {
+          kind: "complete_dependencies",
+          occurrence_id: root.occurrenceId,
+          preview_token: "e".repeat(64),
+          mode,
+          happened_at: 1,
+        },
+      } as never,
+    });
+  const pane = () => within(dialog()?.closest("[role=dialog]") as HTMLElement);
+  const review = async (t: Awaited<ReturnType<typeof mount>>["t"]) => {
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: DEPENDENCY_COPY.review }) !== null,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: DEPENDENCY_COPY.review }),
+    );
+    await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+  };
+
+  test.each([false, true])(
+    "REVIEW2 D1 (ported): a refused 'Start anyway' reviewed when the rule is strict (%s) offers no Start anyway and sends nothing",
+    async (strict) => {
+      const root = await seededTask({ title: "Hang the washing" });
+      const local = "70000000-0000-4000-8000-000000000991";
+      const { t } = await mount({
+        root,
+        preview: (r, pre) => answer(r, [item(pre)], { strict }),
+        drafts: [conflicted(root, local, "advisory_override")],
+      });
+      await review(t);
+      const button = pane().queryByRole("button", {
+        name: DEPENDENCY_COPY.startAnyway,
+      });
+      if (!strict) {
+        expect(button).toBeEnabled();
+        fireEvent.click(button as HTMLElement);
+        await t.until(() => t.drafts().some((d) => d.local_id !== local));
+        expect(
+          t
+            .drafts()
+            .filter((d) => d.status === "queued")
+            .map((d) => d.kind),
+        ).toEqual(["complete_dependencies"]);
+        return;
+      }
+      expect(button).toBeNull();
+      expect(
+        pane().queryByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
+      ).toBeNull();
+      expect(
+        pane().getByRole("radio", { name: DEPENDENCY_COPY.wait }),
+      ).toBeChecked();
+      await t.settle();
+      expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
+        [local, "version_conflict"],
+      ]);
+    },
+  );
+
+  test.each(["unavailable", "cannot_complete", "none"] as const)(
+    "REVIEW2 D2 (ported): a refused cascade reviewed when a prerequisite is %s offers no cascade",
+    async (why) => {
+      const root = await seededTask({ title: "Hang the washing" });
+      const local = "70000000-0000-4000-8000-000000000992";
+      const { t } = await mount({
+        root,
+        preview: (r, pre) =>
+          answer(r, [item(pre, { can_complete: why !== "cannot_complete" })], {
+            unavailable: why === "unavailable",
+          }),
+        drafts: [conflicted(root, local, "complete_prerequisites")],
+      });
+      await review(t);
+      const button = pane().queryByRole("button", {
+        name: DEPENDENCY_COPY.completeAll,
+      });
+      if (why === "none") {
+        expect(button).toBeEnabled();
+        return;
+      }
+      expect(button).toBeNull();
+      expect(
+        document.querySelector("[data-mode-reason=complete_prerequisites]"),
+      ).not.toBeNull();
+      expect(t.drafts()).toHaveLength(1);
+    },
+  );
+
+  test("a choice made before the preview changed (strict while open; done, then not) is shown as Wait and has no button", async () => {
+    let strict = false;
+    let done = true;
+    const { t } = await mount({
+      preview: (r, pre) =>
+        answer(r, [item(pre, { complete: done })], { strict }),
+    });
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
+    await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+    // Everything done: Mark done is offered.
+    expect(
+      pane().getByRole("button", { name: DEPENDENCY_COPY.markDone }),
+    ).toBeEnabled();
+    // It becomes unmet: no remembered plain completion slips through.
+    done = false;
+    t.rerender(tasksEnv(t.api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(t.api, { online: true }));
+    await t.until(
+      () =>
+        pane().queryByRole("radio", { name: DEPENDENCY_COPY.wait }) !== null,
+    );
+    expect(
+      pane().queryByRole("button", { name: DEPENDENCY_COPY.markDone }),
+    ).toBeNull();
+    fireEvent.click(
+      pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
+    );
+    expect(
+      pane().getByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+    ).toBeEnabled();
+    // The rule becomes strict while it is open: the choice is Wait, and nothing can be sent.
+    strict = true;
+    t.rerender(tasksEnv(t.api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(t.api, { online: true }));
+    await t.until(
+      () =>
+        pane().queryByRole("radio", { name: DEPENDENCY_COPY.startAnyway }) ===
+        null,
+    );
+    expect(
+      pane().queryByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+    ).toBeNull();
+    expect(t.drafts()).toEqual([]);
+  });
+
+  test("a refused completion reviewed when everything was done, then not: the remembered plain completion is never offered or sent", async () => {
+    const root = await seededTask({ title: "Hang the washing" });
+    const local = "70000000-0000-4000-8000-000000000993";
+    let done = true;
+    const { t } = await mount({
+      root,
+      preview: (r, pre) => answer(r, [item(pre, { complete: done })]),
+      drafts: [conflicted(root, local, "complete_prerequisites")],
+    });
+    await t.until(
+      () =>
+        document.querySelector("[data-completion-conflict=satisfied]") !== null,
+    );
+    // "Review and send again" opens with the plain completion (the cause was "everything is done now").
+    await review(t);
+    expect(
+      pane().getByRole("button", { name: DEPENDENCY_COPY.markDone }),
+    ).toBeEnabled();
+    done = false;
+    t.rerender(tasksEnv(t.api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(t.api, { online: true }));
+    await t.until(
+      () =>
+        pane().queryByRole("radio", { name: DEPENDENCY_COPY.wait }) !== null,
+    );
+    await t.settle();
+    for (const name of [
+      DEPENDENCY_COPY.markDone,
+      DEPENDENCY_COPY.startAnyway,
+      DEPENDENCY_COPY.completeAll,
+    ])
+      expect(pane().queryByRole("button", { name })).toBeNull();
+    expect(
+      pane().getByRole("radio", { name: DEPENDENCY_COPY.wait }),
+    ).toBeChecked();
+    expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
+      [local, "version_conflict"],
+    ]);
+  });
+
+  test.each(["strict", "token", "none"] as const)(
+    "the preview changing while the send prepares (%s) queues nothing and keeps the dialog; control: unchanged, it sends once",
+    async (change) => {
+      const changes = change !== "none";
+      let strict = false;
+      let token = TOKEN;
+      const { t } = await mount({
+        preview: (r, pre) => answer(r, [item(pre)], { strict, token }),
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.see }),
+      );
+      await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+      fireEvent.click(
+        pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
+      );
+      // Hold the send's own preparation (its stream ids are UUIDv5 through WebCrypto).
+      const held: Array<() => void> = [];
+      const real = crypto.subtle.digest.bind(crypto.subtle);
+      const spy = vi.spyOn(crypto.subtle, "digest").mockImplementation(
+        (...args: Parameters<SubtleCrypto["digest"]>) =>
+          new Promise((resolve, reject) => {
+            held.push(() => {
+              real(...args).then(resolve, reject);
+            });
+          }),
+      );
+      fireEvent.click(
+        pane().getByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+      );
+      await t.until(() => held.length > 0);
+      spy.mockRestore();
+      if (changes) {
+        // A rule that now forbids the mode, or only a newer answer (another token) that still admits it.
+        if (change === "strict") strict = true;
+        else token = "f".repeat(64);
+        t.rerender(tasksEnv(t.api, { online: false }));
+        await t.settle();
+        t.rerender(tasksEnv(t.api, { online: true }));
+        await t.settle();
+      }
+      for (const release of held) release();
+      await t.settle();
+      await t.settle();
+      if (changes) {
+        expect(t.drafts()).toEqual([]);
+        expect(dialog()).not.toBeNull();
+        expect(
+          document.querySelector("[data-dependency-message]"),
+        ).toHaveTextContent(DEPENDENCY_COPY.changedWhileSaving);
+      } else {
+        expect(t.drafts().map((d) => d.kind)).toEqual([
+          "complete_dependencies",
+        ]);
+        expect(t.bodies()[0]?.command.command).toMatchObject({
+          mode: "advisory_override",
+        });
+      }
+    },
+  );
+
+  test("the dialog acts only on the answer of the read it asked when it opened: before it, nothing can be sent", async () => {
+    let strict = false;
+    let hold = false;
+    let release: () => void = () => undefined;
+    const { t } = await mount({
+      preview: (r, pre) => answer(r, [item(pre)], { strict }),
+    });
+    // The rule becomes strict; the dialog's own read is held.
+    strict = true;
+    hold = true;
+    const real = t.api.readDependencies;
+    t.api.readDependencies = (id) =>
+      hold
+        ? new Promise((resolve) => {
+            release = () => {
+              hold = false;
+              void real(id).then(resolve);
+            };
+          })
+        : real(id);
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
+    await t.until(() => dialog()?.dataset.dependencyDialog === "checking");
+    await t.settle();
+    expect(dialog()?.dataset.dependencyDialog).toBe("checking");
+    // The earlier (permissive) answer still shows "Start anyway"; choosing it sends nothing while the dialog's read is unanswered.
+    fireEvent.click(
+      pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
+    );
+    const button = pane().getByRole("button", {
+      name: DEPENDENCY_COPY.startAnyway,
+    });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    await t.settle();
+    expect(t.drafts()).toEqual([]);
+    release();
+    await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+    expect(
+      pane().queryByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+    ).toBeNull();
+    expect(t.drafts()).toEqual([]);
   });
 });

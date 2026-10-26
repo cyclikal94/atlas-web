@@ -430,6 +430,8 @@ export async function mountTasks(options: {
   /** WEB-10c: rows of other stores seeded before the screens mount (catch-up sequences, a timer copy in `sync_state`). */
   sequences?: object[];
   timerCopy?: unknown;
+  /** WEB-10c revision 2: failed catch-up discoveries by task (`sync_state.materialise_discovery`), as another page recorded them. */
+  discovery?: Record<string, object>;
   /** WEB-10c revision 1: overlay rows (`pending_effects`) seeded with the drafts, so an acknowledged draft's effect still stands. */
   effects?: object[];
 }): Promise<Mounted> {
@@ -457,6 +459,15 @@ export async function mountTasks(options: {
       if (sync === undefined) throw new Error("setup: no sync state");
       world.idb.seed(NAME, "sync_state", [
         { ...sync, timer_copy: options.timerCopy },
+      ]);
+    }
+    if (options.discovery !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [
+        { ...sync, materialise_discovery: options.discovery as never },
       ]);
     }
     if (options.cacheStatus !== undefined) {

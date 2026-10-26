@@ -18,13 +18,13 @@ export function CatchUpNotice({
   title: string;
 }) {
   const env = useTasksEnv();
-  const { runner, state, records } = useCatchUp();
+  const { runner, state, records, discovery } = useCatchUp();
   const latest = latestByTask(
     records.status === "ready"
       ? records.value.filter((r) => r.task_id === taskId)
       : [],
   );
-  const stop = stopFor(taskId, latest, state);
+  const stop = stopFor(taskId, latest, state, discovery);
   if (stop === null) return null;
   const reachable = env.online && env.writable;
   return (

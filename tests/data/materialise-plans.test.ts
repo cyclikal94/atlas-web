@@ -7,14 +7,18 @@ import type {
 } from "../../src/data/model/types";
 import {
   pruneMaterialiseSequences,
+  readMaterialiseDiscovery,
   readMaterialiseSequence,
   readMaterialiseSequences,
   SEQUENCE_WINDOW,
+  writeMaterialiseDiscovery,
   writeMaterialiseSequence,
 } from "../../src/data/plans/materialise";
 import {
+  issueTimerOrder,
   parseTimerCopy,
   readTimerCopy,
+  reconcileTimerCopy,
   TIMER_COPY_ROWS,
   writeTimerCopy,
 } from "../../src/data/plans/timer-copy";
@@ -306,33 +310,39 @@ describe("W28: the running-timer copy", () => {
     access: "available",
     id: `cccccccc-0000-4000-8000-${String(n).padStart(12, "0")}`,
   });
-  const copy = (readAt: number, running = [session(1)]) => ({
-    format: 1 as const,
+  // Revision 2 (review R10, DA-T2): a copy carries its read's place in the observation order; `read_at` is shown, never compared.
+  const copy = (order: number, running = [session(1)], readAt = 1_000) => ({
+    format: 2 as const,
+    order,
     read_at: readAt,
     complete: true,
     running,
   });
 
-  test("writes one record, keeps a copy read LATER than the incoming one, and removes it on null", async () => {
+  /**
+   * Adaptation (revision 2): this case compared `read_at` (ms) and kept the copy whose clock was later. Its intent, "an earlier read
+   * never replaces a later one", is kept over the observation order: the later ORDER stays, whatever either clock says.
+   */
+  test("writes one record, keeps a copy of a LATER order than the incoming one (whatever the clocks), and removes it on null", async () => {
     const { t, service } = await bound();
     const run = (c: ReturnType<typeof copy> | null) =>
       service.store.run(writeTimerCopy, {
         captured: service.capture(1),
         copy: c,
       });
-    expect(await run(copy(200))).toEqual({
+    expect(await run(copy(2, [session(1)], 100))).toEqual({
       kind: "applied",
-      value: { written: true, stored: copy(200) },
+      value: { written: true, stored: copy(2, [session(1)], 100) },
     });
-    expect(await run(copy(100, []))).toEqual({
+    expect(await run(copy(1, [], 200))).toEqual({
       kind: "applied",
-      value: { written: false, stored: copy(200) },
+      value: { written: false, stored: copy(2, [session(1)], 100) },
     });
     expect(
       await service.store.run(readTimerCopy, {
         incarnationId: service.incarnationId,
       }),
-    ).toEqual(copy(200));
+    ).toEqual(copy(2, [session(1)], 100));
     await run(null);
     const sync = t.world.idb.peek(
       DB,
@@ -340,6 +350,10 @@ describe("W28: the running-timer copy", () => {
       "singleton",
     ) as SyncStateRow;
     expect(sync.timer_copy).toBeNull();
+    // Removed, the fence stays: an earlier read still writes nothing.
+    expect(await run(copy(1))).toMatchObject({
+      value: { written: false },
+    });
   });
 
   test("MU-10C-12 guards: another incarnation, an earlier epoch or a closing wipe writes nothing", async () => {
@@ -377,6 +391,9 @@ describe("W28: the running-timer copy", () => {
       ),
     ).toBeNull();
     expect(parseTimerCopy({ format: 2 })).toBeNull();
+    // An order that does not read is 0: older than every ordered read (a corrected format-1 copy keeps it).
+    expect(parseTimerCopy({ ...copy(1), order: -4 })?.order).toBe(0);
+    expect(parseTimerCopy({ format: 3 })).toBeNull();
     expect(parseTimerCopy(undefined)).toBeNull();
     const out = await service.store.run(writeTimerCopy, {
       captured: service.capture(1),
@@ -417,5 +434,199 @@ describe("W28: the running-timer copy", () => {
         incarnationId: service.incarnationId,
       }),
     ).toEqual(copy(9));
+  });
+
+  test("DA-T2: two reads are given distinct places in issue order, so a tie or a clock that went back decides nothing", async () => {
+    const { service } = await bound();
+    const issue = async () => {
+      const out = await service.store.run(issueTimerOrder, {
+        captured: service.capture(1),
+      });
+      if (out.kind !== "applied") throw new Error("not applied");
+      return out.value.order as number;
+    };
+    const a = await issue();
+    const b = await issue();
+    expect(b).toBeGreaterThan(a);
+    const run = (c: ReturnType<typeof copy>) =>
+      service.store.run(writeTimerCopy, {
+        captured: service.capture(1),
+        copy: c,
+      });
+    // B (issued later, the SAME millisecond) lands first, saying nothing runs; A lands after it: refused.
+    expect(await run(copy(b, [], 5_000))).toMatchObject({
+      value: { written: true },
+    });
+    expect(await run(copy(a, [session(1)], 5_000))).toMatchObject({
+      value: { written: false },
+    });
+    // A later read whose clock went BACK is still the later read.
+    const c = await issue();
+    expect(await run(copy(c, [session(2)], 10))).toMatchObject({
+      value: { written: true },
+    });
+    // Another incarnation is given no place.
+    expect(
+      await service.store.run(issueTimerOrder, {
+        captured: { ...service.capture(1), incarnationId: "x" },
+      }),
+    ).toEqual({ kind: "dropped", reason: "incarnation" });
+  });
+
+  test("a copy written before the order existed (format 1) reads as order 0 and the first ordered write replaces it", async () => {
+    const { service, seed } = await bound();
+    const legacy = {
+      format: 1,
+      read_at: 9_999_999_999_999,
+      complete: true,
+      running: [session(1)],
+    };
+    seed({ timer_copy: legacy });
+    expect(parseTimerCopy(legacy)).toEqual({
+      ...copy(0),
+      read_at: legacy.read_at,
+    });
+    const out = await service.store.run(writeTimerCopy, {
+      captured: service.capture(1),
+      copy: copy(1, []),
+    });
+    expect(out).toMatchObject({ value: { written: true } });
+  });
+
+  test("DA-T1: a day's correction removes what it names and fences out every earlier read; an earlier correction changes nothing", async () => {
+    const { service } = await bound();
+    const issue = async () => {
+      const out = await service.store.run(issueTimerOrder, {
+        captured: service.capture(1),
+      });
+      if (out.kind !== "applied") throw new Error("not applied");
+      return out.value.order as number;
+    };
+    const account = await issue(); // an account read, its answer still on its way
+    const first = await issue();
+    await service.store.run(writeTimerCopy, {
+      captured: service.capture(1),
+      copy: copy(first, [session(1), session(2)]),
+    });
+    const day = await issue();
+    const correct = (order: number, id: string) =>
+      service.store.run(reconcileTimerCopy, {
+        captured: service.capture(1),
+        order,
+        drop: (row, newer) => newer && row.id === id,
+      });
+    expect(await correct(day, session(1).id)).toEqual({
+      kind: "applied",
+      value: { removed: 1, applied: true },
+    });
+    // The same read's later page (its traversal keeps its first page's place) may still correct.
+    expect(await correct(day, session(2).id)).toEqual({
+      kind: "applied",
+      value: { removed: 1, applied: true },
+    });
+    // The account read issued before the correction lands now: refused, so the removed sessions are never restored (reload included).
+    expect(
+      await service.store.run(writeTimerCopy, {
+        captured: service.capture(1),
+        copy: copy(account, [session(1), session(2)]),
+      }),
+    ).toMatchObject({ value: { written: false } });
+    expect(
+      (
+        await service.store.run(readTimerCopy, {
+          incarnationId: service.incarnationId,
+        })
+      )?.running,
+    ).toEqual([]);
+    // A correction of an earlier order than the fence changes nothing.
+    expect(await correct(first, session(1).id)).toEqual({
+      kind: "applied",
+      value: { removed: 0, applied: false },
+    });
+    // Control: a read issued after the correction replaces the copy normally.
+    expect(
+      await service.store.run(writeTimerCopy, {
+        captured: service.capture(1),
+        copy: copy(await issue(), [session(3)]),
+      }),
+    ).toMatchObject({ value: { written: true } });
+  });
+});
+
+describe("W27: a task's discovery entry (revision 2, review R13 and DA-M1)", () => {
+  const entry = (failures: number, stopped = false, retry = 0) => ({
+    retry,
+    failures,
+    stop: stopped ? { reason: "unreachable" as const } : null,
+  });
+  test("a compare-and-set: written over the entry decided on, stale over another, removed on success; read back by task", async () => {
+    const { service } = await bound();
+    const write = (
+      expected: ReturnType<typeof entry> | null,
+      next: ReturnType<typeof entry> | null,
+      task = TASK,
+    ) =>
+      service.store.run(writeMaterialiseDiscovery, {
+        captured: service.capture(1),
+        task_id: task,
+        expected,
+        next,
+      });
+    expect(await write(null, entry(1))).toEqual({
+      kind: "applied",
+      value: { kind: "written", stored: entry(1) },
+    });
+    // A late answer decided on the absent entry: stale, nothing written.
+    expect(await write(null, entry(1))).toEqual({
+      kind: "applied",
+      value: { kind: "stale", stored: entry(1) },
+    });
+    expect(await write(entry(1), entry(3, true))).toMatchObject({
+      value: { kind: "written" },
+    });
+    // "Try again" moves `retry`: an answer decided under the earlier budget (same counts, earlier retry) is stale.
+    expect(await write(entry(3, true), entry(0, false, 1))).toMatchObject({
+      value: { kind: "written" },
+    });
+    expect(await write(entry(0, false, 0), entry(1, false, 0))).toMatchObject({
+      value: { kind: "stale" },
+    });
+    expect(
+      await service.store.run(readMaterialiseDiscovery, {
+        incarnationId: service.incarnationId,
+      }),
+    ).toEqual({ [TASK]: entry(0, false, 1) });
+    expect(await write(entry(0, false, 1), null)).toMatchObject({
+      value: { kind: "written", stored: null },
+    });
+    expect(
+      await service.store.run(readMaterialiseDiscovery, {
+        incarnationId: service.incarnationId,
+      }),
+    ).toEqual({});
+  });
+
+  test("bounded: one that would add a task beyond the window is refused (full); response-derived guards apply", async () => {
+    const { service, seed } = await bound();
+    const many: Record<string, ReturnType<typeof entry>> = {};
+    for (let i = 0; i < SEQUENCE_WINDOW; i += 1)
+      many[`bbbbbbbb-0000-4000-8000-${String(i).padStart(12, "0")}`] = entry(1);
+    seed({ materialise_discovery: many });
+    expect(
+      await service.store.run(writeMaterialiseDiscovery, {
+        captured: service.capture(1),
+        task_id: OTHER_TASK,
+        expected: null,
+        next: entry(1),
+      }),
+    ).toEqual({ kind: "applied", value: { kind: "full", stored: null } });
+    expect(
+      await service.store.run(writeMaterialiseDiscovery, {
+        captured: { ...service.capture(1), incarnationId: "x" },
+        task_id: TASK,
+        expected: null,
+        next: entry(1),
+      }),
+    ).toEqual({ kind: "dropped", reason: "incarnation" });
   });
 });

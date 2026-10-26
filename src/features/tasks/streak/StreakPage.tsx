@@ -214,7 +214,7 @@ const requiresCatchUp = (result: TasksResult<TaskStreak>) =>
  */
 function useStreakFigures(taskId: string, shared: boolean) {
   const env = useTasksEnv();
-  const { runner, state, records } = useCatchUp();
+  const { runner, state, records, discovery, discoveryRead } = useCatchUp();
   const position = useCachePosition();
   // Committed CONTENT asks again (WEB-10a decision 25); the position's first load is not a change.
   const revision =
@@ -311,16 +311,41 @@ function useStreakFigures(taskId: string, shared: boolean) {
     const running =
       state.active.includes(taskId) ||
       (record !== undefined && record.phase !== "stopped");
-    if (!running && record?.phase !== "stopped" && !visit.current.reread) {
+    // A stopped discovery (review R13) is not a finished catch-up: it is shown, never read past (nor while its record is unread).
+    const stopped =
+      record?.phase === "stopped" ||
+      !discoveryRead ||
+      discovery[taskId]?.stop != null ||
+      state.unrecorded.has(taskId);
+    if (!running && !stopped && !visit.current.reread) {
       visit.current.reread = true;
       setAsk((n) => n + 1);
     }
-  }, [waiting, env.online, state, record, runner, taskId]);
+  }, [
+    waiting,
+    env.online,
+    state,
+    record,
+    discovery,
+    discoveryRead,
+    runner,
+    taskId,
+  ]);
   const stoppedRecord =
     waiting && record?.phase === "stopped" && record.stop !== null
       ? record
       : null;
-  const memoryStop = waiting ? state.unrecorded.get(taskId) : undefined;
+  const discovered = discovery[taskId]?.stop;
+  const memoryStop = !waiting
+    ? undefined
+    : discovered
+      ? {
+          reason: discovered.reason,
+          ...(discovered.request_id
+            ? { requestId: discovered.request_id }
+            : {}),
+        }
+      : state.unrecorded.get(taskId);
   const stop: Read | null = stoppedRecord?.stop
     ? {
         kind: "stopped",

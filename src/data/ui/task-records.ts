@@ -1,17 +1,27 @@
 import type { AccountService } from "../engine/account-service";
 import { utf8Length } from "../model/outbox";
-import type { Captured, MaterialiseSequenceRow } from "../model/types";
+import type {
+  Captured,
+  JsonObject,
+  MaterialiseDiscovery,
+  MaterialiseSequenceRow,
+} from "../model/types";
 import {
+  type DiscoveryWrite,
   pruneMaterialiseSequences,
+  readMaterialiseDiscovery,
   readMaterialiseSequence,
   readMaterialiseSequences,
   type SequenceExpectation,
   type SequenceKey,
   type SequenceWrite,
+  writeMaterialiseDiscovery,
   writeMaterialiseSequence,
 } from "../plans/materialise";
 import {
+  issueTimerOrder,
   readTimerCopy,
+  reconcileTimerCopy,
   type TimerCopyRecord,
   writeTimerCopy,
 } from "../plans/timer-copy";
@@ -41,6 +51,20 @@ export function useMaterialiseSequences(
     },
     [taskId],
   );
+}
+
+/** The failed catch-up discoveries of the displayed account's database, by task, live (every page's). */
+export function useMaterialiseDiscovery(): Loadable<
+  Record<string, MaterialiseDiscovery>
+> {
+  return useWatch((env) => {
+    const service = env.service();
+    return service
+      ? service.store.watch(readMaterialiseDiscovery, {
+          incarnationId: service.incarnationId,
+        })
+      : null;
+  }, []);
 }
 
 /** The running-timer copy of the displayed account's database, live (`null`: none, or none readable). */
@@ -120,6 +144,71 @@ export async function readMaterialiseSequenceNow(
   }
 }
 
+/** The failed discoveries as stored now; `undefined`: the store could not be read. */
+export async function readMaterialiseDiscoveryNow(
+  service: AccountService,
+): Promise<Record<string, MaterialiseDiscovery> | undefined> {
+  try {
+    return await service.store.run(readMaterialiseDiscovery, {
+      incarnationId: service.incarnationId,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/** W27's compare-and-set of one task's discovery entry (G1, G2, G5; INC, CLS, EPO). Never throws. */
+export async function commitMaterialiseDiscovery(
+  service: AccountService,
+  captured: Captured,
+  input: {
+    task_id: string;
+    expected: MaterialiseDiscovery | null;
+    next: MaterialiseDiscovery | null;
+  },
+): Promise<RecordCommit<DiscoveryWrite>> {
+  try {
+    return settled(
+      await service.commit(writeMaterialiseDiscovery, { captured, ...input }),
+    );
+  } catch {
+    return { kind: "failed" };
+  }
+}
+
+/**
+ * W28's observation order: the place of a timer read about to be sent (`captured`: the stamp of its issue). `null`: none was given (no
+ * service, another identity, a store failure): the read is then shown but decides nothing against the copy and writes nothing to it.
+ */
+export async function issueTimerOrderNow(
+  service: AccountService,
+  captured: Captured,
+): Promise<number | null> {
+  try {
+    const out = await service.commit(issueTimerOrder, { captured });
+    return out.kind === "applied"
+      ? (out.value as { order: number | null }).order
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** W28: the copy corrected by a read of one occurrence's sessions (`reconcileTimerCopy`). Never throws. */
+export async function commitTimerCorrection(
+  service: AccountService,
+  captured: Captured,
+  input: { order: number; drop(row: JsonObject, newer: boolean): boolean },
+): Promise<RecordCommit<{ removed: number; applied: boolean }>> {
+  try {
+    return settled(
+      await service.commit(reconcileTimerCopy, { captured, ...input }),
+    );
+  } catch {
+    return { kind: "failed" };
+  }
+}
+
 /**
  * W28: replaces the running-timer copy with `copy` (or removes it), admitted as a cache write through the origin's quota ledger first (a
  * refusal writes nothing), then committed through the service (G1, G2, G5; INC, CLS, EPO). `captured` is the stamp of the READ's issue.
@@ -157,6 +246,7 @@ export async function commitTimerCopy(
 }
 
 export type {
+  DiscoveryWrite,
   SequenceExpectation,
   SequenceKey,
   SequenceWrite,

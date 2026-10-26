@@ -316,3 +316,190 @@ describe("R3: the list's Stop asks as the detail's does", () => {
     ).toBeNull();
   });
 });
+
+/**
+ * Revision 2 (review R10): ONE read owns each section. A newer read (reconnect, Retry, a change of mine) takes over at once: an earlier
+ * read's answer, success or failure, never reaches the screen or the copy, and a further page is accepted only for the read and cursor
+ * that asked for it. Running and earlier sessions are owned separately.
+ */
+describe("R10: one read owns each section", () => {
+  const full = (from: number, over: Record<string, unknown> = {}) => {
+    const items = Array.from({ length: 50 }, (_, i) => ({
+      ...restricted,
+      id: `cccccccc-0000-4000-8000-${String(from + i).padStart(12, "0")}`,
+      ...over,
+    }));
+    return { items, next_after: items[49]?.id ?? null } as AccountTimerPage;
+  };
+
+  test("REVIEW2 T3 (ported): an old available page cannot replace a newer restricted row (no title, link, Stop or Discard), nor the copy", async () => {
+    const task = await seededTask({ title: "Practise piano" });
+    const old = available(task);
+    const hidden = {
+      ...restricted,
+      id: old.id,
+      started_at: old.started_at,
+      version: old.version,
+    };
+    // Every running read is held (the protected tree may mount twice early, so "the first read" is not necessarily the owning one).
+    const held: Array<(r: TasksResult<AccountTimerPage>) => void> = [];
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        q.state !== "running"
+          ? page([])
+          : new Promise((r) => {
+              held.push(r);
+            }),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(() => held.length >= 1);
+    await t.settle();
+    const before = held.length;
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: true }));
+    await t.until(() => held.length > before);
+    held.at(-1)?.(page([hidden]));
+    await t.until(() => rowOf(old.id)?.dataset.access === "restricted");
+    await t.until(
+      () =>
+        (t.world.idb.peek(NAME, "sync_state", "singleton") as SyncStateRow)
+          .timer_copy != null,
+    );
+    expect(
+      within(rowOf(old.id) as HTMLElement).queryByRole("button"),
+    ).toBeNull();
+    for (const release of held.slice(0, -1)) release(page([old]));
+    await t.settle();
+    const row = rowOf(old.id) as HTMLElement;
+    expect(row.dataset.access).toBe("restricted");
+    expect(within(row).queryByRole("link")).toBeNull();
+    expect(within(row).queryByRole("button")).toBeNull();
+    expect(row).not.toHaveTextContent("Practise piano");
+    const kept = (
+      t.world.idb.peek(NAME, "sync_state", "singleton") as SyncStateRow
+    ).timer_copy as { running: Array<{ access: string }> };
+    expect(kept.running.map((r) => r.access)).toEqual(["restricted"]);
+  });
+
+  test("reconnect and Retry: earlier reads answering last (success or failure) never replace the newest; the other section is its own", async () => {
+    const task = await seededTask({ title: "Practise piano" });
+    const finished = available(task, {
+      id: "cccccccc-0000-4000-8000-000000000019",
+      stopped_at: now() - 60,
+      can_modify: false,
+    });
+    const held: Array<(r: TasksResult<AccountTimerPage>) => void> = [];
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        q.state !== "running"
+          ? page([finished])
+          : new Promise((r) => {
+              held.push(r);
+            }),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(() => held.length >= 1);
+    await t.settle();
+    const first = held.length;
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: true }));
+    await t.until(() => held.length > first);
+    await t.settle();
+    // The newest read fails: Retry asks once more.
+    held.at(-1)?.({ ok: false, kind: "uncertain" } as never);
+    await t.until(
+      () => document.querySelector("[data-timers-running=error]") !== null,
+    );
+    const before = held.length;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await t.until(() => held.length > before);
+    held.at(-1)?.(page([{ ...restricted, id: available(task).id }]));
+    await t.until(() => rowOf(available(task).id) !== null);
+    // Every earlier read answers now, available or failed.
+    held.slice(0, -1).forEach((release, i) => {
+      release(
+        i % 2 === 0
+          ? page([available(task)])
+          : ({ ok: false, kind: "uncertain" } as never),
+      );
+    });
+    await t.settle();
+    expect(rowOf(available(task).id)?.dataset.access).toBe("restricted");
+    expect(
+      document.querySelector("[data-timers-running=ready]"),
+    ).not.toBeNull();
+    expect(rowOf(finished.id)).not.toBeNull();
+  });
+
+  test("Load more: an old read's further page is not merged into a newer read; a second press asks once", async () => {
+    let release: (r: TasksResult<AccountTimerPage>) => void = () => undefined;
+    const afters: string[] = [];
+    let firsts = 0;
+    const api = fakeApi({
+      readAccountTimers: async (q) => {
+        if (q.state !== "running") return page([]);
+        if (q.after === undefined) {
+          firsts += 1;
+          return { ok: true, value: full(firsts === 1 ? 1 : 101) };
+        }
+        afters.push(q.after);
+        return new Promise((r) => {
+          release = r;
+        });
+      },
+    });
+    const t = await mountTasks({ path: "/tasks/timers", api });
+    await t.until(
+      () => firsts === 1 && rowOf(full(1).items[0]?.id as string) !== null,
+    );
+    const more = within(
+      document.querySelector("[data-timers-running]") as HTMLElement,
+    ).getByRole("button", { name: TIMERS_COPY.loadMore });
+    fireEvent.click(more);
+    fireEvent.click(more);
+    await t.settle();
+    expect(afters).toHaveLength(1);
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: true }));
+    await t.until(() => firsts === 2);
+    await t.settle();
+    release(
+      page([{ ...restricted, id: "cccccccc-0000-4000-8000-000000000051" }]),
+    );
+    await t.settle();
+    expect(rowOf("cccccccc-0000-4000-8000-000000000051")).toBeNull();
+    expect(
+      document.querySelectorAll("[data-timers-running] [data-account-timer]"),
+    ).toHaveLength(50);
+  }, 20_000);
+
+  test("a stop of mine leaving the outbox (another tab's included) reads the list again", async () => {
+    const task = await seededTask({ title: "Practise piano" });
+    let reads = 0;
+    const api = fakeApi({
+      readAccountTimers: async (q) => {
+        if (q.state === "running") reads += 1;
+        return page(q.state === "running" ? [available(task)] : []);
+      },
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(() => rowOf(available(task).id) !== null);
+    const before = reads;
+    fireEvent.click(
+      within(rowOf(available(task).id) as HTMLElement).getByRole("button", {
+        name: "Stop",
+      }),
+    );
+    await t.until(() => t.drafts().length === 1);
+    await t.settle();
+    const queued = reads;
+    expect(queued).toBeGreaterThan(before);
+    // The draft is discarded (it leaves the outbox, as another tab's settle or discard would show here): read again.
+    await t.data.outbox()?.discard(t.drafts()[0]?.local_id as string);
+    await t.until(() => reads > queued);
+    expect(reads).toBeGreaterThan(queued);
+  });
+});

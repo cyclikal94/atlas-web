@@ -350,3 +350,85 @@ describe("R8: the command path on a task's own detail", () => {
     expect(document.querySelector("[data-catch-up-stopped]")).toBeNull();
   });
 });
+
+/**
+ * Revision 2 (review R13, DA-M1): a stopped DISCOVERY (the first read; recorded by any page of the account) is shown wherever the task's
+ * stop is shown, admits no automatic read, and is lifted by Try again alone.
+ */
+describe("R13: a recorded discovery stop", () => {
+  const unreachable = (task: SeededTask) => ({
+    [task.taskId]: { retry: 0, failures: 3, stop: { reason: "unreachable" } },
+  });
+
+  test("Today shows another page's stop, reads nothing for it; Try again lifts it and catches up", async () => {
+    const task = await seededTask({ title: "Water the plants" });
+    const reads = [
+      position(task, "2026-01-01", true),
+      position(task, TODAY, false),
+    ];
+    const { api, calls } = counted({
+      readTask: async () => reads.shift() ?? position(task, TODAY, false),
+      materialise: async () => ({ ok: true, value: { revision: 9 } }),
+    });
+    api.respond = (q) =>
+      q.scope === "joint" ? daily([task.taskId]) : daily([]);
+    const t = await mountTasks({
+      path: PATH,
+      rows: task.rows,
+      api,
+      discovery: unreachable(task),
+    });
+    await t.until(
+      () =>
+        document.querySelector("[data-catch-up-stopped]") !== null &&
+        (banner()?.textContent ?? "").includes("Water the plants"),
+    );
+    await t.settle();
+    const stop = document.querySelector(
+      "[data-catch-up-stopped]",
+    ) as HTMLElement;
+    expect(stop.dataset.catchUpStopped).toBe("unreachable");
+    expect(stop).toHaveTextContent(CATCH_UP_COPY.reason.unreachable);
+    expect(calls.readTask).toBe(0);
+    expect(calls.materialise).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await t.until(
+      () => document.querySelector("[data-catch-up-stopped]") === null,
+    );
+    await t.until(() => calls.materialise === 1);
+    expect(calls.materialise).toBe(1);
+  });
+
+  test("the task's detail shows it too; control: another task's discovery stop is not this task's", async () => {
+    const task = await seededTask({ title: "Water the plants" });
+    const other = await seededTask({ title: "Feed the cat" });
+    const { api } = counted({});
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}`,
+      rows: [...task.rows, ...other.rows],
+      api,
+      discovery: unreachable(task),
+    });
+    await t.until(
+      () => document.querySelector("[data-catch-up-stopped]") !== null,
+    );
+    expect(
+      document
+        .querySelector("[data-catch-up-stopped]")
+        ?.getAttribute("data-catch-up-task"),
+    ).toBe(task.taskId);
+    cleanup();
+    forgetCatchUp();
+    const again = await mountTasks({
+      path: `/tasks/${other.taskId}`,
+      rows: [...task.rows, ...other.rows],
+      api,
+      discovery: unreachable(task),
+    });
+    await again.until(
+      () => document.querySelector("[data-task-detail]") !== null,
+    );
+    await again.settle();
+    expect(document.querySelector("[data-catch-up-stopped]")).toBeNull();
+  });
+});

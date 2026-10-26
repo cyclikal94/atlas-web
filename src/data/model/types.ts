@@ -253,6 +253,19 @@ export interface SyncStateRow {
    * absent (a database created before it) or damaged is "no copy". Optional, so no migration.
    */
   timer_copy?: unknown | null;
+  /**
+   * WEB-10c revision 2 (W28): the last place handed out in the timer observation order (`issueTimerOrder`), and the latest order
+   * already applied to `timer_copy` (an earlier read's replacement or correction is refused). Absent: 0.
+   */
+  timer_order?: number;
+  timer_fence?: number;
+  /**
+   * WEB-10c revision 2 (W27, review R13, design assessment DA-M1): the catch-up DISCOVERY of each task (its first read, before its day is
+   * known) that has failed: the consecutive uncertain answers it met and, once they reached the bound or a definite refusal came, its
+   * stop. Kept across reloads and tabs, so the budget never starts again by itself; only the person's "Try again" (a new `retry`) does.
+   * Removed when the discovery succeeds. Absent: none.
+   */
+  materialise_discovery?: Record<string, MaterialiseDiscovery>;
   device_id: string | null;
   device_verified: boolean;
   device_verified_for: { account_id: AccountId; epoch: Epoch } | null;
@@ -340,6 +353,15 @@ export interface MaterialiseSequenceRow {
     request_id?: string;
   };
   trigger: "daily" | "streak" | "draft";
+}
+
+/** WEB-10c revision 2 (W27): one task's failed catch-up discovery (`sync_state.materialise_discovery`). */
+export interface MaterialiseDiscovery {
+  /** The person's "Try again" moves it: an answer decided under an earlier one never applies. */
+  retry: number;
+  /** Consecutive uncertain first reads. */
+  failures: number;
+  stop: null | { reason: "unreachable" | "rejected"; request_id?: string };
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

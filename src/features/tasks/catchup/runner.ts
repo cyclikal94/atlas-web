@@ -1,8 +1,11 @@
 import {
   type AccountService,
+  commitMaterialiseDiscovery,
   commitMaterialiseSequence,
+  type MaterialiseDiscovery,
   type MaterialiseSequenceRow,
   pruneOlderSequences,
+  readMaterialiseDiscoveryNow,
   readMaterialiseSequenceNow,
   type SequenceKey,
 } from "../../../data";
@@ -41,6 +44,16 @@ import { todayIn } from "../model/time";
  * and resumed only by the person's "Try again", so a stop never loops; a new day is a new key. Everything is bound to the identity and
  * the database binding it was made for: an identity that moves disposes the runner, a late answer is dropped by W27's guards, and a
  * `401`, `not_sent` or `closed` answer writes nothing.
+ *
+ * DISCOVERY (review R13, design assessment DA-M1): the first read of a task (its zone and position, before a day and so a sequence row
+ * can exist) keeps its failures and its stop in W27's discovery entry, written BEFORE another read is made, so its budget is the task's,
+ * not this call's: a pause, a reload or another tab's turn carries on from the count reached, and a stop (three uncertain answers, or a
+ * definite refusal) admits no automatic read again, whichever trigger asks (Today's list, the streak, a command's retry, a kick). Only
+ * the person's "Try again" admits a fresh budget, once: it is made under the account's lock, against the stop it was pressed on (a
+ * second press, here or in another tab, finds the stop already lifted and adds nothing), and every write of a discovery compares the
+ * entry it decided on, so a late answer of an earlier budget never changes a newer one. A stop whose write failed is kept in this page's
+ * memory (`unrecorded`) and refuses automatic work here alike. An environmental pause (offline, not compatible, the session held) is
+ * not a stop: it resumes.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -70,7 +83,7 @@ export interface RunnerState {
   current: string | null;
   /** This page waits for the account's lock (another page is catching up). */
   waiting: boolean;
-  /** Stops that have no record (the first read never answered): memory only, with "Try again". */
+  /** Discovery stops whose record could not be written (the store failed or is full): memory only, with "Try again". */
   unrecorded: ReadonlyMap<string, UnrecordedStop>;
   /** Tasks whose sequence finished on this page since it began (for an announcement). */
   finished: number;
@@ -187,14 +200,25 @@ function classifyRead(
 
 const POSITION_READ = (taskId: string) => `task:${taskId}`;
 
-/** One task to bring up to date, as asked. `resume`: the item of a sequence this page paused, resumed (its day is known). */
+/**
+ * One task to bring up to date, as asked. `resume`: the item of a sequence this page paused, resumed (its day is known). `retry`: the
+ * person's "Try again", with the stops it was pressed on (the discovery entry and the day's sequence as they were read then), which it
+ * lifts under the lock only if they still stand as seen.
+ */
 interface Item {
   taskId: string;
   trigger: Trigger;
   throughDate?: string;
   manual: boolean;
   resume?: boolean;
+  retry?: { discovery: MaterialiseDiscovery | null; sequence: Sequence | null };
 }
+
+const NO_DISCOVERY: MaterialiseDiscovery = {
+  retry: 0,
+  failures: 0,
+  stop: null,
+};
 
 /**
  * How one task's work ended (review R1): `done` when nothing more is to happen without the person (complete, a stop recorded or shown,
@@ -388,39 +412,154 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     return DONE;
   };
 
+  /** A discovery stop that could not be recorded: kept in this page's memory, which refuses automatic work alike. */
+  const stopInMemory = (taskId: string, stop: UnrecordedStop) => {
+    unrecord(taskId, stop);
+    set({ stops: state.stops + 1 });
+    return DONE;
+  };
+
+  /**
+   * The person's "Try again", under the lock (review R13): lifts the discovery stop and the day's stopped sequence it was pressed on, if
+   * they still stand as seen (another press, here or in another tab, has lifted them already otherwise: nothing more is added). `false`:
+   * a lift could not be written, so the stop stays shown and nothing is read.
+   */
+  const lift = async (
+    service: AccountService,
+    item: Item & { retry: NonNullable<Item["retry"]> },
+  ): Promise<boolean> => {
+    const seen = item.retry.discovery;
+    if (seen?.stop) {
+      const out = await commitMaterialiseDiscovery(
+        service,
+        service.capture(deps.epoch),
+        {
+          task_id: item.taskId,
+          expected: seen,
+          next: { retry: seen.retry + 1, failures: 0, stop: null },
+        },
+      );
+      if (out.kind !== "applied") return false;
+    }
+    unrecord(item.taskId);
+    const stopped = item.retry.sequence;
+    if (stopped !== null) {
+      // A fresh budget from the position reached, the held attempt (if any) kept.
+      const out = await commit(
+        service,
+        service.capture(deps.epoch),
+        { task_id: stopped.task_id, through_date: stopped.through_date },
+        stopped,
+        freshBudget(stopped),
+      );
+      if (out === null) return false;
+    }
+    return true;
+  };
+
+  /**
+   * The first read of a task, admitted and counted by its discovery entry (W27): its zone (its day) and position. Uncertain answers are
+   * retried with the same pacing; each is recorded before the next read, the bound's or a definite refusal is a recorded stop. A stop
+   * already standing admits no read. An answer of a budget that a "Try again" has replaced meanwhile changes nothing (`stale`).
+   */
+  const discover = async (
+    service: AccountService,
+    item: Item,
+  ): Promise<
+    | {
+        kind: "ok";
+        read: PositionRead;
+        captured: ReturnType<AccountService["capture"]>;
+      }
+    | { kind: "end"; outcome: Outcome }
+  > => {
+    if (state.unrecorded.has(item.taskId))
+      return { kind: "end", outcome: DONE };
+    const entries = await readMaterialiseDiscoveryNow(service);
+    if (entries === undefined) return { kind: "end", outcome: PAUSED };
+    let entry: MaterialiseDiscovery | null = entries[item.taskId] ?? null;
+    if (entry?.stop) return { kind: "end", outcome: DONE };
+    const record = async (next: MaterialiseDiscovery | null) => {
+      const live = alive();
+      if (live === null) return "paused" as const;
+      const out = await commitMaterialiseDiscovery(
+        live,
+        live.capture(deps.epoch),
+        { task_id: item.taskId, expected: entry, next },
+      );
+      if (out.kind !== "applied" || out.value.kind === "full")
+        return "unrecorded" as const;
+      if (out.value.kind === "stale") return "stale" as const;
+      entry = out.value.stored;
+      return "written" as const;
+    };
+    for (;;) {
+      const captured = service.capture(deps.epoch);
+      const read = await readPosition(item.taskId);
+      if (read.answer.kind === "pause" || alive() === null)
+        return { kind: "end", outcome: PAUSED };
+      if (read.answer.kind === "ok" && read.zone !== null) {
+        // Found: the discovery's failures are over (its entry goes); a page's memory stop of it is lifted by its success.
+        if (entry !== null) await record(null);
+        if (state.unrecorded.has(item.taskId)) unrecord(item.taskId);
+        return { kind: "ok", read, captured };
+      }
+      const base = entry ?? NO_DISCOVERY;
+      const failures =
+        read.answer.kind === "uncertain" ? base.failures + 1 : base.failures;
+      const stop: UnrecordedStop | null =
+        read.answer.kind !== "uncertain"
+          ? {
+              reason: "rejected",
+              ...(read.answer.kind === "rejected" && read.answer.requestId
+                ? { requestId: read.answer.requestId }
+                : {}),
+            }
+          : failures >= MAX_READ_FAILURES
+            ? { reason: "unreachable" }
+            : null;
+      const written = await record({
+        retry: base.retry,
+        failures,
+        stop:
+          stop === null
+            ? null
+            : {
+                reason: stop.reason,
+                ...(stop.requestId ? { request_id: stop.requestId } : {}),
+              },
+      });
+      if (written === "paused") return { kind: "end", outcome: PAUSED };
+      if (written === "stale") return { kind: "end", outcome: DONE };
+      if (written === "unrecorded")
+        return {
+          kind: "end",
+          outcome: stopInMemory(item.taskId, stop ?? { reason: "unreachable" }),
+        };
+      if (stop !== null) {
+        set({ stops: state.stops + 1 });
+        return { kind: "end", outcome: DONE };
+      }
+      await sleep(RETRY_DELAYS_MS[failures - 1] as number);
+      if (!mayRun()) return { kind: "end", outcome: PAUSED };
+    }
+  };
+
   /** Finds or begins the sequence of one task through its day, then drives it. */
   const work = async (item: Item): Promise<Outcome> => {
     let service = alive();
     if (service === null) return PAUSED;
-    // The first read: the task's zone (its day) and position. Uncertain answers are retried with the same pacing; a definite refusal or
-    // no answer at all is a stop this page shows (nothing is recorded: there was nothing to send).
-    let read: PositionRead | null = null;
-    // The stamp of the read that is answered last: a sequence adopted while awaiting its position takes that read as its own.
-    let captured = service.capture(deps.epoch);
-    for (let failures = 0; ; ) {
-      captured = service.capture(deps.epoch);
-      read = await readPosition(item.taskId);
-      if (read.answer.kind !== "uncertain") break;
-      failures += 1;
-      if (failures >= MAX_READ_FAILURES) break;
-      await sleep(RETRY_DELAYS_MS[failures - 1] as number);
-      if (!mayRun()) return PAUSED;
-    }
-    service = alive();
-    if (service === null || read === null || read.answer.kind === "pause")
-      return PAUSED;
-    if (read.answer.kind !== "ok" || read.zone === null) {
-      const reason =
-        read.answer.kind === "uncertain" ? "unreachable" : "rejected";
-      unrecord(item.taskId, {
-        reason,
-        ...(read.answer.kind === "rejected" && read.answer.requestId
-          ? { requestId: read.answer.requestId }
-          : {}),
-      });
-      set({ stops: state.stops + 1 });
+    if (
+      item.retry !== undefined &&
+      !(await lift(service, { ...item, retry: item.retry }))
+    )
       return DONE;
-    }
+    const found = await discover(service, item);
+    if (found.kind === "end") return found.outcome;
+    const { read, captured } = found;
+    service = alive();
+    if (service === null || read.answer.kind !== "ok" || read.zone === null)
+      return PAUSED;
     const zone = read.zone;
     const today = () => todayIn(zone, deps.now());
     const throughDate = item.throughDate ?? today();
@@ -569,6 +708,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       }
       if (queue.some((q) => q.taskId === taskId) || state.current === taskId)
         return;
+      // A discovery stop this page could not record admits nothing automatic either (a recorded one is refused where the work begins).
+      if (state.unrecorded.has(taskId)) return;
       // Brought up to date (or found stopped) through this task's today already on this page: nothing to ask again.
       const known = settledThrough.get(taskId);
       if (
@@ -594,34 +735,41 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     tryAgain(taskId, throughDate) {
       if (disposed) return;
       void (async () => {
-        unrecord(taskId);
+        // What the person pressed it on, as stored now: lifted under the lock only if it still stands so (review R13).
         const service = alive();
         const day = throughDate ?? settledThrough.get(taskId)?.day;
-        if (service !== null && day !== undefined) {
-          const key = { task_id: taskId, through_date: day };
-          const stored = await readMaterialiseSequenceNow(service, key);
-          if (stored?.phase === "stopped") {
-            // The person's act: a fresh budget from the position reached, the held attempt (if any) kept.
-            const out = await commit(
-              service,
-              service.capture(deps.epoch),
-              key,
-              stored,
-              freshBudget(stored),
-            );
-            if (out === null) return;
+        let discovery: MaterialiseDiscovery | null = null;
+        let sequence: Sequence | null = null;
+        if (service !== null) {
+          const entries = await readMaterialiseDiscoveryNow(service);
+          if (entries === undefined) return;
+          discovery = entries[taskId] ?? null;
+          if (day !== undefined) {
+            const stored = await readMaterialiseSequenceNow(service, {
+              task_id: taskId,
+              through_date: day,
+            });
+            if (stored === undefined) return;
+            if (stored?.phase === "stopped") sequence = stored;
           }
         }
+        if (disposed) return;
         // The person's act supersedes paused work on the task: it is asked for again, once.
         parked.delete(taskId);
-        if (queue.some((q) => q.taskId === taskId) || state.current === taskId)
-          return;
-        queue.push({
-          taskId,
-          trigger: "daily",
-          ...(day === undefined ? {} : { throughDate: day }),
-          manual: true,
-        });
+        const retry = { discovery, sequence };
+        const queued = queue.find((q) => q.taskId === taskId);
+        if (queued !== undefined) {
+          queued.manual = true;
+          queued.retry = retry;
+          if (day !== undefined) queued.throughDate = day;
+        } else
+          queue.push({
+            taskId,
+            trigger: "daily",
+            ...(day === undefined ? {} : { throughDate: day }),
+            manual: true,
+            retry,
+          });
         publishQueue();
         pump();
       })();

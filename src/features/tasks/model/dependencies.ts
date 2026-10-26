@@ -71,6 +71,27 @@ export function modesOf(
   };
 }
 
+/**
+ * The completion that may be sent for `chosen` on this preview, or null (Wait) (review R12): ONE rule for the choice shown, the button and
+ * the send, so a mode remembered from a refused draft or chosen before the preview changed is never offered or sent once the preview
+ * forbids it. A satisfied day is completed plainly (`require_satisfied`) and only then; a cascade needs every open prerequisite completable
+ * and the root's own evidence; "Start anyway" needs a rule that is not strict.
+ */
+export function admittedMode(
+  preview: DependencyPreview,
+  rootId: string,
+  rootCompletable: boolean,
+  chosen: Mode | "wait",
+): Mode | null {
+  if (chosen === "wait") return null;
+  if (satisfiedPreview(preview, rootId))
+    return chosen === "require_satisfied" ? chosen : null;
+  if (chosen === "require_satisfied") return null;
+  return modesOf(preview, rootId, rootCompletable)[chosen] === null
+    ? chosen
+    : null;
+}
+
 /** The progress counts of the detail's row ("{done} of {n} done"). */
 export function progressOf(
   preview: DependencyPreview,

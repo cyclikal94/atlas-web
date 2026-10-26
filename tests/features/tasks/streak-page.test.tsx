@@ -321,6 +321,58 @@ describe("A5: materialisation_required", () => {
   });
 });
 
+describe("R13: a stopped discovery is not a finished catch-up", () => {
+  test("the streak shows the recorded stop; it neither reads the task nor reads the streak again (no catch-up, no rearm)", async () => {
+    const task = await repeating(["complete"]);
+    let streaks = 0;
+    let tasks = 0;
+    const api = fakeApi({
+      readStreak: async () => {
+        streaks += 1;
+        return MATERIALISE;
+      },
+      readTask: async () => {
+        tasks += 1;
+        return { ok: false, kind: "uncertain" };
+      },
+    });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}/streak`,
+      rows: task.rows,
+      api,
+      discovery: {
+        [task.taskId]: {
+          retry: 0,
+          failures: 3,
+          stop: { reason: "unreachable" },
+        },
+      },
+    });
+    await t.until(() => scope("personal")?.dataset.streakState === "stopped");
+    await t.settle();
+    expect(
+      scope("personal")
+        ?.querySelector("[data-streak-stopped]")
+        ?.getAttribute("data-streak-stopped"),
+    ).toBe("unreachable");
+    // (The protected tree may mount twice early, each mount reading once: counted from the stop on.)
+    const shown = streaks;
+    await t.settle();
+    await t.settle();
+    // No "finished" reread follows the stop.
+    expect(streaks).toBe(shown);
+    t.rerender(tasksEnv(t.api, { online: false }));
+    await t.settle();
+    t.rerender(tasksEnv(t.api, { online: true }));
+    await t.settle();
+    await t.settle();
+    expect(tasks).toBe(0);
+    expect(scope("personal")?.dataset.streakState).toBe("stopped");
+    // Online again the streak is read once (its own reconnect), and the stop stands: no catch-up, no further read.
+    expect(streaks).toBeLessThanOrEqual(shown + 1);
+  });
+});
+
 describe("offline and identity", () => {
   test("offline: the figures wait for the connection; the strip is drawn from this device and labelled so", async () => {
     const task = await repeating(["complete", "missed"]);
