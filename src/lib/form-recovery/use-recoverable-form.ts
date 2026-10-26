@@ -31,21 +31,13 @@ import {
   watch,
 } from "./fields";
 import { restoreValues } from "./guard";
+import { HANDOFF_PREFIX, type HandoffStore, pageHandoffs } from "./handoff";
+import { adoptCopy, chooseLeft, isHandoff, readLeft } from "./look";
 import {
-  forgetHandoff,
-  HANDOFF_PREFIX,
-  type HandoffStore,
-  handoffContext,
-  handoffFor,
-  pageHandoffs,
-} from "./handoff";
-import {
-  type CopyTarget,
   type DiscardResult,
   type FormRecoveryPort,
   type RecoverableFieldSpec,
   type RecoverySnapshot,
-  readCopies,
   readCopy,
   type SaveResult,
 } from "./port";
@@ -247,46 +239,13 @@ export interface RecoverableForm {
 const NO_VIEW: SessionView = { restored: null, alternatives: [] };
 const NONE: readonly string[] = [];
 
-/** What a look read (revision 7): the hand-off held and read just now, the gone tabs' copies, the abandoned hand-offs, this page's id. */
-interface Found {
-  handed: RecoverySnapshot | null;
-  gone: RecoverySnapshot[];
-  left: RecoverySnapshot[];
-  own: string | null;
-}
-
 /** A look being made: its cancellation, and its outcome (true once it read the store and showed or offered what it found). */
 interface LookRun {
   cancel(): void;
   done: Promise<boolean>;
 }
 
-/** Revision 6 (R13): whether a copy offered is an update hand-off (a page's that never came back, or one left to this page). */
-export const isHandoff = (copy: RecoverySnapshot): boolean =>
-  copy.formContext.startsWith(HANDOFF_PREFIX);
-
-/**
- * How long the next page waits for the hand-off left to it while another page holds it (revision 6, R13): the page it replaces, whose
- * locks the browser may not have released yet, or a duplicated tab. Only the right to remove the hand-off depends on it, never what is
- * restored.
- */
-export const HANDOFF_CLAIM_WAIT_MS = 2_000;
-
-/**
- * Revision 8 (R16, DA-C): whether `copy` is one of the copies a hand-off's lineage names, by its exact key and the capture named (a copy
- * named by key alone, written before captures had identities, by its key). Only the hand-off this page holds makes its lineage part of the
- * form's continuation; equal text never does.
- */
-const inLineage = (
-  lineage: readonly CopyTarget[],
-  copy: RecoverySnapshot,
-): boolean =>
-  lineage.some(
-    (target) =>
-      target.formContext === copy.formContext &&
-      target.tabInstanceId === copy.tabInstanceId &&
-      (target.capture === null || target.capture === copy.capture),
-  );
+export { HANDOFF_CLAIM_WAIT_MS, isHandoff } from "./look";
 
 /** A ticket taken while the mount had no session (revision 3, R10): held by the mount until the mount binds a session of its context. */
 interface Provisional {
@@ -473,62 +432,12 @@ export function useRecoverableForm(
       const beganInput = current.fields.input;
       // Revision 7 (C4): pinned NOW; every read of this look reaches this one database, or the look reads nothing.
       const reader = targetOf(current);
-      const context = current.formContext;
       let cancelled = false;
       let finished = false;
-      /** Every read of the look; null when one could not be made (nothing is then known). */
-      const read = async (through: FormRecoveryPort): Promise<Found | null> => {
-        // Revision 6 (R13): the hand-off this tab's previous page left for this form comes first. Revision 7 (R15): its lock first, then the
-        // read; without the lock it is neither read nor shown (a live page holds it).
-        let handed: RecoverySnapshot | null = null;
-        if (mode === "restore") {
-          const left = handoffFor(current.handoffs, context, current.scope);
-          if (left.kind === "unknown") return null;
-          if (
-            left.kind === "left" &&
-            (await (current.tab.holdHandoff?.(left.id, HANDOFF_CLAIM_WAIT_MS) ??
-              true))
-          ) {
-            const found = await readCopy(
-              through,
-              handoffContext(context),
-              left.id,
-            );
-            if (found.kind === "unavailable") return null;
-            if (found.kind === "found") handed = found.copy;
-            // Resolved already (its page submitted or discarded it): nothing to take over; the stale reference goes (this page holds it).
-            else forgetHandoff(current.handoffs, left.id);
-          }
-        }
-        const listed = await readCopies(through, context);
-        if (listed.kind === "unavailable") return null;
-        // What may be restored: THIS page's own copy first (the form was mounted again in the same page after its session ended), then the
-        // copies of tabs that have gone, newest first. Another OPEN tab's copy is never taken over.
-        const own = current.tab.current();
-        const gone: RecoverySnapshot[] = listed.copies.filter(
-          (copy) => copy.tabInstanceId === own,
-        );
-        for (const copy of listed.copies)
-          if (
-            copy.tabInstanceId !== own &&
-            !(await current.tab.ownerOpen(copy.tabInstanceId))
-          )
-            gone.push(copy);
-        // Hand-offs no live page holds (their page never came back): offered, never restored at once, never removed by this page.
-        const abandoned = await readCopies(through, handoffContext(context));
-        if (abandoned.kind === "unavailable") return null;
-        const left: RecoverySnapshot[] = [];
-        for (const copy of abandoned.copies)
-          if (
-            copy.tabInstanceId !== handed?.tabInstanceId &&
-            !current.handoffs.written.has(copy.tabInstanceId) &&
-            !(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false))
-          )
-            left.push(copy);
-        return { handed, gone, left, own };
-      };
       const done = (async (): Promise<boolean> => {
-        const found = reader ? await read(reader).catch(() => null) : null;
+        const found = reader
+          ? await readLeft(current, reader, mode).catch(() => null)
+          : null;
         if (cancelled) return false;
         finished = true;
         if (current.attached?.token !== shown.token) return false;
@@ -544,34 +453,10 @@ export function useRecoverableForm(
         current.recovery = "ok";
         current.relook = null;
         setUnavailable(false);
-        const { handed, gone, left, own } = found;
+        const { handed, own } = found;
         // Holding its lock, read just now: the hand-off is this page's to remove (its source, once restored or chosen).
         if (handed) current.claimed = handed.tabInstanceId;
-        // Revision 8 (R16; design assessment C3, DA-C): the copies the hand-off's page owed the removal of (its own ordinary copy, holding the
-        // same input, and what it had not cleaned up), named EXACTLY in the hand-off by key and capture, are part of the hand-off and are not
-        // offered on their own; a copy it does not name is another branch, offered whatever text it holds, and an abandoned hand-off is
-        // offered whatever another copy holds. Revision 7 took the first copy with EQUAL TEXT for that predecessor and hid any abandoned
-        // hand-off whose text another copy had.
-        const lineage = handed ? lineageOf(handed) : [];
-        // What the session already owes the removal of (a source taken earlier, a clean-up not landed yet) is its continuation too.
-        const owing = [
-          ...lineage,
-          ...(current.persisted.source?.lineage ?? []),
-          ...current.persisted.debts,
-        ];
-        const ownCopy = gone.filter((copy) => copy.tabInstanceId === own);
-        // This page's own copy first (it is newer than anything left to it), then the hand-off, then the gone tabs' copies.
-        const candidates = [
-          ...ownCopy,
-          ...(handed ? [handed] : []),
-          ...gone.filter(
-            (copy) => copy.tabInstanceId !== own && !inLineage(owing, copy),
-          ),
-        ];
-        const offered = (shown: RecoverySnapshot | null) => [
-          ...candidates.filter((copy) => copy !== shown),
-          ...left.filter((copy) => !inLineage(owing, copy)),
-        ];
+        const { candidates, lineage, offered } = chooseLeft(current, found);
         if (mode === "offer") {
           offerOwed.current = false;
           const showing = current.view.restored?.tabInstanceId;
@@ -604,38 +489,7 @@ export function useRecoverableForm(
             const incomplete = applySnapshot(fields, form, newest);
             // Revision 10 (R11; C3): what the copy holds, ALL of it (revision 9 recorded what the form showed of it, a projection).
             const values = internalOf(newest);
-            const capture = newest.capture ?? null;
-            if (newest === handed)
-              // The hand-off left to this page, held by it: its source, with the copies its lineage names (R13; revision 8, R16).
-              current.persisted = {
-                ...current.persisted,
-                source: {
-                  id: newest.tabInstanceId,
-                  context: newest.formContext,
-                  values,
-                  capture,
-                  lineage,
-                  at: current.order.next,
-                },
-              };
-            else if (newest.tabInstanceId === own)
-              current.persisted = {
-                ...current.persisted,
-                own: { values, op: 0, capture },
-                ownAsked: true,
-              };
-            else
-              current.persisted = {
-                ...current.persisted,
-                source: {
-                  id: newest.tabInstanceId,
-                  context,
-                  values,
-                  capture,
-                  lineage: [],
-                  at: current.order.next,
-                },
-              };
+            adoptCopy(current, newest, values, found, lineage);
             setView({
               restored: newest,
               alternatives: offered(newest),

@@ -2,6 +2,8 @@ import { useId, useRef, useState } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
+import { useRecoverableEditor } from "../../lib/form-recovery/editor";
+import { RecoveryNotice } from "../../lib/form-recovery/RecoveryNotice";
 import type { CalendarApi } from "./api";
 import {
   ACCESS_LOST,
@@ -106,6 +108,29 @@ export function submissionMessage(outcome: SubmissionOutcome): {
  * admitted only while Link is still available; a second press before the screen shows the first as busy does nothing; and an answer
  * that arrives after the form has closed closes nothing (another dialog may be open by then).
  */
+/**
+ * Revision 37 (WEB-14a R40): the link form's NON-SECRET input (label and timezone) is recoverable around an app-update reload (Q4). The URL
+ * and token never are (Q22: held in memory only; a reload requires re-entering them), and an uncertain attempt is never replayed.
+ */
+export const LINK_CONTEXT = "calendar-link";
+type LinkInput = { label: string; timezone: string };
+const encodeLink = (input: LinkInput) =>
+  JSON.stringify({ v: 1, label: input.label, timezone: input.timezone });
+function decodeLink(text: string): LinkInput | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    return raw !== null &&
+      typeof raw === "object" &&
+      raw.v === 1 &&
+      typeof raw.label === "string" &&
+      typeof raw.timezone === "string"
+      ? { label: raw.label, timezone: raw.timezone }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function LinkCalendarDialog({
   api,
   environment,
@@ -143,8 +168,38 @@ export function LinkCalendarDialog({
   );
   // A synchronous latch over Connect and Check: one request at a time, whatever arrives before the next render.
   const inFlight = useRef(false);
+  // Revision 37 (R40): the non-secret fields reach the form's recoverable model first (refused while an update reload is prepared).
+  const touched = useRef(false);
+  const labelRef = useRef<HTMLInputElement>(null);
+  const latestFields = useRef(fields);
+  latestFields.current = fields;
+  const recovery = useRecoverableEditor<LinkInput>({
+    identity: `${api.identity.account}:${api.identity.epoch}`,
+    context: LINK_CONTEXT,
+    encode: encodeLink,
+    decode: decodeLink,
+    start: () => ({ label: "", timezone: defaultTimezone() }),
+    untouched: () => !touched.current,
+    restored: (input) =>
+      setFields((previous) => ({
+        ...previous,
+        label: input.label,
+        timezone: input.timezone,
+      })),
+  });
 
   const edit = (name: keyof Fields, value: string) => {
+    if (name === "label" || name === "timezone") {
+      const now = latestFields.current;
+      if (
+        !recovery.edit({
+          label: name === "label" ? value : now.label,
+          timezone: name === "timezone" ? value : now.timezone,
+        })
+      )
+        return;
+      touched.current = true;
+    }
     setFields((previous) => ({ ...previous, [name]: value }));
     submission.current.invalidate();
     setUncertain(false);
@@ -181,6 +236,9 @@ export function LinkCalendarDialog({
       setMessage(available.reason ?? NEEDS_CONNECTION);
       return;
     }
+    // Its ticket first (R40): none while an update reload is prepared.
+    const ticket = recovery.submitting();
+    if (ticket === null) return;
     const pair = submission.current.attempt({
       label: fields.label.trim(),
       timezone: fields.timezone.trim(),
@@ -215,6 +273,9 @@ export function LinkCalendarDialog({
       !answer.ok && answer.kind === "closed" && !lifetime.online()
         ? ({ kind: "offline" } as const)
         : classifySubmission(answer, afterUncertain);
+    // Only a success covers what was sent; an uncertain or refused attempt keeps the input (never replayed by recovery).
+    if (outcome.kind === "succeeded") void ticket.succeeded();
+    else ticket.failed();
     if (outcome.kind === "succeeded") return done();
     if (outcome.kind === "uncertain") {
       submission.current.markUncertain();
@@ -291,7 +352,24 @@ export function LinkCalendarDialog({
           void submit();
         }}
       >
+        <RecoveryNotice
+          recovery={{
+            ...recovery,
+            discard: async () => {
+              const result = await recovery.discard();
+              touched.current = false;
+              setFields((previous) => ({
+                ...previous,
+                label: "",
+                timezone: defaultTimezone(),
+              }));
+              return result;
+            },
+          }}
+          firstFieldRef={labelRef}
+        />
         <Field
+          ref={labelRef}
           label={LABEL}
           name="label"
           value={fields.label}

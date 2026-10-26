@@ -570,7 +570,7 @@ its three-click bound, its identity assertion, the 20 s deadline and zero retrie
     mounted then, consumes the session only at that revision (the form then closes onto its task only if the person is on it; the
     amount clears), and otherwise keeps the newer input with what the save had to say (a refusal, "Saved. Your newer changes are still
     here."). A fix's answer reaches its draft wherever it is (session and draft numbers are the page's, never reused). Opening an editor
-    forgets every other identity's kept input; a reload forgets all of it (page memory only; Q4 recovery is WEB-14a's). The preset
+    forgets every other identity's kept input; a reload forgets all of it (page memory only); an accepted app update saves and restores it (Q4: WEB-14a revision 37, each recoverable editor's model in `kept-input.ts`). The preset
     picker's choice is kept through its own in-dialog sync control the same way. The occurrence correction keeps its own reviewed owner.
 45. **Coming back from the sync screens finds the day and the entry the input was typed for (DA19-I1/N1, revision 19).** The day the
     detail shows without an occurrence in its address is part of the draft: it is kept with the screen through a sync visit (a
@@ -772,8 +772,8 @@ are the operator's (schedule WEB-10c before the checkpoint, or approve a minimal
 - **A `403` re-check of the session** closes and reopens the display: a screen remounts, by design of the session.
 - **Unfinished input lasts for its screen's logical visit only (decisions 44 and 48, revisions 18 and 22).** ia.md §1.3.3 requires it
   for checking sync state; the same visit also keeps it through the data hiding an editor, the cache gate and a `403` re-check's remount
-  at the same address. A reload, a crash, another tab or another identity keep nothing (the enrolment draft keeps its own owner; Q4
-  update recovery is WEB-14a's). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
+  at the same address. A reload, a crash, another tab or another identity keep nothing (the enrolment draft keeps its own owner); an
+  accepted app update saves and restores the recoverable editors' input (Q4, WEB-14a revision 37; docs/pwa.md). A kept session lasts until a save consumes it or the visit ends: any departure from the screen's address
   other than to the sync screens, including leaving the sync screens for anywhere but that address (revision 22 reverses decision 44 on
   this point, per Review 22 and DA22-I3).
 - **A save answered while the person is away closes nothing (decisions 49 and 50, revisions 23 and 24).** Coming back to the form after

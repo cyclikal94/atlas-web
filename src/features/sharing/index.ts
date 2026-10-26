@@ -10,6 +10,7 @@ export type { SharingApi, SharingResult } from "./api";
 export { DefaultsReview } from "./DefaultsReview";
 export { SharingBoundary, type SharingEnv, SharingEnvProvider } from "./env";
 export {
+  PolicyEditorRecoveryHost,
   ResourcePolicyEditor,
   type ResourcePolicyEditorProps,
 } from "./ResourcePolicyEditor";

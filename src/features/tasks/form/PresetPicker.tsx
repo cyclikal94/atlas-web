@@ -3,9 +3,10 @@ import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { useKeptInput } from "../kept-input";
+import { type KeptRecovery, useKeptInput } from "../kept-input";
 import { noteIfRefused, refusalOf } from "../memory";
 import type { TaskDefinition, TaskPreset } from "../model/contract";
+import { decodePresetChoice, encodePresetChoice } from "../model/recovery";
 import { todayIn } from "../model/time";
 
 const PRESETS = "presets";
@@ -58,6 +59,12 @@ export function describeDefinition(definition: TaskDefinition): string {
  * in-dialog sync control goes to the sync screens STRAIGHT from the picker (revision 22, `visit.ts`): passing through the task list first
  * would be a departure that ends the visit owning the choice, and Back from the queue would not find the picker.
  */
+const PICK_RECOVERY: KeptRecovery<string> = {
+  context: "task-form:new:preset",
+  encode: encodePresetChoice,
+  decode: decodePresetChoice,
+};
+
 export function PresetPicker({
   zone,
   keptAs,
@@ -78,8 +85,10 @@ export function PresetPicker({
     | { kind: "failed"; requestId?: string }
     | { kind: "offline" }
   >(env.online ? { kind: "loading" } : { kind: "offline" });
+  // Revision 37 (WEB-14a R40): the choice is recoverable around an app-update reload (Q4), as the picker's own versioned text.
   const choice = useKeptInput<string>(keptAs, env.identity, () => "", {
     consumed: () => null,
+    recover: PICK_RECOVERY,
   });
   // Set by the in-dialog sync control just before it closes the dialog and opens the sync screens: that close is not leaving for the list.
   const toSync = useRef(false);

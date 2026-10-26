@@ -147,8 +147,16 @@ export const provider = {
 
 const allowedStatuses = new WeakMap<TestInfo, Set<number>>();
 /** The console guard of tests/e2e/helpers.ts, with the one thing an integration run needs: a test DECLARES the HTTP statuses it provokes. */
+/**
+ * WEB-14a revision 37 (R41): console WARNINGS a test names as the browser's own report about a document its premise keeps from using what
+ * it preloaded (WebKit: "…was preloaded using link preload but not used within a few seconds…", for a document held neutral). Each is
+ * attached to the report (`tolerated-console-messages`), never dropped; errors and page errors are never tolerated.
+ */
+const toleratedWarnings = new WeakMap<object, RegExp[]>();
+
 export const test = base.extend<{
   provokes: (...statuses: number[]) => void;
+  tolerates: (pattern: RegExp) => void;
   guard: undefined;
   stack: undefined;
 }>({
@@ -172,12 +180,29 @@ export const test = base.extend<{
       for (const status of statuses) allowed.add(status);
     });
   },
+  tolerates: async ({ page: _page }, use, info) => {
+    const patterns: RegExp[] = [];
+    toleratedWarnings.set(info, patterns);
+    await use((pattern) => {
+      patterns.push(pattern);
+    });
+  },
   guard: [
-    async ({ page, provokes: _provokes }, use, info) => {
+    async ({ page, provokes: _provokes, tolerates: _tolerates }, use, info) => {
       const problems: string[] = [];
+      const tolerated: string[] = [];
       page.on("console", (message) => {
         if (message.type() !== "error" && message.type() !== "warning") return;
         const text = message.text();
+        if (
+          message.type() === "warning" &&
+          (toleratedWarnings.get(info) ?? []).some((pattern) =>
+            pattern.test(text),
+          )
+        ) {
+          tolerated.push(text);
+          return;
+        }
         const allowed = allowedStatuses.get(info) ?? new Set<number>();
         const status = /status of (\d{3})/.exec(text)?.[1];
         // Chromium reports an HTTP 4xx/5xx as a console error; a test that provokes one says which.
@@ -196,6 +221,11 @@ export const test = base.extend<{
         problems.push(`pageerror: ${error.message}`),
       );
       await use(undefined);
+      if (tolerated.length > 0)
+        await info.attach("tolerated-console-messages", {
+          body: tolerated.join("\n"),
+          contentType: "text/plain",
+        });
       // A failing run keeps the kernel's own trace from every page, so a flake can be read, not guessed at.
       if (info.status !== info.expectedStatus) {
         let index = 0;
@@ -519,6 +549,92 @@ export function withStaleSharedConfirmation(
   return ageSharedConfirmation(page, expected, ageMs);
 }
 
+/** The id of the newest proxy log entry now (0: none): what `untilRequestsRetired` counts a document's readers from. */
+export const proxyMark = async (): Promise<number> =>
+  (await proxy.log()).reduce((newest, entry) => Math.max(newest, entry.id), 0);
+
+/**
+ * WEB-14a revision 37 (review of 25 October 2026, R41 `offline-reload-request-retirement-premise`; design assessment C5, I10/I11, Q8): THE
+ * DURABLE PREMISE OF A DOCUMENT TRANSITION. Before a test replaces or reloads a document, or takes the network away, on the premise that the
+ * document has finished its own requests, the SESSION RECORD must say so: every request lease (any class but `exposure`) has been retired.
+ * A proxy entry with a status says only that the proxy answered; the browser may not have delivered that answer to the page yet, and the
+ * page retires the lease only after handling it, in its own durable transaction. A document that goes before then leaves the lease
+ * unresolved, and the next document must verify it (online) or, offline, stays neutral (`1e.interrupted_offline`): a different premise.
+ *
+ *  1. The document's expected `readers` (path patterns) have been ISSUED and answered at the proxy since `since` (`proxyMark()` taken before
+ *     the document loaded), so a zero sampled before they start is never taken for their retirement. None named: nothing is required here.
+ *  2. Within `timeout`, the durable record holds no request lease, still settles exactly `expected`, and is read from the SAME document
+ *     (a marker the helper sets); otherwise it fails as a SETUP error naming what it saw. The records are only read: nothing is retired,
+ *     deleted, aged or suppressed here.
+ *
+ * It is a read-only sample, not a browser-wide lock: work a test starts after it (a reload's own boot) is the test's to account for.
+ * Returns what it established (metadata only: counts and classes, never a credential or body), for an attachment.
+ */
+export async function untilRequestsRetired(
+  page: Page,
+  expected: SettledLike,
+  options: {
+    since: number;
+    readers?: readonly RegExp[];
+    label: string;
+    timeout?: number;
+  },
+): Promise<{ document: string; readers: string[]; leases: string[] }> {
+  const timeout = options.timeout ?? 15_000;
+  const end = Date.now() + timeout;
+  const mark = () =>
+    page.evaluate(() => {
+      const scope = window as unknown as { __retirementDocument?: string };
+      scope.__retirementDocument ??= crypto.randomUUID();
+      return scope.__retirementDocument;
+    });
+  const document = await mark();
+  const readers = options.readers ?? [];
+  let issued: string[] = [];
+  for (;;) {
+    const log = (await proxy.log()).filter(
+      (entry) => entry.id > options.since && entry.status !== undefined,
+    );
+    issued = readers
+      .filter((reader) => log.some((entry) => reader.test(entry.path)))
+      .map(String);
+    if (issued.length === readers.length) break;
+    if (Date.now() > end)
+      throw new Error(
+        `setup (${options.label}): the document's readers were not issued and answered (${readers.map(String).join(", ")}; seen ${issued.join(", ") || "none"})`,
+      );
+    await page.waitForTimeout(50);
+  }
+  let leases: string[] = [];
+  for (;;) {
+    const read = (await records(page)) as RecordsLike | undefined;
+    if (read?.auth_state === undefined)
+      throw new Error(
+        `setup (${options.label}): the session record could not be read`,
+      );
+    const settled = read.auth_state.settled;
+    if (
+      settled?.account_id !== expected.account_id ||
+      settled?.epoch !== expected.epoch ||
+      settled?.session_id !== expected.session_id
+    )
+      throw new Error(
+        `setup (${options.label}): the record no longer settles the expected session`,
+      );
+    if ((await mark()) !== document)
+      throw new Error(`setup (${options.label}): the document was replaced`);
+    leases = Object.values(read.auth_state.leases)
+      .filter((lease) => lease.class !== "exposure")
+      .map((lease) => lease.class);
+    if (leases.length === 0) return { document, readers: issued, leases };
+    if (Date.now() > end)
+      throw new Error(
+        `setup (${options.label}): the document's requests were not retired within ${timeout} ms (leases: ${leases.join(", ")})`,
+      );
+    await page.waitForTimeout(50);
+  }
+}
+
 /**
  * R16: navigates `page` to a NEW harness document (`/__session?route=...`, never `reload()`: a reload of the harness page loads the
  * app route itself, without the fixture bridge), waits for its boot and exposes its session, and checks that the new document's
@@ -534,13 +650,13 @@ export async function freshHarnessDocument(
   // the display lifts. A document replaced while one of them is in flight leaves its request lease unretired, and the new document must
   // then verify that lease before it displays: a different premise from the one these callers state (the new document's ONLY identity
   // read is its own resume verification). So the replaced document finishes its own requests first, within a bound, or the setup fails.
-  await untilRecord(
-    page,
-    (state) =>
-      Object.values(state.leases).every((lease) => lease.class === "exposure"),
-    "setup: the replaced document's own requests have finished (no request lease is left for the new document to verify)",
-    15_000,
-  );
+  // Revision 37 (R41; design assessment C5): the one durable premise shared with I-U2 (`untilRequestsRetired`), now also checking that the
+  // record is read from this document and still settles `expected`.
+  await untilRequestsRetired(page, expected, {
+    since: 0,
+    label:
+      "the replaced document's own requests have finished (no request lease is left for the new document to verify)",
+  });
   await page.goto(`/__session?route=${encodeURIComponent(route)}`);
   // A document without the fixture bridge (the app route itself, as `reload()` of a harness page loads) is a setup failure named as
   // such, within a bound, before anything is read from it.

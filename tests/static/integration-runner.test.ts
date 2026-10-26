@@ -444,7 +444,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10a revision 27 (R39): I-T12's supersession case is the 22nd task case.
         tasks: 22,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(233);
+      // WEB-14a revision 37 (R41): the I-U2 unfinished-request control is the second case of the separate PWA obligation.
+      expect(inBrowser(whole, browser)).toHaveLength(234);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)

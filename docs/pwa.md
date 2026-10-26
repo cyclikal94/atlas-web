@@ -203,7 +203,7 @@ the rerun decides. A pause (`unsupported`, `missing`) stays as it is until the f
 offline with the reconnect's `/health` held (matching, and proxy-supplied mismatched and missing answers). Integrated acceptance of
 cases 2-3 against a backend whose version really varies stays with BE-B2 and WEB-09d.
 
-## Recoverable forms: the contract for feature slices (D-P7)
+## Recoverable forms: the contract for feature slices (D-P7; product editors: see below)
 
 ```ts
 const port = useFormRecoveryPort(); // src/data: the displayed account's store, or null while it has no open database
@@ -340,6 +340,40 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   own reload) and browser reload/close are outside the update coordinator; they are not claimed protected (design assessment, 10 October
   2026; the owning slice decides). The newest eligible copy stays the default after a reload (WEB-04 8): another tab can save a newer copy
   after this tab's last save, so "this tab's input" is preserved as an available copy, not guaranteed to be the one selected.
+
+## The product's editors (revision 37; review of 25 October 2026, R40)
+
+D-P7 assumed no product form existed. The merged application ships editors whose input is a MODEL held by a feature owner and shown
+through controlled inputs, which `useRecoverableForm` (a form element's named fields) cannot read. None of them was registered, so the
+update banner offered a plain Reload, the coordinator found the page sealed, and the reload lost a typed task (R40). Each now takes part:
+
+- **One recovery protocol.** `src/lib/form-recovery/model.ts` is the same form session (`session.ts`: saves, update hand-offs, ordered
+  discards, exact submission acknowledgement, account/incarnation pinning, copy lineage and debts) with one admitted field whose value the
+  OWNER gives: an explicitly versioned, non-secret text of its raw input (invalid text, hidden values, stage and the baseline it was composed
+  against). The owner stays the one authority for the input and gives every change in the same step (`edit`); while an update reload is
+  prepared `edit`, `submitting`, `discard` and the recovery actions refuse, and the owner must not take the change (React puts a controlled
+  input back). A native editing state the model cannot hold (a date or time field partly typed) is unfinished input (`probe`): dirty, never
+  saved as the last value. Before the account's store is open a provisional handle is dirty by the same rule and its save fails. The look
+  for what was left (`look.ts`, shared with the hook) restores the newest copy only into an untouched owner, after the owner's session has
+  opened (a look begun before it would take the session's start for input and only offer the copy); anything else is offered
+  (`RecoveryNotice`). A copy the owner's codec cannot read is offered as it is, never restored in part, never removed.
+- **Owners adopted.** The task feature's kept-input owner (`kept-input.ts`: the new and edit task form `task-form:new` / `task-form:<id>`,
+  the preset picker's choice, the Record progress amount `record:<progress>`), the occurrence correction (`occurrence-correction:<id>`),
+  the entry history's fix drafts (`entry-fix:<progress>`), the calendar Add, Link (label and timezone only) and Manage (settings edited)
+  forms, the households' create and invite forms, the sharing policy editor (`sharing-policy:<id>`, with the version it was composed
+  against) and each defaults layer form (`sharing-defaults:<layer>:<household|personal>:<kind>`). Component-state editors use
+  `editor.ts` (`useRecoverableEditor`).
+- **Restore hosts.** A dialog or stage that is not open after a reload cannot look: the screen that opens it does (`useKeptRecovery` for
+  the new task's preset stage, `CorrectionRecoveryHost` and `PolicyEditorRecoveryHost` on the task detail, `useRecoveryHost` on the
+  calendar screen and its rows). A copy found is held for the editor (never submitted) and the editor is opened on it.
+- **Departure, discard and submission.** A departure that drops an owner's input (the visit's end, Cancel, another day) discards its
+  copies (`end`), so it never returns after a later reload; a session kept for a visit to the sync screens stays dirty and listed. A save
+  takes the model's ticket in the same step as the feature's own ticket; only a durable success covers what it sent, an uncertain or
+  refused one keeps the input, and recovery never replays an uncertain operation.
+- **Not recovered.** Passwords and calendar connection secrets (Q4, Q22); the change-password form holds nothing else. Directory searches
+  are presentation, not committed input. The non-secret username of the sign-in and join forms, typed before any account is displayed, is
+  an open owner decision (where pre-account input may be kept): until it is decided it is never written anywhere (`unbound`), counts for an
+  update, and its save fails honestly (retry or an explicit discard), so it is never lost silently.
 
 ## Test builds and constants
 

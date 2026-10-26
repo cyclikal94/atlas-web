@@ -237,6 +237,16 @@ export interface FormSession extends PageFormSession {
   /** Revision 7 (R13): makes the failed look again (in the mount that failed it); true once it has read the store. */
   relook: (() => Promise<boolean>) | null;
   attached: Attachment | null;
+  /**
+   * Revision 37 (R40; design assessment C2): how many editors show a MODEL session (`model.ts`), which no form element shows: while any does,
+   * the session is listed as an attached one is. Always 0 for a DOM form's session.
+   */
+  present: number;
+  /**
+   * Revision 37 (R40): brings a MODEL session's field state up to date with what its editor shows that the model cannot hold (a native
+   * editing state, `model.ts`), before the session decides anything. Absent for a DOM form's session (its fields read the page).
+   */
+  readonly refresh?: () => void;
   /** While no mount shows the form: whether its last mount had a sensitive field in its allow-list (the strict guard refuses its capture). */
   left: { sensitive: boolean } | null;
   readonly pending: Set<Promise<unknown>>;
@@ -270,6 +280,7 @@ export const valuesOf = (session: FormSession): Values =>
  * that is not resolved is an obligation of its own (R11).
  */
 export const isDirty = (session: FormSession): boolean => {
+  session.refresh?.();
   const { own, source, owed } = session.persisted;
   const fields = session.fields;
   if (owed > 0 || hasDebt(fields)) return true;
@@ -477,6 +488,7 @@ export async function removeCopies(
 
 /** Saves a copy of what the form holds now (or discards its copies when it is back to its clean values). Never throws. */
 export async function flushSession(session: FormSession): Promise<SaveResult> {
+  session.refresh?.();
   // Retained input (a field no longer admitted or no longer shown) cannot be captured, and a capture without it would replace a copy that
   // may hold it (revision 3, R11; D1; revision 4): nothing is written, and the form stays dirty.
   if (hasDebt(session.fields)) return "failed";
@@ -960,13 +972,15 @@ export interface OpenSession {
   port: FormRecoveryPort;
   /** Whether the registry keeps it as the context's session (false: another mount of the same context is attached to that one). */
   keep: boolean;
+  /** Revision 37 (R40): a model session's refresh (`FormSession.refresh`). */
+  refresh?: () => void;
 }
 
 /** The registration of each listed session's handle. */
 const registrations = new WeakMap<FormSession, () => void>();
 
 /** The session's handle joins the registry's list (a freeze in force holds it as it joins). */
-function list(session: FormSession): void {
+export function list(session: FormSession): void {
   if (session.listed || session.retired) return;
   session.listed = true;
   registrations.set(session, session.registry.register(session.handle));
@@ -1007,6 +1021,8 @@ export function openSession(options: OpenSession): FormSession {
     recovery: "ok",
     relook: null,
     attached: null,
+    present: 0,
+    ...(options.refresh ? { refresh: options.refresh } : {}),
     left: null,
     pending: new Set(),
     frozen: 0,
@@ -1053,6 +1069,7 @@ export function unlistIfIdle(session: FormSession): void {
   if (
     session.retired ||
     session.attached !== null ||
+    session.present > 0 ||
     session.pending.size > 0 ||
     session.persisted.owed > 0 ||
     isDirty(session)
@@ -1070,7 +1087,12 @@ export function retireOtherScopes(
 ): void {
   for (const other of registry.sessions()) {
     const session = other as FormSession;
-    if (session.scope !== scope && session.attached === null) retire(session);
+    if (
+      session.scope !== scope &&
+      session.attached === null &&
+      session.present === 0
+    )
+      retire(session);
   }
 }
 

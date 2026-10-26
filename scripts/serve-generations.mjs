@@ -208,6 +208,13 @@ const app = createServer((request, response) => {
         households: [],
       }),
     );
+  // WEB-14a revision 37 (R40): the new-task screen's preset picker reads the presets; the empty-account answer, as above.
+  if (path === "/api/experimental/v1/task-presets" && identity !== null)
+    return answer(
+      200,
+      { "content-type": "application/json", "Cache-Control": "no-store" },
+      JSON.stringify({ items: [] }),
+    );
   if (BACKEND.test(path))
     return answer(
       404,

@@ -2,6 +2,7 @@ import { type FormEvent, useRef, useState } from "react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { NeutralStatus } from "../../components/ui/neutral-status";
+import { useRecoverableEditor } from "../../lib/form-recovery/editor";
 import type { RegisterResult } from "./controller";
 import { RequestId } from "./MessageText";
 import { fieldOf, MESSAGE_TEXT, type MessageField } from "./outcome-copy";
@@ -43,6 +44,25 @@ export function JoinForm({
   }): Promise<RegisterResult>;
 }) {
   const [username, setUsername] = useState("");
+  // WEB-14a revision 37 (R40): the username typed here is non-secret input of a form shown BEFORE any account is displayed. Where it may
+  // be kept across an app-update reload is an open owner decision, so it is never written anywhere: it counts for an update (the update
+  // stops with "Couldn't save", offering retry or an explicit discard), never lost silently. The password is never part of it (Q4).
+  const typed = useRef(false);
+  const recovery = useRecoverableEditor<string>({
+    identity: "pre-account",
+    context: "join",
+    encode: (text) => text,
+    decode: () => null,
+    start: () => "",
+    untouched: () => !typed.current,
+    restored: () => undefined,
+    unbound: true,
+  });
+  const changeUsername = (text: string) => {
+    if (!recovery.edit(text)) return;
+    typed.current = true;
+    setUsername(text);
+  };
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<FieldError | null>(null);
@@ -110,7 +130,7 @@ export function JoinForm({
           disabled={!online}
           aria-invalid={usernameError ? true : undefined}
           aria-describedby={usernameError ? "join-username-error" : undefined}
-          onChange={(event) => setUsername(event.target.value)}
+          onChange={(event) => changeUsername(event.target.value)}
         />
         {usernameError ? (
           <NeutralStatus kind="alert" id="join-username-error">

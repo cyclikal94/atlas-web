@@ -301,6 +301,11 @@ export async function seedAccount(
   world: Generations,
   account = "acct-a",
   session = "s1",
+  /**
+   * WEB-14a revision 37 (R40): the account's empty cache is also VALID (`seedDelta`: the delta phase at `cursor`), so the task screens
+   * show their editors as they do for an account that has synced; the real first snapshot is WEB-09b's. Off: the database is only created.
+   */
+  options: { validCache?: string } = {},
 ): Promise<void> {
   await world.identity({ account, session });
   const page = await context.newPage();
@@ -318,14 +323,18 @@ export async function seedAccount(
   await page.waitForLoadState("networkidle");
   await page.goto(`${world.url}/__data`);
   await page.waitForFunction(() => window.__atlasData !== undefined);
-  const created = await page.evaluate(async (id) => {
-    const data = window.__atlasData;
-    if (!data) throw new Error("the data harness is not loaded");
-    data.setIdentity(id);
-    const result = await data.open(id, { create: true });
-    data.close(id);
-    return result;
-  }, account);
+  const created = await page.evaluate(
+    async ({ id, cursor }) => {
+      const data = window.__atlasData;
+      if (!data) throw new Error("the data harness is not loaded");
+      data.setIdentity(id);
+      const result = await data.open(id, { create: true });
+      if (cursor !== null) await data.seedDelta(id, cursor);
+      data.close(id);
+      return result;
+    },
+    { id: account, cursor: options.validCache ?? null },
+  );
   expect(created).toBe("created");
   await page.close();
 }

@@ -1,10 +1,16 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { completeKept, keptKey, useKeptInput } from "../kept-input";
+import {
+  completeKept,
+  type KeptRecovery,
+  keptKey,
+  useKeptInput,
+} from "../kept-input";
 import { parseDecimalInput } from "../model/decimal";
 import { MESSAGES } from "../model/form";
 import { recordBlock } from "../reasons";
@@ -30,6 +36,28 @@ export const RECORD_COPY = {
  * it" (`observe`), or one checkbox per checklist item. Every act appends evidence; nothing is ever deleted. Disabled with its reason when
  * I cannot record now. A unit of seconds still records a quantity (the timer is WEB-10c's).
  */
+type RecordInput = { mode: "amount" | "observe"; amount: string };
+
+const recordRecovery = (progressId: string): KeptRecovery<RecordInput> => ({
+  context: `record:${progressId}`,
+  encode: (input) =>
+    JSON.stringify({ v: 1, mode: input.mode, amount: input.amount }),
+  decode: (text) => {
+    try {
+      const raw = JSON.parse(text) as Record<string, unknown> | null;
+      return raw !== null &&
+        typeof raw === "object" &&
+        raw.v === 1 &&
+        (raw.mode === "amount" || raw.mode === "observe") &&
+        typeof raw.amount === "string"
+        ? { mode: raw.mode, amount: raw.amount }
+        : null;
+    } catch {
+      return null;
+    }
+  },
+});
+
 export function RecordCard({
   row,
   actions,
@@ -53,13 +81,19 @@ export function RecordCard({
   // this day (revision 18, R33; `kept-input.ts`): a visit to the sync screens keeps them, raw, and coming back shows them again. Every edit
   // moves the session's revision: a save clears the amount only if nothing was typed after the amount it submitted (R3, revision 1;
   // PRODUCT-DECISIONS-20261011), whichever mount made it: a successful older save never consumes newer input.
-  const input = useKeptInput<{ mode: "amount" | "observe"; amount: string }>(
+  // Revision 37 (WEB-14a R40): recoverable around an app-update reload (Q4), for exactly this progress stream (the day's occurrence and me):
+  // a copy is restored only into this card, never into another day's.
+  const input = useKeptInput<RecordInput>(
     keptKey(env.identity, `record:${row.progressId}`),
     env.identity,
     () => ({ mode: "amount", amount: "" }),
-    { consumed: (submitted) => ({ ...submitted, amount: "" }) },
+    {
+      consumed: (submitted) => ({ ...submitted, amount: "" }),
+      recover: recordRecovery(row.progressId),
+    },
   );
   const { mode, amount } = input.value;
+  const amountRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [running, setBusy] = useState(false);
   const busy = running || input.busy;
@@ -95,6 +129,9 @@ export function RecordCard({
       <h2 id={heading} className="text-[15px] font-medium text-ink-1">
         {RECORD_COPY.heading}
       </h2>
+      {input.recovery ? (
+        <RecoveryNotice recovery={input.recovery} firstFieldRef={amountRef} />
+      ) : null}
       {goal.kind === "checkbox" ? (
         <span>
           {reason !== null || busy ? (
@@ -148,6 +185,7 @@ export function RecordCard({
             <div className="flex flex-wrap items-end gap-2">
               <div className="w-32">
                 <Input
+                  ref={amountRef}
                   label={`${RECORD_COPY.amount} (${goal.unit})`}
                   inputMode="decimal"
                   value={amount}

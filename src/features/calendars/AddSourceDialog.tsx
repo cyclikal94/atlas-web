@@ -3,6 +3,8 @@ import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
 import { type EnqueueOutcome, useOptionalDataEnv } from "../../data";
+import { useRecoverableEditor } from "../../lib/form-recovery/editor";
+import { RecoveryNotice } from "../../lib/form-recovery/RecoveryNotice";
 import {
   ADD_HELP,
   ADD_TITLE,
@@ -49,11 +51,34 @@ export function refusalMessage(
  * form open; a retry of the SAME values reuses the same save identity and the same source id, so a save whose completion was lost is
  * recognised and not made twice.
  */
+/** Revision 37 (WEB-14a R40): the add form's input, recoverable around an app-update reload (Q4). Nothing in it is a secret. */
+export const ADD_CONTEXT = "calendar-add";
+type AddInput = { label: string; timezone: string };
+const encodeAdd = (input: AddInput) =>
+  JSON.stringify({ v: 1, label: input.label, timezone: input.timezone });
+function decodeAdd(text: string): AddInput | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    return raw !== null &&
+      typeof raw === "object" &&
+      raw.v === 1 &&
+      typeof raw.label === "string" &&
+      typeof raw.timezone === "string"
+      ? { label: raw.label, timezone: raw.timezone }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function AddSourceDialog({
   online,
+  identity,
   onClose,
 }: {
   online: boolean;
+  /** The displayed identity the form's recovery belongs to (revision 37, R40). */
+  identity: string;
   onClose(): void;
 }) {
   const env = useOptionalDataEnv();
@@ -68,6 +93,27 @@ export function AddSourceDialog({
   }>({ label: null, timezone: null });
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Revision 37 (R40): every change reaches the form's recoverable model first (refused while an update reload is prepared).
+  const touched = useRef(false);
+  const labelRef = useRef<HTMLInputElement>(null);
+  const recovery = useRecoverableEditor<AddInput>({
+    identity,
+    context: ADD_CONTEXT,
+    encode: encodeAdd,
+    decode: decodeAdd,
+    start: () => ({ label: "", timezone: defaultTimezone() }),
+    untouched: () => !touched.current,
+    restored: (input) => {
+      setLabel(input.label);
+      setTimezone(input.timezone);
+    },
+  });
+  const change = (next: AddInput) => {
+    if (!recovery.edit(next)) return;
+    touched.current = true;
+    setLabel(next.label);
+    setTimezone(next.timezone);
+  };
   const submission = useRef(
     createSubmission<{ label: string; timezone: string }>(() =>
       crypto.randomUUID(),
@@ -97,6 +143,9 @@ export function AddSourceDialog({
       setMessage(NEEDS_DATABASE);
       return;
     }
+    // Its ticket first (R40): none while an update reload is prepared, so nothing is saved after the last recovery copy.
+    const ticket = recovery.submitting();
+    if (ticket === null) return;
     const pair = submission.current.attempt({
       label: label.trim(),
       timezone: timezone.trim(),
@@ -113,6 +162,8 @@ export function AddSourceDialog({
       const outcome = await outbox.enqueue(
         createSourceRequest({ id, ...pair.body, localId: pair.key }),
       );
+      if (outcome.kind === "queued") void ticket.succeeded();
+      else ticket.failed();
       if (outcome.kind === "queued") {
         announcer.announce(online ? ADDED : ADDED_OFFLINE);
         // A save that finished after the form closed closes nothing: another dialog may be open by then.
@@ -122,6 +173,7 @@ export function AddSourceDialog({
       setMessage(refusalMessage(outcome.reason));
     } catch {
       // A request the facade refused as built wrongly, or a failure it did not classify: nothing was stored.
+      ticket.failed();
       setMessage(NOT_SAVED);
     } finally {
       saving.current = false;
@@ -160,12 +212,26 @@ export function AddSourceDialog({
           void submit();
         }}
       >
+        <RecoveryNotice
+          recovery={{
+            ...recovery,
+            discard: async () => {
+              const result = await recovery.discard();
+              touched.current = false;
+              setLabel("");
+              setTimezone(defaultTimezone());
+              return result;
+            },
+          }}
+          firstFieldRef={labelRef}
+        />
         <Field
+          ref={labelRef}
           label={LABEL}
           name="label"
           value={label}
           error={errors.label}
-          onChange={(event) => setLabel(event.target.value)}
+          onChange={(event) => change({ label: event.target.value, timezone })}
         />
         <Field
           label={TIMEZONE}
@@ -174,7 +240,7 @@ export function AddSourceDialog({
           list={zonesId}
           autoComplete="off"
           error={errors.timezone}
-          onChange={(event) => setTimezone(event.target.value)}
+          onChange={(event) => change({ label, timezone: event.target.value })}
         />
         <TimezoneSuggestions id={zonesId} />
         <p className="text-[12.5px] leading-[1.6] text-ink-2">{ADD_HELP}</p>
