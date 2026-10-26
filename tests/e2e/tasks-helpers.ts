@@ -250,7 +250,7 @@ export async function serveTaskReads(
       status: 200,
       body: {
         defaults: {
-          revision: "0".repeat(63) + "1",
+          revision: `${"0".repeat(63)}1`,
           preferences_version: 1,
           primary_household_id: null,
           person: { kind: "private" },

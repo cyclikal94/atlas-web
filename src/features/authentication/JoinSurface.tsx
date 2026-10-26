@@ -205,15 +205,15 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
               <span className="sr-only">Loading your invitation…</span>
               <span
                 aria-hidden="true"
-                className="block h-7 w-3/4 motion-safe:animate-pulse rounded-control bg-hairline-strong"
+                className="block h-7 w-3/4 animate-pulse rounded-md bg-muted"
               />
             </span>
           }
         >
           <div aria-hidden="true" className="flex flex-col gap-4">
-            <span className="block h-4 w-full motion-safe:animate-pulse rounded-control bg-hairline-strong" />
-            <span className="block h-11 w-full rounded-control border border-field-edge bg-canvas opacity-60" />
-            <span className="block h-11 w-full rounded-control border border-field-edge bg-canvas opacity-60" />
+            <span className="block h-4 w-full animate-pulse rounded-md bg-muted" />
+            <span className="block h-11 w-full rounded-md border border-input bg-background opacity-60" />
+            <span className="block h-11 w-full rounded-md border border-input bg-background opacity-60" />
           </div>
         </PublicCard>
       );
@@ -227,7 +227,7 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
           heading={`You're invited to join ${name ?? "Atlas"}`}
         >
           {name ? (
-            <p className="text-[14px] leading-[1.6] text-ink-2">
+            <p className="text-sm leading-relaxed text-muted-foreground">
               This invitation joins the {name} household. It expires{" "}
               {formatExpiry(phase.expiresAt)}.
             </p>
@@ -254,7 +254,7 @@ export function JoinSurface({ session: provided }: { session?: Session }) {
             {MESSAGE_TEXT.invitation_unavailable}
           </NeutralStatus>
           {phase.afterSubmit ? (
-            <p className="text-[14px] leading-[1.6] text-ink-2">
+            <p className="text-sm leading-relaxed text-muted-foreground">
               {LOST_RESPONSE}
             </p>
           ) : null}
@@ -289,7 +289,7 @@ function EarlierRegistration({ username }: { username: string }) {
   return (
     <div
       data-earlier-registration=""
-      className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-raised p-3.5"
+      className="flex flex-col items-start gap-2 rounded-xl border bg-card p-4 shadow-sm"
     >
       <NeutralStatus kind="status">
         <strong className="font-medium">{EARLIER_HEADING}.</strong>{" "}
@@ -298,7 +298,7 @@ function EarlierRegistration({ username }: { username: string }) {
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => signInRequest.request(username)}>Sign in</Button>
         <Button
-          variant="quiet"
+          variant="ghost"
           onClick={() => invitationMemory.dismissEarlier()}
         >
           Dismiss
@@ -312,7 +312,7 @@ function EarlierRegistration({ username }: { username: string }) {
 function SignInLink({ username = "" }: { username?: string }) {
   return (
     <div>
-      <Button variant="primary" onClick={() => signInRequest.request(username)}>
+      <Button variant="default" onClick={() => signInRequest.request(username)}>
         Sign in
       </Button>
     </div>

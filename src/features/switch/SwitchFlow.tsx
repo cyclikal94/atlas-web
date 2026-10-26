@@ -207,7 +207,7 @@ export function SwitchPicker({
         <p
           id={noteId}
           data-switch-note=""
-          className="text-[13px] leading-[1.6] text-ink-2"
+          className="text-sm leading-relaxed text-muted-foreground"
         >
           {SWITCH_COPY.note}
         </p>
@@ -225,10 +225,10 @@ export function SwitchPicker({
                 aria-hidden="true"
                 className="flex items-center gap-3"
               >
-                <span className="size-9 motion-safe:animate-pulse rounded-full bg-hairline-strong" />
+                <span className="animate-pulse size-9 rounded-full bg-muted" />
                 <span className="flex flex-col gap-1.5">
-                  <span className="h-3.5 w-32 motion-safe:animate-pulse rounded-control bg-hairline-strong" />
-                  <span className="h-3 w-48 motion-safe:animate-pulse rounded-control bg-hairline-strong" />
+                  <span className="animate-pulse h-3.5 w-32 rounded-md bg-muted" />
+                  <span className="animate-pulse h-3 w-48 rounded-md bg-muted" />
                 </span>
               </span>
             ))}
@@ -238,7 +238,7 @@ export function SwitchPicker({
             {listing.kind === "unknown" ? (
               <p
                 data-switch-unknown=""
-                className="text-[13px] leading-[1.6] text-ink-1"
+                className="text-sm leading-relaxed text-foreground"
               >
                 {SWITCH_COPY.unknownListing}
               </p>
@@ -246,7 +246,7 @@ export function SwitchPicker({
             {onlyOne ? (
               <p
                 data-switch-only-one=""
-                className="text-[13px] leading-[1.6] text-ink-1"
+                className="text-sm leading-relaxed text-foreground"
               >
                 {SWITCH_COPY.onlyOne}
               </p>
@@ -260,13 +260,13 @@ export function SwitchPicker({
               tabIndex={0}
               data-switch-list=""
               onKeyDown={onKeyDown}
-              className="flex flex-col gap-1 rounded-row"
+              className="flex flex-col gap-1 rounded-lg"
             >
               {rows.map((row, index) => {
                 const selected = index === active;
                 const base =
-                  "flex min-h-12 cursor-pointer items-center gap-3 rounded-row px-3 py-2 text-[14px] text-ink-1 hover:bg-row-hover";
-                const tone = selected ? " bg-select-tint" : "";
+                  "flex min-h-12 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm text-foreground hover:bg-accent";
+                const tone = selected ? " bg-accent" : "";
                 if (row.kind === "current")
                   return (
                     // biome-ignore lint/a11y/useKeyWithClickEvents: the listbox handles the keyboard (aria-activedescendant)
@@ -284,14 +284,14 @@ export function SwitchPicker({
                       <Avatar name={label} />
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span className="break-words">{currentName}</span>
-                        <span className="text-[12.5px] text-ink-2">
+                        <span className="text-xs text-muted-foreground">
                           {SWITCH_COPY.signedInNow}
                         </span>
                       </span>
                       {waiting !== null && waiting > 0 ? (
                         <span
                           data-switch-waiting=""
-                          className="shrink-0 rounded-control border border-hairline-strong px-1.5 py-0.5 text-[12px] text-ink-2"
+                          className="shrink-0 rounded-md border border-border px-1.5 py-0.5 text-xs text-muted-foreground"
                         >
                           {waitingTag(waiting)}
                         </span>
@@ -316,13 +316,13 @@ export function SwitchPicker({
                       <Avatar name={row.account.lastVerifiedName} />
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span className="break-words">{name}</span>
-                        <span className="text-[12.5px] text-ink-2">
+                        <span className="text-xs text-muted-foreground">
                           {SWITCH_COPY.usedBefore}
                         </span>
                       </span>
                       {typeof row.account.waiting === "number" &&
                       row.account.waiting > 0 ? (
-                        <span className="shrink-0 rounded-control border border-hairline-strong px-1.5 py-0.5 text-[12px] text-ink-2">
+                        <span className="shrink-0 rounded-md border border-border px-1.5 py-0.5 text-xs text-muted-foreground">
                           {waitingTag(row.account.waiting)}
                         </span>
                       ) : null}
@@ -343,7 +343,7 @@ export function SwitchPicker({
                   >
                     <span
                       aria-hidden="true"
-                      className="flex size-9 shrink-0 items-center justify-center rounded-full border border-hairline-strong text-[16px] text-ink-2"
+                      className="flex size-9 shrink-0 items-center justify-center rounded-full border border-border text-base text-muted-foreground"
                     >
                       +
                     </span>
@@ -367,7 +367,7 @@ function Avatar({ name }: { name: string | null }) {
   return (
     <span
       aria-hidden="true"
-      className="flex size-9 shrink-0 items-center justify-center rounded-full bg-raised text-[13px] font-medium text-ink-1"
+      className="flex size-9 shrink-0 items-center justify-center rounded-full bg-secondary text-sm font-medium text-foreground"
     >
       {name ? ([...name][0]?.toUpperCase() ?? "") : ""}
     </span>
@@ -419,12 +419,14 @@ export function SwitchSignIn({
             id={cautionId}
             aria-label={SWITCH_COPY.cautionHeading}
             data-switch-caution=""
-            className="flex flex-col gap-1 rounded-row border border-hairline-strong bg-inset p-3 text-[13px] leading-[1.6]"
+            className="flex flex-col gap-1 rounded-lg border border-border bg-muted p-3 text-sm leading-relaxed"
           >
-            <p className="font-medium text-ink-1">
+            <p className="font-medium text-foreground">
               {SWITCH_COPY.cautionHeading}
             </p>
-            <p className="text-ink-2">{cautionText(current, waiting)}</p>
+            <p className="text-muted-foreground">
+              {cautionText(current, waiting)}
+            </p>
           </div>
         ) : null}
         <SignInForm

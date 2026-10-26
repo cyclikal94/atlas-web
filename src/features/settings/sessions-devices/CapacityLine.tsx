@@ -47,7 +47,10 @@ export function CapacityLine({
   raw: unknown;
 }) {
   return (
-    <p data-capacity={kind} className="text-[12.5px] leading-[1.6] text-ink-2">
+    <p
+      data-capacity={kind}
+      className="text-xs leading-relaxed text-muted-foreground"
+    >
       {capacityText(kind, decodeCapacity(raw))}
     </p>
   );

@@ -27,9 +27,9 @@ export function AudienceSummary({
     <section
       aria-labelledby={heading}
       data-audience=""
-      className="flex flex-col gap-1.5 rounded-row border border-hairline-strong bg-panel p-3.5 text-[13px] leading-[1.55] text-ink-1"
+      className="flex flex-col gap-1.5 rounded-lg border border-border bg-card p-3.5 text-sm leading-relaxed text-foreground"
     >
-      <h3 id={heading} className="text-[13.5px] font-medium">
+      <h3 id={heading} className="text-sm font-medium">
         {copy.EFFECTIVE_HEADING}
       </h3>
       <p data-audience-owner="">{copy.OWNER(audience.owner.label)}</p>
@@ -59,14 +59,14 @@ export function AudienceSummary({
           {copy.EXCLUDED_PEOPLE}: {names(audience.excluded)}
         </p>
       ) : null}
-      <p className="text-[12px] text-ink-2">{copy.OWNER_KEEPS}</p>
+      <p className="text-xs text-muted-foreground">{copy.OWNER_KEEPS}</p>
       {audience.parentLimited ? (
-        <p className="text-[12px] text-ink-2" data-audience-parent="">
+        <p className="text-xs text-muted-foreground" data-audience-parent="">
           {copy.PARENT_LIMITED(parentLabel ?? copy.PARENT_UNNAMED)}
         </p>
       ) : null}
       {membersAsOf ? (
-        <p className="text-[12px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {copy.MEMBERS_AS_OF(membersAsOf)}
         </p>
       ) : null}

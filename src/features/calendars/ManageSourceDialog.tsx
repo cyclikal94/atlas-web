@@ -310,11 +310,11 @@ export function ManageSourceDialog({
               busy ? { enabled: false, reason: "Saving…" } : actions.save
             }
           >
-            <Button variant="primary" type="submit" form={formId}>
+            <Button variant="default" type="submit" form={formId}>
               {SAVE}
             </Button>
           </Gate>
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="outline" onClick={onClose}>
             {CANCEL}
           </Button>
         </>
@@ -330,10 +330,12 @@ export function ManageSourceDialog({
         }}
       >
         <div className="flex flex-col gap-1">
-          <span className="text-[13px] font-medium text-ink-1">{LABEL}</span>
-          <p className="text-[13.5px] text-ink-1">
+          <span className="text-sm font-medium text-foreground">{LABEL}</span>
+          <p className="text-sm text-foreground">
             {current.label}{" "}
-            <span className="text-[12px] text-ink-2">{LABEL_READ_ONLY}</span>
+            <span className="text-xs text-muted-foreground">
+              {LABEL_READ_ONLY}
+            </span>
           </p>
         </div>
         <Field
@@ -352,15 +354,15 @@ export function ManageSourceDialog({
       </form>
       <section
         aria-label={CONNECTION}
-        className="mt-4 flex flex-col gap-2 border-t border-hairline pt-4"
+        className="mt-4 flex flex-col gap-2 border-t border-border pt-4"
       >
         <div className="flex flex-wrap items-center gap-2">
-          <h3 className="text-[13px] font-medium text-ink-1">{CONNECTION}</h3>
-          <span className="text-[11.5px] uppercase tracking-[0.06em] text-ink-2">
+          <h3 className="text-sm font-medium text-foreground">{CONNECTION}</h3>
+          <span className="text-xs uppercase tracking-[0.06em] text-muted-foreground">
             {ONLINE_ONLY}
           </span>
         </div>
-        <p className="text-[12.5px] text-ink-2">{CONNECTION_NOT_SHOWN}</p>
+        <p className="text-xs text-muted-foreground">{CONNECTION_NOT_SHOWN}</p>
         <div className="flex flex-wrap items-start gap-2">
           <Gate enablement={actions.replace}>
             <Button onClick={() => openPanel("replace")}>{REPLACE}</Button>
@@ -400,7 +402,7 @@ export function ManageSourceDialog({
         ) : null}
       </section>
       <div className="mt-4 flex flex-col gap-3">
-        <label className="flex min-h-11 items-center gap-3 text-[13.5px] text-ink-1">
+        <label className="flex min-h-11 items-center gap-3 text-sm text-foreground">
           <input
             type="checkbox"
             name="enabled"
@@ -414,7 +416,9 @@ export function ManageSourceDialog({
           />
           {ENABLED}
         </label>
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">{MANAGE_HELP}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {MANAGE_HELP}
+        </p>
         <FormMessage message={message} />
       </div>
     </Dialog>
@@ -442,8 +446,8 @@ function Gate({
   return (
     <Button
       variant={
-        (children.props as { variant?: "primary" | "secondary" }).variant ??
-        "secondary"
+        (children.props as { variant?: "default" | "outline" }).variant ??
+        "outline"
       }
       {...(type === undefined ? {} : { type })}
       {...(form === undefined ? {} : { form })}
@@ -610,7 +614,7 @@ function ConnectionPanel({
   return (
     <div
       data-connection-panel={panel}
-      className="flex flex-col gap-3 rounded-row border border-hairline-strong bg-inset p-3"
+      className="flex flex-col gap-3 rounded-lg border border-border bg-muted p-3"
     >
       {panel === "replace" ? (
         <>
@@ -632,28 +636,30 @@ function ConnectionPanel({
             {...entry}
             onChange={(event) => edit("bearer", event)}
           />
-          <p className="text-[12px] leading-[1.5] text-ink-2">
+          <p className="text-xs leading-[1.5] text-muted-foreground">
             {REPLACE_ROTATE_NOTE}
           </p>
-          <p className="text-[12px] leading-[1.5] text-ink-2">
+          <p className="text-xs leading-[1.5] text-muted-foreground">
             {REPLACE_KEEP_NOTE}
           </p>
         </>
       ) : (
-        <p className="text-[13px] leading-[1.6] text-ink-1">{REMOVE_CONFIRM}</p>
+        <p className="text-sm leading-relaxed text-foreground">
+          {REMOVE_CONFIRM}
+        </p>
       )}
       <FormMessage message={message} />
       <div className="flex flex-wrap items-start gap-2">
         {blocked.enabled ? (
-          <Button variant="primary" onClick={() => void submit()}>
+          <Button variant="default" onClick={() => void submit()}>
             {submitLabel}
           </Button>
         ) : (
-          <Button variant="primary" disabled reason={blocked.reason ?? ""}>
+          <Button variant="default" disabled reason={blocked.reason ?? ""}>
             {submitLabel}
           </Button>
         )}
-        <Button variant="secondary" onClick={onClose}>
+        <Button variant="outline" onClick={onClose}>
           {CLOSE_PANEL}
         </Button>
       </div>

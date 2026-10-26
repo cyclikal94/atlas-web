@@ -246,7 +246,7 @@ function ReviewDialog({
           )}
           {confirmReason === null ? (
             <Button
-              variant="primary"
+              variant="default"
               data-confirm=""
               onClick={() => void confirm()}
             >
@@ -254,7 +254,7 @@ function ReviewDialog({
             </Button>
           ) : (
             <Button
-              variant="primary"
+              variant="default"
               data-confirm=""
               disabled
               reason={confirmReason}
@@ -270,9 +270,9 @@ function ReviewDialog({
         data-review-case={reviewCase ?? "pending"}
       >
         <div className="flex flex-col gap-1.5">
-          <h2 className="text-[15px] font-medium text-ink-1">{heading}</h2>
+          <h2 className="text-base font-medium text-foreground">{heading}</h2>
           {reviewCase !== null ? (
-            <p className="text-[13px] leading-[1.6] text-ink-2">
+            <p className="text-sm leading-relaxed text-muted-foreground">
               {copy.REVIEW_BODIES[reviewCase]}
             </p>
           ) : null}
@@ -337,17 +337,17 @@ function KindSection({
     <section
       aria-labelledby={heading}
       data-review-kind={kind}
-      className="flex flex-col gap-3 rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="flex flex-col gap-3 rounded-lg border border-border bg-card p-3.5"
     >
-      <h3 id={heading} className="text-[13.5px] font-medium text-ink-1">
+      <h3 id={heading} className="text-sm font-medium text-foreground">
         {KIND_SHARING[kind]}
       </h3>
       <div className="flex flex-col gap-1" data-review-was="">
-        <h4 className="text-[12.5px] font-medium text-ink-2">
+        <h4 className="text-xs font-medium text-muted-foreground">
           {copy.REVIEW_WAS}
         </h4>
         {was === null ? (
-          <p className="text-[13px] text-ink-1">{copy.REVIEW_NOT_RECORDED}</p>
+          <p className="text-sm text-foreground">{copy.REVIEW_NOT_RECORDED}</p>
         ) : (
           <>
             <Described
@@ -357,7 +357,7 @@ function KindSection({
               accounts={was.accounts ?? []}
             />
             {wasRevision ? (
-              <p className="text-[12px] text-ink-2">
+              <p className="text-xs text-muted-foreground">
                 {copy.REVIEW_WAS_NOTE(wasRevision)}
               </p>
             ) : null}
@@ -365,7 +365,7 @@ function KindSection({
         )}
       </div>
       <div className="flex flex-col gap-1" data-review-now="">
-        <h4 className="text-[12.5px] font-medium text-ink-2">
+        <h4 className="text-xs font-medium text-muted-foreground">
           {copy.REVIEW_NOW}
         </h4>
         {now !== null ? (
@@ -375,12 +375,12 @@ function KindSection({
               primary={now.primary}
               households={now.households}
             />
-            <p className="text-[12px] text-ink-2">
+            <p className="text-xs text-muted-foreground">
               {copy.REVIEW_NOW_NOTE(now.at)}
             </p>
           </>
         ) : status.kind === "offline" ? (
-          <p className="text-[13px] text-ink-1">
+          <p className="text-sm text-foreground">
             {copy.REVIEW_NOW_NEEDS_CONNECTION}
           </p>
         ) : status.kind === "failed" ? (
@@ -389,7 +389,9 @@ function KindSection({
             action={<Button onClick={onRetry}>{copy.TRY_AGAIN}</Button>}
           />
         ) : (
-          <p className="text-[13px] text-ink-2">{copy.REVIEW_NOW_LOADING}</p>
+          <p className="text-sm text-muted-foreground">
+            {copy.REVIEW_NOW_LOADING}
+          </p>
         )}
       </div>
     </section>
@@ -420,14 +422,14 @@ function Described({
     described.accounts.length +
     described.excluded.length;
   return (
-    <div className="flex flex-col gap-1 text-[13px] text-ink-1">
+    <div className="flex flex-col gap-1 text-sm text-foreground">
       <p>{described.summary}</p>
       {rows > 0 ? (
         <List className="flex flex-col gap-0.5">
           {described.households.map((household) => (
             <li
               key={`household:${household.id}`}
-              className="list-none text-[12.5px]"
+              className="list-none text-xs"
               data-review-household={household.id}
             >
               {"unavailable" in household
@@ -448,7 +450,7 @@ function Described({
           {described.accounts.map((account) => (
             <li
               key={`account:${account.id}`}
-              className="list-none text-[12.5px]"
+              className="list-none text-xs"
               data-review-account={account.id}
               data-review-access={account.edit ? "edit" : "read"}
             >
@@ -458,7 +460,7 @@ function Described({
           {described.excluded.map((id) => (
             <li
               key={`excluded:${id}`}
-              className="list-none text-[12.5px]"
+              className="list-none text-xs"
               data-review-excluded={id}
             >
               {copy.REVIEW_EXCLUDED(label(id))}

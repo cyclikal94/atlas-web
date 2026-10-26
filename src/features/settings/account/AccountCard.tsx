@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { Avatar, AvatarFallback } from "../../../components/ui/avatar";
 import { Button } from "../../../components/ui/button";
+import { Skeleton } from "../../../components/ui/skeleton";
 import { useSession } from "../../../session";
 import { LoadFailed } from "../sessions-devices/LoadFailed";
 import {
@@ -59,9 +61,12 @@ export function AccountCard() {
     <section
       aria-labelledby="account-heading"
       data-account-card=""
-      className="flex flex-col gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+      className="flex flex-col gap-2.5 rounded-xl border bg-card p-3 shadow-sm tablet:gap-3 tablet:p-4"
     >
-      <h2 id="account-heading" className="text-[15px] font-medium text-ink-1">
+      <h2
+        id="account-heading"
+        className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+      >
         {ACCOUNT_HEADING}
       </h2>
       {account.status === "loading" ? (
@@ -71,13 +76,10 @@ export function AccountCard() {
           className="flex items-center gap-3"
         >
           <span className="sr-only">Loading your account…</span>
-          <span
-            aria-hidden="true"
-            className="size-9 motion-safe:animate-pulse rounded-full bg-hairline-strong"
-          />
+          <Skeleton className="size-10 rounded-full" />
           <span className="flex flex-col gap-1.5" aria-hidden="true">
-            <span className="h-3.5 w-32 motion-safe:animate-pulse rounded-control bg-hairline-strong" />
-            <span className="h-3 w-48 motion-safe:animate-pulse rounded-control bg-hairline-strong" />
+            <Skeleton className="h-3.5 w-32" />
+            <Skeleton className="h-3 w-48" />
           </span>
         </div>
       ) : account.status === "error" ? (
@@ -88,21 +90,22 @@ export function AccountCard() {
         />
       ) : (
         <div className="flex flex-wrap items-center gap-3">
-          <span
-            aria-hidden="true"
-            className="flex size-9 shrink-0 items-center justify-center rounded-full bg-raised text-[13px] font-medium text-ink-1"
-          >
-            {[...account.value.username][0]?.toUpperCase() ?? ""}
-          </span>
+          <Avatar aria-hidden="true">
+            <AvatarFallback>
+              {[...account.value.username][0]?.toUpperCase() ?? ""}
+            </AvatarFallback>
+          </Avatar>
           <div className="flex min-w-0 flex-1 basis-48 flex-col gap-0.5">
             <p
               data-account-username=""
-              className="break-words text-[14px] text-ink-1"
+              className="break-words text-base font-medium text-foreground"
             >
               <span className="sr-only">Signed in as username </span>
               {account.value.username}
             </p>
-            {since ? <p className="text-[12.5px] text-ink-2">{since}</p> : null}
+            {since ? (
+              <p className="text-xs text-muted-foreground">{since}</p>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {accountActions.map((action) => (

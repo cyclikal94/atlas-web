@@ -37,11 +37,11 @@ export function Banner({
   return (
     <div
       data-sharing-banner={tone}
-      className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="flex flex-col items-start gap-2 rounded-lg border border-border bg-card p-3.5"
     >
-      <p className="text-[13.5px] leading-[1.55] text-ink-1">{message}</p>
+      <p className="text-sm leading-relaxed text-foreground">{message}</p>
       {requestId ? (
-        <p className="font-num select-all text-[12px] text-ink-2">
+        <p className="font-num select-all text-xs text-muted-foreground">
           {REQUEST_ID(requestId)}
         </p>
       ) : null}
@@ -90,13 +90,13 @@ export function ChoiceGroup<Value extends string>({
         <RadioGroup.Item
           key={choice.value}
           value={choice.value}
-          className="atlas-transition flex min-h-11 items-center gap-2 rounded-control border border-hairline-strong bg-canvas px-3 text-left text-[13px] text-ink-1 hover:border-field-edge disabled:opacity-60 data-[state=checked]:border-action-fill"
+          className="atlas-transition flex min-h-11 items-center gap-2 rounded-md border border-border bg-background px-3 text-left text-sm text-foreground hover:border-input disabled:opacity-60 data-[state=checked]:border-primary"
         >
           <span
             aria-hidden="true"
-            className="flex size-[15px] flex-none items-center justify-center rounded-round border-[1.5px] border-field-edge"
+            className="flex size-[15px] flex-none items-center justify-center rounded-full border-[1.5px] border-input"
           >
-            <RadioGroup.Indicator className="size-[7px] rounded-round bg-action-fill" />
+            <RadioGroup.Indicator className="size-[7px] rounded-full bg-primary" />
           </span>
           <span>{choice.label}</span>
         </RadioGroup.Item>

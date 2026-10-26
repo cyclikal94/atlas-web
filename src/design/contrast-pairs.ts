@@ -10,32 +10,6 @@ export interface DeclaredPair {
   use: string;
 }
 
-const TEXT_SURFACES: readonly TokenName[] = [
-  "canvas",
-  "panel",
-  "raised",
-  "chrome",
-  "chrome-inset",
-  "inset",
-  "tab-bar",
-  "row-hover",
-  "rail-hover",
-  "nav-active",
-  "select-tint",
-  "action-tint",
-];
-
-/** ink-3 is not permitted on every surface (findings F3); these are the surfaces that carry it. */
-const INK_3_SURFACES: readonly TokenName[] = [
-  "canvas",
-  "panel",
-  "raised",
-  "chrome",
-  "inset",
-  "tab-bar",
-  "row-hover",
-];
-
 function pairs(
   fgs: readonly TokenName[],
   bgs: readonly TokenName[],
@@ -45,108 +19,91 @@ function pairs(
   return fgs.flatMap((fg) => bgs.map((bg) => ({ fg, bg, kind, use })));
 }
 
+/**
+ * Every foreground on every surface it is used on. A theme pasted from tweakcn is held to the same pairs, so a palette that
+ * cannot be read fails the guard rather than shipping.
+ */
 export const declaredPairs: readonly DeclaredPair[] = [
   ...pairs(
-    ["ink-1", "ink-2"],
-    TEXT_SURFACES,
+    ["foreground"],
+    ["background", "card", "popover", "secondary", "muted", "accent"],
     "text",
-    "Body and secondary text",
+    "Body text on every surface",
   ),
   ...pairs(
-    ["ink-3"],
-    INK_3_SURFACES,
+    ["muted-foreground"],
+    ["background", "card", "popover", "muted", "secondary"],
     "text",
-    "Tertiary text and placeholders (not on the tinted surfaces)",
+    "Secondary text, placeholders and descriptions",
+  ),
+  ...pairs(["primary-foreground"], ["primary"], "text", "Primary button label"),
+  ...pairs(
+    ["secondary-foreground"],
+    ["secondary"],
+    "text",
+    "Secondary button label",
   ),
   ...pairs(
-    ["action-ink"],
-    ["canvas", "panel", "raised", "chrome", "action-tint"],
+    ["accent-foreground"],
+    ["accent"],
     "text",
-    "Links and accent text",
+    "Text on the accent tint (selected rows, hover)",
   ),
   ...pairs(
-    ["action-on"],
-    ["action-fill", "action-hover"],
+    ["destructive-foreground"],
+    ["destructive"],
     "text",
-    "Primary button label",
+    "Destructive button label",
+  ),
+  ...pairs(["success-foreground"], ["success"], "text", "Done badge label"),
+  ...pairs(["warning-foreground"], ["warning"], "text", "Missed badge label"),
+  ...pairs(
+    ["primary", "destructive", "success", "warning"],
+    ["background", "card"],
+    "text",
+    "Links, accent text and state text on the page and on cards",
   ),
   ...pairs(
-    ["done"],
-    ["canvas", "panel", "chrome-inset", "done-tint"],
+    ["sidebar-foreground"],
+    ["sidebar", "sidebar-accent"],
     "text",
-    "Done state text",
+    "Navigation labels, at rest and hovered",
   ),
   ...pairs(
-    ["missed"],
-    ["canvas", "panel", "chrome-inset", "missed-tint"],
+    ["sidebar-accent-foreground"],
+    ["sidebar-accent"],
     "text",
-    "Missed state text",
+    "The active navigation label",
   ),
   ...pairs(
-    ["conflict"],
-    ["canvas", "panel", "chrome-inset", "conflict-tint"],
+    ["sidebar-primary-foreground"],
+    ["sidebar-primary"],
     "text",
-    "Conflict state text",
-  ),
-  ...pairs(
-    ["conflict-text"],
-    ["conflict-tint"],
-    "text",
-    "Body copy inside a conflict panel",
-  ),
-  ...pairs(
-    ["ink-1"],
-    ["done-tint", "missed-tint", "conflict-tint"],
-    "text",
-    "Body copy inside state panels",
+    "Text on the sidebar's primary fill",
   ),
   // Non-text (3:1)
   ...pairs(
-    ["field-edge"],
-    ["canvas", "panel"],
+    ["input"],
+    ["background", "card"],
     "non-text",
-    "Input border; inputs fill only from canvas or panel (F1)",
+    "Input border against the page and against a card (WCAG 1.4.11; Q17)",
   ),
   ...pairs(
-    ["field-edge"],
-    ["panel", "canvas"],
-    "non-text",
-    "Unselected radio-card ring (F5)",
-  ),
-  ...pairs(
-    ["action-ink"],
-    ["canvas", "panel", "raised", "chrome"],
+    ["ring"],
+    ["background", "card"],
     "non-text",
     "Focus ring (2px, 2px offset: it sits on the surface beneath the control)",
   ),
   ...pairs(
-    ["action-fill"],
-    ["canvas", "panel"],
+    ["primary"],
+    ["background", "card"],
     "non-text",
-    "Selected radio dot and selected card border",
-  ),
-  ...pairs(
-    ["action-ink"],
-    ["nav-active"],
-    "non-text",
-    "Active navigation marker (F6)",
-  ),
-  ...pairs(
-    ["done", "missed", "conflict", "action-ink"],
-    ["chrome-inset"],
-    "non-text",
-    "Sync chip status dot",
-  ),
-  ...pairs(
-    ["withheld"],
-    ["chrome-inset"],
-    "non-text",
-    "Sync chip muted dot (never text, F4)",
+    "Selected radio dot, active markers and the done bar",
   ),
 ];
 
 export const minimumFor = (kind: PairKind): number =>
   kind === "text" ? 4.5 : 3;
 
-/** Input fills that are permitted, because light field-edge is below 3:1 on raised and chrome (F1). */
-export const inputFillSurfaces: readonly TokenName[] = ["canvas", "panel"];
+/** Input fills that are permitted: the input border is declared against these surfaces. */
+export const inputFillSurfaces: readonly TokenName[] = ["background", "card"];

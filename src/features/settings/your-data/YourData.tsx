@@ -35,7 +35,7 @@ export const pendingDetail = (count: number): string =>
 function Block({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="flex max-w-[700px] flex-col gap-2.5">
-      <h2 className="text-[14px] font-medium text-ink-1">{title}</h2>
+      <h2 className="text-sm font-medium text-foreground">{title}</h2>
       {children}
     </section>
   );
@@ -48,7 +48,7 @@ export function YourData() {
       <div className="flex flex-col gap-2">
         <Link
           to="/settings"
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13.5px] text-ink-2 hover:text-ink-1"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
         >
           Settings
         </Link>
@@ -61,12 +61,12 @@ export function YourData() {
           {HOLDING_ROWS.map((row, index) => (
             <li
               key={row.label}
-              className="flex flex-col gap-1 border-t border-hairline px-0.5 py-3 tablet:flex-row tablet:items-center tablet:gap-3"
+              className="flex flex-col gap-1 border-t border-border px-0.5 py-3 tablet:flex-row tablet:items-center tablet:gap-3"
             >
-              <span className="text-[13.5px] text-ink-1 tablet:w-[220px] tablet:flex-none">
+              <span className="text-sm text-foreground tablet:w-[220px] tablet:flex-none">
                 {row.label}
               </span>
-              <span className="text-[12.5px] text-ink-2">
+              <span className="text-xs text-muted-foreground">
                 {index === 1
                   ? pendingDetail(syncModel.pendingCount)
                   : row.detail}
@@ -82,7 +82,7 @@ export function YourData() {
           {WORTH_KNOWING.map((line) => (
             <li
               key={line}
-              className="list-none rounded-row border border-hairline bg-panel p-3 text-[12.5px] leading-[1.6] text-ink-2"
+              className="list-none rounded-lg border border-border bg-card p-3 text-xs leading-relaxed text-muted-foreground"
             >
               {line}
             </li>
@@ -92,11 +92,13 @@ export function YourData() {
 
       {/* owner: WEB-08 */}
       <Block title="Things Atlas can't do yet">
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">{CANT_DO_YET}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {CANT_DO_YET}
+        </p>
         {/* owner: WEB-13 - the named slot */}
         <p
           data-slot="calendarLine"
-          className="text-[12.5px] leading-[1.6] text-ink-2"
+          className="text-xs leading-relaxed text-muted-foreground"
         >
           {yourDataSlots.calendarLine}
         </p>

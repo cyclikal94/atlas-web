@@ -57,7 +57,7 @@ describe.each(Object.entries(documents))(
       expect(head?.hasAttribute("type")).toBe(false);
     });
 
-    test("declares per-scheme theme-color values that are accepted canvas tokens", () => {
+    test("declares per-scheme theme-color values that are the background tokens", () => {
       const colours = Array.from(
         doc.querySelectorAll('meta[name="theme-color"]'),
       ).map((meta) => [
@@ -65,8 +65,8 @@ describe.each(Object.entries(documents))(
         meta.getAttribute("content"),
       ]);
       expect(colours).toEqual([
-        ["(prefers-color-scheme: dark)", "#08090A"],
-        ["(prefers-color-scheme: light)", "#F7F8F9"],
+        ["(prefers-color-scheme: dark)", "#0C0C10"],
+        ["(prefers-color-scheme: light)", "#F7F7FA"],
       ]);
       expect(html).not.toContain("#14141a");
     });

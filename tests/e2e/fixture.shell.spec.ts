@@ -242,10 +242,10 @@ test.describe("keyboard and focus (B8)", () => {
   });
 
   for (const [scheme, colour] of [
-    ["dark", "rgb(154, 147, 245)"],
-    ["light", "rgb(75, 66, 196)"],
+    ["dark", "rgb(142, 128, 255)"],
+    ["light", "rgb(91, 77, 230)"],
   ] as const) {
-    test(`focus ring is 2px action-ink with a 2px offset (${scheme})`, async ({
+    test(`focus ring is 2px ring with a 2px offset (${scheme})`, async ({
       browser,
     }) => {
       const context = await browser.newContext({

@@ -305,12 +305,12 @@ describe("AppShell", () => {
     expect(screen.getByRole("banner")).toHaveClass(
       "sticky",
       "top-0",
-      "bg-canvas",
+      "bg-background",
     );
     expect(screen.getByRole("navigation", { name: "Primary" })).toHaveClass(
       "sticky",
       "bottom-0",
-      "bg-tab-bar",
+      "bg-sidebar",
     );
     expect(inset(TOP)).toBe(`${RING}px`);
     expect(inset(BOTTOM)).toBe(`${RING}px`);

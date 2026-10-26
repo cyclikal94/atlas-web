@@ -69,12 +69,12 @@ export function AppearanceDialog({
           options={OPTIONS}
         />
         {persisted ? null : (
-          <p className="rounded-row border border-missed-edge bg-missed-tint p-3 text-[12.5px] leading-[1.6] text-ink-1">
+          <p className="rounded-lg border border-warning/30 bg-warning/12 px-3.5 py-3 text-xs leading-relaxed text-foreground">
             This browser can't save your choice, so it will reset when you
             reload.
           </p>
         )}
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           Saved for this browser only, so a shared computer doesn't inherit your
           choice.
         </p>

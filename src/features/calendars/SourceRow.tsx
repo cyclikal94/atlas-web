@@ -166,7 +166,7 @@ function Lines({ lines }: { lines: readonly string[] }) {
         <span
           key={line}
           data-status-line=""
-          className="text-[12.5px] text-ink-2"
+          className="text-xs text-muted-foreground"
         >
           {line}
         </span>
@@ -218,7 +218,7 @@ function DraftAction({
     <Link
       to="/sync"
       search={{ tab: "conflicts" }}
-      className="atlas-transition inline-flex min-h-11 items-center text-[13.5px] text-ink-2 underline hover:text-ink-1"
+      className="atlas-transition inline-flex min-h-11 items-center text-sm text-muted-foreground underline hover:text-foreground"
     >
       {REVIEW}
     </Link>
@@ -282,11 +282,11 @@ export function SourceRow({
     <li
       data-source-row={id}
       data-observation={observationState(observation)}
-      className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="list-none rounded-lg border border-border bg-card p-3.5"
     >
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="break-words text-[14px] text-ink-1">{label}</span>
+          <span className="break-words text-sm text-foreground">{label}</span>
           <Lines lines={status.lines} />
         </div>
         <div className="flex flex-wrap items-start gap-2">
@@ -313,10 +313,10 @@ export function SourceRow({
       {notice !== undefined ? (
         <div
           data-row-notice=""
-          className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] leading-[1.6] text-ink-1"
+          className="mt-2 flex flex-wrap items-center gap-2 text-xs leading-relaxed text-foreground"
         >
           <span>{notice}</span>
-          <Button variant="quiet" onClick={() => onDismissNotice?.()}>
+          <Button variant="ghost" onClick={() => onDismissNotice?.()}>
             {DISMISS}
           </Button>
         </div>
@@ -324,7 +324,7 @@ export function SourceRow({
       {view !== null ? (
         <div
           data-refresh={view.kind}
-          className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] leading-[1.6] text-ink-1"
+          className="mt-2 flex flex-wrap items-center gap-2 text-xs leading-relaxed text-foreground"
         >
           <span>{refreshMessage(view)}</span>
           {view.kind === "still_refreshing" ? (
@@ -332,14 +332,14 @@ export function SourceRow({
             // server, an editable source that is on), with the same reason beside it when it is not; it keeps the run's key.
             status.refresh.enabled ? (
               <Button
-                variant="quiet"
+                variant="ghost"
                 onClick={() => controller?.checkAgain(id)}
               >
                 {CHECK_AGAIN}
               </Button>
             ) : (
               <Button
-                variant="quiet"
+                variant="ghost"
                 disabled
                 reason={status.refresh.reason ?? ""}
               >
@@ -348,12 +348,12 @@ export function SourceRow({
             )
           ) : null}
           {view.kind === "failed" && view.cause === "connection_unavailable" ? (
-            <Button variant="quiet" onClick={() => manage({ replace: true })}>
+            <Button variant="ghost" onClick={() => manage({ replace: true })}>
               {UPDATE_CONNECTION}
             </Button>
           ) : null}
           {view.kind === "failed" && view.cause === "turned_off" ? (
-            <Button variant="quiet" onClick={() => manage({ enable: true })}>
+            <Button variant="ghost" onClick={() => manage({ enable: true })}>
               {TURN_ON}
             </Button>
           ) : null}
@@ -362,7 +362,7 @@ export function SourceRow({
       {observed !== null ? (
         <div
           data-observed={observation?.kind === "busy" ? "busy" : "unconfirmed"}
-          className="mt-2 flex flex-wrap items-center gap-2 text-[12.5px] leading-[1.6] text-ink-1"
+          className="mt-2 flex flex-wrap items-center gap-2 text-xs leading-relaxed text-foreground"
         >
           <span>{observed}</span>
         </div>
@@ -387,11 +387,11 @@ export function PendingRow({
   return (
     <li
       data-pending-source={row.id}
-      className="list-none rounded-row border border-dashed border-hairline-strong bg-panel p-3.5"
+      className="list-none rounded-lg border border-dashed border-border bg-card p-3.5"
     >
       <div className="flex flex-wrap items-center gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <span className="break-words text-[14px] text-ink-1">
+          <span className="break-words text-sm text-foreground">
             {row.label}
           </span>
           <Lines lines={status.lines} />

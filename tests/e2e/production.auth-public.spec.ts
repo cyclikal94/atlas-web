@@ -566,7 +566,7 @@ test.describe("modes the design pass checks beyond width and theme", () => {
 for (const scheme of ["dark", "light"] as const) {
   test.describe(`A-4 painted contrast on the public surfaces, ${scheme}`, () => {
     test.use({ colorScheme: scheme });
-    test("sign-in and join: the input border is field-edge at 3:1 or better, and the primary action text is 4.5:1 or better", async ({
+    test("sign-in and join: the input border is the input edge at 3:1 or better, and the primary action text is 4.5:1 or better", async ({
       page,
       context,
     }, info) => {

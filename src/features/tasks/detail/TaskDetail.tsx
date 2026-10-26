@@ -1,7 +1,10 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useId, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
+import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
+import { Label } from "../../../components/ui/label";
+import { NativeSelect } from "../../../components/ui/native-select";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type DraftWithCommand,
@@ -70,7 +73,9 @@ function ReadError({
     >
       <p
         className={
-          stale ? "text-[12.5px] text-ink-2" : "text-[13px] text-ink-2"
+          stale
+            ? "text-xs text-muted-foreground"
+            : "text-sm text-muted-foreground"
         }
       >
         {error === "unstable" ? copy.LOCAL_UNSTABLE : copy.LOCAL_FAILED}
@@ -114,7 +119,7 @@ export function TaskDetail({
   const conflictDraft = useDraftWithCommand(conflictId);
   if (view.status === "loading")
     return (
-      <p aria-busy="true" className="text-[13px] text-ink-2">
+      <p aria-busy="true" className="text-sm text-muted-foreground">
         {DETAIL_COPY.loading}
       </p>
     );
@@ -127,7 +132,7 @@ export function TaskDetail({
   if (view.task === null)
     return (
       <div className="flex flex-col gap-3" data-task-detail="absent">
-        <p className="text-[13.5px] text-ink-2">{DETAIL_COPY.absent}</p>
+        <p className="text-sm text-muted-foreground">{DETAIL_COPY.absent}</p>
       </div>
     );
   const { task, row } = view;
@@ -166,32 +171,29 @@ export function TaskDetail({
   ];
   return (
     <article
-      className="flex max-w-[760px] flex-col gap-6"
+      className="atlas-enter flex max-w-[760px] flex-col gap-6"
       data-task-detail={task.id}
     >
       <div className="flex flex-col gap-2">
         <Link
           to="/tasks"
           search={{}}
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13px] text-ink-2 hover:text-ink-1"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm font-medium text-muted-foreground hover:text-primary"
         >
           {DETAIL_COPY.back}
         </Link>
         <div className="flex flex-wrap items-center gap-3">
           {row ? (
-            <span
-              data-detail-pill={row.pill}
-              className={`rounded-round border px-2.5 py-0.5 text-[12px] text-ink-1 ${pillTone(row.pill)}`}
-            >
+            <Badge data-detail-pill={row.pill} variant={pillTone(row.pill)}>
               {copy.PILL[row.pill]}
               {row.personal.kind === "result" && row.personal.provisional
                 ? ` (${copy.PROVISIONAL})`
                 : ""}
-            </span>
+            </Badge>
           ) : null}
           {row ? (
             <span
-              className="text-[13px] text-ink-2"
+              className="text-sm text-muted-foreground"
               data-detail-day={row.data.slot.date ?? ""}
             >
               {row.data.slot.date === null
@@ -202,16 +204,18 @@ export function TaskDetail({
           {row?.pending ? (
             <span
               data-pending-mark={row.pending}
-              className="text-[12px] text-ink-2"
+              className="text-xs text-muted-foreground"
             >
               {copy.PENDING[row.pending]}
             </span>
           ) : null}
         </div>
         <PageHeading>{task.label}</PageHeading>
-        <p className="text-[13px] text-ink-2">{DETAIL_COPY.sharingLine}</p>
+        <p className="text-sm text-muted-foreground">
+          {DETAIL_COPY.sharingLine}
+        </p>
         {row ? (
-          <p className="text-[13px] text-ink-2">
+          <p className="text-sm text-muted-foreground">
             {copy.CARRY[row.data.definition.carry].line}
           </p>
         ) : null}
@@ -225,13 +229,11 @@ export function TaskDetail({
               {DETAIL_COPY.edit}
             </Button>
           ) : (
-            <Link
-              to="/tasks/$taskId/edit"
-              params={{ taskId: task.id }}
-              className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
-            >
-              {DETAIL_COPY.edit}
-            </Link>
+            <Button asChild variant="outline">
+              <Link to="/tasks/$taskId/edit" params={{ taskId: task.id }}>
+                {DETAIL_COPY.edit}
+              </Link>
+            </Button>
           )}
           {row === null ? null : row.canEdit ? (
             <Button onClick={() => setCorrecting(row.id)}>
@@ -270,14 +272,11 @@ export function TaskDetail({
       view.days.previous ||
       view.days.paged ||
       view.days.error !== null ? (
-        <div className="flex flex-col gap-1" data-day-picker="">
-          <label htmlFor={dayId} className="text-[12px] font-medium text-ink-2">
-            {DETAIL_COPY.day}
-          </label>
-          <select
+        <div className="flex flex-col gap-2" data-day-picker="">
+          <Label htmlFor={dayId}>{DETAIL_COPY.day}</Label>
+          <NativeSelect
             id={dayId}
             value={row?.id ?? ""}
-            data-field-edge=""
             onChange={(event) =>
               void navigate({
                 to: "/tasks/$taskId",
@@ -286,7 +285,7 @@ export function TaskDetail({
                 replace: true,
               })
             }
-            className="min-h-11 max-w-[260px] rounded-control border border-field-edge bg-canvas px-3 text-[13.5px] text-ink-1"
+            className="max-w-[260px]"
           >
             {row === null ? <option value="" /> : null}
             {view.occurrences.map((o) => (
@@ -296,16 +295,16 @@ export function TaskDetail({
                   : DETAIL_COPY.undated}
               </option>
             ))}
-          </select>
+          </NativeSelect>
           {view.days.error !== null ? (
             <span
               className="flex flex-wrap items-center gap-2"
               data-day-picker-error={view.days.error}
             >
-              <span className="text-[12.5px] text-ink-2">
+              <span className="text-xs text-muted-foreground">
                 {DETAIL_COPY.daysFailed}
               </span>
-              <Button variant="quiet" onClick={view.days.retry}>
+              <Button variant="ghost" onClick={view.days.retry}>
                 {copy.TRY_AGAIN}
               </Button>
             </span>
@@ -313,12 +312,12 @@ export function TaskDetail({
           {view.days.more || view.days.previous ? (
             <span className="flex flex-wrap gap-2">
               {view.days.previous ? (
-                <Button variant="quiet" onClick={view.days.showPrevious}>
+                <Button variant="ghost" onClick={view.days.showPrevious}>
                   {DETAIL_COPY.previousDays}
                 </Button>
               ) : null}
               {view.days.more ? (
-                <Button variant="quiet" onClick={view.days.showMore}>
+                <Button variant="ghost" onClick={view.days.showMore}>
                   {DETAIL_COPY.moreDays}
                 </Button>
               ) : null}
@@ -327,18 +326,20 @@ export function TaskDetail({
         </div>
       ) : null}
       {view.selection === "loading" ? (
-        <p aria-busy="true" className="text-[13px] text-ink-2">
+        <p aria-busy="true" className="text-sm text-muted-foreground">
           {DETAIL_COPY.dayLoading}
         </p>
       ) : view.selection === "unavailable" ? (
         <div className="flex flex-col gap-2" data-day-unavailable="">
-          <p className="text-[13px] text-ink-2">{DETAIL_COPY.dayUnavailable}</p>
+          <p className="text-sm text-muted-foreground">
+            {DETAIL_COPY.dayUnavailable}
+          </p>
           {view.lost ? (
             // The visit's own day is gone here (kept with input through a sync visit, DA19-I1, or shown by this visit, DA20-I1): this address
             // already names no day, so choose again in place.
             <span>
               <Button
-                variant="quiet"
+                variant="ghost"
                 onClick={() => {
                   setChoseAgain(true);
                   view.chooseAgain();
@@ -352,16 +353,16 @@ export function TaskDetail({
               to="/tasks/$taskId"
               params={{ taskId: task.id }}
               search={{}}
-              className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13px] text-ink-2 hover:text-ink-1"
+              className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
             >
               {DETAIL_COPY.showDays}
             </Link>
           )}
         </div>
       ) : view.unreadable ? (
-        <p className="text-[13px] text-ink-2">{copy.UNREADABLE}</p>
+        <p className="text-sm text-muted-foreground">{copy.UNREADABLE}</p>
       ) : row === null ? (
-        <p className="text-[13px] text-ink-2" data-no-occurrence="">
+        <p className="text-sm text-muted-foreground" data-no-occurrence="">
           {DETAIL_COPY.noOccurrence}
         </p>
       ) : (
@@ -404,7 +405,7 @@ export function TaskDetail({
           {row.streamPresent && view.synced ? (
             <span>
               <Button
-                variant="quiet"
+                variant="ghost"
                 onClick={() => setSharing(row.progressId)}
               >
                 {DETAIL_COPY.sharingProgress}
@@ -527,12 +528,12 @@ function CorrectionConflict({
   return (
     <section
       data-correction-conflict=""
-      className="flex flex-col gap-2 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+      className="flex flex-col gap-2 rounded-lg border border-destructive/35 bg-destructive/10 p-4"
     >
-      <h2 className="text-[14px] font-medium text-ink-1">
+      <h2 className="text-sm font-semibold text-foreground">
         {CORRECTION_COPY.conflictTitle}
       </h2>
-      <p className="text-[13px] text-ink-1">
+      <p className="text-sm text-foreground">
         {CORRECTION_COPY.current}:{" "}
         {row.data.slot.date
           ? dayLabel(row.data.slot.date)
@@ -542,17 +543,17 @@ function CorrectionConflict({
           : ""}
       </p>
       {mine === null && readable ? (
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {CORRECTION_COPY.mineUnavailable}
         </p>
       ) : mine !== null && !newerShown ? (
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {CORRECTION_COPY.waitingNewer}
         </p>
       ) : null}
       {failed !== null ? (
         <p
-          className="text-[12.5px] text-ink-2"
+          className="text-xs text-muted-foreground"
           data-correction-replace-failed=""
         >
           {failed}
@@ -568,7 +569,7 @@ function CorrectionConflict({
             {CORRECTION_COPY.saveMine}
           </Button>
         ) : (
-          <Button variant="primary" onClick={() => void saveMine()}>
+          <Button variant="default" onClick={() => void saveMine()}>
             {CORRECTION_COPY.saveMine}
           </Button>
         )}

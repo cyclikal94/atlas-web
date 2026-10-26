@@ -63,17 +63,17 @@ export function Unconfirmed({ check }: { check(): Promise<Result<unknown>> }) {
   return (
     <div
       data-unconfirmed=""
-      className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-raised p-3.5"
+      className="flex flex-col items-start gap-2 rounded-lg border border-border bg-secondary p-3.5"
     >
-      <p className="text-[13.5px] leading-[1.6] text-ink-1">
+      <p className="text-sm leading-relaxed text-foreground">
         {MESSAGE_TEXT.unconfirmed}
       </p>
       {state === "still" ? (
-        <p data-still-unconfirmed="" className="text-[13px] text-ink-1">
+        <p data-still-unconfirmed="" className="text-sm text-foreground">
           {MESSAGE_TEXT.still_unconfirmed}
         </p>
       ) : state === "unknown" ? (
-        <p className="text-[13px] text-ink-1">
+        <p className="text-sm text-foreground">
           We couldn't check either. {MESSAGE_TEXT.unreachable}
         </p>
       ) : null}

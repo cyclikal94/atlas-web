@@ -139,11 +139,11 @@ export function PresetPicker({
       description={PRESET_COPY.description}
       footer={
         <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="quiet" onClick={onScratch}>
+          <Button variant="ghost" onClick={onScratch}>
             {PRESET_COPY.scratch}
           </Button>
           {preset !== undefined ? (
-            <Button variant="primary" onClick={() => onUse(preset)}>
+            <Button variant="default" onClick={() => onUse(preset)}>
               {PRESET_COPY.use}
             </Button>
           ) : null}
@@ -155,16 +155,21 @@ export function PresetPicker({
           <div aria-busy="true" className="flex flex-col gap-2">
             <span className="sr-only">{PRESET_COPY.loading}</span>
             {[0, 1, 2].map((n) => (
-              <div key={n} className="min-h-12 rounded-row bg-raised" />
+              <div
+                key={n}
+                className="min-h-12 animate-pulse rounded-lg bg-muted"
+              />
             ))}
           </div>
         ) : state.kind === "offline" ? (
-          <p className="text-[13px] text-ink-2">{PRESET_COPY.offline}</p>
+          <p className="text-sm text-muted-foreground">{PRESET_COPY.offline}</p>
         ) : state.kind === "failed" ? (
           <div className="flex flex-col gap-1">
-            <p className="text-[13px] text-ink-2">{PRESET_COPY.failed}</p>
+            <p className="text-sm text-muted-foreground">
+              {PRESET_COPY.failed}
+            </p>
             {state.requestId ? (
-              <p className="select-all font-num text-[12px] text-ink-2">
+              <p className="select-all font-num text-xs text-muted-foreground">
                 {copy.REQUEST_ID(state.requestId)}
               </p>
             ) : null}
@@ -176,7 +181,7 @@ export function PresetPicker({
               <label
                 key={p.id}
                 data-contract-id={p.id}
-                className="atlas-transition flex min-h-12 items-start gap-2.5 rounded-row border border-hairline-strong bg-canvas p-3 text-left hover:border-field-edge"
+                className="atlas-transition flex min-h-12 items-start gap-2.5 rounded-lg border border-border bg-background p-3 text-left hover:border-input hover:bg-accent"
               >
                 <input
                   type="radio"
@@ -184,13 +189,13 @@ export function PresetPicker({
                   value={p.id}
                   checked={chosen === p.id}
                   onChange={() => choice.edit(() => p.id)}
-                  className="mt-0.5 size-[15px]"
+                  className="mt-0.5 size-4"
                 />
                 <span className="flex flex-col gap-0.5">
-                  <span className="text-[13.5px] font-medium text-ink-1">
+                  <span className="text-sm font-medium text-foreground">
                     {p.title}
                   </span>
-                  <span className="text-[12px] text-ink-2">
+                  <span className="text-xs text-muted-foreground">
                     {describeDefinition(p.definition)}
                   </span>
                 </span>

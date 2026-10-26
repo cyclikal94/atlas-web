@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import { contrastRatio } from "../../src/design/contrast";
+import { contrastRatio, toHex } from "../../src/design/contrast";
 import {
   declaredPairs,
   inputFillSurfaces,
@@ -15,7 +15,11 @@ const css = readFileSync(
   "utf8",
 );
 
-/** Extracts the declarations of one rule. `selector` is matched literally, at the start of a line. */
+/**
+ * Extracts the colour declarations of one rule. `selector` is matched literally, at the start of a line. A tweakcn export
+ * also carries non-colour properties (`--radius`, fonts, shadows, tracking, spacing); those are not tokens and are ignored.
+ */
+const NON_COLOUR = /^(radius|font-|shadow|tracking|spacing|letter-spacing)/;
 function block(selector: string, source = css): Record<string, string> {
   const start = source.indexOf(`${selector} {`);
   if (start < 0) throw new Error(`No rule for ${selector}`);
@@ -23,11 +27,11 @@ function block(selector: string, source = css): Record<string, string> {
   const body = source.slice(start + selector.length + 2, end);
   const out: Record<string, string> = {};
   for (const match of body.matchAll(/^\s*--([a-z0-9-]+):\s*(.+?);\s*$/gm)) {
+    if (!match[1] || !match[2] || NON_COLOUR.test(match[1])) continue;
     // The formatter lowercases hex colours; the mirror and the docs use upper case.
-    if (match[1] && match[2])
-      out[match[1]] = match[2].replace(/#[0-9a-f]{3,8}\b/gi, (hex) =>
-        hex.toUpperCase(),
-      );
+    out[match[1]] = match[2].replace(/#[0-9a-f]{3,8}\b/gi, (hex) =>
+      hex.toUpperCase(),
+    );
   }
   return out;
 }
@@ -60,9 +64,15 @@ describe("tokens.css", () => {
     expect(lightExplicit).toEqual(tokens.light);
   });
 
-  test("theme-color values equal the canvas tokens", () => {
-    expect(THEME_COLOR.dark).toBe(tokens.dark.canvas);
-    expect(THEME_COLOR.light).toBe(tokens.light.canvas);
+  test("every value is a colour the contrast maths can read", () => {
+    for (const theme of ["dark", "light"] as const)
+      for (const name of tokenNames)
+        expect(toHex(tokens[theme][name])).toMatch(/^#[0-9A-F]{6}$/);
+  });
+
+  test("theme-color values equal the background tokens", () => {
+    expect(THEME_COLOR.dark).toBe(toHex(tokens.dark.background));
+    expect(THEME_COLOR.light).toBe(toHex(tokens.light.background));
   });
 
   test("Auto light applies only while no explicit dark choice exists", () => {
@@ -70,6 +80,27 @@ describe("tokens.css", () => {
     expect(css).toMatch(/@media \(prefers-color-scheme: light\)/);
     const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
     expect(withoutComments).not.toContain("light-dark(");
+  });
+});
+
+describe("colour parsing (the formats a tweakcn export may use)", () => {
+  test("hex, rgb, hsl and oklch all resolve to sRGB hex", () => {
+    expect(toHex("#abc")).toBe("#AABBCC");
+    expect(toHex("rgb(255, 0, 0)")).toBe("#FF0000");
+    expect(toHex("hsl(120 100% 50%)")).toBe("#00FF00");
+    expect(toHex("oklch(1 0 0)")).toBe("#FFFFFF");
+    expect(toHex("oklch(0 0 0)")).toBe("#000000");
+    // oklch(0.6231 0.188 259.81) is Tailwind's blue-500, #3B82F6.
+    const blue = toHex("oklch(0.6231 0.188 259.81)");
+    const channel = (at: number) => Number.parseInt(blue.slice(at, at + 2), 16);
+    expect(Math.abs(channel(1) - 0x3b)).toBeLessThanOrEqual(2);
+    expect(Math.abs(channel(3) - 0x82)).toBeLessThanOrEqual(2);
+    expect(Math.abs(channel(5) - 0xf6)).toBeLessThanOrEqual(2);
+  });
+
+  test("anything else is refused", () => {
+    expect(() => toHex("red")).toThrow();
+    expect(() => toHex("var(--x)")).toThrow();
   });
 });
 
@@ -84,65 +115,32 @@ describe.each(["dark", "light"] as const)("contrast guard (%s)", (theme) => {
   test("the input border is at least 3:1 on every permitted input fill", () => {
     for (const surface of inputFillSurfaces) {
       expect(
-        contrastRatio(tokens[theme]["field-edge"], tokens[theme][surface]),
+        contrastRatio(tokens[theme].input, tokens[theme][surface]),
       ).toBeGreaterThanOrEqual(3);
     }
   });
 });
 
-describe("findings recorded in docs/design-tokens.md", () => {
-  const ratio = (
-    theme: "dark" | "light",
-    a: keyof typeof tokens.dark,
-    b: keyof typeof tokens.dark,
-  ) => contrastRatio(tokens[theme][a], tokens[theme][b]);
-
-  test("F1: light field-edge is below 3:1 on raised and chrome, which is why inputs fill from canvas or panel only", () => {
-    expect(ratio("light", "field-edge", "raised")).toBeLessThan(3);
-    expect(ratio("light", "field-edge", "chrome")).toBeLessThan(3);
-    expect(inputFillSurfaces).toEqual(["canvas", "panel"]);
-  });
-
-  test("F3: ink-3 is not permitted on the tinted or inset surfaces", () => {
-    expect(ratio("dark", "ink-3", "chrome-inset")).toBeLessThan(4.5);
-    expect(ratio("dark", "ink-3", "nav-active")).toBeLessThan(4.5);
-    expect(ratio("dark", "ink-3", "rail-hover")).toBeLessThan(4.5);
-  });
-
-  test("F5: the design's unselected radio ring (placeholder) fails 3:1, so field-edge replaces it", () => {
-    expect(ratio("dark", "placeholder", "panel")).toBeLessThan(3);
-    expect(ratio("dark", "field-edge", "panel")).toBeGreaterThanOrEqual(3);
-  });
-
-  test("F6: nav-active on chrome is not a perceivable cue on its own", () => {
-    expect(ratio("dark", "nav-active", "chrome")).toBeLessThan(3);
-    expect(ratio("light", "nav-active", "chrome")).toBeLessThan(3);
-  });
-
-  test("the quoted 3.02:1 for light field-edge on white is really 3.22:1", () => {
-    expect(ratio("light", "field-edge", "panel")).toBeCloseTo(3.22, 1);
-  });
-});
-
 describe("mutation check", () => {
   test("a deliberately broken token value is caught by the guard", () => {
-    const broken = { ...tokens.dark, "field-edge": tokens.dark.hairline };
+    const broken = { ...tokens.dark, input: tokens.dark.border };
     const failing = declaredPairs.filter(
       (pair) =>
         contrastRatio(broken[pair.fg], broken[pair.bg]) < minimumFor(pair.kind),
     );
     expect(failing.length).toBeGreaterThan(0);
-    expect(failing.every((pair) => pair.fg === "field-edge")).toBe(true);
+    expect(failing.every((pair) => pair.fg === "input")).toBe(true);
   });
 });
 
 describe("input component", () => {
-  test("never uses a hairline token for its edge", () => {
+  test("takes the input edge, never a hairline, and fills only from background or card", () => {
     const source = readFileSync(
       resolve(__dirname, "../../src/components/ui/input.tsx"),
       "utf8",
     );
-    expect(source).toContain("border-field-edge");
-    expect(source).not.toMatch(/border-hairline/);
+    expect(source).toContain("border-input");
+    expect(source).not.toMatch(/border-border/);
+    expect(inputFillSurfaces).toEqual(["background", "card"]);
   });
 });

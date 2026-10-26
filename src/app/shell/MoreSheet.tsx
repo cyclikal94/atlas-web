@@ -32,7 +32,9 @@ export function MoreSheet({
     onClose();
   };
   const row =
-    "atlas-transition flex min-h-12 w-full items-center gap-3 rounded-row px-3 text-[15px] text-ink-1 hover:bg-row-hover data-[status=active]:bg-select-tint data-[status=active]:font-semibold";
+    "atlas-transition group flex min-h-13 w-full items-center gap-3 rounded-lg px-2.5 text-base text-foreground hover:bg-accent hover:text-accent-foreground data-[status=active]:bg-accent data-[status=active]:font-semibold data-[status=active]:text-accent-foreground";
+  const tile =
+    "flex size-9 flex-none items-center justify-center rounded-md border bg-card text-muted-foreground shadow-xs group-data-[status=active]:border-primary/25 group-data-[status=active]:bg-background group-data-[status=active]:text-primary";
   return (
     <Dialog
       open={open}
@@ -45,7 +47,7 @@ export function MoreSheet({
         event.preventDefault();
       }}
     >
-      <List className="flex flex-col gap-1">
+      <List className="atlas-stagger flex flex-col gap-1">
         {destinations
           .filter((destination) => destination.mobile === "more")
           .map((destination) => {
@@ -53,7 +55,9 @@ export function MoreSheet({
             return (
               <li key={destination.id} className="list-none">
                 <Link to={destination.to} className={row} onClick={choose}>
-                  <Icon aria-hidden="true" size={18} className="text-ink-2" />
+                  <span aria-hidden="true" className={tile}>
+                    <Icon className="size-[18px]" strokeWidth={1.9} />
+                  </span>
                   {destination.label}
                 </Link>
               </li>
@@ -68,7 +72,9 @@ export function MoreSheet({
               sync.onOpen("queue");
             }}
           >
-            <ListTodo aria-hidden="true" size={18} className="text-ink-2" />
+            <span aria-hidden="true" className={tile}>
+              <ListTodo className="size-[18px]" strokeWidth={1.9} />
+            </span>
             Offline queue
           </button>
         </li>
@@ -78,7 +84,7 @@ export function MoreSheet({
         // stacked. A keyboard activation of the button is a click too, so this covers it.
         // biome-ignore lint/a11y/useKeyWithClickEvents: only bubbles the account button's own activation
         // biome-ignore lint/a11y/noStaticElementInteractions: as above, the button inside is the interactive element
-        <div className="mt-4 border-t border-hairline pt-4" onClick={choose}>
+        <div className="mt-4 border-t pt-4" onClick={choose}>
           {account}
         </div>
       ) : null}

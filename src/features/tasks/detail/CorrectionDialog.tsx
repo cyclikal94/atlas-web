@@ -226,7 +226,7 @@ export function CorrectionDialog({
       : {};
   const message = (name: CorrectionField) =>
     errors[name] ? (
-      <p id={`${formId}-${name}`} className="text-[12px] text-conflict-text">
+      <p id={`${formId}-${name}`} className="text-xs text-destructive">
         {errors[name]}
       </p>
     ) : null;
@@ -279,7 +279,7 @@ export function CorrectionDialog({
   };
   const was = (text: string | null) =>
     text === null || text === "" ? null : (
-      <span className="text-[12px] text-ink-2">
+      <span className="text-xs text-muted-foreground">
         {CORRECTION_COPY.was(text)}
       </span>
     );
@@ -295,10 +295,12 @@ export function CorrectionDialog({
       }}
       footer={
         <div className="flex flex-col gap-2">
-          <p className="text-[12px] text-ink-2">{CORRECTION_COPY.footer}</p>
+          <p className="text-xs text-muted-foreground">
+            {CORRECTION_COPY.footer}
+          </p>
           <div className="flex flex-wrap justify-end gap-2">
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => {
                 discard();
                 onClose();
@@ -323,7 +325,7 @@ export function CorrectionDialog({
                 {CORRECTION_COPY.save}
               </Button>
             ) : (
-              <Button variant="primary" onClick={() => void save()}>
+              <Button variant="default" onClick={() => void save()}>
                 {CORRECTION_COPY.save}
               </Button>
             )}
@@ -334,7 +336,7 @@ export function CorrectionDialog({
       <div className="flex flex-col gap-4" data-correction-form="">
         {goal.kind !== "checkbox" ? (
           <fieldset className="flex flex-col gap-2">
-            <legend className="text-[13px] font-medium text-ink-1">
+            <legend className="text-sm font-medium text-foreground">
               {CORRECTION_COPY.target}
             </legend>
             {goal.kind === "numeric" ? (
@@ -418,7 +420,7 @@ export function CorrectionDialog({
                 })
               }
             />
-            <span className="text-[12px] text-ink-2">
+            <span className="text-xs text-muted-foreground">
               {CORRECTION_COPY.timeHint}
             </span>
             {message("time")}
@@ -444,7 +446,9 @@ export function CorrectionDialog({
             {message("closeDaysAfter")}
           </div>
         </div>
-        <p className="text-[12.5px] text-ink-2">{CORRECTION_COPY.roster}</p>
+        <p className="text-xs text-muted-foreground">
+          {CORRECTION_COPY.roster}
+        </p>
       </div>
     </Dialog>
   );

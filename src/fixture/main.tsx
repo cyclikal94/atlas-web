@@ -109,12 +109,12 @@ function FixtureShell({ children }: { children: ReactNode }) {
             <div
               role="img"
               aria-label="Fixture account"
-              className="flex size-11 items-center justify-center rounded-nav text-[13px] font-semibold text-ink-2"
+              className="flex size-11 items-center justify-center rounded-md text-sm font-semibold text-muted-foreground"
             >
               F
             </div>
           ) : (
-            <div className="px-2.5 py-2 text-[13px] text-ink-2">
+            <div className="px-2.5 py-2 text-sm text-muted-foreground">
               Fixture account
             </div>
           ),

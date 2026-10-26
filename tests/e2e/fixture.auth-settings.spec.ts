@@ -303,7 +303,7 @@ test.describe("Remove is described by the sign-out consequence (review R4)", () 
 for (const scheme of ["dark", "light"] as const) {
   test.describe(`A-4 painted contrast in the Signing in dialog, ${scheme}`, () => {
     test.use({ colorScheme: scheme });
-    test("the dialog's inputs are field-edge at 3:1 or better against the dialog and their fill; Change password is 4.5:1 or better", async ({
+    test("the dialog's inputs take the input edge at 3:1 or better against the dialog and their fill; Change password is 4.5:1 or better", async ({
       page,
     }) => {
       await page.goto("/settings/signing-in?fresh=1");

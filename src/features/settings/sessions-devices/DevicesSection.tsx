@@ -91,10 +91,13 @@ export function DevicesSection() {
       className="flex max-w-[700px] flex-col gap-3"
     >
       <div className="flex flex-col gap-1">
-        <h2 id="devices-heading" className="text-[15px] font-medium text-ink-1">
+        <h2
+          id="devices-heading"
+          className="text-base font-semibold tracking-tight text-foreground"
+        >
           {DEVICES_HEADING}
         </h2>
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           {DEVICES_EXPLANATION}
         </p>
         {load.status === "ready" ? (
@@ -102,7 +105,7 @@ export function DevicesSection() {
         ) : null}
       </div>
       {load.status === "loading" ? (
-        <p aria-busy="true" className="text-[13px] text-ink-2">
+        <p aria-busy="true" className="text-sm text-muted-foreground">
           Loading your devices…
         </p>
       ) : load.status === "error" ? (
@@ -112,12 +115,12 @@ export function DevicesSection() {
           {canName && hasDuplicateTitles(load.value.devices) ? (
             <p
               data-duplicate-hint=""
-              className="text-[12.5px] leading-[1.6] text-ink-2"
+              className="text-xs leading-relaxed text-muted-foreground"
             >
               {DUPLICATE_HINT}
             </p>
           ) : null}
-          <List className="flex flex-col gap-2">
+          <List className="atlas-stagger flex flex-col gap-2">
             {load.value.devices.map((row) => {
               const display = deviceDisplay(row);
               const phrase = devicePhrase(row, now);
@@ -128,11 +131,11 @@ export function DevicesSection() {
                 <li
                   key={row.id}
                   data-device-row={row.current ? "current" : "other"}
-                  className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
+                  className="list-none rounded-xl border bg-card p-4 shadow-sm"
                 >
                   <div className="flex flex-wrap items-center gap-3">
                     <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                      <span className="text-[14px] text-ink-1 [overflow-wrap:anywhere]">
+                      <span className="text-sm text-foreground [overflow-wrap:anywhere]">
                         {display.named ? (
                           <bdi data-device-name="">{display.title}</bdi>
                         ) : (
@@ -141,7 +144,7 @@ export function DevicesSection() {
                         {row.current ? (
                           <span
                             data-current-tag=""
-                            className="ml-2 text-[12px] text-ink-2"
+                            className="ml-2 text-xs text-muted-foreground"
                           >
                             {THIS_DEVICE_TAG}
                           </span>
@@ -150,12 +153,12 @@ export function DevicesSection() {
                       {display.named && display.label ? (
                         <span
                           data-device-label=""
-                          className="text-[12.5px] text-ink-2"
+                          className="text-xs text-muted-foreground"
                         >
                           {display.label}
                         </span>
                       ) : null}
-                      <span className="text-[12.5px] text-ink-2">
+                      <span className="text-xs text-muted-foreground">
                         {deviceMeta(row, now)}
                       </span>
                     </div>

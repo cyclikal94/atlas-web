@@ -27,7 +27,7 @@ export function Field({
     .join(" ");
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="text-[13px] font-medium text-ink-1">
+      <label htmlFor={id} className="text-sm font-medium text-foreground">
         {label}
       </label>
       <input
@@ -43,10 +43,10 @@ export function Field({
         aria-invalid={error ? true : undefined}
         aria-describedby={described === "" ? undefined : described}
         data-field-edge=""
-        className="atlas-transition box-border min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 py-2.5 text-[14px] text-ink-1 placeholder:text-ink-3"
+        className="atlas-transition box-border min-h-11 w-full rounded-md border border-input bg-background px-3 py-2.5 text-sm text-foreground placeholder:text-muted-foreground"
       />
       {hint ? (
-        <p id={hintId} className="text-[12px] leading-[1.5] text-ink-2">
+        <p id={hintId} className="text-xs leading-[1.5] text-muted-foreground">
           {hint}
         </p>
       ) : null}
@@ -54,7 +54,7 @@ export function Field({
         <p
           id={errorId}
           data-field-error=""
-          className="text-[12.5px] leading-[1.5] text-ink-1"
+          className="text-xs leading-[1.5] text-foreground"
         >
           {error}
         </p>
@@ -90,7 +90,7 @@ export function FormMessage({ message }: { message: string | null }) {
   return (
     <p
       data-form-message=""
-      className="rounded-row border border-hairline-strong bg-panel p-3 text-[12.5px] leading-[1.6] text-ink-1"
+      className="rounded-lg border border-border bg-card p-3 text-xs leading-relaxed text-foreground"
     >
       {message}
     </p>

@@ -6,7 +6,7 @@ export function RequestId({ id }: { id: string | undefined }) {
   return (
     <>
       {" "}
-      <span data-request-id="" className="block text-[12px] text-ink-2">
+      <span data-request-id="" className="block text-xs text-muted-foreground">
         Request ID: {id}
       </span>
     </>

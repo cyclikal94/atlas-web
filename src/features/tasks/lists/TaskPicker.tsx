@@ -287,14 +287,14 @@ export function TaskPicker({
       footer={
         <div className="flex w-full flex-wrap items-center justify-between gap-2">
           <span
-            className="text-[12.5px] text-ink-2"
+            className="text-xs text-muted-foreground"
             data-picker-selected={selected.length}
           >
             {PICKER.selected(selected.length)}
           </span>
           <span className="flex gap-2">
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => {
                 discard();
                 onClose();
@@ -304,14 +304,14 @@ export function TaskPicker({
             </Button>
             {selected.length === 0 || !env.writable ? (
               <Button
-                variant="primary"
+                variant="default"
                 disabled
                 reason={!env.writable ? copy.NOT_WRITABLE : PICKER.chooseFirst}
               >
                 {PICKER.submit}
               </Button>
             ) : (
-              <Button variant="primary" onClick={() => void save()}>
+              <Button variant="default" onClick={() => void save()}>
                 {PICKER.submit}
               </Button>
             )}
@@ -335,12 +335,12 @@ export function TaskPicker({
             setCursors([null]);
             kept.edit((v) => ({ ...v, query: value }));
           }}
-          className="min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 text-[14px] text-ink-1 placeholder:text-ink-3"
+          className="min-h-11 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground"
         />
-        <p id={caption} className="text-[12px] text-ink-2">
+        <p id={caption} className="text-xs text-muted-foreground">
           {PICKER.caption}
         </p>
-        <p className="text-[12px] text-ink-2" data-picker-room={room}>
+        <p className="text-xs text-muted-foreground" data-picker-room={room}>
           {PICKER.room(Math.max(0, room - selected.length))}
         </p>
         {page.error !== null ? (
@@ -357,7 +357,7 @@ export function TaskPicker({
             </p>
           ) : null
         ) : items.length === 0 ? (
-          <p className="text-[13px] text-ink-2">
+          <p className="text-sm text-muted-foreground">
             {kept.value.query.trim() === "" ? PICKER.none : PICKER.noMatch}
           </p>
         ) : (
@@ -371,20 +371,20 @@ export function TaskPicker({
                 <label
                   key={item.id}
                   data-picker-task={item.id}
-                  className="flex min-h-11 items-center gap-2.5 border-t border-hairline px-0.5 py-2 text-[13.5px] text-ink-1"
+                  className="flex min-h-11 items-center gap-2.5 border-t border-border px-0.5 py-2 text-sm text-foreground"
                 >
                   <input
                     type="checkbox"
                     checked={checked}
                     disabled={!checked && full}
                     onChange={() => toggle(item.id, item.title)}
-                    className="size-[15px]"
+                    className="size-4"
                   />
                   <span className="min-w-0 flex-1 break-words">
                     {item.title}
                   </span>
                   {item.createLocalId !== null ? (
-                    <span className="flex-none text-[11.5px] text-ink-2">
+                    <span className="flex-none text-xs text-muted-foreground">
                       {PICKER.notSent}
                     </span>
                   ) : null}
@@ -395,13 +395,13 @@ export function TaskPicker({
         )}
         <div className="flex gap-2">
           {cursors.length > 1 ? (
-            <Button variant="quiet" onClick={() => setCursors([null])}>
+            <Button variant="ghost" onClick={() => setCursors([null])}>
               {PICKER.first}
             </Button>
           ) : null}
           {more ? (
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() =>
                 setCursors((c) => [...c, page.value?.next ?? null])
               }
@@ -411,21 +411,21 @@ export function TaskPicker({
           ) : null}
         </div>
         {shownNote ? (
-          <p className="text-[12.5px] text-ink-2" data-list-note="">
+          <p className="text-xs text-muted-foreground" data-list-note="">
             {shownNote}
           </p>
         ) : null}
         {gone.map((c) => (
           <p
             key={c.localId}
-            className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2"
+            className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground"
             data-picker-missing={c.task}
           >
             <span className="min-w-0 flex-1 break-words">
               {PICKER.missing(c.title)}
             </span>
             <Button
-              variant="quiet"
+              variant="ghost"
               aria-label={PICKER.deselect(c.title)}
               onClick={() => toggle(c.task, c.title)}
             >
@@ -438,7 +438,7 @@ export function TaskPicker({
             className="flex flex-col items-start gap-2"
             data-list-decision=""
           >
-            <p id={decision} className="text-[12.5px] text-ink-2">
+            <p id={decision} className="text-xs text-muted-foreground">
               {PICKER.againNote}
             </p>
             {selected.length === 0 || !env.writable ? (

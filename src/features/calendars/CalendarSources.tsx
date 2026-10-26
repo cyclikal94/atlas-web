@@ -76,17 +76,17 @@ export function CalendarSources() {
       <div className="flex flex-col gap-2">
         <Link
           to="/settings"
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13.5px] text-ink-2 hover:text-ink-1"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
         >
           Settings
         </Link>
-        <p className="text-[12px] uppercase tracking-[0.06em] text-ink-2">
+        <p className="text-xs uppercase tracking-[0.06em] text-muted-foreground">
           {SCREEN_EYEBROW}
         </p>
         <PageHeading>{SCREEN_HEADING}</PageHeading>
       </div>
       {env === null ? (
-        <p className="max-w-[700px] text-[13px] leading-[1.6] text-ink-2">
+        <p className="max-w-[700px] text-sm leading-relaxed text-muted-foreground">
           {NO_DATABASE}
         </p>
       ) : (
@@ -269,14 +269,14 @@ function Sources() {
           <EntryPoint label={ADD_SOURCE_CLASS}>
             {actions.add.enabled ? (
               <Button
-                variant="primary"
+                variant="default"
                 onClick={() => setDialog({ kind: "add" })}
               >
                 {ADD_SOURCE}
               </Button>
             ) : (
               <Button
-                variant="primary"
+                variant="default"
                 disabled
                 reason={actions.add.reason ?? ""}
               >
@@ -299,11 +299,11 @@ function Sources() {
         {linkNotice !== undefined ? (
           <div
             data-row-notice="link"
-            className="flex flex-wrap items-center gap-2 text-[12.5px] leading-[1.6] text-ink-1"
+            className="flex flex-wrap items-center gap-2 text-xs leading-relaxed text-foreground"
           >
             <span>{linkNotice}</span>
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => {
                 memory?.notices.delete("link");
                 dismissedLink();
@@ -316,7 +316,7 @@ function Sources() {
         {service === null ? (
           <p
             data-no-database=""
-            className="text-[13px] leading-[1.6] text-ink-2"
+            className="text-sm leading-relaxed text-muted-foreground"
           >
             {NO_DATABASE}
           </p>
@@ -369,7 +369,7 @@ function EntryPoint({
 }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[11.5px] uppercase tracking-[0.06em] text-ink-2">
+      <span className="text-xs uppercase tracking-[0.06em] text-muted-foreground">
         {label}
       </span>
       {children}
@@ -421,7 +421,7 @@ function CachedSources({
           <div
             key={n}
             data-skeleton=""
-            className="h-[68px] rounded-row border border-hairline bg-panel"
+            className="h-[68px] rounded-lg border border-border bg-card"
           />
         ))}
       </div>
@@ -430,9 +430,9 @@ function CachedSources({
     return page.reason === "absent" ? null : (
       <div
         data-load-error=""
-        className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+        className="flex flex-col items-start gap-2 rounded-lg border border-border bg-card p-3.5"
       >
-        <p className="text-[13.5px] text-ink-1">{LOAD_FAILED}</p>
+        <p className="text-sm text-foreground">{LOAD_FAILED}</p>
         <Button onClick={() => actions.retryLoad()}>
           {LOAD_FAILED_ACTION}
         </Button>
@@ -443,7 +443,7 @@ function CachedSources({
   return (
     <div className="flex flex-col gap-2">
       {rows.length === 0 && cursors.length === 1 ? (
-        <p data-empty="" className="text-[13px] text-ink-2">
+        <p data-empty="" className="text-sm text-muted-foreground">
           {EMPTY}
         </p>
       ) : (
@@ -469,7 +469,7 @@ function CachedSources({
         <div className="flex flex-wrap gap-2">
           {cursors.length > 1 ? (
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => setCursors((list) => list.slice(0, -1))}
             >
               {SHOW_PREVIOUS}
@@ -477,7 +477,7 @@ function CachedSources({
           ) : null}
           {next !== null ? (
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => setCursors((list) => [...list, next])}
             >
               {SHOW_NEXT}
@@ -513,7 +513,7 @@ function PendingSources({
   const next = page.value.next;
   return (
     <section aria-labelledby="pending-sources" className="flex flex-col gap-2">
-      <h2 id="pending-sources" className="text-[13.5px] font-medium text-ink-1">
+      <h2 id="pending-sources" className="text-sm font-medium text-foreground">
         {WAITING_GROUP}
       </h2>
       <List className="flex flex-col gap-2">
@@ -531,7 +531,7 @@ function PendingSources({
         <div className="flex flex-wrap gap-2">
           {cursors.length > 1 ? (
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => setCursors((list) => list.slice(0, -1))}
             >
               {SHOW_PREVIOUS}
@@ -539,7 +539,7 @@ function PendingSources({
           ) : null}
           {next !== null ? (
             <Button
-              variant="quiet"
+              variant="ghost"
               onClick={() => setCursors((list) => [...list, next])}
             >
               {SHOW_NEXT}

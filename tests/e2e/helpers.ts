@@ -141,8 +141,8 @@ export async function runAxe(
   }, context) as Promise<AxeViolation[]>;
 }
 
-export const DARK = { canvas: "rgb(8, 9, 10)" };
-export const LIGHT = { canvas: "rgb(247, 248, 249)" };
+export const DARK = { canvas: "rgb(12, 12, 16)" };
+export const LIGHT = { canvas: "rgb(247, 247, 250)" };
 
 /** Screenshots share the invocation's isolated evidence tree and refuse duplicates. */
 export function evidencePath(name: string): string {

@@ -1110,23 +1110,23 @@ export function EntryHistory({
       data-stream-version={row.progressVersion ?? ""}
       data-journal-version={journal?.version ?? ""}
     >
-      <h2 id={heading} className="text-[15px] font-medium text-ink-1">
+      <h2 id={heading} className="text-base font-medium text-foreground">
         {full ? HISTORY_COPY.full : HISTORY_COPY.heading}
       </h2>
       {fix !== null && !fixShown ? (
         // The entry being fixed is on a page not shown now: its fix stays open, with what was typed.
         <div
-          className="flex flex-col gap-1 rounded-row border border-hairline px-3 py-2"
+          className="flex flex-col gap-1 rounded-lg border border-border px-3 py-2"
           data-fix-detached={fix.entry.id}
         >
-          <span className="text-[13px] text-ink-1">
+          <span className="text-sm text-foreground">
             {HISTORY_COPY.fix}: {describeEvidence(fix.entry.evidence, goal)}
           </span>
           {fixForm}
         </div>
       ) : null}
       {shown.length === 0 ? (
-        <p className="text-[13px] text-ink-2">{HISTORY_COPY.none}</p>
+        <p className="text-sm text-muted-foreground">{HISTORY_COPY.none}</p>
       ) : (
         <ul className="m-0 flex list-none flex-col gap-1 p-0">
           {shown.map((entry) => {
@@ -1138,13 +1138,15 @@ export function EntryHistory({
                 key={entry.id}
                 data-entry={entry.id}
                 data-entry-pending={entry.pending ? "" : undefined}
-                className="flex flex-col gap-1 rounded-row border border-hairline px-3 py-2"
+                className="flex flex-col gap-1 rounded-lg border border-border px-3 py-2"
               >
-                <span className="flex flex-wrap items-baseline gap-2 text-[13px] text-ink-1">
-                  <span className={entry.replaced ? "text-ink-2" : ""}>
+                <span className="flex flex-wrap items-baseline gap-2 text-sm text-foreground">
+                  <span
+                    className={entry.replaced ? "text-muted-foreground" : ""}
+                  >
                     {describeEvidence(entry.evidence, goal)}
                   </span>
-                  <span className="text-ink-2">
+                  <span className="text-muted-foreground">
                     {entry.recordedBy === env.accountId
                       ? HISTORY_COPY.byYou
                       : HISTORY_COPY.byOther}
@@ -1152,17 +1154,17 @@ export function EntryHistory({
                     {momentLabel(entry.happenedAt * 1000, env.now(), zone)}
                   </span>
                   {entry.replaced ? (
-                    <span className="text-[12px] text-ink-2">
+                    <span className="text-xs text-muted-foreground">
                       {HISTORY_COPY.corrected}
                     </span>
                   ) : null}
                   {entry.replaces !== null ? (
-                    <span className="text-[12px] text-ink-2">
+                    <span className="text-xs text-muted-foreground">
                       {HISTORY_COPY.correction}
                     </span>
                   ) : null}
                   {entry.pending ? (
-                    <span className="text-[12px] text-ink-2">
+                    <span className="text-xs text-muted-foreground">
                       {copy.PENDING.queued}
                     </span>
                   ) : null}
@@ -1176,12 +1178,12 @@ export function EntryHistory({
                         {HISTORY_COPY.fix}
                       </Button>
                     ) : (
-                      <Button variant="quiet" onClick={() => askFix(entry)}>
+                      <Button variant="ghost" onClick={() => askFix(entry)}>
                         {HISTORY_COPY.fix}
                       </Button>
                     )}
                     {checkFailed ? (
-                      <span className="text-[12px] text-ink-2">
+                      <span className="text-xs text-muted-foreground">
                         {HISTORY_COPY.checkFailed}
                       </span>
                     ) : null}
@@ -1193,15 +1195,15 @@ export function EntryHistory({
         </ul>
       )}
       {journal?.error === "refused" ? (
-        <p className="text-[12.5px] text-ink-2">{HISTORY_COPY.refused}</p>
+        <p className="text-xs text-muted-foreground">{HISTORY_COPY.refused}</p>
       ) : journal?.error === "failed" ? (
-        <p className="text-[12.5px] text-ink-2" data-history-stale="">
+        <p className="text-xs text-muted-foreground" data-history-stale="">
           {full ? HISTORY_COPY.stale : HISTORY_COPY.failed}
         </p>
       ) : null}
       <span className="flex flex-wrap gap-2">
         {!env.online ? (
-          <span className="text-[12.5px] text-ink-2">
+          <span className="text-xs text-muted-foreground">
             {HISTORY_COPY.fullOffline}
           </span>
         ) : !full ? (
@@ -1229,7 +1231,7 @@ export function EntryHistory({
                 {HISTORY_COPY.loadMore}
               </Button>
             ) : null}
-            <Button variant="quiet" onClick={() => void refresh()}>
+            <Button variant="ghost" onClick={() => void refresh()}>
               {journal.error === "failed"
                 ? copy.TRY_AGAIN
                 : HISTORY_COPY.refresh}
@@ -1237,7 +1239,7 @@ export function EntryHistory({
           </>
         )}
         {full ? (
-          <Button variant="quiet" onClick={close}>
+          <Button variant="ghost" onClick={close}>
             {HISTORY_COPY.recent}
           </Button>
         ) : null}
@@ -1303,7 +1305,7 @@ function FixForm({
           />
         </div>
       ) : (
-        <span className="text-[13px] text-ink-1">
+        <span className="text-sm text-foreground">
           {HISTORY_COPY.newValue}:{" "}
           {entry.evidence.kind === "checkbox"
             ? entry.evidence.complete
@@ -1325,20 +1327,20 @@ function FixForm({
           {HISTORY_COPY.fixSave}
         </Button>
       ) : (
-        <Button variant="primary" onClick={() => save()}>
+        <Button variant="default" onClick={() => save()}>
           {HISTORY_COPY.fixSave}
         </Button>
       )}
       {onRecheck !== null ? (
-        <Button variant="quiet" onClick={onRecheck}>
+        <Button variant="ghost" onClick={onRecheck}>
           {HISTORY_COPY.recheck}
         </Button>
       ) : null}
-      <Button variant="quiet" onClick={onCancel}>
+      <Button variant="ghost" onClick={onCancel}>
         {HISTORY_COPY.cancel}
       </Button>
       {fix.error ? (
-        <p className="w-full text-[12.5px] text-conflict-text">{fix.error}</p>
+        <p className="w-full text-xs text-destructive">{fix.error}</p>
       ) : null}
     </div>
   );

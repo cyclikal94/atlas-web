@@ -43,7 +43,7 @@ describe("Button", () => {
   });
 
   test("an enabled button has no reason text and defaults to type=button", () => {
-    render(<Button variant="primary">Save</Button>);
+    render(<Button variant="default">Save</Button>);
     expect(screen.getByRole("button", { name: "Save" })).toHaveAttribute(
       "type",
       "button",
@@ -52,7 +52,7 @@ describe("Button", () => {
 
   test("touch layouts get a 44px minimum height", () => {
     render(<Button>Save</Button>);
-    expect(screen.getByRole("button").className).toContain("min-h-11");
+    expect(screen.getByRole("button").className).toContain("h-11");
   });
 });
 
@@ -75,25 +75,18 @@ describe("Input", () => {
     expect(screen.getByLabelText("Other")).toBeInTheDocument();
   });
 
-  test("its border is field-edge and its fill is canvas or panel", () => {
-    render(
-      <>
-        <Input aria-label="a" />
-        <Input aria-label="b" surface="panel" />
-      </>,
-    );
-    const [a, b] = screen.getAllByRole("textbox");
-    expect(a?.className).toContain("border-field-edge");
-    expect(a?.className).toContain("bg-canvas");
-    expect(b?.className).toContain("bg-panel");
-    for (const input of [a, b])
-      expect(input?.className).not.toMatch(/hairline|bg-raised|bg-chrome/);
+  test("its border is the input edge and its fill is the page background", () => {
+    render(<Input aria-label="a" />);
+    const a = screen.getByRole("textbox");
+    expect(a.className).toContain("border-input");
+    expect(a.className).toContain("bg-background");
+    expect(a.className).not.toMatch(/border-border|bg-secondary|bg-muted/);
   });
 
-  test("placeholder text uses ink-3", () => {
+  test("placeholder text uses muted-foreground", () => {
     render(<Input aria-label="a" placeholder="Type here" />);
     expect(screen.getByPlaceholderText("Type here").className).toContain(
-      "placeholder:text-ink-3",
+      "placeholder:text-muted-foreground",
     );
   });
 });
@@ -151,7 +144,7 @@ describe("RadioCardGroup", () => {
     render(<Harness />);
     const first = screen.getAllByRole("radio")[0] as HTMLElement;
     expect(first.querySelector('[data-state="checked"]')).not.toBeNull();
-    expect(first.querySelector(".border-field-edge")).not.toBeNull();
+    expect(first.querySelector(".border-input")).not.toBeNull();
     expect(first).toHaveAttribute("data-contract-id", "opt-a");
     expect(first).not.toHaveAttribute("title");
   });

@@ -124,7 +124,7 @@ describe("the sign-in surface", () => {
       screen.getByRole("button", { name: "Sign in" }),
       screen.getByRole("button", { name: "Use single sign-on instead" }),
     ])
-      expect(control.className).toMatch(/min-h-11/);
+      expect(control.className).toMatch(/\b(min-)?h-11\b/);
     expect(container.querySelector("form")).not.toBeNull();
     // Nothing about any account: only the heading, the two fields and the two buttons.
     expect(container.textContent).toBe(

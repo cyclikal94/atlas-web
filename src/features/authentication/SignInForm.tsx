@@ -208,24 +208,24 @@ export function SignInForm({
         {disabledReason ? (
           <Button
             type="submit"
-            variant="primary"
+            variant="default"
             disabled
             reason={disabledReason}
           >
             {submitLabel}
           </Button>
         ) : (
-          <Button type="submit" variant="primary">
+          <Button type="submit" variant="default">
             {submitLabel}
           </Button>
         )}
         {disabledReason ? null : (
-          <Button variant="secondary" onClick={() => void sso()}>
+          <Button variant="outline" onClick={() => void sso()}>
             Use single sign-on instead
           </Button>
         )}
         {onBack ? (
-          <Button variant="quiet" onClick={onBack}>
+          <Button variant="ghost" onClick={onBack}>
             {backLabel}
           </Button>
         ) : null}

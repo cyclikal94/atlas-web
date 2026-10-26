@@ -34,7 +34,7 @@ export function AccountSlot({
         aria-label={slotLabel(label)}
         data-account-slot=""
         onClick={(event) => open(event.currentTarget)}
-        className="atlas-transition flex size-11 items-center justify-center rounded-nav text-[13px] font-semibold text-ink-2 hover:bg-row-hover hover:text-ink-1"
+        className="atlas-transition flex size-11 items-center justify-center rounded-md text-sm font-semibold text-muted-foreground hover:bg-accent hover:text-foreground"
       >
         <span aria-hidden="true">{Array.from(label)[0]?.toUpperCase()}</span>
       </button>
@@ -46,7 +46,7 @@ export function AccountSlot({
       aria-label={slotLabel(label)}
       data-account-slot=""
       onClick={(event) => open(event.currentTarget)}
-      className="atlas-transition flex min-h-11 w-full min-w-0 items-center rounded-nav px-2.5 py-2 text-left text-[13px] text-ink-2 hover:bg-row-hover hover:text-ink-1"
+      className="atlas-transition flex min-h-11 w-full min-w-0 items-center rounded-md px-2.5 py-2 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground"
     >
       <span className="min-w-0 truncate">{label}</span>
     </button>

@@ -177,7 +177,7 @@ export function NameDeviceDialog({
       title={title}
       footer={
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="outline" onClick={onClose}>
             {gone ? DONE : CANCEL}
           </Button>
           {display.named && !gone ? (
@@ -190,11 +190,11 @@ export function NameDeviceDialog({
             )
           ) : null}
           {gone ? null : blocked ? (
-            <Button variant="primary" disabled reason={blocked}>
+            <Button variant="default" disabled reason={blocked}>
               {SAVE_NAME}
             </Button>
           ) : (
-            <Button variant="primary" type="submit" form={formId}>
+            <Button variant="default" type="submit" form={formId}>
               {SAVE_NAME}
             </Button>
           )}
@@ -205,17 +205,20 @@ export function NameDeviceDialog({
         id={formId}
         noValidate
         onSubmit={save}
-        className="flex flex-col gap-3 text-[14px] leading-[1.6] text-ink-1"
+        className="flex flex-col gap-3 text-sm leading-relaxed text-foreground"
       >
         {!display.named && !display.fallback ? (
-          <p className="text-ink-2 [overflow-wrap:anywhere]">{display.title}</p>
+          <p className="text-muted-foreground [overflow-wrap:anywhere]">
+            {display.title}
+          </p>
         ) : display.named && display.label ? (
-          <p className="text-ink-2 [overflow-wrap:anywhere]">{display.label}</p>
+          <p className="text-muted-foreground [overflow-wrap:anywhere]">
+            {display.label}
+          </p>
         ) : null}
         <Input
           ref={field}
           label={NAME_LABEL}
-          surface="panel"
           value={value}
           autoComplete="off"
           spellCheck={false}
@@ -231,11 +234,11 @@ export function NameDeviceDialog({
             if (phase.kind === "invalid") setPhase({ kind: "idle" });
           }}
         />
-        <p id={describedId} className="text-[12.5px] text-ink-2">
+        <p id={describedId} className="text-xs text-muted-foreground">
           {NAME_DESCRIPTION}
         </p>
         {phase.kind === "invalid" ? (
-          <p id={problemId} data-name-problem="" className="text-[12.5px]">
+          <p id={problemId} data-name-problem="" className="text-xs">
             {phase.text}
           </p>
         ) : null}
@@ -243,7 +246,7 @@ export function NameDeviceDialog({
           <p
             data-refusal={phase.kept ? undefined : ""}
             data-name-kept={phase.kept ? "" : undefined}
-            className="text-ink-2"
+            className="text-muted-foreground"
           >
             {phase.text}
           </p>

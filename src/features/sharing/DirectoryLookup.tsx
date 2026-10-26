@@ -81,18 +81,23 @@ export function DirectoryLookup({
   return (
     <section aria-labelledby={ids.heading} className="flex flex-col gap-5">
       <div className="flex items-center gap-3">
-        <Button variant="quiet" onClick={onBack}>
+        <Button variant="ghost" onClick={onBack}>
           ‹ {copy.LOOKUP_BACK}
         </Button>
         <div className="flex flex-col">
-          <h2 id={ids.heading} className="text-[15px] font-medium text-ink-1">
+          <h2
+            id={ids.heading}
+            className="text-base font-medium text-foreground"
+          >
             {copy.LOOKUP_TITLE}
           </h2>
-          <span className="text-[12.5px] text-ink-2">{purpose}</span>
+          <span className="text-xs text-muted-foreground">{purpose}</span>
         </div>
       </div>
       {offline ? (
-        <p className="text-[13px] text-ink-2">{copy.LOOKUP_NEEDS_CONNECTION}</p>
+        <p className="text-sm text-muted-foreground">
+          {copy.LOOKUP_NEEDS_CONNECTION}
+        </p>
       ) : null}
       <section
         aria-labelledby={`${ids.search}-h`}
@@ -101,7 +106,7 @@ export function DirectoryLookup({
       >
         <h3
           id={`${ids.search}-h`}
-          className="text-[13.5px] font-medium text-ink-1"
+          className="text-sm font-medium text-foreground"
         >
           {copy.LOOKUP_SEARCH}
         </h3>
@@ -143,7 +148,7 @@ export function DirectoryLookup({
       >
         <h3
           id={`${ids.exact}-h`}
-          className="text-[13.5px] font-medium text-ink-1"
+          className="text-sm font-medium text-foreground"
         >
           {copy.LOOKUP_EXACT}
         </h3>
@@ -192,10 +197,10 @@ function Results({
 }) {
   if (found.status === "idle") return null;
   if (found.status === "busy")
-    return <p className="text-[12.5px] text-ink-2">…</p>;
+    return <p className="text-xs text-muted-foreground">…</p>;
   if (found.status === "failed")
     return (
-      <p className="text-[12.5px] text-ink-1" data-lookup-failed="">
+      <p className="text-xs text-foreground" data-lookup-failed="">
         {copy.LOOKUP_FAILED}
         {found.requestId ? ` ${copy.REQUEST_ID(found.requestId)}` : ""}
       </p>
@@ -203,9 +208,11 @@ function Results({
   if (found.entries.length === 0)
     return (
       <div className="flex flex-col gap-1" data-lookup-empty="">
-        <p className="text-[13px] font-medium text-ink-1">{copy.LOOKUP_NONE}</p>
+        <p className="text-sm font-medium text-foreground">
+          {copy.LOOKUP_NONE}
+        </p>
         {exact ? (
-          <p className="text-[12.5px] leading-[1.55] text-ink-2">
+          <p className="text-xs leading-relaxed text-muted-foreground">
             {copy.LOOKUP_NONE_EXACT}
           </p>
         ) : null}
@@ -216,9 +223,9 @@ function Results({
       {found.entries.map((entry) => (
         <li
           key={entry.id}
-          className="flex min-h-11 list-none items-center gap-3 rounded-row border border-hairline-strong bg-panel px-3 py-1.5"
+          className="flex min-h-11 list-none items-center gap-3 rounded-lg border border-border bg-card px-3 py-1.5"
         >
-          <span className="min-w-0 flex-1 break-words text-[13.5px] text-ink-1">
+          <span className="min-w-0 flex-1 break-words text-sm text-foreground">
             {entry.username}
           </span>
           <Button

@@ -1,12 +1,13 @@
 import { Link } from "@tanstack/react-router";
 import { Tooltip } from "../../components/ui/tooltip";
+import { cn } from "../../lib/utils";
 import type { Destination } from "./destinations";
 import type { LayoutMode } from "./layout-mode";
 
 /**
- * A rail item. The active item is marked by more than colour (finding F6): aria-current, heavier weight,
- * and an accent bar, because nav-active on chrome is only 1.4:1 in dark and 1.2:1 in light.
- * Collapsed items are icon-only with 44px targets; the label shows on hover and on focus.
+ * A rail item, styled as shadcn/ui's sidebar menu button. The active item is marked by more than colour (finding F6):
+ * aria-current, heavier weight, and an accent bar. Collapsed items are icon-only with 44px targets; the label shows on
+ * hover and on focus.
  */
 export function RailItem({
   destination,
@@ -21,20 +22,23 @@ export function RailItem({
     <Link
       to={destination.to}
       aria-label={destination.label}
-      className={`atlas-transition group relative flex items-center rounded-nav text-[14px] text-ink-2 hover:bg-rail-hover data-[status=active]:bg-nav-active data-[status=active]:font-semibold data-[status=active]:text-ink-1 ${
-        collapsed ? "size-11 justify-center" : "min-h-10 gap-2.5 px-2.5 py-2"
-      }`}
+      className={cn(
+        "atlas-transition group relative flex items-center rounded-md text-sm text-sidebar-foreground",
+        "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+        "data-[status=active]:bg-sidebar-accent data-[status=active]:font-semibold data-[status=active]:text-sidebar-accent-foreground",
+        collapsed ? "size-11 justify-center" : "h-10 gap-3 px-3",
+      )}
     >
       <span
         aria-hidden="true"
-        className="absolute inset-y-2 left-0 hidden w-[3px] rounded-round bg-action-ink group-data-[status=active]:block"
+        className="absolute inset-y-2.5 left-0 hidden w-[3px] rounded-full bg-primary group-data-[status=active]:block"
       />
       <Icon
         aria-hidden="true"
-        size={18}
-        className="flex-none group-data-[status=active]:text-action-ink"
+        className="size-[18px] flex-none group-data-[status=active]:text-primary"
+        strokeWidth={1.9}
       />
-      {collapsed ? null : <span>{destination.label}</span>}
+      {collapsed ? null : <span className="truncate">{destination.label}</span>}
     </Link>
   );
   return collapsed ? (

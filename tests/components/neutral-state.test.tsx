@@ -138,7 +138,7 @@ describe("neutral states (F-NS, F-UI)", () => {
 
   test("a control is at least 44 px tall (the button's own class)", () => {
     render(<NeutralState state="1b" actions={actions()} />);
-    expect(screen.getByRole("button").className).toMatch(/min-h-11/);
+    expect(screen.getByRole("button").className).toMatch(/\bh-11\b/);
   });
 
   test("focus follows a change of state", () => {

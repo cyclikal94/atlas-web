@@ -1,4 +1,5 @@
 import { type ReactNode, useLayoutEffect } from "react";
+import { Skeleton } from "../../components/ui/skeleton";
 import { useCacheGate, useOptionalDataEnv } from "../../data";
 import { GATE_BODY, GATE_TITLE } from "./copy";
 import { registerGate } from "./gate-presence";
@@ -53,15 +54,25 @@ function Gate({
         aria-labelledby="cache-gate-heading"
         aria-busy="true"
         data-cache-gate="refreshing"
-        className="flex max-w-[620px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+        className="flex max-w-[620px] flex-col gap-2 rounded-xl border bg-card p-4 shadow-sm"
       >
         <h2
           id="cache-gate-heading"
-          className="text-[14px] font-medium text-ink-1"
+          className="flex items-center gap-2 text-sm font-semibold text-foreground"
         >
+          <span
+            aria-hidden="true"
+            className="size-[7px] animate-pulse rounded-full bg-primary"
+          />
           {GATE_TITLE}
         </h2>
-        <p className="text-[13px] leading-[1.6] text-ink-2">{GATE_BODY}</p>
+        <p className="text-sm leading-relaxed text-muted-foreground">
+          {GATE_BODY}
+        </p>
+        <div aria-hidden="true" className="mt-1 flex flex-col gap-2">
+          <Skeleton className="h-3.5 w-2/3" />
+          <Skeleton className="h-3.5 w-1/2" />
+        </div>
       </section>
     </>
   );

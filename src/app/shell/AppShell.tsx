@@ -45,7 +45,7 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
       id="main"
       tabIndex={-1}
       // isolate: nothing a screen positions inside main can be stacked above the sticky chrome.
-      className="isolate min-w-0 flex-1 px-5 py-6 tablet:px-8 tablet:py-7"
+      className="isolate min-w-0 flex-1 px-4 py-4 tablet:px-9 tablet:py-8 desktop:px-12 desktop:py-10"
     >
       {children}
     </main>
@@ -60,17 +60,17 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
         <RouteFocus />
         <TitleSync />
         {mode === "mobile" ? (
-          <div className="flex min-h-dvh flex-col bg-canvas">
+          <div className="flex min-h-dvh flex-col bg-background">
             <header
               ref={setHeader}
-              className="sticky top-0 z-30 flex items-center gap-3 border-b border-hairline bg-canvas px-5 py-2"
+              className="sticky top-0 z-30 flex items-center gap-3 border-b bg-background px-4 py-2"
             >
               {mobileBack ? (
                 <Link
                   to={mobileBack.to}
-                  className="atlas-transition -ml-2 flex min-h-11 items-center gap-1.5 rounded-control px-2 text-[14px] text-ink-2 hover:text-ink-1"
+                  className="atlas-transition -ml-2 flex min-h-11 items-center gap-1.5 rounded-md px-2 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground"
                 >
-                  <ArrowLeft aria-hidden="true" size={18} />
+                  <ArrowLeft aria-hidden="true" className="size-[18px]" />
                   {mobileBack.label}
                 </Link>
               ) : (
@@ -96,7 +96,7 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
             />
           </div>
         ) : (
-          <div className="flex min-h-dvh bg-canvas">
+          <div className="flex min-h-dvh bg-background">
             <Rail mode={mode} />
             {main}
           </div>

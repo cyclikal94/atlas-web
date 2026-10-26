@@ -148,16 +148,18 @@ export function JoinForm({
       ) : null}
       <div>
         {reason ? (
-          <Button type="submit" variant="primary" disabled reason={reason}>
+          <Button type="submit" variant="default" disabled reason={reason}>
             {submitLabel}
           </Button>
         ) : (
-          <Button type="submit" variant="primary">
+          <Button type="submit" variant="default">
             {submitLabel}
           </Button>
         )}
       </div>
-      <p className="text-[12.5px] leading-[1.6] text-ink-2">{JOIN_FOOTNOTE}</p>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {JOIN_FOOTNOTE}
+      </p>
     </form>
   );
 }

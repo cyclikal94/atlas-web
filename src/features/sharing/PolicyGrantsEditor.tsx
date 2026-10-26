@@ -76,12 +76,12 @@ export function PolicyGrantsEditor({
         key={`${grant.kind}:${grant.id}`}
         data-grant={grant.kind}
         data-principal={grant.id}
-        className="flex list-none flex-wrap items-center gap-2 rounded-row border border-hairline-strong bg-panel px-3 py-2"
+        className="flex list-none flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2"
       >
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="break-words text-[13.5px] text-ink-1">{name}</span>
+          <span className="break-words text-sm text-foreground">{name}</span>
           {grant.kind === "account" && excluded.has(grant.id) ? (
-            <span className="text-[12px] text-ink-2">
+            <span className="text-xs text-muted-foreground">
               {copy.ALREADY_EXCLUDED}
             </span>
           ) : null}
@@ -105,7 +105,7 @@ export function PolicyGrantsEditor({
         />
         {disabled ? null : (
           <Button
-            variant="quiet"
+            variant="ghost"
             aria-label={`${copy.REMOVE}: ${name}`}
             onClick={() =>
               dispatch({ type: "remove", kind: grant.kind, id: grant.id })
@@ -130,16 +130,18 @@ export function PolicyGrantsEditor({
   return (
     <div className="flex flex-col gap-5" data-grants-editor="">
       {refusal ? (
-        <p className="text-[12.5px] text-ink-1" data-policy-refusal="">
+        <p className="text-xs text-foreground" data-policy-refusal="">
           {refusal}
         </p>
       ) : null}
       <section aria-labelledby={ids.accounts} className="flex flex-col gap-2">
-        <h3 id={ids.accounts} className="text-[13.5px] font-medium text-ink-1">
+        <h3 id={ids.accounts} className="text-sm font-medium text-foreground">
           {copy.ACCOUNT_GRANTS}
         </h3>
         {accounts.length === 0 ? (
-          <p className="text-[12.5px] text-ink-2">{copy.NO_ACCOUNT_GRANTS}</p>
+          <p className="text-xs text-muted-foreground">
+            {copy.NO_ACCOUNT_GRANTS}
+          </p>
         ) : (
           <List className="flex flex-col gap-1.5">
             {accounts.map(grantRow)}
@@ -147,28 +149,30 @@ export function PolicyGrantsEditor({
         )}
         {disabled ? null : (
           <span>
-            <Button variant="quiet" onClick={() => onLookup("grant")}>
+            <Button variant="ghost" onClick={() => onLookup("grant")}>
               {copy.ADD_ACCOUNT}
             </Button>
           </span>
         )}
       </section>
       <section aria-labelledby={ids.households} className="flex flex-col gap-2">
-        <h3
-          id={ids.households}
-          className="text-[13.5px] font-medium text-ink-1"
-        >
+        <h3 id={ids.households} className="text-sm font-medium text-foreground">
           {copy.HOUSEHOLD_GRANTS}
         </h3>
         {householdGrants.length === 0 ? (
-          <p className="text-[12.5px] text-ink-2">{copy.NO_HOUSEHOLD_GRANTS}</p>
+          <p className="text-xs text-muted-foreground">
+            {copy.NO_HOUSEHOLD_GRANTS}
+          </p>
         ) : (
           <List className="flex flex-col gap-1.5">
             {householdGrants.map(grantRow)}
           </List>
         )}
         {membership.status === "loading" ? (
-          <p className="text-[12.5px] text-ink-2" data-membership="loading">
+          <p
+            className="text-xs text-muted-foreground"
+            data-membership="loading"
+          >
             {copy.HOUSEHOLDS_LOADING}
           </p>
         ) : membership.status === "failed" ? (
@@ -194,17 +198,17 @@ export function PolicyGrantsEditor({
         ) : null}
         {disabled ? null : addReason !== null ? (
           <span>
-            <Button variant="quiet" disabled reason={addReason}>
+            <Button variant="ghost" disabled reason={addReason}>
               {copy.ADD_HOUSEHOLD}
             </Button>
           </span>
         ) : picking ? (
           <div className="flex flex-col gap-1.5" data-household-picker="">
-            <span className="text-[12.5px] text-ink-2">
+            <span className="text-xs text-muted-foreground">
               {copy.HOUSEHOLD_PICKER}
             </span>
             {addable.length === 0 ? (
-              <p className="text-[12.5px] text-ink-2">
+              <p className="text-xs text-muted-foreground">
                 {copy.NO_HOUSEHOLDS_TO_ADD}
               </p>
             ) : (
@@ -224,25 +228,25 @@ export function PolicyGrantsEditor({
               </List>
             )}
             <span>
-              <Button variant="quiet" onClick={() => setPicking(false)}>
+              <Button variant="ghost" onClick={() => setPicking(false)}>
                 {copy.CANCEL}
               </Button>
             </span>
           </div>
         ) : (
           <span>
-            <Button variant="quiet" onClick={() => setPicking(true)}>
+            <Button variant="ghost" onClick={() => setPicking(true)}>
               {copy.ADD_HOUSEHOLD}
             </Button>
           </span>
         )}
       </section>
       <section aria-labelledby={ids.excluded} className="flex flex-col gap-2">
-        <h3 id={ids.excluded} className="text-[13.5px] font-medium text-ink-1">
+        <h3 id={ids.excluded} className="text-sm font-medium text-foreground">
           {copy.EXCLUSIONS}
         </h3>
         {policy.exclude_accounts.length === 0 ? (
-          <p className="text-[12.5px] text-ink-2">{copy.NO_EXCLUSIONS}</p>
+          <p className="text-xs text-muted-foreground">{copy.NO_EXCLUSIONS}</p>
         ) : (
           <List className="flex flex-col gap-1.5">
             {policy.exclude_accounts.map((id) => {
@@ -251,14 +255,14 @@ export function PolicyGrantsEditor({
                 <li
                   key={id}
                   data-exclusion={id}
-                  className="flex list-none flex-wrap items-center gap-2 rounded-row border border-hairline-strong bg-panel px-3 py-2"
+                  className="flex list-none flex-wrap items-center gap-2 rounded-lg border border-border bg-card px-3 py-2"
                 >
-                  <span className="min-w-0 flex-1 break-words text-[13.5px] text-ink-1">
+                  <span className="min-w-0 flex-1 break-words text-sm text-foreground">
                     {name} — {copy.EXCLUDED_NOTE}
                   </span>
                   {disabled ? null : (
                     <Button
-                      variant="quiet"
+                      variant="ghost"
                       aria-label={`${copy.REMOVE_EXCLUSION}: ${name}`}
                       onClick={() => dispatch({ type: "include", id })}
                     >
@@ -272,13 +276,13 @@ export function PolicyGrantsEditor({
         )}
         {disabled ? null : (
           <span>
-            <Button variant="quiet" onClick={() => onLookup("exclude")}>
+            <Button variant="ghost" onClick={() => onLookup("exclude")}>
               {copy.ADD_EXCLUSION}
             </Button>
           </span>
         )}
       </section>
-      <p className="text-[12px] leading-[1.55] text-ink-2">
+      <p className="text-xs leading-relaxed text-muted-foreground">
         {copy.EXCLUSION_RULE}
       </p>
     </div>

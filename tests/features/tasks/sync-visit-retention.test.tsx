@@ -403,7 +403,7 @@ describe("the edit form (R33)", () => {
   test("kept for its own task only: another task's form starts from that task, and going there ends the first task's edit", async () => {
     const { t, task } = await editForm();
     const other = await seededTask({ title: "Other task" });
-    t.world.idb.seed("atlas-" + ME, "cache", other.rows);
+    t.world.idb.seed(`atlas-${ME}`, "cache", other.rows);
     type(FORM_COPY.name, "Typed for the first task");
     await toSync(t);
     await to(t, `/tasks/${other.taskId}/edit`);

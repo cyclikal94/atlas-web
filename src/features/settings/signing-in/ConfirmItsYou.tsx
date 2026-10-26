@@ -71,7 +71,9 @@ export function ConfirmItsYou({
         <Button onClick={() => owner && confirmFlow.open(owner)}>
           {CONFIRM_LABEL}
         </Button>
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">{CONFIRM_HINT}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {CONFIRM_HINT}
+        </p>
       </div>
     );
 
@@ -79,9 +81,9 @@ export function ConfirmItsYou({
     <section
       aria-labelledby={headingId}
       data-confirm-its-you="open"
-      className="flex flex-col gap-3 rounded-row border border-hairline-strong bg-inset p-3.5"
+      className="flex flex-col gap-3 rounded-lg border border-border bg-muted p-3.5"
     >
-      <h4 id={headingId} className="text-[14px] font-medium text-ink-1">
+      <h4 id={headingId} className="text-sm font-medium text-foreground">
         {CONFIRM_LABEL}
       </h4>
       <SignInForm

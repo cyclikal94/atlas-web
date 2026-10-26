@@ -157,7 +157,7 @@ describe("navigation state is not colour alone (finding F6)", () => {
       screen.getByRole("navigation", { name: "Primary" }),
     ).getByRole("link", { name: "Tasks" });
     expect(link.className).toContain("data-[status=active]:font-semibold");
-    expect(link.querySelector(".bg-action-ink")).not.toBeNull();
+    expect(link.querySelector(".bg-primary")).not.toBeNull();
   });
 
   test("a nested route keeps its parent destination active", async () => {

@@ -103,7 +103,7 @@ function Chooser({ policy, onChange, blocked }: AudienceChooserProps) {
       {disabled ? null : (
         <span>
           <Button
-            variant="quiet"
+            variant="ghost"
             onClick={() =>
               dispatch({
                 type: "reset",

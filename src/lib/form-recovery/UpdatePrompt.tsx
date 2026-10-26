@@ -23,14 +23,14 @@ export function UpdatePrompt({
   return (
     <div
       data-recovery-state="update-available"
-      className="flex flex-col gap-3 rounded-row border border-action-tint-edge bg-action-tint p-3.5"
+      className="flex flex-col gap-3 rounded-lg border border-primary/25 bg-accent p-3.5"
     >
-      <p className="text-[13.5px] leading-[1.6] text-ink-1">{UPDATE_TEXT}</p>
+      <p className="text-sm leading-relaxed text-foreground">{UPDATE_TEXT}</p>
       <div className="flex flex-wrap gap-2">
-        <Button variant="primary" onClick={onSaveAndReload}>
+        <Button variant="default" onClick={onSaveAndReload}>
           Save and reload
         </Button>
-        <Button variant="quiet" onClick={onNotNow}>
+        <Button variant="ghost" onClick={onNotNow}>
           Not now
         </Button>
       </div>

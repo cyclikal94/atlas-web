@@ -51,19 +51,19 @@ export function useSyncStatus(): SyncStatusValue {
 }
 
 const DOT: Record<ChipTone, string> = {
-  ok: "bg-done",
-  busy: "bg-action-ink",
-  warn: "bg-missed",
-  error: "bg-conflict",
-  muted: "bg-withheld",
+  ok: "bg-success",
+  busy: "bg-primary",
+  warn: "bg-warning",
+  error: "bg-destructive",
+  muted: "bg-muted-foreground",
 };
 /** A non-healthy state adds a state-coloured border. It is a supplementary cue: text and the dot carry the state. */
 const BORDER: Record<ChipTone, string> = {
-  ok: "border-chrome-inset-edge",
-  busy: "border-action-tint-edge",
-  warn: "border-missed-edge",
-  error: "border-conflict-edge",
-  muted: "border-chrome-inset-edge",
+  ok: "border-border",
+  busy: "border-primary/40",
+  warn: "border-warning/50",
+  error: "border-destructive/50",
+  muted: "border-border",
 };
 
 /** Re-renders each minute so "synced 2m ago" does not go stale. */
@@ -95,10 +95,13 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
     onBeforeOpen?.();
     onOpen(view.destination);
   };
+  // The dot pulses (motion-safe) only while something is happening: busy is the one tone that means activity.
   const dot = (
     <span
       aria-hidden="true"
-      className={`size-[7px] flex-none rounded-round ${DOT[view.tone]}`}
+      className={`size-[7px] flex-none rounded-full ${DOT[view.tone]} ${
+        view.tone === "busy" ? "animate-pulse" : ""
+      }`}
     />
   );
 
@@ -110,7 +113,7 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
           <>
             <span className="block font-medium">{view.label}</span>
             {view.detail ? (
-              <span className="block text-ink-2">{view.detail}</span>
+              <span className="block text-muted-foreground">{view.detail}</span>
             ) : null}
           </>
         }
@@ -120,11 +123,11 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
           aria-label={name}
           data-sync-tone={view.tone}
           onClick={activate}
-          className={`atlas-transition flex size-11 flex-col items-center justify-center gap-0.5 rounded-nav border bg-chrome-inset ${BORDER[view.tone]}`}
+          className={`atlas-transition flex size-11 flex-col items-center justify-center gap-0.5 rounded-md border bg-card shadow-xs hover:bg-accent ${BORDER[view.tone]}`}
         >
           {dot}
           {view.conflictCountText || view.pendingCountText ? (
-            <span className="font-num text-[11px] leading-none text-ink-1">
+            <span className="font-num text-xs leading-none text-foreground">
               {view.conflictCountText
                 ? model.conflictCount
                 : model.pendingCount}
@@ -142,15 +145,15 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
         aria-label={name}
         data-sync-tone={view.tone}
         onClick={activate}
-        className={`atlas-transition flex w-full items-center gap-[9px] rounded-nav border bg-chrome-inset px-2.5 py-2.5 text-left ${BORDER[view.tone]}`}
+        className={`atlas-transition flex w-full items-center gap-2.5 rounded-md border bg-card px-3 py-2.5 text-left shadow-xs hover:bg-accent ${BORDER[view.tone]}`}
       >
         {dot}
         <span className="flex min-w-0 flex-col gap-px">
-          <span className="text-[13px] font-medium text-ink-1">
+          <span className="text-sm font-medium text-foreground">
             {view.label}
           </span>
           {view.detail ? (
-            <span className="font-num text-[11px] text-ink-2">
+            <span className="font-num text-xs text-muted-foreground">
               {view.detail}
             </span>
           ) : null}
@@ -166,14 +169,10 @@ export function SyncStatusChip({ variant, onBeforeOpen }: SyncStatusChipProps) {
       aria-label={name}
       data-sync-tone={view.tone}
       onClick={activate}
-      className={`atlas-transition inline-flex min-h-11 min-w-0 items-center gap-[7px] rounded-nav border bg-raised px-2.5 py-1.5 text-left ${
-        view.tone === "ok" || view.tone === "muted"
-          ? "border-hairline-strong"
-          : BORDER[view.tone]
-      }`}
+      className={`atlas-transition inline-flex min-h-11 min-w-0 items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-left shadow-xs hover:bg-accent ${BORDER[view.tone]}`}
     >
       {dot}
-      <span className="text-[12px] font-medium text-ink-1">
+      <span className="text-xs font-medium text-foreground">
         {view.compactLabel}
       </span>
     </button>

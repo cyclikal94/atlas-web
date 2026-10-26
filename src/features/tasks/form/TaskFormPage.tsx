@@ -1,7 +1,8 @@
 import { useNavigate } from "@tanstack/react-router";
 import { type ReactNode, useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
-import { Input } from "../../../components/ui/input";
+import { Input, inputClass } from "../../../components/ui/input";
+import { NativeSelect } from "../../../components/ui/native-select";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
   type DraftWithCommand,
@@ -171,7 +172,7 @@ function EditTask({ taskId }: { taskId: string }) {
         className="flex flex-col gap-2"
         data-task-edit-error={view.readError}
       >
-        <p className="text-[13px] text-ink-2">
+        <p className="text-sm text-muted-foreground">
           {view.readError === "unstable"
             ? copy.LOCAL_UNSTABLE
             : copy.LOCAL_FAILED}
@@ -183,12 +184,14 @@ function EditTask({ taskId }: { taskId: string }) {
       </div>
     );
   if (view.status === "loading" || outstanding.status === "loading")
-    return <p className="text-[13px] text-ink-2">{copy.LOADING}</p>;
+    return <p className="text-sm text-muted-foreground">{copy.LOADING}</p>;
   if (view.status === "error") return notice;
   if (view.task === null)
-    return <p className="text-[13px] text-ink-2">{DETAIL_COPY.absent}</p>;
+    return (
+      <p className="text-sm text-muted-foreground">{DETAIL_COPY.absent}</p>
+    );
   if (view.definition === null || view.execution === null)
-    return <p className="text-[13px] text-ink-2">{copy.NO_DATABASE}</p>;
+    return <p className="text-sm text-muted-foreground">{copy.NO_DATABASE}</p>;
   const initial = fromDefinition(
     view.task.label,
     view.definition,
@@ -231,8 +234,7 @@ interface FormInput {
   state: TaskFormState;
 }
 
-const select =
-  "min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 text-[14px] text-ink-1";
+const select = inputClass;
 
 function Field({
   id,
@@ -249,17 +251,17 @@ function Field({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="text-[13px] font-medium text-ink-1">
+      <label htmlFor={id} className="text-sm font-medium text-foreground">
         {label}
       </label>
       {children}
       {hint ? (
-        <p id={`${id}-hint`} className="text-[12px] text-ink-2">
+        <p id={`${id}-hint`} className="text-xs text-muted-foreground">
           {hint}
         </p>
       ) : null}
       {error ? (
-        <p id={`${id}-error`} className="text-[12px] text-conflict-text">
+        <p id={`${id}-error`} className="text-xs text-destructive">
           {error}
         </p>
       ) : null}
@@ -511,7 +513,7 @@ function TaskForm({
   const lockedRepeat = editing;
   return (
     <form
-      className="flex max-w-[620px] flex-col gap-5"
+      className="atlas-enter flex max-w-[620px] flex-col gap-5"
       data-task-form={mode.kind}
       noValidate
       onSubmit={(event) => {
@@ -522,7 +524,10 @@ function TaskForm({
       <PageHeading>
         {editing ? FORM_COPY.editTitle : FORM_COPY.newTitle}
       </PageHeading>
-      <fieldset disabled={busy} className="flex flex-col gap-5">
+      <fieldset
+        disabled={busy}
+        className="flex flex-col gap-5 rounded-xl border bg-card p-5 shadow-sm"
+      >
         <Field id={fid("title")} label={FORM_COPY.name} error={errors.title}>
           <input
             {...described("title")}
@@ -538,12 +543,10 @@ function TaskForm({
             label={FORM_COPY.repeats}
             hint={lockedRepeat ? FORM_COPY.locked : FORM_COPY.monthEnd}
           >
-            <select
+            <NativeSelect
               id={fid("repeat")}
               aria-describedby={`${fid("repeat")}-hint`}
               value={state.repeat}
-              data-field-edge=""
-              className={select}
               onChange={(e) => set({ repeat: e.target.value as RepeatChoice })}
             >
               {(Object.keys(FORM_COPY.repeat) as RepeatChoice[])
@@ -557,7 +560,7 @@ function TaskForm({
                     {FORM_COPY.repeat[r]}
                   </option>
                 ))}
-            </select>
+            </NativeSelect>
           </Field>
           {show.interval ? (
             <Field
@@ -619,11 +622,9 @@ function TaskForm({
             label={FORM_COPY.zone}
             error={errors.timezone}
           >
-            <select
+            <NativeSelect
               {...described("timezone")}
               value={state.timezone}
-              data-field-edge=""
-              className={select}
               onChange={(e) => set({ timezone: e.target.value })}
             >
               {(zones.includes(state.timezone)
@@ -634,7 +635,7 @@ function TaskForm({
                   {z}
                 </option>
               ))}
-            </select>
+            </NativeSelect>
           </Field>
           <Field
             id={fid("openDaysBefore")}
@@ -666,21 +667,21 @@ function TaskForm({
           </Field>
         </div>
         <fieldset className="flex flex-col gap-2">
-          <legend className="text-[13px] font-medium text-ink-1">
+          <legend className="text-sm font-medium text-foreground">
             {FORM_COPY.done}
           </legend>
           <div className="flex flex-wrap gap-3">
             {(["checkbox", "numeric", "checklist"] as const).map((kind) => (
               <label
                 key={kind}
-                className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1"
+                className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground"
               >
                 <input
                   type="radio"
                   name={fid("goal")}
                   checked={state.goalKind === kind}
                   onChange={() => set({ goalKind: kind })}
-                  className="size-[15px]"
+                  className="size-4"
                 />
                 {FORM_COPY.goal[kind]}
               </label>
@@ -751,7 +752,7 @@ function TaskForm({
                     />
                   </div>
                   <Button
-                    variant="quiet"
+                    variant="ghost"
                     aria-label={FORM_COPY.removeItem(index + 1)}
                     onClick={() =>
                       set({
@@ -782,32 +783,30 @@ function TaskForm({
                 </span>
               ) : null}
               {errors.checklist ? (
-                <p className="text-[12px] text-conflict-text">
-                  {errors.checklist}
-                </p>
+                <p className="text-xs text-destructive">{errors.checklist}</p>
               ) : null}
             </div>
           ) : null}
         </fieldset>
         <fieldset className="flex flex-col gap-2">
-          <legend className="text-[13px] font-medium text-ink-1">
+          <legend className="text-sm font-medium text-foreground">
             {FORM_COPY.carry}
           </legend>
           {CARRIES.map((carry: Carry) => (
             <label
               key={carry}
-              className="flex min-h-11 items-start gap-2 text-[13.5px] text-ink-1"
+              className="flex min-h-11 items-start gap-2 text-sm text-foreground"
             >
               <input
                 type="radio"
                 name={fid("carry")}
                 checked={state.carry === carry}
                 onChange={() => set({ carry })}
-                className="mt-0.5 size-[15px]"
+                className="mt-0.5 size-4"
               />
               <span className="flex flex-col">
                 <span>{copy.CARRY[carry].label}</span>{" "}
-                <span className="text-[12px] text-ink-2">
+                <span className="text-xs text-muted-foreground">
                   {copy.CARRY[carry].line}
                 </span>
               </span>
@@ -820,7 +819,7 @@ function TaskForm({
             errors.participation ? fid("participation-error") : undefined
           }
         >
-          <legend className="text-[13px] font-medium text-ink-1">
+          <legend className="text-sm font-medium text-foreground">
             {FORM_COPY.who}
           </legend>
           {PARTICIPATIONS.filter(
@@ -828,75 +827,79 @@ function TaskForm({
           ).map((p: Participation) => (
             <label
               key={p}
-              className="flex min-h-11 items-start gap-2 text-[13.5px] text-ink-1"
+              className="flex min-h-11 items-start gap-2 text-sm text-foreground"
             >
               <input
                 type="radio"
                 name={fid("who")}
                 checked={state.participation === p}
                 onChange={() => set({ participation: p })}
-                className="mt-0.5 size-[15px]"
+                className="mt-0.5 size-4"
               />
               <span className="flex flex-col">
                 <span>{copy.PARTICIPATION[p]}</span>{" "}
-                <span className="text-[12px] text-ink-2">
+                <span className="text-xs text-muted-foreground">
                   {copy.PARTICIPATION_LINE[p]}
                 </span>
               </span>
             </label>
           ))}
           {editing ? (
-            <p className="text-[12px] text-ink-2">{FORM_COPY.lockedWho}</p>
+            <p className="text-xs text-muted-foreground">
+              {FORM_COPY.lockedWho}
+            </p>
           ) : null}
           {errors.participation ? (
             <p
               id={fid("participation-error")}
-              className="text-[12px] text-conflict-text"
+              className="text-xs text-destructive"
             >
               {errors.participation}
             </p>
           ) : null}
         </fieldset>
-        <label className="flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
+        <label className="flex min-h-11 items-center gap-2 text-sm text-foreground">
           <input
             type="checkbox"
             checked={state.allowExclusions}
             onChange={() => set({ allowExclusions: !state.allowExclusions })}
-            className="size-[15px]"
+            className="size-4"
           />
           {FORM_COPY.exclusions}
         </label>
         {mode.kind === "new" ? (
           <fieldset className="flex flex-col gap-2">
-            <legend className="text-[13px] font-medium text-ink-1">
+            <legend className="text-sm font-medium text-foreground">
               {FORM_COPY.sharing}
             </legend>
             {(["defaults", "only_me"] as const).map((choice) => (
               <label
                 key={choice}
-                className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1"
+                className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground"
               >
                 <input
                   type="radio"
                   name={fid("sharing")}
                   checked={state.sharing === choice}
                   onChange={() => set({ sharing: choice })}
-                  className="size-[15px]"
+                  className="size-4"
                 />
                 {choice === "defaults"
                   ? defaultsSummary
                   : FORM_COPY.sharingOnlyMe}
               </label>
             ))}
-            <p className="text-[12px] text-ink-2">{FORM_COPY.sharingLater}</p>
+            <p className="text-xs text-muted-foreground">
+              {FORM_COPY.sharingLater}
+            </p>
           </fieldset>
         ) : null}
       </fieldset>
       {errors.definition ? (
-        <p className="text-[12.5px] text-conflict-text">{errors.definition}</p>
+        <p className="text-xs text-destructive">{errors.definition}</p>
       ) : null}
       {notice ? (
-        <p className="text-[13px] text-ink-1" data-form-notice="">
+        <p className="text-sm text-foreground" data-form-notice="">
           {notice}
         </p>
       ) : null}
@@ -921,12 +924,12 @@ function TaskForm({
             {FORM_COPY.save}
           </Button>
         ) : (
-          <Button variant="primary" type="submit">
+          <Button variant="default" type="submit">
             {FORM_COPY.save}
           </Button>
         )}
         <Button
-          variant="quiet"
+          variant="ghost"
           onClick={() =>
             // Cancel leaves for the task (or the list), which discards what was typed; a save already made stays queued.
             void (mode.kind === "edit"

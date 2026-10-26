@@ -1,28 +1,37 @@
+/*
+ * The base layer and the few component classes the static gate markup (index.html) and the neutral screens rely on.
+ * Colours are tokens (tokens.css) or `color-mix` of tokens: no surface carries a colour of its own. Every animation is wrapped
+ * in `prefers-reduced-motion: no-preference`; the one colour transition (`atlas-transition`) is removed under reduce.
+ */
 @layer base {
   html {
     -webkit-text-size-adjust: 100%;
     text-size-adjust: 100%;
     /* Set on the root as well as the body, so overscroll and the area behind the body match the theme. */
-    background-color: var(--canvas);
+    background-color: var(--background);
     /* The mobile header and bottom tabs are sticky: focus and fragment scrolling stay clear of them (chrome-insets.ts). */
     scroll-padding-top: var(--shell-inset-top, 0px);
     scroll-padding-bottom: var(--shell-inset-bottom, 0px);
+    scrollbar-color: var(--border) transparent;
   }
   body {
     margin: 0;
     min-width: 0;
-    background-color: var(--canvas);
-    color: var(--ink-1);
+    background-color: var(--background);
+    color: var(--foreground);
     font-family: var(--font-sans);
     font-size: 14px;
     line-height: 1.5;
     overflow-wrap: anywhere;
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    accent-color: var(--primary);
   }
   *,
   *::before,
   *::after {
     box-sizing: border-box;
+    border-color: var(--border);
   }
   h1,
   h2,
@@ -30,8 +39,15 @@
   p {
     margin: 0;
   }
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
   button,
-  input {
+  input,
+  select,
+  textarea {
     font: inherit;
     color: inherit;
   }
@@ -41,9 +57,9 @@
   button:disabled {
     cursor: not-allowed;
   }
-  /* One focus ring everywhere (design README): 2px action-ink, 2px offset. */
+  /* One focus ring everywhere (design README): 2px ring, 2px offset. */
   :focus-visible {
-    outline: 2px solid var(--action-ink);
+    outline: 2px solid var(--ring);
     outline-offset: 2px;
   }
   /* Programmatic focus on a landmark or heading must not draw a ring around the whole page. */
@@ -51,8 +67,24 @@
     outline: none;
   }
   ::placeholder {
-    color: var(--ink-3);
+    color: var(--muted-foreground);
     opacity: 1;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--primary) 35%, transparent);
+  }
+  input[type="date"],
+  input[type="time"],
+  select {
+    color-scheme: inherit;
+  }
+  input[type="checkbox"],
+  input[type="radio"] {
+    margin: 0;
+    cursor: pointer;
+  }
+  summary {
+    cursor: pointer;
   }
 }
 
@@ -66,12 +98,101 @@
   transition:
     background-color 140ms ease,
     border-color 140ms ease,
-    color 140ms ease;
+    color 140ms ease,
+    box-shadow 140ms ease;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .atlas-transition {
     transition: none;
+  }
+  /* tw-animate-css entrances and the pulse are taken away as a whole, not sped up (this rule is unlayered, so it wins). */
+  .animate-in,
+  .animate-out,
+  .animate-pulse,
+  .neutral-gate__mark,
+  .neutral-gate__body::after {
+    animation: none;
+  }
+}
+
+/* ---------- Entrances. Never the opacity of content: a fading element reads to a contrast check (and briefly to the eye) as
+   lower-contrast text. Content rises a few pixels, and a same-coloured veil over it clears instead (`::after`, which no
+   accessibility tree or hit test sees). Nothing an entrance does changes a control's measured size. ---------- */
+@keyframes atlas-rise {
+  from {
+    transform: translateY(8px);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes atlas-veil {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .atlas-enter {
+    position: relative;
+    animation: atlas-rise 300ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .atlas-enter::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background: var(--background);
+    animation: atlas-veil 280ms ease-out both;
+  }
+  /* Rows revealed one after another: each row's own card-coloured veil clears a little later than the one above. No row
+     moves, so adjacent targets never overlap mid-animation (a moving row would read to a target-size check as obscuring its
+     neighbour). */
+  .atlas-stagger > * {
+    position: relative;
+  }
+  .atlas-stagger > *::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background: var(--card);
+    animation: atlas-veil 360ms ease-out both;
+  }
+  .atlas-stagger > :nth-child(2)::after {
+    animation-delay: 45ms;
+  }
+  .atlas-stagger > :nth-child(3)::after {
+    animation-delay: 90ms;
+  }
+  .atlas-stagger > :nth-child(4)::after {
+    animation-delay: 135ms;
+  }
+  .atlas-stagger > :nth-child(5)::after {
+    animation-delay: 180ms;
+  }
+  .atlas-stagger > :nth-child(6)::after {
+    animation-delay: 225ms;
+  }
+  .atlas-stagger > :nth-child(n + 7)::after {
+    animation-delay: 270ms;
+  }
+  .atlas-dialog::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    pointer-events: none;
+    background: var(--card);
+    animation: atlas-veil 220ms ease-out both;
+  }
+  .atlas-dialog > :not(header) {
+    animation: atlas-rise 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 }
 
@@ -81,16 +202,61 @@
     outline: 2px solid Highlight;
   }
   input,
+  select,
   [data-field-edge] {
     border: 1px solid ButtonText;
   }
   [role="radio"][aria-checked="true"] {
     outline: 2px solid Highlight;
   }
+  .atlas-mark,
+  .neutral-gate__mark {
+    border: 1px solid ButtonText;
+  }
 }
 
-/* Neutral gate: used by the static boot gate in index.html and by NeutralGate, so a cold load and the
-   React screen look identical. Opaque canvas, never the translucent scrim. */
+/* The brand mark: a primary-filled tile with an orbit ring. Shared by the gate (statically, in index.html), the sidebar and the
+   public card, so a cold load and the shell match. Decorative; never carries text. */
+.atlas-mark,
+.neutral-gate__mark {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--primary) 80%, white),
+    var(--primary) 55%,
+    color-mix(in srgb, var(--primary) 80%, black)
+  );
+  box-shadow: 0 6px 16px -6px
+    color-mix(in srgb, var(--primary) 70%, transparent);
+}
+.atlas-mark::after,
+.neutral-gate__mark::after {
+  content: "";
+  position: absolute;
+  inset: 27%;
+  border-radius: 50%;
+  border: 2px solid var(--primary-foreground);
+  box-sizing: border-box;
+  opacity: 0.92;
+}
+.atlas-mark--lg,
+.neutral-gate__mark {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-xl);
+}
+.atlas-mark--lg::after,
+.neutral-gate__mark::after {
+  border-width: 3px;
+}
+
+/* Neutral gate: used by the static boot gate in index.html, by NeutralGate and by the resume gate, so a cold load and the
+   React screen look identical. Opaque background, never the translucent scrim. */
 .neutral-gate {
   position: fixed;
   inset: 0;
@@ -105,30 +271,68 @@
   margin: 0;
   padding: 24px;
   border: 0;
-  background: var(--canvas);
-  color: var(--ink-1);
+  background: var(--background);
+  color: var(--foreground);
 }
 .neutral-gate__body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
   text-align: center;
+  max-width: 420px;
 }
 .neutral-gate__mark {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background: var(--action-fill);
+  margin-bottom: 6px;
 }
 .neutral-gate h1 {
-  font-size: 22px;
-  font-weight: 500;
-  letter-spacing: -0.015em;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.15;
 }
 .neutral-gate p {
   min-height: 1.5em;
-  color: var(--ink-2);
+  color: var(--muted-foreground);
+}
+/* An indeterminate progress line under the message: the gate is waiting on something, and says so without words. */
+.neutral-gate__body::after {
+  content: "";
+  display: block;
+  width: 112px;
+  height: 3px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background-color: color-mix(in srgb, var(--primary) 20%, transparent);
+  background-image: linear-gradient(90deg, var(--primary), var(--primary));
+  background-size: 34% 100%;
+  background-repeat: no-repeat;
+  background-position: 0 0;
+}
+@keyframes atlas-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+@keyframes atlas-slide {
+  from {
+    background-position: -60% 0;
+  }
+  to {
+    background-position: 160% 0;
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .neutral-gate__mark {
+    animation: atlas-breathe 2.6s ease-in-out infinite;
+  }
+  .neutral-gate__body::after {
+    animation: atlas-slide 1.4s ease-in-out infinite;
+  }
 }
 
 /* Appearance previews (WF-SETTINGS-05): fixed literal colours on purpose. A preview of the dark theme is dark
@@ -137,16 +341,16 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  height: 44px;
-  padding: 0 8px;
+  height: 48px;
+  padding: 0 9px;
   border: 1px solid;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
 }
 .appearance-preview i {
   width: 14px;
   height: 14px;
   border-radius: 4px;
-  background: #5b51d4;
+  background: #8e80ff;
 }
 .appearance-preview b {
   flex: 1;
@@ -154,18 +358,18 @@
   border-radius: 3px;
 }
 .appearance-preview[data-preview="dark"] {
-  background: #121316;
-  border-color: #292d31;
+  background: #131319;
+  border-color: #26262f;
 }
 .appearance-preview[data-preview="dark"] b {
-  background: #2a2c30;
+  background: #2a2a34;
 }
 .appearance-preview[data-preview="light"] {
-  background: #f4f5f7;
-  border-color: #dfe1e5;
+  background: #f7f7fa;
+  border-color: #e2e2ea;
 }
 .appearance-preview[data-preview="light"] b {
-  background: #d3d6db;
+  background: #d4d4de;
 }
 .appearance-preview--split {
   padding: 0;
@@ -177,10 +381,10 @@
   height: 100%;
 }
 .appearance-preview--split > [data-half="dark"] {
-  background: #121316;
-  border: 1px solid #292d31;
+  background: #131319;
+  border: 1px solid #26262f;
 }
 .appearance-preview--split > [data-half="light"] {
-  background: #f4f5f7;
-  border: 1px solid #dfe1e5;
+  background: #f7f7fa;
+  border: 1px solid #e2e2ea;
 }

@@ -55,16 +55,16 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
     return (
       <div
         data-recovery-state="save-failed"
-        className="flex flex-col gap-3 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+        className="flex flex-col gap-3 rounded-lg border border-destructive/35 bg-destructive/12 p-3.5"
       >
-        <p className="text-[13.5px] leading-[1.6] text-conflict-text">
+        <p className="text-sm leading-relaxed text-destructive">
           {SAVE_FAILED_TEXT}
         </p>
         <div className="flex flex-wrap gap-2">
-          <Button variant="secondary" onClick={state.onRetry}>
+          <Button variant="outline" onClick={state.onRetry}>
             Retry save
           </Button>
-          <Button variant="quiet" onClick={state.onDiscardAndReload}>
+          <Button variant="ghost" onClick={state.onDiscardAndReload}>
             Discard and reload anyway
           </Button>
         </div>
@@ -75,13 +75,13 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
     return (
       <div
         data-recovery-state="save-refused"
-        className="flex flex-col gap-3 rounded-row border border-conflict-edge bg-conflict-tint p-3.5"
+        className="flex flex-col gap-3 rounded-lg border border-destructive/35 bg-destructive/12 p-3.5"
       >
-        <p className="text-[13.5px] leading-[1.6] text-conflict-text">
+        <p className="text-sm leading-relaxed text-destructive">
           {SAVE_REFUSED_TEXT}
         </p>
         <div className="flex flex-wrap gap-2">
-          <Button variant="quiet" onClick={state.onDiscardAndReload}>
+          <Button variant="ghost" onClick={state.onDiscardAndReload}>
             Discard and reload anyway
           </Button>
         </div>
@@ -91,11 +91,11 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
   return (
     <div
       data-recovery-state="restored"
-      className="flex flex-col gap-3 rounded-row border border-action-tint-edge bg-action-tint p-3.5"
+      className="flex flex-col gap-3 rounded-lg border border-primary/25 bg-accent p-3.5"
     >
-      <p className="text-[13.5px] leading-[1.6] text-ink-1">{RESTORED_TEXT}</p>
+      <p className="text-sm leading-relaxed text-foreground">{RESTORED_TEXT}</p>
       <div className="flex flex-wrap gap-2">
-        <Button variant="quiet" onClick={state.onDiscard}>
+        <Button variant="ghost" onClick={state.onDiscard}>
           Discard instead
         </Button>
       </div>

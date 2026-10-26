@@ -150,15 +150,15 @@ export function WipeConfirmDialog({
       initialFocusSelector="[data-stay]"
       footer={
         <>
-          <Button variant="secondary" data-stay="" onClick={onClose}>
+          <Button variant="outline" data-stay="" onClick={onClose}>
             {STAY_LABEL}
           </Button>
           {known && !busy && !offline ? (
-            <Button variant="primary" onClick={() => void confirm()}>
+            <Button variant="default" onClick={() => void confirm()}>
               {confirmLabel(kind, unsynced)}
             </Button>
           ) : (
-            <Button variant="primary" disabled reason={waitingReason}>
+            <Button variant="default" disabled reason={waitingReason}>
               {confirmLabel(kind, unsynced)}
             </Button>
           )}

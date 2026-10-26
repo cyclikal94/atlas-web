@@ -15,15 +15,17 @@ export function GateGallery() {
       <CacheGate>
         <section
           aria-labelledby="cached-heading"
-          className="rounded-row border border-hairline-strong bg-panel p-3.5"
+          className="rounded-lg border border-border bg-card p-3.5"
         >
           <h2
             id="cached-heading"
-            className="text-[14px] font-medium text-ink-1"
+            className="text-sm font-medium text-foreground"
           >
             Tasks
           </h2>
-          <p className="text-[13px] text-ink-2">Water plants · Take bins out</p>
+          <p className="text-sm text-muted-foreground">
+            Water plants · Take bins out
+          </p>
         </section>
       </CacheGate>
     </main>

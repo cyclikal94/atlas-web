@@ -1,5 +1,7 @@
 import { type ReactNode, useEffect, useRef } from "react";
+import { AtlasMark } from "../../components/ui/brand";
 import { Button } from "../../components/ui/button";
+import { Card } from "../../components/ui/card";
 import { NeutralStatus } from "../../components/ui/neutral-status";
 import { authFeedback, type FeedbackItem } from "./feedback";
 import { MessageText } from "./MessageText";
@@ -38,23 +40,27 @@ export function PublicCard({
   return (
     <main
       data-public-surface={surface}
-      className="mx-auto flex min-h-dvh w-full max-w-[440px] flex-col justify-center gap-3 px-4 py-10"
+      className="atlas-enter mx-auto flex min-h-dvh w-full max-w-[460px] flex-col justify-center gap-4 px-4 py-10"
     >
       {banners}
-      <div className="flex flex-col gap-5 rounded-row border border-hairline-strong bg-panel p-5 tablet:p-6">
-        <div className="flex flex-col gap-3">
-          <span aria-hidden="true" className="neutral-gate__mark" />
-          <p className="text-[13px] font-medium text-ink-2">Atlas</p>
+      <Card className="gap-6 px-6 py-6 tablet:px-8 tablet:py-8">
+        <div className="flex flex-col gap-4">
+          <span className="flex items-center gap-3">
+            <AtlasMark size="lg" />
+            <span className="text-base font-semibold tracking-tight text-foreground">
+              Atlas
+            </span>
+          </span>
           <h1
             ref={headingRef}
             tabIndex={-1}
-            className="text-[22px] font-medium tracking-[-0.015em] text-ink-1"
+            className="text-2xl font-semibold leading-tight tracking-tight text-foreground"
           >
             {heading}
           </h1>
         </div>
         {children}
-      </div>
+      </Card>
     </main>
   );
 }
@@ -68,7 +74,7 @@ export function FeedbackBanners({ items }: { items: readonly FeedbackItem[] }) {
         <div
           key={item.id}
           data-feedback={item.kind}
-          className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-raised p-3.5"
+          className="flex flex-col items-start gap-2 rounded-xl border bg-card p-4 shadow-sm"
         >
           <NeutralStatus kind="status">
             {item.kind === "superseded" ? (
@@ -94,7 +100,7 @@ export function FeedbackBanners({ items }: { items: readonly FeedbackItem[] }) {
               <MessageText message={item.message} />
             )}
           </NeutralStatus>
-          <Button variant="quiet" onClick={() => authFeedback.dismiss(item.id)}>
+          <Button variant="ghost" onClick={() => authFeedback.dismiss(item.id)}>
             Dismiss
           </Button>
         </div>

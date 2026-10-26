@@ -6,7 +6,7 @@ export function PageHeading({ children }: { children: ReactNode }) {
     <h1
       data-page-heading=""
       tabIndex={-1}
-      className="text-[26px] font-semibold tracking-[-0.025em] text-ink-1 tablet:text-[30px]"
+      className="text-2xl font-semibold leading-tight tracking-tight text-foreground tablet:text-3xl"
     >
       {children}
     </h1>

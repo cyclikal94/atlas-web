@@ -12,10 +12,10 @@ export type ResolvedTheme = "light" | "dark";
 export const APPEARANCE_STORAGE_KEY = "atlas.appearance.v1";
 export const LIGHT_QUERY = "(prefers-color-scheme: light)";
 
-/** Kept in step with --canvas in tokens.css; asserted by tests/design/tokens.test.ts. */
+/** Kept in step with --background in tokens.css; asserted by tests/design/tokens.test.ts. */
 export const THEME_COLOR: Record<ResolvedTheme, string> = {
-  dark: "#08090A",
-  light: "#F7F8F9",
+  dark: "#0C0C10",
+  light: "#F7F7FA",
 };
 
 export function parsePreference(raw: unknown): AppearancePreference {

@@ -19,7 +19,7 @@ export function ReadNotice({
       className="flex flex-col gap-2"
       {...(stale ? { "data-list-stale": error } : { "data-list-error": error })}
     >
-      <p className="text-[12.5px] text-ink-2">
+      <p className="text-xs text-muted-foreground">
         {error === "unstable" ? copy.LOCAL_UNSTABLE : copy.LOCAL_FAILED}
         {stale ? ` ${copy.SHOWING_LAST_READ}` : ""}
       </p>

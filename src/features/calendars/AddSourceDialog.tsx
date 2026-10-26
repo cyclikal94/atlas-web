@@ -137,15 +137,15 @@ export function AddSourceDialog({
       footer={
         <>
           {busy ? (
-            <Button variant="primary" disabled reason="Saving…">
+            <Button variant="default" disabled reason="Saving…">
               {CREATE_SOURCE}
             </Button>
           ) : (
-            <Button variant="primary" type="submit" form={formId}>
+            <Button variant="default" type="submit" form={formId}>
               {CREATE_SOURCE}
             </Button>
           )}
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="outline" onClick={onClose}>
             {CANCEL}
           </Button>
         </>
@@ -177,7 +177,9 @@ export function AddSourceDialog({
           onChange={(event) => setTimezone(event.target.value)}
         />
         <TimezoneSuggestions id={zonesId} />
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">{ADD_HELP}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {ADD_HELP}
+        </p>
         <FormMessage message={message} />
       </form>
     </Dialog>

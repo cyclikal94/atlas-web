@@ -1,4 +1,6 @@
+import { OctagonAlert } from "lucide-react";
 import { useEffect } from "react";
+import { Alert, AlertDescription } from "../../../components/ui/alert";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import type { LoadError } from "./useLoad";
@@ -25,15 +27,13 @@ export function LoadFailed({
     announcer.announce(message, "assertive");
   }, [message]);
   return (
-    <div
-      data-load-error=""
-      className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
-    >
-      <p className="text-[13.5px] text-ink-1">{message}</p>
-      {error.requestId ? (
-        <p className="text-[12px] text-ink-2">Request ID: {error.requestId}</p>
-      ) : null}
-      <Button onClick={onRetry}>Try again</Button>
-    </div>
+    <Alert data-load-error="" variant="destructive" className="py-2.5">
+      <OctagonAlert aria-hidden="true" />
+      <p className="col-start-2 text-sm font-medium leading-snug">{message}</p>
+      <AlertDescription>
+        {error.requestId ? <p>Request ID: {error.requestId}</p> : null}
+        <Button onClick={onRetry}>Try again</Button>
+      </AlertDescription>
+    </Alert>
   );
 }

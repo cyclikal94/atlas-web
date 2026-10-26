@@ -96,11 +96,11 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
       >
         <h3
           id="no-password-heading"
-          className="text-[14px] font-medium text-ink-1"
+          className="text-sm font-medium text-foreground"
         >
           {NO_PASSWORD_HEADING}
         </h3>
-        <p className="text-[13px] leading-[1.6] text-ink-2">
+        <p className="text-sm leading-relaxed text-muted-foreground">
           {NO_PASSWORD_BODY}
         </p>
       </section>
@@ -168,7 +168,7 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
       : null;
   return (
     <section aria-labelledby="password-heading" className="flex flex-col gap-3">
-      <h3 id="password-heading" className="text-[14px] font-medium text-ink-1">
+      <h3 id="password-heading" className="text-sm font-medium text-foreground">
         {PASSWORD_HEADING}
       </h3>
       <form
@@ -185,7 +185,6 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
           data-focus-key="password-current"
           type="password"
           autoComplete="current-password"
-          surface="panel"
           value={current}
           aria-invalid={error?.field === "current" ? true : undefined}
           onChange={(event) => setCurrent(event.target.value)}
@@ -199,37 +198,36 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
             data-focus-key="password-new"
             type="password"
             autoComplete="new-password"
-            surface="panel"
             value={next}
             aria-describedby={`${ids.hint} ${ids.consequence}`}
             aria-invalid={error?.field === "next" ? true : undefined}
             onChange={(event) => setNext(event.target.value)}
           />
-          <p id={ids.hint} className="text-[12px] text-ink-2">
+          <p id={ids.hint} className="text-xs text-muted-foreground">
             {PASSWORD_HINT}
           </p>
         </div>
         <p
           id={ids.consequence}
-          className="text-[12.5px] leading-[1.6] text-ink-2"
+          className="text-xs leading-relaxed text-muted-foreground"
         >
           {PASSWORD_CONSEQUENCE}
         </p>
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           {WRONG_CURRENT_WARNING}
         </p>
         {error ? (
-          <p data-error="" className="text-[13px] text-ink-1">
+          <p data-error="" className="text-sm text-foreground">
             {error.text}
           </p>
         ) : null}
         <div>
           {reason ? (
-            <Button type="submit" variant="primary" disabled reason={reason}>
+            <Button type="submit" variant="default" disabled reason={reason}>
               Change password
             </Button>
           ) : (
-            <Button type="submit" variant="primary">
+            <Button type="submit" variant="default">
               Change password
             </Button>
           )}

@@ -1,19 +1,23 @@
 import { Link } from "@tanstack/react-router";
+import { Compass } from "lucide-react";
+import { buttonVariants } from "../components/ui/button";
+import { EmptyState } from "../components/ui/empty-state";
 import { PageHeading } from "../components/ui/page-heading";
 
 export function NotFound() {
   return (
-    <div className="flex max-w-[620px] flex-col gap-3">
+    <div className="atlas-enter flex max-w-[620px] flex-col gap-6">
       <PageHeading>Page not found</PageHeading>
-      <p className="text-[14px] leading-[1.6] text-ink-2">
-        Nothing lives at this address.
-      </p>
-      <Link
-        to="/today"
-        className="w-fit text-[14px] text-action-ink underline underline-offset-2"
+      <EmptyState
+        icon={Compass}
+        action={
+          <Link to="/today" className={buttonVariants({ variant: "default" })}>
+            Go to Today
+          </Link>
+        }
       >
-        Go to Today
-      </Link>
+        Nothing lives at this address.
+      </EmptyState>
     </div>
   );
 }

@@ -46,12 +46,16 @@ export interface DialogProps {
   sheetBelow?: "tablet" | "desktop";
 }
 
-/** The panel's classes: a full-screen sheet below the breakpoint, the centred dialog from it. Written out whole for Tailwind. */
+/**
+ * The panel's classes (shadcn/ui's dialog content, as a full-screen sheet below the breakpoint and a centred panel from it).
+ * Written out whole for Tailwind. The panel itself never animates its geometry (a control's measured size must not change);
+ * the veil over it clears and its body settles (`atlas-dialog` in base.css).
+ */
 const PANEL: Readonly<Record<"tablet" | "desktop", string>> = {
   tablet:
-    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[440px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-dialog tablet:border tablet:border-hairline-strong tablet:shadow-modal",
+    "atlas-dialog fixed inset-0 z-50 flex flex-col overflow-hidden bg-card text-card-foreground tablet:inset-auto tablet:left-1/2 tablet:top-[8vh] tablet:max-h-[84vh] tablet:w-[460px] tablet:max-w-[calc(100vw-32px)] tablet:-translate-x-1/2 tablet:rounded-xl tablet:border tablet:shadow-lg",
   desktop:
-    "fixed inset-0 z-50 flex flex-col overflow-hidden bg-panel desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[440px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-dialog desktop:border desktop:border-hairline-strong desktop:shadow-modal",
+    "atlas-dialog fixed inset-0 z-50 flex flex-col overflow-hidden bg-card text-card-foreground desktop:inset-auto desktop:left-1/2 desktop:top-[8vh] desktop:max-h-[84vh] desktop:w-[460px] desktop:max-w-[calc(100vw-32px)] desktop:-translate-x-1/2 desktop:rounded-xl desktop:border desktop:shadow-lg",
 };
 
 /**
@@ -137,7 +141,7 @@ export function Dialog({
         <div
           aria-hidden="true"
           data-dialog-scrim=""
-          className="fixed inset-0 z-40 bg-scrim"
+          className="fixed inset-0 z-40 bg-black/60 animate-in fade-in-0 duration-200 backdrop-blur-[2px]"
         />
         <DialogPrimitive.Content
           ref={setContent}
@@ -168,7 +172,7 @@ export function Dialog({
           data-dialog-sheet-below={sheetBelow}
           className={PANEL[sheetBelow]}
         >
-          <header className="flex items-center gap-3 border-b border-hairline px-[18px] py-4">
+          <header className="flex items-center gap-3 border-b px-5 py-4">
             {/*
               The title never squeezes below its longest word, so the sync control gives way first (a flex item's automatic minimum is
               its min-content width). That minimum is capped by the max-width, which keeps 160 px for the sync control and Close: a word
@@ -176,11 +180,11 @@ export function Dialog({
               controls out of the dialog.
             */}
             <div className="max-w-[calc(100%-160px)] break-words">
-              <DialogPrimitive.Title className="text-[16px] font-medium tracking-[-0.01em] text-ink-1">
+              <DialogPrimitive.Title className="text-lg font-semibold leading-tight tracking-tight">
                 {title}
               </DialogPrimitive.Title>
               {description ? (
-                <DialogPrimitive.Description className="mt-0.5 text-[12.5px] text-ink-2">
+                <DialogPrimitive.Description className="mt-1 text-sm text-muted-foreground">
                   {description}
                 </DialogPrimitive.Description>
               ) : null}
@@ -201,17 +205,17 @@ export function Dialog({
                   event.preventDefault();
                   discard();
                 }}
-                className="atlas-transition flex size-11 shrink-0 items-center justify-center rounded-control text-ink-2 hover:text-ink-1"
+                className="atlas-transition flex size-11 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-accent-foreground"
               >
-                <X aria-hidden="true" size={18} />
+                <X aria-hidden="true" className="size-[18px]" />
               </DialogPrimitive.Close>
             </div>
           </header>
-          <div ref={setBody} className="flex-1 overflow-y-auto p-[18px]">
+          <div ref={setBody} className="flex-1 overflow-y-auto p-5">
             {children}
           </div>
           {footer ? (
-            <footer className="flex items-center gap-2 border-t border-hairline bg-inset px-[18px] py-3.5">
+            <footer className="flex items-center gap-2 border-t bg-muted/60 px-5 py-3.5">
               {footer}
             </footer>
           ) : null}

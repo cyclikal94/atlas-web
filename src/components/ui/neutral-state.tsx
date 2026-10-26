@@ -4,7 +4,9 @@ import type {
   NeutralActions,
   NeutralStateId,
 } from "../../session";
+import { AtlasMark } from "./brand";
 import { Button } from "./button";
+import { Card } from "./card";
 import { isGateOpen } from "./gate-dialog";
 
 /**
@@ -21,7 +23,7 @@ import { isGateOpen } from "./gate-dialog";
  */
 type ActionName = "signIn" | "retry" | "reload" | "reviewDevice";
 
-interface Card {
+interface NeutralCard {
   heading: string;
   message: string;
   /** A second paragraph under the message, before the control. */
@@ -33,7 +35,7 @@ interface Card {
 }
 
 export const NEUTRAL_COPY: Readonly<
-  Record<Exclude<NeutralStateId, "wipe.consent">, Card>
+  Record<Exclude<NeutralStateId, "wipe.consent">, NeutralCard>
 > = {
   "1a.confirming": {
     heading: "Confirming your last action",
@@ -204,10 +206,13 @@ export function NeutralState({ state, actions, consent }: NeutralStateProps) {
     if (!isGateOpen()) heading.current?.focus();
   }, [state]);
 
-  const main = "mx-auto flex max-w-[620px] flex-col gap-4 px-5 py-16";
-  const h1 = "text-[26px] font-semibold tracking-[-0.025em] text-ink-1";
-  const body = "text-[14px] leading-[1.6] text-ink-1";
-  const muted = "text-[14px] leading-[1.6] text-ink-2";
+  // One centred card, as the public surfaces draw it (PublicCard): the mark, the heading, then the message and its control.
+  const main =
+    "atlas-enter mx-auto flex min-h-dvh w-full max-w-[520px] flex-col justify-center px-4 py-10";
+  const h1 =
+    "text-2xl font-semibold leading-tight tracking-tight text-foreground";
+  const body = "text-sm leading-relaxed text-foreground";
+  const muted = "text-sm leading-relaxed text-muted-foreground";
 
   if (state === "wipe.consent") {
     // The choice is made on THIS prompt: the ticket the view carried with it names it (two accounts can be waiting).
@@ -216,20 +221,23 @@ export function NeutralState({ state, actions, consent }: NeutralStateProps) {
     };
     return (
       <main data-neutral-state={state} className={main}>
-        <h1 ref={heading} tabIndex={-1} className={h1}>
-          {CONSENT_HEADING}
-        </h1>
-        <p role="status" className={body}>
-          {consentMessage(consent?.count ?? 0)}
-        </p>
-        <div className="flex flex-wrap gap-3">
-          <Button variant="secondary" onClick={() => answer("keep")}>
-            {CONSENT_KEEP}
-          </Button>
-          <Button variant="primary" onClick={() => answer("delete")}>
-            {CONSENT_DELETE}
-          </Button>
-        </div>
+        <Card className="gap-4 px-6 py-6 tablet:px-7 tablet:py-7">
+          <AtlasMark size="lg" />
+          <h1 ref={heading} tabIndex={-1} className={h1}>
+            {CONSENT_HEADING}
+          </h1>
+          <p role="status" className={body}>
+            {consentMessage(consent?.count ?? 0)}
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <Button variant="outline" onClick={() => answer("keep")}>
+              {CONSENT_KEEP}
+            </Button>
+            <Button variant="default" onClick={() => answer("delete")}>
+              {CONSENT_DELETE}
+            </Button>
+          </div>
+        </Card>
       </main>
     );
   }
@@ -237,24 +245,29 @@ export function NeutralState({ state, actions, consent }: NeutralStateProps) {
   const card = NEUTRAL_COPY[state];
   return (
     <main data-neutral-state={state} className={main}>
-      <h1 ref={heading} tabIndex={-1} className={h1}>
-        {card.heading}
-      </h1>
-      <p role={card.live} className={body}>
-        {card.message}
-      </p>
-      {card.more ? <p className={muted}>{card.more}</p> : null}
-      {card.button ? (
-        <div>
-          <Button
-            variant="primary"
-            onClick={() => actions[card.button?.action ?? "retry"]()}
-          >
-            {card.button.label}
-          </Button>
-        </div>
-      ) : null}
-      {card.note ? <p className={muted}>{card.note}</p> : null}
+      <Card className="gap-4 px-6 py-6 tablet:px-7 tablet:py-7">
+        <AtlasMark size="lg" />
+        <h1 ref={heading} tabIndex={-1} className={h1}>
+          {card.heading}
+        </h1>
+        <p role={card.live} className={body}>
+          {card.message}
+        </p>
+        {card.more ? <p className={muted}>{card.more}</p> : null}
+        {card.button ? (
+          <div>
+            <Button
+              variant="default"
+              onClick={() => actions[card.button?.action ?? "retry"]()}
+            >
+              {card.button.label}
+            </Button>
+          </div>
+        ) : null}
+        {card.note ? (
+          <p className={`${muted} border-t pt-4`}>{card.note}</p>
+        ) : null}
+      </Card>
     </main>
   );
 }

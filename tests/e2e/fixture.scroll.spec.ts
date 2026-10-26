@@ -419,7 +419,9 @@ async function sharedInputClasses(page: Page) {
     const classes = await gallery
       .getByTestId("input-canvas")
       .getAttribute("class");
-    expect(classes, "the shared input's minimum height").toContain("min-h-11");
+    expect(classes, "the shared input's minimum height").toMatch(
+      /\b(min-)?h-11\b/,
+    );
     return classes ?? "";
   } finally {
     await gallery.close();

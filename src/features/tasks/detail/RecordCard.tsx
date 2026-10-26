@@ -90,9 +90,12 @@ export function RecordCard({
       tabIndex={-1}
       aria-labelledby={heading}
       data-record-card={goal.kind}
-      className="flex flex-col gap-3 rounded-row border border-hairline-strong bg-panel p-4"
+      className="flex flex-col gap-3 rounded-xl border bg-card p-5 shadow-sm"
     >
-      <h2 id={heading} className="text-[15px] font-medium text-ink-1">
+      <h2
+        id={heading}
+        className="text-base font-semibold tracking-tight text-foreground"
+      >
         {RECORD_COPY.heading}
       </h2>
       {goal.kind === "checkbox" ? (
@@ -101,7 +104,7 @@ export function RecordCard({
             blocked(done ? copy.MARK_NOT_DONE : copy.MARK_DONE)
           ) : (
             <Button
-              variant={done ? "secondary" : "primary"}
+              variant={done ? "outline" : "default"}
               onClick={() =>
                 void run(() =>
                   actions.record(
@@ -119,7 +122,7 @@ export function RecordCard({
         </span>
       ) : goal.kind === "numeric" ? (
         <div className="flex flex-col gap-3">
-          <p className="text-[13.5px] text-ink-1" data-record-progress="">
+          <p className="text-sm text-foreground" data-record-progress="">
             {RECORD_COPY.progress(
               amountShown,
               goal.minimum ?? goal.maximum,
@@ -131,14 +134,14 @@ export function RecordCard({
             {(["amount", "observe"] as const).map((m) => (
               <label
                 key={m}
-                className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1"
+                className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground"
               >
                 <input
                   type="radio"
                   name={`${heading}-mode`}
                   checked={mode === m}
                   onChange={() => input.edit((v) => ({ ...v, mode: m }))}
-                  className="size-[15px]"
+                  className="size-4"
                 />
                 {m === "amount" ? RECORD_COPY.logAmount : RECORD_COPY.checkedOn}
               </label>
@@ -164,7 +167,7 @@ export function RecordCard({
                 blocked(copy.RECORD)
               ) : (
                 <Button
-                  variant="primary"
+                  variant="default"
                   onClick={() => {
                     const value = parseDecimalInput(amount);
                     if (value === null) {
@@ -199,7 +202,7 @@ export function RecordCard({
           ) : (
             <span>
               <Button
-                variant="primary"
+                variant="default"
                 onClick={() =>
                   void run(() =>
                     actions.record(
@@ -216,10 +219,7 @@ export function RecordCard({
             </span>
           )}
           {error ? (
-            <p
-              id={`${heading}-error`}
-              className="text-[12.5px] text-conflict-text"
-            >
+            <p id={`${heading}-error`} className="text-xs text-destructive">
               {error}
             </p>
           ) : null}
@@ -233,7 +233,7 @@ export function RecordCard({
             const checked = summary?.checked.includes(item.id) ?? false;
             return (
               <li key={item.id}>
-                <label className="inline-flex min-h-11 items-center gap-2.5 text-[13.5px] text-ink-1">
+                <label className="inline-flex min-h-11 items-center gap-2.5 text-sm text-foreground">
                   <input
                     type="checkbox"
                     checked={checked}
@@ -255,7 +255,7 @@ export function RecordCard({
                         ),
                       )
                     }
-                    className="size-[15px]"
+                    className="size-4"
                   />
                   {item.label}
                 </label>
@@ -263,13 +263,16 @@ export function RecordCard({
             );
           })}
           {reason !== null ? (
-            <li id={`${heading}-reason`} className="text-[12px] text-ink-2">
+            <li
+              id={`${heading}-reason`}
+              className="text-xs text-muted-foreground"
+            >
               {reason}
             </li>
           ) : null}
         </ul>
       )}
-      <p className="text-[12px] text-ink-2">{RECORD_COPY.offline}</p>
+      <p className="text-xs text-muted-foreground">{RECORD_COPY.offline}</p>
     </section>
   );
 }

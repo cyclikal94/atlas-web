@@ -84,7 +84,7 @@ export function ListDetail({ listId }: { listId: string }) {
       );
     return (
       <Frame state="loading">
-        <p aria-busy="true" className="text-[13px] text-ink-2">
+        <p aria-busy="true" className="text-sm text-muted-foreground">
           {DETAIL.loading}
         </p>
       </Frame>
@@ -140,7 +140,7 @@ export function ListDetail({ listId }: { listId: string }) {
         list.pending ? (
           <span
             data-pending-mark={list.pending}
-            className="text-[12px] text-ink-2"
+            className="text-xs text-muted-foreground"
           >
             {copy.PENDING[list.pending]}
           </span>
@@ -149,7 +149,7 @@ export function ListDetail({ listId }: { listId: string }) {
       header={
         <>
           {row.archived ? (
-            <p className="text-[13px] text-ink-2" data-list-archived="">
+            <p className="text-sm text-muted-foreground" data-list-archived="">
               {DETAIL.archivedNote}
             </p>
           ) : null}
@@ -185,7 +185,7 @@ export function ListDetail({ listId }: { listId: string }) {
         <ReadNotice error={view.error} stale retry={view.retry} />
       ) : null}
       {conflicted ? (
-        <p className="text-[12.5px] text-conflict-text" data-list-attention="">
+        <p className="text-xs text-destructive" data-list-attention="">
           {DETAIL.attention}{" "}
           <Link
             to="/sync"
@@ -202,7 +202,7 @@ export function ListDetail({ listId }: { listId: string }) {
         return (
           <p
             key={draft.local_id}
-            className="text-[12.5px] text-conflict-text"
+            className="text-xs text-destructive"
             data-list-refused={draft.local_id}
           >
             {DETAIL.refused(task?.label ?? null)}{" "}
@@ -217,13 +217,13 @@ export function ListDetail({ listId }: { listId: string }) {
         );
       })}
       {!readable ? (
-        <p className="text-[13.5px] text-ink-2" data-list-unreadable="">
+        <p className="text-sm text-muted-foreground" data-list-unreadable="">
           {DETAIL.unreadable}
         </p>
       ) : (
         <section className="flex flex-col gap-3">
           {rows.length === 0 ? (
-            <p className="text-[13px] text-ink-2">{DETAIL.empty}</p>
+            <p className="text-sm text-muted-foreground">{DETAIL.empty}</p>
           ) : (
             <List className="flex flex-col">
               {rows.map((item, index) => {
@@ -234,38 +234,38 @@ export function ListDetail({ listId }: { listId: string }) {
                     key={item.id}
                     data-list-row={item.kind}
                     data-list-task={item.id}
-                    className="flex min-h-11 list-none items-center gap-3 border-t border-hairline py-1"
+                    className="flex min-h-11 list-none items-center gap-3 border-t border-border py-1"
                   >
                     {item.kind === "task" ? (
                       <Link
                         to="/tasks/$taskId"
                         params={{ taskId: item.id }}
                         search={{}}
-                        className="atlas-transition flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-row px-2 text-[14px] text-ink-1 hover:bg-row-hover"
+                        className="atlas-transition flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-sm text-foreground hover:bg-accent"
                       >
                         <span className="truncate">{item.title}</span>
                         {item.archived ? (
-                          <span className="flex-none text-[11.5px] text-ink-2">
+                          <span className="flex-none text-xs text-muted-foreground">
                             {DETAIL.archivedTask}
                           </span>
                         ) : null}
                         {item.projected ? (
-                          <span className="flex-none text-[11.5px] text-ink-2">
+                          <span className="flex-none text-xs text-muted-foreground">
                             {DETAIL.notSent}
                           </span>
                         ) : null}
                       </Link>
                     ) : (
                       <span
-                        className="flex min-w-0 flex-1 items-center gap-2 px-2 text-[14px] text-ink-2"
+                        className="flex min-w-0 flex-1 items-center gap-2 px-2 text-sm text-muted-foreground"
                         data-list-withheld=""
                       >
                         <span
                           aria-hidden="true"
-                          className="size-[7px] flex-none rounded-full bg-withheld"
+                          className="size-[7px] flex-none rounded-full bg-muted-foreground"
                         />
                         {DETAIL.withheld}
-                        <span className="text-[11.5px] text-ink-2">
+                        <span className="text-xs text-muted-foreground">
                           {DETAIL.withheldTag}
                         </span>
                       </span>
@@ -273,14 +273,14 @@ export function ListDetail({ listId }: { listId: string }) {
                     {item.mark ? (
                       <span
                         data-pending-mark={item.mark}
-                        className="flex-none text-[11.5px] text-ink-2"
+                        className="flex-none text-xs text-muted-foreground"
                       >
                         {copy.PENDING[item.mark]}
                       </span>
                     ) : null}
                     {editable ? (
                       <Button
-                        variant="quiet"
+                        variant="ghost"
                         data-list-remove={item.id}
                         aria-label={
                           title === null
@@ -312,7 +312,10 @@ export function ListDetail({ listId }: { listId: string }) {
           </div>
         </section>
       )}
-      <p className="max-w-[560px] text-[12px] text-ink-2" data-list-caption="">
+      <p
+        className="max-w-[560px] text-xs text-muted-foreground"
+        data-list-caption=""
+      >
         {DETAIL.caption}
       </p>
       {dialog === "rename" ? (
@@ -388,7 +391,7 @@ function BackLink() {
   return (
     <Link
       to="/tasks/lists"
-      className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13px] text-ink-2 hover:text-ink-1"
+      className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
     >
       {DETAIL.back}
     </Link>
@@ -399,7 +402,7 @@ function BackLink() {
 function absent(dialog: ReactNode = null) {
   return (
     <Frame state="absent">
-      <p className="text-[13.5px] text-ink-2">{DETAIL.absent}</p>
+      <p className="text-sm text-muted-foreground">{DETAIL.absent}</p>
       {dialog}
     </Frame>
   );

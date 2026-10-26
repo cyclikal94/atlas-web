@@ -39,7 +39,7 @@
       document.head.appendChild(meta);
     }
     meta.removeAttribute("media");
-    meta.setAttribute("content", resolved === "light" ? "#F7F8F9" : "#08090A");
+    meta.setAttribute("content", resolved === "light" ? "#F7F7FA" : "#0C0C10");
   } catch {
     /* The stylesheet's dark default (or the device setting for Auto) still applies. */
   }

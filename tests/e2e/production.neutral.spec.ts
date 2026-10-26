@@ -297,7 +297,7 @@ test.describe("no flash of the wrong theme (B3)", () => {
       colorScheme: "dark",
       stored: "light",
       canvas: LIGHT.canvas,
-      meta: "#F7F8F9",
+      meta: "#F7F7FA",
       theme: "light",
     },
     {
@@ -305,7 +305,7 @@ test.describe("no flash of the wrong theme (B3)", () => {
       colorScheme: "light",
       stored: "dark",
       canvas: DARK.canvas,
-      meta: "#08090A",
+      meta: "#0C0C10",
       theme: "dark",
     },
     {
@@ -313,7 +313,7 @@ test.describe("no flash of the wrong theme (B3)", () => {
       colorScheme: "light",
       stored: undefined,
       canvas: LIGHT.canvas,
-      meta: "#F7F8F9",
+      meta: "#F7F7FA",
       theme: null,
     },
     {
@@ -321,7 +321,7 @@ test.describe("no flash of the wrong theme (B3)", () => {
       colorScheme: "dark",
       stored: undefined,
       canvas: DARK.canvas,
-      meta: "#08090A",
+      meta: "#0C0C10",
       theme: null,
     },
     {
@@ -329,7 +329,7 @@ test.describe("no flash of the wrong theme (B3)", () => {
       colorScheme: "light",
       stored: "banana",
       canvas: LIGHT.canvas,
-      meta: "#F7F8F9",
+      meta: "#F7F7FA",
       theme: null,
     },
   ] as const;

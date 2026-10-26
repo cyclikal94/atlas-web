@@ -260,22 +260,22 @@ export function LinkCalendarDialog({
       footer={
         <>
           {busy ? (
-            <Button variant="primary" disabled reason="Working…">
+            <Button variant="default" disabled reason="Working…">
               {uncertain ? RETRY : CONNECT}
             </Button>
           ) : !available.enabled ? (
-            <Button variant="primary" disabled reason={available.reason ?? ""}>
+            <Button variant="default" disabled reason={available.reason ?? ""}>
               {CONNECT}
             </Button>
           ) : (
-            <Button variant="primary" type="submit" form={formId}>
+            <Button variant="default" type="submit" form={formId}>
               {uncertain ? RETRY : CONNECT}
             </Button>
           )}
           {uncertain && !busy && available.enabled ? (
             <Button onClick={() => void check()}>{CHECK}</Button>
           ) : null}
-          <Button variant="secondary" onClick={onClose}>
+          <Button variant="outline" onClick={onClose}>
             {CANCEL}
           </Button>
         </>
@@ -326,7 +326,9 @@ export function LinkCalendarDialog({
           {...entry}
           onChange={(event) => editSecret("bearer", event)}
         />
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">{SECRET_HELP}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {SECRET_HELP}
+        </p>
         <FormMessage message={message} />
       </form>
     </Dialog>

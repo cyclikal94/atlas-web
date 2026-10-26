@@ -297,14 +297,14 @@ function DefaultsDialog({
       initialFocusSelector='[role="tab"][aria-selected="true"]'
       sheetBelow="desktop"
       footer={
-        <Button variant="secondary" onClick={done}>
+        <Button variant="outline" onClick={done}>
           {copy.CLOSE}
         </Button>
       }
     >
       <div className="flex flex-col gap-4">
-        <p className="text-[12.5px] leading-[1.55] text-ink-2">
-          <strong className="font-medium text-ink-1">
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          <strong className="font-medium text-foreground">
             {copy.REQUIRES_CONNECTION}
           </strong>{" "}
           {copy.DEFAULTS_ONLINE_ONLY}
@@ -329,7 +329,7 @@ function DefaultsDialog({
               tabIndex={each === kind ? 0 : -1}
               onClick={() => onKindChange(each)}
               onKeyDown={(event) => onTabKey(event, at)}
-              className="atlas-transition min-h-11 rounded-control border border-hairline-strong px-3 text-[13px] text-ink-1 aria-selected:border-action-fill aria-selected:font-medium"
+              className="atlas-transition min-h-11 rounded-md border border-border px-3 text-sm text-foreground aria-selected:border-primary aria-selected:font-medium"
             >
               {KIND_LABEL[each]}
             </button>
@@ -346,7 +346,7 @@ function DefaultsDialog({
             householdName={primary?.name ?? null}
           />
           {!resolved.known && (env.online || formsRead) ? (
-            <p className="text-[12.5px] text-ink-2" data-chain-unknown="">
+            <p className="text-xs text-muted-foreground" data-chain-unknown="">
               {copy.CHAIN_UNKNOWN(copy.MISSING[resolved.missing])}
             </p>
           ) : null}
@@ -362,7 +362,7 @@ function DefaultsDialog({
             <>
               {!env.online ? (
                 <p
-                  className="text-[12.5px] text-ink-1"
+                  className="text-xs text-foreground"
                   data-defaults-offline-editing=""
                 >
                   {copy.DEFAULTS_OFFLINE_EDITING}
@@ -389,14 +389,14 @@ function DefaultsDialog({
                 {!primaryEvidence.known ? (
                   !env.online ? (
                     <p
-                      className="text-[13px] text-ink-2"
+                      className="text-sm text-muted-foreground"
                       data-primary-unknown=""
                     >
                       {copy.PRIMARY_OFFLINE}
                     </p>
                   ) : snapshotRead.outcome === "loading" ? (
                     <p
-                      className="text-[13px] text-ink-2"
+                      className="text-sm text-muted-foreground"
                       data-primary-unknown=""
                     >
                       {copy.PRIMARY_LOADING}
@@ -414,10 +414,12 @@ function DefaultsDialog({
                     />
                   )
                 ) : primaryId === null ? (
-                  <p className="text-[13px] text-ink-2">{copy.NO_PRIMARY}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {copy.NO_PRIMARY}
+                  </p>
                 ) : (
                   <>
-                    <h3 className="text-[13.5px] font-medium text-ink-1">
+                    <h3 className="text-sm font-medium text-foreground">
                       {copy.HOUSEHOLD_LAYER(primary?.name ?? "")}
                     </h3>
                     {householdLoad.status === "failed" ? (
@@ -435,10 +437,10 @@ function DefaultsDialog({
                         }
                       />
                     ) : household === null ? (
-                      <p className="text-[13px] text-ink-2">…</p>
+                      <p className="text-sm text-muted-foreground">…</p>
                     ) : (
                       <>
-                        <p className="text-[13px] text-ink-1">
+                        <p className="text-sm text-foreground">
                           {copy.HOUSEHOLD_CURRENT(
                             describe(
                               household.template ?? APPLICATION_DEFAULTS[kind],
@@ -466,7 +468,7 @@ function DefaultsDialog({
                             onSaved={() => saved("household")}
                           />
                         ) : (
-                          <p className="text-[12.5px] text-ink-2">
+                          <p className="text-xs text-muted-foreground">
                             {copy.HOUSEHOLD_MANAGER_ONLY}
                           </p>
                         )}
@@ -476,9 +478,9 @@ function DefaultsDialog({
                 )}
               </section>
               <section className="flex flex-col gap-2" data-layer="personal">
-                <h3 className="flex items-center gap-2 text-[13.5px] font-medium text-ink-1">
+                <h3 className="flex items-center gap-2 text-sm font-medium text-foreground">
                   {copy.PERSONAL_LAYER}
-                  <span className="text-[12px] font-normal text-ink-2">
+                  <span className="text-xs font-normal text-muted-foreground">
                     {copy.PERSONAL_SELF_SERVE}
                   </span>
                 </h3>
@@ -495,11 +497,11 @@ function DefaultsDialog({
                     }
                   />
                 ) : personal === null ? (
-                  <p className="text-[13px] text-ink-2">…</p>
+                  <p className="text-sm text-muted-foreground">…</p>
                 ) : (
                   <>
                     <p
-                      className="text-[13px] text-ink-1"
+                      className="text-sm text-foreground"
                       data-personal-state=""
                     >
                       {resolved.known && resolved.layer === "personal"
@@ -562,16 +564,16 @@ function Chain({
     { layer: "explicit", label: copy.CHAIN_EXPLICIT },
   ];
   return (
-    <List className="flex flex-wrap items-center gap-1.5 text-[12.5px]">
+    <List className="flex flex-wrap items-center gap-1.5 text-xs">
       {steps.map((step, at) => (
         <li
           key={step.layer}
           data-chain={step.layer}
           aria-current={step.layer === resolves ? "true" : undefined}
-          className={`list-none rounded-badge border px-2 py-1 ${
+          className={`list-none rounded-sm border px-2 py-1 ${
             step.layer === resolves
-              ? "border-action-fill font-medium text-ink-1"
-              : "border-hairline-strong text-ink-2"
+              ? "border-primary font-medium text-foreground"
+              : "border-border text-muted-foreground"
           }`}
         >
           {at > 0 ? <span aria-hidden="true">→ </span> : null}
@@ -598,16 +600,20 @@ function OfflineDefaults({
 }) {
   return (
     <div className="flex flex-col gap-1.5" data-defaults-offline="">
-      <p className="text-[13px] text-ink-1">{copy.DEFAULTS_OFFLINE_READONLY}</p>
+      <p className="text-sm text-foreground">
+        {copy.DEFAULTS_OFFLINE_READONLY}
+      </p>
       {template === null ? (
-        <p className="text-[13px] text-ink-2">{copy.DEFAULTS_NONE_YET}</p>
+        <p className="text-sm text-muted-foreground">
+          {copy.DEFAULTS_NONE_YET}
+        </p>
       ) : (
-        <p className="text-[13.5px] text-ink-1">
+        <p className="text-sm text-foreground">
           {KIND_LABEL[kind]}: {describe(template)}
         </p>
       )}
       {at !== null ? (
-        <p className="text-[12px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {copy.AS_OF(formatWhen(at, now))}
         </p>
       ) : null}
@@ -891,7 +897,7 @@ function LayerForm({
   return (
     <div className="flex flex-col gap-3" data-layer-form={layer}>
       {kept !== undefined ? (
-        <p className="text-[12.5px] text-ink-1" data-layer-restored="">
+        <p className="text-xs text-foreground" data-layer-restored="">
           {copy.RESTORED_UNSAVED}
         </p>
       ) : null}
@@ -937,7 +943,10 @@ function LayerForm({
           onLookup={(purpose) => setLookup(purpose)}
         />
       ) : null}
-      <p className="text-[12.5px] leading-[1.55] text-ink-2" data-preview="">
+      <p
+        className="text-xs leading-relaxed text-muted-foreground"
+        data-preview=""
+      >
         {!changed
           ? copy.PREVIEW_UNCHANGED
           : missing !== null
@@ -978,14 +987,14 @@ function LayerForm({
       <span>
         {reason === null ? (
           <Button
-            variant="primary"
+            variant="default"
             data-save={layer}
             onClick={() => void send()}
           >
             {copy.SAVE_DEFAULTS}
           </Button>
         ) : (
-          <Button variant="primary" data-save={layer} disabled reason={reason}>
+          <Button variant="default" data-save={layer} disabled reason={reason}>
             {copy.SAVE_DEFAULTS}
           </Button>
         )}

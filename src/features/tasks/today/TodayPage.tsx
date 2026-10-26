@@ -1,6 +1,14 @@
+import { CalendarX2, ChevronLeft, ChevronRight } from "lucide-react";
 import { useId, useMemo, useState } from "react";
 import { Button } from "../../../components/ui/button";
+import { EmptyState } from "../../../components/ui/empty-state";
+import { inputClass } from "../../../components/ui/input";
+import { Label } from "../../../components/ui/label";
 import { List } from "../../../components/ui/list";
+import { NativeSelect } from "../../../components/ui/native-select";
+import { Progress } from "../../../components/ui/progress";
+import { Skeleton } from "../../../components/ui/skeleton";
+import { cn } from "../../../lib/utils";
 import { useTaskActions } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -78,26 +86,29 @@ export function TodayPage({
     const group = groupOf(row, day, zone);
     groups.set(group, [...(groups.get(group) ?? []), row]);
   }
+  const progress =
+    counts.total > 0 ? Math.round((counts.done / counts.total) * 100) : 0;
   return (
-    <div className="flex max-w-[760px] flex-col gap-5" data-today-page="">
+    <div
+      className="atlas-enter flex max-w-[760px] flex-col gap-6"
+      data-today-page=""
+    >
       {/* The page's heading is the route's (`features/today/route.tsx`), outside the cache gate and this lazy screen. */}
-      <p className="text-[13px] text-ink-2">{longDayLabel(day)}</p>
-      <div className="flex flex-wrap items-end gap-3">
+      <p className="-mt-3 text-base text-muted-foreground">
+        {longDayLabel(day)}
+      </p>
+      <div className="flex flex-wrap items-end gap-x-5 gap-y-3 rounded-xl border bg-card p-4 shadow-sm">
         <div className="flex items-end gap-1.5">
           <Button
-            variant="quiet"
+            variant="ghost"
+            size="icon"
             aria-label={copy.PREVIOUS_DAY}
             onClick={() => onChange({ day: addDays(day, -1) })}
           >
-            ‹
+            <ChevronLeft aria-hidden="true" />
           </Button>
-          <div className="flex flex-col gap-1">
-            <label
-              htmlFor={dayId}
-              className="text-[12px] font-medium text-ink-2"
-            >
-              {copy.DAY_LABEL}
-            </label>
+          <div className="flex flex-col gap-2">
+            <Label htmlFor={dayId}>{copy.DAY_LABEL}</Label>
             <input
               id={dayId}
               type="date"
@@ -106,75 +117,95 @@ export function TodayPage({
               onChange={(event) => {
                 if (event.target.value) onChange({ day: event.target.value });
               }}
-              className="min-h-11 rounded-control border border-field-edge bg-canvas px-3 text-[13.5px] text-ink-1"
+              className={cn(inputClass, "w-auto font-num")}
             />
           </div>
           <Button
-            variant="quiet"
+            variant="ghost"
+            size="icon"
             aria-label={copy.NEXT_DAY}
             onClick={() => onChange({ day: addDays(day, 1) })}
           >
-            ›
+            <ChevronRight aria-hidden="true" />
           </Button>
           {dayGiven && day !== today ? (
-            <Button variant="quiet" onClick={() => onChange({ day: today })}>
+            <Button variant="ghost" onClick={() => onChange({ day: today })}>
               {copy.BACK_TO_TODAY}
             </Button>
           ) : null}
         </div>
-        <div className="flex flex-col gap-1">
-          <label
-            htmlFor={zoneId}
-            className="text-[12px] font-medium text-ink-2"
-          >
-            {copy.ZONE_LABEL}
-          </label>
-          <select
+        <div className="flex min-w-0 flex-col gap-2">
+          <Label htmlFor={zoneId}>{copy.ZONE_LABEL}</Label>
+          <NativeSelect
             id={zoneId}
             value={zone}
-            data-field-edge=""
             onChange={(event) => onChange({ zone: event.target.value })}
-            className="min-h-11 max-w-[260px] rounded-control border border-field-edge bg-canvas px-3 text-[13.5px] text-ink-1"
+            className="max-w-[260px]"
           >
             {(zones.includes(zone) ? zones : [zone, ...zones]).map((z) => (
               <option key={z} value={z}>
                 {z}
               </option>
             ))}
-          </select>
+          </NativeSelect>
         </div>
       </div>
-      <fieldset className="flex flex-col gap-2">
-        <legend id={filterName} className="text-[12px] font-medium text-ink-2">
-          {copy.FILTERS_NAME}
-        </legend>
-        <div className="flex flex-wrap gap-1.5">
-          {FILTERS.map((f) => (
-            <label
-              key={f}
-              className="atlas-transition inline-flex min-h-11 items-center gap-2 rounded-control border border-hairline-strong bg-raised px-3.5 text-[13.5px] text-ink-1"
-            >
-              <input
-                type="radio"
-                name={filterName}
-                value={f}
-                checked={filter === f}
-                onChange={() => setFilter(f)}
-                className="size-[15px]"
-              />
-              {copy.FILTER_LABEL[f]}
-            </label>
-          ))}
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
+        <fieldset className="flex flex-col gap-2">
+          <legend
+            id={filterName}
+            className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+          >
+            {copy.FILTERS_NAME}
+          </legend>
+          <div className="flex flex-wrap gap-1.5">
+            {FILTERS.map((f) => (
+              <label
+                key={f}
+                className={cn(
+                  "atlas-transition inline-flex h-10 cursor-pointer items-center gap-2 rounded-full border px-3.5 text-sm shadow-xs hover:bg-accent hover:text-accent-foreground",
+                  filter === f
+                    ? "border-primary/40 bg-accent font-medium text-accent-foreground"
+                    : "border-border bg-card text-foreground",
+                )}
+              >
+                <input
+                  type="radio"
+                  name={filterName}
+                  value={f}
+                  checked={filter === f}
+                  onChange={() => setFilter(f)}
+                  className="size-4"
+                />
+                {copy.FILTER_LABEL[f]}
+              </label>
+            ))}
+          </div>
+        </fieldset>
+        <div className="flex min-w-[200px] flex-1 flex-col gap-1.5 tablet:max-w-[300px]">
+          <p className="text-sm text-foreground" data-today-summary="">
+            {copy.SUMMARY(
+              counts.done,
+              counts.total,
+              counts.toDo,
+              counts.notKnown,
+            )}
+          </p>
+          <Progress
+            aria-hidden="true"
+            value={progress}
+            className="h-1.5"
+            indicatorClassName="bg-success"
+          />
+          <p className="text-xs text-muted-foreground">
+            {copy.ZONE_HINT(zone)}
+          </p>
         </div>
-      </fieldset>
-      <p className="text-[13px] text-ink-1" data-today-summary="">
-        {copy.SUMMARY(counts.done, counts.total, counts.toDo, counts.notKnown)}
-      </p>
-      <p className="text-[12px] text-ink-2">{copy.ZONE_HINT(zone)}</p>
+      </div>
       {view.pendingTasks.length > 0 ? (
         <p
           data-pending-tasks=""
-          className="max-w-[620px] rounded-row border border-hairline-strong bg-raised px-3.5 py-2.5 text-[13px] leading-[1.55] text-ink-1"
+          className="max-w-[620px] rounded-lg border border-warning/35 bg-warning/10 px-3.5 py-2.5 text-sm leading-relaxed text-foreground"
         >
           {copy.PENDING_TASKS}
         </p>
@@ -183,26 +214,28 @@ export function TodayPage({
         <section
           data-today-error={view.error.kind}
           aria-labelledby={`${filterName}-error`}
-          className="flex max-w-[620px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+          className="flex max-w-[620px] flex-col gap-2 rounded-xl border border-destructive/35 bg-card p-4 shadow-sm"
         >
           <h2
             id={`${filterName}-error`}
-            className="text-[14px] font-medium text-ink-1"
+            className="text-sm font-medium text-foreground"
           >
             {copy.ERROR_TITLE}
           </h2>
-          <p className="text-[13px] text-ink-2">
+          <p className="text-sm text-muted-foreground">
             {view.error.kind === "kept_changing"
               ? copy.KEPT_CHANGING
               : copy.ERROR_BODY}
           </p>
           {view.error.kind === "failed" && view.error.requestId ? (
-            <p className="select-all font-num text-[12px] text-ink-2">
+            <p className="select-all font-num text-xs text-muted-foreground">
               {copy.REQUEST_ID(view.error.requestId)}
             </p>
           ) : null}
           {all.length > 0 ? (
-            <p className="text-[12.5px] text-ink-2">{copy.SHOWING_DEVICE}</p>
+            <p className="text-xs text-muted-foreground">
+              {copy.SHOWING_DEVICE}
+            </p>
           ) : null}
           <span>
             <Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>
@@ -213,21 +246,23 @@ export function TodayPage({
         <section
           data-today-local-error={view.localError}
           aria-labelledby={`${filterName}-local-error`}
-          className="flex max-w-[620px] flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+          className="flex max-w-[620px] flex-col gap-2 rounded-xl border border-destructive/35 bg-card p-4 shadow-sm"
         >
           <h2
             id={`${filterName}-local-error`}
-            className="text-[14px] font-medium text-ink-1"
+            className="text-sm font-medium text-foreground"
           >
             {copy.LOCAL_ERROR_TITLE}
           </h2>
-          <p className="text-[13px] text-ink-2">
+          <p className="text-sm text-muted-foreground">
             {view.localError === "unstable"
               ? copy.LOCAL_UNSTABLE
               : copy.LOCAL_FAILED}
           </p>
           {view.stale ? (
-            <p className="text-[12.5px] text-ink-2">{copy.SHOWING_LAST_READ}</p>
+            <p className="text-xs text-muted-foreground">
+              {copy.SHOWING_LAST_READ}
+            </p>
           ) : null}
           <span>
             <Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>
@@ -242,15 +277,15 @@ export function TodayPage({
         >
           <span className="sr-only">{copy.LOADING}</span>
           {[0, 1, 2].map((n) => (
-            <div key={n} className="min-h-11 rounded-row bg-raised" />
+            <Skeleton key={n} className="min-h-14 rounded-lg" />
           ))}
         </div>
       ) : shown.length === 0 && view.unreadable.length === 0 ? (
         // Unknown is not empty: a day whose saved tasks could not be read says so above, never "nothing due" (R9, revision 3).
         view.localError === null && (view.error === null || all.length > 0) ? (
-          <p className="text-[13.5px] text-ink-2" data-today-empty="">
+          <EmptyState icon={CalendarX2} data-today-empty="">
             {copy.EMPTY(filter)}
-          </p>
+          </EmptyState>
         ) : null
       ) : (
         <div
@@ -266,11 +301,11 @@ export function TodayPage({
             >
               <h2
                 id={`${filterName}-${group}`}
-                className="text-[13px] font-semibold text-ink-2"
+                className="mb-2 px-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground"
               >
                 {copy.GROUPS[group]}
               </h2>
-              <List className="rounded-row border border-hairline-strong bg-panel px-3">
+              <List className="atlas-stagger overflow-hidden rounded-xl border bg-card px-4 shadow-sm">
                 {[...(groups.get(group) ?? [])].sort(compareRows).map((row) => (
                   <TodayRow
                     key={row.id}
@@ -288,7 +323,7 @@ export function TodayPage({
           ))}
           {view.unreadable.length > 0 ? (
             <p
-              className="text-[12.5px] text-ink-2"
+              className="text-xs text-muted-foreground"
               data-today-unreadable={view.unreadable.length}
             >
               {copy.UNREADABLE}

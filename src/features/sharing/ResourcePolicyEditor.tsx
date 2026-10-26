@@ -319,25 +319,27 @@ function PolicyEditorDialog({
   // ---- what the dialog shows -------------------------------------------------------------------------------------------------------
   let body: React.ReactNode;
   let footer: React.ReactNode = (
-    <Button variant="secondary" onClick={cancel}>
+    <Button variant="outline" onClick={cancel}>
       {copy.CLOSE}
     </Button>
   );
   if (cached.status === "loading")
-    body = <p className="text-[13px] text-ink-2">{copy.POLICY_LOADING}</p>;
+    body = (
+      <p className="text-sm text-muted-foreground">{copy.POLICY_LOADING}</p>
+    );
   else if (merged === null)
     body = (
-      <p className="text-[13.5px] text-ink-1" data-policy-state="absent">
+      <p className="text-sm text-foreground" data-policy-state="absent">
         {copy.POLICY_ABSENT}
       </p>
     );
   else if (!env.online && draft === null)
     body = (
       <div className="flex flex-col gap-2" data-policy-state="offline">
-        <p className="text-[14px] font-medium text-ink-1">
+        <p className="text-sm font-medium text-foreground">
           {copy.OFFLINE_TITLE}
         </p>
-        <p className="text-[13px] leading-[1.55] text-ink-2">
+        <p className="text-sm leading-relaxed text-muted-foreground">
           {copy.OFFLINE_BODY}
         </p>
       </div>
@@ -346,11 +348,11 @@ function PolicyEditorDialog({
     const failure = policyLoad.failure;
     body =
       failure.kind === "forbidden" ? (
-        <p className="text-[13.5px] text-ink-1" data-policy-state="owner-only">
+        <p className="text-sm text-foreground" data-policy-state="owner-only">
           {copy.POLICY_OWNER_ONLY}
         </p>
       ) : failure.kind === "not_found" ? (
-        <p className="text-[13.5px] text-ink-1" data-policy-state="gone">
+        <p className="text-sm text-foreground" data-policy-state="gone">
           {copy.POLICY_GONE}
         </p>
       ) : failure.kind === "closed" ? null : (
@@ -361,7 +363,9 @@ function PolicyEditorDialog({
         />
       );
   } else if (policyLoad.status !== "ready" || draft === null)
-    body = <p className="text-[13px] text-ink-2">{copy.POLICY_LOADING}</p>;
+    body = (
+      <p className="text-sm text-muted-foreground">{copy.POLICY_LOADING}</p>
+    );
   else if (view !== "edit")
     body = (
       <DirectoryLookup
@@ -409,22 +413,22 @@ function PolicyEditorDialog({
             : null;
     body = (
       <div className="flex flex-col gap-4" data-policy-state="editing">
-        <p className="text-[12.5px] leading-[1.55] text-ink-2">
-          <strong className="font-medium text-ink-1">
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          <strong className="font-medium text-foreground">
             {copy.REQUIRES_CONNECTION}
           </strong>{" "}
           {copy.POLICY_ONLINE_ONLY}
         </p>
         {restored ? (
-          <p className="text-[12.5px] text-ink-1" data-policy-restored="">
+          <p className="text-xs text-foreground" data-policy-restored="">
             {copy.RESTORED_UNSAVED}
           </p>
         ) : null}
         {behind ? (
-          <p className="text-[12.5px] text-ink-2">{copy.CACHE_BEHIND}</p>
+          <p className="text-xs text-muted-foreground">{copy.CACHE_BEHIND}</p>
         ) : null}
         {waiting > 0 ? (
-          <p className="text-[12.5px] text-ink-1" data-policy-queued="">
+          <p className="text-xs text-foreground" data-policy-queued="">
             {copy.QUEUED_EDITS(waiting)}
           </p>
         ) : null}
@@ -461,19 +465,19 @@ function PolicyEditorDialog({
     );
     footer = (
       <>
-        <Button variant="secondary" onClick={cancel}>
+        <Button variant="outline" onClick={cancel}>
           {copy.CANCEL}
         </Button>
         {reason === null ? (
           <Button
-            variant="primary"
+            variant="default"
             data-save=""
             onClick={() => void send(draft.policy, draft.base)}
           >
             {copy.SAVE_POLICY}
           </Button>
         ) : (
-          <Button variant="primary" data-save="" disabled reason={reason}>
+          <Button variant="default" data-save="" disabled reason={reason}>
             {copy.SAVE_POLICY}
           </Button>
         )}

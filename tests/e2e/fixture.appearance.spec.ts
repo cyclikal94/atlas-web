@@ -104,7 +104,7 @@ test.describe("WF-SETTINGS-05 Appearance (B15, fixture)", () => {
             ?.getAttribute("content"),
         ),
       )
-      .toBe("#F7F8F9");
+      .toBe("#F7F7FA");
   });
 
   test("a choice made in one tab reaches another tab, and is device-local (not sent to any server)", async ({

@@ -15,12 +15,12 @@ function JoinWhileSignedIn() {
   return (
     <div className="flex max-w-[620px] flex-col gap-3">
       <PageHeading>{JOIN_WHILE_SIGNED_IN_HEADING}</PageHeading>
-      <p className="text-[14px] leading-[1.6] text-ink-2">
+      <p className="text-sm leading-relaxed text-muted-foreground">
         {JOIN_WHILE_SIGNED_IN_BODY}
       </p>
       <Link
         to="/settings"
-        className="w-fit text-[14px] text-action-ink underline underline-offset-2"
+        className="w-fit text-sm text-primary underline underline-offset-2"
       >
         Go to Settings
       </Link>

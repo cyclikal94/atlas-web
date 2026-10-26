@@ -29,7 +29,7 @@ const media = installMatchMedia({ width: 1440 });
 beforeEach(() => {
   localStorage.clear();
   document.documentElement.removeAttribute("data-theme");
-  document.head.innerHTML = '<meta name="theme-color" content="#08090A">';
+  document.head.innerHTML = '<meta name="theme-color" content="#0C0C10">';
 });
 
 async function mount(path: string) {
@@ -86,7 +86,7 @@ describe("WF-SETTINGS-05 Appearance", () => {
       document
         .querySelector('meta[name="theme-color"]')
         ?.getAttribute("content"),
-    ).toBe("#F7F8F9");
+    ).toBe("#F7F7FA");
     expect(localStorage.getItem(APPEARANCE_STORAGE_KEY)).toBe("light");
     expect(radio("Light")).toBeChecked();
   });
@@ -116,7 +116,7 @@ describe("WF-SETTINGS-05 Appearance", () => {
         document
           .querySelector('meta[name="theme-color"]')
           ?.getAttribute("content"),
-      ).toBe("#F7F8F9"),
+      ).toBe("#F7F7FA"),
     );
     expect(document.documentElement.hasAttribute("data-theme")).toBe(false);
   });

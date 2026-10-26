@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { useId } from "react";
+import { buttonVariants } from "../../components/ui/button";
 import { List } from "../../components/ui/list";
 import { PageHeading } from "../../components/ui/page-heading";
 import { TEMPLATE_KINDS, useSharingDefaults } from "../../data";
@@ -21,27 +22,33 @@ export function SharingPage() {
   const items = useId();
   const record = defaults.record;
   return (
-    <div className="flex max-w-[720px] flex-col gap-8" data-sharing-page="">
+    <div
+      className="atlas-enter flex max-w-[720px] flex-col gap-8"
+      data-sharing-page=""
+    >
       <PageHeading>{copy.PAGE_TITLE}</PageHeading>
       <section aria-labelledby={heading} className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          <h2 id={heading} className="text-[17px] font-medium text-ink-1">
+          <h2 id={heading} className="text-lg font-medium text-foreground">
             {copy.DEFAULTS_HEADING}
           </h2>
           <Link
             to="/sharing/defaults"
             search={{ kind: "person" }}
             data-sharing-link="defaults"
-            className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+            className={buttonVariants({ variant: "outline" })}
           >
             {copy.DEFAULTS_EDIT}
           </Link>
         </div>
-        <p className="text-[13px] leading-[1.55] text-ink-2">
+        <p className="text-sm leading-relaxed text-muted-foreground">
           {copy.DEFAULTS_INTRO}
         </p>
         {record === null ? (
-          <p className="text-[13px] text-ink-2" data-defaults-summary="none">
+          <p
+            className="text-sm text-muted-foreground"
+            data-defaults-summary="none"
+          >
             {defaults.status === "loading"
               ? copy.DEFAULTS_LOADING
               : copy.DEFAULTS_NONE_YET}
@@ -59,29 +66,29 @@ export function SharingPage() {
                   <li
                     key={kind}
                     data-defaults-kind={kind}
-                    className="flex list-none flex-wrap items-baseline gap-x-3 gap-y-1 rounded-row border border-hairline-strong bg-panel px-3.5 py-2.5"
+                    className="flex list-none flex-wrap items-baseline gap-x-3 gap-y-1 rounded-xl border bg-card px-4 py-3 shadow-sm"
                   >
-                    <span className="w-24 text-[13px] font-medium text-ink-1">
+                    <span className="w-24 text-sm font-medium text-foreground">
                       {KIND_LABEL[kind]}
                     </span>
-                    <span className="min-w-0 flex-1 text-[13px] text-ink-1">
+                    <span className="min-w-0 flex-1 text-sm text-foreground">
                       {described.summary}
                     </span>
                   </li>
                 );
               })}
             </List>
-            <p className="text-[12px] text-ink-2">
+            <p className="text-xs text-muted-foreground">
               {copy.AS_OF(formatWhen(record.fetched_at, env.now()))}
             </p>
           </>
         )}
       </section>
       <section aria-labelledby={items} className="flex flex-col gap-1.5">
-        <h2 id={items} className="text-[17px] font-medium text-ink-1">
+        <h2 id={items} className="text-lg font-medium text-foreground">
           {copy.ITEM_SHARING_HEADING}
         </h2>
-        <p className="text-[13px] leading-[1.55] text-ink-2">
+        <p className="text-sm leading-relaxed text-muted-foreground">
           {copy.ITEM_SHARING_BODY}
         </p>
       </section>

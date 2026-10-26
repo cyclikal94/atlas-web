@@ -101,28 +101,28 @@ export function RetireOtherDialog({
       initialFocusSelector="[data-keep]"
       footer={
         <>
-          <Button variant="secondary" data-keep="" onClick={onClose}>
+          <Button variant="outline" data-keep="" onClick={onClose}>
             Keep this device
           </Button>
           {busy ? (
-            <Button variant="primary" disabled reason="Working…">
+            <Button variant="default" disabled reason="Working…">
               Retire device
             </Button>
           ) : !online ? (
-            <Button variant="primary" disabled reason={RETIRE_OFFLINE_REASON}>
+            <Button variant="default" disabled reason={RETIRE_OFFLINE_REASON}>
               Retire device
             </Button>
           ) : (
-            <Button variant="primary" onClick={() => void confirm()}>
+            <Button variant="default" onClick={() => void confirm()}>
               Retire device
             </Button>
           )}
         </>
       }
     >
-      <div className="flex flex-col gap-3 text-[14px] leading-[1.6] text-ink-1">
+      <div className="flex flex-col gap-3 text-sm leading-relaxed text-foreground">
         <p>{RETIRE_OTHER_BODY}</p>
-        <List className="flex flex-col gap-1 text-ink-2">
+        <List className="flex flex-col gap-1 text-muted-foreground">
           {summaryLines(device.summary).map((line) => (
             <li key={line} className="ml-5 list-disc">
               {line}
@@ -130,7 +130,7 @@ export function RetireOtherDialog({
           ))}
         </List>
         {message ? (
-          <p data-refusal="" className="text-ink-2">
+          <p data-refusal="" className="text-muted-foreground">
             {message}
           </p>
         ) : null}

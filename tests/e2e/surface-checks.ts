@@ -174,7 +174,7 @@ const toHex = (rgb: string): string => {
 };
 
 /**
- * A-4 in a real browser: the colours actually PAINTED. An input's border must be the `field-edge` token and reach 3:1 against what
+ * A-4 in a real browser: the colours actually PAINTED. An input's border must be the `input` token and reach 3:1 against what
  * surrounds the input and against its own fill (non-text contrast, WCAG 1.4.11); a primary button's label must reach 4.5:1 against
  * its fill. `surround` is the nearest ancestor that paints a background.
  */
@@ -204,8 +204,8 @@ export async function expectPaintedContrast(
     };
   });
   expect(painted.width, `${label}: border width`).toBe("1px");
-  expect(toHex(painted.border), `${label}: border is field-edge`).toBe(
-    tokens[scheme]["field-edge"],
+  expect(toHex(painted.border), `${label}: border is the input edge`).toBe(
+    tokens[scheme].input,
   );
   expect(
     contrastRatio(toHex(painted.border), toHex(painted.surround)),

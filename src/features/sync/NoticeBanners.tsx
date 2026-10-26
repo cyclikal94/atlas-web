@@ -1,5 +1,17 @@
 import { useRouterState } from "@tanstack/react-router";
+import {
+  Info,
+  type LucideIcon,
+  OctagonAlert,
+  TriangleAlert,
+} from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import {
+  Alert,
+  AlertDescription,
+  AlertTitle,
+  type AlertVariant,
+} from "../../components/ui/alert";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import {
@@ -61,10 +73,15 @@ import { useGateMounted } from "./gate-presence";
  * Tone is never colour alone: the heading and the words carry the state.
  */
 type Tone = "info" | "warn" | "error";
-const TONE: Record<Tone, string> = {
-  info: "border-hairline-strong bg-panel",
-  warn: "border-missed-edge bg-missed-tint",
-  error: "border-conflict-edge bg-conflict-tint",
+const VARIANT: Record<Tone, AlertVariant> = {
+  info: "default",
+  warn: "warning",
+  error: "destructive",
+};
+const ICON: Record<Tone, LucideIcon> = {
+  info: Info,
+  warn: TriangleAlert,
+  error: OctagonAlert,
 };
 
 export function Banner({
@@ -81,20 +98,21 @@ export function Banner({
   actions?: ReactNode;
 }) {
   const heading = useId();
+  const Icon = ICON[tone];
   return (
-    <section
+    <Alert
       aria-labelledby={heading}
       data-notice={kind}
-      className={`flex max-w-[700px] flex-col gap-2 rounded-row border p-3.5 ${TONE[tone]}`}
+      variant={VARIANT[tone]}
+      className="max-w-[700px]"
     >
-      <h2 id={heading} className="text-[14px] font-medium text-ink-1">
-        {title}
-      </h2>
-      <div className="flex flex-col gap-1.5 text-[13px] leading-[1.6] text-ink-2">
-        {children}
-      </div>
-      {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
-    </section>
+      <Icon aria-hidden="true" />
+      <AlertTitle id={heading}>{title}</AlertTitle>
+      <AlertDescription>{children}</AlertDescription>
+      {actions ? (
+        <div className="col-start-2 mt-2 flex flex-wrap gap-2">{actions}</div>
+      ) : null}
+    </Alert>
   );
 }
 
@@ -172,7 +190,7 @@ function NoticeView({
           tone="error"
           title={PAGE_NOT_SAVED_TITLE}
           actions={
-            <Button variant="primary" onClick={() => actions.retryUpdates()}>
+            <Button variant="default" onClick={() => actions.retryUpdates()}>
               {PAGE_NOT_SAVED_ACTION}
             </Button>
           }
@@ -191,7 +209,7 @@ function NoticeView({
             <>
               <Button onClick={onDismiss}>{STORAGE_FULL_DISMISS}</Button>
               <Button
-                variant="primary"
+                variant="default"
                 onClick={() => {
                   actions.retryUpdates();
                   actions.retryChanges();
@@ -217,7 +235,7 @@ function NoticeView({
           tone="error"
           title={STORAGE_NOT_RESPONDING_TITLE}
           actions={
-            <Button variant="primary" onClick={() => actions.retryChanges()}>
+            <Button variant="default" onClick={() => actions.retryChanges()}>
               {STORAGE_NOT_RESPONDING_ACTION}
             </Button>
           }
@@ -244,7 +262,7 @@ function NoticeView({
           title={titleOf(notice)}
           actions={
             <Button
-              variant="primary"
+              variant="default"
               onClick={() =>
                 notice.scope === "updates"
                   ? actions.retryUpdates()
@@ -279,7 +297,7 @@ function NoticeView({
           tone="warn"
           title={UNRECOGNISED_TITLE}
           actions={
-            <Button variant="primary" onClick={() => actions.retryUpdates()}>
+            <Button variant="default" onClick={() => actions.retryUpdates()}>
               {UNRECOGNISED_ACTION}
             </Button>
           }
@@ -317,8 +335,8 @@ function NoticeView({
       return (
         <Banner kind="queue_warning" tone="info" title={QUEUE_WARNING_TITLE}>
           <p>
-            <span className="font-num text-ink-1">{notice.total}</span> waiting
-            to send
+            <span className="font-num text-foreground">{notice.total}</span>{" "}
+            waiting to send
           </p>
           <p>{QUEUE_WARNING_BODY}</p>
         </Banner>
@@ -343,7 +361,7 @@ function SyncBlocked({ onRetry }: { onRetry(): void }) {
           <Button onClick={() => session.actions.reload()}>
             {SYNC_BLOCKED_RELOAD}
           </Button>
-          <Button variant="primary" onClick={onRetry}>
+          <Button variant="default" onClick={onRetry}>
             {SYNC_BLOCKED_RETRY}
           </Button>
         </>

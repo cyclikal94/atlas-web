@@ -1,5 +1,6 @@
-import * as RadioGroup from "@radix-ui/react-radio-group";
+import * as RadioGroupPrimitive from "@radix-ui/react-radio-group";
 import type { ReactNode } from "react";
+import { cn } from "../../lib/utils";
 
 export interface RadioCardOption<Value extends string> {
   value: Value;
@@ -18,9 +19,9 @@ export interface RadioCardGroupProps<Value extends string> {
 }
 
 /**
- * Card-style radio group (accessibility.md 1.5): role radiogroup, roving tabindex, arrows move and select,
- * Space checks. The state is never colour alone: a 15px ring (field-edge) holds a filled dot when selected,
- * and the selected card also takes the action-fill border (findings F5, F8).
+ * Card-style radio group (accessibility.md 1.5): role radiogroup, roving tabindex, arrows move and select, Space checks. The
+ * state is never colour alone: a 16px ring (`border-input`) holds a primary dot when selected, and the selected card also takes
+ * the primary border and the accent tint.
  */
 export function RadioCardGroup<Value extends string>({
   label,
@@ -29,18 +30,21 @@ export function RadioCardGroup<Value extends string>({
   options,
 }: RadioCardGroupProps<Value>) {
   return (
-    <RadioGroup.Root
+    <RadioGroupPrimitive.Root
       aria-label={label}
       value={value}
       onValueChange={(next) => onValueChange(next as Value)}
-      className="flex gap-2"
+      className="grid grid-cols-3 gap-2"
     >
       {options.map((option) => (
-        <RadioGroup.Item
+        <RadioGroupPrimitive.Item
           key={option.value}
           value={option.value}
           data-contract-id={option.contractId}
-          className="atlas-transition flex min-w-0 flex-1 flex-col gap-2 rounded-row border border-hairline-strong bg-canvas p-3 text-left hover:border-field-edge data-[state=checked]:border-action-fill"
+          className={cn(
+            "atlas-transition flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-background p-3 text-left shadow-xs",
+            "hover:border-input hover:bg-accent/40 data-[state=checked]:border-primary data-[state=checked]:bg-accent",
+          )}
         >
           {option.preview ? (
             <span aria-hidden="true" className="block">
@@ -50,16 +54,16 @@ export function RadioCardGroup<Value extends string>({
           <span className="flex items-center gap-2">
             <span
               aria-hidden="true"
-              className="flex size-[15px] flex-none items-center justify-center rounded-round border-[1.5px] border-field-edge"
+              className="flex size-4 flex-none items-center justify-center rounded-full border border-input bg-background"
             >
-              <RadioGroup.Indicator className="size-[7px] rounded-round bg-action-fill" />
+              <RadioGroupPrimitive.Indicator className="size-2 rounded-full bg-primary" />
             </span>
-            <span className="text-[13px] font-medium text-ink-1">
+            <span className="text-sm font-medium text-foreground">
               {option.label}
             </span>
           </span>
-        </RadioGroup.Item>
+        </RadioGroupPrimitive.Item>
       ))}
-    </RadioGroup.Root>
+    </RadioGroupPrimitive.Root>
   );
 }

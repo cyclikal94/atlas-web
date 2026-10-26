@@ -186,7 +186,7 @@ export function ItemDetailDialog({
   const footer =
     variant === "online_only" ? null : confirming ? (
       <div className="flex w-full flex-wrap items-center justify-end gap-2">
-        <span className="mr-auto text-[13px] text-ink-1">
+        <span className="mr-auto text-sm text-foreground">
           {DISCARD_CONFIRM}
         </span>
         <Button onClick={() => setConfirming(false)}>
@@ -197,14 +197,14 @@ export function ItemDetailDialog({
             {DISCARD_CONFIRM_YES}
           </Button>
         ) : (
-          <Button variant="primary" onClick={() => void discard()}>
+          <Button variant="default" onClick={() => void discard()}>
             {DISCARD_CONFIRM_YES}
           </Button>
         )}
       </div>
     ) : (
       <div className="flex w-full flex-wrap items-center gap-2">
-        <span className="mr-auto font-num text-[11.5px] text-ink-2">
+        <span className="mr-auto font-num text-xs text-muted-foreground">
           {DETAIL_REF(ref)} ·{" "}
           <button
             type="button"
@@ -221,7 +221,7 @@ export function ItemDetailDialog({
         </Button>
         {rebuildable ? (
           newAllowed && !busy ? (
-            <Button variant="primary" onClick={() => void saveAsNew()}>
+            <Button variant="default" onClick={() => void saveAsNew()}>
               {variant === "operation_conflict"
                 ? DETAIL_SAVE_NEW
                 : DETAIL_RESEND}
@@ -256,7 +256,7 @@ export function ItemDetailDialog({
     >
       <div
         data-item-detail={variant}
-        className="flex flex-col gap-3 text-[13.5px] leading-[1.6] text-ink-2"
+        className="flex flex-col gap-3 text-sm leading-relaxed text-muted-foreground"
       >
         {variant === "online_only" ? (
           <p>{DETAIL_ONLINE_ONLY}</p>
@@ -275,21 +275,21 @@ export function ItemDetailDialog({
                     : DETAIL_CURRENTLY_SAVED
                 }
                 data-compare="current"
-                className="rounded-row border border-hairline-strong bg-panel p-3"
+                className="rounded-lg border border-border bg-card p-3"
               >
-                <h3 className="text-[12.5px] font-medium text-ink-1">
+                <h3 className="text-xs font-medium text-foreground">
                   {variant === "operation_conflict"
                     ? DETAIL_CURRENTLY_SAVED_ON(title)
                     : DETAIL_CURRENTLY_SAVED}
                 </h3>
                 {read === "loaded" && base !== null ? (
                   <>
-                    <p className="text-ink-1">{base.label}</p>
-                    <p className="font-num text-[12px]">
+                    <p className="text-foreground">{base.label}</p>
+                    <p className="font-num text-xs">
                       {DETAIL_VERSION(base.version)}
                     </p>
                     {variant === "operation_conflict" ? (
-                      <p className="text-[12px]">{DETAIL_OPERATION_LIMIT}</p>
+                      <p className="text-xs">{DETAIL_OPERATION_LIMIT}</p>
                     ) : null}
                   </>
                 ) : read === "loading" ? (
@@ -311,13 +311,13 @@ export function ItemDetailDialog({
                 <section
                   aria-label={DETAIL_RETAINED}
                   data-compare="retained"
-                  className="rounded-row border border-hairline-strong bg-panel p-3"
+                  className="rounded-lg border border-border bg-card p-3"
                 >
-                  <h3 className="text-[12.5px] font-medium text-ink-1">
+                  <h3 className="text-xs font-medium text-foreground">
                     {DETAIL_RETAINED}
                   </h3>
-                  <p className="text-ink-1">{title}</p>
-                  <p className="font-num text-[12px]">
+                  <p className="text-foreground">{title}</p>
+                  <p className="font-num text-xs">
                     {DETAIL_QUEUED_SINCE(
                       formatSavedAt(draft.created_at, new Date()),
                     )}
@@ -327,7 +327,7 @@ export function ItemDetailDialog({
             </div>
           </>
         )}
-        {failed ? <p className="text-ink-1">{failed}</p> : null}
+        {failed ? <p className="text-foreground">{failed}</p> : null}
       </div>
     </Dialog>
   );

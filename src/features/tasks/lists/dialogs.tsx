@@ -148,7 +148,7 @@ function Decision({
   const explained = useId();
   return (
     <div className="flex flex-col items-start gap-2" data-list-decision="">
-      <p id={explained} className="text-[12.5px] text-ink-2">
+      <p id={explained} className="text-xs text-muted-foreground">
         {note}
       </p>
       {writable ? (
@@ -179,7 +179,7 @@ function NameField({
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={id} className="text-[13px] font-medium text-ink-1">
+      <label htmlFor={id} className="text-sm font-medium text-foreground">
         {CREATE.name}
       </label>
       <input
@@ -192,10 +192,10 @@ function NameField({
           ? { "aria-invalid": true, "aria-describedby": `${id}-error` }
           : {})}
         onChange={(event) => onChange(event.target.value)}
-        className="min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 text-[14px] text-ink-1 placeholder:text-ink-3"
+        className="min-h-11 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground placeholder:text-muted-foreground"
       />
       {problem ? (
-        <p id={`${id}-error`} className="text-[12px] text-conflict-text">
+        <p id={`${id}-error`} className="text-xs text-destructive">
           {NAME_PROBLEM[problem]}
         </p>
       ) : null}
@@ -327,7 +327,7 @@ export function CreateListDialog({
       footer={
         <div className="flex flex-wrap justify-end gap-2">
           <Button
-            variant="quiet"
+            variant="ghost"
             onClick={() => {
               discard();
               onClose();
@@ -335,7 +335,7 @@ export function CreateListDialog({
           >
             {CREATE.cancel}
           </Button>
-          <Button variant="primary" onClick={() => void save()}>
+          <Button variant="default" onClick={() => void save()}>
             {CREATE.submit}
           </Button>
         </div>
@@ -358,10 +358,10 @@ export function CreateListDialog({
             placeholder={CREATE.placeholder}
             onChange={(name) => kept.edit((v) => ({ ...v, name }))}
           />
-          <p className="text-[12px] text-ink-2">{CREATE.caption}</p>
+          <p className="text-xs text-muted-foreground">{CREATE.caption}</p>
         </fieldset>
         {kept.note ? (
-          <p className="text-[12.5px] text-ink-2" data-list-note="">
+          <p className="text-xs text-muted-foreground" data-list-note="">
             {kept.note}
           </p>
         ) : null}
@@ -581,7 +581,7 @@ export function RenameListDialog({
       footer={
         <div className="flex flex-wrap justify-end gap-2">
           <Button
-            variant="quiet"
+            variant="ghost"
             onClick={() => {
               discard();
               onClose();
@@ -594,7 +594,7 @@ export function RenameListDialog({
           nameProblem !== null ||
           !changed ? (
             <Button
-              variant="primary"
+              variant="default"
               disabled
               reason={
                 blocked ??
@@ -608,7 +608,7 @@ export function RenameListDialog({
               {RENAME.submit}
             </Button>
           ) : (
-            <Button variant="primary" onClick={() => void save()}>
+            <Button variant="default" onClick={() => void save()}>
               {RENAME.submit}
             </Button>
           )}
@@ -633,7 +633,7 @@ export function RenameListDialog({
           />
         </fieldset>
         {(refusal ?? kept.note) ? (
-          <p className="text-[12.5px] text-ink-2" data-list-note="">
+          <p className="text-xs text-muted-foreground" data-list-note="">
             {refusal ?? kept.note}
           </p>
         ) : null}

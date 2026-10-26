@@ -129,11 +129,11 @@ export function SessionsSection({
       <div className="flex flex-col gap-1">
         <h2
           id="sessions-heading"
-          className="text-[15px] font-medium text-ink-1"
+          className="text-base font-semibold tracking-tight text-foreground"
         >
           {SESSIONS_HEADING}
         </h2>
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">
+        <p className="text-xs leading-relaxed text-muted-foreground">
           {SESSIONS_CONSEQUENCE}
         </p>
         {load.status === "ready" ? (
@@ -141,13 +141,13 @@ export function SessionsSection({
         ) : null}
       </div>
       {load.status === "loading" ? (
-        <p aria-busy="true" className="text-[13px] text-ink-2">
+        <p aria-busy="true" className="text-sm text-muted-foreground">
           Loading your sign-ins…
         </p>
       ) : load.status === "error" ? (
         <LoadFailed what="your sign-ins" error={load.error} onRetry={reload} />
       ) : (
-        <List className="flex flex-col gap-2">
+        <List className="atlas-stagger flex flex-col gap-2">
           {load.value.sessions.map((row) => {
             const device = decodeDeviceName(row.device_name);
             const label = `Sign out ${sessionPhrase(row, now)}`;
@@ -156,16 +156,16 @@ export function SessionsSection({
               <li
                 key={row.id}
                 data-session-row={row.current ? "current" : "other"}
-                className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
+                className="list-none rounded-xl border bg-card p-4 shadow-sm"
               >
                 <div className="flex flex-wrap items-center gap-3">
                   <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                    <span className="text-[14px] text-ink-1 [overflow-wrap:anywhere]">
+                    <span className="text-sm text-foreground [overflow-wrap:anywhere]">
                       {sessionTitle(row)}
                       {row.current ? (
                         <span
                           data-current-tag=""
-                          className="ml-2 text-[12px] text-ink-2"
+                          className="ml-2 text-xs text-muted-foreground"
                         >
                           {THIS_BROWSER_TAG}
                         </span>
@@ -174,12 +174,12 @@ export function SessionsSection({
                     {device !== null ? (
                       <span
                         data-device-name=""
-                        className="text-[12.5px] text-ink-2 [overflow-wrap:anywhere]"
+                        className="text-xs text-muted-foreground [overflow-wrap:anywhere]"
                       >
                         {ON_DEVICE} <bdi>{device}</bdi>
                       </span>
                     ) : null}
-                    <span className="text-[12.5px] text-ink-2">
+                    <span className="text-xs text-muted-foreground">
                       {sessionMeta(row, now)}
                     </span>
                   </div>
@@ -201,12 +201,12 @@ export function SessionsSection({
                   )}
                 </div>
                 {row.current ? (
-                  <p className="mt-2 text-[12.5px] leading-[1.6] text-ink-2">
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                     {CURRENT_NOTE}
                   </p>
                 ) : null}
                 {state?.kind === "failed" ? (
-                  <p data-error="" className="mt-2 text-[12.5px] text-ink-1">
+                  <p data-error="" className="mt-2 text-xs text-foreground">
                     {REVOKE_FAILED}
                     {state.requestId ? ` Request ID: ${state.requestId}` : ""}
                   </p>

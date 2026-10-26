@@ -1,70 +1,51 @@
 #!/usr/bin/env node
 // A1. Generates docs/design-tokens.md from src/design/tokens.ts and src/design/contrast-pairs.ts, so the documented
-// contrast figures are computed from the accepted hex values and never copied from prose. `--check` fails if the file is stale.
+// contrast figures are computed from the token values and never copied from prose. `--check` fails if the file is stale.
 import { readFileSync, writeFileSync } from "node:fs";
-import { contrastRatio } from "../src/design/contrast.ts";
+import { contrastRatio, toHex } from "../src/design/contrast.ts";
 import { declaredPairs, minimumFor } from "../src/design/contrast-pairs.ts";
 import { tokenNames, tokens } from "../src/design/tokens.ts";
 
-/** Values that were derived because the accepted design does not publish them. Everything else is published. */
-const PROPOSED = {
-  "select-tint": {
-    light:
-      "Proposed in WEB-05.5 design-coverage.md section 7 (the dark value is accepted). Kieran may veto at review.",
-  },
-  "tab-bar": {
-    light:
-      "Proposed: panel white. The design gives only the dark tab bar (#0B0C0D).",
-  },
-  "done-edge": {
-    light:
-      "Proposed decorative border derived from the done tint; state is carried by text and a dot.",
-  },
-  "conflict-edge": {
-    light:
-      "Proposed decorative border derived from the conflict tint; state is carried by text and a dot.",
-  },
-  "conflict-text": {
-    light:
-      "Proposed in design-coverage.md section 7: the conflict accent itself, 5.9:1 on the conflict tint.",
-  },
-  "withheld-edge": {
-    light:
-      "Borrowed from the light board's control border (#D3D6DB); decorative.",
-  },
-};
 const NOTES = {
-  canvas: "Page background",
-  panel: "Cards, tables, dialogs",
-  raised: "Row hover, quiet button fill",
-  chrome: "App rail: lifts above content in dark, recedes below it in light",
-  "chrome-inset": "Workspace chip, rail footer chips",
-  "chrome-inset-edge": "Border of the inset chips (dark equals chrome-edge)",
-  inset: "Dialog footer and recessed bands",
-  "tab-bar": "Mobile bottom tab bar",
-  hairline: "Separators between visible content. Never an input edge.",
-  "hairline-strong":
-    "Card borders (light does not distinguish the two strengths)",
-  "chrome-edge": "Rail borders and dividers",
-  "field-edge": "The input border (Q17). Border only, never text.",
-  "ink-1": "Primary text",
-  "ink-2": "Secondary text",
-  "ink-3":
-    "Tertiary text and placeholders. Not on the tinted or inset surfaces (F3).",
-  placeholder:
-    "Decorative glyphs only, never text and never a control edge (F5)",
-  "action-fill": "Primary button and selected marker",
-  "action-ink": "Links, accent text, active marker and the focus ring",
-  "action-on": "Text on action-fill",
-  "action-hover": "Primary button hover",
-  "action-tint": "Accent-tinted panels",
-  "action-tint-edge": "Border of accent-tinted panels",
-  "nav-active": "Active rail item fill. Not a perceivable cue on its own (F6).",
-  "select-tint": "Selected list row",
-  "rail-hover": "Rail item hover",
-  "row-hover": "List row hover",
-  withheld: "Dot and border only, never text (F4)",
-  scrim: "Modal scrim",
+  background: "Page background",
+  foreground: "Body text",
+  card: "Cards, lists, dialogs",
+  "card-foreground": "Text on a card",
+  popover: "Tooltips and menus",
+  "popover-foreground": "Text in a tooltip or menu",
+  primary: "Primary button fill, links, active markers, the focus ring colour",
+  "primary-foreground": "Text on the primary fill",
+  secondary: "Secondary button fill, quiet chips",
+  "secondary-foreground": "Text on the secondary fill",
+  muted: "Recessed bands, skeletons, the progress track",
+  "muted-foreground": "Secondary text, descriptions, placeholders",
+  accent: "Hover and selected rows, the tinted tiles",
+  "accent-foreground": "Text on the accent tint",
+  destructive:
+    "Errors and conflicts: text, borders (via opacity) and the destructive button",
+  "destructive-foreground": "Text on the destructive fill",
+  success: "Done: text, the done bar, tinted badges (via opacity)",
+  "success-foreground": "Text on a solid success fill",
+  warning:
+    "Missed and notices needing attention: text and tinted badges (via opacity)",
+  "warning-foreground": "Text on a solid warning fill",
+  border: "Hairlines and card edges. Never an input edge.",
+  input:
+    "The input border (Q17): at least 3:1 against the page and a card. Border only, never text.",
+  ring: "The focus ring (2px, 2px offset)",
+  "chart-1": "Charts, first series",
+  "chart-2": "Charts, second series",
+  "chart-3": "Charts, third series",
+  "chart-4": "Charts, fourth series",
+  "chart-5": "Charts, fifth series",
+  sidebar: "The navigation rail and the mobile tab bar",
+  "sidebar-foreground": "Navigation labels",
+  "sidebar-primary": "The brand mark in the rail",
+  "sidebar-primary-foreground": "Text on the sidebar's primary fill",
+  "sidebar-accent": "The active and hovered navigation item",
+  "sidebar-accent-foreground": "The active navigation label",
+  "sidebar-border": "Rail borders and dividers",
+  "sidebar-ring": "Focus ring inside the rail",
 };
 const ratio = (theme, a, b) =>
   contrastRatio(tokens[theme][a], tokens[theme][b]);
@@ -81,23 +62,20 @@ line(
   "`pnpm docs:tokens` regenerates it and `pnpm docs:tokens -- --check` fails when it is stale. Every contrast figure is computed from the",
 );
 line(
-  "hex values with the WCAG 2.x relative-luminance formula. Figures quoted in earlier prose are not used.",
+  "token values (converted to sRGB) with the WCAG 2.x relative-luminance formula. Figures quoted in earlier prose are not used.",
 );
 line();
 line(
-  "Source: the accepted Claude Design handoff (`design_handoff_atlas_web/README.md`, `Atlas Light Theme.dc.html`) and WEB-05.5",
+  "The set is the shadcn/ui theme variable set, which the shadcn registry and tweakcn.com read and write, with `success` and `warning`",
 );
 line(
-  "`design-coverage.md` section 7. Geist and Geist Mono, indigo accents, dark by default, light as a full second theme (Q2, Q15).",
-);
-line(
-  "The earlier WEB-02 `visual-direction.md` palette (system font, blue accents, light only) is superseded and is not used.",
+  "added for the task states. Geist and Geist Mono, a violet primary, dark by default, light as a full second theme.",
 );
 line();
 line("## How theming works");
 line();
 line(
-  "- Tokens are CSS custom properties in `src/styles/tokens.css`. Tailwind reads them through `@theme inline`, so `bg-canvas`, `text-ink-1`, `border-field-edge` follow the active theme.",
+  "- Tokens are CSS custom properties in `src/styles/tokens.css`. Tailwind reads them through `@theme inline` (`src/styles/theme.css`), so `bg-background`, `text-muted-foreground`, `border-input` follow the active theme.",
 );
 line(
   '- No `data-theme` attribute means **Auto**: dark, or light when the device prefers light. `data-theme="light"` or `"dark"` is an explicit choice that overrides the device.',
@@ -108,34 +86,23 @@ line(
 line(
   "- The choice is stored on this device only (`atlas.appearance.v1`). Auto stores nothing.",
 );
+line(
+  "- To try another theme, export one from tweakcn and run `node scripts/apply-theme.mjs <file.css>`: it rewrites the token blocks and this document, and the contrast guard then holds the new values to the pairs below.",
+);
 line();
 line("## Tokens");
 line();
 line("| Token | Dark | Light | Use |");
 line("| --- | --- | --- | --- |");
 for (const name of tokenNames) {
-  const proposed = PROPOSED[name]?.light ? " **(light: proposed)**" : "";
+  const hex = (theme) =>
+    tokens[theme][name] === toHex(tokens[theme][name])
+      ? `\`${tokens[theme][name]}\``
+      : `\`${tokens[theme][name]}\` (${toHex(tokens[theme][name])})`;
   line(
-    `| \`${name}\` | \`${tokens.dark[name]}\` | \`${tokens.light[name]}\`${proposed} | ${NOTES[name] ?? ""} |`,
+    `| \`${name}\` | ${hex("dark")} | ${hex("light")} | ${NOTES[name] ?? ""} |`,
   );
 }
-line();
-line("### Values that are proposed, not published");
-line();
-line(
-  "The accepted design does not publish these light-theme values. Each is isolated to one token, so a rejected value is a one-line change, and the contrast guard re-validates any replacement.",
-);
-line();
-for (const [name, reasons] of Object.entries(PROPOSED))
-  line(`- \`${name}\` (light \`${tokens.light[name]}\`): ${reasons.light}`);
-line();
-line(
-  "Corrected by this work: the earlier plan listed primary hover, rail hover, row hover and the missed-chip border as unpublished. The accepted light board (`Atlas Light Theme.dc.html`) does publish them (`#3E36AD`, `#E3E5E8`, `#F0F1F3`, `#EBD6AE`), and they are used as published.",
-);
-line();
-line(
-  "Note on the light `ink-3`: the light board's own token table shows `#6B7280`; the later accepted table in `design-coverage.md` section 7 and the handoff README use `#5F6570`, which is darker and clears 4.5:1 on more surfaces. The darker value is used.",
-);
 line();
 line("## Contrast guard: every declared pair");
 line();
@@ -154,110 +121,29 @@ for (const pair of declaredPairs) {
   );
 }
 line();
-line("## Findings and the response to each");
-line();
-const surfaces = [
-  "canvas",
-  "panel",
-  "raised",
-  "chrome",
-  "chrome-inset",
-  "select-tint",
-  "rail-hover",
-  "nav-active",
-];
-line("### F1 Light `field-edge` is below 3:1 on `raised` and `chrome`");
-line();
-line("| Theme | canvas | panel | raised | chrome |");
-line("| --- | --- | --- | --- | --- |");
-for (const theme of ["dark", "light"])
-  line(
-    `| ${theme} | ${["canvas", "panel", "raised", "chrome"].map((s) => fmt(ratio(theme, "field-edge", s))).join(" | ")} |`,
-  );
+line("## Rules the components follow");
 line();
 line(
-  "Response: the accepted token is kept. `Input` fills only from `canvas` or `panel` (`inputFillSurfaces`), and the guard fails any declared input-on-`raised` or `chrome` pair. Escalate only if a later screen truly needs an input on those surfaces.",
+  "- Inputs take `border-input` and fill only from `background` or `card` (`inputFillSurfaces`): the border is declared against both and nothing else.",
 );
-line();
 line(
-  `### F2 The quoted 3.02:1 for light \`field-edge\` on white is really ${fmt(ratio("light", "field-edge", "panel"))}:1`,
+  "- Tinted state surfaces (a done badge, a missed notice, a conflict panel) are the state colour at low opacity over the card, with the state colour itself or `foreground` as text. They are checked in a real browser by axe (tests/e2e), since a blended colour has no single token value.",
 );
-line();
-line("Response: tests compute from tokens and never assert quoted figures.");
-line();
-line("### F3 `ink-3` is not permitted on every surface");
-line();
-line(`| Theme | ${surfaces.join(" | ")} |`);
-line(`| --- | ${surfaces.map(() => "---").join(" | ")} |`);
-for (const theme of ["dark", "light"])
-  line(
-    `| ${theme} | ${surfaces
-      .map((s) => {
-        const r = ratio(theme, "ink-3", s);
-        return `${fmt(r)}${r >= 4.5 ? "" : " ✗"}`;
-      })
-      .join(" | ")} |`,
-  );
-line();
 line(
-  "Response: secondary text on `chrome-inset`, `select-tint`, `rail-hover` and `nav-active` uses `ink-2`. The sync chip's sub-label sits on `chrome-inset`, so it is `ink-2`.",
+  "- `muted-foreground` is secondary text on the page, a card, a popover and the muted and secondary fills; it is not used on `accent`, where `accent-foreground` is.",
 );
 line();
-line("### F4 `withheld` is never text");
-line();
-line(
-  `Dark \`withheld\` on \`panel\` is ${fmt(ratio("dark", "withheld", "panel"))}:1 and on \`chrome-inset\` ${fmt(ratio("dark", "withheld", "chrome-inset"))}:1. Response: it is a dot or border only; its label uses \`ink-2\`. Carried to WEB-10.`,
-);
-line();
-line(
-  "### F5 The design's unselected radio ring and `placeholder` are too faint",
-);
-line();
-line(
-  `\`placeholder\` (\`#4A4E54\`) on dark \`panel\` is ${fmt(ratio("dark", "placeholder", "panel"))}:1 and on \`canvas\` ${fmt(ratio("dark", "placeholder", "canvas"))}:1 (WCAG 1.4.11 needs 3:1). Response: the unselected ring uses \`field-edge\` (${fmt(ratio("dark", "field-edge", "panel"))}:1 on \`panel\`). \`placeholder\` is decorative only; input placeholder text and inactive icons use \`ink-3\`.`,
-);
-line();
-line("### F6 The active rail item is not a perceivable cue on its own");
-line();
-line(
-  `\`nav-active\` on \`chrome\` is ${fmt(ratio("dark", "nav-active", "chrome"))}:1 in dark and ${fmt(ratio("light", "nav-active", "chrome"))}:1 in light. Response: the active item also carries an accent bar, heavier weight and \`aria-current="page"\`; tests assert all three.`,
-);
-line();
-line("### F7 The Settings 05 frame carries a designer's annotation");
-line();
-line(
-  'Response: the sentence beginning "This screen replaces the \'dark mode is deferred\' note" is not product copy and is not shipped. The genuine line, "Saved for this browser only, so a shared computer doesn\'t inherit your choice.", is.',
-);
-line();
-line(
-  "### F8 The Settings 05 theme cards showed selection by border colour only",
-);
-line();
-line(
-  "Response: the card-radio ring-and-dot from the component inventory is used, so state is not colour alone (WCAG 1.4.1).",
-);
-line();
-line("### F9 Unpublished light values");
-line();
-line('See "Values that are proposed, not published" above.');
-line();
+
 const text = `${out.join("\n")}\n`;
+const target = "docs/design-tokens.md";
 if (process.argv.includes("--check")) {
-  const current = (() => {
-    try {
-      return readFileSync("docs/design-tokens.md", "utf8");
-    } catch {
-      return "";
-    }
-  })();
+  const current = readFileSync(target, "utf8");
   if (current !== text) {
-    console.error("docs/design-tokens.md is stale: run `pnpm docs:tokens`");
+    console.error(`${target} is stale: run pnpm docs:tokens`);
     process.exit(1);
   }
-  console.log("docs/design-tokens.md is up to date");
+  console.log(`${target} is up to date`);
 } else {
-  writeFileSync("docs/design-tokens.md", text);
-  console.log(
-    `Wrote docs/design-tokens.md (${declaredPairs.length} declared pairs)`,
-  );
+  writeFileSync(target, text);
+  console.log(`Wrote ${target}`);
 }

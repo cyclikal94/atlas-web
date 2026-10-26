@@ -29,7 +29,7 @@ export function SessionsDevices() {
       <div className="flex flex-col gap-2">
         <Link
           to="/settings"
-          className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13.5px] text-ink-2 hover:text-ink-1"
+          className="atlas-transition inline-flex min-h-11 w-fit items-center text-sm text-muted-foreground hover:text-foreground"
         >
           Settings
         </Link>

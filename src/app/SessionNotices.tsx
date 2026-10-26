@@ -81,13 +81,13 @@ export function SessionNotices() {
   return (
     <section
       aria-label="Notices"
-      className="fixed inset-x-4 bottom-20 z-30 flex flex-col gap-2 tablet:inset-x-auto tablet:bottom-4 tablet:right-4 tablet:w-[420px]"
+      className="atlas-stagger fixed inset-x-4 bottom-20 z-30 flex flex-col gap-2 tablet:inset-x-auto tablet:bottom-5 tablet:right-5 tablet:w-[420px]"
     >
       {notices.map((notice) => (
         <div
           key={notice.id}
           data-notice={notice.kind}
-          className="flex flex-col gap-2 rounded-row border border-hairline-strong bg-raised p-3.5 text-[13.5px] leading-[1.6] text-ink-1"
+          className="flex flex-col gap-2.5 rounded-xl border bg-card p-4 text-sm leading-relaxed text-card-foreground shadow-lg"
         >
           <p>{REMAINED_SIGNED_IN}</p>
           <div>
@@ -101,7 +101,7 @@ export function SessionNotices() {
         <div
           key={`feedback-${item.id}`}
           data-notice={`feedback-${item.kind}`}
-          className="flex flex-col gap-2 rounded-row border border-hairline-strong bg-raised p-3.5 text-[13.5px] leading-[1.6] text-ink-1"
+          className="flex flex-col gap-2.5 rounded-xl border bg-card p-4 text-sm leading-relaxed text-card-foreground shadow-lg"
         >
           <p>
             {item.kind === "superseded" ? (

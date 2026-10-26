@@ -30,9 +30,12 @@ export function WipeConfirmBody({
 }) {
   const unsynced = summary !== null && summary.count > 0;
   return (
-    <div className="flex flex-col gap-3 text-[14px] leading-[1.6] text-ink-1">
+    <div className="flex flex-col gap-3 text-sm leading-relaxed text-foreground">
       {identity ? (
-        <p data-identity="" className="text-ink-2 [overflow-wrap:anywhere]">
+        <p
+          data-identity=""
+          className="text-muted-foreground [overflow-wrap:anywhere]"
+        >
           {identity.line}
           {identity.named !== undefined ? <bdi>{identity.named}</bdi> : null}
         </p>
@@ -43,7 +46,7 @@ export function WipeConfirmBody({
         <>
           <p>{changesLine(summary.count)}</p>
           {summary.items.length > 0 ? (
-            <List className="flex flex-col gap-1 text-ink-2">
+            <List className="flex flex-col gap-1 text-muted-foreground">
               {summary.items.map((item) => (
                 <li key={item} className="ml-5 list-disc">
                   {item}
@@ -58,7 +61,7 @@ export function WipeConfirmBody({
       )}
       {kind === "retire" && device ? (
         <>
-          <List className="flex flex-col gap-1 text-ink-2">
+          <List className="flex flex-col gap-1 text-muted-foreground">
             {summaryLines(device.summary).map((line) => (
               <li key={line} className="ml-5 list-disc">
                 {line}
@@ -69,7 +72,7 @@ export function WipeConfirmBody({
         </>
       ) : null}
       {refusal ? (
-        <p data-refusal="" className="text-ink-2">
+        <p data-refusal="" className="text-muted-foreground">
           {refusal}
         </p>
       ) : null}

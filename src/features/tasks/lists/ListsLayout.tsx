@@ -1,6 +1,8 @@
 import { Link, useMatchRoute } from "@tanstack/react-router";
+import { ListTodo } from "lucide-react";
 import { type ReactNode, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
+import { EmptyState } from "../../../components/ui/empty-state";
 import { List } from "../../../components/ui/list";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -31,7 +33,7 @@ export function ListsLayout() {
       </nav>
       <div className="min-w-0 flex-1">
         {listId === null ? (
-          <p className="hidden text-[13px] text-ink-2 desktop:block">
+          <p className="hidden text-sm text-muted-foreground desktop:block">
             {LISTS.choose}
           </p>
         ) : (
@@ -65,7 +67,7 @@ function ListsPane({ selected }: { selected: string | null }) {
       type="button"
       onClick={() => setCreating(true)}
       data-new-list=""
-      className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-dashed border-action-tint-edge px-4 text-[13.5px] font-medium text-action-ink hover:bg-row-hover"
+      className="atlas-transition inline-flex min-h-11 items-center gap-1.5 rounded-md border border-dashed border-primary/25 px-4 text-sm font-medium text-primary hover:border-primary hover:bg-accent"
     >
       {label}
     </button>
@@ -77,12 +79,15 @@ function ListsPane({ selected }: { selected: string | null }) {
       data-lists-pane=""
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 id={heading} className="text-[15px] font-medium text-ink-1">
+        <h2
+          id={heading}
+          className="text-base font-semibold tracking-tight text-foreground"
+        >
           {LISTS.pane}
         </h2>
         {newList(LISTS.newList)}
       </div>
-      <label className="inline-flex min-h-11 items-center gap-2 text-[13px] text-ink-1">
+      <label className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground">
         <input
           type="checkbox"
           checked={archived}
@@ -90,12 +95,12 @@ function ListsPane({ selected }: { selected: string | null }) {
             setArchived(!archived);
             setCursors([null]);
           }}
-          className="size-[15px]"
+          className="size-4"
         />
         {LISTS.archivedFilter}
       </label>
       {value !== null && value.attention > 0 ? (
-        <p className="text-[12.5px] text-conflict-text" data-lists-attention="">
+        <p className="text-xs text-destructive" data-lists-attention="">
           {LISTS.attention}{" "}
           <Link
             to="/sync"
@@ -128,11 +133,11 @@ function ListsPane({ selected }: { selected: string | null }) {
           {archived ? null : newList(LISTS.newListEmpty)}
         </Empty>
       ) : lists.length === 0 ? (
-        <p className="text-[13px] text-ink-2" data-lists-none="">
+        <p className="text-sm text-muted-foreground" data-lists-none="">
           {archived ? LISTS.emptyArchived : LISTS.noneHere}
         </p>
       ) : (
-        <List className="flex flex-col gap-1">
+        <List className="atlas-stagger overflow-hidden rounded-xl border bg-card p-1.5 shadow-sm">
           {lists.map((list) => {
             const id = list.row.id;
             const current = selected === id;
@@ -143,26 +148,26 @@ function ListsPane({ selected }: { selected: string | null }) {
                   params={{ listId: id }}
                   data-list-link={id}
                   aria-current={current ? "page" : undefined}
-                  className={`atlas-transition flex min-h-11 items-center justify-between gap-2 rounded-row px-3 py-2 text-[13.5px] text-ink-1 hover:bg-row-hover ${current ? "bg-select-tint font-medium" : ""}`}
+                  className={`atlas-transition flex min-h-11 items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm text-foreground hover:bg-accent ${current ? "bg-accent font-medium text-accent-foreground" : ""}`}
                 >
                   <span className="truncate">{list.row.label}</span>
                   <span className="flex flex-none items-center gap-2">
                     {list.pending ? (
                       <span
                         data-pending-mark={list.pending}
-                        className="text-[11.5px] text-ink-2"
+                        className="text-xs text-muted-foreground"
                       >
                         {copy.PENDING[list.pending]}
                       </span>
                     ) : null}
                     {list.members === null ? (
-                      <span className="font-num text-[11px] text-ink-2">
+                      <span className="font-num text-xs text-muted-foreground">
                         <span aria-hidden="true">—</span>
                         <span className="sr-only">{LISTS.countUnknown}</span>
                       </span>
                     ) : (
                       <span
-                        className="font-num text-[11px] text-ink-2"
+                        className="font-num text-xs text-muted-foreground"
                         data-list-count={list.members.length}
                       >
                         <span aria-hidden="true">{list.members.length}</span>
@@ -180,13 +185,13 @@ function ListsPane({ selected }: { selected: string | null }) {
       )}
       <div className="flex gap-2">
         {cursors.length > 1 ? (
-          <Button variant="quiet" onClick={() => setCursors([null])}>
+          <Button variant="ghost" onClick={() => setCursors([null])}>
             {LISTS.first}
           </Button>
         ) : null}
         {value !== null && value.next !== null ? (
           <Button
-            variant="quiet"
+            variant="ghost"
             onClick={() => setCursors([...cursors, value.next])}
           >
             {LISTS.more}
@@ -211,11 +216,8 @@ function Empty({
   children: ReactNode;
 }) {
   return (
-    <div className="flex flex-col items-center gap-3 py-10" data-lists-empty="">
-      <p className="text-[13px] text-ink-2">
-        {archived ? LISTS.emptyArchived : LISTS.empty}
-      </p>
-      {children}
-    </div>
+    <EmptyState icon={ListTodo} action={children} data-lists-empty="">
+      {archived ? LISTS.emptyArchived : LISTS.empty}
+    </EmptyState>
   );
 }

@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { AtlasMark } from "../components/ui/brand";
+import { Card } from "../components/ui/card";
 import { List } from "../components/ui/list";
 import type { ApiCompatibility } from "../session";
 import type { CapabilityId, CapabilityIssue } from "./capabilities";
@@ -49,46 +51,52 @@ export function CompatibilityScreen({
     return (
       <main
         data-compatibility="api"
-        className="mx-auto flex max-w-[620px] flex-col gap-4 px-5 py-16"
+        className="atlas-enter mx-auto flex min-h-dvh w-full max-w-[520px] flex-col justify-center px-4 py-10"
       >
-        <h1
-          ref={heading}
-          tabIndex={-1}
-          className="text-[26px] font-semibold tracking-[-0.025em] text-ink-1"
-        >
-          {API_HEADING}
-        </h1>
-        <p className="text-[14px] leading-[1.6] text-ink-1">
-          {API_EXPLANATION[api.status]}
-        </p>
+        <Card className="gap-4 px-6 py-6 tablet:px-7 tablet:py-7">
+          <AtlasMark size="lg" />
+          <h1
+            ref={heading}
+            tabIndex={-1}
+            className="text-2xl font-semibold leading-tight tracking-tight text-foreground"
+          >
+            {API_HEADING}
+          </h1>
+          <p className="text-sm leading-relaxed text-foreground">
+            {API_EXPLANATION[api.status]}
+          </p>
+        </Card>
       </main>
     );
   }
   return (
-    <main className="mx-auto flex max-w-[620px] flex-col gap-4 px-5 py-16">
-      <h1
-        ref={heading}
-        tabIndex={-1}
-        className="text-[26px] font-semibold tracking-[-0.025em] text-ink-1"
-      >
-        Atlas can't open in this browser
-      </h1>
-      <List className="flex flex-col gap-2">
-        {issues.map((issue) => (
-          <li
-            key={issue.id}
-            data-capability={issue.id}
-            className="list-none text-[14px] leading-[1.6] text-ink-1"
-          >
-            {EXPLANATION[issue.id]}
-          </li>
-        ))}
-      </List>
-      <p className="text-[14px] leading-[1.6] text-ink-2">
-        Atlas works in the current or previous version of Chrome, Edge, Firefox
-        or Safari (including Chrome on Android and Safari on iPhone and iPad),
-        over HTTPS.
-      </p>
+    <main className="atlas-enter mx-auto flex min-h-dvh w-full max-w-[520px] flex-col justify-center px-4 py-10">
+      <Card className="gap-4 px-6 py-6 tablet:px-7 tablet:py-7">
+        <AtlasMark size="lg" />
+        <h1
+          ref={heading}
+          tabIndex={-1}
+          className="text-2xl font-semibold leading-tight tracking-tight text-foreground"
+        >
+          Atlas can't open in this browser
+        </h1>
+        <List className="flex flex-col gap-2">
+          {issues.map((issue) => (
+            <li
+              key={issue.id}
+              data-capability={issue.id}
+              className="list-none rounded-lg border border-warning/35 bg-warning/10 px-3.5 py-2.5 text-sm leading-relaxed text-foreground"
+            >
+              {EXPLANATION[issue.id]}
+            </li>
+          ))}
+        </List>
+        <p className="border-t pt-4 text-sm leading-relaxed text-muted-foreground">
+          Atlas works in the current or previous version of Chrome, Edge,
+          Firefox or Safari (including Chrome on Android and Safari on iPhone
+          and iPad), over HTTPS.
+        </p>
+      </Card>
     </main>
   );
 }

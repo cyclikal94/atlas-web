@@ -25,7 +25,7 @@ export function NeutralStatus({
       id={id}
       role={kind}
       data-neutral-status={kind}
-      className="text-[13px] leading-[1.6] text-ink-1"
+      className="text-sm leading-relaxed text-foreground"
     >
       {children}
     </p>

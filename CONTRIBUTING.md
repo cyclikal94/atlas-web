@@ -52,9 +52,11 @@ scripts/integration/     the released-backend integration harness and delaying p
 - **The protected root.** `#protected-root` starts inert and hidden. Everything that renders account data lives inside it, including dialogs and tooltips (use the shared
   `Dialog` and `Tooltip`, which render into the registered portal container). Do not lift the gate; only the session's `act` does, through `src/session/adapters/protected-surface.ts`. Lint rules R1 to R12 enforce the mechanical parts
   (R7 to R12 by `scripts/check-session-conventions.mjs`, run by `pnpm lint`). Never send a request except through `session.api`; never read `atlas-auth` except in `src/session`.
-- **Tokens.** Colours come from tokens (`bg-canvas`, `text-ink-2`, `border-field-edge`). Never write a hex value in a component. Change a token in `src/styles/tokens.css`, mirror it in
-  `src/design/tokens.ts`, add or adjust its declared pairs in `src/design/contrast-pairs.ts`, and run `pnpm docs:tokens`. The contrast test fails on any declared pair below its minimum.
-  Inputs use `field-edge` and fill only from `canvas` or `panel` (Q17).
+- **Tokens and the kit.** The UI is built from the shadcn/ui kit in `src/components/ui` (Button, Input, Card, Badge, Alert, Dialog, Tooltip and the rest), composed with
+  `cn` from `src/lib/utils.ts`. Colours come from the shadcn theme variables (`bg-background`, `text-muted-foreground`, `border-input`, `bg-sidebar`). Never write a hex
+  value in a component. To change the palette, export a theme from tweakcn.com and run `node scripts/apply-theme.mjs <file.css>`: it rewrites `src/styles/tokens.css`
+  and the mirror `src/design/tokens.ts` and regenerates `docs/design-tokens.md`; the contrast test (`tests/design/tokens.test.ts`) then fails on any declared pair
+  (`src/design/contrast-pairs.ts`) below its minimum. Inputs take `border-input` and fill only from `background` or `card` (Q17).
 - **No inline script or style.** The production content security policy forbids both. Load scripts as files. Do not add a component that injects a `<style>` element or sets a `style`
   attribute through `setAttribute`; setting `element.style.x` is fine.
 - **Copy.** Use the accepted copy deck (`design_handoff_atlas_web`). Do not ship a designer's annotation.

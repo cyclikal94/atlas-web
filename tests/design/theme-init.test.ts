@@ -19,7 +19,7 @@ function runInit(
 ) {
   const doc = document.implementation.createHTMLDocument("x");
   doc.head.innerHTML =
-    '<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#08090A"><meta name="theme-color" media="(prefers-color-scheme: light)" content="#F7F8F9">';
+    '<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0C0C10"><meta name="theme-color" media="(prefers-color-scheme: light)" content="#F7F7FA">';
   const fakeWindow = {
     localStorage: {
       getItem: (key: string) => {
@@ -64,7 +64,7 @@ describe("public/theme-init.js parity with src/design/theme.ts", () => {
     const fromScript = runInit(stored, prefersLight);
     const doc = document.implementation.createHTMLDocument("x");
     doc.head.innerHTML =
-      '<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#08090A"><meta name="theme-color" media="(prefers-color-scheme: light)" content="#F7F8F9">';
+      '<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0C0C10"><meta name="theme-color" media="(prefers-color-scheme: light)" content="#F7F7FA">';
     const preference = parsePreference(stored === "throw" ? null : stored);
     applyPreference(preference, doc, prefersLight === true);
     expect(fromScript.theme).toBe(

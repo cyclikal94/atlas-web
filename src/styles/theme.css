@@ -1,67 +1,65 @@
 /*
- * Tailwind reads the design tokens through `inline` so utilities such as bg-canvas, text-ink-1
- * and border-field-edge resolve to var(--canvas) and follow the active theme without a rebuild.
- * The default Tailwind palette is removed: only accepted tokens exist as colour utilities.
+ * Tailwind reads the design tokens through `inline`, so bg-background, text-muted-foreground and border-input resolve to
+ * var(--background) and so on and follow the active theme without a rebuild. This is the shadcn/ui mapping; a tweakcn export
+ * carries the same block and can replace it. The default Tailwind palette is removed: only tokens exist as colour utilities.
  */
 @theme inline {
   --color-*: initial;
-  --color-canvas: var(--canvas);
-  --color-panel: var(--panel);
-  --color-raised: var(--raised);
-  --color-chrome: var(--chrome);
-  --color-chrome-inset: var(--chrome-inset);
-  --color-chrome-inset-edge: var(--chrome-inset-edge);
-  --color-inset: var(--inset);
-  --color-tab-bar: var(--tab-bar);
-  --color-hairline: var(--hairline);
-  --color-hairline-strong: var(--hairline-strong);
-  --color-chrome-edge: var(--chrome-edge);
-  --color-field-edge: var(--field-edge);
-  --color-ink-1: var(--ink-1);
-  --color-ink-2: var(--ink-2);
-  --color-ink-3: var(--ink-3);
-  --color-placeholder: var(--placeholder);
-  --color-action-fill: var(--action-fill);
-  --color-action-ink: var(--action-ink);
-  --color-action-on: var(--action-on);
-  --color-action-hover: var(--action-hover);
-  --color-action-tint: var(--action-tint);
-  --color-action-tint-edge: var(--action-tint-edge);
-  --color-nav-active: var(--nav-active);
-  --color-select-tint: var(--select-tint);
-  --color-rail-hover: var(--rail-hover);
-  --color-row-hover: var(--row-hover);
-  --color-done: var(--done);
-  --color-done-tint: var(--done-tint);
-  --color-done-edge: var(--done-edge);
-  --color-missed: var(--missed);
-  --color-missed-tint: var(--missed-tint);
-  --color-missed-edge: var(--missed-edge);
-  --color-conflict: var(--conflict);
-  --color-conflict-tint: var(--conflict-tint);
-  --color-conflict-edge: var(--conflict-edge);
-  --color-conflict-text: var(--conflict-text);
-  --color-withheld: var(--withheld);
-  --color-withheld-tint: var(--withheld-tint);
-  --color-withheld-edge: var(--withheld-edge);
-  --color-scrim: var(--scrim);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  /* The two literal colours shadcn components use for scrims and destructive labels. */
+  --color-black: #000;
+  --color-white: #fff;
 
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, monospace;
 
-  --radius-*: initial;
-  --radius-badge: 6px;
-  --radius-nav: 7px;
-  --radius-control: 8px;
-  --radius-row: 10px;
-  --radius-card: 12px;
-  --radius-dialog: 14px;
-  --radius-round: 9999px;
-
-  --shadow-*: initial;
-  --shadow-modal: 0 30px 70px -20px rgba(0, 0, 0, 0.9);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
 
   --breakpoint-*: initial;
   --breakpoint-tablet: 768px;
   --breakpoint-desktop: 1280px;
+}
+
+/* The one radius every corner derives from (shadcn `--radius`; tweakcn exports it). */
+:root {
+  --radius: 0.625rem;
 }

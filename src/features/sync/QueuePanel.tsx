@@ -106,12 +106,15 @@ export function QueuePanel({
   const panel = useRef<HTMLDivElement>(null);
 
   return (
-    <div className="flex max-w-[760px] flex-col gap-4">
+    <div className="atlas-enter flex max-w-[760px] flex-col gap-5">
       <header className="flex flex-wrap items-start gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <PageHeading>{PANEL_HEADING}</PageHeading>
-          <p className="text-[13.5px] text-ink-2">{PANEL_SUBTITLE}</p>
-          <p data-phase-label="" className="font-num text-[12px] text-ink-2">
+          <p className="text-sm text-muted-foreground">{PANEL_SUBTITLE}</p>
+          <p
+            data-phase-label=""
+            className="font-num text-xs text-muted-foreground"
+          >
             {chip.phaseLabel}
           </p>
         </div>
@@ -138,25 +141,25 @@ export function QueuePanel({
         className="flex flex-col gap-2"
       >
         {queue.status === "loading" ? (
-          <p aria-busy="true" className="text-[13px] text-ink-2">
+          <p aria-busy="true" className="text-sm text-muted-foreground">
             {LOADING}
           </p>
         ) : queue.status === "unavailable" && queue.reason !== "absent" ? (
           <div
             data-load-error=""
-            className="flex flex-col items-start gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+            className="flex flex-col items-start gap-2 rounded-xl border border-destructive/35 bg-card p-4 shadow-sm"
           >
-            <p className="text-[13.5px] text-ink-1">{LOAD_FAILED}</p>
+            <p className="text-sm text-foreground">{LOAD_FAILED}</p>
             <Button onClick={() => dataActions.retryLoad()}>
               {LOAD_FAILED_ACTION}
             </Button>
           </div>
         ) : rows.length === 0 ? (
-          <p data-empty="" className="text-[13px] text-ink-2">
+          <p data-empty="" className="text-sm text-muted-foreground">
             {tab === "waiting" ? EMPTY_WAITING : EMPTY_DECISION}
           </p>
         ) : (
-          <List className="flex flex-col gap-2">
+          <List className="atlas-stagger flex flex-col gap-2">
             {rows.map((draft) => (
               <QueueRow
                 key={draft.local_id}
@@ -199,7 +202,7 @@ export function QueuePanel({
         ) : null}
       </div>
 
-      <p className="max-w-[620px] text-[12px] leading-[1.55] text-ink-2">
+      <p className="max-w-[620px] text-xs leading-relaxed text-muted-foreground">
         {FOOTER}
       </p>
     </div>
@@ -244,7 +247,7 @@ function Tabs({
     <div
       role="tablist"
       aria-label="Sync queue"
-      className="flex flex-wrap gap-1 border-b border-hairline"
+      className="inline-flex w-fit flex-wrap items-center gap-1 rounded-lg bg-muted p-1 text-muted-foreground"
     >
       {order.map((id) => (
         <button
@@ -261,10 +264,10 @@ function Tabs({
           data-tab={id}
           onClick={() => onChange(id)}
           onKeyDown={(event) => move(event, id)}
-          className={`atlas-transition min-h-11 border-b-2 px-3 text-[13.5px] ${
+          className={`atlas-transition inline-flex h-11 items-center rounded-md px-3.5 text-sm ${
             tab === id
-              ? "border-action-ink font-medium text-ink-1"
-              : "border-transparent text-ink-2 hover:text-ink-1"
+              ? "bg-background font-medium text-foreground shadow-sm"
+              : "hover:text-foreground"
           }`}
         >
           {label[id]} · <span className="font-num">{counts[id]}</span>
@@ -334,45 +337,47 @@ function QueueRow({
     <li
       data-draft-row={draft.status}
       data-draft-id={draft.local_id}
-      className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="list-none rounded-xl border bg-card p-4 shadow-sm"
     >
       <div className="flex flex-wrap items-start gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <span className="flex flex-wrap items-center gap-2">
-            <span className="text-[14px] text-ink-1">{title}</span>
+            <span className="text-sm font-medium text-foreground">{title}</span>
             {view.badge ? (
               <span
                 data-badge=""
-                className="rounded-badge border border-conflict-edge bg-conflict-tint px-1.5 py-0.5 text-[11.5px] text-conflict-text"
+                className="rounded-md border border-destructive/30 bg-destructive/12 px-2 py-0.5 text-xs font-medium text-destructive"
               >
                 {view.badge}
               </span>
             ) : null}
           </span>
-          <span className="font-num text-[12px] text-ink-2">
+          <span className="font-num text-xs text-muted-foreground">
             {SAVED_AT(formatSavedAt(draft.created_at, new Date()))}
           </span>
-          <span className="text-[12.5px] text-ink-2">
+          <span className="text-xs text-muted-foreground">
             {view.status}
             {view.attempts ? ` · ${view.attempts}` : ""}
           </span>
           {view.body ? (
-            <span className="max-w-[560px] text-[12.5px] leading-[1.55] text-ink-2">
+            <span className="max-w-[560px] text-xs leading-relaxed text-muted-foreground">
               {view.body}
             </span>
           ) : null}
           {view.cannotDiscard ? (
-            <span className="text-[12px] text-ink-2">{CANNOT_DISCARD}</span>
+            <span className="text-xs text-muted-foreground">
+              {CANNOT_DISCARD}
+            </span>
           ) : null}
           {failed ? (
-            <span className="text-[12.5px] text-ink-1">{DISCARD_FAILED}</span>
+            <span className="text-xs text-foreground">{DISCARD_FAILED}</span>
           ) : null}
         </div>
         {confirming ? (
           <div className="flex flex-col items-end gap-2">
-            <span className="text-[13px] text-ink-1">{DISCARD_CONFIRM}</span>
+            <span className="text-sm text-foreground">{DISCARD_CONFIRM}</span>
             {dependants > 0 ? (
-              <span className="max-w-[260px] text-right text-[12px] text-ink-2">
+              <span className="max-w-[260px] text-right text-xs text-muted-foreground">
                 {DISCARD_DEPENDANTS(dependants)}
               </span>
             ) : null}
@@ -385,7 +390,7 @@ function QueueRow({
                   {DISCARD_CONFIRM_YES}
                 </Button>
               ) : (
-                <Button variant="primary" onClick={() => void discard()}>
+                <Button variant="default" onClick={() => void discard()}>
                   {DISCARD_CONFIRM_YES}
                 </Button>
               )}
@@ -406,8 +411,8 @@ function QueueRow({
                 key={action}
                 variant={
                   action === "retry" || action === "review"
-                    ? "primary"
-                    : "secondary"
+                    ? "default"
+                    : "outline"
                 }
                 aria-label={`${label[action]}: ${title}`}
                 onClick={() => run(action)}

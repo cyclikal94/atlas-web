@@ -204,11 +204,11 @@ export function LinkedIdentities({
       className="flex flex-col gap-3"
       data-linked=""
     >
-      <h3 id={headingId} className="text-[14px] font-medium text-ink-1">
+      <h3 id={headingId} className="text-sm font-medium text-foreground">
         {LINKED_HEADING}
       </h3>
       {account.oidc_issuers.length === 0 ? (
-        <p className="text-[13px] text-ink-2">{NO_LINKS}</p>
+        <p className="text-sm text-muted-foreground">{NO_LINKS}</p>
       ) : (
         <List className="flex flex-col gap-2">
           {account.oidc_issuers.map((issuer) => {
@@ -217,7 +217,7 @@ export function LinkedIdentities({
               <li
                 key={issuer}
                 data-issuer-row=""
-                className="list-none rounded-row border border-hairline-strong bg-panel p-3"
+                className="list-none rounded-lg border border-border bg-card p-3"
               >
                 <div className="flex flex-wrap items-start gap-x-3 gap-y-2">
                   {/* The host takes the room it needs and the control wraps below it, so a host is only broken inside a word when
@@ -225,13 +225,13 @@ export function LinkedIdentities({
                   <span className="flex min-w-0 flex-1 basis-48 items-center gap-3">
                     <span
                       aria-hidden="true"
-                      className="shrink-0 rounded-control border border-hairline-strong px-1.5 py-0.5 text-[11px] text-ink-2"
+                      className="shrink-0 rounded-md border border-border px-1.5 py-0.5 text-xs text-muted-foreground"
                     >
                       SSO
                     </span>
                     <span
                       data-issuer=""
-                      className="min-w-0 break-words text-[14px] text-ink-1"
+                      className="min-w-0 break-words text-sm text-foreground"
                     >
                       {issuerLabel(issuer)}
                     </span>
@@ -266,7 +266,7 @@ export function LinkedIdentities({
                 {problem ? (
                   <p
                     data-error=""
-                    className="mt-2 text-[12.5px] leading-[1.6] text-ink-1"
+                    className="mt-2 text-xs leading-relaxed text-foreground"
                   >
                     {problem.text}
                   </p>
@@ -281,11 +281,11 @@ export function LinkedIdentities({
           <p
             id={consequenceId}
             data-remove-consequence=""
-            className="text-[12.5px] leading-[1.6] text-ink-2"
+            className="text-xs leading-relaxed text-muted-foreground"
           >
             {REMOVE_CONSEQUENCE}
           </p>
-          <p className="text-[12.5px] leading-[1.6] text-ink-2">
+          <p className="text-xs leading-relaxed text-muted-foreground">
             {REMOVE_RULE}
           </p>
         </>
@@ -311,9 +311,11 @@ export function LinkedIdentities({
             {LINK_LABEL}
           </Button>
         )}
-        <p className="text-[12.5px] leading-[1.6] text-ink-2">{LINK_HINT}</p>
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {LINK_HINT}
+        </p>
         {linkProblem ? (
-          <p data-error="" className="text-[12.5px] leading-[1.6] text-ink-1">
+          <p data-error="" className="text-xs leading-relaxed text-foreground">
             {linkProblem.text}
             <RequestId id={linkProblem.requestId} />
           </p>

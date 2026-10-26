@@ -316,10 +316,10 @@ export function HouseholdsMinimal() {
       data-households=""
     >
       <div className="flex flex-col gap-1">
-        <h2 id={ids.heading} className="text-[17px] font-medium text-ink-1">
+        <h2 id={ids.heading} className="text-lg font-medium text-foreground">
           {copy.HOUSEHOLDS_HEADING}
         </h2>
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {copy.HOUSEHOLDS_SUBSET_NOTE}
         </p>
       </div>
@@ -338,7 +338,7 @@ export function HouseholdsMinimal() {
                   <Button onClick={retry}>{copy.TRY_AGAIN}</Button>
                 )}
                 <Button
-                  variant="quiet"
+                  variant="ghost"
                   onClick={() => {
                     // Shows the households and invitations again; the unconfirmed change stays to be tried again (R8).
                     reloadHouseholds();
@@ -363,16 +363,16 @@ export function HouseholdsMinimal() {
           action={<Button onClick={reloadHouseholds}>{copy.TRY_AGAIN}</Button>}
         />
       ) : shown === null ? (
-        <p className="text-[13px] text-ink-2">
+        <p className="text-sm text-muted-foreground">
           {env.online ? copy.HOUSEHOLDS_LOADING : copy.HOUSEHOLDS_OFFLINE_NONE}
         </p>
       ) : shown.from === "snapshot" && shown.list.length === 0 ? (
         // B5 names no household: that is not "you're in none" (DA-M2).
         <div className="flex flex-col gap-1" data-households-from="snapshot">
-          <p className="text-[13px] text-ink-1">
+          <p className="text-sm text-foreground">
             {copy.HOUSEHOLDS_SNAPSHOT_NONE}
           </p>
-          <p className="text-[12px] text-ink-2">
+          <p className="text-xs text-muted-foreground">
             {copy.AS_OF(formatWhen(shown.at, env.now()))}
           </p>
         </div>
@@ -380,7 +380,7 @@ export function HouseholdsMinimal() {
         <>
           {!env.online ? (
             <p
-              className="text-[12px] text-ink-2"
+              className="text-xs text-muted-foreground"
               data-households-from={shown.from}
             >
               {shown.from === "snapshot"
@@ -390,7 +390,7 @@ export function HouseholdsMinimal() {
           ) : null}
           {shown.list.length === 0 ? (
             // Only the complete list can say this (DA-M2).
-            <p className="text-[13px] text-ink-1">{copy.HOUSEHOLDS_EMPTY}</p>
+            <p className="text-sm text-foreground">{copy.HOUSEHOLDS_EMPTY}</p>
           ) : (
             <List className="flex flex-col gap-2">
               {shown.list.map((household) => (
@@ -408,7 +408,7 @@ export function HouseholdsMinimal() {
       )}
       <form
         aria-labelledby={ids.create}
-        className="flex flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+        className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3.5"
         onSubmit={(event) => {
           event.preventDefault();
           if (blocked !== null || nameLength < 1 || nameLength > 300) return;
@@ -420,27 +420,26 @@ export function HouseholdsMinimal() {
           });
         }}
       >
-        <h3 id={ids.create} className="text-[13.5px] font-medium text-ink-1">
+        <h3 id={ids.create} className="text-sm font-medium text-foreground">
           {copy.CREATE_HEADING}
         </h3>
         <Input
           label={copy.CREATE_NAME}
-          surface="panel"
           value={name}
           maxLength={300}
           onChange={(event) => setName(event.target.value)}
         />
         <span>
           {blocked !== null ? (
-            <Button variant="primary" disabled reason={blocked}>
+            <Button variant="default" disabled reason={blocked}>
               {copy.CREATE_BUTTON}
             </Button>
           ) : nameLength < 1 || nameLength > 300 ? (
-            <Button variant="primary" disabled reason={copy.CREATE_NAME_REASON}>
+            <Button variant="default" disabled reason={copy.CREATE_NAME_REASON}>
               {copy.CREATE_BUTTON}
             </Button>
           ) : (
-            <Button variant="primary" type="submit">
+            <Button variant="default" type="submit">
               {copy.CREATE_BUTTON}
             </Button>
           )}
@@ -452,7 +451,7 @@ export function HouseholdsMinimal() {
       >
         <h3
           id={ids.invitations}
-          className="text-[13.5px] font-medium text-ink-1"
+          className="text-sm font-medium text-foreground"
         >
           {copy.INVITATIONS_HEADING}
         </h3>
@@ -483,7 +482,7 @@ export function HouseholdsMinimal() {
             }
           />
         ) : (
-          <p className="text-[13px] text-ink-2">
+          <p className="text-sm text-muted-foreground">
             {env.online
               ? copy.HOUSEHOLDS_LOADING
               : copy.LOOKUP_NEEDS_CONNECTION}
@@ -509,19 +508,19 @@ function HouseholdRow({
   return (
     <li
       data-household={household.id}
-      className="flex list-none flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
+      className="flex list-none flex-col gap-2 rounded-lg border border-border bg-card p-3.5"
     >
       <span className="flex flex-wrap items-center gap-2">
-        <span className="text-[14px] font-medium text-ink-1">
+        <span className="text-sm font-medium text-foreground">
           {household.name}
         </span>
         {primary ? (
-          <span className="rounded-badge border border-hairline-strong px-1.5 py-0.5 text-[11.5px] text-ink-2">
+          <span className="rounded-sm border border-border px-1.5 py-0.5 text-xs text-muted-foreground">
             {copy.PRIMARY_BADGE}
           </span>
         ) : null}
       </span>
-      <span className="text-[12.5px] text-ink-2">
+      <span className="text-xs text-muted-foreground">
         {copy.HOUSEHOLD_ROLE(household.role)} ·{" "}
         {copy.HOUSEHOLD_MEMBERS(household.members.length)}:{" "}
         {household.members.map((member) => member.username).join(", ")}
@@ -540,7 +539,6 @@ function HouseholdRow({
           <div className="min-w-0 flex-1">
             <Input
               label={copy.INVITE_LABEL(household.name)}
-              surface="panel"
               value={username}
               autoCapitalize="none"
               spellCheck={false}
@@ -576,7 +574,7 @@ function InvitationList({
   onRespond(invitation: Invitation, accept: boolean): void;
 }) {
   if (invitations.length === 0)
-    return <p className="text-[13px] text-ink-1">{copy.INVITATIONS_EMPTY}</p>;
+    return <p className="text-sm text-foreground">{copy.INVITATIONS_EMPTY}</p>;
   return (
     <List className="flex flex-col gap-2">
       {invitations.map((invitation) => {
@@ -585,9 +583,9 @@ function InvitationList({
           <li
             key={invitation.id}
             data-invitation={invitation.id}
-            className="flex list-none flex-wrap items-center gap-2 rounded-row border border-hairline-strong bg-panel p-3"
+            className="flex list-none flex-wrap items-center gap-2 rounded-lg border border-border bg-card p-3"
           >
-            <span className="min-w-0 flex-1 text-[13px] text-ink-1">
+            <span className="min-w-0 flex-1 text-sm text-foreground">
               {copy.INVITATION_FROM(
                 invitation.household_name,
                 Number.isNaN(expires)
@@ -608,7 +606,7 @@ function InvitationList({
                   {copy.DECLINE}
                 </Button>
                 <Button
-                  variant="primary"
+                  variant="default"
                   aria-label={`${copy.ACCEPT}: ${invitation.household_name}`}
                   onClick={() => onRespond(invitation, true)}
                 >

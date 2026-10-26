@@ -25,7 +25,7 @@ for (const scheme of ["dark", "light"] as const) {
   test.describe(`controls (${scheme})`, () => {
     test.use({ colorScheme: scheme, viewport: { width: 900, height: 1400 } });
 
-    test("an empty input's border is field-edge and reaches 3:1 against the surface it sits on (Q17)", async ({
+    test("an empty input's border is the input edge and reaches 3:1 against the surface it sits on (Q17)", async ({
       page,
     }) => {
       await page.goto("/__controls");
@@ -47,7 +47,7 @@ for (const scheme of ["dark", "light"] as const) {
           };
         });
         expect(painted.width).toBe("1px");
-        expect(hex(painted.border)).toBe(tokens[scheme]["field-edge"]);
+        expect(hex(painted.border)).toBe(tokens[scheme].input);
         // The visible boundary is between the border and what surrounds the input, and between the border and the fill.
         expect(
           contrastRatio(hex(painted.border), hex(painted.surround)),
@@ -55,11 +55,11 @@ for (const scheme of ["dark", "light"] as const) {
         expect(
           contrastRatio(hex(painted.border), hex(painted.fill)),
         ).toBeGreaterThanOrEqual(3);
-        expect(hex(painted.border)).not.toBe(tokens[scheme].hairline);
+        expect(hex(painted.border)).not.toBe(tokens[scheme].border);
       }
     });
 
-    test("the input's fill is canvas or panel, never raised or chrome (finding F1)", async ({
+    test("the input's fill is background or card, never muted or secondary (finding F1)", async ({
       page,
     }) => {
       await page.goto("/__controls");
@@ -70,12 +70,12 @@ for (const scheme of ["dark", "light"] as const) {
           elements.map((element) => getComputedStyle(element).backgroundColor),
         );
       for (const fill of fills)
-        expect([tokens[scheme].canvas, tokens[scheme].panel]).toContain(
+        expect([tokens[scheme].background, tokens[scheme].card]).toContain(
           hex(fill),
         );
     });
 
-    test("placeholder text is ink-3 and readable on its fill", async ({
+    test("placeholder text is muted-foreground and readable on its fill", async ({
       page,
     }) => {
       await page.goto("/__controls");
@@ -85,13 +85,13 @@ for (const scheme of ["dark", "light"] as const) {
         .evaluate(
           (element) => getComputedStyle(element, "::placeholder").color,
         );
-      expect(hex(colour)).toBe(tokens[scheme]["ink-3"]);
+      expect(hex(colour)).toBe(tokens[scheme]["muted-foreground"]);
       expect(
-        contrastRatio(hex(colour), tokens[scheme].panel),
+        contrastRatio(hex(colour), tokens[scheme].card),
       ).toBeGreaterThanOrEqual(4.5);
     });
 
-    test("the radio card's unselected ring is field-edge (finding F5), and selection is a ring with a dot", async ({
+    test("the radio card's unselected ring is the input edge (finding F5), and selection is a ring with a dot", async ({
       page,
     }) => {
       await page.goto("/__controls");
@@ -101,7 +101,7 @@ for (const scheme of ["dark", "light"] as const) {
         .locator("span[aria-hidden]")
         .last()
         .evaluate((element) => getComputedStyle(element).borderTopColor);
-      expect(hex(ring)).toBe(tokens[scheme]["field-edge"]);
+      expect(hex(ring)).toBe(tokens[scheme].input);
       await expect(
         page
           .getByRole("radio", { name: "First" })

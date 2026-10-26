@@ -145,7 +145,10 @@ export function ClosureControls({
       className="flex flex-col gap-2"
       data-closure=""
     >
-      <h2 id={heading} className="text-[15px] font-medium text-ink-1">
+      <h2
+        id={heading}
+        className="text-base font-semibold tracking-tight text-foreground"
+      >
         {CONTROLS_COPY.closureHeading}
       </h2>
       <div className="flex flex-wrap items-start gap-2">
@@ -176,14 +179,11 @@ export function ClosureControls({
           )
         ) : null}
       </div>
-      <p id={note} className="text-[12.5px] text-ink-2">
+      <p id={note} className="text-xs text-muted-foreground">
         {CONTROLS_COPY.closeNote}
       </p>
       {conflict ? (
-        <p
-          className="text-[12.5px] text-conflict-text"
-          data-closure-conflict=""
-        >
+        <p className="text-xs text-destructive" data-closure-conflict="">
           {CONTROLS_COPY.conflict}
         </p>
       ) : null}
@@ -226,11 +226,11 @@ export function ArchiveControl({
           </Button>
         )}
       </span>
-      <p id={note} className="text-[12px] text-ink-2">
+      <p id={note} className="text-xs text-muted-foreground">
         {CONTROLS_COPY.archiveNote}
       </p>
       {attention ? (
-        <p className="text-[12.5px] text-conflict-text">
+        <p className="text-xs text-destructive">
           {CONTROLS_COPY.archiveConflict}
         </p>
       ) : null}
@@ -307,21 +307,24 @@ export function Participation({
       className="flex flex-col gap-2"
       data-participation=""
     >
-      <h2 id={heading} className="text-[15px] font-medium text-ink-1">
+      <h2
+        id={heading}
+        className="text-base font-semibold tracking-tight text-foreground"
+      >
         {CONTROLS_COPY.whoHeading}
       </h2>
-      <p className="text-[13px] text-ink-1">
+      <p className="text-sm text-foreground">
         {copy.PARTICIPATION[data.definition.participation]} ·{" "}
         {whoLabel(row, env.accountId)}
       </p>
-      <p className="text-[12.5px] text-ink-2">
+      <p className="text-xs text-muted-foreground">
         {copy.PARTICIPATION_LINE[data.definition.participation]}
       </p>
-      <p className="text-[13px] text-ink-1" data-my-result="">
+      <p className="text-sm text-foreground" data-my-result="">
         {CONTROLS_COPY.mine}: {mine}
       </p>
       {shared ? (
-        <p className="text-[13px] text-ink-1" data-joint-line={line.kind}>
+        <p className="text-sm text-foreground" data-joint-line={line.kind}>
           {copy.JOINT.heading}: {lineText}
         </p>
       ) : null}
@@ -530,18 +533,18 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
       aria-labelledby={heading}
       data-enrolment=""
     >
-      <h3 id={heading} className="text-[13.5px] font-medium text-ink-1">
+      <h3 id={heading} className="text-sm font-medium text-foreground">
         {CONTROLS_COPY.settings}
       </h3>
       {!env.online ? (
-        <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.offline}</p>
+        <p className="text-xs text-muted-foreground">{CONTROLS_COPY.offline}</p>
       ) : state === "unavailable" ? (
         <span className="flex flex-wrap items-center gap-2">
-          <span className="text-[12.5px] text-ink-2">
+          <span className="text-xs text-muted-foreground">
             {CONTROLS_COPY.enrolUnavailable}
           </span>
           <Button
-            variant="quiet"
+            variant="ghost"
             onClick={() => {
               forgetRefusal(env.identity, readKey);
               setState("loading");
@@ -552,7 +555,7 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
           </Button>
         </span>
       ) : enrolment === null ? (
-        <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.loading}</p>
+        <p className="text-xs text-muted-foreground">{CONTROLS_COPY.loading}</p>
       ) : (
         <div className="flex flex-col gap-2">
           {kept && held !== null ? (
@@ -588,12 +591,12 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
               className="flex flex-wrap items-center gap-2"
               data-enrolment-uncertain=""
             >
-              <span className="text-[12.5px] text-conflict-text">
+              <span className="text-xs text-destructive">
                 {CONTROLS_COPY.enrolFailed}
               </span>
               {env.writable ? (
                 <Act
-                  variant="quiet"
+                  variant="ghost"
                   blocked={blocked}
                   onClick={() => void send(uncertain.command)}
                 >
@@ -602,11 +605,13 @@ function EnrolmentSettings({ taskId }: { taskId: string }) {
               ) : null}
             </span>
           ) : state === "refused" ? (
-            <p className="text-[12.5px] text-ink-2">
+            <p className="text-xs text-muted-foreground">
               {CONTROLS_COPY.enrolRefused}
             </p>
           ) : state === "saved" ? (
-            <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.saved}</p>
+            <p className="text-xs text-muted-foreground">
+              {CONTROLS_COPY.saved}
+            </p>
           ) : null}
         </div>
       )}
@@ -624,7 +629,7 @@ function Act({
   blocked: string | null;
   onClick(): void;
   children: string;
-  variant?: "quiet" | "primary";
+  variant?: "ghost" | "default";
   "data-enrol-act"?: string;
 }) {
   return blocked !== null ? (
@@ -678,7 +683,7 @@ function Enrolled({
           {CONTROLS_COPY.leave}
         </Act>
       </span>
-      <label className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
+      <label className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground">
         <input
           type="checkbox"
           checked={enrolment.aggregate_consent}
@@ -691,14 +696,16 @@ function Enrolled({
         {CONTROLS_COPY.consent}
       </label>
       <div className="flex flex-col gap-2" data-enrol-audience="">
-        <p className="text-[13px] text-ink-1">
+        <p className="text-sm text-foreground">
           {CONTROLS_COPY.audienceHeading}:{" "}
           {CONTROLS_COPY.audienceLine(enrolment.policy)}
         </p>
-        <p className="text-[12.5px] text-ink-2">{CONTROLS_COPY.audienceNote}</p>
+        <p className="text-xs text-muted-foreground">
+          {CONTROLS_COPY.audienceNote}
+        </p>
         {draft === null ? (
           <span>
-            <Act variant="quiet" blocked={blocked} onClick={open}>
+            <Act variant="ghost" blocked={blocked} onClick={open}>
               {CONTROLS_COPY.changeAudience}
             </Act>
           </span>
@@ -710,11 +717,11 @@ function Enrolled({
               blocked={blocked}
             />
             <span className="flex flex-wrap items-center gap-2">
-              <Act variant="quiet" blocked={blocked} onClick={cancel}>
+              <Act variant="ghost" blocked={blocked} onClick={cancel}>
                 {CONTROLS_COPY.cancel}
               </Act>
               <Act
-                variant="primary"
+                variant="default"
                 blocked={blocked ?? (unchanged ? CONTROLS_COPY.noChange : null)}
                 data-enrol-act="save-audience"
                 onClick={() => save(draft)}
@@ -741,11 +748,9 @@ function KeptDraft({
 }) {
   return (
     <div className="flex flex-col gap-2" data-enrol-kept="">
-      <p className="text-[12.5px] text-conflict-text">
-        {CONTROLS_COPY.keptDraft}
-      </p>
+      <p className="text-xs text-destructive">{CONTROLS_COPY.keptDraft}</p>
       {draft.consent === null ? null : (
-        <p className="text-[13px] text-ink-1">
+        <p className="text-sm text-foreground">
           {draft.consent ? CONTROLS_COPY.consentYes : CONTROLS_COPY.consentNo}
         </p>
       )}
@@ -755,7 +760,7 @@ function KeptDraft({
         blocked={CONTROLS_COPY.keptDraft}
       />
       <span>
-        <Act variant="quiet" blocked={blocked} onClick={discard}>
+        <Act variant="ghost" blocked={blocked} onClick={discard}>
           {CONTROLS_COPY.discard}
         </Act>
       </span>
@@ -798,15 +803,15 @@ function FirstJoin({
       ) : (
         <>
           {seed.status === "loading" ? (
-            <p className="text-[12.5px] text-ink-2">
+            <p className="text-xs text-muted-foreground">
               {CONTROLS_COPY.defaultLoading}
             </p>
           ) : (
             <span className="flex flex-wrap items-center gap-2">
-              <span className="text-[12.5px] text-ink-2">
+              <span className="text-xs text-muted-foreground">
                 {CONTROLS_COPY.defaultFailed}
               </span>
-              <Button variant="quiet" onClick={() => setRound((n) => n + 1)}>
+              <Button variant="ghost" onClick={() => setRound((n) => n + 1)}>
                 {copy.TRY_AGAIN}
               </Button>
             </span>
@@ -873,7 +878,7 @@ function JoinForm({
   const legend = useId();
   const consent = draft?.consent ?? null;
   const choice = (value: boolean, label: string) => (
-    <label className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1">
+    <label className="inline-flex min-h-11 items-center gap-2 text-sm text-foreground">
       <input
         type="radio"
         name={legend}
@@ -888,17 +893,17 @@ function JoinForm({
   return (
     <>
       <fieldset className="flex flex-col" data-enrol-consent="">
-        <legend id={legend} className="text-[13px] text-ink-1">
+        <legend id={legend} className="text-sm text-foreground">
           {CONTROLS_COPY.joinConsent}
         </legend>
         {choice(true, CONTROLS_COPY.consentYes)}
         {choice(false, CONTROLS_COPY.consentNo)}
       </fieldset>
       <div className="flex flex-col gap-2" data-enrol-audience="">
-        <p className="text-[13px] text-ink-1">
+        <p className="text-sm text-foreground">
           {CONTROLS_COPY.audienceHeading}
         </p>
-        <p className="text-[12.5px] text-ink-2">
+        <p className="text-xs text-muted-foreground">
           {note} {CONTROLS_COPY.audienceNote}
         </p>
         <AudienceChooser

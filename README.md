@@ -7,8 +7,9 @@ and offline-first sync. This repository is developed, versioned and deployed **s
 
 This is the **client foundation** (WEB-07). It has:
 
-- the accepted design tokens (Geist and Geist Mono, self-hosted; indigo; dark by default with a full light theme) and **Appearance**: Auto by default, with
-  Light and Dark overrides, stored on this device only and applied before first paint;
+- the design system: the [shadcn/ui](https://ui.shadcn.com) kit on Radix and Tailwind, the shadcn theme variable set (so a [tweakcn](https://tweakcn.com) theme
+  drops in with `node scripts/apply-theme.mjs`), Geist and Geist Mono self-hosted, dark by default with a full light theme, and **Appearance**: Auto by default,
+  with Light and Dark overrides, stored on this device only and applied before first paint;
 - the shared shell: skip link, rail, icon rail and bottom tabs, the More sheet, the persistent sync/offline status control (the presentation, not the sync logic),
   a shared dialog, and the accessible primitives;
 - the protected-surface plumbing: a static, **inert** `#protected-root` with a visible neutral gate, a portal container, the announcer, the title module, and a
@@ -46,6 +47,7 @@ for example `/today?phase=offline&pending=3&conflicts=1` (phases: `synced`, `res
 | `pnpm package:prepare` | provenance and third-party notices for `dist/` |
 | `pnpm check:artefacts` | no fixture code, no off-origin URL, size budgets, complete third-party notices |
 | `pnpm docs:tokens` | regenerates `docs/design-tokens.md` |
+| `node scripts/apply-theme.mjs <theme.css>` | applies a tweakcn or shadcn theme export to the token files and regenerates the docs |
 
 ## Documentation
 

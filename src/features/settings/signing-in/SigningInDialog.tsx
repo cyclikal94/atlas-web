@@ -21,7 +21,7 @@ function SigningInBody() {
   const [sessions] = useLoad(() => session.operations.listSessions());
   if (account.status === "loading")
     return (
-      <p aria-busy="true" className="text-[13px] text-ink-2">
+      <p aria-busy="true" className="text-sm text-muted-foreground">
         Loading how you sign in…
       </p>
     );
