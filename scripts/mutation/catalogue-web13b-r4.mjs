@@ -40,10 +40,11 @@ export const UNIT_13B_R4 = [
     tests: [T_SETTLE],
     expect: /the pause still holds when the run starts again 100 ms/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "        owedTo = null;\n      }\n      restoreOwed();\n",
-        "        owedTo = null;\n      }\n",
+        "        if (until <= now) owed.delete(localId);\n",
+        "        if (Number.isFinite(until)) owed.delete(localId);\n",
       ),
   },
   {
@@ -70,7 +71,12 @@ export const UNIT_13B_R4 = [
     expect:
       /storage full through wakes, `online`, restarts of the binding|a full disk met again by the retried send|the pause still holds when the run starts again 100 ms|storage full after the display opens/,
     patch: (t) =>
-      sub(t, "      if (owedTo !== next) {\n", "      if (true) {\n"),
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
+      sub(
+        t,
+        "      if (bound !== next) owed.clear();\n",
+        "      owed.clear();\n",
+      ),
   },
   {
     id: "MU-2533",
@@ -95,7 +101,13 @@ export const UNIT_13B_R4 = [
     tests: [T_SETTLE],
     expect:
       /during the pause sends nothing early|storage full through wakes, `online`/,
-    patch: (t) => sub(t, "    } else restoreOwed();\n", "    }\n"),
+    patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
+      sub(
+        t,
+        "    if (owedSeen !== null) retireOwed(owedSeen);\n",
+        "    if (owedSeen !== null) retireOwed(owedSeen);\n    else owed.clear();\n",
+      ),
   },
   {
     id: "MU-2535",
@@ -105,11 +117,8 @@ export const UNIT_13B_R4 = [
     tests: [T_SETTLE],
     expect: /made offline, is not undone by a restart/,
     patch: (t) =>
-      sub(
-        t,
-        "      if (localId === undefined) owed.clear();\n      else owed.delete(localId);\n",
-        "",
-      ),
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
+      sub(t, "    if (owedSeen !== null) retireOwed(owedSeen);\n", ""),
   },
   {
     id: "MU-2536",
@@ -119,10 +128,15 @@ export const UNIT_13B_R4 = [
     tests: [T_SETTLE],
     expect: /the binding ends while its failed record is under way/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        "    const stands = run !== null && !run.signal.aborted && service.live;\n",
-        "    const stands = run !== null;\n",
+        sub(
+          t,
+          "    const stands = run !== null && !run.signal.aborted && service.live;\n",
+          "    const stands = run !== null;\n",
+        ),
+        '    if (!authorised()) return { when: "event" };\n    failedOperations.add(operation);',
+        "    failedOperations.add(operation);",
       ),
   },
   {

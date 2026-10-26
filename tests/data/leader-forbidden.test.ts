@@ -458,3 +458,138 @@ describe("F-13b-1a: a failed record of an issued answer is counted, paced and st
     expect(sends.at).toHaveLength(2);
   });
 });
+
+/**
+ * Holds the DELIVERY of the first run of the plan `name` on the page's service: the transaction runs at once, its caller hears at `release()`.
+ */
+function holdDelivery(one: LeaderPage, name: string) {
+  const service = one.runtime.serviceFor(A);
+  if (service === null) throw new Error("setup: no service");
+  const store = service.store as unknown as {
+    run: (plan: { name: string }, ...rest: unknown[]) => Promise<unknown>;
+  };
+  const real = store.run.bind(store);
+  let hits = 0;
+  let release = () => {};
+  store.run = (plan, ...rest) => {
+    const result = real(plan, ...rest);
+    if (plan.name !== name || hits > 0) return result;
+    hits += 1;
+    return new Promise((resolve, reject) =>
+      result.then(
+        (value) => {
+          release = () => resolve(value);
+        },
+        (error) => {
+          release = () => reject(error);
+        },
+      ),
+    );
+  };
+  return {
+    service,
+    get hits() {
+      return hits;
+    },
+    release: () => release(),
+  };
+}
+
+describe("F-13b-1b and F-13b-1c (revision 5) through production leadership and the public retry", () => {
+  test.each([
+    ["the second answer meets a full disk again: that new hold stands", 2],
+    ["control: the second answer is recorded", 1],
+  ] as const)(
+    "two overlapping retries of the page's public outbox (DataActions.retryChanges) after a visible full disk, the first one's completion delivered last; %s",
+    async (_, faults) => {
+      const w = leaderWorld();
+      const one = w.page("A");
+      await w.settle();
+      const sends = heldEvery(w, 403, forbidden);
+      await enqueueOne(w, one);
+      const hits = failNamed(w, "data.recordOutcome", faults, "quota");
+      await holdDisplay(w, one);
+      await reopenDisplay(w, one);
+      await sends.answer();
+      expect(one.leader.dispatcher.state.get()).toEqual({
+        kind: "stopped",
+        cause: "storage_full",
+      });
+      const outbox = one.leader.outbox();
+      if (outbox === null) throw new Error("setup: no outbox");
+      const first = holdDelivery(one, "data.resumeDrafts");
+      outbox.retry(LOCAL_ID);
+      await w.settle();
+      expect(first.hits).toBe(1);
+      outbox.retry(LOCAL_ID);
+      await w.settle();
+      expect(sends.at).toHaveLength(2);
+      await holdDisplay(w, one);
+      await reopenDisplay(w, one);
+      await sends.answer();
+      expect(hits.count).toBe(faults);
+      first.release();
+      await w.settle();
+      await w.advance(5 * 60_000);
+      await holdDisplay(w, one);
+      await reopenDisplay(w, one);
+      await w.advance(60_000);
+      expect(sends.at).toHaveLength(2);
+      expect(new Set(posts(w).map((r) => r.key))).toEqual(new Set([LOCAL_ID]));
+      expect(one.leader.dispatcher.state.get()).toEqual(
+        faults === 2
+          ? { kind: "stopped", cause: "storage_full" }
+          : { kind: "idle" },
+      );
+    },
+  );
+
+  test.each([
+    [
+      "the leader gives the binding up (its service live): no stop is left, and the page that leads after the rejection's delivery sends the draft again under its key",
+      true,
+    ],
+    ["control: the binding stands, the draft is stopped", false],
+  ] as const)(
+    "a failed record whose counter fails too, the counter's rejection delivered after the display reopened; %s",
+    async (_, ends) => {
+      const w = leaderWorld();
+      const one = w.page("A");
+      await w.settle();
+      const sends = heldEvery(w, 403, forbidden);
+      await enqueueOne(w, one);
+      const record = failNamed(w, "data.recordOutcome", 1);
+      const counter = failNamed(w, "data.recordLocalWriteOutcome", 1);
+      const held = holdDelivery(one, "data.recordLocalWriteOutcome");
+      await holdDisplay(w, one);
+      await reopenDisplay(w, one);
+      await sends.answer();
+      expect([record.count, counter.count, held.hits]).toEqual([1, 1, 1]);
+      if (ends) {
+        one.leader.dispose();
+        await w.settle();
+        expect(held.service.live, "the service outlives the binding").toBe(
+          true,
+        );
+      }
+      held.release();
+      await w.settle();
+      await w.advance(60_000);
+      if (!ends) {
+        expect(sends.at).toHaveLength(1);
+        expect(one.leader.dispatcher.state.get()).toEqual({
+          kind: "stopped",
+          cause: "local_storage",
+        });
+        return;
+      }
+      expect(sends.at, "nobody leads yet").toHaveLength(1);
+      // The page that leads next, AFTER the ended binding's late rejection was delivered: it reads the account's records.
+      const next = w.page("C");
+      await w.settle();
+      expect(next.leader.role.get()).toEqual({ kind: "leader" });
+      expect(sends.at, "the next leader is not stopped").toHaveLength(2);
+      expect(new Set(posts(w).map((r) => r.key))).toEqual(new Set([LOCAL_ID]));
+    },
+  );
+});

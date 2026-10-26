@@ -60,6 +60,18 @@ interface Issued {
   readonly durable: ReadonlyMap<string, number>;
 }
 
+/** One obligation a binding owes the queue for a draft (`owed`, F-13b-1a): its own instance (F-13b-1b) and the instant it ends. */
+interface Owed {
+  readonly instance: number;
+  readonly until: number;
+}
+
+/** The obligations an act saw when it began (F-13b-1b): the binding they were owed to and, per draft, the instance. */
+interface OwedSeen {
+  readonly binding: SyncOwnership | null;
+  readonly instances: ReadonlyMap<LocalId, number>;
+}
+
 /**
  * The outbox dispatcher (plan 5.5.3 and 5.5.4): the loop that sends queued drafts, one at a time, and applies each answer.
  *
@@ -310,12 +322,19 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
    * when it opens, and a start forgets every schedule. Each entry is an instant before which the draft is not sent: the pause after a
    * below-bound failure to record its answer (`localWriteRetryMs` from the failure), the pause of a commit that could not be verified,
    * and the hold of a commit that found storage full, which only the person's retry lifts (`Infinity`). They are enforced where a draft
-   * is picked (`blockedUntil`), by the run that stands now or starts next for that binding, so neither a restart, a wake nor `online`
-   * sends the draft early, and the rest of the queue goes on (D-18). Only the run that stands schedules and shows anything. Another
-   * binding inherits nothing: what it owes is what the durable records say. In memory only, as the run's own schedule is.
+   * is picked (`admissionBlocks`), by the run that stands now or starts next for that binding, so neither a restart, a wake nor
+   * `online` sends the draft early, and the rest of the queue goes on (D-18). Only the run that stands schedules and shows anything.
+   * Another binding inherits nothing: what it owes is what the durable records say. In memory only, as the run's own schedule is.
+   *
+   * Each obligation is an INSTANCE of its own (F-13b-1b, revision 5), as a stop's marker and memory hold are (R50): the person's retry
+   * ends the instances it saw when it was made, and a success the instance that stood when its record was issued, however late either
+   * result is delivered. A failure met since (a second full disk, a new pause) is a new instance, even at the same instant (two holds are
+   * both `Infinity`), and stands. The obligations are kept APART from the run's own schedule (`blockedUntil`) and combined with it only
+   * where drafts are picked, so that nothing which ends one reason (a retry's, a back-off's, a stop's release) ends another.
    */
-  let owedTo: SyncOwnership | null = null;
-  const owed = new Map<LocalId, number>();
+  let bound: SyncOwnership | null = null;
+  const owed = new Map<LocalId, Owed>();
+  let owedInstances = 0;
 
   const alive = (id: number): boolean =>
     id === generation && ownership !== null && !ownership.signal.aborted;
@@ -334,45 +353,71 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
   const settles = (id: number, run: SyncOwnership | null): boolean =>
     alive(id) || (run !== null && !run.signal.aborted);
 
-  /** The draft is not sent before `until`, by any run of the binding `run` (`owed`, F-13b-1a). A binding that ended owes nothing. */
+  /**
+   * The draft is not sent before `until`, by any run of the binding `run` (`owed`, F-13b-1a), as a NEW instance (F-13b-1b): an
+   * obligation that already stands is renewed, never extended under the identity an earlier act saw. Only the binding this dispatcher
+   * was last started with owes anything: one that ended, or that another binding replaced, owes nothing and touches nothing.
+   */
   const owe = (
     run: SyncOwnership | null,
     localId: LocalId,
     until: number,
   ): void => {
-    if (run === null || run.signal.aborted) return;
-    if (owedTo !== run) {
-      owed.clear();
-      owedTo = run;
-    }
-    owed.set(localId, Math.max(owed.get(localId) ?? 0, until));
-    if (ownership === run)
-      blockedUntil.set(
-        localId,
-        Math.max(blockedUntil.get(localId) ?? 0, until),
-      );
+    if (run === null || run.signal.aborted || run !== bound) return;
+    owedInstances += 1;
+    owed.set(localId, {
+      instance: owedInstances,
+      until: Math.max(owed.get(localId)?.until ?? 0, until),
+    });
   };
-  /** What the binding that stands owes is put back where drafts are picked (a start, a back-off that `online` ended). */
-  const restoreOwed = (): void => {
-    if (ownership === null || owedTo !== ownership) return;
-    const now = deps.clock.now();
-    for (const [localId, until] of [...owed]) {
-      if (until <= now) {
+  /**
+   * What is owed now, as an act that begins now sees it (F-13b-1b): the binding and each draft's instance, `localId` alone when the act
+   * names one. Taken SYNCHRONOUSLY where the act is admitted (the person's retry, a record about to be issued), before anything awaits.
+   */
+  const witnessOwed = (localId?: LocalId): OwedSeen => ({
+    binding: bound,
+    instances: new Map(
+      [...owed]
+        .filter(([draft]) => localId === undefined || draft === localId)
+        .map(([draft, { instance }]) => [draft, instance] as const),
+    ),
+  });
+  /**
+   * Ends the obligations an act saw, and only those (F-13b-1b): still owed to the binding it saw, under the instance it saw. A newer
+   * instance of the same draft, another draft's obligation, or one owed to a binding that has since replaced it, stays. Answers
+   * whether anything ended.
+   */
+  const retireOwed = (seen: OwedSeen): boolean => {
+    if (seen.binding === null || seen.binding !== bound) return false;
+    let ended = false;
+    for (const [localId, instance] of seen.instances)
+      if (owed.get(localId)?.instance === instance) {
         owed.delete(localId);
-        continue;
+        ended = true;
       }
-      blockedUntil.set(
-        localId,
-        Math.max(blockedUntil.get(localId) ?? 0, until),
-      );
-    }
+    return ended;
+  };
+  /**
+   * Where drafts are picked, every reason that stands holds a draft (F-13b-1b): the run's own schedule (`blockedUntil`: back-off, a
+   * stop, a hold of an unreadable record) and what the settlements of the binding that stands still owe, the later instant of the two.
+   * An obligation that has run out holds nothing, and lets the run's own schedule and the durable state decide.
+   */
+  const admissionBlocks = (): ReadonlyMap<LocalId, number> => {
+    if (ownership === null || bound !== ownership || owed.size === 0)
+      return blockedUntil;
+    const now = deps.clock.now();
+    const blocks = new Map(blockedUntil);
+    for (const [localId, { until }] of owed)
+      if (until > now)
+        blocks.set(localId, Math.max(blocks.get(localId) ?? 0, until));
+    return blocks;
   };
   /** The earliest instant a draft paced by `owed` may be sent, for a step that found nothing to send (nothing else wakes it). */
   const owedWake = (): number | null => {
-    if (ownership === null || owedTo !== ownership) return null;
+    if (ownership === null || bound !== ownership) return null;
     const now = deps.clock.now();
     let at: number | null = null;
-    for (const until of owed.values())
+    for (const { until } of owed.values())
       if (Number.isFinite(until) && until > now)
         at = at === null ? until : Math.min(at, until);
     return at;
@@ -380,8 +425,8 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
   /** A draft of the binding that stands is held because recording its answer found storage full. */
   const owedFull = (): boolean =>
     ownership !== null &&
-    owedTo === ownership &&
-    [...owed.values()].includes(Number.POSITIVE_INFINITY);
+    bound === ownership &&
+    [...owed.values()].some(({ until }) => until === Number.POSITIVE_INFINITY);
 
   const clearTimer = (): void => {
     if (timer !== null) deps.clock.clearTimeout(timer);
@@ -717,7 +762,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     return service.store.run(readDispatchWindow, {
       incarnationId: service.incarnationId,
       now: deps.clock.now(),
-      blockedUntil,
+      blockedUntil: admissionBlocks(),
       windowSize: config.queueWorkingSet,
       ...(scanAfter === undefined ? {} : { after: scanAfter }),
       markerOperations: markerOperations(service),
@@ -983,6 +1028,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
 
     if (outcome.kind === "receipt") {
       const issued = issue(service, [draftOperations(draft.local_id)[1]]);
+      const owing = witnessOwed(draft.local_id);
       const out = await service.commit(admitReceipt, {
         captured,
         localId: draft.local_id,
@@ -998,6 +1044,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
             ? { kind: "applied", value: out.value.kind === "admitted" }
             : out,
           issued,
+          owing,
         );
       if (out.kind === "dropped") return dropped(out.reason);
       if (out.kind === "failed")
@@ -1009,7 +1056,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
           run,
         );
       blockedUntil.delete(draft.local_id);
-      owed.delete(draft.local_id);
+      retireOwed(owing);
       if (out.value.kind === "admitted")
         succeeded(service, draftOperations(draft.local_id)[1], issued);
       deps.channel?.post({
@@ -1122,6 +1169,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     run: SyncOwnership | null,
   ): Promise<Next> {
     const issued = issue(service, [draftOperations(draft.local_id)[1]]);
+    const owing = witnessOwed(draft.local_id);
     const out = await service.commit(recordOutcome, {
       captured,
       localId: draft.local_id,
@@ -1140,6 +1188,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
           ? { kind: "applied", value: out.value.kind === "recorded" }
           : out,
         issued,
+        owing,
       );
     if (out.kind === "dropped") return dropped(out.reason);
     if (out.kind === "failed")
@@ -1150,7 +1199,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
         `receipt:${draft.local_id}`,
         run,
       );
-    owed.delete(draft.local_id);
+    retireOwed(owing);
     if (out.value.kind === "recorded")
       succeeded(service, draftOperations(draft.local_id)[1], issued);
     deps.channel?.post({
@@ -1167,9 +1216,10 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
    * The record of an issued answer, delivered after the run that sent it ended (F-13b-1a, WEB-13b revision 4). `settles` admitted it, so
    * it is the binding's, and every result is disposed of as a live run's would be, except what belongs to the run that stands (its
    * schedule, its state): an applied record tells the account's other pages and, while the binding stands, ends what its success ends
-   * (`succeeded`: the stops witnessed when it was issued; `value` is whether the plan wrote, a no-op ends nothing); a failed one is
-   * counted against the draft's receipt (`localFailure`), with its pause or hold owed to the binding's runs; a commit that could not be
-   * verified owes its pause. Any other drop, and anything after the binding ended, leaves the draft `in_flight` for its next owner.
+   * (`succeeded`: the stops witnessed when it was issued; `value` is whether the plan wrote, a no-op ends nothing) and the obligation that
+   * stood when it was issued (`owing`; one owed since is newer, F-13b-1b); a failed one is counted against the draft's receipt
+   * (`localFailure`), with its pause or hold owed to the binding's runs; a commit that could not be verified owes its pause. Any other
+   * drop, and anything after the binding ended, leaves the draft `in_flight` for its next owner.
    */
   async function retained(
     id: number,
@@ -1178,12 +1228,13 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     localId: LocalId,
     out: CommitOutcome<boolean>,
     issued: Issued,
+    owing: OwedSeen,
   ): Promise<Next> {
     const stands = run !== null && !run.signal.aborted && service.live;
     switch (out.kind) {
       case "applied":
         if (stands) {
-          owed.delete(localId);
+          retireOwed(owing);
           if (out.value)
             succeeded(service, draftOperations(localId)[1], issued);
         }
@@ -1265,6 +1316,16 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
       if (alive(id)) setState({ kind: "stopped", cause: "storage_full" });
       return { when: "event" };
     }
+    /**
+     * The authority this failure was met under (F-13b-1c, revision 5): its binding and its service, both still standing. The account's
+     * service can outlive the binding (the leader's unbind aborts the ownership and stops the dispatcher, and the service goes on), so
+     * the service alone does not say that this callback may still create anything. It is asked before anything is counted and again
+     * after every wait, up to the synchronous moment a fallback stop is created (`recordStop`), for the marker and the page's memory
+     * alike. What a commit made in the meantime is a fact and is announced; nothing new is created for a binding that is over.
+     */
+    const authorised = (): boolean =>
+      run !== null && !run.signal.aborted && service.live;
+    if (!authorised()) return { when: "event" };
     failedOperations.add(operation);
     failureCount += 1;
     failedAt.set(operation, failureCount);
@@ -1282,10 +1343,22 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
         return { when: "event" };
       }
       if (result.version !== null) observed.set(operation, result.version);
+      // The binding ended while the counter was being written (F-13b-1c): a stop the counter committed is a fact of the record, and the
+      // account's writers are told of it (this page's and the others), but nothing is stalled, owed or shown for a binding that is over.
+      // Whoever owns the account next reads the record.
+      if (!authorised()) {
+        if (result.stop) {
+          stops.announce(service, self, { recorded: [operation] });
+          stopsChanged(service);
+        }
+        return { when: "event" };
+      }
       if (result.stop) {
         stops.announce(service, self, { recorded: [operation] });
         stopsChanged(service);
-        return stall(id, service, operation);
+        // Only the run that stands holds the draft and shows the stop; a run that a display interruption ended leaves that to the run
+        // of the same binding that stands or starts next, which reads the stop from the record (F-13b-1c).
+        return alive(id) ? stall(id, service, operation) : { when: "event" };
       }
       // Below the bound: the operation is tried again in a moment, never at once. For an answer's draft that pause is owed to its
       // binding, so a run that starts meanwhile, or a wake, does not send it early (F-13b-1a).
@@ -1293,12 +1366,13 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     } catch {
       // The streak itself could not be written: stop at once, with no counting, and record the stop in the fallback marker of this
       // database's lifetime so a reload finds it. When that cannot be written either, the stop is held in the page's memory and says
-      // so; the facade, which writes the same operation, sees it there. A callback that outlived its service records nothing (R56).
+      // so; the facade, which writes the same operation, sees it there. A callback that outlived its service, or its binding
+      // (F-13b-1c), creates nothing: it would stop the account's next owner on a failure that owner never met (R56).
       const recorded = recordStop(
         deps.markers,
         service,
         operation,
-        () => service.live,
+        authorised,
         {
           hold: () => {
             stops.hold(service, operation);
@@ -1307,7 +1381,7 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
       );
       if (recorded === "obsolete") return { when: "event" };
       stops.announce(service, self, { recorded: [operation] });
-      return stall(id, service, operation);
+      return alive(id) ? stall(id, service, operation) : { when: "event" };
     }
     if (!alive(id)) return { when: "event" };
     return { when: "after", ms: 250 };
@@ -1541,6 +1615,11 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
     explicit: boolean,
   ): Promise<void> {
     const id = generation;
+    const under = ownership;
+    // What the settlements of the binding owe that this retry names, as they stand when the person acts (F-13b-1b): the retry ends these
+    // instances and no other. A pause or a hold met while the retry is under way (it waits on the database) is newer than the person's
+    // decision, and stands, however late this retry's own result is delivered.
+    const owedSeen = explicit ? witnessOwed(localId) : null;
     scanAfter = undefined;
     fruitlessCycles = 0;
     const service = deps.service();
@@ -1587,6 +1666,16 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
         // Resuming is best effort; the step below re-reads the record.
       }
     }
+    // The person's retry lifts what an answer's settlement owed (a pause, a full disk's hold) for what it names, the instances it saw;
+    // `online` lifts none of it: a full disk and a failed local write are not connectivity problems (F-13b-1a). The obligations are
+    // the binding's, so they are lifted even when a restart of that binding replaced the run meanwhile (an offline retry).
+    if (owedSeen !== null) retireOwed(owedSeen);
+    if (!alive(id)) {
+      // The run the act was made in has ended. Its own schedule is the run's that stands, and nothing of it is this act's to end; that
+      // run, of the same binding, looks again at what the act lifted (a wake forgives nothing: it reads what stands).
+      if (explicit && ownership !== null && ownership === under) wake();
+      return;
+    }
     if (localId === undefined) {
       for (const draft of [...blockedUntil.keys()])
         if (explicit || (!stalled.has(draft) && !unreadable.has(draft)))
@@ -1603,13 +1692,6 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
       stalled.delete(localId);
       if (explicit) unreadable.delete(localId);
     }
-    // The person's retry lifts what an answer's settlement owed (a pause, a full disk's hold) for what it names; `online` does not:
-    // a full disk and a failed local write are not connectivity problems (F-13b-1a).
-    if (explicit) {
-      if (localId === undefined) owed.clear();
-      else owed.delete(localId);
-    } else restoreOwed();
-    if (!alive(id)) return;
     if (explicit && store.get().kind === "stopped")
       setState({ kind: "waiting", reason: "session" });
     void tick(id, "signal");
@@ -1626,12 +1708,12 @@ export function createOutboxDispatcher(deps: DispatcherDeps): OutboxDispatcher {
       stalled.clear();
       unreadable.clear();
       // A restart is not a retry: what the settlement of an answer owes the binding is still owed by the run that takes it over
-      // (F-13b-1a). Another binding owes none of it.
-      if (owedTo !== next) {
-        owed.clear();
-        owedTo = null;
-      }
-      restoreOwed();
+      // (F-13b-1a), combined with that run's schedule where drafts are picked (`admissionBlocks`). Another binding owes none of it.
+      if (bound !== next) owed.clear();
+      bound = next;
+      const now = deps.clock.now();
+      for (const [localId, { until }] of [...owed])
+        if (until <= now) owed.delete(localId);
       // A draft whose stop only this tab's memory holds is still stopped: a restart is not a retry, and the tab is still alive. The
       // first step reads that memory with the markers and the record, so the draft is held back before anything is picked.
       scanAfter = undefined;

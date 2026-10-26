@@ -479,7 +479,8 @@ export interface DataHarness {
       | "data.enqueueDraft"
       | "data.discardDraft"
       | "data.supersedeDraft"
-      | "data.recordLocalWriteOutcome",
+      | "data.recordLocalWriteOutcome"
+      | "data.resumeDrafts",
   ): void;
   outboxPlanHeld(): boolean;
   releaseOutboxPlan(): void;

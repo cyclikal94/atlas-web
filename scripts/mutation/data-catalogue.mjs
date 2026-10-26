@@ -22,6 +22,7 @@ import { UNIT_13B_R1 } from "./catalogue-web13b-r1.mjs";
 import { UNIT_13B_R2 } from "./catalogue-web13b-r2.mjs";
 import { UNIT_13B_R3 } from "./catalogue-web13b-r3.mjs";
 import { UNIT_13B_R4 } from "./catalogue-web13b-r4.mjs";
+import { UNIT_13B_R5 } from "./catalogue-web13b-r5.mjs";
 
 export class PatchError extends Error {}
 
@@ -10840,10 +10841,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /shown by the facade at once/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
-        "      if (result.stop) {\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
+        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        // Only the run",
+        "      if (result.stop) {\n        stopsChanged(service);\n        // Only the run",
       ),
   },
   {
@@ -10855,10 +10857,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /shown by the facade at once/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      stops.announce(service, self, { recorded: [operation] });\n      return stall(id, service, operation);\n    }\n    if (!alive(id))",
-        "      return stall(id, service, operation);\n    }\n    if (!alive(id))",
+        '      stops.announce(service, self, { recorded: [operation] });\n      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
+        '      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
       ),
   },
   {
@@ -13141,10 +13144,11 @@ export const UNIT = [
     expect:
       /(nothing is recorded under `queue`|nothing is recorded under `draft:<id>`)/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "        () => service.live,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
-        "        () => true,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        authorised,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        () => run !== null && !run.signal.aborted,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
       ),
   },
   {
@@ -13154,11 +13158,17 @@ export const UNIT = [
     file: "src/data/engine/outbox-dispatcher.ts",
     tests: ["tests/data/marker-lifetime.test.ts"],
     expect: /dispatcher: two earlier failures/,
+    // The revision-5 guard after the counter also asks the service: the defect removes the service half of both looks.
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        '      if (!service.live) {\n        if (result.stop) stopsChanged(service);\n        return { when: "event" };\n      }\n      if (result.version !== null) observed.set(operation, result.version);',
-        "      if (result.version !== null) observed.set(operation, result.version);",
+        sub(
+          t,
+          '      if (!service.live) {\n        if (result.stop) stopsChanged(service);\n        return { when: "event" };\n      }\n      if (result.version !== null) observed.set(operation, result.version);',
+          "      if (result.version !== null) observed.set(operation, result.version);",
+        ),
+        "      if (!authorised()) {\n        if (result.stop) {",
+        "      if (run === null || run.signal.aborted) {\n        if (result.stop) {",
       ),
   },
   {
@@ -13169,10 +13179,15 @@ export const UNIT = [
     tests: ["tests/data/marker-lifetime.test.ts"],
     expect: /nothing is recorded under `capture`/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        "      if (!service.live) return lifetimeOver(id);\n      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => service.live,",
-        "      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => true,",
+        sub(
+          t,
+          '      if (!service.live) return lifetimeOver(id);\n      if (!authorised()) return { when: "event" };\n      stop = true;',
+          '      if (run === null || run.signal.aborted) return { when: "event" };\n      stop = true;',
+        ),
+        "        authorised,\n        { hold: () => holdMemory(key) },",
+        "        () => run !== null && !run.signal.aborted,\n        { hold: () => holdMemory(key) },",
       ),
   },
   {
@@ -13183,10 +13198,15 @@ export const UNIT = [
     tests: ["tests/data/marker-lifetime.test.ts"],
     expect: /engine: two earlier failures/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        "      if (!service.live) return lifetimeOver(id);\n      stop = result.stop;",
-        "      stop = result.stop;",
+        sub(
+          t,
+          "      if (!service.live) return lifetimeOver(id);\n      if (result.version !== null)",
+          "      if (result.version !== null)",
+        ),
+        '      if (!authorised()) return { when: "event" };\n      stop = result.stop;',
+        '      if (run === null || run.signal.aborted) return { when: "event" };\n      stop = result.stop;',
       ),
   },
   {
@@ -13846,10 +13866,11 @@ export const UNIT = [
     // The failing tests must include one of these (an unrelated crash or timeout is no evidence): see scripts/run-data-mutants.mjs.
     expect: /(receipt write fails three times|claim fails three times)/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "        stopsChanged(service);\n        return stall(id, service, operation);",
-        "        return stall(id, service, operation);",
+        "        stopsChanged(service);\n        // Only the run",
+        "        // Only the run",
       ),
   },
   {
@@ -21844,6 +21865,7 @@ export const UNIT = [
   ...UNIT_13B_R2,
   ...UNIT_13B_R3,
   ...UNIT_13B_R4,
+  ...UNIT_13B_R5,
 ];
 
 /**
@@ -23409,10 +23431,11 @@ export const ENGINE = [
     grep: "the dispatcher's streak stop of a draft ends on the facade's",
     expect: /the dispatcher's streak stop of a draft ends on the facade's/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
-        "      if (result.stop) {\n        stopsChanged(service);\n        return stall(id, service, operation);\n      }",
+        "      if (result.stop) {\n        stops.announce(service, self, { recorded: [operation] });\n        stopsChanged(service);\n        // Only the run",
+        "      if (result.stop) {\n        stopsChanged(service);\n        // Only the run",
       ),
   },
   {
@@ -23425,10 +23448,11 @@ export const ENGINE = [
     expect:
       /the dispatcher's (marker|memory) stop of a draft ends on the facade's/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "      stops.announce(service, self, { recorded: [operation] });\n      return stall(id, service, operation);\n    }\n    if (!alive(id))",
-        "      return stall(id, service, operation);\n    }\n    if (!alive(id))",
+        '      stops.announce(service, self, { recorded: [operation] });\n      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
+        '      return alive(id) ? stall(id, service, operation) : { when: "event" };\n    }\n    if (!alive(id))',
       ),
   },
   {
@@ -23913,10 +23937,11 @@ export const ENGINE = [
     grep: "R56 dispatcher",
     expect: /R56 dispatcher: the service closed and the database deleted/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
         t,
-        "        () => service.live,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
-        "        () => true,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        authorised,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
+        "        () => run !== null && !run.signal.aborted,\n        {\n          hold: () => {\n            stops.hold(service, operation);",
       ),
   },
   {
@@ -23928,10 +23953,15 @@ export const ENGINE = [
     grep: "R56 engine",
     expect: /R56 engine: the service closed and the database deleted/,
     patch: (t) =>
+      // Re-expressed in WEB-13b revision 5 (F-13b-1b/1c, N1): the same defect, anchored on the corrected text.
       sub(
-        t,
-        "      if (!service.live) return lifetimeOver(id);\n      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => service.live,",
-        "      stop = true;\n      lifted.delete(key);\n      const recorded = recordStop(\n        deps.markers,\n        service,\n        operation,\n        () => true,",
+        sub(
+          t,
+          '      if (!service.live) return lifetimeOver(id);\n      if (!authorised()) return { when: "event" };\n      stop = true;',
+          '      if (run === null || run.signal.aborted) return { when: "event" };\n      stop = true;',
+        ),
+        "        authorised,\n        { hold: () => holdMemory(key) },",
+        "        () => run !== null && !run.signal.aborted,\n        { hold: () => holdMemory(key) },",
       ),
   },
   {
