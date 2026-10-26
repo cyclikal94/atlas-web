@@ -45,9 +45,17 @@ import {
  * else, so they end the visit. The task detail lets go of the sessions of a day it stops showing in place (`disownKept`), as a departure
  * would.
  *
- * A save takes a ticket naming the session and the revision it submitted. Its completion, whichever mount made it and whether or not any
- * editor is mounted then, consumes the session only if it is still that session at that revision; newer input stays (with the note the
- * save left), and the session's CURRENT editor, if one is mounted, is told either way. Session numbers are never reused.
+ * A save takes a ticket naming the session, the revision it submitted and its FLIGHT: a session has at most one save pending (a second
+ * submit while one is pending is refused), and only that flight's completion settles it. Its completion, whichever mount made it and
+ * whether or not any editor is mounted then, consumes the session only if it is still that session at that revision; newer input stays
+ * (with the note the save left), and the session's CURRENT editor, if one is mounted, is told either way. Session and flight numbers are
+ * never reused.
+ *
+ * Settling a save that keeps the session is ONE transition of the kept entry (WEB-10b revision 2, R1 / DA-P1): what the save leaves in
+ * the session (`change`: an attempt's id retired or bound, say), evaluated once, the note and the end of the flight, all before any editor
+ * is told. The entry is the only authority: every editor holding the session then shows the entry as it is (its value, note and busy
+ * state), the one mounted now whether or not it is the one that took the save (it may have been removed for the sync screens and
+ * mounted again on Back). What a save leaves is not an edit by the person: it does not move the revision.
  *
  * Settling a save is not permission to act on the screen (revision 23, R35 / DA23): the editor told of a consumed session moves on (its
  * form closing onto the task, a fresh amount) only if it still PRESENTS (`visit.ts`, `TaskAttachment`), that is, the person has not
@@ -119,6 +127,8 @@ export interface KeptTicket {
   readonly revision: number;
   /** Revision 37 (R40): the recoverable model's ticket for what this save sent (its success covers exactly that). */
   readonly recovery?: ModelTicket;
+  /** The pending save this ticket is (only it settles the session). */
+  readonly flight: number;
 }
 
 export type KeptEvent =
@@ -132,6 +142,8 @@ interface Held {
   revision: number;
   value: unknown;
   submitting: number | null;
+  /** The pending save's flight, or null. */
+  flight: number | null;
   note: string | null;
   holders: number;
   /** The visit whose input it is (null: an editor outside any router, kept only while it is mounted). */
@@ -143,6 +155,7 @@ interface Held {
 const entries = new Map<string, Held>();
 const listeners = new Map<string, Set<(event: KeptEvent) => void>>();
 let sessions = 0;
+let flights = 0;
 
 /** Holding something of the person's: an edit, a pending save, or a session kept before it is edited. */
 const holdsInput = (held: Held) =>
@@ -239,6 +252,7 @@ function restoreKept(key: string, text: string): boolean {
       revision: 1,
       value,
       submitting: null,
+      flight: null,
       note: null,
       holders: 0,
       owner,
@@ -293,6 +307,7 @@ export function openKept<T>(
     revision: 0,
     value: initial(),
     submitting: null,
+    flight: null,
     note: null,
     holders: 1,
     owner,
@@ -372,37 +387,48 @@ export function editKept<T>(key: string, session: number, value: T): boolean {
   return true;
 }
 
-/** A save begins: the ticket names exactly the session and revision submitted. */
+/** A save begins: the ticket names exactly the session, revision and flight submitted (null: another save of it is still pending). */
 export function submitKept(key: string, session: number): KeptTicket | null {
   const held = entries.get(key);
   if (held === undefined || held.session !== session) return null;
+  if (held.flight !== null) return null;
   // Revision 37 (R40): its model's ticket, taken in the same step (none while an update reload is prepared: nothing is sent then).
   const linked = models.get(key);
   const recovery = linked?.model.submitting();
   if (recovery === null) return null;
+  flights += 1;
   held.submitting = held.revision;
+  held.flight = flights;
   return {
     key,
     session,
     revision: held.revision,
+    flight: flights,
     ...(recovery ? { recovery } : {}),
   };
 }
 
 /**
  * A save ended. Success consumes the session only if it is still the submitted one at the submitted revision (`consumed`, with `detail`
- * for its editor); otherwise the newer input stays with `note` (`kept`); a session that no longer exists is left alone (`gone`).
+ * for its editor); otherwise the session stays (`kept`) as `change` leaves it, with `note`, in one transition told to its editors once
+ * (see above); a session that no longer exists, or a ticket that is not its pending save, is left alone (`gone`).
  */
-export function completeKept(
+export function completeKept<T>(
   ticket: KeptTicket,
   saved: boolean,
-  outcome: { note?: string | null; detail?: string | null } = {},
+  outcome: {
+    note?: string | null;
+    detail?: string | null;
+    change?: (value: T) => T;
+  } = {},
 ): "consumed" | "kept" | "gone" {
   // Revision 37 (R40): the model acknowledges exactly what the save sent (newer input stays its own, dirty until saved); a failure covers nothing.
   if (saved) void ticket.recovery?.succeeded();
   else ticket.recovery?.failed();
   const held = entries.get(ticket.key);
   if (held === undefined || held.session !== ticket.session) return "gone";
+  if (held.flight !== ticket.flight) return "gone";
+  held.flight = null;
   if (saved && held.revision === ticket.revision) {
     entries.delete(ticket.key);
     publish(ticket.key, {
@@ -413,6 +439,8 @@ export function completeKept(
     });
     return "consumed";
   }
+  if (outcome.change !== undefined)
+    held.value = outcome.change(held.value as T);
   held.submitting = null;
   held.note = outcome.note ?? null;
   publish(ticket.key, { kind: "settled", session: ticket.session });
@@ -605,8 +633,13 @@ export function useKeptInput<T>(
         return;
       }
       if (event.kind === "settled") {
+        // The settled session as the entry now holds it (R1, revision 2): this editor may not be the one that took the save.
         const entry = keptEntry<T>(key);
-        setShown((s) => ({ ...s, busy: false, note: entry?.note ?? null }));
+        setShown((s) =>
+          entry === null
+            ? { ...s, busy: false, note: null }
+            : { key, value: entry.value, busy: false, note: entry.note },
+        );
         return;
       }
       session.current = null;

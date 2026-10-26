@@ -10,7 +10,7 @@ import type {
   TargetNeeds,
 } from "../../data";
 import {
-  archive,
+  archiveResource,
   canonicalDefinition,
   commandOf,
   exclude,
@@ -22,15 +22,17 @@ import {
   parseDefinition,
   parseEvidence,
   parseProgressPage,
+  parseProjection,
   parseTaskDetail,
 } from "./model/contract";
 import { evaluate } from "./model/evaluate";
+import { editList, listItem, projectCreateList } from "./model/lists";
 import { slotOn, windows } from "./model/time";
 
 /**
- * The registrations of WEB-10a's queued kinds (plan §4.7): a description for the queue, the projection of a create the cache does not hold
- * yet, the authorised current-state read of WF-QUEUE-02 (D-10a-15) and the rebuild of "Resend as a new operation". Registered ONCE per
- * registry (the registry throws on a second registration), before the routes render.
+ * The registrations of WEB-10a's queued kinds (plan §4.7) and WEB-10b's list kinds (its plan §3.4): a description for the queue, the
+ * projection of a create the cache does not hold yet, the authorised current-state read of WF-QUEUE-02 (D-10a-15) and the rebuild of
+ * "Resend as a new operation". Registered ONCE per registry (the registry throws on a second registration), before the routes render.
  */
 export const DESCRIPTIONS: Readonly<Record<string, string>> = {
   create_task: "New task",
@@ -40,6 +42,9 @@ export const DESCRIPTIONS: Readonly<Record<string, string>> = {
   exclude: "Streak exclusion",
   revise_occurrence: "Correction to one day",
   archive: "Archive or restore",
+  create_list: "New list",
+  edit_list: "List name change",
+  list_item: "List change",
 };
 
 type Obj = Record<string, unknown>;
@@ -149,6 +154,29 @@ async function readTaskCurrent(
     io,
     `/tasks/${encodeURIComponent(taskId)}`,
   );
+  return taskRead(status, body);
+}
+
+/**
+ * An archive's target is a task or a list (WEB-10b, plan §3.4): the task read first, exactly as before for a task (a `200` is that
+ * answer); `GET /tasks/{id}` answers `404` for a list, and only then is the list read (`readListCurrent`). Any other answer is the task
+ * read's. A task no longer readable costs the list walk too, and still ends `inaccessible`.
+ */
+async function readArchiveCurrent(
+  draft: DraftWithCommand,
+  io: CurrentReadIo,
+): Promise<CurrentRead> {
+  const id = draft.target_resource_ids[0];
+  if (id === undefined) return { kind: "failed", reason: "unavailable" };
+  const { status, body } = await readJson(
+    io,
+    `/tasks/${encodeURIComponent(id)}`,
+  );
+  if (status === 404) return readListCurrent(draft, io);
+  return taskRead(status, body);
+}
+
+function taskRead(status: number, body: unknown): CurrentRead {
   if (status !== 200) return failedFor(status);
   const detail = parseTaskDetail(body);
   // The task's details come back with it and are kept beside it (DA-A1): a revision needs write access to both, and only this read says
@@ -215,6 +243,98 @@ async function readProgressCurrent(
   }
 }
 
+/** The page size of the list walk: the server's maximum (`reads.rs` `resources`: 1..=200). */
+export const LIST_PAGE = 200;
+
+/**
+ * One page of `GET /lists?archived=<archived>&limit=200[&after=<after>]` (`ResourcePage`), or null when it is not what the released
+ * endpoint answers to that request (as `parseProgressPage`, R19): exact keys; every item a list projection of the archived state asked
+ * for, its ids strictly ascending and after `after`; and `next_after` the last id exactly when the page is full, otherwise null.
+ */
+export function parseListPage(
+  value: unknown,
+  archived: boolean,
+  after: string | null,
+): { items: CacheRow[]; next_after: string | null } | null {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    !Object.hasOwn(value, "items") ||
+    !Object.hasOwn(value, "next_after")
+  )
+    return null;
+  const { items, next_after: next } = value as Obj;
+  if (!Array.isArray(items) || items.length > LIST_PAGE) return null;
+  const out: CacheRow[] = [];
+  let last = after;
+  for (const raw of items) {
+    const row = parseProjection(raw);
+    if (
+      row === null ||
+      row.kind !== "list" ||
+      row.parent_id !== null ||
+      row.archived !== archived ||
+      (last !== null && !(row.id > last))
+    )
+      return null;
+    out.push(row);
+    last = row.id;
+  }
+  if (out.length === LIST_PAGE ? next !== last : next !== null) return null;
+  return { items: out, next_after: next as string | null };
+}
+
+/**
+ * List-level kinds (WEB-10b): the list's projection from `GET /lists`, which filters by `archived` (default `false`). There is no read of
+ * one list by its id, so the two collections are walked, the one the draft expects first (for an archive, the state before it; otherwise
+ * active), each page following its cursor, until the list is found (`loaded`). Pages are id-ordered, so a valid page holding a larger id
+ * ends that collection without it. The list is absent (`inaccessible`) only once BOTH collections ended without it. A refusal or an error
+ * of any page is that page's answer; a page that is not one of the collection (`parseListPage`) is `indeterminate`, never absence and never
+ * another request. Only the page in hand is kept, and a scope that ended (`io.signal`) sends nothing more (the contract of
+ * `readProgressCurrent`).
+ */
+async function readListCurrent(
+  draft: DraftWithCommand,
+  io: CurrentReadIo,
+): Promise<CurrentRead> {
+  const command = commandOf(draft);
+  const listId = command?.kind === "list_item" ? command.list_id : command?.id;
+  const ended: CurrentRead = { kind: "failed", reason: "unavailable" };
+  if (command === null || !isString(listId)) return ended;
+  const first =
+    command.kind === "archive" && typeof command.archived === "boolean"
+      ? !command.archived
+      : false;
+  for (const archived of [first, !first]) {
+    let after: string | null = null;
+    for (;;) {
+      if (io.signal.aborted) return ended;
+      const cursor = after ? `&after=${encodeURIComponent(after)}` : "";
+      const { status, body } = await readJson(
+        io,
+        `/lists?archived=${archived}&limit=${LIST_PAGE}${cursor}`,
+      );
+      if (io.signal.aborted) return ended;
+      // Any answer but a 200 is this page's answer (`failedFor`); a 200 that is not a page of the collection is `indeterminate`.
+      const page: ReturnType<typeof parseListPage> | undefined =
+        status === 200 ? parseListPage(body, archived, after) : undefined;
+      if (page === undefined) return failedFor(status);
+      if (page === null) return { kind: "indeterminate" };
+      const found = page.items.find((item) => item.id === listId);
+      if (found) return { kind: "loaded", value: found };
+      if (
+        page.next_after === null ||
+        page.items.some((item) => item.id > listId)
+      )
+        break;
+      after = page.next_after;
+    }
+  }
+  return { kind: "failed", reason: "inaccessible" };
+}
+
 /**
  * "Save as new" (WF-QUEUE-02) for a task command (R5, revision 1): the replacement is the SAME kind of request the person's act made, built
  * by its own builder from the stored command, so it keeps every target the original named (the ordering targets, the side effects whose
@@ -272,7 +392,7 @@ const isString = (value: unknown): value is string => typeof value === "string";
  * review's confirmation rebuilds a stored draft without the builder, so the needs are derived again from the draft and its body. A record
  * writes my stream and, when it creates it, needs the occurrence (`joinRequiresEdit`, decided from what the writing transaction knows);
  * an exclusion writes my stream; a closure and a correction need the occurrence; a revision the task and its details; an archive the
- * task. A create needs nothing (its rows are its own). A body this cannot read needs nothing more than what the server decides.
+ * task or list; a rename or a membership change of a list the list (WEB-10b). A create needs nothing (its rows are its own). A body this cannot read needs nothing more than what the server decides.
  */
 function admissionOf(draft: DraftWithCommand): TargetNeeds {
   const command = commandOf(draft);
@@ -292,8 +412,13 @@ function admissionOf(draft: DraftWithCommand): TargetNeeds {
         : {};
     case "revise_occurrence":
     case "archive":
+    case "edit_list":
       return isString(command.id)
         ? { [command.id]: { requiresEdit: true } }
+        : {};
+    case "list_item":
+      return isString(command.list_id)
+        ? { [command.list_id]: { requiresEdit: true } }
         : {};
     case "revise_task": {
       if (!isString(command.id)) return {};
@@ -427,21 +552,83 @@ function rebuildArchive(
   current: CacheRow | null,
 ): EnqueueRequest | null {
   const command = commandOf(draft);
-  const taskId = draft.target_resource_ids[0];
-  // Archiving needs write access to the task (DA-A3): never rebuilt on a reviewed read that denies it.
+  const id = draft.target_resource_ids[0];
+  // Archiving needs write access to the task or list (DA-A3): never rebuilt on a reviewed read that denies it.
   if (
     command === null ||
     current === null ||
-    taskId === undefined ||
-    current.id !== taskId ||
+    id === undefined ||
+    current.id !== id ||
+    (current.kind !== "task" && current.kind !== "list") ||
     !current.can_edit ||
     typeof command.archived !== "boolean"
   )
     return null;
-  return asReplacement(draft, archive({ taskId, archived: command.archived }), {
-    id: taskId,
-    version: current.version,
-  });
+  return asReplacement(
+    draft,
+    archiveResource({ id, archived: command.archived }),
+    { id, version: current.version },
+  );
+}
+
+/** A rename rebuilt on the reviewed list: its policy version (Q1) and write access as the reviewed read returned them. */
+function rebuildEditList(
+  draft: DraftWithCommand,
+  current: CacheRow | null,
+): EnqueueRequest | null {
+  const command = commandOf(draft);
+  const listId = draft.target_resource_ids[0];
+  if (
+    command === null ||
+    current === null ||
+    listId === undefined ||
+    current.id !== listId ||
+    current.kind !== "list" ||
+    current.policy_version === undefined ||
+    current.can_edit === false ||
+    !isString(command.name)
+  )
+    return null;
+  return asReplacement(
+    draft,
+    editList({
+      listId,
+      name: command.name,
+      policyVersion: current.policy_version,
+    }),
+    { id: listId, version: current.version },
+  );
+}
+
+/**
+ * A membership change rebuilt on the reviewed list: the same task and direction, on the reviewed version, with write access. No
+ * `dependsOnExtra`: the original was sent, so every create it waited for had been sent or refused before it could conflict; and the
+ * supersession keeps the original's own dependency edges in any case (`decideSupersede` joins them to the replacement's), so a create
+ * still standing is waited for (revision 4).
+ */
+function rebuildListItem(
+  draft: DraftWithCommand,
+  current: CacheRow | null,
+): EnqueueRequest | null {
+  const command = commandOf(draft);
+  const listId = draft.target_resource_ids[0];
+  if (
+    command === null ||
+    current === null ||
+    listId === undefined ||
+    current.id !== listId ||
+    command.list_id !== listId ||
+    current.kind !== "list" ||
+    current.can_edit === false ||
+    !isString(command.task_id) ||
+    typeof command.included !== "boolean"
+  )
+    return null;
+  return asReplacement(
+    draft,
+    listItem({ listId, taskId: command.task_id, included: command.included }),
+    { id: listId, version: current.version },
+  );
 }
 
 export function taskCommandSpecs(): Record<string, CommandSpec> {
@@ -478,8 +665,24 @@ export function taskCommandSpecs(): Record<string, CommandSpec> {
     },
     archive: {
       describe: describe("archive"),
-      readCurrent: readTaskCurrent,
+      readCurrent: readArchiveCurrent,
       rebuild: rebuildArchive,
+      admission: admissionOf,
+    },
+    create_list: {
+      describe: describe("create_list"),
+      projectCreate: projectCreateList,
+    },
+    edit_list: {
+      describe: describe("edit_list"),
+      readCurrent: readListCurrent,
+      rebuild: rebuildEditList,
+      admission: admissionOf,
+    },
+    list_item: {
+      describe: describe("list_item"),
+      readCurrent: readListCurrent,
+      rebuild: rebuildListItem,
       admission: admissionOf,
     },
   };
@@ -487,7 +690,7 @@ export function taskCommandSpecs(): Record<string, CommandSpec> {
 
 const registered = new WeakSet<CommandRegistry>();
 
-/** Registers every WEB-10a kind into `registry`, once (idempotent per registry). */
+/** Registers every WEB-10a and WEB-10b kind into `registry`, once (idempotent per registry). */
 export function registerTaskCommands(registry: CommandRegistry): void {
   if (registered.has(registry)) return;
   registered.add(registry);
