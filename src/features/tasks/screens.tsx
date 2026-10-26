@@ -9,6 +9,7 @@ import { TaskDetail } from "./detail/TaskDetail";
 import { TaskList } from "./detail/TaskList";
 import { TasksBoundary } from "./env";
 import { TaskFormPage } from "./form/TaskFormPage";
+import { ListsLayout } from "./lists/ListsLayout";
 import { isKnownZone } from "./model/primitives";
 import { dayEnd, todayIn } from "./model/time";
 import { StreakPage } from "./streak/StreakPage";
@@ -167,4 +168,13 @@ export function TaskStreakScreen({ taskId }: { taskId: string }) {
 
 export function TimersScreen() {
   return <TimersPage />;
+}
+
+/** WEB-10b: the Lists pane beside the list detail from 1280 px (D-10b-2). */
+export function ListsLayoutScreen() {
+  return (
+    <TasksBoundary>
+      <ListsLayout />
+    </TasksBoundary>
+  );
 }

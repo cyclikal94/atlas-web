@@ -11,6 +11,7 @@ export const LIST_COPY = {
   heading: "Your tasks",
   newTask: "New task",
   timers: "Your timers",
+  lists: "Lists",
   showArchived: "Archived",
   showActive: "Active",
   none: "No tasks here yet.",
@@ -74,6 +75,14 @@ export function TaskList({ selected }: { selected?: string }) {
             data-your-timers=""
           >
             {LIST_COPY.timers}
+          </Link>
+          {/* WEB-10b (D-10b-1): Lists live under the Tasks destination, reached from here (no rail or tab item of their own). */}
+          <Link
+            to="/tasks/lists"
+            data-lists-link=""
+            className="atlas-transition inline-flex min-h-11 items-center rounded-control border border-hairline-strong bg-raised px-4 text-[13.5px] text-ink-1 hover:bg-row-hover"
+          >
+            {LIST_COPY.lists}
           </Link>
           <Link
             to="/tasks/new"
