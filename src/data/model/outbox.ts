@@ -922,9 +922,9 @@ export function planEdit(
 /**
  * Whether `draft`, stored under the key of a replacement, IS that replacement: the same endpoint, target and resources, and a command
  * that the request builds again, from the bases the draft holds, to the digest the draft carries. A draft edited since, or another
- * command that merely uses the key, is not.
+ * command that merely uses the key, is not. (WEB-10b revision 3 asks it too, of a save whose answer was lost: `plans/draft-header.ts`.)
  */
-function isSameSave(request: EnqueueRequest, draft: DraftRow): boolean {
+export function isSameSave(request: EnqueueRequest, draft: DraftRow): boolean {
   if (!sameTargets(request, draft)) return false;
   try {
     return (

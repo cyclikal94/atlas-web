@@ -1,3 +1,5 @@
+// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85).
+// Historical reports keep their original IDs; mutation patches, selectors and assertions are unchanged.
 // WEB-13b revision 3's mutants (review 3, R3c; the design assessment's sensitivity list), in the form and under the rules of
 // `data-catalogue.mjs`, which spreads them into its `UNIT` list after `catalogue-web13b-r2.mjs`. Each removes ONE part of the detail
 // section's choice of the visit going on (`AnchorSection.tsx`), its owner's refusal of an ended visit (`anchor-kept.ts`) or the binding
@@ -16,17 +18,17 @@ const LATE =
   /an ordinary 403 forbidden|a 422 answered under the same interruption|a receipt under the same interruption|while the display stays closed/;
 
 /**
- * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the owner alone), MU-2517, MU-2518 and
- * MU-2520..MU-2522. Withdrawn as equivalent after an exploratory run (no test of either layer can tell them apart; recorded in the revision
- * report with that run's evidence), their ids never reused: MU-2519 (the visit taken without checking that the person is at the section's
- * address: in every schedule the router, its history and the document reach, the visit asked for is the task's), MU-2523 (no re-check as
+ * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the owner alone), MU-2602, MU-2603 and
+ * MU-2605..MU-2607. Withdrawn as equivalent after an exploratory run (no test of either layer can tell them apart; recorded in the revision
+ * report with that run's evidence), their ids never reused: MU-2604 (the visit taken without checking that the person is at the section's
+ * address: in every schedule the router, its history and the document reach, the visit asked for is the task's), MU-2608 (no re-check as
  * a panel opens: the route's own re-check always comes first in the component tests; the open-time one is the guard for a browser's
- * ordering, which E-ANC4 drives natively), MU-2524 (the save's identities taken from the section's visit at the press: a panel is never
- * shown once its visit has ended, so the two are the same visit) and MU-2525 (Try again with the section's last recorded visit: the same).
+ * ordering, which E-ANC4 drives natively), MU-2609 (the save's identities taken from the section's visit at the press: a panel is never
+ * shown once its visit has ended, so the two are the same visit) and MU-2610 (Try again with the section's last recorded visit: the same).
  */
 export const UNIT_13B_R3 = [
   {
-    id: "MU-2517",
+    id: "MU-2602",
     title:
       "WEB-13b R3c: the section keeps the visit it was first shown on (a panel opened after a departure and return the section outlived is the ended visit's, and its kept input is discarded)",
     file: SECTION,
@@ -41,7 +43,7 @@ export const UNIT_13B_R3 = [
       ),
   },
   {
-    id: "MU-2518",
+    id: "MU-2603",
     title:
       "WEB-13b R3c: the section follows the visit going on only when a panel opens (its binding stays the ended visit's read)",
     file: SECTION,
@@ -52,7 +54,7 @@ export const UNIT_13B_R3 = [
       sub(t, "    return onRouteMoved(() => {\n      rebind();\n    });\n", ""),
   },
   {
-    id: "MU-2520",
+    id: "MU-2605",
     title:
       "WEB-13b R3c: a panel opens on a visit that has ended (its session is kept by nothing, and its input lost at the next close)",
     file: KEPT,
@@ -61,7 +63,7 @@ export const UNIT_13B_R3 = [
     patch: (t) => sub(t, "  if (owner?.ended()) return null;\n", ""),
   },
   {
-    id: "MU-2521",
+    id: "MU-2606",
     title:
       "WEB-13b R3c: a panel shown when its visit ends stays open, showing input its ended session can no longer save",
     file: SECTION,
@@ -76,7 +78,7 @@ export const UNIT_13B_R3 = [
       ),
   },
   {
-    id: "MU-2522",
+    id: "MU-2607",
     title:
       "WEB-13b R3c: an unsent binding read a newer visit's read replaced is still sent while the person is at the task (two requests for one read)",
     file: BINDING,
@@ -91,10 +93,10 @@ export const UNIT_13B_R3 = [
       ),
   },
   // F-13b-1 (handover `delivery/handoffs/web13b-foundation-403-approved-20261025.md`): the issued answer of a stopped run (L1b, production
-  // leadership over the deterministic world). Withdrawn as equivalent after an exploratory run, its id never reused: MU-2528 (the answer of
+  // leadership over the deterministic world). Withdrawn as equivalent after an exploratory run, its id never reused: MU-2613 (the answer of
   // an ENDED binding settled too: the commit's own guards, identity, epoch, incarnation and ownership, refuse it all the same, F-2).
   {
-    id: "MU-2526",
+    id: "MU-2611",
     title:
       "WEB-13b F-13b-1: an issued command's answer is dropped with the run the display's interim hold stopped (resent at once, as found)",
     file: DISPATCHER,
@@ -108,7 +110,7 @@ export const UNIT_13B_R3 = [
       ),
   },
   {
-    id: "MU-2527",
+    id: "MU-2612",
     title:
       "WEB-13b F-13b-1: the decoded answer of a stopped run is dropped before it is recorded",
     file: DISPATCHER,

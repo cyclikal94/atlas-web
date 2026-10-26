@@ -17,6 +17,7 @@ import { ENGINE_R23, UNIT_R23 } from "./catalogue-web10a-r23.mjs";
 import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
 import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
+import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
 import { ENGINE_13B, UNIT_13B } from "./catalogue-web13b.mjs";
 import { UNIT_13B_R1 } from "./catalogue-web13b-r1.mjs";
 import { UNIT_13B_R2 } from "./catalogue-web13b-r2.mjs";
@@ -21866,6 +21867,7 @@ export const UNIT = [
   ...UNIT_13B_R3,
   ...UNIT_13B_R4,
   ...UNIT_13B_R5,
+  ...UNIT_WEB10B,
 ];
 
 /**
@@ -25339,4 +25341,5 @@ export const ENGINE = [
   ...ENGINE_R22,
   ...ENGINE_R23,
   ...ENGINE_13B,
+  ...ENGINE_WEB10B,
 ];

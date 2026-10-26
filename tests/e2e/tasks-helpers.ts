@@ -386,3 +386,52 @@ export async function bodiesOf(
     ACCOUNT,
   )) as never;
 }
+
+// ---- WEB-10b: lists -------------------------------------------------------------------------------------------------------------
+export const listIdOf = (n: number) => hexN(n, "72000000");
+
+/** A list projection as `/sync` upserts it (`service.rs` 296-303): `{task_ids}` are the ids the reader can see, by id. */
+export function listUpsert(
+  n: number,
+  name: string,
+  taskIds: readonly string[],
+  over: Record<string, unknown> = {},
+): { id: string; upsert: unknown } {
+  const id = listIdOf(n);
+  return {
+    id,
+    upsert: {
+      kind: "upsert",
+      resource: {
+        id,
+        kind: "list",
+        parent_id: null,
+        label: name,
+        value: { task_ids: [...taskIds].sort() },
+        version: 2,
+        can_edit: true,
+        archived: false,
+        policy_version: 1,
+        ...over,
+      },
+    },
+  };
+}
+
+/** One `/sync` delta page carrying tasks and lists, through the fixture leader. */
+export async function cacheTasksAndLists(
+  page: Page,
+  net: SyncStub,
+  tasks: BuiltTask[],
+  lists: Array<{ upsert: unknown }>,
+): Promise<void> {
+  net.script.push(() => ({
+    status: 200,
+    body: pageText(
+      [[...tasks.flatMap((t) => t.upserts), ...lists.map((l) => l.upsert)]],
+      "cursor-1",
+    ),
+  }));
+  await startLeader(page);
+  await waitForState(page, "idle");
+}

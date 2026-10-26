@@ -1,3 +1,5 @@
+// Main reconciliation, 26 October 2026: WEB-13b MU-2501..MU-2551 are now MU-2586..MU-2636 (+85).
+// Historical reports keep their original IDs; mutation patches, selectors and assertions are unchanged.
 // WEB-13b revision 1's mutants (review 1, R1–R6), in the form and under the rules of `data-catalogue.mjs`, which spreads them into its
 // `UNIT` list after `catalogue-web13b.mjs`. Each removes ONE guard the revision added; `expect` names the test written for it, so only an
 // assertion of that test catches it. `sub` is the catalogue's own exactly-one-occurrence patcher.
@@ -22,7 +24,7 @@ const T_SECTION = "tests/features/tasks/anchor-section.test.tsx";
 const T_FORM = "tests/features/tasks/task-form-anchor.test.tsx";
 
 /**
- * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the model), MU-2471..MU-2504. Clear time's own
+ * Unit mutants (layer L1b, the production composition over the IndexedDB double; L1a for the model), MU-2471..MU-2589. Clear time's own
  * end of the kept time has no mutant: the time field's edit ends it too, so removing it changes nothing observable (an equivalent mutant,
  * recorded in the revision report).
  */
@@ -430,7 +432,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2501",
+    id: "MU-2586",
     title:
       "WEB-13b I1: a kept panel's newer input after its own save keeps the old context (its save is refused as changed by its own change)",
     // Re-expressed in revision 2: the session's own done save does not renew what its next save is checked against.
@@ -440,7 +442,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "      current = renew(current);\n", ""),
   },
   {
-    id: "MU-2502",
+    id: "MU-2587",
     title:
       "WEB-13b I1: a save done after the panel was kept is never settled (the kept state of a saved change is resumed)",
     // Re-expressed in revision 2: the session never hears its save's completion.
@@ -455,7 +457,7 @@ export const UNIT_13B_R1 = [
       ),
   },
   {
-    id: "MU-2503",
+    id: "MU-2588",
     title: "WEB-13b I1: the new-task form does not resume its kept panel",
     file: TASK_FORM,
     tests: [T_FORM],
@@ -464,7 +466,7 @@ export const UNIT_13B_R1 = [
     patch: (t) => sub(t, "        ...(panel ?? {\n", "        ...({\n"),
   },
   {
-    id: "MU-2504",
+    id: "MU-2589",
     title:
       "WEB-13b I1: the new-task form's resumed panel, cancelled, is resumed again (Cancel does not discard it)",
     file: TASK_FORM,
