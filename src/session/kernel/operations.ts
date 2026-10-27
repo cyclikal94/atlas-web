@@ -7,7 +7,9 @@ import type {
   OperationStart,
   Operations,
   Result,
+  SendOptions,
   SessionSummary,
+  SessionsRead,
   Store,
 } from "../api";
 import { LOCKS } from "../constants";
@@ -15,6 +17,7 @@ import { raiseOperationFence } from "../model/reducers/operation";
 import type {
   AccountId,
   AuthRecords,
+  DeviceId,
   Envelope,
   Epoch,
   OperationId,
@@ -182,6 +185,8 @@ export async function ordinaryCall<T>(
     selfRevoking?: "password" | "unlink";
     /** False for a call that needs only the status: the body is discarded, not read. Default true. */
     readBody?: boolean;
+    /** WEB-08d (review R3): see `SendOptions`. Withdrawn before it is issued, the request is never sent (`not_sent`). */
+    withdraw?: AbortSignal;
   },
   read: (response: Response) => Result<T> | Promise<Result<T>>,
 ): Promise<Result<T>> {
@@ -203,6 +208,7 @@ export async function ordinaryCall<T>(
     epoch: identity.epoch,
     request,
     selfRevoking: options.selfRevoking,
+    withdraw: options.withdraw,
     onAnswer: handleOrdinaryAnswer,
   });
   switch (outcome.kind) {
@@ -625,25 +631,70 @@ export class OperationService implements Operations {
     return this.ordinary("GET", "/devices", {}, (response) =>
       this.json(response, (value) => {
         const devices = (value as { devices?: unknown } | null)?.devices;
-        return Array.isArray(devices)
-          ? { devices: devices as DeviceRow[] }
-          : null;
+        if (!Array.isArray(devices)) return null;
+        // BE-Q25: the capacity travels inside this sealed result, untouched, and only when the answer carries it (absent is not null).
+        return Object.hasOwn(value as object, "sync_capacity")
+          ? {
+              devices: devices as DeviceRow[],
+              sync_capacity: (value as { sync_capacity: unknown })
+                .sync_capacity,
+            }
+          : { devices: devices as DeviceRow[] };
       }),
     );
   }
 
-  listSessions(): Promise<Result<{ sessions: readonly SessionSummary[] }>> {
+  listSessions(): Promise<Result<SessionsRead>> {
     return this.ordinary("GET", "/sessions", {}, (response) =>
       this.json(response, (value) => {
         const sessions = (value as { sessions?: unknown } | null)?.sessions;
-        return Array.isArray(sessions)
-          ? { sessions: sessions as SessionSummary[] }
-          : null;
+        if (!Array.isArray(sessions)) return null;
+        return Object.hasOwn(value as object, "session_capacity")
+          ? {
+              sessions: sessions as SessionSummary[],
+              session_capacity: (value as { session_capacity: unknown })
+                .session_capacity,
+            }
+          : { sessions: sessions as SessionSummary[] };
       }),
     );
   }
 
-  async revokeOtherSession(id: SessionId): Promise<Result<"revoked" | "gone">> {
+  /**
+   * BE-Q25: name or un-name a listed device. The body carries the name exactly as given (never trimmed). The answer is read through
+   * `jsonResult`'s error path (the Atlas body carries the request ID), so the result is sealed after that decode like any other read.
+   */
+  nameDevice(
+    id: DeviceId,
+    name: string | null,
+    send: SendOptions = {},
+  ): Promise<Result<"named" | "cleared" | "gone">> {
+    return this.ordinary(
+      name === null ? "DELETE" : "PUT",
+      `/devices/${encodeURIComponent(id)}/name`,
+      name === null
+        ? { withdraw: send.withdraw }
+        : { body: { name }, withdraw: send.withdraw },
+      async (response): Promise<Result<"named" | "cleared" | "gone">> => {
+        if (response.status === 204)
+          return { ok: true, value: name === null ? "cleared" : "named" };
+        const refused = await jsonResult<never>(response, () => null);
+        if (
+          !refused.ok &&
+          response.status === 404 &&
+          refused.atlasError?.code === "not_found"
+        )
+          return { ok: true, value: "gone" };
+        // Any other answer, a 2xx other than 204 included, is `http` with the status and any Atlas error.
+        return refused;
+      },
+    );
+  }
+
+  async revokeOtherSession(
+    id: SessionId,
+    send: SendOptions = {},
+  ): Promise<Result<"revoked" | "gone">> {
     const identity = this.k.identity.get();
     // The current session ends only through `logout`, which raises a fence and an envelope first.
     if (identity && identity.session_id === id)
@@ -651,7 +702,7 @@ export class OperationService implements Operations {
     return this.ordinary(
       "DELETE",
       `/sessions/${encodeURIComponent(id)}`,
-      { readBody: false },
+      { readBody: false, withdraw: send.withdraw },
       (response): Result<"revoked" | "gone"> => {
         if (response.status === 204) return { ok: true, value: "revoked" };
         if (response.status === 404) return { ok: true, value: "gone" };
@@ -662,6 +713,7 @@ export class OperationService implements Operations {
 
   async retireOtherDevice(
     read: DeviceRow,
+    send: SendOptions = {},
   ): Promise<Result<"confirmed_applied" | "superseded" | "rejected_stale">> {
     // SA-10: an ordinary request with a fresh key; no fence and no wipe (it cannot revoke this session).
     const operationId = this.k.ports.ids.uuid();
@@ -673,6 +725,7 @@ export class OperationService implements Operations {
           "Idempotency-Key": operationId,
           "Atlas-Device-State": read.state_token,
         },
+        withdraw: send.withdraw,
       },
       async (
         response,
@@ -697,10 +750,13 @@ export class OperationService implements Operations {
     );
   }
 
-  changePassword(input: {
-    current: string;
-    next: string;
-  }): Promise<Result<"changed">> {
+  changePassword(
+    input: {
+      current: string;
+      next: string;
+    },
+    send: SendOptions = {},
+  ): Promise<Result<"changed">> {
     return this.ordinary(
       "POST",
       "/password",
@@ -708,6 +764,7 @@ export class OperationService implements Operations {
         body: { current_password: input.current, new_password: input.next },
         selfRevoking: "password",
         readBody: false,
+        withdraw: send.withdraw,
       },
       (response): Result<"changed"> =>
         response.status >= 200 && response.status < 300
@@ -741,11 +798,19 @@ export class OperationService implements Operations {
     );
   }
 
-  unlinkOidc(issuer: string): Promise<Result<"unlinked">> {
+  unlinkOidc(
+    issuer: string,
+    send: SendOptions = {},
+  ): Promise<Result<"unlinked">> {
     return this.ordinary(
       "DELETE",
       "/oidc/identities",
-      { body: { issuer }, selfRevoking: "unlink", readBody: false },
+      {
+        body: { issuer },
+        selfRevoking: "unlink",
+        readBody: false,
+        withdraw: send.withdraw,
+      },
       (response): Result<"unlinked"> =>
         response.status >= 200 && response.status < 300
           ? { ok: true, value: "unlinked" }

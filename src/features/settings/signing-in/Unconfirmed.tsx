@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import type { Result } from "../../../session";
 import { MESSAGE_TEXT } from "../../authentication/outcome-copy";
 import { isOnlineNow, useOnline } from "../../authentication/use-online";
+import { useInteractions } from "../sessions-devices/ownership";
 
 /** [P], review R7: checking asks the server, so it needs a connection like the change it follows. */
 export const CHECK_OFFLINE_REASON = "Checking needs a connection.";
@@ -19,6 +20,9 @@ export const CHECK_OFFLINE_REASON = "Checking needs a connection.";
  * and it can commit after the read. So a successful read leaves the outcome unconfirmed and says exactly that (review R3); it
  * never states "nothing changed" and never sends the change again. While the browser reports no connection the check is disabled
  * with its reason (a hint: a check that does start is judged by its own answer).
+ *
+ * WEB-08d (design assessment A4, review R4): a check belongs to the screen that asked. If the dialog is dismissed, the screen left or
+ * the identity moves on before its answer, the session still observes the read, but nothing is said or shown for it.
  */
 export function Unconfirmed({ check }: { check(): Promise<Result<unknown>> }) {
   const announcer = useAnnouncer();
@@ -26,8 +30,13 @@ export function Unconfirmed({ check }: { check(): Promise<Result<unknown>> }) {
   const [state, setState] = useState<"idle" | "checking" | "still" | "unknown">(
     "idle",
   );
+  const interactions = useInteractions();
+  const checking = useRef(false);
   const run = async () => {
-    if (!online || !isOnlineNow()) return;
+    // Synchronous: a second press before "Checking…" renders asks nothing more.
+    if (checking.current || !online || !isOnlineNow()) return;
+    checking.current = true;
+    const interaction = interactions.begin();
     setState("checking");
     let result: Result<unknown> | null = null;
     try {
@@ -35,6 +44,10 @@ export function Unconfirmed({ check }: { check(): Promise<Result<unknown>> }) {
     } catch {
       result = null;
     }
+    const owned = interaction.current();
+    interaction.end();
+    checking.current = false;
+    if (!owned) return setState("idle");
     if (result?.ok) {
       setState("still");
       announcer.announce(MESSAGE_TEXT.still_unconfirmed);

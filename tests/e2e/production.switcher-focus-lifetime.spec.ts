@@ -265,7 +265,8 @@ for (const entry of ["rail", "more", "settings"] as const)
         name: "Sign in to another account",
       });
       await expect(back).toContainText(
-        "This device has too many active sign-ins for this account.",
+        // WEB-08d D-8d-13 (merged in revision 30): the limit is per account.
+        "This account has reached its limit of active sign-ins.",
         { timeout: 15_000 },
       );
       await expect(page.locator("#protected-root:not([inert])")).toHaveCount(

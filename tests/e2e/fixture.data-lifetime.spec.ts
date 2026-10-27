@@ -10,7 +10,6 @@ import {
   outboxState,
   warning,
 } from "./data-local-faults";
-import { untilOutboxPlanCalled } from "./data-operation-barriers";
 import {
   ACCOUNT,
   bootSession,
@@ -20,6 +19,7 @@ import {
   stubNetwork,
   uuid,
 } from "./data-sync-helpers";
+import { withHeldOperations } from "./held-operation";
 import { expect, test } from "./helpers";
 
 /**
@@ -224,20 +224,26 @@ test.describe("E-O12 (revision 33, R56): the facade's edit, a failed counter who
       expect((await enqueue(page, A, "r", "original"))?.kind).toBe("queued");
       const old = await incarnationOf(page, ACCOUNT);
       await arm(page, { id: A, armed: 1, counter: 1 });
-      // The counter's transaction fails, and the delivery of its rejection is held.
-      await page.evaluate(() =>
-        window.__atlasData?.holdOutboxPlan("data.recordLocalWriteOutcome"),
-      );
-      const editing = editDraft(page, A, "r", "unsaved");
-      await untilOutboxPlanCalled(page);
-      if (ended) {
-        expect(["deleted", "blocked_then_deleted"]).toContain(
-          await endLifetime(page),
+      // The counter's transaction fails, and the delivery of its rejection is held. Revision 21 (R20-N1): the edit and the held answer
+      // are owned by a scope that releases the hold by its own token and joins the edit on every path.
+      const result = await withHeldOperations(async (holds) => {
+        const counter = await holds.holdOutbox(
+          page,
+          "data.recordLocalWriteOutcome",
         );
-        expect(await rawKeys(page)).toEqual([]);
-      }
-      await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
-      const result = await editing;
+        const editing = holds.launch("the failing edit", () =>
+          editDraft(page, A, "r", "unsaved"),
+        );
+        await counter.untilHeld();
+        if (ended) {
+          expect(["deleted", "blocked_then_deleted"]).toContain(
+            await endLifetime(page),
+          );
+          expect(await rawKeys(page)).toEqual([]);
+        }
+        await counter.release();
+        return await editing.settled();
+      });
       if (ended) {
         expect(result).toMatchObject({
           kind: "refused",
@@ -289,17 +295,21 @@ test.describe("E-O12 (revision 33, R56): the dispatcher's read of the queue, a f
       await installFaults(page);
       const old = await incarnationOf(page, ACCOUNT);
       await faults(page, { queue: 1, counter: 1 });
-      await page.evaluate(() =>
-        window.__atlasData?.holdOutboxPlan("data.recordLocalWriteOutcome"),
-      );
-      // The dispatcher is asked to look at the queue now (the browser's `online` event).
-      await page.evaluate(() => window.dispatchEvent(new Event("online")));
-      await untilOutboxPlanCalled(page);
-      if (ended)
-        expect(["deleted", "blocked_then_deleted"]).toContain(
-          await endLifetime(page),
+      // Revision 21 (R20-N1): the held answer is owned by a scope that releases it by its own token on every path.
+      await withHeldOperations(async (holds) => {
+        const counter = await holds.holdOutbox(
+          page,
+          "data.recordLocalWriteOutcome",
         );
-      await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+        // The dispatcher is asked to look at the queue now (the browser's `online` event).
+        await page.evaluate(() => window.dispatchEvent(new Event("online")));
+        await counter.untilHeld();
+        if (ended)
+          expect(["deleted", "blocked_then_deleted"]).toContain(
+            await endLifetime(page),
+          );
+        await counter.release();
+      });
       if (ended) {
         await page.waitForTimeout(500);
         expect(await rawKeys(page)).toEqual([]);
@@ -344,21 +354,22 @@ test.describe("E-O12 (revision 33, R56): the sync engine's capture, a failed cou
       const page = await bootSession(context);
       await installFaults(page);
       await faults(page, { capture: 1, counter: 1 });
-      await page.evaluate(() =>
-        window.__atlasData?.holdEnginePlan("data.recordLocalWriteOutcome"),
-      );
-      await startLeader(page);
-      await expect
-        .poll(() => page.evaluate(() => window.__atlasData?.enginePlanHeld()), {
-          timeout: 20_000,
-        })
-        .toBe(true);
-      const old = await incarnationOf(page, ACCOUNT);
-      if (ended)
-        expect(["deleted", "blocked_then_deleted"]).toContain(
-          await endLifetime(page),
+      // Revision 21 (R20-N1): the held answer is owned by a scope that releases it by its own token on every path.
+      const old = await withHeldOperations(async (holds) => {
+        const counter = await holds.holdEngine(
+          page,
+          "data.recordLocalWriteOutcome",
         );
-      await page.evaluate(() => window.__atlasData?.releaseEnginePlan());
+        await startLeader(page);
+        await counter.untilHeld();
+        const old = await incarnationOf(page, ACCOUNT);
+        if (ended)
+          expect(["deleted", "blocked_then_deleted"]).toContain(
+            await endLifetime(page),
+          );
+        await counter.release();
+        return old;
+      });
       const state = () =>
         page.evaluate(() => window.__atlasData?.engineState());
       if (ended) {

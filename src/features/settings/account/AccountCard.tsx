@@ -2,6 +2,10 @@ import { useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { useSession } from "../../../session";
 import { LoadFailed } from "../sessions-devices/LoadFailed";
+import {
+  type Interaction,
+  useInteractions,
+} from "../sessions-devices/ownership";
 import { useLoad } from "../sessions-devices/useLoad";
 import { WipeConfirmDialog } from "../sessions-devices/WipeConfirmDialog";
 import { accountActions } from "./slots";
@@ -35,7 +39,9 @@ export function AccountCard() {
   );
   // Only the current row's start time is wanted; if this read fails the line is simply omitted.
   const [sessions] = useLoad(() => session.operations.listSessions());
-  const [loggingOut, setLoggingOut] = useState(false);
+  // WEB-08d review R3: the logout warning closes only itself; a late answer of an older one cannot close a newer one.
+  const interactions = useInteractions();
+  const [loggingOut, setLoggingOut] = useState<Interaction | null>(null);
 
   if (
     account.status === "error" &&
@@ -102,12 +108,26 @@ export function AccountCard() {
             {accountActions.map((action) => (
               <span key={action.id}>{action.render()}</span>
             ))}
-            <Button onClick={() => setLoggingOut(true)}>Sign out</Button>
+            <Button
+              onClick={() => {
+                loggingOut?.end();
+                setLoggingOut(interactions.begin());
+              }}
+            >
+              Sign out
+            </Button>
           </div>
         </div>
       )}
       {loggingOut ? (
-        <WipeConfirmDialog kind="logout" onClose={() => setLoggingOut(false)} />
+        <WipeConfirmDialog
+          key={loggingOut.id}
+          kind="logout"
+          onClose={() => {
+            loggingOut.end();
+            setLoggingOut((open) => (open === loggingOut ? null : open));
+          }}
+        />
       ) : null}
     </section>
   );

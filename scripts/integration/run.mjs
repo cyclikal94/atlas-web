@@ -23,10 +23,18 @@
 // On SIGINT/SIGTERM Playwright is asked to interrupt (it reports what it ran) and every owned group is terminated within two
 // seconds, inside the shared validation driver's grace period.
 //
+// WEB-08d revision 30 (DELEGATED-WEB08D-RUNNER-RECONCILIATION-20261024, the accepted runner merged into WEB-08d): the PostgreSQL
+// repeat keeps WEB-08d's Docker ownership (review r6 H4a, r7 DA-1, r8 DA-1a). Everything a stack creates carries the invocation's and
+// the stack's labels and is disposed of by label and VERIFIED gone (scripts/integration/docker-resources.mjs `disposeLabelled`), so
+// a creation whose answer was lost is still found; the two pinned images are leased under a host lock shared by every invocation on
+// this host and removed only by the last user of a generation that found them absent, never because "this run added them" (another
+// invocation may be using them). An unverified disposal fails the stack. Docker commands are bounded and owned
+// (scripts/integration/docker-exec.mjs); after a signal only clean-up commands start.
+//
 // Loopback listeners on OS-chosen free ports only. Disposable state under a fresh directory in $TMPDIR. Every process this script
 // starts is stopped on exit and the ports are checked to be free again. It touches no existing service and no real user data.
-import { spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -42,8 +50,16 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createCalendarFeed } from "./calendar-feed.mjs";
 import { createProxy } from "./delaying-proxy.mjs";
+import { dockerExec } from "./docker-exec.mjs";
+import {
+  disposeLabelled,
+  dockerClient,
+  LABEL_INVOCATION,
+  LABEL_STACK,
+} from "./docker-resources.mjs";
 import { freePort } from "./free-port.mjs";
 import { createOidcProvider } from "./oidc-provider.mjs";
+import { membersOf, processTable, stopMembers } from "./ownership.mjs";
 import { startPostgresBackend } from "./postgres-backend.mjs";
 import { ownedGroups } from "./process-groups.mjs";
 import { playwrightLister, runIntegration } from "./schedule.mjs";
@@ -97,17 +113,96 @@ try {
 }
 const { narrowed, partial, manifest, stacks: STACKS } = plan;
 
+// The reaper (scripts/integration/reaper.mjs, WEB-08d review r6 H4, carried over in revision 30): started first, in a group of its
+// own, told every owned group and Docker stack, released once this process has cleaned up. If this process is killed (SIGKILL, a
+// crash) before it releases, the reaper stops those groups and disposes of those Docker resources itself. It holds this process's
+// stdout and stderr, so a caller that waits for them also waits for its clean-up.
+const invocationId = randomUUID();
+let reaperReleased = false;
+mkdirSync(evidence, { recursive: true });
+const reaper = spawn(
+  process.execPath,
+  [
+    join(root, "scripts/integration/reaper.mjs"),
+    "--record",
+    join(evidence, `reaper-${invocationId}.json`),
+  ],
+  { detached: true, stdio: ["pipe", "inherit", "inherit"] },
+);
+let reaperProblem = null;
+reaper.once("error", (error) => {
+  reaperProblem = `reaper: ${error.message}`;
+  console.error(reaperProblem);
+});
+reaper.once("exit", (code, signal) => {
+  if (!reaperReleased) {
+    reaperProblem ??= `reaper ended early (exit ${code}, signal ${signal})`;
+    console.error(reaperProblem);
+  }
+});
+reaper.stdin.on("error", () => undefined);
+reaper.unref();
+const tellReaper = (message) => {
+  if (!reaper.stdin.writable) return;
+  reaper.stdin.write(`${JSON.stringify(message)}\n`);
+};
+/** After this process's own clean-up: the reaper exits doing nothing. Waits (bounded) for it to end. */
+async function releaseReaper() {
+  if (reaperReleased) return;
+  reaperReleased = true;
+  tellReaper({ type: "release" });
+  reaper.stdin.end();
+  // The bounded wait keeps the event loop alive (a referenced timer, cleared once the reaper exits): this runs under a top-level
+  // await, and with nothing referenced Node would end the process there (exit 13) before the runner's own exit status is set.
+  if (reaper.exitCode === null && reaper.signalCode === null) {
+    let timer;
+    await Promise.race([
+      new Promise((resolveExit) => reaper.once("exit", resolveExit)),
+      new Promise((resolveWait) => {
+        timer = setTimeout(resolveWait, 5_000);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+}
+
+// WEB-08d review r6 H4b, carried over in revision 30: every process this invocation starts after this point inherits an ownership
+// MARK in its environment (`ATLAS_IT_<token>=1`, scripts/integration/ownership.mjs), so a descendant that left its process group
+// (a new session, an exited parent) is still found: each clean-up ends with a look for marked processes, which are stopped and
+// reported. The reaper above was started before the mark was set and never carries it.
+const markToken = randomBytes(8).toString("hex");
+process.env[`ATLAS_IT_${markToken}`] = "1";
+tellReaper({ type: "mark", token: markToken });
+const marked = () => {
+  try {
+    return membersOf({
+      table: processTable(),
+      marks: new Set([`${markToken}=1`]),
+      never: new Set([process.pid, process.ppid, reaper.pid]),
+    });
+  } catch {
+    return null; // the table could not be read: stopMembers reports it
+  }
+};
+
 // R18: every spawned process leads its own group; clean-up and signals reach the whole tree (scripts/integration/process-groups.mjs).
 const groups = ownedGroups({
-  onSpawn: ({ pgid, label }) =>
-    console.error(`owned process group ${pgid} (${label})`),
+  onSpawn: ({ pgid, label }) => {
+    tellReaper({ type: "group", pgid });
+    console.error(`owned process group ${pgid} (${label})`);
+  },
 });
+// The PostgreSQL repeat's Docker commands and labels (see the header). `dockerStack`: the label of the stack whose containers,
+// network, volumes and image leases exist or may exist, set BEFORE the first docker command of that stack.
+const dockerCommands = dockerExec();
+const docker = dockerClient(dockerCommands.run);
+const dockerStop = new AbortController();
+let dockerStack = null;
 let tmp = "";
 const ports = [];
 let proxy = null;
 let feed = null;
 let lastBackend = null;
-let extraCleanup = null;
 let provider = null;
 // R17: what the backend answered this stack (the proxy's `observe`), for its throttle record.
 let exchanges = [];
@@ -161,20 +256,34 @@ function cleanup() {
         .catch((e) =>
           problems.push(`provider stop: ${String(e?.message ?? e)}`),
         );
-    if (extraCleanup) {
-      try {
-        const left = extraCleanup();
-        console.error(
-          `clean-up (containers, network, images added by this run): ${JSON.stringify(left)}`,
+    if (dockerStack) {
+      // Every container, network and volume labelled with this stack, then its image leases (never throws; ok only when verified).
+      const disposed = await disposeLabelled(docker, {
+        filter: `${LABEL_STACK}=${dockerStack}`,
+      });
+      console.error(
+        `clean-up (containers, network, volumes, image leases of ${dockerStack}): ${JSON.stringify(disposed)}`,
+      );
+      if (!disposed.ok)
+        problems.push(
+          `docker clean-up of ${dockerStack} not verified: ${JSON.stringify({ errors: disposed.errors, remaining: disposed.remaining, images: disposed.images.filter((i) => !i.ok) })}`,
         );
-        if ((left?.images_added_and_left ?? []).length > 0)
-          problems.push(
-            `images added by this run remain: ${left.images_added_and_left.join(", ")}`,
-          );
-      } catch (e) {
-        problems.push(`container clean-up: ${String(e?.message ?? e)}`);
-      }
-      extraCleanup = null;
+      dockerStack = null;
+    }
+    // Anything still carrying this invocation's mark escaped its process group (H4b): stopped here, noted, and a failure if it
+    // survives or the process table cannot be read.
+    const escaped = marked();
+    if (escaped === null) problems.push("the process table could not be read");
+    else if (escaped.size > 0) {
+      const pids = [...escaped.keys()];
+      const swept = await stopMembers({ scan: marked });
+      console.error(
+        `clean-up: marked process(es) outside their group: ${pids.join(", ")}; ${JSON.stringify({ escalated: swept.escalated, left: swept.left === null ? "unknown" : [...swept.left.keys()] })}`,
+      );
+      if (swept.left === null || swept.left.size > 0)
+        problems.push(
+          `marked process(es) remain: ${swept.left === null ? "unknown" : [...swept.left.keys()].join(", ")}`,
+        );
     }
     try {
       if (tmp) rmSync(tmp, { recursive: true, force: true });
@@ -213,7 +322,9 @@ const onSignal = (signal) => {
   const code = exitFor(signal);
   if (interrupted) {
     console.error(`${signal} again: forcing clean-up and exit`);
-    cleanup().finally(() => process.exit(code));
+    cleanup()
+      .then(releaseReaper)
+      .finally(() => process.exit(code));
     return;
   }
   interrupted = signal;
@@ -221,12 +332,16 @@ const onSignal = (signal) => {
     `\n${signal}: stopping the stack in progress; nothing else starts`,
   );
   groups.interrupt();
+  dockerCommands.stop(signal);
+  dockerStop.abort(signal);
   cancel(signal);
   setTimeout(() => {
     console.error(
       `${signal}: still running 120 s later: forcing clean-up and exit`,
     );
-    cleanup().finally(() => process.exit(code));
+    cleanup()
+      .then(releaseReaper)
+      .finally(() => process.exit(code));
   }, 120_000).unref();
 };
 process.on("SIGINT", () => onSignal("SIGINT"));
@@ -283,6 +398,7 @@ async function stackRun(browser, stack) {
   ];
   const invitations = [];
   tmp = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "atlas-integration-"));
+  tellReaper({ type: "dir", path: tmp });
   // R17: the specs' sign-in ledger and account rotation live as long as THIS stack (removed with it), never keyed by a reusable port.
   const state = join(tmp, "state");
   mkdirSync(state);
@@ -325,8 +441,18 @@ async function stackRun(browser, stack) {
 
   if (postgres) {
     // OPTIONAL repeat: the released backend CONTAINER image against a disposable PostgreSQL (docs/session.md, "Integration").
-    const started = await startPostgresBackend({ backendPort, origin, names });
-    extraCleanup = started.stop;
+    // Its disposal (by label, verified) is owed from before the first docker command.
+    dockerStack = `${invocationId}-${browser}${stack.suffix || "-narrowed"}`;
+    tellReaper({ type: "docker", stack: dockerStack });
+    const started = await startPostgresBackend({
+      backendPort,
+      origin,
+      names,
+      docker,
+      labels: { [LABEL_INVOCATION]: invocationId, [LABEL_STACK]: dockerStack },
+      signal: dockerStop.signal,
+      log: (line) => console.error(line),
+    });
     stopIfInterrupted();
     Object.assign(accounts, started.accounts);
     revision = started.describe;
@@ -615,5 +741,11 @@ const status = serve
     });
 // No owned process group may outlive the invocation (a stack's clean-up already checked its own; this covers an early exit).
 const { problems: left } = await groups.stopAll();
+// Nor a docker command (a clean-up waits for its own; this covers a stack that ended while one was still settling).
+const dockerLeft = await dockerCommands.settle();
+if (dockerLeft.length > 0)
+  left.push(`docker command(s) still running: ${dockerLeft.join(", ")}`);
+await releaseReaper();
+if (reaperProblem) left.push(reaperProblem);
 for (const problem of left) console.error(`clean-up problem: ${problem}`);
 process.exit(left.length > 0 && status === 0 ? 1 : status);

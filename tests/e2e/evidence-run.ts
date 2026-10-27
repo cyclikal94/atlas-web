@@ -4,8 +4,10 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  realpathSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { FullConfig, TestInfo } from "@playwright/test";
 
@@ -59,6 +61,27 @@ export function configureEvidenceRun(argv = process.argv): string {
     }
   }
   return newEvidenceRun();
+}
+
+/**
+ * WEB-08d revision 26 (review r25 R25-N1): the runtime this Playwright run is, as its own process sees it. The config records it in the
+ * report's metadata (`atlasRuntime`), so held-operation evidence can check the runtime its applicability record names against the one
+ * that actually ran (scripts/validation/held-operation-applicability.mjs witnessProblems). Metadata only: it selects and changes nothing.
+ * Revision 27 (review r26 R26-N1): also the real directory of the @playwright/test this run loaded, so a report names the installation
+ * (the run's private snapshot) it really came from.
+ */
+export function runtimeWitness() {
+  const require = createRequire(import.meta.url);
+  const manifest = require.resolve("@playwright/test/package.json");
+  const version: unknown = require(manifest).version;
+  return {
+    node: process.version,
+    exec_path: process.execPath,
+    platform: process.platform,
+    arch: process.arch,
+    playwright: String(version),
+    playwright_dir: realpathSync(dirname(manifest)),
+  };
 }
 
 export default function setupEvidenceRun(config: FullConfig): void {
