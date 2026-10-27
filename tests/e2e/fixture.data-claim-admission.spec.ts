@@ -39,6 +39,7 @@ import {
 import {
   type OutboxReadiness,
   untilDraftWriteCommitted,
+  untilOutboxPlanCalled,
   withSettledOutboxPeers,
 } from "./data-operation-barriers";
 import {
@@ -133,6 +134,8 @@ const untilWarning = (
     .toEqual({ notResponding, memoryOnly });
 const untilStatus = (page: Page, id: string, status: string) =>
   expect.poll(() => statusOf(page, id), { timeout: 20_000 }).toBe(status);
+// Retained WEB-14a R21 schedules use the original barrier; WEB-08d schedules above use their owned HeldCall.
+const untilHeld = untilOutboxPlanCalled;
 const untilLanded = (page: Page, text: string) =>
   untilDraftWriteCommitted(page, ACCOUNT, text);
 // `staysHeld` and `staysUnsent` (the twelve-reconnect observations of revisions 28 to 31) are in `./data-compat-observation`: ADAPTED, WEB-14a
