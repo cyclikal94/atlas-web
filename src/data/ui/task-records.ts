@@ -7,6 +7,7 @@ import type {
   MaterialiseSequenceRow,
 } from "../model/types";
 import {
+  DISCOVERY_ENTRY_BYTES,
   type DiscoveryWrite,
   pruneMaterialiseSequences,
   readMaterialiseDiscovery,
@@ -21,8 +22,11 @@ import {
 import {
   issueTimerOrder,
   readTimerCopy,
+  readTimerScope,
   reconcileTimerCopy,
   type TimerCopyRecord,
+  type TimerScopeObservation,
+  type TimerScopeRecord,
   writeTimerCopy,
 } from "../plans/timer-copy";
 import type { Loadable } from "../store/port";
@@ -77,6 +81,24 @@ export function useTimerCopy(): Loadable<TimerCopyRecord | null> {
         })
       : null;
   }, []);
+}
+
+/** One day's timer scope (DA-T3) and the floor of the displayed account's database, live (every page's). */
+export function useTimerScope(
+  occurrenceId: string,
+): Loadable<{ scope: TimerScopeRecord | null; floor: number }> {
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readTimerScope, {
+            incarnationId: service.incarnationId,
+            occurrenceId,
+          })
+        : null;
+    },
+    [occurrenceId],
+  );
 }
 
 export type RecordCommit<O> =
@@ -157,7 +179,11 @@ export async function readMaterialiseDiscoveryNow(
   }
 }
 
-/** W27's compare-and-set of one task's discovery entry (G1, G2, G5; INC, CLS, EPO). Never throws. */
+/**
+ * W27's compare-and-set of one task's discovery entry (G1, G2, G5; INC, CLS, EPO). An entry that ADDS a task (expected absent) grows the
+ * singleton: with `env`, it is admitted through the origin's quota ledger first (revision 3, R16), and a refusal is `refused` (nothing
+ * written). Never throws.
+ */
 export async function commitMaterialiseDiscovery(
   service: AccountService,
   captured: Captured,
@@ -166,13 +192,31 @@ export async function commitMaterialiseDiscovery(
     expected: MaterialiseDiscovery | null;
     next: MaterialiseDiscovery | null;
   },
+  env: Pick<DataEnv, "quota"> | null = null,
 ): Promise<RecordCommit<DiscoveryWrite>> {
+  const grows = input.expected === null && input.next !== null;
+  let reservation: Awaited<ReturnType<DataEnv["quota"]["reserve"]>> | null =
+    null;
+  let written = false;
   try {
-    return settled(
-      await service.commit(writeMaterialiseDiscovery, { captured, ...input }),
-    );
+    if (grows && env !== null)
+      reservation = await env.quota.reserve("cache", DISCOVERY_ENTRY_BYTES);
+    const lease = reservation;
+    const out = await service.commit(writeMaterialiseDiscovery, {
+      captured,
+      ...input,
+      ...(lease === null
+        ? {}
+        : lease.verdict === "refuse"
+          ? { admitted: false }
+          : { leaseLive: () => lease.live() }),
+    });
+    written = out.kind === "applied" && out.value.kind === "written";
+    return settled(out);
   } catch {
     return { kind: "failed" };
+  } finally {
+    reservation?.settle(written ? "written" : "not_written");
   }
 }
 
@@ -194,20 +238,53 @@ export async function issueTimerOrderNow(
   }
 }
 
-/** W28: the copy corrected by a read of one occurrence's sessions (`reconcileTimerCopy`). Never throws. */
+/**
+ * W28: the copy corrected by a read of one occurrence's sessions, and that read's observation of its day recorded (`reconcileTimerCopy`;
+ * revision 3, DA-T3). The observation's growth is admitted as a cache write through the origin's quota ledger first; a refusal still
+ * corrects the copy and raises the floor instead. Never throws.
+ */
 export async function commitTimerCorrection(
+  env: Pick<DataEnv, "quota">,
   service: AccountService,
   captured: Captured,
-  input: { order: number; drop(row: JsonObject, newer: boolean): boolean },
-): Promise<RecordCommit<{ removed: number; applied: boolean }>> {
+  input: {
+    order: number;
+    drop(row: JsonObject, newer: boolean): boolean;
+    scope: TimerScopeObservation;
+  },
+): Promise<
+  RecordCommit<{ removed: number; applied: boolean; scoped: boolean }>
+> {
+  let reservation: Awaited<ReturnType<DataEnv["quota"]["reserve"]>> | null =
+    null;
+  let scoped = false;
   try {
-    return settled(
-      await service.commit(reconcileTimerCopy, { captured, ...input }),
-    );
+    try {
+      reservation = await env.quota.reserve(
+        "cache",
+        utf8Length(JSON.stringify(input.scope)) + SCOPE_OVERHEAD,
+      );
+    } catch {
+      reservation = null;
+    }
+    const lease = reservation?.verdict === "refuse" ? null : reservation;
+    const out = await service.commit(reconcileTimerCopy, {
+      captured,
+      ...input,
+      admitted: lease !== null,
+      ...(lease === null ? {} : { leaseLive: () => lease.live() }),
+    });
+    if (out.kind === "applied") scoped = out.value.scoped;
+    return settled(out);
   } catch {
     return { kind: "failed" };
+  } finally {
+    reservation?.settle(scoped ? "written" : "not_written");
   }
 }
+
+/** A scope's own fields beside its lists (orders and names): what a new day's record adds beyond the ids it lists. */
+const SCOPE_OVERHEAD = 128;
 
 /**
  * W28: replaces the running-timer copy with `copy` (or removes it), admitted as a cache write through the origin's quota ledger first (a
@@ -251,4 +328,13 @@ export type {
   SequenceKey,
   SequenceWrite,
 } from "../plans/materialise";
-export { TIMER_COPY_ROWS, type TimerCopyRecord } from "../plans/timer-copy";
+export {
+  DISCOVERY_ENTRY_BYTES,
+  DISCOVERY_REQUEST_ID,
+} from "../plans/materialise";
+export {
+  TIMER_COPY_ROWS,
+  type TimerCopyRecord,
+  type TimerScopeObservation,
+  type TimerScopeRecord,
+} from "../plans/timer-copy";

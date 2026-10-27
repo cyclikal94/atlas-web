@@ -34,8 +34,16 @@ export const CATCH_UP_COPY = {
     rejected:
       "This task can't be brought up to date from here. It may have been archived, or it's no longer shared with you.",
     unreachable: "Atlas couldn't reach the server.",
-  } satisfies Record<StopReason, string>,
+    storage:
+      "This device is short of storage space, so Atlas couldn't keep track of catching up. Free some space, then try again.",
+  } satisfies Record<ShownReason, string>,
 } as const;
+
+/**
+ * Why a task's catch-up stopped, as shown: a sequence's or a discovery's reason, or `storage` (revision 3, review R16: this page could not
+ * admit the task's discovery record, so it sent nothing).
+ */
+export type ShownReason = StopReason | "storage";
 
 /** The latest day's sequence of each task (a task has at most a few: older ones are pruned when a later day begins). */
 export function latestByTask(
@@ -57,7 +65,7 @@ export function latestByTask(
 export interface ShownStop {
   taskId: string;
   throughDate: string | undefined;
-  reason: StopReason;
+  reason: ShownReason;
   requestId: string | undefined;
 }
 export function stopFor(

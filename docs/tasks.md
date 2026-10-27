@@ -946,7 +946,10 @@ MU-3036…MU-3050 and MU-3060…MU-3065, one or more per correction; revision 2 
 with their reasons). Revision 2: the reviewer's T1/T2/T3/D1/D2/M1 ported into `timer-block`, `timers-page`, `dependency-dialog` and
 `catchup-runner` with their controls, the caller schedules of the design assessment (partial pages, old continuations and failures, the
 copy's order and corrections, the opening read and the send's preparation, discovery pauses, reloads, two Try agains, a failed record), and
-native E-M5 and E-TM2.
+native E-M5 and E-TM2. Revision 3 (Review 3 R14–R18, design assessment DA-T3): the reviewer's T4, D3, M2, M3, R4 and R4-P ported with
+their controls into `timer-block`, `dependency-dialog`, `catchup-runner` and `rota`; the observation rule in both directions (`timer-model`),
+the day scopes, bounds, floor and admission (`materialise-plans`), root admission at every entry point, discovery admission and binding
+schedules, rota read ownership; native E-TM3 (another tab's day read reaches this tab's kept read); MU-3085…MU-3101.
 
 ## Limits (WEB-10c)
 
@@ -958,6 +961,11 @@ native E-M5 and E-TM2.
   pending task, one session read per timer day shown.
 - **Command path fixture-only (E-8)**; TASK-30 checks 3 and 5 are backend-internal (E-9). A command on a day this device does not hold
   cannot have its need derived (its task and date come from the cache): it is retried under the back-off as before, with nothing asked.
+- **Revision 3 bounds.** A day's timer observation is kept for at most 100 days and 100 sessions each way; beyond them (and when the
+  quota ledger refuses the record) the floor retires older day reads seen running instead, so a page kept open for very long may show a
+  running session as not running offline until it reads again (the conservative side). A task's catch-up record is admitted before its
+  first read: on a device the quota ledger refuses, the task shows "This device is short of storage space…" with Try again and nothing is
+  sent. Pages without Web Locks each admit the read they send; the later admission wins and the other's answer records nothing.
 - **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
   compatibility are those last rendered (a pause is taken up again when a task screen renders).
 
@@ -970,6 +978,8 @@ native E-M5 and E-TM2.
 | The editor's replace wording, "Don't allow starting early", "n of 32" | `/tasks/<id>` → Set what this waits for |
 | Timer words ("Not used for this task…", the 7-day and closed-day choices, the conflict block, "Last checked …") | `/tasks/<id>` of a seconds task (jsdom `timer-block.test.tsx`) |
 | Revision 2: the dependency dialog's "Checking what it waits for…" until its opening read answers, and "What this waits for changed while saving. Check it and choose again." | `/tasks/<id>` → See what needs doing first (jsdom `dependency-dialog.test.tsx`) |
+| Revision 3: "Mark done: Record this day's progress on its card first." (and "Start anyway: …" the same) when the day's own progress is not entered | `/tasks/<id>` of a numeric task → See what needs doing first (jsdom `dependency-dialog.test.tsx`) |
+| Revision 3: the catch-up reason "This device is short of storage space, so Atlas couldn't keep track of catching up. Free some space, then try again." | `/today` with `pending_tasks` and a refusing quota ledger (the runner state in jsdom `catchup-runner.test.ts`; the words themselves are rendered by no test, nor natively) |
 | "Your timers" in the task list and the timer block; "Restricted — sharing changed since this session" | `/tasks/timers` (native E-TM1) |
 | Rota labels ("You", usernames, "Someone (abcd…)"), "Take turns on this task", the conflict without the other person's name, "Left open", "Projected" | `/tasks/<id>` of an Anyone task (jsdom `rota.test.tsx`, native E-R1) |
 | Streak tiles "Shared" and "You", unit words, five strip states including "Skipped", no run dates, "On this device" offline | `/tasks/<id>/streak` (jsdom `streak-page.test.tsx`, native E-S2) |

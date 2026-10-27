@@ -18,13 +18,17 @@ import {
   issueTimerOrder,
   parseTimerCopy,
   readTimerCopy,
+  readTimerScope,
   reconcileTimerCopy,
   TIMER_COPY_ROWS,
+  TIMER_SCOPE_IDS,
+  TIMER_SCOPES,
   writeTimerCopy,
 } from "../../src/data/plans/timer-copy";
 import {
   commitMaterialiseSequence,
   commitTimerCopy,
+  commitTimerCorrection,
 } from "../../src/data/ui/task-records";
 import { DB, defaultsWorld } from "../support/data/defaults-world";
 
@@ -517,12 +521,12 @@ describe("W28: the running-timer copy", () => {
       });
     expect(await correct(day, session(1).id)).toEqual({
       kind: "applied",
-      value: { removed: 1, applied: true },
+      value: { removed: 1, applied: true, scoped: false },
     });
     // The same read's later page (its traversal keeps its first page's place) may still correct.
     expect(await correct(day, session(2).id)).toEqual({
       kind: "applied",
-      value: { removed: 1, applied: true },
+      value: { removed: 1, applied: true, scoped: false },
     });
     // The account read issued before the correction lands now: refused, so the removed sessions are never restored (reload included).
     expect(
@@ -541,7 +545,7 @@ describe("W28: the running-timer copy", () => {
     // A correction of an earlier order than the fence changes nothing.
     expect(await correct(first, session(1).id)).toEqual({
       kind: "applied",
-      value: { removed: 0, applied: false },
+      value: { removed: 0, applied: false, scoped: false },
     });
     // Control: a read issued after the correction replaces the copy normally.
     expect(
@@ -606,20 +610,51 @@ describe("W27: a task's discovery entry (revision 2, review R13 and DA-M1)", () 
     ).toEqual({});
   });
 
-  test("bounded: one that would add a task beyond the window is refused (full); response-derived guards apply", async () => {
+  /**
+   * Revision 3 (review R16): this case asserted a FIXED cap of `SEQUENCE_WINDOW` entries (`full`): the very limit that lost a stop across
+   * a reload. Its intent, "the discovery record is bounded and its response-derived guards apply", is kept over admission: a NEW task's
+   * entry is written only when the quota ledger admitted its growth (refused, or a lapsed hold: `refused`, nothing written), however many
+   * entries exist (here more than the old window); replacing an entry needs no admission (its size was admitted); the guards apply.
+   */
+  test("admitted, not capped: a new task's entry needs the ledger's admission (refused or lapsed: nothing written), at any count; guards apply", async () => {
     const { service, seed } = await bound();
     const many: Record<string, ReturnType<typeof entry>> = {};
-    for (let i = 0; i < SEQUENCE_WINDOW; i += 1)
+    for (let i = 0; i <= SEQUENCE_WINDOW; i += 1)
       many[`bbbbbbbb-0000-4000-8000-${String(i).padStart(12, "0")}`] = entry(1);
-    seed({ materialise_discovery: many });
-    expect(
-      await service.store.run(writeMaterialiseDiscovery, {
+    seed({ materialise_discovery: { ...many, [TASK]: entry(1) } });
+    const add = (over: { admitted?: boolean; leaseLive?: () => boolean }) =>
+      service.store.run(writeMaterialiseDiscovery, {
         captured: service.capture(1),
         task_id: OTHER_TASK,
         expected: null,
         next: entry(1),
+        ...over,
+      });
+    expect(await add({ admitted: false })).toEqual({
+      kind: "applied",
+      value: { kind: "refused", stored: null },
+    });
+    expect(await add({ leaseLive: () => false })).toEqual({
+      kind: "applied",
+      value: { kind: "refused", stored: null },
+    });
+    expect(await add({ leaseLive: () => true })).toEqual({
+      kind: "applied",
+      value: { kind: "written", stored: entry(1) },
+    });
+    // Replacing a stored entry (its outcome) is not growth: no admission asked.
+    expect(
+      await service.store.run(writeMaterialiseDiscovery, {
+        captured: service.capture(1),
+        task_id: TASK,
+        expected: entry(1),
+        next: entry(2),
+        admitted: false,
       }),
-    ).toEqual({ kind: "applied", value: { kind: "full", stored: null } });
+    ).toEqual({
+      kind: "applied",
+      value: { kind: "written", stored: entry(2) },
+    });
     expect(
       await service.store.run(writeMaterialiseDiscovery, {
         captured: { ...service.capture(1), incarnationId: "x" },
@@ -628,5 +663,238 @@ describe("W27: a task's discovery entry (revision 2, review R13 and DA-M1)", () 
         next: entry(1),
       }),
     ).toEqual({ kind: "dropped", reason: "incarnation" });
+  });
+
+  test("an answer is recorded only over its own admitted attempt: another attempt, or an entry deleted and made again, is stale", async () => {
+    const { service, seed } = await bound();
+    const mine = { ...entry(1), attempt: "attempt-a" };
+    seed({
+      materialise_discovery: { [TASK]: { ...entry(1), attempt: "attempt-b" } },
+    });
+    const write = (expected: object | null, next: object | null) =>
+      service.store.run(writeMaterialiseDiscovery, {
+        captured: service.capture(1),
+        task_id: TASK,
+        expected: expected as never,
+        next: next as never,
+      });
+    // Another page re-admitted the read (attempt b): a's answer (its count, its success) changes nothing.
+    expect(
+      await write(mine, { ...entry(2), attempt: "attempt-c" }),
+    ).toMatchObject({
+      value: { kind: "stale", stored: { attempt: "attempt-b" } },
+    });
+    expect(await write(mine, null)).toMatchObject({ value: { kind: "stale" } });
+    // Deleted (b's success), then made again by a new admission: still not a's.
+    expect(
+      await write({ ...entry(1), attempt: "attempt-b" }, null),
+    ).toMatchObject({
+      value: { kind: "written", stored: null },
+    });
+    expect(
+      await write(null, { ...entry(0), attempt: "attempt-d" }),
+    ).toMatchObject({
+      value: { kind: "written" },
+    });
+    expect(await write(mine, null)).toMatchObject({ value: { kind: "stale" } });
+    // An entry of revision 2 (no attempt) is read and compared as attempt null: its stop and count are kept.
+    seed({ materialise_discovery: { [TASK]: entry(3, true) } });
+    expect(
+      await write(entry(3, true), { ...entry(0), retry: 1 }),
+    ).toMatchObject({
+      value: { kind: "written" },
+    });
+  });
+});
+
+/**
+ * Revision 3 (review R14, design assessment DA-T3): a day's read records what it observed of its day (its scope) under the day's OWN
+ * order, whatever the copy's fence; bounded, and whatever is not kept raises the floor instead (never dropped silently).
+ */
+describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
+  const DAY = "aaaaaaaa-0000-4000-8000-0000000000d1";
+  const id = (n: number) =>
+    `cccccccc-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const seen = (
+    running: string[],
+    ended: string[] = [],
+    complete = true,
+    day = DAY,
+  ) => ({ occurrence_id: day, complete, running, ended });
+  async function scoped() {
+    const b = await bound();
+    const issue = async () => {
+      const out = await b.service.store.run(issueTimerOrder, {
+        captured: b.service.capture(1),
+      });
+      if (out.kind !== "applied") throw new Error("not applied");
+      return out.value.order as number;
+    };
+    const observe = (
+      order: number,
+      scope: ReturnType<typeof seen>,
+      over: { admitted?: boolean; leaseLive?: () => boolean } = {},
+    ) =>
+      b.service.store.run(reconcileTimerCopy, {
+        captured: b.service.capture(1),
+        order,
+        drop: () => false,
+        scope,
+        ...over,
+      });
+    const read = async (day = DAY) =>
+      b.service.store.run(readTimerScope, {
+        incarnationId: b.service.incarnationId,
+        occurrenceId: day,
+      });
+    return { ...b, issue, observe, read };
+  }
+
+  test("recorded under the day's own order even when the copy's fence is later; later pages of one read merge; an earlier complete read never replaces a later one", async () => {
+    const { service, issue, observe, read } = await scoped();
+    const day = await issue();
+    // An account read issued after it lands first: the copy's fence passes the day's read.
+    await service.store.run(writeTimerCopy, {
+      captured: service.capture(1),
+      copy: {
+        format: 2,
+        order: await issue(),
+        read_at: 1,
+        complete: false,
+        running: [],
+      },
+    });
+    expect(await observe(day, seen([], [id(1)], false))).toMatchObject({
+      value: { applied: false, scoped: true },
+    });
+    expect(await read()).toEqual({
+      scope: {
+        seen: day,
+        order: 0,
+        running: [],
+        ended: [id(1)],
+        ended_at: day,
+      },
+      floor: 0,
+    });
+    // The same read's last page completes it: its running list is the day's.
+    await observe(day, seen([id(2)], [id(1)], true));
+    expect((await read()).scope).toEqual({
+      seen: day,
+      order: day,
+      running: [id(2)],
+      ended: [],
+      ended_at: 0,
+    });
+    const later = await issue();
+    await observe(later, seen([], [], true));
+    // An earlier complete read arriving late changes nothing it would contradict.
+    await observe(day, seen([id(3)], [], true));
+    expect((await read()).scope).toMatchObject({
+      seen: later,
+      order: later,
+      running: [],
+    });
+  });
+
+  test("another day's observation is its own; a scope decides only for its day", async () => {
+    const { issue, observe, read } = await scoped();
+    const other = "aaaaaaaa-0000-4000-8000-0000000000d2";
+    await observe(await issue(), seen([], [], true, other));
+    expect((await read()).scope).toBeNull();
+    expect((await read(other)).scope).toMatchObject({ running: [] });
+  });
+
+  test(`at most ${TIMER_SCOPES} days: the one seen longest ago goes, and its order becomes the floor`, async () => {
+    const { issue, observe, read } = await scoped();
+    const first = await issue();
+    await observe(first, seen([], [], true));
+    for (let i = 0; i < TIMER_SCOPES; i += 1)
+      await observe(
+        await issue(),
+        seen(
+          [],
+          [],
+          true,
+          `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        ),
+      );
+    expect(await read()).toEqual({ scope: null, floor: first });
+  });
+
+  test(`a list beyond ${TIMER_SCOPE_IDS} sessions is not kept: the floor rises to that read's order instead`, async () => {
+    const { issue, observe, read } = await scoped();
+    const many = Array.from({ length: TIMER_SCOPE_IDS + 1 }, (_, i) => id(i));
+    const order = await issue();
+    await observe(order, seen([], many, false));
+    expect(await read()).toEqual({
+      scope: { seen: order, order: 0, running: [], ended: [], ended_at: 0 },
+      floor: order,
+    });
+  });
+
+  test("growth the quota ledger refused, or a hold that lapsed, is not recorded: the floor rises and the copy is still corrected", async () => {
+    const { t, service, issue, observe, read } = await scoped();
+    const a = await issue();
+    expect(
+      await observe(a, seen([], [], true), { leaseLive: () => false }),
+    ).toMatchObject({ value: { applied: true, scoped: false } });
+    expect(await read()).toEqual({ scope: null, floor: a });
+    await service.store.run(writeTimerCopy, {
+      captured: service.capture(1),
+      copy: {
+        format: 2,
+        order: await issue(),
+        read_at: 1,
+        complete: true,
+        running: [{ id: id(9), occurrence_id: DAY }],
+      },
+    });
+    const b = await issue();
+    const refused = await commitTimerCorrection(
+      {
+        quota: {
+          ...t.env.quota,
+          reserve: async () =>
+            ({
+              verdict: "refuse",
+              live: () => false,
+              settle: () => undefined,
+            }) as never,
+        },
+      },
+      service,
+      service.capture(1),
+      {
+        order: b,
+        drop: (row) => row.id === id(9),
+        scope: seen([], [id(9)], true),
+      },
+    );
+    expect(refused).toEqual({
+      kind: "applied",
+      value: { removed: 1, applied: true, scoped: false },
+    });
+    expect(await read()).toEqual({ scope: null, floor: b });
+    // Admitted (the ledger of the world), it is recorded.
+    const c = await issue();
+    expect(
+      await commitTimerCorrection(t.env, service, service.capture(1), {
+        order: c,
+        drop: () => false,
+        scope: seen([id(4)], [], true),
+      }),
+    ).toMatchObject({ value: { scoped: true } });
+    expect((await read()).scope).toMatchObject({ order: c, running: [id(4)] });
+  });
+
+  test("a stored scope that does not read raises the floor to what it had seen, or to every order handed out", async () => {
+    const { seed, read, issue } = await scoped();
+    await issue();
+    await issue();
+    seed({ timer_scopes: { [DAY]: { seen: 2, order: "x" } } });
+    expect(await read()).toEqual({ scope: null, floor: 2 });
+    seed({ timer_scopes: { [DAY]: "damaged" }, timer_order: 7 });
+    expect(await read()).toEqual({ scope: null, floor: 7 });
   });
 });

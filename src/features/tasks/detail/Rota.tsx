@@ -146,6 +146,11 @@ async function sendAccess(
 /**
  * The rota of the task (`GET /tasks/{id}/rota`) and whether I take part now (`GET /tasks/{id}/enrolment`), online, per identity.
  * Exported for its hook-level identity test (the screens remount on another identity, which hides this hook's own rule).
+ *
+ * ONE read owns what this shows (review R18): the pair asked last. Asking again (`reload`, a reconnect, another identity or task) and
+ * going offline or unmounting move the owner at once, so an earlier pair's answer, success or failure, never replaces a later one's
+ * roster, consent or enrolment, even for the same identity and task. A refusal is still noted for the page whatever the owner
+ * (`noteIfRefused`: the protected tree must not loop on it).
  */
 export function useRota(taskId: string) {
   const env = useTasksEnv();
@@ -157,38 +162,45 @@ export function useRota(taskId: string) {
     enrolled: boolean | null;
   }>({ scope: "", rota: { kind: "loading" }, enrolled: null });
   const scope = `${env.identity}\u0000${taskId}`;
-  const current = useRef(scope);
-  current.current = scope;
+  const owner = useRef(0);
   const [again, setAgain] = useState(0);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for another identity, the connection or a change made
   useEffect(() => {
+    owner.current += 1;
+    const mine = owner.current;
     if (!env.online) {
       setState({ scope, rota: { kind: "offline" }, enrolled: null });
       return;
     }
-    const asked = scope;
     void Promise.all([
       env.api.readRota(taskId),
       env.api.readEnrolment(taskId),
     ]).then(([rota, enrolment]) => {
       noteIfRefused(env.identity, `rota:${taskId}`, rota);
       noteIfRefused(env.identity, `enrolment:${taskId}`, enrolment);
-      // An answer of another identity or task is never shown (CM-384).
-      if (current.current !== asked) return;
+      // Only the pair asked last is shown (CM-384 for another identity or task; review R18 for the same one).
+      if (owner.current !== mine) return;
       setState({
-        scope: asked,
+        scope,
         rota: rota.ok
           ? { kind: "ready", value: rota.value }
           : { kind: "error" },
         enrolled: enrolment.ok ? enrolment.value.active : null,
       });
     });
+    return () => {
+      owner.current += 1;
+    };
   }, [scope, env.online, again]);
   const value = state.scope === scope ? state : null;
   return {
     rota: value?.rota ?? { kind: "loading" as const },
     enrolled: value?.enrolled ?? null,
-    reload: () => setAgain((n) => n + 1),
+    reload: () => {
+      // The pair on its way is no longer the one asked for, even before the next read begins.
+      owner.current += 1;
+      setAgain((n) => n + 1);
+    },
   };
 }
 

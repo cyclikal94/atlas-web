@@ -172,16 +172,27 @@ export const readMaterialiseSequences = readPlan<
 /**
  * WEB-10c revision 2 (review R13, design assessment DA-M1): the DISCOVERY of a task's catch-up (its first read, before its day is known,
  * so before any sequence row can exist) in `sync_state.materialise_discovery`, by task. A COMPARE-AND-SET like the rows: it applies only
- * while the stored entry is the one the caller decided on (absent, or its `retry`, `failures` and whether it is stopped), so a reload,
- * another tab or a late answer of an earlier "Try again" never overwrites a newer decision; a loss writes nothing and says what is
- * stored. Response-derived (the person's "Try again" included), so INC, CLS and EPO. At most `SEQUENCE_WINDOW` entries: one that would
- * add another is refused (`full`), and the caller keeps its stop in page memory instead; a success removes its entry. A few dozen bytes
- * in the singleton, so not admitted through the quota ledger.
+ * while the stored entry is the one the caller decided on (absent, or its `retry`, `failures`, whether it is stopped and its `attempt`),
+ * so a reload, another tab or a late answer of an earlier "Try again" or of an earlier read never overwrites a newer decision; a loss
+ * writes nothing and says what is stored. Response-derived (the person's "Try again" included), so INC, CLS and EPO.
+ *
+ * Revision 3 (reviews R16 and R17, design assessment DA-M1): a first read is ADMITTED before it is sent: the caller writes the entry with
+ * a fresh `attempt` (the read's identity, never reused), and each answer is recorded only over that very attempt, so an answer of a read
+ * another page re-admitted since, or of a deleted and re-created entry, changes nothing. There is no fixed number of entries: an entry
+ * that would ADD a task grows the singleton, so the caller admits it through the origin's quota ledger first (`leaseLive`, read where
+ * this decides; `admitted: false` when the ledger refused), and a growth not admitted is `refused`, with nothing written and nothing sent.
+ * Replacing a task's entry (its outcome, a "Try again") stays within the size admitted for it (`DISCOVERY_ENTRY_BYTES`). A success removes
+ * the entry.
  */
 export type DiscoveryWrite =
   | { kind: "written"; stored: MaterialiseDiscovery | null }
   | { kind: "stale"; stored: MaterialiseDiscovery | null }
-  | { kind: "full"; stored: null };
+  /** A new task's entry whose growth the quota ledger did not admit: nothing was written. */
+  | { kind: "refused"; stored: null };
+
+/** What one task's entry is admitted at: its fields, a stop's reason and a request id of at most `DISCOVERY_REQUEST_ID` characters. */
+export const DISCOVERY_ENTRY_BYTES = 512;
+export const DISCOVERY_REQUEST_ID = 128;
 
 const isDiscovery = (value: unknown): value is MaterialiseDiscovery => {
   if (typeof value !== "object" || value === null) return false;
@@ -189,6 +200,9 @@ const isDiscovery = (value: unknown): value is MaterialiseDiscovery => {
   return (
     Number.isSafeInteger(v.retry) &&
     Number.isSafeInteger(v.failures) &&
+    (v.attempt === undefined ||
+      v.attempt === null ||
+      (typeof v.attempt === "string" && v.attempt.length <= 64)) &&
     (v.stop === null ||
       (typeof v.stop === "object" &&
         v.stop !== null &&
@@ -215,7 +229,8 @@ const sameDiscovery = (
     ? a === b
     : a.retry === b.retry &&
       a.failures === b.failures &&
-      (a.stop === null) === (b.stop === null);
+      (a.stop === null) === (b.stop === null) &&
+      (a.attempt ?? null) === (b.attempt ?? null);
 
 export const writeMaterialiseDiscovery = guardedPlan<
   {
@@ -224,12 +239,16 @@ export const writeMaterialiseDiscovery = guardedPlan<
     expected: MaterialiseDiscovery | null;
     /** The replacement entry, or `null` to remove it (the discovery succeeded). */
     next: MaterialiseDiscovery | null;
+    /** The quota ledger refused a new task's entry. */
+    admitted?: boolean;
+    /** The reservation's `live()`, for a new task's entry; absent: not admitted through the ledger (a test of the plan alone). */
+    leaseLive?: () => boolean;
   },
   null,
   DiscoveryWrite
 >({
   name: "data.writeMaterialiseDiscovery",
-  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: null },
+  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: [],
   durability: "strict",
   read: async () => null,
@@ -245,9 +264,10 @@ export const writeMaterialiseDiscovery = guardedPlan<
     } else {
       if (
         !(input.task_id in entries) &&
-        Object.keys(entries).length >= SEQUENCE_WINDOW
+        (input.admitted === false ||
+          (input.leaseLive !== undefined && !input.leaseLive()))
       )
-        return { result: { kind: "full", stored: null } };
+        return { result: { kind: "refused", stored: null } };
       entries[input.task_id] = input.next;
     }
     return {

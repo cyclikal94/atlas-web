@@ -183,8 +183,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        'meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },',
-        'meta: { writer: "W28", guards: [], quota: "cache" },',
+        // Re-anchored (revision 3): two W28 plans are admitted now; this is the copy's write.
+        'name: "data.writeTimerCopy",\n  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },',
+        'name: "data.writeTimerCopy",\n  meta: { writer: "W28", guards: [], quota: "cache" },',
       ),
   },
   {
@@ -242,8 +243,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    advisory_override: preview.strict ? "strict" : null,',
-        "    advisory_override: null,",
+        // Re-anchored (revision 3, R15): the same fault, the strict rule unread, over the root's admission.
+        '    advisory_override: preview.strict ? "strict" : root,',
+        "    advisory_override: root,",
       ),
   },
   {
@@ -498,8 +500,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
+        // Re-anchored (revision 3): an ended binding's branch follows this one, so the fault keeps the statement and parks nothing.
         '      if (outcome.kind === "paused") park(item, outcome.throughDate);\n',
-        "",
+        '      if (outcome.kind === "paused") void item;\n',
       ),
   },
   {
@@ -552,7 +555,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "    if (readSupersedesCopy && !listed.has(s.id)) continue;\n",
+        // Re-anchored (revision 3, R14): the read's complete observation is no longer one of those that retire.
+        "  if (input.read !== null && input.complete === true && known(input.readOrder))\n    complete.push({ order: input.readOrder, lists: listed });\n",
         "",
       ),
   },
@@ -751,11 +755,13 @@ export const UNIT_10C = [
     tests: ["tests/features/tasks/rota.test.tsx"],
     expect: /A18: a late rota answer|A18 \(hook\): one reader/,
     // The guard alone is backed by the render-time scope check; the fault is an answer applied under the CURRENT scope.
+    // Re-anchored (revision 3, R18): one owner and the render-time scope replace the identity ref; the fault applies an answer under
+    // whatever identity is shown, so both go.
     patch: (t) =>
       sub(
-        t,
-        "      if (current.current !== asked) return;\n      setState({\n        scope: asked,",
-        "      setState({\n        scope: current.current,",
+        sub(t, "      if (owner.current !== mine) return;\n", ""),
+        "  const value = state.scope === scope ? state : null;",
+        "  const value = state;",
       ),
   },
   {
@@ -878,8 +884,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "    input.readOrder > input.copyOrder;",
-        "    input.readOrder >= input.copyOrder;",
+        // Re-anchored (revision 3): one rule compares every complete observation with the order a session was seen at.
+        "complete.some((o) => o.order > order && !o.lists.has(id))",
+        "complete.some((o) => o.order >= order && !o.lists.has(id))",
       ),
   },
   {
@@ -973,7 +980,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    if (entry?.stop) return { kind: "end", outcome: DONE };\n',
+        // Re-anchored (revision 3).
+        "    if (entry?.stop) return end(DONE);\n",
         "",
       ),
   },
@@ -987,8 +995,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    if (entry?.stop) return { kind: "end", outcome: DONE };\n',
-        '    if (entry?.stop) return { kind: "end", outcome: DONE };\n    if (entry !== null) entry = null;\n',
+        // Re-anchored (revision 3, R16): the read is admitted over the entry; the fault admits it from a zero count.
+        "      ...(entry ?? NO_DISCOVERY),\n      attempt: deps.newId(),",
+        "      ...NO_DISCOVERY,\n      retry: entry?.retry ?? 0,\n      attempt: deps.newId(),",
       ),
   },
   {
@@ -1001,8 +1010,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "          next: { retry: seen.retry + 1, failures: 0, stop: null },\n",
-        "          next: { retry: seen.retry, failures: 0, stop: null },\n",
+        // Re-anchored (revision 3).
+        "            retry: seen.retry + 1,\n",
+        "            retry: seen.retry,\n",
       ),
   },
   {
@@ -1016,7 +1026,8 @@ export const UNIT_10C = [
       sub(
         sub(
           t,
-          '    if (state.unrecorded.has(item.taskId))\n      return { kind: "end", outcome: DONE };\n',
+          // Re-anchored (revision 3).
+          "    if (state.unrecorded.has(item.taskId)) return end(DONE);\n",
           "",
         ),
         "      if (state.unrecorded.has(taskId)) return;\n",
@@ -1045,6 +1056,248 @@ export const UNIT_10C = [
         "  const found = discovery[taskId]?.stop;\n  if (found)",
         "  const found = discovery[taskId]?.stop;\n  if (false as boolean && found)",
       ),
+  },
+  {
+    id: "MU-3085",
+    title:
+      "R15: WEB-10c A9: Mark done is offered and sent without the root's own admission",
+    file: "src/features/tasks/model/dependencies.ts",
+    tests: [
+      "tests/features/tasks/dependency-model.test.ts",
+      "tests/features/tasks/dependency-dialog.test.tsx",
+    ],
+    expect:
+      /REVIEW3 D3 \(ported\)|modesOf: without the root|numeric root with nothing entered|admittedMode: no mode/,
+    patch: (t) =>
+      sub(
+        t,
+        '    require_satisfied: !satisfiedPreview(preview, rootId) ? "open" : root,',
+        '    require_satisfied: !satisfiedPreview(preview, rootId) ? "open" : null,',
+      ),
+  },
+  {
+    id: "MU-3086",
+    title:
+      "R15: WEB-10c A9: Start anyway is offered and sent without the root's own admission",
+    file: "src/features/tasks/model/dependencies.ts",
+    tests: [
+      "tests/features/tasks/dependency-model.test.ts",
+      "tests/features/tasks/dependency-dialog.test.tsx",
+    ],
+    expect:
+      /REVIEW3 D3 \(ported\)|modesOf: without the root|admittedMode: no mode|refused advisory_override/,
+    patch: (t) =>
+      sub(
+        t,
+        '    advisory_override: preview.strict ? "strict" : root,',
+        '    advisory_override: preview.strict ? "strict" : null,',
+      ),
+  },
+  {
+    id: "MU-3087",
+    title:
+      "R15: WEB-10c A9: a numeric or checklist root is admitted by its can_complete (a tick its goal refuses)",
+    file: "src/features/tasks/model/dependencies.ts",
+    tests: ["tests/features/tasks/dependency-model.test.ts"],
+    expect: /rootAdmitted/,
+    patch: (t) =>
+      sub(
+        t,
+        '  return goalKind === "checkbox" ? root.can_complete : evidence;',
+        '  return goalKind === "checkbox" ? root.can_complete : evidence || root.can_complete;',
+      ),
+  },
+  {
+    id: "MU-3088",
+    title:
+      "R18: WEB-10c A17/A18: the rota shows any answer of the same task and identity, an earlier read's included",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /REVIEW3 R4|FAILS after a later one|the enrolment is the same pair/,
+    patch: (t) => sub(t, "      if (owner.current !== mine) return;\n", ""),
+  },
+  {
+    id: "MU-3089",
+    title:
+      "R18: WEB-10c A17: going offline (or any new read) does not move the rota's owner",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /going offline invalidates|REVIEW3 R4-P/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "    owner.current += 1;\n    const mine = owner.current;",
+          "    const mine = owner.current;",
+        ),
+        "    return () => {\n      owner.current += 1;\n    };\n  }, [scope, env.online, again]);",
+        "  }, [scope, env.online, again]);",
+      ),
+  },
+  {
+    id: "MU-3090",
+    title:
+      "R14: WEB-10c A15: a later complete account copy never retires what an earlier day read saw",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect:
+      /REVIEW3 T4 \(ported\)|REVIEW3 T4's rule|every row reads, none is this session/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (\n    input.copy !== null &&\n    input.copyComplete === true &&\n    known(input.copyOrder)\n  )\n    complete.push({\n      order: input.copyOrder,\n      lists: new Set(input.copy.map((s) => s.id)),\n    });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3091",
+    title:
+      "R14: WEB-10c A15: a copy whose rows did not all read still counts as complete (absence from what was lost)",
+    file: "src/features/tasks/timers/copy.ts",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /a row of it does not read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    complete: copy.value.complete && !lost,",
+        "    complete: copy.value.complete,",
+      ),
+  },
+  {
+    id: "MU-3092",
+    title:
+      "DA-T3: WEB-10c A15: a later complete read of the day in another page is not consulted",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /DA-T3/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (input.scope && input.scope.order > 0)\n    complete.push({\n      order: input.scope.order,\n      lists: new Set(input.scope.running),\n    });\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3093",
+    title:
+      "DA-T3: WEB-10c A15: a day read issued before the floor is still trusted for a running session",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /the floor/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!readTrusted || retired(s.id, input.readOrder)) continue;",
+        "    if (retired(s.id, input.readOrder)) continue;",
+      ),
+  },
+  {
+    id: "MU-3094",
+    title:
+      "DA-T3: WEB-10c A15: a read kept under another database incarnation stands",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /a kept read belongs/,
+    patch: (t) =>
+      sub(
+        t,
+        "  (kept.incarnation === null || bound === null || kept.incarnation === bound);",
+        "  true;",
+      ),
+  },
+  {
+    id: "MU-3095",
+    title:
+      "DA-T3: WEB-10c W28: a day's observation is recorded although its growth was not admitted",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /growth the quota ledger refused/,
+    patch: (t) =>
+      sub(t, "      if (admitted) {", "      if (true as boolean) {"),
+  },
+  {
+    id: "MU-3096",
+    title:
+      "DA-T3: WEB-10c W28: an evicted day's observation is dropped without raising the floor",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /at most 100 days/,
+    patch: (t) =>
+      sub(t, "      floor = Math.max(floor, out[id]?.seen ?? 0);\n", ""),
+  },
+  {
+    id: "MU-3097",
+    title:
+      "R16: WEB-10c W27: a new task's discovery entry is written although the quota ledger refused it",
+    file: "src/data/plans/materialise.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /admitted, not capped/,
+    patch: (t) =>
+      sub(t, "        (input.admitted === false ||", "        (false ||"),
+  },
+  {
+    id: "MU-3098",
+    title:
+      "R16: WEB-10c A19: a first read whose record was not admitted is sent anyway",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /the quota ledger refuses the task's record/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (admitted === "refused")\n      return end(stopInMemory(item.taskId, { reason: "storage" }));\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3099",
+    title:
+      "R16: WEB-10c W27: an answer is recorded over another page's admitted read (the attempt is not compared)",
+    file: "src/data/plans/materialise.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /only over its own admitted attempt|two pages without Web Locks/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (a.stop === null) === (b.stop === null) &&\n      (a.attempt ?? null) === (b.attempt ?? null);",
+        "      (a.stop === null) === (b.stop === null);",
+      ),
+  },
+  {
+    id: "MU-3100",
+    title:
+      "R17: WEB-10c A19: a discovery answer is recorded through whichever service is displayed when it lands (revision 2's fault)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /REVIEW3 M3 \(ported\)|of the ended binding writes nothing/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "!disposed && at.service.live && deps.service() === at.service;",
+          "!disposed && deps.service() !== null;",
+        ),
+        "      const out = await commitMaterialiseDiscovery(\n        at.service,\n        captured,\n        { task_id: item.taskId, expected: entry, next },",
+        "      const out = await commitMaterialiseDiscovery(\n        (deps.service() ?? at.service),\n        (deps.service() ?? at.service).capture(deps.epoch),\n        { task_id: item.taskId, expected: entry, next },",
+      ),
+  },
+  {
+    id: "MU-3101",
+    title:
+      "R17: WEB-10c A19: a Try again pressed under an ended binding lifts the replacement's stop",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /Try again pressed under the ended binding/,
+    patch: (t) => sub(t, "      item.retry.service === service &&\n", ""),
   },
 ];
 

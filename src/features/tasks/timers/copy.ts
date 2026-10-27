@@ -15,7 +15,12 @@ export interface TimerCopy {
   readAt: number;
   /** That read's place in the observation order (W28; 0 for a copy written before the order existed). */
   order: number;
+  /**
+   * The copy lists every running session its read could see, and every row of it was read here (review R14): only then does a session
+   * it does not list count as not running at its order. A row that does not parse makes it incomplete (what it held is not known).
+   */
   complete: boolean;
+  /** Every row read, restricted ones included (a restricted row lists its session, though it offers nothing). */
   rows: AccountTimerSession[];
 }
 
@@ -23,14 +28,16 @@ export function useCopiedTimers(): TimerCopy | null {
   const copy = useTimerCopy();
   if (copy.status !== "ready" || copy.value === null) return null;
   const rows: AccountTimerSession[] = [];
+  let lost = false;
   for (const raw of copy.value.running) {
     const row = parseAccountTimer(raw);
     if (row !== null && row.stopped_at === null) rows.push(row);
+    else lost = true;
   }
   return {
     readAt: copy.value.read_at,
     order: copy.value.order,
-    complete: copy.value.complete,
+    complete: copy.value.complete && !lost,
     rows,
   };
 }

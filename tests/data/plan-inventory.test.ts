@@ -305,6 +305,10 @@ describe("F-S7: the writer inventory", () => {
       "data.writeDefaults",
       // WEB-10c: the running-timer copy is server-sized (up to 50 rows with titles), admitted as a cache write by its caller.
       "data.writeTimerCopy",
+      // WEB-10c revision 3: a day's timer observation (W28's scope, DA-T3) grows the singleton, admitted as a cache write by its caller.
+      "data.reconcileTimerCopy",
+      // WEB-10c revision 3: a NEW task's discovery entry grows the singleton (no fixed cap now, R16), admitted by the runner before its read.
+      "data.writeMaterialiseDiscovery",
     ];
     // A fixed few hundred bytes, once per page context and form (the writer claim) or in place in the singleton `sync_state` row (the
     // verified name and the device id): no caller-sized growth, covered by the reserve's slack and the allowance each save carries.

@@ -6,6 +6,7 @@ import type {
 } from "../../../src/features/tasks/model/contract";
 import {
   copyCorrection,
+  keptStands,
   runningOn,
 } from "../../../src/features/tasks/model/timers";
 import { draftRow } from "../../support/data/rows";
@@ -264,5 +265,163 @@ describe("DA-T1: the copy's correction by a read of one day", () => {
     expect(copyCorrection(OCC, [session()], true)(row(COPIED), true)).toBe(
       false,
     );
+  });
+});
+
+/**
+ * Revision 3 (review R14, design assessment DA-T3): the same rule in the other direction and across pages. A COMPLETE account list (the
+ * copy, every row read) or a complete read of the day in any page (its scope) at a LATER order retires a session an earlier read of the
+ * day saw running and that it does not list; a finished session in the day's scope is never running; a day's read below the floor is not
+ * trusted for what it saw running.
+ */
+describe("R14 and DA-T3: later complete observations retire what an earlier read of the day saw", () => {
+  const read = [session()];
+  test("REVIEW3 T4's rule: a later complete copy not listing it retires the earlier read's session; listing it keeps it", () => {
+    const base = { drafts: [], read, complete: true, readOrder: 3 };
+    expect(
+      ids({ ...base, copy: [], copyOrder: 4, copyComplete: true }),
+    ).toEqual([]);
+    expect(
+      ids({ ...base, copy: [copied()], copyOrder: 4, copyComplete: true }),
+    ).toEqual([[COPIED, "read"]]);
+  });
+
+  test("a partial copy, an equal or earlier copy, an unknown order or a copy whose rows did not all read retire nothing", () => {
+    const base = { drafts: [], read, complete: false, readOrder: 3 };
+    // A partial account list (or one that lost a row to the parser) proves no absence.
+    expect(
+      ids({ ...base, copy: [], copyOrder: 4, copyComplete: false }),
+    ).toEqual([[COPIED, "read"]]);
+    // Same order (no tie decides), an earlier copy, either order unknown.
+    for (const [readOrder, copyOrder] of [
+      [4, 4],
+      [5, 4],
+      [null, 4],
+      [3, null],
+    ] as const)
+      expect(
+        ids({
+          ...base,
+          readOrder,
+          copy: [],
+          copyOrder,
+          copyComplete: true,
+        }),
+      ).toEqual([[COPIED, "read"]]);
+  });
+
+  test("a restricted row of the later copy still lists the session (it stays, from the read); it never offers it from the copy", () => {
+    expect(
+      ids({
+        drafts: [],
+        read,
+        complete: true,
+        readOrder: 3,
+        copy: [
+          {
+            access: "restricted",
+            id: COPIED,
+            started_at: T0 / 1000 - 600,
+            stopped_at: null,
+            version: 3,
+          } as AccountTimerSession,
+        ],
+        copyOrder: 4,
+        copyComplete: true,
+      }),
+    ).toEqual([[COPIED, "read"]]);
+  });
+
+  test("this device's unsettled start stays whatever a later complete copy omits; a stop on its way still takes a session out", () => {
+    const start = draftRow({
+      local_id: "70000000-0000-4000-8000-0000000000e1",
+      kind: "start_timer",
+      status: "queued",
+      command: {
+        command: {
+          kind: "start_timer",
+          occurrence_id: OCC,
+          session_id: COPIED,
+          started_at: T0 / 1000 - 60,
+        },
+      } as never,
+    });
+    expect(
+      ids({
+        drafts: [start],
+        read: null,
+        copy: [],
+        copyOrder: 9,
+        copyComplete: true,
+      }),
+    ).toEqual([[COPIED, "draft"]]);
+  });
+
+  test("DA-T3: a later complete read of the day in any page retires it; listing it keeps it; an earlier one decides nothing", () => {
+    const base = { drafts: [], read, complete: true, readOrder: 5, copy: null };
+    expect(
+      ids({ ...base, scope: { order: 6, running: [], ended: [] } }),
+    ).toEqual([]);
+    expect(
+      ids({ ...base, scope: { order: 6, running: [COPIED], ended: [] } }),
+    ).toEqual([[COPIED, "read"]]);
+    expect(
+      ids({ ...base, scope: { order: 5, running: [], ended: [] } }),
+    ).toEqual([[COPIED, "read"]]);
+    // A copied session the day's later scope does not list is retired too (the copy was earlier).
+    expect(
+      ids({
+        drafts: [],
+        read: null,
+        copy: [copied()],
+        copyOrder: 2,
+        scope: { order: 6, running: [], ended: [] },
+      }),
+    ).toEqual([]);
+  });
+
+  test("DA-T3: a session the day's scope lists finished is never running, whatever the orders", () => {
+    expect(
+      ids({
+        drafts: [],
+        read,
+        complete: false,
+        readOrder: 9,
+        copy: [copied()],
+        copyOrder: 9,
+        scope: { order: 0, running: [], ended: [COPIED] },
+      }),
+    ).toEqual([]);
+  });
+
+  test("the floor: a day's read issued before it is not trusted for a running session; at or after it, or unordered, it is", () => {
+    const base = { drafts: [], read, complete: false, copy: null };
+    expect(ids({ ...base, readOrder: 3, floor: 4 })).toEqual([]);
+    expect(ids({ ...base, readOrder: 4, floor: 4 })).toEqual([
+      [COPIED, "read"],
+    ]);
+    expect(ids({ ...base, readOrder: null, floor: 4 })).toEqual([
+      [COPIED, "read"],
+    ]);
+    // The copy is corrected where it is written: the floor is not its rule.
+    expect(
+      ids({
+        drafts: [],
+        read: null,
+        copy: [copied()],
+        copyOrder: 1,
+        floor: 4,
+      }),
+    ).toEqual([[COPIED, "copy"]]);
+  });
+});
+
+describe("DA-T3: a kept read belongs to the database it was ordered in", () => {
+  test("another incarnation bound: it does not stand; the same one, none known or none bound: it does; none kept: nothing", () => {
+    expect(keptStands({ incarnation: "a" }, "b")).toBe(false);
+    expect(keptStands({ incarnation: "a" }, "a")).toBe(true);
+    expect(keptStands({ incarnation: null }, "b")).toBe(true);
+    expect(keptStands({ incarnation: "a" }, null)).toBe(true);
+    expect(keptStands(null, "a")).toBe(false);
   });
 });

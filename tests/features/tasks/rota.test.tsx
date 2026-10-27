@@ -565,3 +565,231 @@ describe("A18 (hook): one reader across an identity change", () => {
     ).toBe(false);
   });
 });
+
+/**
+ * Revision 3 (review R18, family `rota-read-generation-ownership`): one READ owns what the rota shows, not merely its identity and task.
+ * REVIEW3 R4, ported (the hook): an earlier read held, a later reload answered (version 3, consent version 4, declined, nobody), then the
+ * earlier answer (version 2, consent version 3, accepted, two people) released: the later one stays. The control asks no later read: the
+ * held answer is shown. REVIEW3 R4-P, ported (the stable task screen, two reconnects): consent stays declined after the earlier answer.
+ */
+describe("R18: one read owns what the rota shows", () => {
+  test.each([false, true])(
+    "REVIEW3 R4 (ported): a later read was answered first = %s",
+    async (newer) => {
+      let release: (r: TasksResult<RotaState>) => void = () => undefined;
+      let calls = 0;
+      const old = rota({
+        version: 2,
+        consent_version: 3,
+        accepted: true,
+        participants: [ME, OTHER],
+      });
+      const current = rota({
+        version: 3,
+        consent_version: 4,
+        accepted: false,
+        participants: [],
+      });
+      expect(old.ok && parseRotaState(old.value)).not.toBeNull();
+      expect(current.ok && parseRotaState(current.value)).not.toBeNull();
+      const api = fakeApi({
+        readRota: () =>
+          ++calls === 1
+            ? new Promise((r) => {
+                release = r;
+              })
+            : Promise.resolve(current),
+        readEnrolment: async () => enrolled(true) as never,
+      });
+      const env = tasksEnv(api);
+      const wrapper = ({ children }: { children: ReactNode }) => (
+        <TasksEnvProvider value={env}>{children}</TasksEnvProvider>
+      );
+      const { result } = renderHook(() => useRota("t-1"), { wrapper });
+      await act(async () => undefined);
+      expect(calls).toBe(1);
+      if (newer) {
+        await act(async () => result.current.reload());
+        expect(calls).toBe(2);
+        expect(result.current.rota).toEqual({
+          kind: "ready",
+          value: current.ok && current.value,
+        });
+      }
+      await act(async () => release(old));
+      expect(result.current.rota).toEqual({
+        kind: "ready",
+        value: newer ? current.ok && current.value : old.ok && old.value,
+      });
+    },
+  );
+
+  test.each([false, true])(
+    "REVIEW3 R4-P (ported): on a stable task screen, a later reconnect's read was answered first = %s",
+    async (newer) => {
+      const task = await anyone();
+      let release: ((r: TasksResult<RotaState>) => void) | null = null;
+      let gate = false;
+      let currentReads = 0;
+      const old = rota({
+        version: 2,
+        consent_version: 3,
+        accepted: true,
+        participants: [ME, OTHER],
+      });
+      const current = rota({
+        version: 3,
+        consent_version: 4,
+        accepted: false,
+        participants: [],
+      });
+      const api = fakeApi({
+        readRota: () => {
+          if (gate) {
+            gate = false;
+            return new Promise((r) => {
+              release = r;
+            });
+          }
+          currentReads += 1;
+          return Promise.resolve(current);
+        },
+        readEnrolment: async () => enrolled(true) as never,
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(
+        () => !!document.querySelector("[data-rota-consent]:not(:disabled)"),
+      );
+      expect(
+        (screen.getByLabelText(ROTA_COPY.takeTurns) as HTMLInputElement)
+          .checked,
+      ).toBe(false);
+      t.rerender(tasksEnv(api, { online: false }));
+      await t.settle();
+      gate = true;
+      t.rerender(tasksEnv(api, { online: true }));
+      await t.settle();
+      expect(release).not.toBeNull();
+      if (newer) {
+        const before = currentReads;
+        t.rerender(tasksEnv(api, { online: false }));
+        await t.settle();
+        t.rerender(tasksEnv(api, { online: true }));
+        await t.settle();
+        expect(currentReads).toBe(before + 1);
+        expect(
+          (screen.getByLabelText(ROTA_COPY.takeTurns) as HTMLInputElement)
+            .checked,
+        ).toBe(false);
+      }
+      (release as unknown as (r: TasksResult<RotaState>) => void)(old);
+      await t.settle();
+      const input = screen.getByLabelText(
+        ROTA_COPY.takeTurns,
+      ) as HTMLInputElement;
+      expect(input.disabled).toBe(false);
+      expect(input.checked).toBe(!newer);
+    },
+  );
+});
+
+describe("R18: the other schedules of one read's ownership", () => {
+  const old = rota({
+    version: 2,
+    consent_version: 3,
+    accepted: true,
+    participants: [ME, OTHER],
+  });
+  const current = rota({
+    version: 3,
+    consent_version: 4,
+    accepted: false,
+    participants: [],
+  });
+  function hook(api: ReturnType<typeof fakeApi>) {
+    let env = tasksEnv(api);
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <TasksEnvProvider value={env}>{children}</TasksEnvProvider>
+    );
+    const out = renderHook(() => useRota("t-1"), { wrapper });
+    return {
+      ...out,
+      setOnline: (online: boolean) => {
+        env = tasksEnv(api, { online });
+        out.rerender();
+      },
+    };
+  }
+
+  test("going offline invalidates the pair on its way: its later answer shows nothing; online again, the new read is shown", async () => {
+    let release: (r: TasksResult<RotaState>) => void = () => undefined;
+    let calls = 0;
+    const api = fakeApi({
+      readRota: () =>
+        ++calls === 1
+          ? new Promise((r) => {
+              release = r;
+            })
+          : Promise.resolve(current),
+      readEnrolment: async () => enrolled(true) as never,
+    });
+    const { result, setOnline } = hook(api);
+    await act(async () => undefined);
+    await act(async () => setOnline(false));
+    expect(result.current.rota).toEqual({ kind: "offline" });
+    await act(async () => release(old));
+    expect(result.current.rota).toEqual({ kind: "offline" });
+    await act(async () => setOnline(true));
+    expect(calls).toBe(2);
+    expect(result.current.rota).toEqual({
+      kind: "ready",
+      value: current.ok && current.value,
+    });
+  });
+
+  test.each([false, true])(
+    "an earlier read that FAILS after a later one answered changes nothing; control (no later read): its failure is shown = %s",
+    async (newer) => {
+      let release: (r: TasksResult<RotaState>) => void = () => undefined;
+      let calls = 0;
+      const api = fakeApi({
+        readRota: () =>
+          ++calls === 1
+            ? new Promise((r) => {
+                release = r;
+              })
+            : Promise.resolve(current),
+        readEnrolment: async () => enrolled(true) as never,
+      });
+      const { result } = hook(api);
+      await act(async () => undefined);
+      if (newer) await act(async () => result.current.reload());
+      await act(async () => release({ ok: false, kind: "uncertain" } as never));
+      expect(result.current.rota).toEqual(
+        newer
+          ? { kind: "ready", value: current.ok && current.value }
+          : { kind: "error" },
+      );
+    },
+  );
+
+  test("the enrolment is the same pair's: an earlier enrolment answer held past a later pair never replaces it", async () => {
+    let release: (r: unknown) => void = () => undefined;
+    let enrolments = 0;
+    const api = fakeApi({
+      readRota: async () => current,
+      readEnrolment: () =>
+        ++enrolments === 1
+          ? (new Promise((r) => {
+              release = r;
+            }) as never)
+          : (Promise.resolve(enrolled(false)) as never),
+    });
+    const { result } = hook(api);
+    await act(async () => undefined);
+    await act(async () => result.current.reload());
+    expect(result.current.enrolled).toBe(false);
+    await act(async () => release(enrolled(true)));
+    expect(result.current.enrolled).toBe(false);
+  });
+});

@@ -115,6 +115,7 @@ async function setup(
       locks?: LockManager | null;
       service?: () => AccountService | null;
       sleep?: () => Promise<void>;
+      quota?: () => import("../../../src/data").DataEnv["quota"] | null;
     } = {},
   ) =>
     createCatchUpRunner({
@@ -135,6 +136,7 @@ async function setup(
         await over.sleep?.();
       },
       locks: over.locks === undefined ? null : over.locks,
+      ...(over.quota ? { quota: over.quota } : {}),
     });
   const idle = async (runner: CatchUpRunner) => {
     for (let i = 0; i < 200; i += 1) {
@@ -361,7 +363,9 @@ describe("A19: uncertain answers resend the SAME key, paced and bounded", () => 
     const runner = w.make();
     runner.ensure(TASK, "daily");
     await w.idle(runner);
+    // Revision 3 (R16): the stop also names the admitted read that met it (its attempt); every other field as before.
     expect(w.discovery()).toEqual({
+      attempt: expect.any(String),
       retry: 0,
       failures: 3,
       stop: { reason: "unreachable" },
@@ -774,7 +778,9 @@ describe("R13: a stopped discovery stays stopped until Try again", () => {
     await w.idle(second);
     // One more read reached the bound (2 + 1); the held answer of the ended page wrote nothing.
     expect(w.reads()).toBe(4);
+    // Revision 3 (R16): the stop also names the admitted read that met it (its attempt); every other field as before.
     expect(w.discovery()).toEqual({
+      attempt: expect.any(String),
       retry: 0,
       failures: 3,
       stop: { reason: "unreachable" },
@@ -816,7 +822,9 @@ describe("R13: a stopped discovery stays stopped until Try again", () => {
     await w.idle(b);
     // One budget (three more reads), not two; the stop stands again under the ONE new retry.
     expect(w.reads()).toBe(6);
+    // Revision 3 (R16): the stop also names the admitted read that met it (its attempt); every other field as before.
     expect(w.discovery()).toEqual({
+      attempt: expect.any(String),
       retry: 1,
       failures: 3,
       stop: { reason: "unreachable" },
@@ -834,25 +842,38 @@ describe("R13: a stopped discovery stays stopped until Try again", () => {
       },
     });
     let failing = true;
-    const real = () => w.t.env.service() as AccountService;
-    const service = () =>
-      new Proxy(real(), {
-        get(target, key, receiver) {
-          if (key !== "commit") return Reflect.get(target, key, receiver);
-          return (plan: { name: string }, input: unknown) =>
-            failing && plan.name === "data.writeMaterialiseDiscovery"
-              ? Promise.resolve({ kind: "failed" })
-              : target.commit(plan as never, input as never);
-        },
-      }) as AccountService;
-    const runner = w.make({ service });
+    // Adaptations (revision 3): ONE double per binding (design assessment DA-H2: a new handle on every lookup is another binding to the
+    // runner now, R17), and only an ANSWER's record fails (a count, a stop or a success's removal): a read's admission (the same count, a
+    // new attempt; R16) is written, so automatic work refused here is refused by the memory stop, not by a failing store.
+    const real = w.t.env.service() as AccountService;
+    type Write = {
+      expected?: { failures: number } | null;
+      next?: { failures: number; stop: unknown } | null;
+    };
+    const admission = (input: Write) =>
+      input.next != null &&
+      input.next.stop === null &&
+      input.next.failures === (input.expected?.failures ?? 0);
+    const failingService = new Proxy(real, {
+      get(target, key, receiver) {
+        if (key !== "commit") return Reflect.get(target, key, receiver);
+        return (plan: { name: string }, input: Write) =>
+          failing &&
+          plan.name === "data.writeMaterialiseDiscovery" &&
+          !admission(input)
+            ? Promise.resolve({ kind: "failed" })
+            : target.commit(plan as never, input as never);
+      },
+    }) as AccountService;
+    const runner = w.make({ service: () => failingService });
     runner.ensure(TASK, "daily");
     await w.idle(runner);
     expect(w.reads()).toBe(1);
     expect(runner.get().unrecorded.get(TASK)).toEqual({
       reason: "unreachable",
     });
-    expect(w.discovery()).toBeUndefined();
+    // The admitted read's entry, its answer unrecorded: no stop, no count.
+    expect(w.discovery()).toMatchObject({ failures: 0, stop: null });
     runner.ensure(TASK, "daily");
     runner.kick();
     await w.idle(runner);
@@ -872,3 +893,309 @@ function createCatchUpRunnerWithSleep(
 ) {
   return w.make({ sleep: onSleep });
 }
+
+const discoveries = (count: number) =>
+  Object.fromEntries(
+    Array.from({ length: count }, (_, i) => [
+      `bbbbbbbb-0000-4000-8000-${String(i).padStart(12, "0")}`,
+      { retry: 0, failures: 3, stop: { reason: "unreachable" } },
+    ]),
+  );
+
+/**
+ * Revision 3 (review R16, family `materialise-discovery-retry-durability`): REVIEW3 M2, ported. However many other tasks' discovery stops
+ * the database already holds (99, 100 or 101), a definite refusal of this task's first read is a DURABLE stop: a new runner on the same
+ * database (a reload) reads nothing more automatically, and nothing is sent. The others' stops are kept as they were.
+ */
+describe("R16: a discovery stop survives a reload at any number of other stops", () => {
+  test.each([99, 100, 101])(
+    "REVIEW3 M2 (ported): %s other stops; a refusal, then a reload: one read in all",
+    async (count) => {
+      const w = await setup({
+        script: {
+          positions: [
+            { ok: false, kind: "forbidden", requestId: "refused-101" },
+            { ok: false, kind: "forbidden", requestId: "refused-101" },
+          ] as never,
+        },
+      });
+      const sync = w.t.world.idb.peek(
+        DB,
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      const others = discoveries(count);
+      w.t.world.idb.seed(DB, "sync_state", [
+        { ...sync, materialise_discovery: others } as never,
+      ]);
+      const first = w.make();
+      first.ensure(TASK, "daily");
+      await w.idle(first);
+      expect(w.reads()).toBe(1);
+      expect(w.sent).toHaveLength(0);
+      expect(
+        w.discovery()?.stop ?? first.get().unrecorded.get(TASK),
+      ).toBeDefined();
+      first.dispose();
+      const second = w.make();
+      second.ensure(TASK, "streak");
+      await w.idle(second);
+      expect(w.reads()).toBe(1);
+      expect(w.sent).toHaveLength(0);
+      expect(w.discovery()?.stop).toMatchObject({
+        reason: "rejected",
+        request_id: "refused-101",
+      });
+      const kept = (
+        w.t.world.idb.peek(DB, "sync_state", "singleton") as SyncStateRow
+      ).materialise_discovery;
+      for (const [task, entry] of Object.entries(others))
+        expect(kept?.[task]).toMatchObject(entry);
+      second.dispose();
+    },
+  );
+});
+
+/**
+ * Revision 3 (review R17, family `materialise-discovery-binding-ownership`): REVIEW3 M3, ported. The first read is answered after the
+ * service it was asked under has closed and a fresh service (another database of the same account) has replaced it: the answer belongs
+ * to the ended binding and writes nothing into the replacement. The control keeps one service: its refusal is recorded as usual.
+ */
+describe("R17: a discovery answer belongs to the service that asked it", () => {
+  test.each([false, true])(
+    "REVIEW3 M3 (ported): the service is replaced before the refusal arrives = %s",
+    async (replace) => {
+      let release: (r: TasksResult<TaskDetail>) => void = () => undefined;
+      const w = await setup({
+        script: {
+          positions: [
+            () =>
+              new Promise<TasksResult<TaskDetail>>((r) => {
+                release = r;
+              }),
+          ],
+        },
+      });
+      const fresh = await defaultsWorld({ online: false, noReader: true });
+      await fresh.settle();
+      const old = w.t.env.service() as AccountService;
+      let service = old;
+      const runner = w.make({ service: () => service });
+      runner.ensure(TASK, "daily");
+      for (let i = 0; i < 100 && w.reads() === 0; i += 1) await w.t.settle();
+      expect(w.reads()).toBe(1);
+      if (replace) {
+        old.dispose("closed");
+        service = fresh.env.service() as AccountService;
+      }
+      release({
+        ok: false,
+        kind: "forbidden",
+        requestId: "old-binding",
+      } as never);
+      await w.idle(runner);
+      await fresh.settle();
+      const replacement = fresh.world.idb.peek(
+        DB,
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      if (replace)
+        expect(replacement.materialise_discovery?.[TASK]).toBeUndefined();
+      else expect(w.discovery()?.stop?.reason).toBe("rejected");
+      runner.dispose();
+    },
+  );
+});
+
+const refusing = {
+  reserve: async () =>
+    ({
+      verdict: "refuse",
+      live: () => false,
+      settle: () => undefined,
+    }) as never,
+} as never;
+const admitting = {
+  reserve: async () =>
+    ({
+      verdict: "ok",
+      live: () => true,
+      settle: () => undefined,
+    }) as never,
+} as never;
+
+describe("R16: a first read is admitted before it is sent", () => {
+  test("the quota ledger refuses the task's record: nothing is read, a storage stop is shown; a reload reads nothing until it is admitted", async () => {
+    const w = await setup();
+    const first = w.make({ quota: () => refusing });
+    first.ensure(TASK, "daily");
+    await w.idle(first);
+    expect(w.reads()).toBe(0);
+    expect(first.get().unrecorded.get(TASK)).toEqual({ reason: "storage" });
+    first.ensure(TASK, "streak");
+    first.kick();
+    await w.idle(first);
+    expect(w.reads()).toBe(0);
+    first.dispose();
+    const second = w.make({ quota: () => refusing });
+    second.ensure(TASK, "daily");
+    await w.idle(second);
+    expect(w.reads()).toBe(0);
+    expect(w.discovery()).toBeUndefined();
+    second.dispose();
+    // Control: admitted, the read is made and recorded as usual (here: found, caught up, the record gone).
+    const third = w.make({ quota: () => admitting });
+    third.ensure(TASK, "daily");
+    await w.idle(third);
+    expect(w.reads()).toBeGreaterThan(0);
+    expect(w.discovery()).toBeUndefined();
+  });
+
+  test("two pages without Web Locks: the later claim wins; the earlier read's refusal, released afterwards, records nothing and spends no budget", async () => {
+    let release: (r: TasksResult<TaskDetail>) => void = () => undefined;
+    const w = await setup({
+      script: {
+        positions: [
+          () =>
+            new Promise<TasksResult<TaskDetail>>((r) => {
+              release = r;
+            }),
+          UNCERTAIN,
+        ],
+      },
+    });
+    const a = w.make();
+    a.ensure(TASK, "daily");
+    for (let i = 0; i < 100 && w.reads() === 0; i += 1) await w.t.settle();
+    const claimed = w.discovery()?.attempt;
+    expect(claimed).toEqual(expect.any(String));
+    const b = w.make({ sleep: () => new Promise(() => undefined) });
+    b.ensure(TASK, "daily");
+    for (let i = 0; i < 100 && w.reads() < 2; i += 1) await w.t.settle();
+    expect(w.reads()).toBe(2);
+    await w.t.settle();
+    // b's uncertain answer is recorded over b's claim.
+    expect(w.discovery()).toMatchObject({ failures: 1, stop: null });
+    release({ ok: false, kind: "forbidden", requestId: "late-a" } as never);
+    await w.idle(a);
+    expect(w.discovery()).toMatchObject({ failures: 1, stop: null });
+    expect(w.discovery()?.attempt).not.toBe(claimed);
+    expect(a.get().unrecorded.size).toBe(0);
+    a.dispose();
+    b.dispose();
+  });
+});
+
+describe("R17: work belongs to the binding it began with", () => {
+  async function replaced(answer: TasksResult<TaskDetail>, gap: boolean) {
+    let release: (r: TasksResult<TaskDetail>) => void = () => undefined;
+    const w = await setup({
+      script: {
+        positions: [
+          () =>
+            new Promise<TasksResult<TaskDetail>>((r) => {
+              release = r;
+            }),
+        ],
+      },
+    });
+    const fresh = await defaultsWorld({ online: false, noReader: true });
+    await fresh.settle();
+    const old = w.t.env.service() as AccountService;
+    let service: AccountService | null = old;
+    const runner = w.make({ service: () => service });
+    runner.ensure(TASK, "daily");
+    for (let i = 0; i < 100 && w.reads() === 0; i += 1) await w.t.settle();
+    old.dispose("closed");
+    if (gap) {
+      // An unbound moment (no service displayed) before the replacement binds.
+      service = null;
+      release(answer);
+      await w.idle(runner);
+      service = fresh.env.service() as AccountService;
+      runner.kick();
+    } else {
+      service = fresh.env.service() as AccountService;
+      release(answer);
+    }
+    await w.idle(runner);
+    await fresh.settle();
+    return { w, fresh, runner };
+  }
+
+  test.each([
+    [false, "a success"],
+    [true, "a success"],
+    [false, "an uncertain answer"],
+    [true, "an uncertain answer"],
+  ] as const)(
+    "unbound moment first = %s; %s of the ended binding writes nothing in the replacement: its own read decides there",
+    async (gap, which) => {
+      const { w, fresh, runner } = await replaced(
+        which === "a success" ? detail("2026-09-01", true) : UNCERTAIN,
+        gap,
+      );
+      // Asked again under the replacement: its own read (the script's default: up to date) decides; nothing of the old answer remains.
+      expect(w.reads()).toBe(2);
+      expect(w.sent).toEqual([]);
+      const sync = fresh.world.idb.peek(
+        DB,
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      expect(sync.materialise_discovery?.[TASK]).toBeUndefined();
+      expect(
+        fresh.world.idb.peek(DB, "materialise_sequences", [TASK, TODAY]),
+      ).toBeUndefined();
+      runner.dispose();
+    },
+  );
+
+  test("a Try again pressed under the ended binding lifts nothing in the replacement: its stop stands until pressed there", async () => {
+    const w = await setup();
+    const fresh = await defaultsWorld({ online: false, noReader: true });
+    await fresh.settle();
+    const stopped = { retry: 0, failures: 3, stop: { reason: "unreachable" } };
+    for (const world of [w.t, fresh]) {
+      const sync = world.world.idb.peek(
+        DB,
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      world.world.idb.seed(DB, "sync_state", [
+        { ...sync, materialise_discovery: { [TASK]: stopped } } as never,
+      ]);
+    }
+    const old = w.t.env.service() as AccountService;
+    let service: AccountService = old;
+    const held: Array<() => void> = [];
+    const runner = w.make({
+      service: () => service,
+      locks: {
+        request: (_name: string, _o: unknown, fn: () => Promise<void>) =>
+          new Promise<void>((resolve, reject) => {
+            held.push(() => {
+              fn().then(resolve, reject);
+            });
+          }),
+      } as unknown as LockManager,
+    });
+    runner.tryAgain(TASK);
+    for (let i = 0; i < 100 && held.length === 0; i += 1) await w.t.settle();
+    expect(held).toHaveLength(1);
+    old.dispose("closed");
+    service = fresh.env.service() as AccountService;
+    for (const go of held.splice(0)) go();
+    await w.idle(runner);
+    await fresh.settle();
+    expect(w.reads()).toBe(0);
+    const sync = fresh.world.idb.peek(
+      DB,
+      "sync_state",
+      "singleton",
+    ) as SyncStateRow;
+    expect(sync.materialise_discovery?.[TASK]).toMatchObject(stopped);
+    runner.dispose();
+  });
+});

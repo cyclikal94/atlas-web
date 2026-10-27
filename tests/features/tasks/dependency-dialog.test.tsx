@@ -1050,3 +1050,275 @@ describe("R12: the completion's mode is admitted on the current preview", () => 
     expect(t.drafts()).toEqual([]);
   });
 });
+
+/**
+ * Revision 3 (review R15, family `dependency-conflict-mode-admission`): every completion mode needs the ROOT's own admission (the released
+ * backend completes the root only with its evidence or its `can_complete`). REVIEW3 D3, ported: a numeric root (20 pages) with no evidence
+ * entered, opened from "See what needs doing first" with a preview whose root cannot be completed: neither "Mark done" (everything done,
+ * `require_satisfied`) nor "Start anyway" (an advisory prerequisite open, `advisory_override`) queues anything. The controls: a checkbox
+ * root I can complete queues exactly one completion in each mode.
+ */
+describe("R15: the root's admission in every mode", () => {
+  test.each(["require_satisfied", "advisory_override"] as const)(
+    "REVIEW3 D3 (ported): a numeric root without evidence cannot queue %s",
+    async (mode) => {
+      const root = await seededTask({
+        title: "Read a book",
+        definition: {
+          goal: {
+            kind: "numeric",
+            minimum: "20",
+            maximum: null,
+            unit: "pages",
+          },
+        },
+      });
+      const { t } = await mount({
+        root,
+        preview: (r, p) =>
+          answer(r, [], {
+            items: [
+              item(p, { complete: mode === "require_satisfied" }),
+              item(r, { can_complete: false }),
+            ],
+          }),
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.see }),
+      );
+      await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+      const modal = dialog()?.closest("[role=dialog]") as HTMLElement;
+      if (mode === "advisory_override") {
+        const radio = within(modal).queryByRole("radio", {
+          name: DEPENDENCY_COPY.startAnyway,
+        });
+        if (radio && !radio.hasAttribute("disabled")) fireEvent.click(radio);
+      }
+      const button = within(modal).queryByRole("button", {
+        name:
+          mode === "require_satisfied"
+            ? DEPENDENCY_COPY.markDone
+            : DEPENDENCY_COPY.startAnyway,
+      });
+      if (button && !button.hasAttribute("disabled")) fireEvent.click(button);
+      await t.settle();
+      expect(t.bodies()).toEqual([]);
+    },
+  );
+
+  test.each(["require_satisfied", "advisory_override"] as const)(
+    "REVIEW3 D3 control (ported): a checkbox root I can complete queues %s once",
+    async (mode) => {
+      const root = await seededTask({ title: "Checkbox root" });
+      const { t } = await mount({
+        root,
+        preview: (r, p) =>
+          answer(r, [], {
+            items: [
+              item(p, { complete: mode === "require_satisfied" }),
+              item(r, { can_complete: true }),
+            ],
+          }),
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.see }),
+      );
+      await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+      const modal = dialog()?.closest("[role=dialog]") as HTMLElement;
+      if (mode === "advisory_override")
+        fireEvent.click(
+          within(modal).getByRole("radio", {
+            name: DEPENDENCY_COPY.startAnyway,
+          }),
+        );
+      fireEvent.click(
+        within(modal).getByRole("button", {
+          name:
+            mode === "require_satisfied"
+              ? DEPENDENCY_COPY.markDone
+              : DEPENDENCY_COPY.startAnyway,
+        }),
+      );
+      await t.settle();
+      expect(t.bodies()).toHaveLength(1);
+      expect(t.bodies()[0]?.command.command).toMatchObject({
+        kind: "complete_dependencies",
+        mode,
+      });
+    },
+  );
+});
+
+describe("R15: the root's admission at every entry point", () => {
+  const numeric = () =>
+    seededTask({
+      title: "Read a book",
+      definition: {
+        goal: { kind: "numeric", minimum: "20", maximum: null, unit: "pages" },
+      },
+    });
+  const pane = () => within(dialog()?.closest("[role=dialog]") as HTMLElement);
+  const refused = (
+    root: SeededTask,
+    local: string,
+    mode: string,
+    evidence: object | null,
+  ) =>
+    draftRow({
+      local_id: local,
+      created_seq: 1,
+      kind: "complete_dependencies",
+      endpoint: "/task-commands",
+      account_id: ME,
+      status: "version_conflict",
+      target_resource_ids: [root.occurrenceId],
+      index_targets: [root.occurrenceId],
+      command: {
+        command: {
+          kind: "complete_dependencies",
+          occurrence_id: root.occurrenceId,
+          preview_token: "e".repeat(64),
+          mode,
+          happened_at: 1,
+          ...(evidence === null ? {} : { root_evidence: evidence }),
+        },
+      } as never,
+    });
+
+  test("everything done, a numeric root with nothing entered: Mark done is withheld with its reason, and nothing is queued", async () => {
+    const root = await numeric();
+    const { t } = await mount({
+      root,
+      preview: (r, p) =>
+        answer(r, [], {
+          items: [
+            item(p, { complete: true }),
+            item(r, { can_complete: false }),
+          ],
+        }),
+    });
+    fireEvent.click(screen.getByRole("button", { name: DEPENDENCY_COPY.see }));
+    await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+    const done = pane().getByRole("button", { name: DEPENDENCY_COPY.markDone });
+    expect(done).toBeDisabled();
+    expect(
+      document.querySelector('[data-mode-reason="require_satisfied"]'),
+    ).toHaveTextContent(DEPENDENCY_COPY.rootWhy);
+    fireEvent.click(done);
+    await t.settle();
+    expect(t.drafts()).toEqual([]);
+  });
+
+  test.each([
+    ["require_satisfied", null],
+    ["advisory_override", null],
+    ["require_satisfied", { kind: "quantity", amount: "25" }],
+    ["advisory_override", { kind: "quantity", amount: "25" }],
+  ] as const)(
+    "a refused %s of a numeric root reviewed again, its evidence %j: only with the evidence is it sent again (once, with it)",
+    async (mode, evidence) => {
+      const root = await numeric();
+      const local = "70000000-0000-4000-8000-000000000a15";
+      const { t } = await mount({
+        root,
+        preview: (r, p) =>
+          answer(r, [], {
+            items: [
+              item(p, { complete: mode === "require_satisfied" }),
+              item(r, { can_complete: false }),
+            ],
+          }),
+        drafts: [refused(root, local, mode, evidence)],
+      });
+      await t.until(
+        () =>
+          screen.queryByRole("button", { name: DEPENDENCY_COPY.review }) !==
+          null,
+      );
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.review }),
+      );
+      await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+      const name =
+        mode === "require_satisfied"
+          ? DEPENDENCY_COPY.markDone
+          : DEPENDENCY_COPY.startAnyway;
+      const button = pane().queryByRole("button", { name });
+      if (evidence === null) {
+        if (button !== null) {
+          expect(button).toBeDisabled();
+          fireEvent.click(button);
+        }
+        await t.settle();
+        expect(t.drafts().map((d) => [d.local_id, d.status])).toEqual([
+          [local, "version_conflict"],
+        ]);
+        return;
+      }
+      expect(button).toBeEnabled();
+      fireEvent.click(button as HTMLElement);
+      await t.until(() => t.drafts().some((d) => d.local_id !== local));
+      const queued = t.drafts().filter((d) => d.status === "queued");
+      expect(queued.map((d) => d.kind)).toEqual(["complete_dependencies"]);
+      const body = t.bodies().find((b) => b.local_id === queued[0]?.local_id);
+      expect(body?.command.command).toMatchObject({
+        mode,
+        root_evidence: evidence,
+      });
+    },
+  );
+
+  test.each([true, false])(
+    "a tick-box root that can no longer be completed by the time the send has prepared (%s) queues nothing; control: it still can, sent once",
+    async (changes) => {
+      let rootCan = true;
+      const { t } = await mount({
+        preview: (r, pre) =>
+          answer(r, [], {
+            items: [item(pre), item(r, { can_complete: rootCan })],
+          }),
+      });
+      fireEvent.click(
+        screen.getByRole("button", { name: DEPENDENCY_COPY.see }),
+      );
+      await t.until(() => dialog()?.dataset.dependencyDialog === "ready");
+      fireEvent.click(
+        pane().getByRole("radio", { name: DEPENDENCY_COPY.startAnyway }),
+      );
+      const held: Array<() => void> = [];
+      const real = crypto.subtle.digest.bind(crypto.subtle);
+      const spy = vi.spyOn(crypto.subtle, "digest").mockImplementation(
+        (...args: Parameters<SubtleCrypto["digest"]>) =>
+          new Promise((resolve, reject) => {
+            held.push(() => {
+              real(...args).then(resolve, reject);
+            });
+          }),
+      );
+      fireEvent.click(
+        pane().getByRole("button", { name: DEPENDENCY_COPY.startAnyway }),
+      );
+      await t.until(() => held.length > 0);
+      spy.mockRestore();
+      if (changes) {
+        rootCan = false;
+        t.rerender(tasksEnv(t.api, { online: false }));
+        await t.settle();
+        t.rerender(tasksEnv(t.api, { online: true }));
+        await t.settle();
+      }
+      for (const release of held) release();
+      await t.settle();
+      await t.settle();
+      if (changes) {
+        expect(t.drafts()).toEqual([]);
+        expect(
+          document.querySelector("[data-dependency-message]"),
+        ).toHaveTextContent(DEPENDENCY_COPY.changedWhileSaving);
+      } else
+        expect(t.bodies().map((b) => b.command.command.mode)).toEqual([
+          "advisory_override",
+        ]);
+    },
+  );
+});

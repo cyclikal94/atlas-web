@@ -1,6 +1,12 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
+import {
+  type AccountService,
+  commitTimerCopy,
+  commitTimerCorrection,
+  issueTimerOrderNow,
+} from "../../../src/data";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { SyncStateRow } from "../../../src/data/model/types";
 import type { TasksResult } from "../../../src/features/tasks/api";
@@ -11,7 +17,11 @@ import {
   type TimerPage,
   type TimerSession,
 } from "../../../src/features/tasks/model/contract";
-import { SEVEN_DAYS } from "../../../src/features/tasks/model/timers";
+import {
+  copyCorrection,
+  dayObservation,
+  SEVEN_DAYS,
+} from "../../../src/features/tasks/model/timers";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import {
@@ -748,4 +758,192 @@ describe("DA-T1: a complete day read corrects the kept copy itself", () => {
       document.querySelector(`[data-account-timer="${sid(700)}"]`),
     ).not.toBeNull();
   });
+});
+
+/**
+ * Revision 3 (review R14, family `timer-copy-authoritative-absence`): REVIEW3 T4, ported. The detail's read saw a session running; a LATER
+ * complete read of the account's running timers (Your timers) no longer lists it; offline, back on the detail, the earlier read kept in
+ * page memory must not bring it back. The control's later account read still lists it: it stays running.
+ */
+describe("R14: a later complete account read retires what an earlier day read saw", () => {
+  test.each([false, true])(
+    "REVIEW3 T4 (ported): the later account read still lists the session = %s",
+    async (stillRunning) => {
+      const task = await seconds();
+      const session = {
+        id: sid(9801),
+        occurrence_id: task.occurrenceId,
+        started_at: nowSeconds() - 600,
+        stopped_at: null,
+        version: 3,
+      };
+      const page = { items: [session], next_after: null };
+      expect(parseTimerPage(page, task.occurrenceId, null, 50)).not.toBeNull();
+      const accountRow = copied(task, session.started_at, session.id);
+      const api = fakeApi({
+        readTimers: async () => ({ ok: true, value: page }),
+        readAccountTimers: async (q) => ({
+          ok: true,
+          value: {
+            items:
+              q.state === "running" && stillRunning
+                ? [accountRow as never]
+                : [],
+            next_after: null,
+          },
+        }),
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      const dayOrder = syncOf(t).timer_order as number;
+      await t.router.navigate({ to: "/tasks/timers" });
+      await t.until(
+        () => document.querySelector("[data-timers-running=ready]") !== null,
+      );
+      await t.until(
+        () =>
+          ((syncOf(t).timer_copy as { order?: number } | undefined)?.order ??
+            0) > dayOrder,
+      );
+      const copy = syncOf(t).timer_copy as {
+        complete: boolean;
+        running: unknown[];
+      };
+      expect(copy.complete).toBe(true);
+      expect(copy.running).toHaveLength(stillRunning ? 1 : 0);
+      t.rerender(tasksEnv(api, { online: false }));
+      await t.settle();
+      await t.router.navigate({
+        to: "/tasks/$taskId",
+        params: { taskId: task.taskId },
+        search: { occurrence: task.occurrenceId },
+      });
+      await t.until(() => block() !== null);
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(
+        stillRunning ? "running" : "idle",
+      );
+      expect(
+        within(block() as HTMLElement).queryByRole("button", {
+          name: TIMER_COPY.stop,
+        }) !== null,
+      ).toBe(stillRunning);
+    },
+    20_000,
+  );
+});
+
+/**
+ * Revision 3 (design assessment DA-T3): a day's read in ANOTHER tab corrects the kept copy (W28) after this tab's read saw the session
+ * running. The correction's scope and order must reach this tab's kept read too: offline (and after a remount of the protected tree) the
+ * session is not brought back, with or without a copy. A correction of ANOTHER day decides nothing about this one (the control).
+ * "Another tab" is this database's own production commit of a day read's correction, made with that read's own place in the order.
+ */
+async function correctAsAnotherTab(
+  t: Awaited<ReturnType<typeof mountTasks>>,
+  occurrenceId: string,
+  sessions: TimerSession[],
+  complete: boolean,
+) {
+  const service = t.data.service() as AccountService;
+  const captured = service.capture(1);
+  const order = await issueTimerOrderNow(service, captured);
+  expect(order).not.toBeNull();
+  // As a day's read in that tab commits it (`useDaySessions`): the copy's correction and the day's observation.
+  const out = await commitTimerCorrection(t.data, service, captured, {
+    order: order as number,
+    drop: copyCorrection(occurrenceId, sessions, complete),
+    scope: dayObservation(occurrenceId, sessions, complete),
+  });
+  expect(out.kind).toBe("applied");
+  await t.settle();
+}
+
+describe("DA-T3: a day read in another tab retires what this tab's kept read saw", () => {
+  test.each([
+    ["with a copy", "the same day", "idle", true],
+    ["without a copy", "the same day", "idle", false],
+    ["with a copy", "another day (control)", "running", true],
+    ["without a copy", "another day (control)", "running", false],
+  ] as const)(
+    "%s, a complete empty read of %s: %s offline, also after a remount",
+    async (_label, which, expected, withCopy) => {
+      const task = await seconds();
+      const session = sessionOf(task, 9802);
+      const api = fakeApi({
+        readTimers: async () => ({
+          ok: true,
+          value: { items: [session], next_after: null },
+        }),
+      });
+      const t = await mountTasks({
+        path: path(task),
+        rows: task.rows,
+        api,
+        ...(withCopy
+          ? {
+              timerCopy: copyOf([copied(task, session.started_at, session.id)]),
+            }
+          : {}),
+      });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      await t.until(() => ((syncOf(t).timer_fence as number) ?? 0) > 0);
+      await correctAsAnotherTab(
+        t,
+        which === "the same day"
+          ? task.occurrenceId
+          : "aaaaaaaa-0000-4000-8000-0000000000fe",
+        [],
+        true,
+      );
+      t.rerender(tasksEnv(api, { online: false }));
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(expected);
+      t.remount();
+      await t.until(() => block() !== null);
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(expected);
+    },
+    20_000,
+  );
+});
+
+describe("R14: absence is evidence only from what was read whole", () => {
+  test.each([
+    ["a row of it does not read", "running", [{ id: "damaged" }]],
+    ["every row reads, none is this session", "idle", []],
+  ] as const)(
+    "a later complete account copy where %s: %s offline",
+    async (_label, expected, rows) => {
+      const task = await seconds();
+      const session = sessionOf(task, 9803);
+      const api = fakeApi({
+        readTimers: async () => ({
+          ok: true,
+          value: { items: [session], next_after: null },
+        }),
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      await t.until(() => ((syncOf(t).timer_fence as number) ?? 0) > 0);
+      // A later account read's copy, as Your timers commits it (another tab), complete.
+      const service = t.data.service() as AccountService;
+      const captured = service.capture(1);
+      const order = (await issueTimerOrderNow(service, captured)) as number;
+      expect(
+        await commitTimerCopy(t.data, service, captured, {
+          format: 2,
+          order,
+          read_at: Date.now(),
+          complete: true,
+          running: rows as never,
+        }),
+      ).toEqual({ kind: "applied", value: { written: true } });
+      await t.settle();
+      t.rerender(tasksEnv(api, { online: false }));
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(expected);
+    },
+    20_000,
+  );
 });

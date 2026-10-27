@@ -68,6 +68,8 @@ export function runnerOf(env: TasksEnv, data: DataEnv): CatchUpRunner {
     accountId: env.accountId,
     epoch: Number.isSafeInteger(epoch) ? epoch : 0,
     service: () => mine()?.data.service() ?? null,
+    // A new task's discovery record is admitted through the origin's quota ledger before its first read (revision 3, R16).
+    quota: () => mine()?.data.quota ?? null,
     online: () => mine()?.online ?? false,
     writable: () => mine()?.writable ?? false,
     now: () => mine()?.env.now() ?? Date.now(),

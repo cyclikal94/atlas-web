@@ -6,6 +6,7 @@ import {
   useDataEnv,
   useDraftWithCommand,
   useSharingDefaults,
+  useTimerScope,
 } from "../../../data";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
@@ -17,8 +18,10 @@ import type { TimerSession } from "../model/contract";
 import { progressOf } from "../model/dependencies";
 import {
   copyCorrection,
+  dayObservation,
   elapsed,
   isTimerGoal,
+  keptStands,
   type RunningSession,
   runningOn,
   SEVEN_DAYS,
@@ -108,6 +111,8 @@ export const MARK: Readonly<Record<string, PendingMark>> = {
  * session this device saw running stays shown, marked with when it was read ("Last checked"), until the connection is back. A read that
  * had not reached the end of the day's list is kept as well, marked incomplete: what it lists is known (review R11), what it omits is
  * not. `issued` orders two readers of one day on this page (a remounted block): an earlier one never replaces a later one's entry.
+ * A kept read belongs to the database it was ordered in (revision 3, DA-T3): once another incarnation is bound, it is not shown (its
+ * order means nothing there, and what retired its sessions there cannot be seen).
  */
 interface Kept {
   sessions: TimerSession[];
@@ -117,6 +122,8 @@ interface Kept {
   order: number | null;
   complete: boolean;
   issued: number;
+  /** The database incarnation the read was issued under, or null (none was bound). */
+  incarnation: string | null;
 }
 const lastRead = new Map<string, Kept>();
 let lastReadFor = "";
@@ -149,6 +156,7 @@ interface Chain {
   askedAt: number;
   issued: number;
   read: IssuedRead | null;
+  incarnation: string | null;
 }
 
 /**
@@ -157,7 +165,8 @@ interface Chain {
  * ONE read owns what this shows (review R10): a new read (mount, another identity, day, connection or answered draft, Retry) takes over
  * at once, so an answer to an earlier one, success or failure, is dropped before it reaches the screen, the page memory or the copy; and
  * a further page is accepted only for the chain and cursor that asked for it, one at a time. Each accepted page corrects the copy (W28)
- * under the read's place in the observation order: a session it lists finished, and, once complete, one it does not list.
+ * under the read's place in the observation order: a session it lists finished, and, once complete, one it does not list; and records
+ * what it observed of the day (its scope, revision 3), for every page of this database.
  */
 function useDaySessions(occurrenceId: string, again: string) {
   const env = useTasksEnv();
@@ -171,6 +180,7 @@ function useDaySessions(occurrenceId: string, again: string) {
     /** When the read's FIRST page was issued (ms): a later page cannot make it newer than that. */
     askedAt?: number;
     order?: number | null;
+    incarnation?: string | null;
   }>({ scope: "", pages: [], next: null, status: "loading" });
   const scope = `${env.identity}\u0000${occurrenceId}`;
   const owner = useRef(0);
@@ -195,10 +205,13 @@ function useDaySessions(occurrenceId: string, again: string) {
         askedAt: env.now(),
         issued: issuedSeq,
         read: null,
+        incarnation: data.service()?.incarnationId ?? null,
       };
       chain.current = link;
       link.read = await issueTimerRead(data, identity);
       if (owner.current !== mine) return;
+      if (link.read !== null)
+        link.incarnation = link.read.service.incarnationId;
     } else {
       const held = chain.current;
       if (
@@ -245,6 +258,7 @@ function useDaySessions(occurrenceId: string, again: string) {
       status: "ready",
       askedAt: link.askedAt,
       order,
+      incarnation: link.incarnation,
     });
     remember(identity, occurrenceId, {
       sessions,
@@ -252,12 +266,14 @@ function useDaySessions(occurrenceId: string, again: string) {
       order,
       complete,
       issued: link.issued,
+      incarnation: link.incarnation,
     });
     const read = link.read;
     if (read !== null && data.service() === read.service)
-      void commitTimerCorrection(read.service, read.captured, {
+      void commitTimerCorrection(data, read.service, read.captured, {
         order: read.order,
         drop: copyCorrection(occurrenceId, sessions, complete),
+        scope: dayObservation(occurrenceId, sessions, complete),
       });
   };
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for another identity, day, connection or answered draft
@@ -268,10 +284,15 @@ function useDaySessions(occurrenceId: string, again: string) {
     };
   }, [scope, env.online, again]);
   const current = state.scope === scope ? state : null;
-  const kept =
+  const bound = data.service()?.incarnationId ?? null;
+  const held =
     current?.status === "offline"
       ? (keptOf(env.identity).get(occurrenceId) ?? null)
       : null;
+  // A read kept from another database incarnation is not shown (DA-T3).
+  const kept = keptStands(held, bound) ? held : null;
+  const shownIncarnation =
+    kept !== null ? kept.incarnation : (current?.incarnation ?? null);
   return {
     status: current?.status ?? "loading",
     requestId: current?.requestId,
@@ -286,13 +307,15 @@ function useDaySessions(occurrenceId: string, again: string) {
           current.status === "ready",
     /** When the sessions shown offline were read (ms), or null for a read now. */
     keptAt: kept?.at ?? null,
-    /** The shown read's place in the observation order (W28), or null. */
+    /** The shown read's place in the observation order (W28), or null (also when it was ordered in another incarnation). */
     order:
-      kept !== null
-        ? kept.order
-        : current?.status === "ready"
-          ? (current.order ?? null)
-          : null,
+      shownIncarnation !== null && bound !== null && shownIncarnation !== bound
+        ? null
+        : kept !== null
+          ? kept.order
+          : current?.status === "ready"
+            ? (current.order ?? null)
+            : null,
     more: current?.next ? () => void load(current.next) : null,
     retry: () => void load(null),
   };
@@ -326,6 +349,7 @@ export function TimerBlock({
   const again = timerDrafts.map((d) => `${d.local_id}:${d.status}`).join(",");
   const day = useDaySessions(row.id, again);
   const copied = useCopiedTimers();
+  const scoped = useTimerScope(row.id);
   const running = runningOn(row.id, {
     drafts: timerDrafts,
     read: day.sessions,
@@ -333,6 +357,9 @@ export function TimerBlock({
     copy: copied?.rows ?? null,
     readOrder: day.order,
     copyOrder: copied?.order ?? null,
+    copyComplete: copied?.complete ?? false,
+    scope: scoped.status === "ready" ? scoped.value.scope : null,
+    floor: scoped.status === "ready" ? scoped.value.floor : 0,
   });
   const now = useSecond(running.length > 0);
   const [showSessions, setShowSessions] = useState(false);

@@ -111,8 +111,8 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
-| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop) | INC, CLS, EPO |
-| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; fixed-size) | INC, CLS, EPO |
+| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop; revision 3: and its admitted read's `attempt`, a new task's entry admitted as a cache write) | INC, CLS, EPO |
+| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; revision 3: the day's observation in `sync_state.timer_scopes`, admitted as a cache write, or the floor) | INC, CLS, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -763,10 +763,27 @@ the current epoch is shown with no request, one persisted for another epoch is n
   `{ retry, failures, stop }` for a catch-up whose first read (before a day, so before any sequence row) has failed: written before the next
   read, so a pause, a reload or another tab carries on from the count; a stop is read by every caller. `writeMaterialiseDiscovery` is a
   compare-and-set on the entry decided on (absent, or its `retry`, `failures` and whether it is stopped; `stale` otherwise); the person's
-  "Try again" moves `retry`. At most `SEQUENCE_WINDOW` entries: one that would add another is refused (`full`; the slice then keeps the stop
-  in page memory); a success removes its entry. Read by `readMaterialiseDiscovery` (`useMaterialiseDiscovery`, `readMaterialiseDiscoveryNow`).
+  "Try again" moves `retry`. A success removes its entry. Read by `readMaterialiseDiscovery` (`useMaterialiseDiscovery`,
+  `readMaterialiseDiscoveryNow`).
+* **Revision 3: admission and attempts (W27; Review 3's R16/R17).** Revision 2's fixed limit of `SEQUENCE_WINDOW` entries (`full`) is gone:
+  it refused the record only AFTER the read had been sent, so its stop lived in page memory and a reload read again. Now a first read is
+  ADMITTED before it is sent: the slice writes the entry with a fresh `attempt` (never reused), and records each answer only over that very
+  attempt (`attempt` is part of the compare-and-set; an entry without one, from revision 2, compares as `null` and keeps its count and
+  stop). An entry that ADDS a task grows the singleton, so `commitMaterialiseDiscovery` admits it through the quota ledger first
+  (`DISCOVERY_ENTRY_BYTES`, its outcome's bounded size, including a request id of at most `DISCOVERY_REQUEST_ID` characters): a refusal or
+  a lapsed hold is `refused`, nothing written and nothing sent. Replacing a task's entry is not growth. The slice commits every answer
+  through the service it began the work under (its binding), never the one displayed when the answer lands.
+* **Revision 3: what a day's reads observed (W28; Review 3's R14, design assessment DA-T3).** `reconcileTimerCopy` also records the day's
+  observation in `sync_state.timer_scopes[occurrence]` = `{ seen, order, running, ended, ended_at }` (`TimerScopeRecord`, read tolerantly):
+  the order of the day's latest COMPLETE read and the sessions it listed running, and sessions any read of the day listed finished, each
+  under the day's own order whatever the copy's fence. Bounded: `TIMER_SCOPES` = 100 days (the one seen longest ago is evicted) and
+  `TIMER_SCOPE_IDS` = 100 sessions each way. Whatever is not kept (an evicted day, a list beyond the bound, a scope that does not read, a
+  growth the quota ledger refused or a hold that lapsed) raises `sync_state.timer_scope_floor` instead: a day's read issued below the
+  floor is no longer trusted for a session it saw running. Read by `readTimerScope` (`useTimerScope`). The record's growth is admitted
+  as a cache write by `commitTimerCorrection`; a refusal still corrects the copy and raises the floor.
 * **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `useMaterialiseSequences`, `useTimerCopy`,
-  `commitMaterialiseSequence`, `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve).
+  `commitMaterialiseSequence`, `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve); revision
+  3: `useTimerScope`, and quota reserves in `commitTimerCorrection` and `commitMaterialiseDiscovery`.
   `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).
 * **Retention.** Nothing new: a discarded or rejected timer draft's `timer_session` version record is removed by the existing recompute
   (no other draft targets it and nothing is cached for it); the wipe removes both records with the account's database.

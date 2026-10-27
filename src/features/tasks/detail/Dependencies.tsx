@@ -44,7 +44,7 @@ import {
   modesOf,
   prerequisitesOf,
   progressOf,
-  rootItemOf,
+  rootAdmitted,
   satisfiedPreview,
   validateList,
 } from "../model/dependencies";
@@ -89,6 +89,8 @@ export const DEPENDENCY_COPY = {
     cannot_complete: "Some of it can't be ticked off from here.",
     root: "Record this day's progress on its card first.",
   },
+  /** Why no mode can complete this day itself (review R15): its progress is not entered, or it can't be ticked off from here. */
+  rootWhy: "Record this day's progress on its card first.",
   preview: "This is a preview. Nothing changes until you choose.",
   markDone: "Mark done",
   close: "Cancel",
@@ -428,10 +430,10 @@ export function DependencyDialog({
   const preview = read.kind === "ready" ? read.preview : null;
   const title = row.title ?? copy.UNTITLED;
   const goal = row.data.definition.goal;
-  const root = preview ? rootItemOf(preview, row.id) : null;
+  // Every mode completes this day too: only with what is sent for it (review R15).
   const rootCompletable =
-    (goal.kind === "checkbox" && (root?.can_complete ?? false)) ||
-    rootEvidence !== null;
+    preview !== null &&
+    rootAdmitted(preview, row.id, goal.kind, rootEvidence !== null);
   const availability = preview
     ? modesOf(preview, row.id, rootCompletable)
     : null;
@@ -587,8 +589,11 @@ export function DependencyDialog({
               {DEPENDENCY_COPY.close}
             </Button>
             {preview === null ? null : satisfied ? (
-              disabledReason ? (
-                <Button disabled reason={disabledReason}>
+              disabledReason || availability?.require_satisfied === "root" ? (
+                <Button
+                  disabled
+                  reason={disabledReason ?? DEPENDENCY_COPY.rootWhy}
+                >
                   {DEPENDENCY_COPY.markDone}
                 </Button>
               ) : (
@@ -650,7 +655,16 @@ export function DependencyDialog({
                 {DEPENDENCY_COPY.evidenceKept}
               </p>
             ) : null}
-            {satisfied ? null : (
+            {satisfied ? (
+              availability?.require_satisfied === "root" ? (
+                <p
+                  className="text-[12px] text-ink-2"
+                  data-mode-reason="require_satisfied"
+                >
+                  {DEPENDENCY_COPY.markDone}: {DEPENDENCY_COPY.rootWhy}
+                </p>
+              ) : null
+            ) : (
               <div className="flex flex-col gap-1.5">
                 <RadioCardGroup<Mode | "wait">
                   label={DEPENDENCY_COPY.modesName}
@@ -677,7 +691,9 @@ export function DependencyDialog({
                     data-mode-reason="advisory_override"
                   >
                     {DEPENDENCY_COPY.startAnyway}:{" "}
-                    {DEPENDENCY_COPY.strict(title)}
+                    {availability.advisory_override === "strict"
+                      ? DEPENDENCY_COPY.strict(title)
+                      : DEPENDENCY_COPY.rootWhy}
                   </p>
                 ) : null}
               </div>

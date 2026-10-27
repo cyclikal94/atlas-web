@@ -40,16 +40,36 @@ export function satisfiedPreview(
 }
 
 export interface ModeAvailability {
+  /** "Mark done" (`require_satisfied`): every prerequisite done and nothing private, and a root I can complete (review R15). */
+  require_satisfied: null | "open" | "root";
   complete_prerequisites: null | "unavailable" | "cannot_complete" | "root";
-  advisory_override: null | "strict";
+  advisory_override: null | "strict" | "root";
 }
 
 /**
- * Which modes can be chosen, and why not (the dialog's disabled reasons):
- *  - `complete_prerequisites` needs nothing private, every INCOMPLETE prerequisite completable by me from here, and a root I can
- *    complete (my own checkbox, or the evidence the person entered for a numeric or checklist root);
+ * Whether what the dialog would send completes the ROOT (review R15). The released backend completes the root, in EVERY mode, only with
+ * the evidence sent for it (`root_evidence`) or, without any, when the preview says I can complete it (`can_complete`), recording a tick.
+ * So a tick-box root needs its `can_complete`, and a numeric or checklist root needs the evidence the person entered on its card (its
+ * `can_complete` would record a tick its goal refuses). A preview that does not hold the root admits nothing.
+ */
+export function rootAdmitted(
+  preview: DependencyPreview,
+  rootId: string,
+  goalKind: string,
+  evidence: boolean,
+): boolean {
+  const root = rootItemOf(preview, rootId);
+  if (root === null) return false;
+  return goalKind === "checkbox" ? root.can_complete : evidence;
+}
+
+/**
+ * Which modes can be chosen, and why not (the dialog's disabled reasons). EVERY mode completes the root, so every mode needs it admitted
+ * (`rootCompletable`, from `rootAdmitted`; review R15). Besides:
+ *  - `require_satisfied` ("Mark done") needs every prerequisite done and nothing private;
+ *  - `complete_prerequisites` needs nothing private and every INCOMPLETE prerequisite completable by me from here;
  *  - `advisory_override` ("Start anyway") is refused by a strict rule.
- * `require_satisfied` is "Wait until everything's done" (no command) until every prerequisite is done, then the primary "Mark done".
+ * While something is open, `require_satisfied` is "Wait until everything's done" (no command).
  */
 export function modesOf(
   preview: DependencyPreview,
@@ -59,23 +79,22 @@ export function modesOf(
   const open = prerequisitesOf(preview, rootId).filter(
     (item) => !item.complete,
   );
+  const root = rootCompletable ? null : ("root" as const);
   return {
+    require_satisfied: !satisfiedPreview(preview, rootId) ? "open" : root,
     complete_prerequisites: preview.unavailable
       ? "unavailable"
       : open.some((item) => !item.can_complete)
         ? "cannot_complete"
-        : !rootCompletable
-          ? "root"
-          : null,
-    advisory_override: preview.strict ? "strict" : null,
+        : root,
+    advisory_override: preview.strict ? "strict" : root,
   };
 }
 
 /**
- * The completion that may be sent for `chosen` on this preview, or null (Wait) (review R12): ONE rule for the choice shown, the button and
- * the send, so a mode remembered from a refused draft or chosen before the preview changed is never offered or sent once the preview
- * forbids it. A satisfied day is completed plainly (`require_satisfied`) and only then; a cascade needs every open prerequisite completable
- * and the root's own evidence; "Start anyway" needs a rule that is not strict.
+ * The completion that may be sent for `chosen` on this preview, or null (Wait) (reviews R12, R15): ONE rule for the choice shown, the
+ * button and the send, so a mode remembered from a refused draft or chosen before the preview changed is never offered or sent once the
+ * preview forbids it. A satisfied day is completed plainly (`require_satisfied`) and only then; every mode needs the root admitted.
  */
 export function admittedMode(
   preview: DependencyPreview,
@@ -84,12 +103,10 @@ export function admittedMode(
   chosen: Mode | "wait",
 ): Mode | null {
   if (chosen === "wait") return null;
-  if (satisfiedPreview(preview, rootId))
-    return chosen === "require_satisfied" ? chosen : null;
-  if (chosen === "require_satisfied") return null;
-  return modesOf(preview, rootId, rootCompletable)[chosen] === null
-    ? chosen
-    : null;
+  const modes = modesOf(preview, rootId, rootCompletable);
+  if (satisfiedPreview(preview, rootId) !== (chosen === "require_satisfied"))
+    return null;
+  return modes[chosen] === null ? chosen : null;
 }
 
 /** The progress counts of the detail's row ("{done} of {n} done"). */

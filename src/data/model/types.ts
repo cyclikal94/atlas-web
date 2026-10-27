@@ -260,6 +260,13 @@ export interface SyncStateRow {
   timer_order?: number;
   timer_fence?: number;
   /**
+   * WEB-10c revision 3 (W28, review R14, design assessment DA-T3): what reads of each day observed (`TimerScopeRecord` by occurrence,
+   * read tolerantly), and the order below which a day's read is no longer trusted for a session it saw running (what was not kept).
+   * Absent: none, 0.
+   */
+  timer_scopes?: Record<string, unknown>;
+  timer_scope_floor?: number;
+  /**
    * WEB-10c revision 2 (W27, review R13, design assessment DA-M1): the catch-up DISCOVERY of each task (its first read, before its day is
    * known) that has failed: the consecutive uncertain answers it met and, once they reached the bound or a definite refusal came, its
    * stop. Kept across reloads and tabs, so the budget never starts again by itself; only the person's "Try again" (a new `retry`) does.
@@ -362,6 +369,11 @@ export interface MaterialiseDiscovery {
   /** Consecutive uncertain first reads. */
   failures: number;
   stop: null | { reason: "unreachable" | "rejected"; request_id?: string };
+  /**
+   * Revision 3 (reviews R16, R17): the identity of the first read admitted last (written BEFORE it is sent, never reused), or null
+   * (none since the entry was made or lifted; an entry of revision 2 has none). An answer is recorded only over its own attempt.
+   */
+  attempt?: string | null;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

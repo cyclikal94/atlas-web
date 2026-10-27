@@ -32,7 +32,6 @@ import {
 } from "../model/contract";
 import { personalResult } from "../model/evaluate";
 import { progressId } from "../model/ids";
-import type { StopReason } from "../model/materialise";
 import {
   type Figure,
   figureOf,
@@ -45,7 +44,7 @@ import {
   tally,
   unitOf,
 } from "../model/streak";
-import { CATCH_UP_COPY } from "../today/CatchUpBanner";
+import { CATCH_UP_COPY, type ShownReason } from "../today/CatchUpBanner";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const STREAK_COPY = {
@@ -198,7 +197,7 @@ type Read =
   | { kind: "ready"; streak: TaskStreak }
   | { kind: "error"; requestId?: string }
   | { kind: "catching_up" }
-  | { kind: "stopped"; reason: StopReason; requestId?: string; day?: string }
+  | { kind: "stopped"; reason: ShownReason; requestId?: string; day?: string }
   | { kind: "offline" };
 
 const STREAK_READ = (taskId: string) => `streak:${taskId}`;

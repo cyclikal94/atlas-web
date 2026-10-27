@@ -51,7 +51,8 @@ import {
  * after a reload from the kept copy; E-R1 the rota's consent and order; and (revision 1, review R9) E-D1/E-R1 identity: a preview and a
  * rota answer held across an account switch, with their positive controls; (revision 2) E-M5 a first read that never answers stays
  * stopped across a reload until Try again (R13, DA-M1), and E-TM2 a complete day read retires a cancelled session from the kept copy, so a
- * reload offline does not show it (DA-T1). E-M3 (the command path) is not here: the fixture outbox
+ * reload offline does not show it (DA-T1); (revision 3) E-TM3 a complete day read in ANOTHER tab retires what this tab's kept read saw,
+ * through the shared store, while one of another day does not (DA-T3, R14). E-M3 (the command path) is not here: the fixture outbox
  * decides `409`s with its own registry, so the page's handler is never asked natively. Its journey (`409 materialisation_required` →
  * catch-up through the day → the SAME key resent → applied) runs in jsdom over the PRODUCTION dispatcher and registry
  * (`catchup-conflicts.test.ts`, revision 1); the first version's claim that the jsdom file covered it was of classification only.
@@ -1105,4 +1106,88 @@ test.describe("E-TM2: a complete day read corrects the kept copy (revision 2: DA
       log: r10c.log.map(({ from: _from, ...e }) => e),
     });
   });
+});
+
+test.describe("E-TM3: a day read in another tab retires what this tab's kept read saw (revision 3: DA-T3, R14)", () => {
+  for (const which of ["the same day", "another day (control)"] as const)
+    test(`tab B's complete empty read of ${which}; tab A offline then shows the session ${which === "the same day" ? "not running" : "still running"}`, async ({
+      context,
+    }, info) => {
+      const goal = {
+        kind: "numeric",
+        minimum: "1800",
+        maximum: null,
+        unit: "seconds",
+      } as const;
+      const here = buildTask({ n: 411, title: "Practise piano", goal });
+      const other = buildTask({ n: 412, title: "Practise scales", goal });
+      const id = "cccccccc-0000-4000-8000-000000000112";
+      let cancelled = false;
+      const detail = (task: BuiltTask) =>
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+      const { page, r10c } = await setup(
+        context,
+        detail(here),
+        [here, other],
+        (_reads, r) => {
+          r.timers = (q) => ({
+            status: 200,
+            body: {
+              items:
+                q.occurrenceId === here.occurrenceId && !cancelled
+                  ? [
+                      {
+                        id,
+                        occurrence_id: here.occurrenceId,
+                        started_at: Math.floor(Date.now() / 1000) - 600,
+                        stopped_at: null,
+                        version: 2,
+                      },
+                    ]
+                  : [],
+              next_after: null,
+            },
+          });
+        },
+      );
+      await expect(page.locator("[data-timer-block]")).toHaveAttribute(
+        "data-timer-block",
+        "running",
+      );
+      // The session is cancelled elsewhere; tab B reads a day.
+      // The place in the observation order the copy's corrections have reached (moved by every applied day read).
+      const fence = () =>
+        page.evaluate(async (acct) => {
+          const rows = (await window.__atlasData?.rows(
+            acct,
+            "sync_state",
+          )) as Array<{ timer_fence?: number }>;
+          return rows?.[0]?.timer_fence ?? 0;
+        }, ACCOUNT);
+      await expect.poll(fence).toBeGreaterThan(0);
+      const before = await fence();
+      cancelled = true;
+      const target = which === "the same day" ? here : other;
+      const second = await bootAt(context, detail(target));
+      await expect(second.locator("[data-timer-block]")).toHaveAttribute(
+        "data-timer-block",
+        "idle",
+      );
+      // Tab B's read has been applied to the shared store (inspected through tab A, whose store handle the fixture exposes).
+      await expect.poll(fence).toBeGreaterThan(before);
+      // Tab A, offline: its kept read of the day is judged against what tab B recorded.
+      await page.bringToFront();
+      await goOfflineAtBoundary(page);
+      await expect(page.locator("[data-timer-block]")).toHaveAttribute(
+        "data-timer-block",
+        which === "the same day" ? "idle" : "running",
+      );
+      recordEvidence(info, "e-tm3", {
+        which,
+        log: r10c.log.map(({ from, ...e }) => ({
+          ...e,
+          tab: from === page ? 1 : from === second ? 2 : 0,
+        })),
+      });
+    });
 });

@@ -2,6 +2,8 @@ import {
   type AccountService,
   commitMaterialiseDiscovery,
   commitMaterialiseSequence,
+  type DataEnv,
+  DISCOVERY_REQUEST_ID,
   type MaterialiseDiscovery,
   type MaterialiseSequenceRow,
   pruneOlderSequences,
@@ -54,6 +56,19 @@ import { todayIn } from "../model/time";
  * entry it decided on, so a late answer of an earlier budget never changes a newer one. A stop whose write failed is kept in this page's
  * memory (`unrecorded`) and refuses automatic work here alike. An environmental pause (offline, not compatible, the session held) is
  * not a stop: it resumes.
+ *
+ * ADMISSION (revision 3, review R16): no first read is sent before it is ADMITTED in the task's entry (a fresh `attempt`, written first),
+ * so every read's answer can be recorded: a new task's entry is admitted through the quota ledger, and one the ledger refuses sends
+ * nothing (a `storage` stop of this page, with "Try again"; a reload asks again, sending nothing until it is admitted). Each answer is
+ * recorded only over its own attempt, so a read another page admitted since (a page without Web Locks), or one of an entry deleted and
+ * made again, changes nothing, and a lost claim never consumes another budget.
+ *
+ * BINDING (revision 3, review R17): each piece of work belongs to the service it began with (`Binding`: the exact service object, the
+ * database incarnation it writes). It reads, writes and stamps through that service only, and checks after every wait that it is still
+ * the displayed one: an answer that arrives once another service has replaced it (the same account and epoch, another database or a
+ * reopened one) is dropped unrecorded, and the work is asked again under the new binding. A new binding retires what this page
+ * remembered of the old one (`attempted`, `settledThrough`, `unrecorded`, paused work), and a "Try again" pressed on the old one lifts
+ * nothing in the new one. A moment with no service bound is a pause.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -71,8 +86,13 @@ export interface CatchUpDeps {
   newId(): string;
   /** The waits between uncertain answers; the page's timers when omitted (tests pass fake ones). */
   sleep?(ms: number): Promise<void>;
-  /** `navigator.locks`, or null where there is none (one page: no cross-tab exclusion is needed). */
+  /**
+   * `navigator.locks`, or null where there is none. Without it, pages are not excluded from each other: each first read is still admitted
+   * (claimed) in the task's entry before it is sent and recorded only over its own claim, so a page that lost the claim records nothing.
+   */
   locks?: LockManager | null;
+  /** The origin's quota ledger (a new task's discovery entry is admitted through it); absent: not admitted (a test of the runner alone). */
+  quota?(): DataEnv["quota"] | null;
 }
 
 /** What this page knows that the durable records do not show: what it is working on, and a stop it could not record. */
@@ -92,7 +112,8 @@ export interface RunnerState {
 }
 
 export interface UnrecordedStop {
-  reason: "unreachable" | "rejected";
+  /** `storage`: the task's entry could not be admitted (the quota ledger refused its growth), so nothing was sent (revision 3, R16). */
+  reason: "unreachable" | "rejected" | "storage";
   requestId?: string;
 }
 
@@ -211,7 +232,19 @@ interface Item {
   throughDate?: string;
   manual: boolean;
   resume?: boolean;
-  retry?: { discovery: MaterialiseDiscovery | null; sequence: Sequence | null };
+  /** Asked again once already because its binding ended (R17): another end parks it for the next kick instead of looping. */
+  rebound?: boolean;
+  retry?: {
+    discovery: MaterialiseDiscovery | null;
+    sequence: Sequence | null;
+    /** The service it was pressed under: a press of an ended binding lifts nothing in another (review R17). */
+    service: AccountService | null;
+  };
+}
+
+/** The binding one piece of work began with (review R17): it reads, writes and stamps through this service only. */
+interface Binding {
+  service: AccountService;
 }
 
 const NO_DISCOVERY: MaterialiseDiscovery = {
@@ -225,9 +258,14 @@ const NO_DISCOVERY: MaterialiseDiscovery = {
  * already handled on this page); `paused` when it stopped part-way for a reason that can clear (offline, not compatible, the session
  * held, a write not applied, a thrown read or store), with the day of the sequence it was working on once that is known.
  */
-type Outcome = { kind: "done" } | { kind: "paused"; throughDate?: string };
+type Outcome =
+  | { kind: "done" }
+  | { kind: "paused"; throughDate?: string }
+  /** The binding it began with ended (another service is displayed now): nothing more of it is written; the task is asked again. */
+  | { kind: "ended" };
 const DONE: Outcome = { kind: "done" };
 const PAUSED: Outcome = { kind: "paused" };
+const ENDED: Outcome = { kind: "ended" };
 const keyed = (outcome: Outcome, throughDate: string): Outcome =>
   outcome.kind === "paused" ? { kind: "paused", throughDate } : outcome;
 
@@ -313,7 +351,43 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   };
   const mayRun = () => alive() !== null && deps.online() && deps.writable();
 
-  /** Commits `next` (or deletes) over `row` as stored; on `stale`, what is stored now (adopted). `null`: stop for this identity. */
+  /** This work's binding is still the displayed one (review R17). */
+  const owns = (at: Binding) =>
+    !disposed && at.service.live && deps.service() === at.service;
+  /** How work whose binding is no longer the displayed one ends: another service displayed, ended; none at the moment, a pause. */
+  const lost = (at: Binding): Outcome => {
+    if (disposed) return DONE;
+    const now = deps.service();
+    return now !== null && now !== at.service ? ENDED : PAUSED;
+  };
+  /** A commit that did not apply: its binding ended, or a pause (a store failure, the guards of the same binding). */
+  const unapplied = (at: Binding): Outcome => (owns(at) ? PAUSED : lost(at));
+
+  /**
+   * The service this page's work last began under. Another one (review R17) retires what this page remembered of the old one: the days
+   * it began or settled, its memory-only stops and its paused work, which is asked again as plain work (never resumed as the old one's).
+   */
+  let bound: AccountService | null = null;
+  const rebind = (service: AccountService | null) => {
+    if (service === null || service === bound) return;
+    if (bound !== null) {
+      attempted.clear();
+      settledThrough.clear();
+      for (const [taskId, item] of parked)
+        parked.set(taskId, {
+          taskId,
+          trigger: item.trigger,
+          manual: false,
+          ...(item.throughDate === undefined
+            ? {}
+            : { throughDate: item.throughDate }),
+        });
+      if (state.unrecorded.size > 0) set({ unrecorded: new Map() });
+    }
+    bound = service;
+  };
+
+  /** Commits `next` (or deletes) over `row` as stored; on `stale`, what is stored now (adopted). `null`: not applied. */
   const commit = async (
     service: AccountService,
     captured: ReturnType<AccountService["capture"]>,
@@ -338,10 +412,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   };
 
   /**
-   * One sequence to its end, a stop, a pause or this identity's end. `row` is the stored sequence this runner works from; every
-   * transition is committed over it, and a lost compare-and-set adopts what is stored instead.
+   * One sequence to its end, a stop, a pause or the end of its binding. `row` is the stored sequence this runner works from; every
+   * transition is committed over it through the binding's service, and a lost compare-and-set adopts what is stored instead.
    */
   const drive = async (
+    at: Binding,
     start: Sequence,
     todayOf: () => string,
   ): Promise<Outcome> => {
@@ -350,9 +425,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       task_id: start.task_id,
       through_date: start.through_date,
     };
+    const service = at.service;
     while (row !== null && row.phase !== "stopped") {
-      const service = alive();
-      if (service === null || !mayRun()) return PAUSED;
+      if (!owns(at)) return lost(at);
+      if (!mayRun()) return PAUSED;
       const step = recover(row);
       if (step === "continue") {
         // `ready`: the attempt is written BEFORE it is sent.
@@ -364,7 +440,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           row,
           next,
         );
-        if (out === null) return PAUSED;
+        if (out === null) return unapplied(at);
         row = out.stored;
         continue;
       }
@@ -376,10 +452,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           attempt.key,
         );
         const answer = classifySend(result);
-        if (answer.kind === "pause" || alive() === null) return PAUSED;
+        if (!owns(at)) return lost(at);
+        if (answer.kind === "pause") return PAUSED;
         const next = onSent(row, answer);
         const out = await commit(service, captured, key, row, next);
-        if (out === null) return PAUSED;
+        if (out === null) return unapplied(at);
         row = out.stored;
         if (
           answer.kind === "uncertain" &&
@@ -393,10 +470,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (step === "read") {
         const captured = service.capture(deps.epoch);
         const read = await readPosition(row.task_id);
-        if (read.answer.kind === "pause" || alive() === null) return PAUSED;
+        if (!owns(at)) return lost(at);
+        if (read.answer.kind === "pause") return PAUSED;
         const next = onRead(row, read.answer, todayOf());
         const out = await commit(service, captured, key, row, next);
-        if (out === null) return PAUSED;
+        if (out === null) return unapplied(at);
         row = out.stored;
         if (row === null) {
           set({ finished: state.finished + 1 });
@@ -420,50 +498,61 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   };
 
   /**
-   * The person's "Try again", under the lock (review R13): lifts the discovery stop and the day's stopped sequence it was pressed on, if
-   * they still stand as seen (another press, here or in another tab, has lifted them already otherwise: nothing more is added). `false`:
-   * a lift could not be written, so the stop stays shown and nothing is read.
+   * The person's "Try again", under the lock (review R13), through the binding it was pressed under (R17): lifts the discovery stop and
+   * the day's stopped sequence it was pressed on, if they still stand as seen. Only a lift WRITTEN here admits a fresh budget: another
+   * press, here or in another tab, that lifted them first leaves this one with nothing to add. `false`: nothing more is done (the stop
+   * stays shown, or the other press's work carries on).
    */
   const lift = async (
-    service: AccountService,
+    at: Binding,
     item: Item & { retry: NonNullable<Item["retry"]> },
   ): Promise<boolean> => {
     const seen = item.retry.discovery;
     if (seen?.stop) {
       const out = await commitMaterialiseDiscovery(
-        service,
-        service.capture(deps.epoch),
+        at.service,
+        at.service.capture(deps.epoch),
         {
           task_id: item.taskId,
           expected: seen,
-          next: { retry: seen.retry + 1, failures: 0, stop: null },
+          next: {
+            retry: seen.retry + 1,
+            failures: 0,
+            stop: null,
+            attempt: null,
+          },
         },
       );
-      if (out.kind !== "applied") return false;
+      if (out.kind !== "applied" || out.value.kind !== "written") return false;
     }
+    if (!owns(at)) return false;
     unrecord(item.taskId);
     const stopped = item.retry.sequence;
     if (stopped !== null) {
       // A fresh budget from the position reached, the held attempt (if any) kept.
-      const out = await commit(
-        service,
-        service.capture(deps.epoch),
-        { task_id: stopped.task_id, through_date: stopped.through_date },
-        stopped,
-        freshBudget(stopped),
+      const out = await commitMaterialiseSequence(
+        at.service,
+        at.service.capture(deps.epoch),
+        {
+          key: { task_id: stopped.task_id, through_date: stopped.through_date },
+          expected: expectationOf(stopped),
+          next: freshBudget(stopped),
+        },
       );
-      if (out === null) return false;
+      if (out.kind !== "applied" || out.value.kind !== "written") return false;
     }
     return true;
   };
 
   /**
-   * The first read of a task, admitted and counted by its discovery entry (W27): its zone (its day) and position. Uncertain answers are
-   * retried with the same pacing; each is recorded before the next read, the bound's or a definite refusal is a recorded stop. A stop
-   * already standing admits no read. An answer of a budget that a "Try again" has replaced meanwhile changes nothing (`stale`).
+   * The first read of a task, ADMITTED and counted by its discovery entry (W27): its zone (its day) and position. Before each read the
+   * entry claims it (a fresh `attempt`; revision 3, R16), so its answer can always be recorded; an answer is recorded only over its own
+   * attempt, through the binding's service with its read's stamp (R17). Uncertain answers are retried with the same pacing, each recorded
+   * (claiming the next read) before the next is made; the bound's or a definite refusal is a recorded stop. A stop already standing
+   * admits no read; an entry the quota ledger would not admit sends nothing.
    */
   const discover = async (
-    service: AccountService,
+    at: Binding,
     item: Item,
   ): Promise<
     | {
@@ -473,34 +562,54 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       }
     | { kind: "end"; outcome: Outcome }
   > => {
-    if (state.unrecorded.has(item.taskId))
-      return { kind: "end", outcome: DONE };
-    const entries = await readMaterialiseDiscoveryNow(service);
-    if (entries === undefined) return { kind: "end", outcome: PAUSED };
+    const end = (outcome: Outcome) => ({ kind: "end" as const, outcome });
+    if (state.unrecorded.has(item.taskId)) return end(DONE);
+    const entries = await readMaterialiseDiscoveryNow(at.service);
+    if (!owns(at)) return end(lost(at));
+    if (entries === undefined) return end(PAUSED);
     let entry: MaterialiseDiscovery | null = entries[item.taskId] ?? null;
-    if (entry?.stop) return { kind: "end", outcome: DONE };
-    const record = async (next: MaterialiseDiscovery | null) => {
-      const live = alive();
-      if (live === null) return "paused" as const;
+    if (entry?.stop) return end(DONE);
+    const quota = deps.quota?.() ?? null;
+    /** `next` over the entry this work admitted, through its own service, stamped as given (an answer: its read's issue). */
+    const record = async (
+      captured: ReturnType<AccountService["capture"]>,
+      next: MaterialiseDiscovery | null,
+    ) => {
       const out = await commitMaterialiseDiscovery(
-        live,
-        live.capture(deps.epoch),
+        at.service,
+        captured,
         { task_id: item.taskId, expected: entry, next },
+        quota === null ? null : { quota },
       );
-      if (out.kind !== "applied" || out.value.kind === "full")
-        return "unrecorded" as const;
-      if (out.value.kind === "stale") return "stale" as const;
+      if (!owns(at) || out.kind === "dropped") return "lost" as const;
+      if (out.kind === "failed") return "failed" as const;
+      if (out.value.kind !== "written") return out.value.kind;
       entry = out.value.stored;
       return "written" as const;
     };
+    // Admission: the read is claimed in the entry before it is sent (a new task's entry admitted through the quota ledger).
+    const admitted = await record(at.service.capture(deps.epoch), {
+      ...(entry ?? NO_DISCOVERY),
+      attempt: deps.newId(),
+    });
+    if (admitted === "lost") return end(lost(at));
+    // Another page decided meanwhile (its record is what is shown); nothing was sent.
+    if (admitted === "stale") return end(DONE);
+    if (admitted === "failed") return end(PAUSED);
+    if (admitted === "refused")
+      return end(stopInMemory(item.taskId, { reason: "storage" }));
     for (;;) {
-      const captured = service.capture(deps.epoch);
+      const captured = at.service.capture(deps.epoch);
       const read = await readPosition(item.taskId);
-      if (read.answer.kind === "pause" || alive() === null)
-        return { kind: "end", outcome: PAUSED };
+      if (read.answer.kind === "pause") return end(PAUSED);
+      // An answer for an ended binding is dropped: it is never recorded in another database (R17).
+      if (!owns(at)) return end(lost(at));
       if (read.answer.kind === "ok" && read.zone !== null) {
-        // Found: the discovery's failures are over (its entry goes); a page's memory stop of it is lifted by its success.
-        if (entry !== null) await record(null);
+        // Found: the discovery's failures are over (its entry goes, only its own); a page's memory stop of it is lifted by its success.
+        const done = await record(captured, null);
+        if (done === "lost") return end(lost(at));
+        if (done === "stale") return end(DONE);
+        if (done !== "written") return end(PAUSED);
         if (state.unrecorded.has(item.taskId)) unrecord(item.taskId);
         return { kind: "ok", read, captured };
       }
@@ -512,54 +621,65 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           ? {
               reason: "rejected",
               ...(read.answer.kind === "rejected" && read.answer.requestId
-                ? { requestId: read.answer.requestId }
+                ? {
+                    requestId: read.answer.requestId.slice(
+                      0,
+                      DISCOVERY_REQUEST_ID,
+                    ),
+                  }
                 : {}),
             }
           : failures >= MAX_READ_FAILURES
             ? { reason: "unreachable" }
             : null;
-      const written = await record({
+      const written = await record(captured, {
         retry: base.retry,
         failures,
         stop:
           stop === null
             ? null
             : {
-                reason: stop.reason,
+                reason: stop.reason as "unreachable" | "rejected",
                 ...(stop.requestId ? { request_id: stop.requestId } : {}),
               },
+        // Recorded with its answer: the next read's claim (none after a stop).
+        attempt: stop === null ? deps.newId() : (base.attempt ?? null),
       });
-      if (written === "paused") return { kind: "end", outcome: PAUSED };
-      if (written === "stale") return { kind: "end", outcome: DONE };
-      if (written === "unrecorded")
-        return {
-          kind: "end",
-          outcome: stopInMemory(item.taskId, stop ?? { reason: "unreachable" }),
-        };
+      if (written === "lost") return end(lost(at));
+      if (written === "stale") return end(DONE);
+      if (written !== "written")
+        return end(
+          stopInMemory(item.taskId, stop ?? { reason: "unreachable" }),
+        );
       if (stop !== null) {
         set({ stops: state.stops + 1 });
-        return { kind: "end", outcome: DONE };
+        return end(DONE);
       }
       await sleep(RETRY_DELAYS_MS[failures - 1] as number);
-      if (!mayRun()) return { kind: "end", outcome: PAUSED };
+      if (!owns(at)) return end(lost(at));
+      if (!mayRun()) return end(PAUSED);
     }
   };
 
-  /** Finds or begins the sequence of one task through its day, then drives it. */
+  /** Finds or begins the sequence of one task through its day, then drives it, under the binding it began with. */
   const work = async (item: Item): Promise<Outcome> => {
-    let service = alive();
+    const service = alive();
     if (service === null) return PAUSED;
+    rebind(service);
+    const at: Binding = { service };
+    // A press made under another binding lifts nothing here: the work is asked as the person asked it, and a stop still standing shows.
     if (
       item.retry !== undefined &&
-      !(await lift(service, { ...item, retry: item.retry }))
+      item.retry.service === service &&
+      !(await lift(at, { ...item, retry: item.retry }))
     )
-      return DONE;
-    const found = await discover(service, item);
+      return owns(at) ? DONE : lost(at);
+    if (!owns(at)) return lost(at);
+    const found = await discover(at, item);
     if (found.kind === "end") return found.outcome;
     const { read, captured } = found;
-    service = alive();
-    if (service === null || read.answer.kind !== "ok" || read.zone === null)
-      return PAUSED;
+    if (!owns(at)) return lost(at);
+    if (read.answer.kind !== "ok" || read.zone === null) return PAUSED;
     const zone = read.zone;
     const today = () => todayIn(zone, deps.now());
     const throughDate = item.throughDate ?? today();
@@ -575,7 +695,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     // or store is such a pause too (its record says where it stands).
     const paused: Outcome = { kind: "paused", throughDate };
     try {
-      return await sequence(service, item, read.answer, {
+      return await sequence(at, item, read.answer, {
         key,
         throughDate,
         today,
@@ -587,12 +707,12 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     }
   };
 
-  /** The sequence of one task through its day: adopted as stored, or begun; then driven. */
+  /** The sequence of one task through its day: adopted as stored, or begun (stamped with the read that found its day); then driven. */
   const sequence = async (
-    service: AccountService,
+    at: Binding,
     item: Item,
     answer: Extract<ReadAnswer, { kind: "ok" }>,
-    at: {
+    day: {
       key: SequenceKey;
       throughDate: string;
       today: () => string;
@@ -600,8 +720,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       paused: Outcome;
     },
   ): Promise<Outcome> => {
-    const { key, throughDate, today, captured, paused } = at;
+    const { key, throughDate, today, captured, paused } = day;
+    const service = at.service;
     const stored = await readMaterialiseSequenceNow(service, key);
+    if (!owns(at)) return lost(at);
     if (stored === undefined) return paused;
     if (stored !== null) {
       // Adopted: a sequence another page began, or one this page left on a reload. A stop is shown, never resumed automatically.
@@ -611,14 +733,14 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         // read (one read, never another `materialise`; CM-440), admitted only over the row as found.
         const next = onRead(stored, answer, today());
         const out = await commit(service, captured, key, stored, next);
-        if (out === null) return paused;
+        if (out === null) return owns(at) ? paused : lost(at);
         if (out.stored === null) {
           set({ finished: state.finished + 1 });
           return DONE;
         }
-        return keyed(await drive(out.stored, today), throughDate);
+        return keyed(await drive(at, out.stored, today), throughDate);
       }
-      return keyed(await drive(stored, today), throughDate);
+      return keyed(await drive(at, stored, today), throughDate);
     }
     const fresh = begin({
       taskId: item.taskId,
@@ -633,14 +755,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       set({ finished: state.finished + 1 });
       return DONE;
     }
-    const created = await commit(
-      service,
-      service.capture(deps.epoch),
-      key,
-      null,
-      fresh,
-    );
-    if (created === null) return paused;
+    const created = await commit(service, captured, key, null, fresh);
+    if (created === null) return owns(at) ? paused : lost(at);
     if (created.stored === null) return DONE;
     // Housekeeping: the task's earlier days that are not running.
     void pruneOlderSequences(service, service.capture(deps.epoch), {
@@ -651,7 +767,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       set({ stops: state.stops + 1 });
       return DONE;
     }
-    return keyed(await drive(created.stored, today), throughDate);
+    return keyed(await drive(at, created.stored, today), throughDate);
   };
 
   const loop = async (): Promise<void> => {
@@ -666,6 +782,21 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         outcome = PAUSED;
       }
       if (outcome.kind === "paused") park(item, outcome.throughDate);
+      // Its binding ended: the task is asked again under the one displayed now, as plain work (R17); once in a row, then it waits
+      // for the next kick (a binding that keeps changing must not spin this loop).
+      else if (outcome.kind === "ended" && !disposed) {
+        const again: Item = {
+          taskId: item.taskId,
+          trigger: item.trigger,
+          manual: false,
+          rebound: true,
+          ...(item.throughDate === undefined
+            ? {}
+            : { throughDate: item.throughDate }),
+        };
+        if (item.rebound) parked.set(item.taskId, again);
+        else queue.unshift(again);
+      }
       publishQueue(null);
     }
   };
@@ -700,6 +831,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     identity: deps.identity,
     ensure(taskId, trigger, options = {}) {
       if (disposed) return;
+      rebind(alive());
       // Work on this task that paused part-way is taken up again (review R1), whichever trigger asks.
       if (unpark(taskId)) {
         publishQueue();
@@ -737,6 +869,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       void (async () => {
         // What the person pressed it on, as stored now: lifted under the lock only if it still stands so (review R13).
         const service = alive();
+        rebind(service);
         const day = throughDate ?? settledThrough.get(taskId)?.day;
         let discovery: MaterialiseDiscovery | null = null;
         let sequence: Sequence | null = null;
@@ -756,7 +889,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         if (disposed) return;
         // The person's act supersedes paused work on the task: it is asked for again, once.
         parked.delete(taskId);
-        const retry = { discovery, sequence };
+        const retry = { discovery, sequence, service };
         const queued = queue.find((q) => q.taskId === taskId);
         if (queued !== undefined) {
           queued.manual = true;
@@ -776,6 +909,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     },
     kick() {
       if (disposed) return;
+      rebind(alive());
       if (unpark()) publishQueue();
       pump();
     },

@@ -6,12 +6,14 @@ import type {
 } from "../../../src/features/tasks/model/contract";
 import { parseDependencyPreview } from "../../../src/features/tasks/model/contract";
 import {
+  admittedMode,
   causeOf,
   editorBlock,
   MAX_PREREQUISITES,
   modesOf,
   prerequisitesOf,
   progressOf,
+  rootAdmitted,
   satisfiedPreview,
   validateList,
 } from "../../../src/features/tasks/model/dependencies";
@@ -203,5 +205,71 @@ describe("the editor", () => {
     expect(editorBlock({ online: true, canEdit: true, preview: null })).toBe(
       "loading",
     );
+  });
+});
+
+/**
+ * Revision 3 (review R15): EVERY mode completes the root, so every mode needs it admitted, with what is sent for it: a tick-box root by
+ * its `can_complete`, a numeric or checklist root only by the evidence entered for it.
+ */
+describe("R15: the root's admission in every mode", () => {
+  test("rootAdmitted: a tick-box root by can_complete; any other by its entered evidence; no root item admits nothing", () => {
+    const can = preview([item(A)]);
+    const cannot: DependencyPreview = {
+      ...can,
+      items: [item(A), item(ROOT, { can_complete: false })],
+    };
+    expect(rootAdmitted(can, ROOT, "checkbox", false)).toBe(true);
+    expect(rootAdmitted(cannot, ROOT, "checkbox", false)).toBe(false);
+    // Entered evidence is not sent for a tick-box root: it admits nothing there.
+    expect(rootAdmitted(cannot, ROOT, "checkbox", true)).toBe(false);
+    expect(rootAdmitted(cannot, ROOT, "numeric", true)).toBe(true);
+    expect(rootAdmitted(cannot, ROOT, "checklist", true)).toBe(true);
+    // A numeric root's can_complete would record a tick its goal refuses.
+    expect(rootAdmitted(can, ROOT, "numeric", false)).toBe(false);
+    expect(rootAdmitted(can, ROOT, "checklist", false)).toBe(false);
+    const rootless: DependencyPreview = { ...can, items: [item(A)] };
+    expect(rootAdmitted(rootless, ROOT, "checkbox", true)).toBe(false);
+    expect(rootAdmitted(rootless, ROOT, "numeric", true)).toBe(false);
+  });
+
+  test("modesOf: without the root, Mark done, Tick the others off and Start anyway all say root (strict still says strict)", () => {
+    const done = preview([item(A, { complete: true })]);
+    const open = preview([item(A)]);
+    expect(modesOf(done, ROOT, false).require_satisfied).toBe("root");
+    expect(modesOf(done, ROOT, true).require_satisfied).toBeNull();
+    expect(modesOf(open, ROOT, true).require_satisfied).toBe("open");
+    expect(modesOf(open, ROOT, false).advisory_override).toBe("root");
+    expect(modesOf(open, ROOT, true).advisory_override).toBeNull();
+    expect(
+      modesOf(preview([item(A)], { strict: true }), ROOT, false)
+        .advisory_override,
+    ).toBe("strict");
+    expect(modesOf(open, ROOT, false).complete_prerequisites).toBe("root");
+  });
+
+  test("admittedMode: no mode is sent without the root; each is sent with it where its own rule allows", () => {
+    const done = preview([item(A, { complete: true })]);
+    const open = preview([item(A)]);
+    for (const mode of [
+      "require_satisfied",
+      "complete_prerequisites",
+      "advisory_override",
+    ] as const) {
+      expect(admittedMode(done, ROOT, false, mode)).toBeNull();
+      expect(admittedMode(open, ROOT, false, mode)).toBeNull();
+    }
+    expect(admittedMode(done, ROOT, true, "require_satisfied")).toBe(
+      "require_satisfied",
+    );
+    expect(admittedMode(done, ROOT, true, "advisory_override")).toBeNull();
+    expect(admittedMode(open, ROOT, true, "require_satisfied")).toBeNull();
+    expect(admittedMode(open, ROOT, true, "advisory_override")).toBe(
+      "advisory_override",
+    );
+    expect(admittedMode(open, ROOT, true, "complete_prerequisites")).toBe(
+      "complete_prerequisites",
+    );
+    expect(admittedMode(open, ROOT, true, "wait")).toBeNull();
   });
 });

@@ -211,6 +211,7 @@ export {
   commitMaterialiseSequence,
   commitTimerCopy,
   commitTimerCorrection,
+  DISCOVERY_REQUEST_ID,
   type DiscoveryWrite,
   issueTimerOrderNow,
   pruneOlderSequences,
@@ -222,7 +223,10 @@ export {
   type SequenceWrite,
   TIMER_COPY_ROWS,
   type TimerCopyRecord,
+  type TimerScopeObservation,
+  type TimerScopeRecord,
   useMaterialiseDiscovery,
   useMaterialiseSequences,
   useTimerCopy,
+  useTimerScope,
 } from "./ui/task-records";
