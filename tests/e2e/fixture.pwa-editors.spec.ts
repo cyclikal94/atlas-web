@@ -217,6 +217,51 @@ test.describe("R40: the production new-task editor across an accepted update", (
     expect(await writes(generations)).toEqual([]);
   });
 
+  test("revision 38 (DA-R40-D): a Lists create dialog kept by its sync control is saved by the update; Back to Lists opens it again on the name typed; nothing is saved", async ({
+    context,
+    generations,
+  }) => {
+    // A modal dialog keeps the page's update region out of reach (revision 38 observation): the person leaves the dialog without
+    // discarding it through its own sync control, which keeps the input for the visit, and accepts the update from the queue.
+    await seedAccount(context, generations, "acct-a", "s1", {
+      validCache: "pwa-r38-lists",
+    });
+    const page = await openApp(context, generations, {
+      route: "/tasks/lists",
+      form: false,
+    });
+    await workerActive(page);
+    await reloadQuietly(page);
+    await page.getByRole("button", { name: "+ New list" }).click();
+    const listName = page
+      .getByRole("dialog")
+      .getByLabel("Name", { exact: true });
+    await listName.fill("R38 unfinished list");
+    await expect(listName).toHaveValue("R38 unfinished list");
+    await page.getByRole("dialog").locator("[data-sync-tone]").click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await quiet(page);
+    await generations.serve("fixture-b");
+    await checkForUpdate(page);
+    await expect(
+      updateRegion(page).getByRole("button", { name: "Save and reload" }),
+    ).toBeVisible();
+    await generations.clearLog();
+    await quiet(page);
+    await updateRegion(page)
+      .getByRole("button", { name: "Save and reload" })
+      .click();
+    await expect(page.locator("html")).toHaveAttribute("data-atlas-build", "b");
+    await displayed(page);
+    await page.goBack();
+    await expect(listName).toHaveValue("R38 unfinished list");
+    await expect(
+      page.getByRole("dialog").locator('[data-recovery-state="restored"]'),
+    ).toBeVisible();
+    expect(await build(page)).toBe("b");
+    expect(await writes(generations), "nothing is submitted").toEqual([]);
+  });
+
   test("CONTROL (the review's): the registered fixture form survives the same worker update", async ({
     context,
     generations,

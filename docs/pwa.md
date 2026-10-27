@@ -371,9 +371,54 @@ update banner offered a plain Reload, the coordinator found the page sealed, and
   takes the model's ticket in the same step as the feature's own ticket; only a durable success covers what it sent, an uncertain or
   refused one keeps the input, and recovery never replays an uncertain operation.
 - **Not recovered.** Passwords and calendar connection secrets (Q4, Q22); the change-password form holds nothing else. Directory searches
-  are presentation, not committed input. The non-secret username of the sign-in and join forms, typed before any account is displayed, is
-  an open owner decision (where pre-account input may be kept): until it is decided it is never written anywhere (`unbound`), counts for an
-  update, and its save fails honestly (retry or an explicit discard), so it is never lost silently.
+  are presentation, not committed input. (Revision 37 left the sign-in and join username unwritten pending an owner decision; revision 38
+  applies that decision, below.)
+
+## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
+
+Revision 37's owners took the recovery model's actions correctly but applied their own effects at the wrong moment or by the wrong rule:
+a "Discard instead" whose storage removal completed after newer input erased that input (R40-A), and a copy the person chose was refused
+once a copy had been restored automatically (R40-B). Each action is now one step of the owner and the model together:
+
+- **Discard at the gesture.** "Discard instead" is admitted only while the model accepts input (`accepting`: no update reload prepared,
+  not retired); admitted, the owner shows its typed baseline and the model holds it in the same synchronous step, and the copies' ordered
+  removal starts. Its completion only reports how the removal went (`RecoveryNotice` says when a copy could not be removed; the session
+  keeps the debt); it never resets the owner. Component-state editors get this from `editor.ts` (`RecoverableEditor.discard`, with each
+  editor's `reset` and optional `baseline`), so no caller awaits the removal; kept-input, the correction and the entry history do the same.
+- **Automatic restore and the person's choice.** The look's restore is automatic: only into untouched input, only if nothing happened in
+  the session since the look began. A copy the person chooses (`restoreAlternative`) replaces what the owner shows at the choice, a copy
+  restored before included (owners get `restore(text, chosen)`); it is applied only if nothing changed the input, the session or the
+  choices since it was made (an edit, a discard, a new session, a later choice or a freeze wins), and an owner with a submission pending
+  refuses it. A choice not applied is reported, never shown as restored. Nothing restored is ever submitted.
+- **Lineage.** The hand-off left to this page and held by it brings the copies its lineage names whether it is restored at once or chosen
+  again later (as the DOM form does), so discarding or submitting it removes its predecessors before the carrier (DA-R40-C).
+- **Submission and settlement.** A submission's ticket is `current` until the input changes (even back to the same text); a success clears
+  the owner only while it is (the households' forms). What a settled save leaves in the recoverable input (a partial add's remaining
+  selection) reaches the model in the same synchronous transition as the session (`settle`), never as the person's edit.
+- **Remount in the same turn.** A component-state editor's or the entry history's unmount is a dismissal decided after the current turn,
+  as kept-input's sessions are: an editor mounted again in that turn (React's development remount) resumes the session, so a copy its host
+  restored is neither discarded nor overwritten by a new session.
+- **Owners added.** The merged Lists dialogs (WEB-10b): create (`list-form:new:dialog`, one stable context), rename (`list-form:<list>`) and
+  the task picker (`list-picker:<list>`: the search and the tasks selected with their titles), through WEB-10b's raw form helpers. Ids, the
+  queued create first seen and any save whose outcome is not known are not kept (docs/lists.md: page memory only): a restored name or
+  selection is a new save with the ids and the read of now. The Lists pane and the list's detail open the dialog on a copy found after a
+  reload. The preset picker now shows its recovery notice, and while an update reload is prepared its footer opens no form.
+- **Observed, not changed: a modal dialog keeps the update region out of reach.** While a dialog editor is open (Lists, calendars, the
+  correction, the policy editor) the page's update region is outside the modal, so its "Save and reload" cannot be reached; leaving with
+  Cancel discards the input, and the input-preserving way out is the dialog's own sync control, which keeps the session for the visit: the
+  update is then accepted from the queue, saves it, and Back reopens the dialog on it (`fixture.pwa-editors.spec.ts`). Whether the update
+  should be reachable from inside a dialog is a design decision for its owner (WEB-15), not made here.
+- **The pre-account username** (Kieran's decision WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026, 26 October 2026). The sign-in and join
+  forms are shown before any account is displayed, so their models (`preAccount`) are bound to this tab's session storage
+  (`tab-session-port.ts`) instead of an account's store, and only for the `sign-in`/`join` contexts and their hand-offs: a copy holds the
+  username's text and nothing else (a password, an invitation token or any other field is refused). The update saves and hands it off as
+  any form; the tab's next page restores only the hand-off left to it (`list` offers nothing, so a duplicated tab or an earlier page's copy
+  is never offered or restored), only into an untouched form, never submitted; the restored copy is removed at once (`releaseSource`) and,
+  once the look has read the store, every other copy of the form in the tab (`sweep`), while the restored text stays unsaved input (a
+  second update saves it again). Leaving the form removes its copies. A pre-account model never retires an account's sessions, nor is it
+  retired by an account's editor; it never writes to an account's store. Storage that cannot be written fails the save (the update stops
+  with retry or an explicit discard); storage that cannot be read leaves the look unavailable, the input as it is. No notice is shown in
+  these forms (the signed-out tree has no announcer); the update's own explicit choices are unchanged.
 
 ## Test builds and constants
 

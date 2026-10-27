@@ -1,4 +1,4 @@
-import { unreadable } from "./control-state";
+import { lineageOf, unreadable } from "./control-state";
 import { decode, encodeText, internalOf, OPAQUE } from "./controls";
 import {
   allResolved,
@@ -31,6 +31,7 @@ import {
   type FormSession,
   list,
   openSession,
+  releaseSource,
   retire,
   retireOtherScopes,
   type SubmissionResult,
@@ -70,6 +71,23 @@ import { getPageRecoveryTab, type RecoveryTab } from "./tab-identity";
  *    refuses a copy of another version: offered, never restored in part, never removed). Everything else is offered (`alternatives`). A look
  *    that could not read the store makes the model `unavailable` (an update's save does not reload the page until a look has read it).
  *
+ * THE OWNER'S ACTIONS (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C4, I3-I6). Each is admitted, and changes both
+ * the owner and the model, in ONE synchronous step at the person's gesture; nothing asynchronous changes the owner's input afterwards:
+ *
+ *  - DISCARD. `discard(text)` puts the model's input at `text` (the owner's own typed baseline, which the owner shows in the same step) and
+ *    starts the copies' ordered removal. Its completion only reports how that removal went (a failure stays the session's debt); it is
+ *    never a moment to reset the owner, which would erase input typed after the gesture. Refused while frozen or retired (`accepting`): the
+ *    owner then changes nothing either.
+ *  - RESTORE, AUTOMATIC OR CHOSEN. The look's restore is automatic: only into untouched input, only if nothing happened since the look
+ *    began. A copy the person chooses (`restoreAlternative`) is a deliberate replacement of what the owner shows at the choice, a copy
+ *    restored before included: the owner is asked with `chosen` (no untouched rule), and the choice is applied only if nothing changed the
+ *    input, the session or the choices since it was made (an edit, a discard, a new session, a later choice: the later act wins), and
+ *    never while a submission of the input is pending (its outcome settles what it sent). Neither ever submits.
+ *  - LINEAGE. The hand-off left to this page and held by it carries the exact copies its lineage names, whether it is restored at once or
+ *    chosen later (as the DOM form does); any other copy brings none.
+ *  - SETTLEMENT. What a settling submission leaves in the owner's input (`settle`: a partial save's remaining selection) reaches the model
+ *    in the same step, even while frozen (the update waits for the submission before its last save), and is not the person's edit of it.
+ *
  * Memory only: nothing here is written anywhere except through the port.
  */
 
@@ -91,6 +109,8 @@ export interface ModelView {
 export interface ModelTicket {
   succeeded(): Promise<SubmissionResult>;
   failed(): void;
+  /** Revision 38 (I7): the input is still what this submission sent (nothing changed it since): only then may its success clear the owner. */
+  current(): boolean;
 }
 
 export type ModelAlternativeResult =
@@ -117,11 +137,13 @@ export interface ModelOptions {
   /** The text the editor starts from (what the next page shows without a copy). "" when opening the editor at all is input. */
   start: string;
   /**
-   * The owner takes a restored copy's text (the copy chosen, or the newest left to it). False: it cannot (its input is no longer untouched,
-   * or its codec cannot read that text): nothing changes, and the copy is offered. Called while the look applies its answer: it must only
-   * take the text into the owner's input (never call back into the model).
+   * The owner takes a restored copy's text. `chosen` false: the look's automatic restore of the newest copy left to it, only into untouched
+   * input. `chosen` true (revision 38, R40-B): the person chose this copy; it replaces what the owner shows now (a copy restored before
+   * included), unless the owner cannot take it now (a submission of its input pending). False: it cannot (or its codec cannot read that
+   * text): nothing changes, and the copy stays offered. Called while the answer is applied: it must only take the text into the owner's
+   * input (never call back into the model).
    */
-  restore(text: string): boolean;
+  restore(text: string, chosen: boolean): boolean;
   /** The owner's input is untouched (nothing typed, chosen or submitted since it opened): a copy left to it may be restored into it. */
   untouched(): boolean;
   /**
@@ -129,6 +151,12 @@ export interface ModelOptions {
    * `validity.badInput`). While it does the model is unfinished: dirty, and its saves fail (an update reload stops with retry or an
    * explicit discard), never a copy of the last value as if the field held it. Set by the editor shown (`probe`).
    */
+  /**
+   * Revision 38 (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): the model of a form shown before any account is displayed, bound to the
+   * tab's pre-account store (`tab-session-port.ts`). A copy restored is removed at once (its source and lineage), not when this page's own
+   * copy lands, and binding it never retires another scope's sessions (an account's kept input stays the account's).
+   */
+  preAccount?: boolean;
   /** Tests only. */
   registry?: RecoverableFormRegistry;
   tab?: RecoveryTab;
@@ -153,9 +181,23 @@ export interface RecoverableModel {
   edit(text: string): boolean;
   /** An update reload is being prepared: the recovery actions are unavailable (disable their controls). */
   frozen(): boolean;
+  /**
+   * Revision 38 (I5): an action of the person's (a discard, an edit) is admitted now: no update reload is being prepared and the model is
+   * not retired. Asked at the gesture, before the owner changes anything.
+   */
+  accepting(): boolean;
+  /**
+   * Revision 38 (C5): what a settling submission leaves in the owner's input, given in the same step as the owner takes it (taken even while
+   * frozen: the update waits for that submission before its last save). Not the person's edit: it covers nothing and submits nothing.
+   */
+  settle(text: string): void;
   /** Before sending a submission; null while an update reload is prepared (send nothing). */
   submitting(): ModelTicket | null;
-  /** "Discard instead" (or Cancel): the copies are discarded and the input becomes `text` (what the editor shows after it). */
+  /**
+   * "Discard instead" (or Cancel): the copies are discarded and the input becomes `text` NOW (what the owner shows from this same step on).
+   * The promise settles with the copies' removal only (revision 38, R40-A): never reset the owner when it settles. "failed" at once, with
+   * nothing changed, when not `accepting`.
+   */
   discard(text: string): Promise<DiscardResult>;
   /** The owner's session ended without a submission (a departure drops it): its copies are discarded, as an explicit discard. */
   end(): Promise<DiscardResult>;
@@ -287,6 +329,8 @@ export function createRecoverableModel(
 
   // ---- the look -------------------------------------------------------------------------------------------------------------------
   let running: { cancel(): void } | null = null;
+  /** Revision 38 (C3): the person's choices of a copy, in the order made; only the latest one made may still be applied. */
+  let choices = 0;
   const look = (
     current: FormSession,
     mode: "restore" | "offer",
@@ -339,11 +383,17 @@ export function createRecoverableModel(
         newest && !unreadable(newest)
           ? textOf(internalOf(newest)[MODEL])
           : null;
-      if (newest && copied !== null && untouched && options.restore(copied)) {
+      if (
+        newest &&
+        copied !== null &&
+        untouched &&
+        options.restore(copied, false)
+      ) {
         const values = internalOf(newest);
         take(copied);
         noteInput(fields, [MODEL]);
         adoptCopy(current, newest, values, found, lineage);
+        if (options.preAccount) void releaseSource(current);
         relist();
         setView({
           unavailable: false,
@@ -390,7 +440,7 @@ export function createRecoverableModel(
       }
       if (port.pin && pinned === null) return;
       const scope = pinned?.scope ?? UNSCOPED;
-      retireOtherScopes(registry, scope);
+      if (!options.preAccount) retireOtherScopes(registry, scope);
       const existing = registry.session(formContext) as FormSession | undefined;
       session = openSession({
         formContext,
@@ -457,6 +507,14 @@ export function createRecoverableModel(
       return true;
     },
     frozen: () => registry.frozen(),
+    accepting: () => !registry.frozen() && !retired,
+    settle(next) {
+      if (retired || next === text) return;
+      take(next);
+      noteInput(fields, [MODEL]);
+      refresh();
+      relist();
+    },
     submitting() {
       if (registry.frozen()) return null;
       let settle: () => void = () => undefined;
@@ -469,6 +527,9 @@ export function createRecoverableModel(
         outstanding,
         done: false,
       };
+      const current = (): boolean =>
+        fields.input === ticket.input &&
+        sameHeld(fields, held(fields), ticket.held);
       tickets.add(ticket);
       if (session) track(session, outstanding);
       else relist();
@@ -510,10 +571,12 @@ export function createRecoverableModel(
           outcome = Promise.resolve<SubmissionResult>("failed");
           finish();
         },
+        current,
       };
     },
     discard(text) {
-      if (registry.frozen()) return Promise.resolve<DiscardResult>("failed");
+      if (registry.frozen() || retired)
+        return Promise.resolve<DiscardResult>("failed");
       return terminal(text);
     },
     end() {
@@ -545,6 +608,9 @@ export function createRecoverableModel(
         return Promise.resolve<ModelAlternativeResult>("unavailable");
       const began = current.order.next;
       const beganInput = fields.input;
+      // Revision 38 (C3): a later choice wins over this one, whichever read answers first.
+      choices += 1;
+      const choice = choices;
       const handoff = isHandoff(chosen);
       const ours = handoff && tabInstanceId === current.claimed;
       const apply = (copy: RecoverySnapshot): ModelAlternativeResult => {
@@ -553,12 +619,15 @@ export function createRecoverableModel(
           : textOf(internalOf(copy)[MODEL]);
         if (
           current.retired ||
+          retired ||
           registry.frozen() ||
           targetOf(current) === null ||
           current.order.next !== began ||
           fields.input !== beganInput ||
+          choices !== choice ||
+          [...tickets].some((ticket) => !ticket.done) ||
           chosenText === null ||
-          !options.restore(chosenText)
+          !options.restore(chosenText, true)
         )
           return "refused";
         take(chosenText);
@@ -572,11 +641,14 @@ export function createRecoverableModel(
                   context: copy.formContext,
                   values: internalOf(copy),
                   capture: copy.capture ?? null,
-                  lineage: [],
+                  // Revision 38 (DA-R40-C, I6): the hand-off left to this page brings the copies its lineage names, as read just now, whether
+                  // it was restored at once or chosen later (the DOM form's rule); any other copy brings none.
+                  lineage: ours ? lineageOf(copy) : [],
                   at: current.order.next,
                 }
               : null,
         };
+        if (options.preAccount) void releaseSource(current);
         relist();
         setView({
           restored: copy,

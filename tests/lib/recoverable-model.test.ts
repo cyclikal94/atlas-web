@@ -7,6 +7,7 @@ import {
   prepareHandoffs,
   storageHandoffs,
 } from "../../src/lib/form-recovery/handoff";
+import type { MemoryRecoveryAdapter } from "../../src/lib/form-recovery/memory-adapter";
 import {
   createRecoverableModel,
   type RecoverableModel,
@@ -47,6 +48,9 @@ class Owner {
   /** What `restore` is told and whether it takes it. */
   takes = true;
   restored: string[] = [];
+  /** Revision 38: the copies the person chose that it took (a choice needs no untouched input; a pending submission refuses it). */
+  chosen: string[] = [];
+  submitting = false;
 }
 
 class ModelPage {
@@ -76,11 +80,15 @@ class ModelPage {
     this.model = createRecoverableModel({
       formContext: context,
       start,
-      restore: (text) => {
-        if (!this.owner.takes || this.owner.revision !== 0) return false;
+      restore: (text, chosen) => {
+        if (!this.owner.takes) return false;
+        // Revision 38 (R40-B): as the product owners (kept-input, correction-owner): automatic only into untouched input; a choice
+        // replaces what the owner holds unless a submission of it is pending.
+        if (chosen ? this.owner.submitting : this.owner.revision !== 0)
+          return false;
         this.owner.value = text;
         this.owner.revision += 1;
-        this.owner.restored.push(text);
+        (chosen ? this.owner.chosen : this.owner.restored).push(text);
         return true;
       },
       untouched: () => this.owner.revision === 0,
@@ -373,5 +381,331 @@ describe("unfinished native input and account scope (R40, I2/I4)", () => {
     (a.spy as ScopedSpyPort).scope = "scope-2";
     expect(await flushDirty(a.registry)).toEqual(["failed"]);
     expect(await world.store.list(CONTEXT)).toHaveLength(0);
+  });
+});
+
+/**
+ * WEB-14a revision 38 (review of revision 37, R40-A/R40-B; design assessment C2-C5, I3-I7, Q3/Q4/Q6, schedules S3-S6). The owner's actions
+ * at the model: the look's automatic restore against the person's choice of a copy, competing actions while a choice's read is held, the
+ * claimed hand-off's lineage on reselection, a submission's `current`, a settlement's `settle` and admission (`accepting`). Every order is
+ * forced by explicit held reads (entered/released), never by time.
+ */
+/** A port whose ORDINARY loads (an explicit choice's re-read) are each held, in the order asked, until that one is released. */
+class HeldLoads extends SpyPort {
+  readonly waiting: Array<() => void> = [];
+  holding = false;
+  constructor(private readonly memory: MemoryRecoveryAdapter) {
+    super(memory);
+  }
+  override async load(formContext: string, id: string) {
+    if (!this.holding || formContext.startsWith("atlas-update-handoff:"))
+      return super.load(formContext, id);
+    const answer = await this.memory.load(formContext, id);
+    await new Promise<void>((resolve) => this.waiting.push(resolve));
+    return answer;
+  }
+  /** Releases the `n`th held load (in the order asked); resolves once it has been applied. */
+  async answer(n: number): Promise<void> {
+    this.waiting[n]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
+/** A copy a tab that has gone left (no lock holds its id). */
+async function gone(id: string, text: string, savedAt: string): Promise<void> {
+  expect(
+    await world.store.save({
+      formContext: CONTEXT,
+      tabInstanceId: id,
+      values: { model: text },
+      savedAt,
+      capture: `${id}-capture`,
+    }),
+  ).toBe("saved");
+}
+const OLDER = "2026-10-25T10:00:00.000Z";
+const NEWER = "2026-10-25T11:00:00.000Z";
+const NEWEST = "2026-10-25T12:00:00.000Z";
+
+describe("revision 38: automatic restore and the person's choice (R40-B, S3)", () => {
+  test("after the automatic restore, the copy the person chooses replaces it; nothing is submitted", async () => {
+    await gone("gone-older", "{older}", OLDER);
+    await gone("gone-newer", "{newer}", NEWER);
+    const b = await page("B").bound();
+    expect(b.owner.restored).toEqual(["{newer}"]);
+    expect(b.model.view().alternatives.map((c) => c.tabInstanceId)).toEqual([
+      "gone-older",
+    ]);
+    expect(await b.model.restoreAlternative("gone-older")).toBe("restored");
+    expect(b.owner.value).toBe("{older}");
+    expect(b.owner.chosen).toEqual(["{older}"]);
+    expect(b.model.view().restored?.tabInstanceId).toBe("gone-older");
+    expect(b.model.view().alternatives.map((c) => c.tabInstanceId)).toEqual([
+      "gone-newer",
+    ]);
+    // The model holds what the owner shows: an update saves the chosen text.
+    b.model.show();
+    expect(await flushDirty(b.registry)).toEqual(["saved"]);
+    expect(
+      (await world.store.list(CONTEXT))
+        .filter((copy) => copy.tabInstanceId.startsWith("B-"))
+        .map((copy) => copy.values.model),
+    ).toEqual(["{older}"]);
+  });
+
+  test("a choice made after the person typed replaces what they typed (the choice is the later act)", async () => {
+    await gone("gone-older", "{older}", OLDER);
+    await gone("gone-newer", "{newer}", NEWER);
+    const b = await page("B").bound();
+    expect(b.type("{typed after the restore}")).toBe(true);
+    expect(await b.model.restoreAlternative("gone-older")).toBe("restored");
+    expect(b.owner.value).toBe("{older}");
+  });
+
+  test("CONTROL: the look's automatic restore still never overwrites input typed before it answered", async () => {
+    await gone("gone-newer", "{newer}", NEWER);
+    const b = page("B");
+    b.model.begin("{}");
+    b.type("{typed first}");
+    await b.bound();
+    expect(b.owner.restored).toEqual([]);
+    expect(b.owner.value).toBe("{typed first}");
+  });
+
+  test("an owner with a submission pending refuses a choice: nothing changes, the copy stays offered", async () => {
+    await gone("gone-older", "{older}", OLDER);
+    await gone("gone-newer", "{newer}", NEWER);
+    const b = await page("B").bound();
+    b.owner.submitting = true;
+    expect(await b.model.restoreAlternative("gone-older")).toBe("refused");
+    expect(b.owner.value).toBe("{newer}");
+    expect(b.model.view().alternatives.map((c) => c.tabInstanceId)).toEqual([
+      "gone-older",
+    ]);
+  });
+});
+
+describe("revision 38: a choice while a submission is pending (S4, I7)", () => {
+  test("a choice is refused while the model's submission is pending, whatever the owner says; after it settles the choice is taken", async () => {
+    await gone("gone-older", "{older}", OLDER);
+    await gone("gone-newer", "{newer}", NEWER);
+    const b = await page("B").bound();
+    const ticket = b.model.submitting();
+    if (!ticket) throw new Error("no ticket");
+    expect(await b.model.restoreAlternative("gone-older")).toBe("refused");
+    expect(b.owner.value).toBe("{newer}");
+    ticket.failed();
+    expect(await b.model.restoreAlternative("gone-older")).toBe("restored");
+    expect(b.owner.value).toBe("{older}");
+  });
+});
+
+describe("revision 38: what happens while a choice's read is held (S4)", () => {
+  async function threeCopies(): Promise<ModelPage & { port: HeldLoads }> {
+    await gone("gone-a", "{a}", OLDER);
+    await gone("gone-b", "{b}", NEWER);
+    await gone("gone-c", "{c}", NEWEST);
+    const b = page("B");
+    const port = new HeldLoads(world.store);
+    await b.bound(port);
+    expect(b.owner.restored).toEqual(["{c}"]);
+    port.holding = true;
+    return Object.assign(b, { port });
+  }
+
+  test("input typed after the choice wins: the choice's late answer is refused, the input stays", async () => {
+    const b = await threeCopies();
+    const choice = b.model.restoreAlternative("gone-a");
+    await until(() => b.port.waiting.length === 1);
+    expect(b.type("{typed while it read}")).toBe(true);
+    await b.port.answer(0);
+    expect(await choice).toBe("refused");
+    expect(b.owner.value).toBe("{typed while it read}");
+    expect(b.owner.chosen).toEqual([]);
+  });
+
+  test("a discard after the choice wins: the choice's late answer is refused, the discarded input stays discarded", async () => {
+    const b = await threeCopies();
+    const choice = b.model.restoreAlternative("gone-a");
+    await until(() => b.port.waiting.length === 1);
+    expect(await b.model.discard("{}")).toBe("discarded");
+    b.owner.value = "{}";
+    await b.port.answer(0);
+    expect(await choice).toBe("refused");
+    expect(b.owner.chosen).toEqual([]);
+    expect(b.owner.value).toBe("{}");
+  });
+
+  test("of two choices, the later one wins whichever read answers first", async () => {
+    for (const order of [
+      [0, 1],
+      [1, 0],
+    ]) {
+      world = new World();
+      const b = await threeCopies();
+      const first = b.model.restoreAlternative("gone-a");
+      const second = b.model.restoreAlternative("gone-b");
+      await until(() => b.port.waiting.length === 2);
+      for (const n of order) await b.port.answer(n);
+      expect(await first, `order ${order}`).toBe("refused");
+      expect(await second, `order ${order}`).toBe("restored");
+      expect(b.owner.value, `order ${order}`).toBe("{b}");
+      b.leave();
+    }
+  });
+
+  test("a freeze after the choice wins: refused, nothing changes", async () => {
+    const b = await threeCopies();
+    const choice = b.model.restoreAlternative("gone-a");
+    await until(() => b.port.waiting.length === 1);
+    const release = b.registry.freeze();
+    await b.port.answer(0);
+    expect(await choice).toBe("refused");
+    expect(b.owner.value).toBe("{c}");
+    release();
+  });
+
+  test("CONTROL: with nothing in between, the held choice is applied when its read answers", async () => {
+    const b = await threeCopies();
+    const choice = b.model.restoreAlternative("gone-a");
+    await until(() => b.port.waiting.length === 1);
+    await b.port.answer(0);
+    expect(await choice).toBe("restored");
+    expect(b.owner.value).toBe("{a}");
+  });
+});
+
+describe("revision 38: the claimed hand-off chosen again keeps its lineage (DA-R40-C, S5)", () => {
+  /** Page A leaves an ordinary copy O and the hand-off H naming it; X is an independent gone copy; B claims H and offers X. */
+  async function claimed(): Promise<{
+    b: ModelPage;
+    storage: TabStorage;
+    ordinary: string;
+    handoff: string;
+  }> {
+    const storage = new TabStorage();
+    const a = await page("A", storage).bound();
+    a.model.show();
+    a.model.begin("{}");
+    a.type("{A}");
+    expect(await a.update()).toEqual(["saved", "saved"]);
+    const ordinary = (await world.store.list(CONTEXT))[0]?.tabInstanceId;
+    if (!ordinary) throw new Error("setup: no ordinary copy");
+    a.leave();
+    await gone("gone-x", "{X}", OLDER);
+    const b = await page("B", storage).bound();
+    expect(b.owner.restored).toEqual(["{A}"]);
+    const handoff = b.model.view().restored?.tabInstanceId;
+    if (!handoff) throw new Error("setup: the hand-off was not restored");
+    // O is part of the hand-off (never offered on its own); X is another branch.
+    expect(b.model.view().alternatives.map((c) => c.tabInstanceId)).toEqual([
+      "gone-x",
+    ]);
+    return { b, storage, ordinary, handoff };
+  }
+
+  test("choose X, choose the hand-off again, discard: the hand-off AND the copy it names go; X stays; a later page cannot restore {A}", async () => {
+    const { b, ordinary, handoff } = await claimed();
+    expect(await b.model.restoreAlternative("gone-x")).toBe("restored");
+    expect(await b.model.restoreAlternative(handoff)).toBe("restored");
+    expect(b.owner.value).toBe("{A}");
+    expect(await b.model.discard("{}")).toBe("discarded");
+    const left = (await world.store.list(CONTEXT)).map((c) => c.tabInstanceId);
+    expect(left).not.toContain(ordinary);
+    expect(left).toContain("gone-x");
+    expect(await world.handoffs(CONTEXT)).toHaveLength(0);
+    b.leave();
+    const c = await page("C").bound();
+    expect(c.owner.restored).toEqual(["{X}"]);
+    expect(
+      c.model.view().alternatives.map((copy) => copy.values.model),
+    ).not.toContain("{A}");
+  });
+
+  test("CONTROL: the hand-off restored at once and discarded removes the same two copies", async () => {
+    const { b, ordinary } = await claimed();
+    expect(await b.model.discard("{}")).toBe("discarded");
+    const left = (await world.store.list(CONTEXT)).map((c) => c.tabInstanceId);
+    expect(left).not.toContain(ordinary);
+    expect(left).toContain("gone-x");
+    expect(await world.handoffs(CONTEXT)).toHaveLength(0);
+  });
+
+  test("a predecessor whose removal fails keeps the hand-off as its carrier (removed last, never before what it names)", async () => {
+    const { b, ordinary, handoff } = await claimed();
+    expect(await b.model.restoreAlternative("gone-x")).toBe("restored");
+    expect(await b.model.restoreAlternative(handoff)).toBe("restored");
+    world.store.failDiscardOf = (_context, id) => id === ordinary;
+    await b.model.discard("{}");
+    expect(
+      (await world.store.list(CONTEXT)).map((c) => c.tabInstanceId),
+    ).toContain(ordinary);
+    expect(
+      (await world.handoffs(CONTEXT)).map((c) => c.tabInstanceId),
+    ).toContain(handoff);
+  });
+});
+
+describe("revision 38: admission, a submission's currency and a settlement (R40-A, I5, I7, C5)", () => {
+  test("accepting: false while an update reload is prepared and once retired; the discard then changes nothing", async () => {
+    const a = await page("A").bound();
+    a.model.show();
+    a.model.begin("{}");
+    a.type("{typed}");
+    expect(a.model.accepting()).toBe(true);
+    const release = a.registry.freeze();
+    expect(a.model.accepting()).toBe(false);
+    expect(await a.model.discard("{}")).toBe("failed");
+    release();
+    expect(a.registry.dirty()).toHaveLength(1);
+    a.model.retire();
+    expect(a.model.accepting()).toBe(false);
+    expect(await a.model.discard("{}")).toBe("failed");
+  });
+
+  test("the discard takes the input at the gesture: input typed while its removal is pending is the person's, dirty and saved", async () => {
+    const a = await page("A").bound();
+    a.model.show();
+    a.model.begin("{}");
+    a.type("{restored-ish}");
+    await flushDirty(a.registry);
+    // Still pending (its removal not landed): the person types again before it completes.
+    const discarded = a.model.discard("{}");
+    a.type("{newer}");
+    expect(await discarded).toBe("discarded");
+    expect(a.registry.dirty()).toHaveLength(1);
+    expect(await flushDirty(a.registry)).toEqual(["saved"]);
+    expect(
+      (await world.store.list(CONTEXT)).map((copy) => copy.values.model),
+    ).toEqual(["{newer}"]);
+  });
+
+  test("a ticket is current until the input changes, even back to the same text", async () => {
+    const a = await page("A").bound();
+    a.model.begin("{}");
+    a.type("{sent}");
+    const ticket = a.model.submitting();
+    if (!ticket) throw new Error("no ticket");
+    expect(ticket.current()).toBe(true);
+    a.type("{other}");
+    a.type("{sent}");
+    expect(ticket.current()).toBe(false);
+  });
+
+  test("a settlement reaches the model while frozen (the update waits for it before its last save); an edit does not", async () => {
+    const a = await page("A").bound();
+    a.model.show();
+    a.model.begin("{}");
+    a.type("{all selected}");
+    const ticket = a.model.submitting();
+    const release = a.registry.freeze();
+    expect(a.type("{typed while frozen}")).toBe(false);
+    a.model.settle("{the rest}");
+    ticket?.failed();
+    expect(await flushDirty(a.registry)).toEqual(["saved"]);
+    release();
+    expect(
+      (await world.store.list(CONTEXT)).map((copy) => copy.values.model),
+    ).toEqual(["{the rest}"]);
   });
 });

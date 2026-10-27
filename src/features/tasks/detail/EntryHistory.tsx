@@ -14,6 +14,7 @@ import {
   type ModelTicket,
   type RecoverableModel,
 } from "../../../lib/form-recovery/model";
+import type { DiscardResult } from "../../../lib/form-recovery/port";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { pageFormRegistry } from "../../../lib/form-recovery/registry";
 import type { TaskActions } from "../actions";
@@ -234,9 +235,11 @@ let fixDrafts = 0;
 interface FixRecovery {
   readonly identity: string;
   readonly model: RecoverableModel;
-  /** The mounted history's take of a restored copy (none mounted: nothing restored). */
-  restore: ((text: string) => boolean) | null;
+  /** The mounted history's take of a restored copy (none mounted: nothing restored); `chosen`: the person chose it (revision 38). */
+  restore: ((text: string, chosen: boolean) => boolean) | null;
   untouched: () => boolean;
+  /** Revision 38 (S12): the histories of the stream mounted now (one unmounted and mounted again in the same turn goes on). */
+  mounts: number;
 }
 const fixModels = new Map<string, FixRecovery>();
 /** A pending save's ticket, by its draft and the revision it submitted. */
@@ -259,10 +262,11 @@ function fixRecovery(
     identity,
     restore: null,
     untouched: () => true,
+    mounts: 0,
     model: createRecoverableModel({
       formContext: `entry-fix:${progressId}`,
       start: "",
-      restore: (text) => linked.restore?.(text) ?? false,
+      restore: (text, chosen) => linked.restore?.(text, chosen) ?? false,
       untouched: () => linked.untouched(),
     }),
   };
@@ -1032,10 +1036,19 @@ export function EntryHistory({
   };
   recovery.untouched = () => holding() === null;
   // A copy left by the page before an update: parked for its entry (a draft of the person's, never sent), and opened when that entry
-  // may be fixed now. Refused while the stream holds input of its own.
-  recovery.restore = (text) => {
+  // may be fixed now. The look's automatic restore is refused while the stream holds input of its own. Revision 38 (R40-B): a copy the
+  // person CHOSE replaces the fix the stream holds (open or parked: the selection that opened it is ended, as Cancel ends it) unless a save
+  // of it is pending; it is opened on its own entry only if that entry may be fixed now, as any restored fix is.
+  recovery.restore = (text, chosen) => {
     const found = decodeFix(text);
-    if (found === null || holding() !== null || !mounted.current) return false;
+    if (found === null || !mounted.current) return false;
+    const mine = holding();
+    if (mine !== null && (!chosen || mine.saving !== null)) return false;
+    if (mine !== null) {
+      sel.current += 1;
+      fixRef.current = null;
+      setFix(null);
+    }
     fixDrafts += 1;
     parked.current = {
       owner,
@@ -1225,12 +1238,18 @@ export function EntryHistory({
     recovery.model.bind(port);
   }, [recovery, port]);
   // The history goes: input it kept for a visit to the sync screens stays the model's; otherwise it was dropped, and its copies go too.
-  useEffect(
-    () => () => {
-      if (!keptFixes.has(ownerRef.current)) void recovery.model.end();
-    },
-    [recovery],
-  );
+  // Revision 38 (S12): decided after the current turn, as the task editors' sessions are (`kept-input.ts`): a history of the stream mounted
+  // again in that turn (React's development remount) goes on with it, and a copy its look restores is not discarded under it.
+  useEffect(() => {
+    recovery.mounts += 1;
+    return () => {
+      recovery.mounts -= 1;
+      setTimeout(() => {
+        if (recovery.mounts === 0 && !keptFixes.has(ownerRef.current))
+          void recovery.model.end();
+      }, 0);
+    };
+  }, [recovery]);
   const fixForm =
     fix === null ? null : (
       <FixForm
@@ -1294,15 +1313,17 @@ export function EntryHistory({
         recovery={{
           view: recoveryView,
           locked,
-          discard: async () => {
-            const result = await recovery.model.discard("");
-            // "Discard instead": the restored fix goes, open or parked.
-            if (!recovery.model.frozen()) {
-              modelText.current = null;
-              parked.current = null;
-              fixRef.current = null;
-              setFix(null);
-            }
+          discard: () => {
+            // "Discard instead": the restored fix goes, open or parked, at the gesture (revision 38, R40-A), or nothing changes; the copies'
+            // removal completing later changes nothing on screen. The selection that opened it ends too, as Cancel ends it.
+            if (!recovery.model.accepting())
+              return Promise.resolve<DiscardResult>("failed");
+            const result = recovery.model.discard("");
+            sel.current += 1;
+            modelText.current = null;
+            parked.current = null;
+            fixRef.current = null;
+            setFix(null);
             return result;
           },
           retry: () => recovery.model.retry(),

@@ -15,6 +15,7 @@ import type {
   RecoverableModel,
   RecoveryControls,
 } from "../../../lib/form-recovery/model";
+import type { DiscardResult } from "../../../lib/form-recovery/port";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import { pageFormRegistry } from "../../../lib/form-recovery/registry";
 import type { TaskActions } from "../actions";
@@ -384,14 +385,15 @@ export function CorrectionDialog({
     view: recoveryView,
     locked,
     discard() {
+      // Admitted at the gesture or not at all (revision 38, R40-A): the session, the dialog and the model take the day as it is now in
+      // this same step; the copies' removal completing later changes nothing on screen.
+      if (!model.accepting()) return Promise.resolve<DiscardResult>("failed");
       const fresh = correctionFrom(row.data);
       const result = model.discard(encodeCorrection(fresh));
-      if (!model.frozen()) {
-        if (session.current !== null)
-          resetCorrection(key, session.current, fresh);
-        setState(fresh);
-        setErrors({});
-      }
+      if (session.current !== null)
+        resetCorrection(key, session.current, fresh);
+      setState(fresh);
+      setErrors({});
       return result;
     },
     retry: () => model.retry(),

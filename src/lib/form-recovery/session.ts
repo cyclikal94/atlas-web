@@ -611,6 +611,27 @@ async function settleDebts(
 }
 
 /**
+ * WEB-14a revision 38 (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): the copy the session restored (its source, and every copy a hand-off
+ * source names) is removed NOW, not once this page's own copy lands: its input stays the session's, unsaved (an update saves it again).
+ * What does not land stays owed (`debts`: tried again at the next save or terminal act).
+ */
+export function releaseSource(session: FormSession): Promise<void> {
+  const source = session.persisted.source;
+  const target = targetOf(session);
+  if (source === null || target === null) return Promise.resolve();
+  session.persisted = {
+    ...session.persisted,
+    source: null,
+    debts: distinctCopies([
+      ...session.persisted.debts,
+      ...source.lineage,
+      sourceTarget(source),
+    ]),
+  };
+  return track(session, settleDebts(session, target, session.order.next));
+}
+
+/**
  * Whether the session's copy needs no update hand-off, or has one (revision 6, R13): no copy of this page's own, or its hand-off holds
  * that copy's order. A session of another account's database than the one the page shows now cannot write one there and is not asked to
  * (its copy stays an ordinary copy in that database).

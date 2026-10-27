@@ -205,6 +205,13 @@ export function ManageSourceDialog({
       setEnabled(input.enabled);
       saves.current.invalidate();
     },
+    // "Discard instead" (revision 38, R40-A): at the gesture, never when the copies' removal completes (a later save stays valid).
+    reset: (input) => {
+      touched.current = false;
+      setTimezone(input.timezone);
+      setEnabled(input.enabled);
+      saves.current.invalidate();
+    },
   });
   const changeSettings = (next: ManageInput): boolean => {
     if (!recovery.edit(next)) return false;
@@ -386,20 +393,7 @@ export function ManageSourceDialog({
             <span className="text-[12px] text-ink-2">{LABEL_READ_ONLY}</span>
           </p>
         </div>
-        <RecoveryNotice
-          recovery={{
-            ...recovery,
-            discard: async () => {
-              const result = await recovery.discard();
-              touched.current = false;
-              setTimezone(null);
-              setEnabled(dialog.enable === true ? true : null);
-              saves.current.invalidate();
-              return result;
-            },
-          }}
-          firstFieldRef={timezoneRef}
-        />
+        <RecoveryNotice recovery={recovery} firstFieldRef={timezoneRef} />
         <Field
           ref={timezoneRef}
           label={TIMEZONE}

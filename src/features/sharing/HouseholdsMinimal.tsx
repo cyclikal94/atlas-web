@@ -53,6 +53,11 @@ function useRecoverableText(identity: string, context: string) {
     start: () => "",
     untouched: () => !touched.current,
     restored: setText,
+    // "Discard instead" (revision 38, R40-A): at the gesture, never when the copies' removal completes.
+    reset: (value) => {
+      touched.current = false;
+      setText(value);
+    },
   });
   return {
     text,
@@ -62,21 +67,16 @@ function useRecoverableText(identity: string, context: string) {
       touched.current = true;
       setText(next);
     },
-    /** Cleared after a send that succeeded: a new session from nothing. */
+    /**
+     * Cleared after a send that succeeded: a new session from nothing. Revision 38 (I7): only while the input is still what that send
+     * sent (`ModelTicket.current`, asked at the answer); text typed while it was on its way stays.
+     */
     clear() {
       touched.current = false;
       recovery.begin("");
       setText("");
     },
-    recovery: {
-      ...recovery,
-      discard: async () => {
-        const result = await recovery.discard();
-        touched.current = false;
-        setText("");
-        return result;
-      },
-    },
+    recovery,
   };
 }
 
@@ -483,9 +483,10 @@ export function HouseholdsMinimal() {
             { kind: "create_household", id: env.newId(), name: name.trim() },
             copy.CREATED,
           ).then((ok) => {
+            const unchanged = ticket.current();
             if (ok) void ticket.succeeded();
             else ticket.failed();
-            if (ok && mounted.current) draft.clear();
+            if (ok && unchanged && mounted.current) draft.clear();
           });
         }}
       >
@@ -612,9 +613,10 @@ function HouseholdRow({
             const ticket = draft.recovery.submitting();
             if (ticket === null) return;
             void onInvite(username.trim()).then((ok) => {
+              const unchanged = ticket.current();
               if (ok) void ticket.succeeded();
               else ticket.failed();
-              if (ok) draft.clear();
+              if (ok && unchanged) draft.clear();
             });
           }}
         >

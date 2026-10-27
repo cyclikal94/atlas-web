@@ -14,6 +14,7 @@ import {
   type RecoverableModel,
   type RecoveryControls,
 } from "../../lib/form-recovery/model";
+import type { DiscardResult } from "../../lib/form-recovery/port";
 import { pageFormRegistry } from "../../lib/form-recovery/registry";
 import {
   forgetTaskVisits,
@@ -78,14 +79,22 @@ import {
  * (the editor keeps what it shows; nothing is typed after the last save). After the reload the editor's look restores the copy left to it
  * into its session (`restoreKept`; never submitted), only while that session is untouched; a screen that shows no editor yet (the new
  * task's preset picker) restores it as the stage the person had reached (`useKeptRecovery`).
+ *
+ * Revision 38 (review of revision 37, R40-B; design assessment C3, C5): a copy the PERSON chooses (the notice's other copies) replaces the
+ * session's input whatever was typed or restored before (the model has already checked that nothing changed it since the choice), unless a
+ * save of the session is pending; never submitted. What a settled save leaves in the session (`completeKept`'s `change`) reaches the
+ * model in the same transition when it changes the recoverable input (a partial save's remaining selection), never as the person's edit.
  */
 export interface KeptRecovery<T> {
   /** Where the copies are kept: the editor and its target (never a session number). The account is the store's. */
   readonly context: string;
   /** The input as one text (versioned; never a secret). */
   encode(value: T): string;
-  /** The text of a copy back into input; null when it is not one this build can read (offered, never restored in part). */
-  decode(text: string): T | null;
+  /**
+   * The text of a copy back into input; null when it is not one this build can read (offered, never restored in part). `start`: what the
+   * editor would start from now (revision 38: what the codec does not keep, such as a new save's fresh ids, comes from it, never the copy).
+   */
+  decode(text: string, start: T): T | null;
 }
 
 interface Linked {
@@ -94,6 +103,8 @@ interface Linked {
   readonly recovery: KeptRecovery<unknown>;
   /** The visit an entry restored with no editor holding it belongs to (the screen that restores it). */
   owner: () => TaskVisit | null;
+  /** What the editor starts from now (the latest caller's). */
+  start: () => unknown;
   /** Opening the editor is itself input (the new task's stage). */
   opened: boolean;
 }
@@ -200,6 +211,7 @@ export function linkKept<T>(
   const known = models.get(key);
   if (known !== undefined) {
     if (options.owner) known.owner = options.owner;
+    known.start = start;
     return known.model;
   }
   const entry = entries.get(key);
@@ -208,11 +220,12 @@ export function linkKept<T>(
     identity,
     recovery: recovery as KeptRecovery<unknown>,
     owner: options.owner ?? (() => null),
+    start,
     opened,
     model: createRecoverableModel({
       formContext: recovery.context,
       start: opened ? "" : recovery.encode(start()),
-      restore: (text) => restoreKept(key, text),
+      restore: (text, chosen) => restoreKept(key, text, chosen),
       untouched: () => {
         const held = entries.get(key);
         return (
@@ -233,14 +246,16 @@ export function linkKept<T>(
 }
 
 /**
- * Revision 37 (R40): a copy's text restored into `key`'s session (the model's look, or the person's choice of another copy). Only while the
- * session is untouched (nothing typed, chosen or submitted since it opened), or with no session yet (a screen restoring the stage the
- * person had reached: a session of the restoring screen's visit, held by no editor until one opens it). Never submits.
+ * Revision 37 (R40): a copy's text restored into `key`'s session (the model's look, or the person's choice of another copy). The look's
+ * automatic restore only while the session is untouched (nothing typed, chosen or submitted since it opened), or with no session yet (a
+ * screen restoring the stage the person had reached: a session of the restoring screen's visit, held by no editor until one opens it).
+ * Revision 38 (R40-B): the person's choice (`chosen`) replaces the session's input, typed or restored, unless a save of it is pending.
+ * Never submits.
  */
-function restoreKept(key: string, text: string): boolean {
+function restoreKept(key: string, text: string, chosen: boolean): boolean {
   const linked = models.get(key);
   if (linked === undefined) return false;
-  const value = linked.recovery.decode(text);
+  const value = linked.recovery.decode(text, linked.start());
   if (value === null) return false;
   const held = entries.get(key);
   if (held === undefined) {
@@ -260,7 +275,8 @@ function restoreKept(key: string, text: string): boolean {
     });
     return true;
   }
-  if (held.revision !== 0 || held.submitting !== null) return false;
+  if (held.submitting !== null || (!chosen && held.revision !== 0))
+    return false;
   held.value = value;
   held.revision += 1;
   publish(key, { kind: "restored", session: held.session });
@@ -439,12 +455,26 @@ export function completeKept<T>(
     });
     return "consumed";
   }
+  const before = held.value;
   if (outcome.change !== undefined)
     held.value = outcome.change(held.value as T);
   held.submitting = null;
   held.note = outcome.note ?? null;
   publish(ticket.key, { kind: "settled", session: ticket.session });
+  settleRecovery(ticket.key, before, held.value);
   return "kept";
+}
+
+/**
+ * Revision 38 (design assessment C5): what a settled save left in the session reaches its recoverable model in the same synchronous
+ * transition, only when it changes the recoverable input (a partial add's remaining selection; new ids or an attempt are not input), and
+ * never as the person's edit (`RecoverableModel.settle`, taken even while an update reload is prepared: the update waits for this save).
+ */
+function settleRecovery(key: string, before: unknown, after: unknown): void {
+  const linked = models.get(key);
+  if (linked === undefined || after === before) return;
+  const text = linked.recovery.encode(after);
+  if (text !== linked.recovery.encode(before)) linked.model.settle(text);
 }
 
 function publish(key: string, event: KeptEvent): void {
@@ -678,12 +708,15 @@ export function useKeptInput<T>(
           view,
           locked,
           discard() {
+            // Admitted at the gesture or not at all (revision 38, R40-A): the session and the model show the start in this same step.
+            if (!model.accepting())
+              return Promise.resolve<DiscardResult>("failed");
             const mine = session.current;
             const fresh = latest.current.initial();
             const result = model.discard(
               options.unedited ? "" : recover.encode(fresh),
             );
-            if (mine !== null && !model.frozen()) {
+            if (mine !== null) {
               resetKept(key, mine, fresh);
               setShown((s) => ({ ...s, key, value: fresh }));
             }

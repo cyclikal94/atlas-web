@@ -44,19 +44,23 @@ export function JoinForm({
   }): Promise<RegisterResult>;
 }) {
   const [username, setUsername] = useState("");
-  // WEB-14a revision 37 (R40): the username typed here is non-secret input of a form shown BEFORE any account is displayed. Where it may
-  // be kept across an app-update reload is an open owner decision, so it is never written anywhere: it counts for an update (the update
-  // stops with "Couldn't save", offering retry or an explicit discard), never lost silently. The password is never part of it (Q4).
+  // WEB-14a revision 37 (R40): the username typed here is non-secret input of a form shown BEFORE any account is displayed. Revision 38
+  // (Kieran's decision WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): only the unfinished username is kept, in this tab's session storage,
+  // for an app-update reload; restored, never submitted, its copy is removed; leaving the form removes it. The password is never part of it.
   const typed = useRef(false);
   const recovery = useRecoverableEditor<string>({
     identity: "pre-account",
     context: "join",
     encode: (text) => text,
-    decode: () => null,
+    decode: (text) => text,
     start: () => "",
     untouched: () => !typed.current,
-    restored: () => undefined,
-    unbound: true,
+    restored: setUsername,
+    reset: (text) => {
+      typed.current = false;
+      setUsername(text);
+    },
+    preAccount: true,
   });
   const changeUsername = (text: string) => {
     if (!recovery.edit(text)) return;

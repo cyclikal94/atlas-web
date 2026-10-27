@@ -211,6 +211,22 @@ function PolicyEditorDialog({
       setOutcome(null);
       setRestored(true);
     },
+    // "Discard instead" (revision 38, R40-A): the draft is the policy as read now, at the gesture, never when the copies' removal completes.
+    baseline: () =>
+      loaded.current && policyLoad.status === "ready"
+        ? { policy: policyLoad.value.policy, base: policyLoad.value.version }
+        : { policy: emptyPolicy(), base: -1 },
+    reset: ({ policy, base }) => {
+      touched.current = false;
+      if (!loaded.current) {
+        // Before the first read: a copy waiting for it is not shown when it lands.
+        if (fromCopy.current) restore.current = undefined;
+        fromCopy.current = false;
+        return;
+      }
+      setDraft({ policy, refused: null, base });
+      setRestored(false);
+    },
   });
   const [view, setView] = useState<"edit" | "grant" | "exclude">("edit");
   const [outcome, setOutcome] = useState<Outcome>(null);
@@ -512,25 +528,7 @@ function PolicyEditorDialog({
           </strong>{" "}
           {copy.POLICY_ONLINE_ONLY}
         </p>
-        <RecoveryNotice
-          recovery={{
-            ...recovery,
-            discard: async () => {
-              const result = await recovery.discard();
-              // "Discard instead": the draft is the policy as read now.
-              if (policyLoad.status === "ready") {
-                touched.current = false;
-                setDraft({
-                  policy: policyLoad.value.policy,
-                  refused: null,
-                  base: policyLoad.value.version,
-                });
-                setRestored(false);
-              }
-              return result;
-            },
-          }}
-        />
+        <RecoveryNotice recovery={recovery} />
         {restored ? (
           <p className="text-[12.5px] text-ink-1" data-policy-restored="">
             {copy.RESTORED_UNSAVED}

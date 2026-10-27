@@ -186,6 +186,15 @@ export function LinkCalendarDialog({
         label: input.label,
         timezone: input.timezone,
       })),
+    // "Discard instead" (revision 38, R40-A): at the gesture; the connection's secrets are not part of it and stay as typed.
+    reset: (input) => {
+      touched.current = false;
+      setFields((previous) => ({
+        ...previous,
+        label: input.label,
+        timezone: input.timezone,
+      }));
+    },
   });
 
   const edit = (name: keyof Fields, value: string) => {
@@ -352,22 +361,7 @@ export function LinkCalendarDialog({
           void submit();
         }}
       >
-        <RecoveryNotice
-          recovery={{
-            ...recovery,
-            discard: async () => {
-              const result = await recovery.discard();
-              touched.current = false;
-              setFields((previous) => ({
-                ...previous,
-                label: "",
-                timezone: defaultTimezone(),
-              }));
-              return result;
-            },
-          }}
-          firstFieldRef={labelRef}
-        />
+        <RecoveryNotice recovery={recovery} firstFieldRef={labelRef} />
         <Field
           ref={labelRef}
           label={LABEL}

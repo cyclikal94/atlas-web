@@ -1,12 +1,18 @@
 import { Link, useMatchRoute } from "@tanstack/react-router";
-import { type ReactNode, useId, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { keptKey } from "../kept-input";
+import { keptKey, useKeptRecovery } from "../kept-input";
 import { LISTS } from "./copy";
-import { CREATE_EDITOR, CreateListDialog, holdsInput } from "./dialogs";
+import {
+  CREATE_EDITOR,
+  CREATE_RECOVERY,
+  CreateListDialog,
+  createStart,
+  holdsInput,
+} from "./dialogs";
 import { ListDetail } from "./ListDetail";
 import { ReadNotice } from "./ReadNotice";
 import { useListsPane } from "./reads";
@@ -56,6 +62,19 @@ function ListsPane({ selected }: { selected: string | null }) {
   // The create dialog is shown again when the person comes back to this screen with its input kept (the in-dialog sync control).
   const createKey = keptKey(env.identity, CREATE_EDITOR);
   const [creating, setCreating] = useState(() => holdsInput(createKey));
+  // Revision 38 (WEB-14a, DA-R40-D): the dialog is not open after an app-update reload, so this screen looks for the copy the page before
+  // it left, and opens the dialog on it (restored, never saved).
+  const recovered = useKeptRecovery(
+    createKey,
+    env.identity,
+    CREATE_RECOVERY,
+    () => createStart(env.newId),
+    false,
+  );
+  useEffect(() => {
+    if (!creating && recovered.restored !== null && holdsInput(createKey))
+      setCreating(true);
+  }, [creating, recovered.restored, createKey]);
   const opener = useRef<HTMLButtonElement | null>(null);
   const value = pane.value;
   const lists = value?.lists ?? [];

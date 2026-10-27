@@ -123,7 +123,7 @@ export function linkCorrection(
     model: createRecoverableModel({
       formContext: context,
       start: codec.encode(start()),
-      restore: (text) => restoreCorrection(key, text),
+      restore: (text, chosen) => restoreCorrection(key, text, chosen),
       untouched: () => {
         const held = entries.get(key);
         return (
@@ -142,8 +142,16 @@ export function linkCorrection(
   return linked.model;
 }
 
-/** Revision 37 (R40): a copy's text restored into the session of `key` while it is untouched, or as a retained session of the detail's visit. */
-function restoreCorrection(key: string, text: string): boolean {
+/**
+ * Revision 37 (R40): a copy's text restored into the session of `key` while it is untouched, or as a retained session of the detail's visit.
+ * Revision 38 (R40-B): the person's choice of a copy (`chosen`) replaces the session's state, typed or restored, unless a save of it is
+ * pending (the model has checked that nothing changed it since the choice). Never submits.
+ */
+function restoreCorrection(
+  key: string,
+  text: string,
+  chosen: boolean,
+): boolean {
   const linked = models.get(key);
   if (linked === undefined) return false;
   const state = linked.decode(text);
@@ -166,7 +174,8 @@ function restoreCorrection(key: string, text: string): boolean {
     });
     return true;
   }
-  if (held.revision !== 0 || held.submitting !== null) return false;
+  if (held.submitting !== null || (!chosen && held.revision !== 0))
+    return false;
   entries.set(key, { ...held, state, revision: held.revision + 1 });
   publish(key, { kind: "restored", session: held.session });
   return true;

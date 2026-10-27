@@ -119,6 +119,14 @@ export class TabStorage {
   unreadable = false;
   /** Reads that throw, one per read, before `unreadable` is consulted. */
   failReads = 0;
+  /** Revision 38: the `Storage` enumeration the pre-account store's sweep and list use (reads, as `getItem`'s rules). */
+  get length(): number {
+    if (this.unreadable) throw new DOMException("unreadable", "SecurityError");
+    return this.items.size;
+  }
+  key(index: number): string | null {
+    return [...this.items.keys()][index] ?? null;
+  }
   getItem(key: string): string | null {
     if (this.failReads > 0) {
       this.failReads -= 1;

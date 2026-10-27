@@ -404,8 +404,15 @@ describe("the calendar Add source form (calendar-add)", () => {
   });
 });
 
-describe("sign-in before any account is displayed (owner decision open)", () => {
-  test("a typed username counts for the update but is never written: its save fails (retry or an explicit discard)", async () => {
+/**
+ * LABELLED ADAPTATION (revision 38): revision 37 asserted that this save FAILS, because where pre-account input may be kept was an open owner
+ * decision. Kieran decided it (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026, hand-off sha256 e802f52e…ebaec3): the username only, in this
+ * tab's session storage. The other intents are kept as they were: the typed username counts for the update, and it is never written to the
+ * account's store. The original case is preserved in `.agtx/evidence/revision-r38-20261026/adaptations/`; the decision's own lifecycle,
+ * isolation and failure cases are `tests/lib/pre-account-recovery.test.tsx`.
+ */
+describe("sign-in before any account is displayed (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026)", () => {
+  test("a typed username counts for the update; it is saved in this tab's session storage, never in the account's store", async () => {
     render(
       protectedTree(
         <SignInForm
@@ -420,7 +427,13 @@ describe("sign-in before any account is displayed (owner decision open)", () => 
       target: { value: "alice" },
     });
     expect(contextsOf(pageFormRegistry.dirty())).toEqual(["sign-in"]);
-    expect(await flushDirty(pageFormRegistry)).toEqual(["failed"]);
+    expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
     expect(await store.list("sign-in")).toHaveLength(0);
+    expect(
+      Object.keys(window.sessionStorage).filter((key) =>
+        key.startsWith("atlas-preaccount-recovery:"),
+      ),
+    ).toHaveLength(1);
+    window.sessionStorage.clear();
   });
 });

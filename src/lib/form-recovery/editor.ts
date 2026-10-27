@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useFormRecoveryPort } from "../../data";
+import { pageHandoffs } from "./handoff";
 import {
   createRecoverableModel,
   type ModelTicket,
@@ -9,6 +10,8 @@ import {
 } from "./model";
 import type { DiscardResult } from "./port";
 import { pageFormRegistry } from "./registry";
+import { getPageRecoveryTab } from "./tab-identity";
+import { preAccountRecoveryPort } from "./tab-session-port";
 
 /**
  * RECOVERABLE EDITORS WHOSE INPUT IS COMPONENT STATE (WEB-14a revision 37; review of 25 October 2026, R40; design assessment C1-C3). The
@@ -27,22 +30,36 @@ import { pageFormRegistry } from "./registry";
  *
  * The codec is the caller's: explicitly versioned, non-secret, the editor's raw input and the base it was composed against (never conferring
  * authority: a Save of restored input keeps the editor's own version/concurrency guards). Memory only, except through the port.
+ *
+ * Revision 38 (review of revision 37, R40-A/R40-B; design assessment C2-C3): "Discard instead" is ONE step at the gesture, here, for every
+ * editor: admitted only while the model accepts input (no update reload prepared), the editor shows its typed baseline (`reset`) in the same
+ * step as the model takes it and its copies' removal starts. The removal's completion changes nothing on screen (a later edit is never
+ * erased by an earlier discard). A copy the person chooses replaces what the editor shows (`restored`), touched or not; only the look's
+ * automatic restore needs untouched input.
  */
 
 interface Editor {
   untouched(): boolean;
-  apply(text: string): boolean;
+  /** `chosen`: the person chose the copy (no untouched rule; see `ModelOptions.restore`). */
+  apply(text: string, chosen: boolean): boolean;
 }
 
 interface Entry {
   readonly identity: string;
   readonly model: RecoverableModel;
+  /** Revision 38: a pre-account form's (its copies live in the tab's session storage, removed once restored or left). */
+  readonly preAccount: boolean;
   /** A copy restored while no editor showed the context, for the next editor to take. */
   pending: string | null;
   editor: Editor | null;
   readonly hosts: Set<() => void>;
   /** The last editor's session was kept for a visit to the sync screens: the next editor resumes it (no new session at its mount). */
   kept: boolean;
+  /**
+   * Revision 38 (S12): the last editor unmounted in this turn; its dismissal is decided after it (an editor mounted again in the same turn,
+   * as React's development remount does, resumes the session: no dismissal, no new session over what it shows).
+   */
+  leaving: ReturnType<typeof setTimeout> | null;
 }
 
 const entries = new Map<string, Entry>();
@@ -50,9 +67,15 @@ const entries = new Map<string, Entry>();
 const keyOf = (identity: string, context: string) =>
   `${identity}\u0000${context}`;
 
-function entryFor(identity: string, context: string): Entry {
+function entryFor(
+  identity: string,
+  context: string,
+  preAccount = false,
+): Entry {
+  // Revision 38: a pre-account form is no account's: it is neither retired by an account's editor (a sign-in shown over the account,
+  // switching) nor retires one; its model is only ever bound to the tab's pre-account store, and leaving it removes its copies.
   for (const [key, other] of [...entries])
-    if (other.identity !== identity) {
+    if (other.identity !== identity && !other.preAccount && !preAccount) {
       other.model.retire();
       entries.delete(key);
     }
@@ -61,15 +84,17 @@ function entryFor(identity: string, context: string): Entry {
   if (known !== undefined) return known;
   const entry: Entry = {
     identity,
+    preAccount,
     pending: null,
     editor: null,
     hosts: new Set(),
     kept: false,
+    leaving: null,
     model: createRecoverableModel({
       formContext: context,
       start: "",
-      restore: (text) => {
-        if (entry.editor) return entry.editor.apply(text);
+      restore: (text, chosen) => {
+        if (entry.editor) return entry.editor.apply(text, chosen);
         if (entry.hosts.size === 0) return false;
         entry.pending = text;
         for (const open of [...entry.hosts]) open();
@@ -77,6 +102,7 @@ function entryFor(identity: string, context: string): Entry {
       },
       untouched: () =>
         entry.editor ? entry.editor.untouched() : entry.pending === null,
+      preAccount,
     }),
   };
   entries.set(key, entry);
@@ -132,6 +158,12 @@ export interface RecoverableEditor<T> extends RecoveryControls {
   keep(): void;
   /** The person dismissed the editor (Cancel, Close, Escape): its copies are discarded. */
   end(): Promise<DiscardResult>;
+  /**
+   * "Discard instead" (revision 38, R40-A): admitted now or not at all. Admitted, the editor shows its baseline (`reset`) and the model
+   * holds it in this same step, and the copies' removal starts; the promise settles with that removal only (never reset anything then).
+   * Not admitted (an update reload is being prepared): "failed", and nothing changes.
+   */
+  discard(): Promise<DiscardResult>;
 }
 
 /**
@@ -149,30 +181,48 @@ export function useRecoverableEditor<T>(options: {
   untouched(): boolean;
   /** What the editor starts from when it mounts (its session begins there unless a restored copy is waiting for it). */
   start(): T;
+  /** Revision 38 (R40-A): what "Discard instead" shows, as of the gesture (default: `start()`). */
+  baseline?: () => T;
+  /**
+   * Revision 38 (R40-A): "Discard instead" shows `value` as an untouched start, in the same step as the model takes it (the editor's own
+   * state: its untouched mark, a restored version, a save's identity). Never called when the discard is not admitted.
+   */
+  reset(value: T): void;
   /** The editor shows a native editing state its value cannot hold (`RecoverableModel.probe`). */
   unfinished?: () => boolean;
   /**
-   * Never bound to an account's store (input typed before any account is displayed: signing in, joining). Its unsaved input still counts
-   * for an update: dirty, and its save fails (the update stops with retry or an explicit discard), never written under another account.
+   * Input typed before any account is displayed (signing in, joining; revision 38, WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): never
+   * bound to an account's store, but to this tab's session storage (`tab-session-port.ts`, the username's text only), for an app-update
+   * reload. A copy restored is removed at once and every other copy of the context in the tab once the look has read it; leaving the form
+   * removes its own. Storage that cannot be written fails the save (the update stops with retry or an explicit discard).
    */
-  unbound?: boolean;
+  preAccount?: boolean;
 }): RecoverableEditor<T> {
   const { identity, context } = options;
   const port = useFormRecoveryPort();
   const latest = useRef(options);
   latest.current = options;
-  const entry = useMemo(() => entryFor(identity, context), [identity, context]);
+  const preAccount = options.preAccount === true;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: one model per identity and context (its kind is the first caller's)
+  const entry = useMemo(
+    () => entryFor(identity, context, preAccount),
+    [identity, context],
+  );
   useEffect(() => {
     const editor: Editor = {
       untouched: () => latest.current.untouched(),
-      apply: (text) => {
+      apply: (text, chosen) => {
         const value = latest.current.decode(text);
-        if (value === null || !latest.current.untouched()) return false;
+        if (value === null || (!chosen && !latest.current.untouched()))
+          return false;
         latest.current.restored(value);
         return true;
       },
     };
     entry.editor = editor;
+    const resumed = entry.leaving !== null;
+    if (entry.leaving !== null) clearTimeout(entry.leaving);
+    entry.leaving = null;
     const hide = entry.model.show();
     if (latest.current.unfinished)
       entry.model.probe(() => latest.current.unfinished?.() ?? false);
@@ -181,8 +231,9 @@ export function useRecoverableEditor<T>(options: {
     entry.pending = null;
     const waiting = pending === null ? null : latest.current.decode(pending);
     if (waiting !== null) latest.current.restored(waiting);
-    // A session kept for a visit to the sync screens goes on (its unsaved input stays the model's); otherwise a new one begins.
-    else if (!entry.kept)
+    // A session kept for a visit to the sync screens, or resumed by a mount in the turn its editor unmounted, goes on (its unsaved input
+    // stays the model's); otherwise a new one begins.
+    else if (!entry.kept && !resumed)
       entry.model.begin(latest.current.encode(latest.current.start()));
     // This editor owns the resumed session now: its unmount is a dismissal unless it is kept again.
     entry.kept = false;
@@ -190,18 +241,36 @@ export function useRecoverableEditor<T>(options: {
       if (entry.editor === editor) entry.editor = null;
       entry.model.probe(null);
       hide();
-      if (!entry.kept) void entry.model.end();
+      if (entry.kept) return;
+      // A dismissal, decided after this turn (see `leaving`).
+      entry.leaving = setTimeout(() => {
+        entry.leaving = null;
+        if (entry.editor === null && !entry.kept) void entry.model.end();
+      }, 0);
     };
   }, [entry]);
-  const unbound = options.unbound === true;
   useEffect(() => {
-    if (!unbound) entry.model.bind(port);
-  }, [entry, port, unbound]);
+    entry.model.bind(preAccount ? preAccountRecoveryPort() : port);
+  }, [entry, port, preAccount]);
   const view = useSyncExternalStore(
     entry.model.subscribe,
     entry.model.view,
     entry.model.view,
   );
+  // Revision 38: once a pre-account form's look has read the tab's store, nothing an earlier page of the tab left for it stays there.
+  const looked = view.ready;
+  useEffect(() => {
+    if (!preAccount || !looked) return;
+    // Never this page's own copy or a hand-off it wrote (an update may be prepared by then).
+    const sweep = (id: string | null) =>
+      preAccountRecoveryPort().sweep(
+        context,
+        (tab) => tab === id || pageHandoffs.written.has(tab),
+      );
+    void getPageRecoveryTab()
+      .id()
+      .then(sweep, () => sweep(null));
+  }, [preAccount, looked, context]);
   const locked = useSyncExternalStore(
     pageFormRegistry.subscribe,
     pageFormRegistry.frozen,
@@ -225,7 +294,14 @@ export function useRecoverableEditor<T>(options: {
       entry.kept = true;
     },
     end: () => model.end(),
-    discard: () => model.discard(""),
+    discard() {
+      if (!model.accepting()) return Promise.resolve<DiscardResult>("failed");
+      const value = (latest.current.baseline ?? latest.current.start)();
+      entry.kept = false;
+      const removal = model.discard(latest.current.encode(value));
+      latest.current.reset(value);
+      return removal;
+    },
     retry: () => model.retry(),
     restoreAlternative: (copy) => model.restoreAlternative(copy.tabInstanceId),
     discardAlternative: (copy) => model.discardAlternative(copy.tabInstanceId),

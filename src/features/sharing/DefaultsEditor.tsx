@@ -798,6 +798,14 @@ function LayerForm({
       uncertain.current = null;
       setOutcome(null);
     },
+    // "Discard instead" (revision 38, R40-A): the layer as recorded now, at the gesture (`start`), never when the copies' removal completes.
+    reset: (input) => {
+      touched.current = false;
+      setChoice(input.choice);
+      setExplicit({ policy: input.policy, refused: null });
+      setLearnt(input.learnt);
+      setRestoredBase(null);
+    },
   });
   /** A change of the person's: the model first, then the form. */
   const change = (next: Partial<LayerInput>): boolean => {
@@ -1017,27 +1025,7 @@ function LayerForm({
   const household = layer === "household";
   return (
     <div className="flex flex-col gap-3" data-layer-form={layer}>
-      <RecoveryNotice
-        recovery={{
-          ...recovery,
-          discard: async () => {
-            const result = await recovery.discard();
-            // "Discard instead": the layer as recorded now.
-            touched.current = false;
-            setChoice(choiceOf(record));
-            setExplicit({
-              policy:
-                record.template?.kind === "explicit"
-                  ? record.template.policy
-                  : emptyPolicy(),
-              refused: null,
-            });
-            setLearnt([]);
-            setRestoredBase(null);
-            return result;
-          },
-        }}
-      />
+      <RecoveryNotice recovery={recovery} />
       {kept !== undefined ? (
         <p className="text-[12.5px] text-ink-1" data-layer-restored="">
           {copy.RESTORED_UNSAVED}

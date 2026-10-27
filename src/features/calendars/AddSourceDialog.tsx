@@ -107,6 +107,12 @@ export function AddSourceDialog({
       setLabel(input.label);
       setTimezone(input.timezone);
     },
+    // "Discard instead" (revision 38, R40-A): at the gesture, never when the copies' removal completes.
+    reset: (input) => {
+      touched.current = false;
+      setLabel(input.label);
+      setTimezone(input.timezone);
+    },
   });
   const change = (next: AddInput) => {
     if (!recovery.edit(next)) return;
@@ -212,19 +218,7 @@ export function AddSourceDialog({
           void submit();
         }}
       >
-        <RecoveryNotice
-          recovery={{
-            ...recovery,
-            discard: async () => {
-              const result = await recovery.discard();
-              touched.current = false;
-              setLabel("");
-              setTimezone(defaultTimezone());
-              return result;
-            },
-          }}
-          firstFieldRef={labelRef}
-        />
+        <RecoveryNotice recovery={recovery} firstFieldRef={labelRef} />
         <Field
           ref={labelRef}
           label={LABEL}
