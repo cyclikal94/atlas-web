@@ -25842,8 +25842,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      (LIVE.includes(draft.status) ||\n",
-        "      ((true as boolean) ||\n",
+        // Re-anchored in revision 18 (review 17, R17.1): the outstanding test moved into the windowed walk; same mutation.
+        "          LIVE.includes(draft.status) ||\n",
+        "          (true as boolean) ||\n",
       ),
   },
   {
@@ -25854,7 +25855,8 @@ export const UNIT = [
     tests: ["tests/data/child-reads.test.ts"],
     expect: /more draft entries over the page than one read answers whole/,
     patch: (t) =>
-      sub(t, "  if (entries.length > NAMING_MOST) return null;\n", ""),
+      // Re-anchored in revision 18 (review 17, R17.1): the bound is of the outstanding drafts held; same mutation.
+      sub(t, "          if (kept.size > NAMING_MOST) return null;\n", ""),
   },
   {
     id: "MU-2844",
@@ -26086,6 +26088,164 @@ export const UNIT = [
     tests: ["tests/data/hooks.test.tsx"],
     expect: /a field with its person in one read: another field is a NEW read/,
     patch: (t) => sub(t, "    [id, parentId],\n", "    [parentId],\n"),
+  },
+
+  // ---- WEB-11a revision 18 (review 17, R17.1; design assessment DA17-14): retained history never counts against a page's drafts ----
+  {
+    id: "MU-2860",
+    title:
+      "WEB-11a R17.1 (DA17-14): every entry naming the page is counted against the bound before its status is looked at (the reviewed defect)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: retained history never counts against a page's outstanding drafts/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const kept = new Map<LocalId, DraftRow>();\n  for (const id of [...new Set(ids)].sort()) {\n",
+          "  const kept = new Map<LocalId, DraftRow>();\n  let entries = 0;\n  for (const id of [...new Set(ids)].sort()) {\n",
+        ),
+        "      for (const draft of rows) {\n        // A draft naming several",
+        "      for (const draft of rows) {\n        if ((entries += 1) > NAMING_MOST) return null;\n        // A draft naming several",
+      ),
+  },
+  {
+    id: "MU-2861",
+    title:
+      "WEB-11a R17.1 (DA17-14): the page's drafts are not limited to the kinds asked for (another feature's queued work is folded over a field)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: retained history never counts against a page's outstanding drafts/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (kept.has(draft.local_id) || !kinds.includes(draft.kind)) continue;\n",
+        "        if (kept.has(draft.local_id)) continue;\n",
+      ),
+  },
+  {
+    id: "MU-2862",
+    title:
+      "WEB-11a R17.1 (DA17-14): a draft naming several rows of the page is counted once per row against the bound",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: each draft counted once; real overflow stays incomplete/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            "  const kept = new Map<LocalId, DraftRow>();\n  for (const id of [...new Set(ids)].sort()) {\n",
+            "  const kept = new Map<LocalId, DraftRow>();\n  let hits = 0;\n  for (const id of [...new Set(ids)].sort()) {\n",
+          ),
+          "        if (kept.has(draft.local_id) || !kinds.includes(draft.kind)) continue;\n",
+          "        if (!kinds.includes(draft.kind)) continue;\n",
+        ),
+        "          if (kept.size > NAMING_MOST) return null;\n",
+        "          if ((hits += 1) > NAMING_MOST) return null;\n",
+      ),
+  },
+  {
+    id: "MU-2863",
+    title:
+      "WEB-11a R17.1 (DA17-14): an acknowledged draft counts over the page whether or not its effect still stands",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: an acknowledgement counts only while its first primary target's effect stands/,
+    patch: (t) =>
+      sub(
+        t,
+        '          (draft.status === "acknowledged" &&\n            (await effectStands(reader, draft.target_resource_ids[0], draft)))\n',
+        '          draft.status === "acknowledged"\n',
+      ),
+  },
+  {
+    id: "MU-2864",
+    title:
+      "WEB-11a R17.1 (DA17-14): an acknowledgement's effect is looked up on the row walked, not on its first primary target",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect:
+      /R17\.1: an acknowledgement counts only while its first primary target's effect stands/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (await effectStands(reader, draft.target_resource_ids[0], draft)))\n        ) {\n",
+        "            (await effectStands(reader, id, draft)))\n        ) {\n",
+      ),
+  },
+  {
+    id: "MU-2865",
+    title:
+      "WEB-11a R17.1 (DA17-14): the page's drafts are answered in key order, not queue order",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: live work among retained history, in queue order/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const rows = [...kept.values()].sort(bySeq);\n  const bodies",
+        "  const rows = [...kept.values()].sort((a, b) =>\n    a.local_id.localeCompare(b.local_id),\n  );\n  const bodies",
+      ),
+  },
+  {
+    id: "MU-2866",
+    title:
+      "WEB-11a R17.1 (DA17-14): only the first window of a row's index entries is walked (live work behind retained history is missed)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: live work among retained history, in queue order/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (rows.length < WINDOW) break;\n    }\n  }\n  const rows = [...kept.values()]",
+        "      break;\n    }\n  }\n  const rows = [...kept.values()]",
+      ),
+  },
+  {
+    id: "MU-2867",
+    title:
+      "WEB-11a R17.1 (DA17-14): only the first row of the page has its drafts read",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: live work among retained history, in queue order/,
+    patch: (t) =>
+      sub(
+        t,
+        "  for (const id of [...new Set(ids)].sort()) {\n",
+        "  for (const id of [...new Set(ids)].sort().slice(0, 1)) {\n",
+      ),
+  },
+  {
+    id: "MU-2868",
+    title:
+      "WEB-11a R17.1 (design assessment C3): an outstanding header without its body is dropped, and the rest answered as all of them",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads-history.test.ts"],
+    expect: /R17\.1: a header without its body is not an answer of everything/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (body === undefined) return null;\n    out.push",
+        "    if (body === undefined) continue;\n    out.push",
+      ),
+  },
+  {
+    id: "MU-2869",
+    title:
+      "WEB-11a R17.1 (DA17-14): a page whose drafts could not be read whole is shown as if it had none",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/retained-history.test.tsx"],
+    expect: /control: 1,001 queued edits over (a field|an archived field)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (drafts === null) return { status: "failed", rows: [], next: null };\n',
+        "",
+      ),
   },
 
   ...UNIT_LABELS,

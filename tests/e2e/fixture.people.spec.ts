@@ -55,6 +55,8 @@ import {
  * Review 15 (25 October 2026): E-P39 a duplicate's field count follows its person across two real pages (R15.1, A14).
  * Review 16 (26 October 2026): E-P40 the detail, the archived ledger, the field editor and the sharing deep link show a field only with its
  * person from the same read, across two real pages (R16.1, DA16-S1, A14).
+ * Review 17 (27 October 2026): E-P41 retained rejections over a field never make it unreachable on the detail or in the archived ledger,
+ * read through real IndexedDB's multi-entry target index (R17.1, A2, A12, A19).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -3594,4 +3596,109 @@ test.describe("E-P37: an edit of an unsent create after the create is published 
     const draft = await expectUpdate(page, id);
     recordEvidence(info, "e-p37-control", { id, draft });
   });
+});
+
+test.describe("E-P41: retained history never hides a cached field, in real IndexedDB (A2, A12, A19; review 17, R17.1)", () => {
+  const G = "66666666-6666-4666-8666-000000000002";
+  /** `count` rejected put_field drafts of `target` (kept until dismissed: `decideDiscard`), headers and bodies as the enqueue plan writes them. */
+  const rejected = (count: number, target: string, prefix: string) => {
+    const headers = Array.from({ length: count }, (_, i) => ({
+      local_id: `${prefix}-${String(i).padStart(5, "0")}`,
+      account_id: ME,
+      endpoint: "/task-commands",
+      target_id: null,
+      kind: "put_field",
+      command_digest: `${prefix}-${i}`,
+      defaults_revision: null,
+      target_resource_ids: [target],
+      side_effect_bases: {},
+      index_targets: [target],
+      bases: {},
+      bumped: [],
+      defaults_context: null,
+      review_block: null,
+      depends_on: [],
+      status: "rejected",
+      held_pending_cache: false,
+      unavailable_outcome: false,
+      retry_state: null,
+      attempts: 1,
+      last_attempt_at: null,
+      last_error: { stage: "dependency_rejected" },
+      display_patch: null,
+      receipt_revision: null,
+      created_seq: 10_000 + i,
+      created_at: "2026-10-01T09:00:00.000Z",
+    }));
+    const bodies = headers.map((header) => ({
+      local_id: header.local_id,
+      command: {
+        command: {
+          kind: "put_field",
+          id: target,
+          parent_id: P,
+          label: "Rejected edit",
+          value: { kind: "text", text: "Rejected" },
+          expected_version: 1,
+        },
+      },
+    }));
+    return { headers, bodies };
+  };
+
+  for (const count of [0, 1001])
+    test(`${count === 0 ? "control: no retained history" : "1,001 retained rejections over each field"}: the current field on the detail and the archived one with Restore in the ledger`, async ({
+      context,
+    }, info) => {
+      const { page } = await setup(context, "/people", [
+        personP(P, "Ada"),
+        fieldP(F, P, "Note", { kind: "text", text: "Current value" }),
+        fieldP(
+          G,
+          P,
+          "Old phone",
+          { kind: "text", text: "0100" },
+          { archived: true },
+        ),
+      ]);
+      const f = rejected(count, F, "rf");
+      const g = rejected(count, G, "rg");
+      await page.evaluate(
+        async ({ account, headers, bodies }) => {
+          const data = window.__atlasData;
+          if (!data) throw new Error("no harness");
+          if (headers.length === 0) return;
+          await data.put(account, "drafts", headers);
+          await data.put(account, "draft_commands", bodies);
+        },
+        {
+          account: ME,
+          headers: [...f.headers, ...g.headers],
+          bodies: [...f.bodies, ...g.bodies],
+        },
+      );
+      await navigateInApp(page, `/people/${P}`);
+      const row = page.locator(`[data-field-row="${F}"]`);
+      await expect(row).toContainText("Note");
+      await expect(row).toContainText("Current value");
+      await expect(row).not.toContainText("Rejected");
+      await navigateInApp(page, "/settings/archived");
+      const archived = page.locator(`[data-archived-row="${G}"]`);
+      await expect(archived).toContainText("Old phone");
+      await expect(
+        archived.getByRole("button", { name: "Restore" }),
+      ).toBeEnabled();
+      await expect(page.locator('[data-archived-state="failed"]')).toHaveCount(
+        0,
+      );
+      // The history is all still there: a read never dismisses it.
+      const stored = (await page.evaluate(
+        (account) => window.__atlasData?.rows(account, "drafts"),
+        ME,
+      )) as Array<{ status: string }>;
+      expect(stored.filter((d) => d.status === "rejected")).toHaveLength(
+        2 * count,
+      );
+      recordEvidence(info, "e-p41", { count, stored: stored.length });
+    });
 });

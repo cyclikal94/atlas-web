@@ -362,7 +362,7 @@ export function childReport(
   const status = statusOf(page);
   if (page.status !== "ready") return { status, rows: [], next: null };
   const { page: read, parents, drafts } = page.value;
-  // More saved changes over the page than one read answers whole: the page cannot be shown as it is (never a part of them as all).
+  // More outstanding changes over the page than one read answers whole: the page cannot be shown as it is (never a part of them as all).
   if (drafts === null) return { status: "failed", rows: [], next: null };
   if (parentId !== undefined && parents[parentId] === undefined)
     return { status, rows: [], next: read.next, hidden: true };

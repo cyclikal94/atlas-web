@@ -191,6 +191,68 @@ const populations: Array<{
       drafts: null,
     },
   },
+  // WEB-11a review 17 (R17.1; DA17-09): the bound is of OUTSTANDING drafts, each counted once, never of the entries naming the rows.
+  {
+    name: "1,001 retained rejections and conflicts over the page, one queued edit: drafts answered (the edit alone)",
+    rows: [person({ id: P, label: "Mo" }), field(1), field(2)],
+    drafts: [
+      ...Array.from({ length: 1001 }, (_, i) =>
+        edit(
+          fid(i % 2 === 0 ? 1 : 2),
+          `R${String(i).padStart(4, "0")}`,
+          i + 10,
+          {
+            status: i % 2 === 0 ? "rejected" : "version_conflict",
+          },
+        ),
+      ),
+      edit(fid(2), "LIVE", 5),
+    ],
+    input: { kind: "field", parentKind: "person", parentId: P, kinds: KINDS },
+    expected: {
+      ids: [fid(1), fid(2)],
+      next: null,
+      parents: { [P]: "Mo" },
+      drafts: ["LIVE"],
+    },
+  },
+  {
+    name: "1,000 queued drafts each naming both fields (2,000 entries): all answered, each once",
+    rows: [person({ id: P, label: "Mo" }), field(1), field(2)],
+    drafts: Array.from({ length: 1000 }, (_, i) =>
+      edit(fid(1), `D${String(i).padStart(4, "0")}`, i + 1, {
+        target_resource_ids: [fid(1), fid(2)],
+        index_targets: [fid(1), fid(2)],
+      }),
+    ),
+    input: { kind: "field", parentKind: "person", parentId: P, kinds: KINDS },
+    expected: {
+      ids: [fid(1), fid(2)],
+      next: null,
+      parents: { [P]: "Mo" },
+      drafts: Array.from(
+        { length: 1000 },
+        (_, i) => `D${String(i).padStart(4, "0")}`,
+      ),
+    },
+  },
+  {
+    name: "1,001 queued drafts naming both fields: drafts null (the real overflow is still not answered as all)",
+    rows: [person({ id: P, label: "Mo" }), field(1), field(2)],
+    drafts: Array.from({ length: 1001 }, (_, i) =>
+      edit(fid(1), `D${String(i).padStart(4, "0")}`, i + 1, {
+        target_resource_ids: [fid(1), fid(2)],
+        index_targets: [fid(1), fid(2)],
+      }),
+    ),
+    input: { kind: "field", parentKind: "person", parentId: P, kinds: KINDS },
+    expected: {
+      ids: [fid(1), fid(2)],
+      next: null,
+      parents: { [P]: "Mo" },
+      drafts: null,
+    },
+  },
 ];
 
 describe("data.readChildPage: the world and the production plan answer each population as the contract says", () => {

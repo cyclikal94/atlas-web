@@ -546,7 +546,9 @@ export function peopleWorld(
     },
     // WEB-11a review 16 (R16.1): a page of children with their parents and the drafts over them, from ONE state of the world, as the
     // production plan reads them in one transaction. A row whose parent the cache does not hold as `parentKind` is not answered; `next` is
-    // the cursor of the page read; more than 1,000 draft entries naming the kept rows answer `drafts: null` (the production bound).
+    // the cursor of the page read; more than 1,000 OUTSTANDING drafts naming the kept rows answer `drafts: null` (the production bound,
+    // review 17 R17.1: each draft counted once, retained conflicts and rejections never). The world keeps no `pending_effects`, so an
+    // acknowledged draft counts as outstanding here; the production plan's acknowledgement rule is tested over the production plan.
     "data.readChildPage": (input) => {
       if (failing) return { status: "unavailable", reason: "error" };
       const read = plans["data.readResourceList"]?.({
@@ -576,23 +578,17 @@ export function peopleWorld(
       let drafted: DraftWithCommand[] | null | undefined;
       if (kinds !== undefined) {
         const kept = new Set(rows.map((row) => row.base.id));
-        const entries = drafts.reduce(
-          (sum, d) => sum + d.index_targets.filter((t) => kept.has(t)).length,
-          0,
-        );
-        drafted =
-          entries > 1000
-            ? null
-            : drafts
-                .filter(
-                  (d) =>
-                    kinds.includes(d.kind) &&
-                    ["queued", "in_flight", "blocked", "acknowledged"].includes(
-                      d.status,
-                    ) &&
-                    d.index_targets.some((t) => kept.has(t)),
-                )
-                .sort((a, b) => a.created_seq - b.created_seq);
+        const outstanding = drafts
+          .filter(
+            (d) =>
+              kinds.includes(d.kind) &&
+              ["queued", "in_flight", "blocked", "acknowledged"].includes(
+                d.status,
+              ) &&
+              d.index_targets.some((t) => kept.has(t)),
+          )
+          .sort((a, b) => a.created_seq - b.created_seq);
+        drafted = outstanding.length > 1000 ? null : outstanding;
       }
       return {
         status: "ready",

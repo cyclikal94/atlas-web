@@ -713,47 +713,70 @@ export const readInventory = readPlan<InventoryInput, Inventory, Inventory>({
  * the screen's rule, said here only as "the cache holds it as `parentKind`" (a person: archival and editability do not change it).
  */
 
-/** At most this many draft entries naming a page's rows are read in one transaction (the outstanding chain's bound: ten windows). */
+/** At most this many OUTSTANDING drafts naming a page's rows are answered in one transaction (the outstanding chain's bound: ten windows). */
 const NAMING_MOST = 10 * WINDOW;
 
 /**
  * The OUTSTANDING drafts of `kinds` that name any of `ids` (`index_targets`), with their bodies, oldest first: queued, in flight and
  * blocked, and acknowledged while the `pending_effects` row of their first primary target stands (`readOutstandingCreates`' definition),
- * inside the caller's transaction. Null when more than `NAMING_MOST` entries name them: never a part of them answered as all of them.
+ * inside the caller's transaction. Null when more than `NAMING_MOST` of THEM name the rows, or when one of them has no body: never a part
+ * of them answered as all of them.
+ *
+ * What is counted is outstanding drafts, each once (WEB-11a review 17, R17.1): the outbox keeps a conflict or a rejection until it is
+ * dismissed (`decideDiscard`), and a released acknowledgement until its receipt is reconciled, so the entries naming a row can be any
+ * number of drafts that change nothing shown. Each id's entries are walked a window at a time (bounded by the count taken first, as
+ * `oldestNaming` does), and only the outstanding ones are held: however long the history, no read returns more than a window and no
+ * more than `NAMING_MOST + 1` headers are held.
  */
 async function outstandingNaming(
   reader: Reader,
   ids: readonly ResourceId[],
   kinds: readonly string[],
 ): Promise<DraftWithCommand[] | null> {
-  if (ids.length === 0) return [];
-  const entries = await reader.anyOf(
-    "drafts",
-    "index_targets",
-    [...ids].sort(),
-    NAMING_MOST + 1,
-  );
-  if (entries.length > NAMING_MOST) return null;
+  if (ids.length === 0 || kinds.length === 0) return [];
   const kept = new Map<LocalId, DraftRow>();
-  for (const draft of entries)
-    if (
-      !kept.has(draft.local_id) &&
-      kinds.includes(draft.kind) &&
-      (LIVE.includes(draft.status) ||
-        (draft.status === "acknowledged" &&
-          (await effectStands(reader, draft.target_resource_ids[0], draft))))
-    )
-      kept.set(draft.local_id, draft);
+  for (const id of [...new Set(ids)].sort()) {
+    const key = range.only(id);
+    const windows = Math.ceil(
+      (await reader.count("drafts", "index_targets", key)) / WINDOW,
+    );
+    for (let at = 0; at < windows; at += 1) {
+      const rows = await reader.byIndex(
+        "drafts",
+        "index_targets",
+        key,
+        WINDOW,
+        at * WINDOW,
+      );
+      for (const draft of rows) {
+        // A draft naming several of the rows is met once per row: it is one draft.
+        if (kept.has(draft.local_id) || !kinds.includes(draft.kind)) continue;
+        if (
+          LIVE.includes(draft.status) ||
+          (draft.status === "acknowledged" &&
+            (await effectStands(reader, draft.target_resource_ids[0], draft)))
+        ) {
+          kept.set(draft.local_id, draft);
+          if (kept.size > NAMING_MOST) return null;
+        }
+      }
+      if (rows.length < WINDOW) break;
+    }
+  }
   const rows = [...kept.values()].sort(bySeq);
   const bodies = await bulkGetWindowed(
     reader,
     "draft_commands",
     rows.map((row) => row.local_id),
   );
-  return rows.flatMap((row, index) => {
+  const out: DraftWithCommand[] = [];
+  for (const [index, row] of rows.entries()) {
     const body = bodies[index];
-    return body ? [{ ...row, command: body.command }] : [];
-  });
+    // A header without its body (they are written and removed together): what it would change is unknown, so the answer is not whole.
+    if (body === undefined) return null;
+    out.push({ ...row, command: body.command });
+  }
+  return out;
 }
 
 export interface ChildPageInput {
@@ -777,7 +800,10 @@ export interface ChildPage {
   page: ResourcePage;
   /** The parents of the kept rows (and `parentId`, when the cache holds it as `parentKind`), each with its overlay: absent is not held. */
   parents: Record<ResourceId, CacheRow>;
-  /** With `kinds`: the outstanding drafts naming a kept row (see `outstandingNaming`); null when too many to read whole. */
+  /**
+   * With `kinds`: the outstanding drafts naming a kept row (see `outstandingNaming`); null when more OUTSTANDING ones than one read answers
+   * whole (retained conflicts, rejections and released acknowledgements are never counted), or one without its body.
+   */
   drafts?: DraftWithCommand[] | null;
 }
 
