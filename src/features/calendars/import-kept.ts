@@ -1,4 +1,4 @@
-import type { GateState } from "../../data";
+import type { CacheLifetime, CacheLifetimes } from "../../data";
 import {
   documentRouteChanges,
   type RouteChanges,
@@ -22,7 +22,15 @@ import { isCalendarsPath } from "./visit";
  *    leaves. A dialog that unmounts otherwise (the sync control, a remount of the protected tree) leaves its session kept.
  *  - The session ends, shown or not, when the settled identity changes (another account, a new epoch, signed out: observed while hidden,
  *    so A→B→A never gives A's old input back), when the database it was composed against is no longer the displayed one (checked whenever
- *    it is shown again or saved), and, while kept hidden, when the cache is hidden to be brought up to date (the open dialog's E9 rule).
+ *    it is shown again or saved), and, while kept hidden, when the cache is invalidated to be brought up to date (the open dialog's E9
+ *    rule).
+ *  - Revision 7 (review 7 R7; design assessment C1-C3, invariants 2, 3, 6): the cache is observed through the PAGE's cache lifetime
+ *    (`pageCacheLifetime`), which every mounted controller publishes in turn, never through the controller that was mounted when the
+ *    session opened: a remount of the protected tree disposes that one and builds another while the page's leader goes on syncing. What
+ *    was missed while no controller (or no observer) was there is told by the cache's durable generation: the session keeps the generation
+ *    of the valid cache it was last shown against (a shown dialog applies E9 itself), and once hidden, a cache known to be invalid, or valid
+ *    under ANOTHER generation, ends it. A controller that has not established the facts yet (a remount's first read) proves nothing either
+ *    way and ends nothing, except that a session is not shown again until its generation can be compared.
  *
  * Page memory only: never stored, sent, broadcast, put in history state or logged; a reload or another tab has none. Retained selection
  * is never retained permission: the dialog reads the source's current state whenever it shows the session.
@@ -41,11 +49,8 @@ export interface ImportOwnerContext {
   };
   /** The displayed account database's incarnation, or null when there is none. */
   readonly incarnation: string | null;
-  /** The cache gate as the data environment derives it, observed while the session is kept and not shown. */
-  readonly gate: {
-    get(): GateState;
-    subscribe(listener: () => void): () => void;
-  } | null;
+  /** The page's cache lifetime (`pageCacheLifetime`), observed for as long as the session is kept; null: none (a test's dialog). */
+  readonly cache: CacheLifetimes | null;
   /** Today's date on this device (`YYYY-MM-DD`): a new session's default window. */
   readonly today: string;
 }
@@ -60,6 +65,10 @@ interface Held {
   readonly inside: boolean;
   /** Whether a dialog shows it now. */
   shown: boolean;
+  /** The generation of the valid cache it was last shown against (null: not shown against a valid one yet). Frozen while hidden. */
+  generation: number | null;
+  /** Judges it by the page's cache as it is now (ends it if that says so). */
+  judge: () => void;
   readonly offs: Array<() => void>;
 }
 
@@ -92,6 +101,50 @@ function release(
   if (held === which) held = null;
 }
 
+/**
+ * Whether the page's cache, as `life` says it now, lets `which` live on (revision 7, R7). Shown: the dialog applies E9 itself, and the
+ * session follows the valid cache it shows (a pending source's dialog stays open while the cache is brought up to date). Hidden: a cache
+ * known to be invalid ends it, and so does a valid cache of another generation (invalidated and recovered while nothing was observing it);
+ * facts not established yet prove nothing. Another database is the incarnation rule's (`revokedIn`), and no controller says nothing.
+ */
+function survives(
+  which: Held,
+  life: CacheLifetime | null,
+  context: ImportOwnerContext,
+): boolean {
+  if (life === null) return true;
+  // Composed before there was a database: the displayed account's first one is its own (as `revokedIn` adopts it).
+  if (
+    which.incarnation === null &&
+    which.identity.startsWith(`${life.account}:`) &&
+    identityOf(context.identities.get()) === which.identity
+  )
+    which.incarnation = life.incarnationId;
+  if (life.incarnationId !== which.incarnation) return true;
+  if (which.shown) {
+    if (life.valid && life.generation !== null)
+      which.generation = life.generation;
+    return true;
+  }
+  if (life.invalidated) return false;
+  if (life.generation === null) return true;
+  if (which.generation === null) {
+    if (life.valid) which.generation = life.generation;
+    return true;
+  }
+  return life.generation === which.generation;
+}
+
+/** Whether `which`'s generation can be compared with the cache's now: it has none to compare yet, or the facts of its database are established. */
+function verifiable(which: Held, life: CacheLifetime | null): boolean {
+  return (
+    which.generation === null ||
+    (life !== null &&
+      life.incarnationId === which.incarnation &&
+      life.generation !== null)
+  );
+}
+
 /** Whether `which` may still be shown or saved in `context`: its identity is displayed and settled, and its database is the displayed one. */
 function owns(which: Held, context: ImportOwnerContext): boolean {
   return !which.editor.ended() && !revokedIn(which, context);
@@ -116,10 +169,13 @@ function current(
 ): ImportEditor | null {
   const which = held;
   if (which === null) return null;
+  const life = context.cache?.get() ?? null;
   if (
     sameEntry(which.entry, entry) &&
     isCalendarsPath(observed().pathname()) &&
-    owns(which, context)
+    owns(which, context) &&
+    (context.cache === null ||
+      (verifiable(which, life) && survives(which, life, context)))
   ) {
     which.shown = true;
     return which.editor;
@@ -152,6 +208,8 @@ export function openImport(
     incarnation: context.incarnation,
     inside: isCalendarsPath(changes.pathname()),
     shown: true,
+    generation: null,
+    judge: () => undefined,
     offs: [],
   };
   held = which;
@@ -166,13 +224,17 @@ export function openImport(
         release(which, "revoked");
     }),
   );
-  const gate = context.gate;
-  if (gate !== null)
-    which.offs.push(
-      gate.subscribe(() => {
-        if (!which.shown && gate.get() !== "open") release(which);
-      }),
-    );
+  const cache = context.cache;
+  if (cache !== null) {
+    // Every publication is judged, shown or not: shown, the session follows the valid cache it is shown against; hidden, it ends on an
+    // invalidation, seen as it happens or told by the generation afterwards (another controller, or none, may have been mounted meanwhile).
+    const judge = (): void => {
+      if (!survives(which, cache.get(), context)) release(which);
+    };
+    which.offs.push(cache.subscribe(judge));
+    which.judge = judge;
+    judge();
+  }
   return editor;
 }
 
@@ -196,6 +258,8 @@ export function hideImport(editor: ImportEditor): void {
   if (which === null || which.editor !== editor) return;
   which.shown = false;
   if (!which.inside) release(which);
+  // What the cache says at the moment it is hidden counts too (an invalidation the shown dialog stayed open through, R7).
+  else which.judge();
 }
 
 /** Whether `editor` may be saved now (asked at the press): still the kept session of the displayed identity and database. */

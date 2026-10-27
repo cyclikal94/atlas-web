@@ -49,6 +49,7 @@ import {
   readResourceView,
 } from "../plans/pending-reads";
 import type { Loadable, Watchable } from "../store/port";
+import { publishCacheLifetime } from "./cache-lifetime";
 import { createDataEnv, type DataActions, type DataEnv } from "./env";
 import {
   currentDeviceThrough,
@@ -74,6 +75,8 @@ export function DataEnvProvider({
   env: DataEnv;
   children: ReactNode;
 }) {
+  // WEB-13b revision 7 (R7): the mounted controller's cache lifetime is the page's, for as long as it is mounted (`cache-lifetime.ts`).
+  useEffect(() => publishCacheLifetime(env.cacheLifetime), [env]);
   return (
     <DataEnvContext.Provider value={env}>{children}</DataEnvContext.Provider>
   );
@@ -349,20 +352,6 @@ export function useNotices(): Notice[] {
 export function useCacheGate(): GateState {
   const inputs = useStatusInputs();
   return useMemo(() => deriveGate(inputs), [inputs]);
-}
-
-/**
- * The cache gate of `env` outside React (WEB-13b revision 6, R7): read and observed by what outlives the screen that showed it (a kept import
- * session, while no screen shows the gate).
- */
-export function cacheGateOf(env: DataEnv): {
-  get(): GateState;
-  subscribe(listener: () => void): () => void;
-} {
-  return {
-    get: () => deriveGate(env.inputs.get()),
-    subscribe: (listener) => env.inputs.subscribe(listener),
-  };
 }
 
 // ---- the queue --------------------------------------------------------------------------------------------------------------------

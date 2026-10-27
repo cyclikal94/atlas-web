@@ -16,8 +16,10 @@ import {
 import {
   deltaPage,
   fresh,
+  leaderOf,
   leaderPage,
   snapshotPage,
+  untilLeader,
 } from "./data-leader-helpers";
 import { startOutbox, untilTreeSettled } from "./data-sync-helpers";
 import { expect, runAxe, test } from "./helpers";
@@ -824,4 +826,474 @@ test.describe("E-IMP7: the in-dialog sync control keeps the import (revision 6, 
     expect(await leaks(page)).toEqual([]);
     expect(await leaks(other)).toEqual([]);
   });
+});
+
+test.describe("E-IMP8: the kept import across a protected-tree remount and a cache invalidation (revision 7, review 7 R7)", () => {
+  /**
+   * Review 7 R7 (family `task-sync-navigation-draft-loss`, incomplete_fix) in a real engine, real File reads and the PRODUCTION session,
+   * leader, protected tree and `DataProvider`; only network answers are scripted (the reviewer's probe, maintained). An ordinary Atlas `403`
+   * to a queued settings change makes the session re-check the display: the protected tree unmounts and mounts again under the same
+   * identity, so its controller is disposed and a new one built, while the page's leader goes on syncing. Then the engine meets
+   * `410 resync_required` (W18: the cache `invalid`) and recovery replaces the cache (W23: `valid` again, the same database). The kept
+   * import must have ended: back on Calendars, Import events is a new session. Controls: `422` (no remount) with the same invalidation, and
+   * the `403` remount with no invalidation (the import kept). The remount is witnessed by the Sync heading's DOM node being replaced.
+   */
+  const { kind_date: _kindDate, ...wireSource } = sourceProjection(SOURCE);
+  const DROP = "[data-import-drop]";
+  type Entry = "row" | "chooser";
+  async function scenario(
+    context: Parameters<typeof calendarsPage>[0],
+    entry: Entry,
+    status: 403 | 422,
+    invalidate: boolean,
+  ) {
+    test.setTimeout(90_000);
+    const net = await fresh(context);
+    net.answer = (call) =>
+      call.cursor === null
+        ? snapshotPage(
+            [{ kind: "upsert", resource: wireSource }],
+            "delta-0",
+            false,
+          )
+        : deltaPage([], call.cursor);
+    const cal = await stubCalendars(context);
+    let release!: (answer: { status: number; body: unknown }) => void;
+    cal.answers.set("/calendar-commands", [
+      {
+        wait: new Promise((resolve) => {
+          release = resolve;
+        }),
+      },
+    ]);
+    const page = await leaderPage(context, net, "one", undefined, {
+      route: "/settings/calendars",
+    });
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible({
+      timeout: 30_000,
+    });
+    const identity = () =>
+      page.evaluate(() =>
+        window.__atlasFixture?.session?.booted?.session.identity.get(),
+      );
+    const before = {
+      identity: await identity(),
+      sync: await rows(page, "sync_state"),
+    };
+    // A settings change queued and held (its answer decides the remount).
+    await page.getByRole("button", { name: "Manage Work rota" }).click();
+    const manage = page.getByRole("dialog", { name: "Manage — Work rota" });
+    await manage.getByLabel("Timezone").fill("Europe/Vienna");
+    await manage.getByRole("button", { name: "Save", exact: true }).click();
+    await expect.poll(() => posts(cal, "/calendar-commands").length).toBe(1);
+    // The import, composed and kept by the sync control.
+    const dialog = page.getByRole("dialog", {
+      name: "Import events",
+      exact: true,
+    });
+    if (entry === "row") {
+      await page
+        .getByRole("button", { name: "Import events into Work rota" })
+        .click();
+      await dialog.locator('input[type="file"]').setInputFiles({
+        name: "retained.ics",
+        mimeType: "text/calendar",
+        buffer: Buffer.from(calendarText(1)),
+      });
+      await expect(dialog.locator("[data-import-file]")).toContainText(
+        "retained.ics",
+      );
+      await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+    } else {
+      await page
+        .locator(DROP)
+        .locator('input[type="file"]')
+        .setInputFiles({
+          name: "retained.ics",
+          mimeType: "text/calendar",
+          buffer: Buffer.from(calendarText(1)),
+        });
+      await expect(dialog.locator("[data-import-file]")).toContainText(
+        "retained.ics",
+      );
+    }
+    await dialog.getByLabel("Through", { exact: true }).fill("2026-12-31");
+    await dialog.locator("button[data-sync-tone]").click();
+    await expect(page).toHaveURL(/\/sync(?:\?|$)/);
+    const heading = page.getByRole("heading", { name: "Sync", exact: true });
+    await expect(heading).toBeVisible();
+    await heading.evaluate((node) => {
+      (node as unknown as { __r7: boolean }).__r7 = true;
+    });
+    release({
+      status,
+      body: atlasBody(status === 403 ? "forbidden" : "invalid_value"),
+    });
+    await expect
+      .poll(
+        async () =>
+          ((await rows(page, "drafts")) as Array<Record<string, unknown>>).find(
+            (d) => d.kind === "configure_source",
+          )?.status,
+        { timeout: 20_000 },
+      )
+      .toBe("rejected");
+    await expect(heading).toBeVisible();
+    const remounted = await heading.evaluate(
+      (node) => (node as unknown as { __r7?: boolean }).__r7 !== true,
+    );
+    const after = {
+      identity: await identity(),
+      sync: await rows(page, "sync_state"),
+    };
+    const history: unknown[] = [];
+    if (invalidate) {
+      let resync = false;
+      let snapshot!: (page: ReturnType<typeof snapshotPage>) => void;
+      const held = new Promise<ReturnType<typeof snapshotPage>>((resolve) => {
+        snapshot = resolve;
+      });
+      net.answer = (call) => {
+        if (!resync) {
+          resync = true;
+          return {
+            status: 410,
+            body: JSON.stringify(atlasBody("resync_required")),
+          };
+        }
+        return call.cursor === null ? held : deltaPage([], call.cursor);
+      };
+      await page.evaluate(() => window.__atlasFixture?.session?.leaderNudge());
+      await expect
+        .poll(async () => (await rows(page, "sync_state"))[0]?.cache_status, {
+          timeout: 15_000,
+        })
+        .toBe("invalid");
+      history.push(await rows(page, "sync_state"));
+      await expect
+        .poll(() => net.calls.filter((c) => c.cursor === null).length, {
+          timeout: 15_000,
+        })
+        .toBe(2);
+      snapshot(
+        snapshotPage(
+          [{ kind: "upsert", resource: wireSource }],
+          "delta-refreshed",
+          false,
+          21,
+        ),
+      );
+      await expect
+        .poll(async () => (await rows(page, "sync_state"))[0]?.cache_status, {
+          timeout: 15_000,
+        })
+        .toBe("valid");
+      history.push(await rows(page, "sync_state"));
+    }
+    await page.goBack();
+    await expect(page).toHaveURL(/settings\/calendars/);
+    let pickers = 0;
+    page.on("filechooser", () => {
+      pickers += 1;
+    });
+    if (entry === "row")
+      await page
+        .getByRole("button", { name: "Import events into Work rota" })
+        .click();
+    else
+      await page.locator(DROP).getByRole("button", { name: "browse" }).click();
+    const shownDialog = pickers === 0 && (await dialog.isVisible());
+    const file = dialog.locator("[data-import-file]");
+    const seen = {
+      remounted,
+      dialog: shownDialog,
+      pickers,
+      file:
+        shownDialog && (await file.count()) > 0
+          ? await file.textContent()
+          : null,
+      through: shownDialog
+        ? await dialog.getByLabel("Through", { exact: true }).inputValue()
+        : null,
+      drafts: (await rows(page, "drafts")) as Array<Record<string, unknown>>,
+      sent: posts(cal, "/calendar-commands").length,
+      imports: posts(cal, IMPORT_PATH).length,
+    };
+    await test.info().attach("observations", {
+      body: JSON.stringify(
+        { entry, status, invalidate, before, after, history, seen },
+        null,
+        2,
+      ),
+      contentType: "application/json",
+    });
+    // The same identity and database throughout; exactly one rejected settings change, and nothing else stored or sent.
+    expect(after.identity).toEqual(before.identity);
+    expect(
+      (after.sync[0] as { incarnation_id?: string } | undefined)
+        ?.incarnation_id,
+    ).toBe(
+      (before.sync[0] as { incarnation_id?: string } | undefined)
+        ?.incarnation_id,
+    );
+    expect(seen.drafts.map((d) => [d.kind, d.status])).toEqual([
+      ["configure_source", "rejected"],
+    ]);
+    expect(seen.sent).toBe(1);
+    expect(seen.imports).toBe(0);
+    expect(seen.remounted).toBe(status === 403);
+    return { page, dialog, seen };
+  }
+
+  for (const entry of ["row", "chooser"] as const) {
+    test(`${entry}: 403 (the tree remounted), then the cache invalidated and replaced while kept at /sync: back, a new session`, async ({
+      context,
+    }) => {
+      const { seen } = await scenario(context, entry, 403, true);
+      if (entry === "row") {
+        expect(seen.dialog).toBe(true);
+        expect(seen.file).toBeNull();
+        expect(seen.through).not.toBe("2026-12-31");
+      } else {
+        // Nothing kept: Browse asks for a file, and no dialog is shown.
+        expect(seen.pickers).toBe(1);
+        expect(seen.dialog).toBe(false);
+      }
+    });
+
+    test(`${entry} control: 403 (the tree remounted) and no invalidation: back, the SAME session`, async ({
+      context,
+    }) => {
+      const { seen } = await scenario(context, entry, 403, false);
+      expect(seen.pickers).toBe(0);
+      expect(seen.dialog).toBe(true);
+      expect(seen.file).toContain("retained.ics");
+      expect(seen.through).toBe("2026-12-31");
+    });
+  }
+
+  test("row control: 422 (no remount), then the same invalidation and replacement: back, a new session", async ({
+    context,
+  }) => {
+    const { seen } = await scenario(context, "row", 422, true);
+    expect(seen.dialog).toBe(true);
+    expect(seen.file).toBeNull();
+    expect(seen.through).not.toBe("2026-12-31");
+  });
+
+  /**
+   * L6 (design assessment): TWO pages. Page `two` is a follower and holds the kept import; page `one` leads, meets `410 resync_required` and
+   * recovers (W18 then W23), so `two` learns of it only through its own controller's reads of the shared database. In the HELD variant every
+   * BroadcastChannel message to `two` (Dexie's cross-tab `storagemutated` wake among them) is held until the cycle is over, so `two` reads
+   * only the final, valid state: the generation it carries is what tells. `one` never receives `two`'s unsaved file.
+   */
+  const HOLD_CHANNELS = () => {
+    const Native = BroadcastChannel;
+    const queue: Array<() => void> = [];
+    const state = window as unknown as {
+      __holdChannels: boolean;
+      __heldMessages: number;
+      __releaseChannels: () => void;
+    };
+    state.__holdChannels = false;
+    state.__heldMessages = 0;
+    state.__releaseChannels = () => {
+      state.__holdChannels = false;
+      for (const deliver of queue.splice(0)) deliver();
+    };
+    const replayed = new WeakSet<Event>();
+    window.BroadcastChannel = class extends Native {
+      constructor(name: string) {
+        super(name);
+        // Registered before any listener of the channel's owner, so it runs first and can hold the message from all of them.
+        this.addEventListener("message", (event) => {
+          if (!state.__holdChannels || replayed.has(event)) return;
+          event.stopImmediatePropagation();
+          state.__heldMessages += 1;
+          queue.push(() => {
+            const copy = new MessageEvent("message", { data: event.data });
+            replayed.add(copy);
+            this.dispatchEvent(copy);
+          });
+        });
+      }
+    } as typeof BroadcastChannel;
+  };
+  for (const variant of ["delivered", "held", "control"] as const)
+    test(`L6 two pages (${variant}): the follower's kept import ${variant === "control" ? "is kept when the leader page only syncs (no invalidation)" : `ends when the leader page invalidates and recovers the cache${variant === "held" ? ", its cross-tab wakes held until after" : ""}`}`, async ({
+      context,
+    }) => {
+      test.setTimeout(90_000);
+      const net = await fresh(context);
+      net.answer = (call) =>
+        call.cursor === null
+          ? snapshotPage(
+              [{ kind: "upsert", resource: wireSource }],
+              "delta-0",
+              false,
+            )
+          : deltaPage([], call.cursor);
+      await stubCalendars(context);
+      const one = await leaderPage(context, net, "one", undefined, {
+        route: "/settings/calendars",
+      });
+      await expect(one.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible({
+        timeout: 30_000,
+      });
+      const twoPage = await context.newPage();
+      await twoPage.addInitScript(HOLD_CHANNELS);
+      const two = await leaderPage(context, net, "two", twoPage, {
+        route: "/settings/calendars",
+      });
+      await expect(two.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible({
+        timeout: 30_000,
+      });
+      expect(
+        (await untilLeader(two, (v) => v.attachment === "follower")).role,
+      ).toBe("follower");
+      expect((await leaderOf(one)).role).toBe("leader");
+      const before = await rows(two, "sync_state");
+      // The follower's import, kept by the sync control.
+      const dialog = two.getByRole("dialog", {
+        name: "Import events",
+        exact: true,
+      });
+      await two
+        .getByRole("button", { name: "Import events into Work rota" })
+        .click();
+      await dialog.locator('input[type="file"]').setInputFiles({
+        name: "retained.ics",
+        mimeType: "text/calendar",
+        buffer: Buffer.from(calendarText(1).replace("Bin day 0", "L6-MARK")),
+      });
+      await expect(dialog.locator("[data-import-file]")).toContainText(
+        "retained.ics",
+      );
+      await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+      await dialog.getByLabel("Through", { exact: true }).fill("2026-12-31");
+      await dialog.locator("button[data-sync-tone]").click();
+      await expect(two).toHaveURL(/\/sync(?:\?|$)/);
+      await expect(
+        two.getByRole("heading", { name: "Sync", exact: true }),
+      ).toBeVisible();
+      if (variant === "held")
+        await two.evaluate(() => {
+          (window as unknown as { __holdChannels: boolean }).__holdChannels =
+            true;
+        });
+      const history: unknown[] = [];
+      let resync = false;
+      let snapshot!: (page: ReturnType<typeof snapshotPage>) => void;
+      const heldSnapshot = new Promise<ReturnType<typeof snapshotPage>>(
+        (resolve) => {
+          snapshot = resolve;
+        },
+      );
+      net.answer = (call) => {
+        if (variant !== "control" && !resync) {
+          resync = true;
+          return {
+            status: 410,
+            body: JSON.stringify(atlasBody("resync_required")),
+          };
+        }
+        return call.cursor === null ? heldSnapshot : deltaPage([], call.cursor);
+      };
+      await one.evaluate(() => window.__atlasFixture?.session?.leaderNudge());
+      if (variant === "control") {
+        await expect
+          .poll(() => net.calls.filter((c) => c.page === "one").length, {
+            timeout: 15_000,
+          })
+          .toBeGreaterThan(1);
+      } else {
+        await expect
+          .poll(async () => (await rows(one, "sync_state"))[0]?.cache_status, {
+            timeout: 15_000,
+          })
+          .toBe("invalid");
+        history.push(await rows(one, "sync_state"));
+        await expect
+          .poll(() => net.calls.filter((c) => c.cursor === null).length, {
+            timeout: 15_000,
+          })
+          .toBe(2);
+        snapshot(
+          snapshotPage(
+            [{ kind: "upsert", resource: wireSource }],
+            "delta-refreshed",
+            false,
+            21,
+          ),
+        );
+        await expect
+          .poll(async () => (await rows(one, "sync_state"))[0]?.cache_status, {
+            timeout: 15_000,
+          })
+          .toBe("valid");
+        history.push(await rows(one, "sync_state"));
+      }
+      const held =
+        variant === "held"
+          ? await two.evaluate(() => {
+              const state = window as unknown as {
+                __heldMessages: number;
+                __releaseChannels: () => void;
+              };
+              const count = state.__heldMessages;
+              state.__releaseChannels();
+              return count;
+            })
+          : null;
+      await two.goBack();
+      await expect(two).toHaveURL(/settings\/calendars/);
+      await two
+        .getByRole("button", { name: "Import events into Work rota" })
+        .click();
+      await expect(dialog).toBeVisible();
+      const file = dialog.locator("[data-import-file]");
+      const seen = {
+        held,
+        file: (await file.count()) > 0 ? await file.textContent() : null,
+        from: await dialog.getByLabel("From", { exact: true }).inputValue(),
+        through: await dialog
+          .getByLabel("Through", { exact: true })
+          .inputValue(),
+        after: await rows(two, "sync_state"),
+        // Nothing of the follower's file in the leader page's storage, nor in the shared drafts.
+        leaked: await one.evaluate(() => {
+          const found: string[] = [];
+          for (const store of [localStorage, sessionStorage])
+            for (let i = 0; i < store.length; i += 1) {
+              const key = store.key(i) ?? "";
+              if (`${key}${store.getItem(key)}`.includes("L6-MARK"))
+                found.push(key);
+            }
+          return found;
+        }),
+        drafts: await rows(one, "drafts"),
+      };
+      await test.info().attach("observations", {
+        body: JSON.stringify({ variant, before, history, seen }, null, 2),
+        contentType: "application/json",
+      });
+      // The same database throughout (one incarnation), nothing stored or leaked.
+      const incarnation = (r: unknown[]) =>
+        (r[0] as { incarnation_id?: string } | undefined)?.incarnation_id;
+      expect(incarnation(seen.after)).toBe(incarnation(before));
+      expect(seen.drafts).toEqual([]);
+      expect(seen.leaked).toEqual([]);
+      if (variant === "held") expect(seen.held).toBeGreaterThan(0);
+      if (variant === "control")
+        expect(seen).toMatchObject({
+          file: expect.stringContaining("retained.ics"),
+          from: "2026-01-01",
+          through: "2026-12-31",
+        });
+      else {
+        expect(seen.file).toBeNull();
+        expect(seen.from).not.toBe("2026-01-01");
+        expect(seen.through).not.toBe("2026-12-31");
+      }
+    });
 });

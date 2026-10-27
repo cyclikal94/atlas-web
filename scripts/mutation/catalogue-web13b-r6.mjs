@@ -144,10 +144,11 @@ export const UNIT_13B_R6 = [
     tests: [T_KEPT, T_RET],
     expect: /cache hidden to be brought up to date/,
     patch: (t) =>
+      // Re-anchored in revision 7 (R7): the same defect at the corrected observation of the page's cache lifetime.
       sub(
         t,
-        '        if (!which.shown && gate.get() !== "open") release(which);\n',
-        "        if (false) release(which);\n",
+        "      if (!survives(which, cache.get(), context)) release(which);\n",
+        "      if (false) release(which);\n",
       ),
   },
   {

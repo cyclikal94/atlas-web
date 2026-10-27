@@ -11,6 +11,9 @@ import type { DraftRow } from "../../../src/data";
 import * as copy from "../../../src/features/calendars/copy";
 import { SHOW_NEXT_CALENDARS } from "../../../src/features/calendars/copy-anchor";
 import * as words from "../../../src/features/calendars/copy-import";
+import { deviceToday } from "../../../src/features/calendars/ImportDialog";
+import { IMPORT_ENDPOINT } from "../../../src/features/calendars/model/commands";
+import { defaultWindow } from "../../../src/features/calendars/model/import";
 import { installMatchMedia } from "../../helpers/match-media";
 import { calendarWorld, sourceRow } from "../../support/calendars";
 import { draftRow } from "../../support/data/rows";
@@ -275,7 +278,9 @@ describe("R7: what goes on while the import is kept (I5, I8-I11)", () => {
     await w.settle();
     await toSyncAndBack(w, dialog);
     const again = await openRow(w);
-    expect(within(again).getByText(words.READING)).toBeInTheDocument();
+    // Revision 7: `queryByText` so that a missing message fails this ASSERTION (a throwing `getByText` is an error, which the merged
+    // mutation runner rejects beside the expected catch: MU-2637/MU-2638 were invalid). The same requirement: the message is shown.
+    expect(within(again).queryByText(words.READING)).toBeInTheDocument();
     fireEvent.submit(present(again.querySelector("form")));
     await w.settle();
     expect(drafts(w)).toHaveLength(0);
@@ -776,4 +781,246 @@ describe("R7: identity and departures (I12, I13)", () => {
       through: "2026-12-31",
     });
   });
+});
+
+/**
+ * WEB-13b revision 7 (review 7 R7, family `task-sync-navigation-draft-loss`, incomplete_fix; design assessment C1-C4, L1/L2): the kept
+ * import must keep observing the cache after the protected tree is REPLACED. Production's `DataProvider` disposes its controller at
+ * unmount and builds a new one at the next mount, while the page's runtime (the leader's) goes on; the revision 6 owner watched the
+ * disposed controller and so missed a later invalidation and recovery. Here: the PRODUCTION provider over the page's runtime
+ * (`production: true`, a new controller per mount, the first one disposed), and the PRODUCTION writers of the cache's lifetime: the
+ * ordinary-phase invalidation (W18, as a `410 resync_required` makes it), the ownership (W20), the capture (W21) and the activation of
+ * the replacement snapshot (W23). The controls pair each case with no remount (the review's 422 control) and with no invalidation.
+ * FIXTURE evidence (jsdom); the native counterpart is `fixture.calendar-import.spec.ts` (E-IMP8).
+ */
+describe("R7 (revision 7): the kept import across a production controller replacement and a cache invalidation (L1, L2)", () => {
+  const production = (over: Parameters<typeof calendarWorld>[0] = {}) =>
+    world({ production: true, validCache: true, ...over });
+  const fresh = defaultWindow(deviceToday());
+  /** The import POSTs made (none may be: nothing is imported by keeping or by reopening). */
+  const importPosts = (w: World) =>
+    w.calls.filter(
+      (call) => call.method === "POST" && call.path === IMPORT_ENDPOINT,
+    );
+  /** The first controller was disposed and the one mounted now is another (what production's remount does). */
+  function replaced(w: World) {
+    const [first, ...rest] = w.controllers();
+    expect(rest.length).toBeGreaterThan(0);
+    expect(w.env).not.toBe(first);
+    expect(first?.service()).toBeNull();
+    expect(first?.cacheLifetime.get()).toBeNull();
+    expect(w.env.service()).not.toBeNull();
+  }
+  /** W18 then W23 (through W20/W21), in the same database: invalid in between, valid again under a later generation. */
+  async function invalidateAndRecover(w: World) {
+    const before = w.sync();
+    await w.invalidate();
+    expect(w.sync()).toMatchObject({
+      cache_status: "invalid",
+      recovery_generation: before.recovery_generation + 1,
+    });
+    await w.recover([sourceRow()]);
+    const after = w.sync();
+    expect(after.cache_status).toBe("valid");
+    expect(after.recovery_generation).toBeGreaterThan(
+      before.recovery_generation,
+    );
+    return { before, after };
+  }
+
+  test("L1: remounted (a NEW controller) at the sync screens, then W18 → W23: back, Import events is a new session (no file, the default window); nothing stored or sent", async () => {
+    const w = await production();
+    const incarnation = w.env.service()?.incarnationId;
+    const dialog = await edited(w);
+    await syncFrom(w, dialog);
+    await w.remount();
+    replaced(w);
+    await invalidateAndRecover(w);
+    expect(w.env.service()?.incarnationId).toBe(incarnation);
+    await w.traverse(-1);
+    const again = await openRow(w);
+    expect(seen(w, again)).toEqual({
+      file: null,
+      from: fresh.from,
+      through: fresh.through,
+      drafts: 0,
+    });
+    expect(importPosts(w)).toHaveLength(0);
+  });
+
+  test("L1: the tree gone (no controller at all) while W18 → W23 complete, then mounted again: back, Import events is a new session", async () => {
+    const w = await production();
+    const dialog = await edited(w);
+    await syncFrom(w, dialog);
+    await w.detach();
+    await invalidateAndRecover(w);
+    await w.attach();
+    replaced(w);
+    await w.traverse(-1);
+    const again = await openRow(w);
+    expect(seen(w, again)).toEqual({
+      file: null,
+      from: fresh.from,
+      through: fresh.through,
+      drafts: 0,
+    });
+    expect(importPosts(w)).toHaveLength(0);
+  });
+
+  test("L1 control (no remount, the review's 422 control): the same controller throughout, W18 → W23: a new session", async () => {
+    const w = await production();
+    const dialog = await edited(w);
+    await syncFrom(w, dialog);
+    await invalidateAndRecover(w);
+    expect(w.controllers()).toHaveLength(1);
+    await w.traverse(-1);
+    const again = await openRow(w);
+    expect(seen(w, again)).toEqual({
+      file: null,
+      from: fresh.from,
+      through: fresh.through,
+      drafts: 0,
+    });
+  });
+
+  test("L1 control (no invalidation): remounted (a NEW controller) at the sync screens, back: the SAME session (file and window)", async () => {
+    const w = await production();
+    const dialog = await edited(w);
+    await syncFrom(w, dialog);
+    const generation = w.sync().recovery_generation;
+    await w.remount();
+    replaced(w);
+    await w.remount();
+    expect(w.controllers().length).toBeGreaterThanOrEqual(3);
+    expect(w.sync().recovery_generation).toBe(generation);
+    await w.traverse(-1);
+    const again = await openRow(w);
+    expect(seen(w, again)).toEqual({
+      file: expect.stringContaining("retained.ics"),
+      from: "2026-01-01",
+      through: "2026-12-31",
+      drafts: 0,
+    });
+    expect(importPosts(w)).toHaveLength(0);
+  });
+
+  test("L1 control (no invalidation): the tree gone and mounted again: back, the SAME session", async () => {
+    const w = await production();
+    const dialog = await edited(w);
+    await syncFrom(w, dialog);
+    await w.detach();
+    await w.attach();
+    replaced(w);
+    await w.traverse(-1);
+    const again = await openRow(w);
+    expect(seen(w, again)).toMatchObject({
+      file: expect.stringContaining("retained.ics"),
+      from: "2026-01-01",
+      through: "2026-12-31",
+    });
+  });
+
+  for (const failed of [true, false])
+    test(`L5${failed ? "" : " control"}: ${failed ? "an admitted invalidation whose write failed (its durable streak at the cache's position; the cache still says valid, the generation unchanged) ends" : "a failure streak of ANOTHER position (one the cache has moved on from) keeps"} the kept import`, async () => {
+      const w = await production();
+      const dialog = await edited(w);
+      await syncFrom(w, dialog);
+      await w.remount();
+      const s = w.sync();
+      await w.commit({
+        put: {
+          store: "sync_state",
+          rows: [
+            {
+              ...s,
+              local_write_streaks: {
+                ...s.local_write_streaks,
+                [failed ? `invalidate:${s.cursor}` : "invalidate:delta-old"]: 1,
+              },
+            },
+          ],
+        },
+      });
+      expect(w.sync()).toMatchObject({
+        cache_status: "valid",
+        recovery_generation: s.recovery_generation,
+      });
+      expect(w.env.cacheLifetime.get()).toMatchObject({
+        generation: s.recovery_generation,
+        invalidated: failed,
+      });
+      // The streak gone again and the generation unchanged: only an observer that saw the known-invalid state can tell (no durable trace).
+      await w.commit({ put: { store: "sync_state", rows: [s] } });
+      await w.traverse(-1);
+      const again = await openRow(w);
+      if (failed)
+        expect(seen(w, again)).toMatchObject({ file: null, from: fresh.from });
+      else
+        expect(seen(w, again)).toMatchObject({
+          file: expect.stringContaining("retained.ics"),
+          from: "2026-01-01",
+        });
+    });
+
+  const zoneInput = () =>
+    present(
+      present(document.querySelector("[data-import-drop]")).querySelector(
+        'input[type="file"]',
+      ),
+    ) as HTMLInputElement;
+  const browse = () =>
+    present(
+      present(document.querySelector("[data-import-drop]")).querySelector(
+        "button",
+      ),
+    );
+  /** The drop zone's import of `drop.ics` with an edited Through, kept by the sync control. */
+  async function droppedAndKept(w: World) {
+    await screen.findByText(words.DROP_PROMPT);
+    await act(async () => {
+      fireEvent.change(zoneInput(), {
+        target: { files: [new File([ICS], "drop.ics")] },
+      });
+    });
+    await w.settle();
+    const dialog = await screen.findByRole("dialog");
+    await waitFor(() => expect(shownFile(dialog)).toContain("drop.ics"));
+    setField(dialog, "Through", "2026-12-31");
+    await syncFrom(w, dialog);
+  }
+
+  for (const invalidated of [true, false])
+    test(`L2: the drop zone's kept import, remounted (a NEW controller)${invalidated ? " then W18 → W23" : " (control: no invalidation)"}: Browse ${invalidated ? "opens the file picker, and no dialog" : "shows the SAME session"}`, async () => {
+      const w = await production();
+      await droppedAndKept(w);
+      await w.remount();
+      replaced(w);
+      if (invalidated) await invalidateAndRecover(w);
+      await w.traverse(-1);
+      const picker = vi
+        .spyOn(HTMLInputElement.prototype, "click")
+        .mockImplementation(() => undefined);
+      fireEvent.click(browse());
+      await w.settle();
+      if (invalidated) {
+        expect(picker).toHaveBeenCalledTimes(1);
+        expect(screen.queryByRole("dialog")).toBeNull();
+        // A file dropped now starts from the default window, not the kept one.
+        await act(async () => {
+          fireEvent.change(zoneInput(), {
+            target: { files: [new File([ICS], "later.ics")] },
+          });
+        });
+        await w.settle();
+        const dialog = await screen.findByRole("dialog");
+        expect(field(dialog, "Through").value).toBe(fresh.through);
+      } else {
+        expect(picker).not.toHaveBeenCalled();
+        const again = present(screen.queryByRole("dialog"));
+        expect(shownFile(again)).toContain("drop.ics");
+        expect(field(again, "Through").value).toBe("2026-12-31");
+      }
+      expect(drafts(w)).toHaveLength(0);
+      expect(importPosts(w)).toHaveLength(0);
+    });
 });

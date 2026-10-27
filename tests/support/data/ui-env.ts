@@ -251,6 +251,7 @@ export function stubEnv(
     outbox: () => null,
     service: () => serviceCell.get() as never,
     serviceStore: serviceCell as never,
+    cacheLifetime: new Cell(null),
     setResource(id, merged) {
       resources.set(id, {
         status: "ready",

@@ -39,6 +39,12 @@ export interface SyncFacts {
    * these, and says so.
    */
   syncStops: SyncStops;
+  /**
+   * WEB-13b revision 7 (review 7 R7): the cache's `recovery_generation`. Every invalidation moves it on (W18, and W24 when it abandons an
+   * attempt), and the activation that makes the cache valid again keeps it (W23), so a valid cache read under another generation than one
+   * read earlier was not valid all along, even when nothing observed it in between.
+   */
+  recoveryGeneration: number;
 }
 
 /** The operations of `local_write_streaks` that are the sync writers' (the engine's and the recovery job's), never the outbox's. */
@@ -84,5 +90,6 @@ export const readSyncFacts = readPlan<
           invalidateOperation: invalidateOperation(sync.cursor),
           recoveryBlocked: blockedBy(sync) !== null,
           syncStops: syncStopsOf(sync),
+          recoveryGeneration: sync.recovery_generation,
         },
 });

@@ -294,6 +294,7 @@ export function fixtureData(params: URLSearchParams): FixtureData {
     outbox: () => null,
     service: () => null,
     serviceStore: new Cell(null),
+    cacheLifetime: new Cell(null),
     attachLeader: () => () => undefined,
     attachFollower: () => () => undefined,
     start: () => undefined,

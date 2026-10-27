@@ -12,9 +12,9 @@ import { List } from "../../components/ui/list";
 import { PageHeading } from "../../components/ui/page-heading";
 import {
   type CacheRow,
-  cacheGateOf,
   type DraftWithCommand,
   type ListedResource,
+  pageCacheLifetime,
   useCacheGate,
   useDataActions,
   useOptionalDataEnv,
@@ -278,7 +278,8 @@ function Sources() {
     setAwaiting((previous) => new Map(previous).set(id, version));
   }, []);
   // Revision 6 (R7): the import dialog shows an editing session the import's visit owns (`import-kept.ts`), so the in-dialog sync control
-  // keeps it. What it is owned by: the displayed identity (observed while it is kept), the database and the cache gate of now.
+  // keeps it. What it is owned by: the displayed identity (observed while it is kept), the database, and the page's cache lifetime (revision
+  // 7: every controller's in turn, not this screen's, which a remount of the protected tree disposes).
   const session = useSession();
   const identityKey =
     api === null ? null : `${api.identity.account}:${api.identity.epoch}`;
@@ -288,7 +289,7 @@ function Sources() {
       identity: identityKey,
       identities: session.identity,
       incarnation: env.service()?.incarnationId ?? null,
-      gate: cacheGateOf(env),
+      cache: pageCacheLifetime,
       today: deviceToday(),
     };
   }, [identityKey, env, session]);

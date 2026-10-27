@@ -147,6 +147,11 @@ export {
   type RetainedListing,
 } from "./store/retained-accounts";
 export {
+  type CacheLifetime,
+  type CacheLifetimes,
+  pageCacheLifetime,
+} from "./ui/cache-lifetime";
+export {
   type DraftEvidence,
   readResourceViewNow,
   readSaveEvidence,
@@ -169,7 +174,6 @@ export {
 } from "./ui/outstanding";
 export {
   type ConflictRow,
-  cacheGateOf,
   DataEnvProvider,
   DataProvider,
   useAccountLabel,
