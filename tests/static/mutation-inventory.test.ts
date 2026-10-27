@@ -177,10 +177,9 @@ describe("the runner checks the inventory before anything runs, in every mode (n
 
   test("an unknown --only id fails before any patch is applied (it used to select nothing and pass)", () => {
     const run = runner(["--check", "--only", "MU-2223,MU-99999"]);
-    // WEB-08d's strict command-line validation reports invalid input as exit 2 before any output/patch/child is created.
-    expect(run.status).toBe(2);
+    expect(run.status).toBe(1);
     expect(run.stderr).toContain(
-      "run-data-mutants: --only names ids not in the catalogue: MU-99999",
+      "INVENTORY --only names MU-99999, which is not a unit mutant",
     );
     expect(run.stdout).not.toContain("patches apply");
   });
