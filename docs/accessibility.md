@@ -28,7 +28,7 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Dialogs:** title, description, the sync control **inside** the focus trap (the page behind is inert), a close control, Escape and the close icon discard, only the sync control retains the draft. Focus goes to the first field on open and returns to the opener on close. Tab and Shift+Tab, with or without Option or Alt, wrap inside the dialog (`src/components/ui/focus-loop.ts`), tested on every engine.
 - **The sync/offline chip** is a real `<button>` whose accessible name states status and action ("2 waiting to send, Receiving updates: up to date. Open sync queue."). It contains its visible text. A separate announcer reports changes: polite on a change of phase or count, assertive **only** when the conflict count increases, never on first render, coalesced to one per frame.
 - **Tone is never colour alone:** every state has words and a dot.
-- **44px targets** for touch controls, 48px for the mobile tabs. The dialog Close control and the in-dialog sync control keep 44px at 320px wide beside long labels and large counts: Close does not shrink (`shrink-0`), the title never squeezes below its longest word, and the sync label wraps (`tests/e2e/fixture.shell.spec.ts`, "dialog header keeps a 44 x 44 Close target").
+- **44px targets** for touch controls, 48px for the mobile tabs. The dialog Close control and the in-dialog sync control keep 44px at 320px wide beside long labels and large counts: Close does not shrink (`shrink-0`), the title never squeezes below its longest word, and the sync label wraps (`tests/e2e/fixture.shell.spec.ts`, "dialog header keeps a 44 x 44 Close target"). The title's width, and so that minimum, is capped at the header less 160 px: a word wider than that (a valid 64-character device name with no spaces) breaks inside the title instead of pushing the sync control and Close out of the dialog (`fixture.session-labels.spec.ts` L-7).
 - **Tooltips** on the icon rail show on hover **and** keyboard focus, are dismissible (Escape), hoverable and persistent (WCAG 1.4.13). Controls keep their own accessible names: labels do not depend on hover.
 - **Focus ring:** one style everywhere, 2px `action-ink`, 2px offset, and system colours in forced-colours mode.
 - **Forms:** every `Input` requires a label association. A disabled control states its reason beside it.
@@ -104,6 +104,29 @@ A green layer 1 does not mean the product is accessible. It means the failures a
 - **Moving between the switcher's steps keeps focus in the step that follows.** Choosing a row puts focus in the credential step's first empty field; "Cancel — stay as …" puts it back on the list. The step that closed returns focus only when the whole flow has closed, so it never pulls focus out of its successor, whether or not the page behind is already inert.
 - **When the control that opened the switcher is gone, focus goes to the same entry in the page as it is now** (DA-F1 of the design assessment of 15 October 2026; the destination is Kieran's decision of that day). The window can cross the 768 px breakpoint while the switcher is open, replacing More with the rail or the reverse, and a switch refused at its activation returns the same account in a new tree with the credential step kept. On close, focus goes to the opening control while it is still usable. Otherwise it goes to Settings' "Switch account" for a flow opened there, then to the account entry of the current layout (the rail's account control, or More on mobile), then to the page heading. The switcher never reopens More and never navigates. Nothing is restored while another account is displayed, a gate covers the page, or the person has signed out: the session owns focus then (`SwitchFlow.tsx`, `returnTargets`).
 - Automated in `tests/app/switcher-focus-return.test.tsx` (jsdom, the production composition), `tests/e2e/production.switcher-focus.spec.ts` and `tests/e2e/production.switcher-focus-lifetime.spec.ts` (production build, three engines, desktop and a 390 × 844 viewport; the second changes the layout while the switcher is open and refuses a switch at its activation). None of them is evidence from a physical phone or a screen reader.
+
+## What WEB-08d built in
+
+- **Every row action is named by its row.** The visible text stays short ("Sign out", "Retire…", "Name…", "Rename…") and the accessible name starts with it (label in
+  name), then carries what tells the row apart without an identifier: its title (label or name), any device name, and the row's own time ("Sign out Chrome on macOS,
+  signed in 3 days ago", "Retire Firefox on Windows, last synced 2 hours ago", "Name this device, Chrome on macOS"). Session and device IDs and state tokens are never
+  shown or announced.
+- **A person's name for a device is text, isolated.** It is rendered as a text node inside `<bdi>` (never markup or an attribute other than `aria-label`), and wrapped
+  in U+2068/U+2069 where it stands in a composed string (an accessible name, a dialog title, an announcement), so a right-to-left name cannot reorder the words around
+  it. A name the server's rules would refuse (bidirectional controls, invisible or control characters, over 64 scalars) is treated as absent and never shown.
+- **Exactly one indicator per current row** ("This browser", "This device"), as text, so it is read with the row.
+- **Reflow at 320 px:** long and hostile names wrap (`overflow-wrap: anywhere`); actions keep their 44 px targets and wrap under the text; the capacity lines sit under
+  each section's explanation, not in the heading.
+- **Naming dialog:** one labelled field with its rule as a description; a refusal is shown under the field, which becomes `aria-invalid`, is described by it and takes
+  focus, and the message is announced once (assertive). "Saved"/"removed" are announced politely after the dialog closes. Offline, "Name…"/"Rename…" and "Save name"
+  are disabled with the visible reason "Naming a device needs a connection.", which is their accessible description. As everywhere, a disabled control is drawn in
+  place of the enabled one, so focus on Save falls to the page when the connection drops (listed in the manual checks below).
+- **Confirmations name the item:** another device's retirement is titled with its name or label; this device's retirement and logout keep the WEB-04 words and add
+  one identifying line above them. A long unbroken name wraps inside the dialog title; the sync control and Close stay inside the dialog with their 44 px targets
+  (L-7, 320 to 1280 px, dark and light, every engine).
+- Automated evidence: jest-axe on every new state (`tests/features/settings/name-device.test.tsx`) and real-engine axe including contrast at 320, 390, 768 and 1280 px
+  in dark, light and Auto (`tests/e2e/fixture.session-labels.spec.ts`), plus the released-backend run (`integration.web08d-labels.spec.ts`). TalkBack, NVDA and
+  VoiceOver passes remain Layer 3 (WEB-15).
 
 ## Layer 2: manual keyboard and screen-reader pass (checklist, for WEB-08c and WEB-15)
 

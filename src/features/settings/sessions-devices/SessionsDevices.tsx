@@ -1,7 +1,9 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { PageHeading } from "../../../components/ui/page-heading";
+import type { SessionSummary } from "../../../session";
 import { DevicesSection } from "./DevicesSection";
+import { type Interaction, useInteractions } from "./ownership";
 import { SessionsSection } from "./SessionsSection";
 import { WipeConfirmDialog } from "./WipeConfirmDialog";
 
@@ -11,7 +13,17 @@ import { WipeConfirmDialog } from "./WipeConfirmDialog";
  * precedes a wipe; on another row they call the ordinary operations directly.
  */
 export function SessionsDevices() {
-  const [loggingOut, setLoggingOut] = useState(false);
+  const interactions = useInteractions();
+  // Review R3: the logout warning closes only itself (a late answer of an older warning cannot close a newer one). Both lists read
+  // again after a change through `ownership.ts` (review R1), whichever section or dialog made it.
+  const [loggingOut, setLoggingOut] = useState<{
+    row: SessionSummary;
+    interaction: Interaction;
+  } | null>(null);
+  const closeLogout = (interaction: Interaction) => {
+    interaction.end();
+    setLoggingOut((open) => (open?.interaction === interaction ? null : open));
+  };
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
@@ -23,10 +35,20 @@ export function SessionsDevices() {
         </Link>
         <PageHeading>Sessions &amp; devices</PageHeading>
       </div>
-      <SessionsSection onSignOutCurrent={() => setLoggingOut(true)} />
+      <SessionsSection
+        onSignOutCurrent={(row) => {
+          loggingOut?.interaction.end();
+          setLoggingOut({ row, interaction: interactions.begin() });
+        }}
+      />
       <DevicesSection />
       {loggingOut ? (
-        <WipeConfirmDialog kind="logout" onClose={() => setLoggingOut(false)} />
+        <WipeConfirmDialog
+          key={loggingOut.interaction.id}
+          kind="logout"
+          current={loggingOut.row}
+          onClose={() => closeLogout(loggingOut.interaction)}
+        />
       ) : null}
     </div>
   );

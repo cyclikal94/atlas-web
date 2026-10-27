@@ -291,7 +291,9 @@ describe("Confirm it's you (G-23)", () => {
     expect(region).not.toBeNull();
     await waitFor(() =>
       expect(
-        screen.queryByText(/This device has too many active sign-ins/),
+        screen.queryByText(
+          /This account has reached its limit of active sign-ins/ /* WEB-08d D-8d-13 copy, merged in revision 30 */,
+        ),
       ).not.toBeNull(),
     );
     expect(returnDestination.peek()).toBeNull();

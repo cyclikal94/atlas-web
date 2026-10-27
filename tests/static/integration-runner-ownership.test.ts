@@ -269,8 +269,19 @@ describe("R18: the runner owns each spawned process's whole tree (real processes
       join(ROOT, "scripts/integration/run.mjs"),
       "utf8",
     );
-    // No bare spawn: the review-14 defect was a Playwright `spawn(...)` that clean-up did not know.
-    expect(source).not.toMatch(/(^|[^.\w])spawn\(/m);
+    // No bare spawn: the review-14 defect was a Playwright `spawn(...)` that clean-up did not know. WEB-08d revision 30: ONE named
+    // exception, the reaper (scripts/integration/reaper.mjs), which must outlive the owned groups to clean them up after a SIGKILL
+    // of the runner: it is started first, in a group of its own, and told every owned group as it is spawned.
+    const reaperSpawn =
+      /const reaper = spawn\(\s*process\.execPath,\s*\[\s*join\(root, "scripts\/integration\/reaper\.mjs"\),[\s\S]*?\{ detached: true, stdio: \["pipe", "inherit", "inherit"\] \},\s*\);/;
+    expect(source).toMatch(reaperSpawn);
+    expect(source.replace(reaperSpawn, "")).not.toMatch(/(^|[^.\w])spawn\(/m);
+    expect(source).toMatch(
+      /onSpawn: \(\{ pgid, label \}\) => \{\s*tellReaper\(\{ type: "group", pgid \}\);/,
+    );
+    expect(source.indexOf("const reaper = spawn(")).toBeLessThan(
+      source.indexOf("const groups = ownedGroups("),
+    );
     expect(source.match(/groups\.spawn\(/g)).toHaveLength(3);
     expect(source).toMatch(
       /groups\.spawn\(\s*"playwright",[\s\S]*?\.\.\.stack\.passthrough,\s*\.\.\.PLAYWRIGHT_POLICY,\s*\]/,

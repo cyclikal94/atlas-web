@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { expect, vi } from "vitest";
 import {
   type AttemptHandle,
   type Attempts,
@@ -62,6 +62,15 @@ export function attemptsDouble(over: Partial<Attempts> = {}): Attempts {
   };
 }
 
+/**
+ * WEB-08d review R3 (revision 2): the options an ordinary change request is now called with. A screen passes the `withdraw` signal of
+ * the interaction that made the request (`SendOptions`), so a call assertion names it as the last argument. Adapted, labelled: the
+ * earlier assertions named only the operation's own arguments; their intent is unchanged.
+ */
+export const WITHDRAW = expect.objectContaining({
+  withdraw: expect.any(AbortSignal),
+});
+
 export function sessionDouble(
   operations: Partial<Operations> = {},
   overrides: Partial<Session> = {},
@@ -79,6 +88,10 @@ export function sessionDouble(
     listSessions: vi.fn(async () => ({
       ok: true as const,
       value: { sessions: [] },
+    })),
+    nameDevice: vi.fn(async (_id: string, name: string | null) => ({
+      ok: true as const,
+      value: name === null ? ("cleared" as const) : ("named" as const),
     })),
     revokeOtherSession: vi.fn(async () => ({
       ok: true as const,

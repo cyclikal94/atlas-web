@@ -42,6 +42,13 @@ export interface SendSpec<R> {
   identityRead?: boolean;
   selfRevoking?: SelfRevoking;
   callerSignal?: AbortSignal;
+  /**
+   * WEB-08d (review R3): the caller's permission to put this request on the wire. Once it is aborted, a request that has not been
+   * issued never is (`not_sent`): the top guard, any lock wait (the activity is cancelled) and the boundary's `refuses()` all see it.
+   * Unlike `callerSignal` it is NOT passed to the transport: withdrawing an intent is not a rollback, so a request already issued
+   * keeps its answer and is handled exactly as before.
+   */
+  withdraw?: AbortSignal;
   /** An operation cover requires the operation fence of THIS envelope. */
   operationId?: OperationId;
   /**
@@ -87,9 +94,11 @@ export async function send<R>(
     spec.epoch,
   );
   const queued = spec.klass === "ordinary" || spec.klass === "recovery";
-  const callerAborted = () => spec.callerSignal?.aborted === true;
+  const callerAborted = () =>
+    spec.callerSignal?.aborted === true || spec.withdraw?.aborted === true;
   const onCallerAbort = () => activity.cancel("caller_abort");
   spec.callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+  spec.withdraw?.addEventListener("abort", onCallerAbort, { once: true });
   const giveUp = k.ports.clock.abortAfter(k.config.stampedRequestTimeoutMs);
   const csrfKey = k.memory.csrfKey(spec.account, spec.epoch);
 
@@ -208,6 +217,7 @@ export async function send<R>(
     }
   } finally {
     spec.callerSignal?.removeEventListener("abort", onCallerAbort);
+    spec.withdraw?.removeEventListener("abort", onCallerAbort);
   }
 }
 

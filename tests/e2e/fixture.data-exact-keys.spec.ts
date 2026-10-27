@@ -20,7 +20,6 @@ import {
   streaks,
   warning,
 } from "./data-local-faults";
-import { untilOutboxPlanCalled } from "./data-operation-barriers";
 import {
   ACCOUNT,
   bootSession,
@@ -31,6 +30,7 @@ import {
   untilTreeSettled,
   uuid,
 } from "./data-sync-helpers";
+import { withHeldOperations } from "./held-operation";
 import { expect, test } from "./helpers";
 
 /**
@@ -509,39 +509,44 @@ test.describe("E-O11 (revision 32, R53): a delayed retry ends the failures that 
         await untilWarning(page, true);
         const olderB = await markerInstances(page, ACCOUNT, `draft:${B}`);
         expect(olderB).toHaveLength(1);
-        // The first counter reset of the retry is held after its transaction was made: the retry has not reached b.
-        await page.evaluate(() =>
-          window.__atlasData?.holdOutboxPlan("data.recordLocalWriteOutcome"),
-        );
-        await page.evaluate(() => window.__atlasData?.retryOutbox());
-        await untilOutboxPlanCalled(page);
-        if (newer) {
-          if (mechanism === "durable") {
-            await arm(page, { id: B, armed: 3 });
-            for (let i = 0; i < 3; i += 1)
+        // The first counter reset of the retry is held after its transaction was made: the retry has not reached b. Revision 21 (R20-N1):
+        // the hold is owned by a scope that releases it by its own token on every path (the retry itself continues in the page).
+        const before = await withHeldOperations(async (holds) => {
+          const reset = await holds.holdOutbox(
+            page,
+            "data.recordLocalWriteOutcome",
+          );
+          await page.evaluate(() => window.__atlasData?.retryOutbox());
+          await reset.untilHeld();
+          if (newer) {
+            if (mechanism === "durable") {
+              await arm(page, { id: B, armed: 3 });
+              for (let i = 0; i < 3; i += 1)
+                expect(
+                  await editDraft(page, B, "s", "newer-failed"),
+                ).toMatchObject({ kind: "refused", reason: "storage" });
+              expect((await streaks(page))[`draft:${B}`]).toBe(3);
+            } else {
+              await arm(page, { id: B, armed: 1, counter: 1 });
               expect(
                 await editDraft(page, B, "s", "newer-failed"),
-              ).toMatchObject({ kind: "refused", reason: "storage" });
-            expect((await streaks(page))[`draft:${B}`]).toBe(3);
-          } else {
-            await arm(page, { id: B, armed: 1, counter: 1 });
-            expect(await editDraft(page, B, "s", "newer-failed")).toMatchObject(
-              {
+              ).toMatchObject({
                 kind: "refused",
                 reason: "storage",
-              },
-            );
+              });
+            }
           }
-        }
-        const before = {
-          markers: await markerInstances(page, ACCOUNT, `draft:${B}`),
-          streak: (await streaks(page))[`draft:${B}`] ?? 0,
-          warning: await warning(page),
-        };
-        // The reads throw before the earlier retry continues (the older retry must not turn that into permission).
-        if (mechanism === "marker-unreadable")
-          await markerReads(page, { enumeration: true, getItem: true });
-        await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+          const before = {
+            markers: await markerInstances(page, ACCOUNT, `draft:${B}`),
+            streak: (await streaks(page))[`draft:${B}`] ?? 0,
+            warning: await warning(page),
+          };
+          // The reads throw before the earlier retry continues (the older retry must not turn that into permission).
+          if (mechanism === "marker-unreadable")
+            await markerReads(page, { enumeration: true, getItem: true });
+          await reset.release();
+          return before;
+        });
         // The retry has moved on to b: a's marker is gone (the key it saw).
         await expect
           .poll(() => markerInstances(page, ACCOUNT, `draft:${A}`), {
@@ -625,31 +630,35 @@ test.describe("E-O11 (revision 32, R53): a delayed retry ends the failures that 
       kind: "refused",
     });
     await untilWarning(page, true);
-    await page.evaluate(() =>
-      window.__atlasData?.holdOutboxPlan("data.recordLocalWriteOutcome"),
-    );
-    await page.evaluate(() => window.__atlasData?.retryOutbox());
-    await untilOutboxPlanCalled(page);
-    // Another real page's failure arrives while the reset waits.
-    // (the other page records it in the lifetime of the database both pages have open, as a real second tab would)
-    const lifetime = await incarnationOf(page, ACCOUNT);
-    await other.evaluate(
-      async ([acct, inc, op]) => {
-        const published = window.__atlasData?.markers.set(
-          { account: acct as string, incarnationId: inc as string },
-          op as string,
-        );
-        if (!published) throw new Error("no markers");
-        return published.state;
-      },
-      [ACCOUNT, lifetime, `draft:${A}`] as const,
-    );
-    await expect
-      .poll(() => markerInstances(page, ACCOUNT, `draft:${A}`), {
-        timeout: 10_000,
-      })
-      .toHaveLength(1);
-    await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+    // Revision 21 (R20-N1): the held reset is owned by a scope that releases it by its own token on every path.
+    await withHeldOperations(async (holds) => {
+      const reset = await holds.holdOutbox(
+        page,
+        "data.recordLocalWriteOutcome",
+      );
+      await page.evaluate(() => window.__atlasData?.retryOutbox());
+      await reset.untilHeld();
+      // Another real page's failure arrives while the reset waits.
+      // (the other page records it in the lifetime of the database both pages have open, as a real second tab would)
+      const lifetime = await incarnationOf(page, ACCOUNT);
+      await other.evaluate(
+        async ([acct, inc, op]) => {
+          const published = window.__atlasData?.markers.set(
+            { account: acct as string, incarnationId: inc as string },
+            op as string,
+          );
+          if (!published) throw new Error("no markers");
+          return published.state;
+        },
+        [ACCOUNT, lifetime, `draft:${A}`] as const,
+      );
+      await expect
+        .poll(() => markerInstances(page, ACCOUNT, `draft:${A}`), {
+          timeout: 10_000,
+        })
+        .toHaveLength(1);
+      await reset.release();
+    });
     await untilWarning(page, true);
     // The person asks again, having seen the warning stay: the second act's entitlement includes the newer marker.
     await page.evaluate(() => window.__atlasData?.retryOutbox());
