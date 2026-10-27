@@ -5,8 +5,8 @@ import { Dialog } from "../../components/ui/dialog";
 import {
   type Policy,
   type ResourceId,
-  useCachedResource,
   useDraftQueue,
+  useMergedUnder,
 } from "../../data";
 import { AudienceSummary } from "./AudienceSummary";
 import {
@@ -107,14 +107,19 @@ function PolicyEditorDialog({
 }: ResourcePolicyEditorProps) {
   const env = useSharingEnv();
   const announcer = useAnnouncer();
-  const cached = useCachedResource(resourceId);
-  const merged = cached.status === "ready" ? cached.value.merged : null;
-  const parentId = merged?.parent_id ?? null;
-  const parent = useCachedResource(parentId ?? "");
-  const parentLabel =
-    parentId !== null && parent.status === "ready"
-      ? (parent.value.merged?.label ?? null)
+  // The resource and the parent it names as ONE read saw them (WEB-11a review 16, DA16-S1). A resource under a parent (a person's field)
+  // is shown only while that same read holds the parent: a parent read separately may answer for an earlier commit than the resource,
+  // and PPL-5 hides a field whose person is not visible. Until then nothing of it is named, read or offered, here or at its deep link.
+  const cached = useMergedUnder(resourceId);
+  const read = cached.status === "ready" ? cached.value : null;
+  const resource = read?.resource.merged ?? null;
+  const parentId = resource?.parent_id ?? null;
+  const merged =
+    resource !== null && (parentId === null || read?.parent?.base)
+      ? resource
       : null;
+  const parentLabel =
+    parentId === null ? null : (read?.parent?.merged?.label ?? null);
   const queue = useDraftQueue();
   const waiting =
     queue.status === "ready"

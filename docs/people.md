@@ -341,6 +341,27 @@ reopens it with its draft), and `/settings/archived`.
   can answer a commit later than the count's. A read-only or archived person is still visible. The detail and the Settings ledger keep
   their own parent gates. Tests: `duplicate-visibility.test.tsx`, `tests/data/visible-children.test.ts`, E-P39 (two real pages).
 
+- **D-11a-31** (review 16 of 26 October 2026, R16.1, and its design assessment's DA16-S1; PPL-5/A14) Whatever is shown of a field comes with
+  evidence, from the SAME read, that its person is visible. Two live reads are delivered separately: a person read that has not yet answered
+  for the commit that removed the person, beside a field read that has, would pair an earlier person with a later field (a new field, a new
+  label or value). So:
+  - the detail and the Settings ledger read each page of fields WITH the persons of its fields and this device's unsent changes over them
+    (`useChildPage` / `readChildPage`, through `ChildScan`): a field is shown, counted, labelled and named only from that one answer, and a
+    detail page read without the person shows nothing of the step (not the fields an earlier page kept, not this device's own unsent fields,
+    not "No fields yet"); the walk moves on by the page READ, so hidden rows never keep a later field out of reach;
+  - the field editor reads the field and its person in ONE read (`useMergedUnder`); a cached field is edited only under the person that read
+    holds (a person only this device creates has no server fields), and a failure of that read is said as the field's;
+  - the outstanding drafts' read (the detail's and the editor's) also reads the person's cached row in each window's transaction: what it
+    shows of unsent changes (a rename, this device's new fields) waits while a window was read from a state without the person, unless the
+    drafts create the person themselves;
+  - held audience changes are listed only when their read of the copies also held the person (`useFormCopiesUnder`);
+  - the shared sharing dialog (embedded and at `/sharing/items/<id>`) names, reads and offers a resource that has a parent only while the
+    same read (`useMergedUnder`) holds the parent: a late policy answer never reopens its editing view.
+  Not shown is not discarded: typed input, retained sessions, held copies and their authority stay; a person who returns shows them again.
+  Visibility is not write authority: every write keeps its own guards. Tests: `parent-read-coherence.test.tsx` (every surface, both orders,
+  every rendered state recorded), `tests/data/child-reads.test.ts` (the production plans and page commit), `world-child-reads.test.tsx` (the
+  double against the plans), `tests/data/hooks.test.tsx`, E-P40 (two real pages).
+
 What is shown of unsent changes: a queued draft has no overlay until it is claimed, so the screens fold the bodies of the outstanding drafts
 (`useOutstandingCreates`) over the cache (`model/project.ts`): a create is projected and marked "Not sent yet"; a later rename, field update or
 archive is folded over its row. A projected row is never a base for a version-checked command.

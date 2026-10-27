@@ -118,6 +118,8 @@ export {
   createConflictHandlerRegistry,
 } from "./outbox/registries";
 export type { FormCopiesPage, FormCopyCursor } from "./plans/form-copies";
+// A resource read with its parent (WEB-11a review 16): the shared policy editor's, so in a module of its own.
+export type { MergedUnder } from "./plans/merged-under";
 export type {
   ConflictPage,
   ListedResource,
@@ -128,6 +130,8 @@ export type {
 // ---- outstanding work, reads by id and the whole-kind walk (WEB-10a) ------------------------------------------------------------------
 export type {
   CachePosition,
+  ChildPage,
+  FormCopiesUnder,
   Inventory,
   LocalBasis,
   OutstandingByKindPage,
@@ -179,11 +183,14 @@ export {
   type DataEnvDeps,
 } from "./ui/env";
 export { useFormCopies } from "./ui/form-copies";
+export { useMergedUnder } from "./ui/merged-under";
 export {
   useAllOutstanding,
   useAllOutstandingByKind,
   useCachedResources,
   useCachePosition,
+  useChildPage,
+  useFormCopiesUnder,
   useInventory,
   useOutstanding as useOutstandingResources,
   useOutstandingByKind,

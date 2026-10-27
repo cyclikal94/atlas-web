@@ -53,6 +53,8 @@ import {
  * a press (finding 3). Review 9 (24 October 2026): E-P36 the field editor whose real IndexedDB read of its field fails says so, and the
  * overlay, the close icon and Escape end only the session of the field shown, reached through the same route (in-app or Back).
  * Review 15 (25 October 2026): E-P39 a duplicate's field count follows its person across two real pages (R15.1, A14).
+ * Review 16 (26 October 2026): E-P40 the detail, the archived ledger, the field editor and the sharing deep link show a field only with its
+ * person from the same read, across two real pages (R16.1, DA16-S1, A14).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -854,6 +856,186 @@ test.describe("E-P39: a duplicate's field count follows its person across two re
       // Nothing was asked of the server again: the count followed the database alone (one read, the observer's first page, at its boot).
       expect(before).toBe(1);
       expect(asked()).toBe(before);
+    });
+});
+
+test.describe("E-P40: a field shown only with its person from the same read, across two real pages (A14, PPL-5; review 16, R16.1, DA16-S1)", () => {
+  const G = "68686868-6868-4686-8686-686868686868";
+  const SECRET = "Newly delivered secret";
+  const RENAMED = "Renamed secret label";
+  type Surface = "detail" | "ledger" | "editor" | "sharing";
+  const routes: Record<Surface, string> = {
+    detail: `/people/${P}`,
+    ledger: "/settings/archived",
+    editor: `/people/${P}/fields/${F}`,
+    sharing: `/sharing/items/${F}`,
+  };
+  const cases: Array<{
+    surface: Surface;
+    schedule: "removed-and-changed" | "removed" | "control";
+  }> = [
+    ...(["detail", "ledger", "editor", "sharing"] as const).flatMap(
+      (surface) => [
+        { surface, schedule: "removed-and-changed" as const },
+        { surface, schedule: "control" as const },
+      ],
+    ),
+    { surface: "detail", schedule: "removed" },
+    { surface: "ledger", schedule: "removed" },
+  ];
+  for (const { surface, schedule } of cases)
+    test(`${surface}: ${schedule === "removed-and-changed" ? "ONE sync page in the leader page removes the person, changes their field and adds another: the other page never shows the new label or value" : schedule === "removed" ? "the person alone is removed by a sync page, their field kept: the other page withdraws the field (its read follows the person)" : "control: the field changed and another added under the visible person reach the other page"}`, async ({
+      context,
+    }, info) => {
+      // The leader page commits the sync pages (the production page commit over real IndexedDB); the observer is another page with its
+      // own memory and its own live reads, which learns of the commit only through the database.
+      const net = await stubNetwork(context);
+      const served = await servePeople(context);
+      const archived = surface === "ledger";
+      const old = fieldP(
+        F,
+        P,
+        "Phone",
+        { kind: "text", text: "Old value" },
+        { archived },
+      );
+      served.people.set(P, { person: personP(P, "Mo"), linked: null });
+      served.policies.set(F, { version: 1, policy: PRIVATE });
+      await seedSettled(context);
+      const leader = await bootAt(context, "/people");
+      const observer = await bootAt(context, routes[surface]);
+      await publish(leader, net, [personP(P, "Mo"), old]);
+      const shown = {
+        detail: () =>
+          expect(observer.locator(`[data-field-row="${F}"]`)).toContainText(
+            "Old value",
+          ),
+        ledger: () => expect(observer.getByText("Phone · Mo")).toBeVisible(),
+        editor: () =>
+          expect(
+            observer.getByRole("dialog", { name: "Edit Phone" }),
+          ).toBeVisible(),
+        sharing: () =>
+          expect(
+            observer.getByRole("dialog", { name: "Sharing — Phone" }),
+          ).toBeVisible(),
+      }[surface];
+      await shown();
+      // Every rendered state of the observer from here on (MutationObserver: no paint or timer is involved).
+      await observer.evaluate(() => {
+        const seen: string[] = [];
+        (window as unknown as { __ep40: string[] }).__ep40 = seen;
+        new MutationObserver(() => {
+          seen.push(document.body.textContent ?? "");
+        }).observe(document.body, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+        });
+      });
+      const changed = fieldP(
+        F,
+        P,
+        RENAMED,
+        { kind: "text", text: SECRET },
+        { archived, version: 2 },
+      );
+      const added = fieldP(
+        G,
+        P,
+        "Mobile",
+        { kind: "text", text: SECRET },
+        { archived },
+      );
+      await publishChanges(
+        leader,
+        net,
+        schedule === "removed"
+          ? [{ kind: "remove", id: P }]
+          : schedule === "removed-and-changed"
+            ? [
+                { kind: "remove", id: P },
+                { kind: "upsert", resource: changed },
+                { kind: "upsert", resource: added },
+              ]
+            : [
+                { kind: "upsert", resource: changed },
+                { kind: "upsert", resource: added },
+              ],
+        // Harness precondition (E-P39): the running leader takes the page, nudged until it does.
+        { start: false, retake: true },
+      );
+      // The commit is in the ONE database both pages read (seen through the leader's handle): the fields stay cached after the person.
+      await expect
+        .poll(async () =>
+          (
+            (await leader.evaluate(
+              (a) => window.__atlasData?.rows(a, "cache"),
+              ME,
+            )) as Array<{ id: string }>
+          )
+            .map((row) => row.id)
+            .filter((id) => [P, F, G].includes(id))
+            .sort(),
+        )
+        .toEqual(
+          (schedule === "removed"
+            ? [F]
+            : schedule === "removed-and-changed"
+              ? [F, G]
+              : [F, G, P]
+          ).sort(),
+        );
+      if (schedule === "control") {
+        const after = {
+          detail: () =>
+            expect(observer.locator(`[data-field-row="${G}"]`)).toContainText(
+              SECRET,
+            ),
+          ledger: () =>
+            expect(observer.getByText(`${RENAMED} · Mo`)).toBeVisible(),
+          editor: () =>
+            expect(observer.getByRole("dialog")).toContainText(SECRET),
+          sharing: () =>
+            expect(
+              observer.getByRole("dialog", { name: `Sharing — ${RENAMED}` }),
+            ).toBeVisible(),
+        }[surface];
+        await after();
+      } else {
+        const gone = {
+          detail: () =>
+            expect(
+              observer.locator('[data-people-state="not-on-device"]'),
+            ).toBeVisible(),
+          ledger: () =>
+            expect(observer.getByText(/Nothing archived/)).toBeVisible(),
+          editor: () =>
+            expect(
+              observer.locator('[data-people-state="not-on-device"]'),
+            ).toBeVisible(),
+          sharing: () =>
+            expect(
+              observer.locator('[data-policy-state="absent"]'),
+            ).toBeVisible(),
+        }[surface];
+        await gone();
+        await expect(observer.locator("body")).not.toContainText("Old value");
+      }
+      const seen = (await observer.evaluate(
+        () => (window as unknown as { __ep40: string[] }).__ep40,
+      )) as string[];
+      recordEvidence(info, "e-p40", {
+        surface,
+        schedule,
+        states: seen.length,
+        log: served.log,
+      });
+      if (schedule === "removed-and-changed") {
+        expect(seen.filter((text) => text.includes(SECRET))).toEqual([]);
+        expect(seen.filter((text) => text.includes(RENAMED))).toEqual([]);
+      }
     });
 });
 

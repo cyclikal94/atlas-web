@@ -179,25 +179,75 @@ export function stubEnv(
     start: () => () => undefined,
   };
   // Cached resources for `useCachedResource`, OFF until a test sets one: a fake service whose store answers the merged-resource read
-  // from this map (nothing else), so the screens that read no resource still see "no database".
+  // from this map (nothing else), so the screens that read no resource still see "no database". `data.readMergedUnder` (a resource with
+  // its parent in one read, WEB-11a review 16) is answered from the same map at once: a parent the map does not hold is not cached.
   const resources = new Map<string, Loadable<MergedResource>>();
   const LOADING_RESOURCE: Loadable<MergedResource> = { status: "loading" };
+  const NOT_CACHED: MergedResource = {
+    base: null,
+    effects: [],
+    creates: [],
+    createsTotal: 0,
+    createsNext: null,
+    merged: null,
+  };
   const resourceListeners = new Set<() => void>();
   const serviceCell = new Cell<unknown>(null);
   const fakeService = {
     live: true,
     incarnationId: "stub",
     store: {
-      watch: (_plan: unknown, input: { id: string }) => ({
+      watch: (
+        plan: { name?: string } | undefined,
+        input: { id: string; parentId?: string },
+      ) => {
         // The same object until it changes: `useSyncExternalStore` reads a new object as a change.
-        get: () => resources.get(input.id) ?? LOADING_RESOURCE,
-        subscribe: (listener: () => void) => {
-          resourceListeners.add(listener);
-          return () => {
-            resourceListeners.delete(listener);
-          };
-        },
-      }),
+        let last: {
+          own: Loadable<MergedResource>;
+          parent: Loadable<MergedResource> | null;
+          answer: Loadable<unknown>;
+        } | null = null;
+        const get = (): Loadable<unknown> => {
+          const own = resources.get(input.id) ?? LOADING_RESOURCE;
+          if (plan?.name !== "data.readMergedUnder") return own;
+          const parentId =
+            input.parentId ??
+            (own.status === "ready" ? own.value.base?.parent_id : null) ??
+            null;
+          const parent =
+            parentId === null
+              ? null
+              : (resources.get(parentId) ?? {
+                  status: "ready" as const,
+                  value: NOT_CACHED,
+                });
+          if (last !== null && last.own === own && last.parent === parent)
+            return last.answer;
+          const answer: Loadable<unknown> =
+            own.status !== "ready"
+              ? own
+              : parent !== null && parent.status !== "ready"
+                ? parent
+                : {
+                    status: "ready",
+                    value: {
+                      resource: own.value,
+                      parent: parent === null ? null : parent.value,
+                    },
+                  };
+          last = { own, parent, answer };
+          return answer;
+        };
+        return {
+          get,
+          subscribe: (listener: () => void) => {
+            resourceListeners.add(listener);
+            return () => {
+              resourceListeners.delete(listener);
+            };
+          },
+        };
+      },
     },
   };
   const defaultsRecord = new Cell<DefaultsRecord | null>(null);

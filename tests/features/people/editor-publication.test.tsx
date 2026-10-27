@@ -58,6 +58,9 @@ afterEach(async () => {
 
 const P = "55555555-5555-4555-8555-555555555555";
 const MERGED = "data.readMerged";
+// Adapted in revision 17 (WEB-11a review 16, R16.1): the editor reads an existing field and its person in ONE read (`data.readMergedUnder`).
+// A fault or freeze of the editor's cache read is put on that read too, so each test still reaches the read it names.
+const MERGED_UNDER = "data.readMergedUnder";
 const OUTSTANDING = "data.readOutstandingCreates";
 const PRIVATE = { grants: [], exclude_accounts: [] };
 const HOME_VIEW = {
@@ -283,7 +286,10 @@ describe("DA10-02: one commit delivered queue-first or cache-first, and the cach
       const w = world();
       const id = await queuedField(w);
       await typed(w, id);
-      w.freezeReads(first === "queue" ? MERGED : OUTSTANDING);
+      if (first === "queue") {
+        w.freezeReads(MERGED);
+        w.freezeReads(MERGED_UNDER);
+      } else w.freezeReads(OUTSTANDING);
       await act(async () => {
         w.handOff([published(id)], []);
       });
@@ -704,6 +710,7 @@ describe("DA10-07: published while the editor's reads failed; Try again", () => 
     const { d } = await typed(w, id);
     expect(d).toBeTruthy();
     w.failRead(MERGED, (input) => input.id === id);
+    w.failRead(MERGED_UNDER, (input) => input.id === id);
     await act(async () => {
       w.handOff([published(id)], []);
     });

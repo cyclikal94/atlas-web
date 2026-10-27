@@ -4,15 +4,20 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   type LedgerState,
   ledgerReported,
-  type ParentReport,
-  parentReported,
 } from "../../../src/features/people/archived/ArchivedItems";
 import {
   archivedLedgerKinds,
   type LedgerReport,
 } from "../../../src/features/people/archived/ledger";
 import { forgetAllPeopleMemory } from "../../../src/features/people/memory";
+import {
+  type Child,
+  type Report,
+  reported,
+  scanStep,
+} from "../../../src/features/people/reads";
 import { installMatchMedia } from "../../helpers/match-media";
+import { cacheRow } from "../../support/data/rows";
 import { peopleWorld, person } from "../../support/people/world";
 
 /**
@@ -25,49 +30,78 @@ afterEach(() => cleanup());
 
 const F = "66666666-6666-4666-8666-666666666666";
 
-describe("U4: a field's parent report is applied only for its current owner", () => {
-  const empty: ReadonlyMap<string, ParentReport> = new Map();
-
-  const replaced = () =>
-    parentReported(
-      parentReported(empty, F, 1, { parent: "P", state: "hidden" }),
-      F,
-      2,
-      { parent: "Q", state: "loading" },
+/**
+ * Adapted in revision 17 (WEB-11a review 16, R16.1). U4 tested `parentReported`, the reduction of a field row's SEPARATE parent read, which no
+ * longer exists: a field and its person are now one answer of a page read (`Child`), reported per page. U4's intent is kept on that report:
+ * an answer of an earlier read (another cursor at the same position) is never counted for the current step, a later page that no longer holds
+ * the parent withdraws what earlier pages kept, and the current read's reports are followed (control). The original file is kept in
+ * `.agtx/evidence/WEB-11a/revision-17/original-tests/archive-reports.test.tsx.orig`.
+ */
+describe("U4: a page's report (a field with its parent) is counted only for the current read", () => {
+  const P = "55555555-5555-4555-8555-555555555555";
+  const child = (id: string): Child => ({
+    row: cacheRow({ id, kind: "field", parent_id: P, archived: true }),
+    parent: cacheRow({ id: P, kind: "person", label: "Mo" }),
+    drafts: [],
+  });
+  type Entry = { after: string | null; report: Report<Child, string> };
+  const page = (
+    after: string | null,
+    rows: Child[],
+    next: string | null,
+    extra: Partial<Report<Child, string>> = {},
+  ): Entry => ({ after, report: { status: "ready", rows, next, ...extra } });
+  const step = (entries: Array<[number, Entry]>, start: string | null = null) =>
+    scanStep(
+      new Map(entries),
+      start,
+      () => true,
+      100,
+      5,
+      (c: Child) => c.row.id,
     );
 
-  test("a later owner's report replaces an earlier one's; the earlier one's LATE REPORT changes nothing", () => {
-    const second = replaced();
-    expect(second.get(F)).toEqual({ owner: 2, parent: "Q", state: "loading" });
-    // The earlier owner's late answer, even for the same parent and state as the current one.
-    expect(
-      parentReported(second, F, 1, { parent: "Q", state: "loading" }),
-    ).toBe(second);
-    expect(parentReported(second, F, 1, { parent: "P", state: "hidden" })).toBe(
-      second,
-    );
+  test("an earlier read's late report at the same position (another cursor) is never counted: loading, not its rows", () => {
+    const now = step([[0, page("previous-start", [child(F)], null)]], null);
+    expect(now.status).toBe("loading");
+    expect(now.rows).toEqual([]);
+    expect(now.settled).toBe(false);
   });
 
-  test("the earlier owner's LATE CLEANUP after the replacement published withdraws nothing; the current owner's own withdrawal does", () => {
-    const second = replaced();
-    expect(parentReported(second, F, 1, null)).toBe(second);
-    // Control: the current owner withdraws its own report.
-    expect(parentReported(second, F, 2, null).has(F)).toBe(false);
+  test("a later page whose read no longer holds the parent withdraws what earlier pages kept (nothing shown, never settled)", () => {
+    const now = step([
+      [0, page(null, [child(F)], "f1")],
+      [1, page("f1", [], null, { hidden: true })],
+    ]);
+    expect(now.rows).toEqual([]);
+    expect(now.hidden).toBe(true);
+    expect(now.settled).toBe(false);
   });
 
-  test("control: the current owner's reports follow its read (loading, then settled), and an unchanged report keeps the same state", () => {
-    const loading = parentReported(empty, F, 3, {
-      parent: "P",
-      state: "loading",
-    });
-    const hidden = parentReported(loading, F, 3, {
-      parent: "P",
-      state: "hidden",
-    });
-    expect(hidden.get(F)?.state).toBe("hidden");
-    expect(parentReported(hidden, F, 3, { parent: "P", state: "hidden" })).toBe(
-      hidden,
+  test("control: the current read's pages are followed to the end, and their rows kept", () => {
+    const now = step([
+      [0, page(null, [child(F)], "f1")],
+      [1, page("f1", [child("f2")], null)],
+    ]);
+    expect(now.rows.map((c) => c.row.id)).toEqual([F, "f2"]);
+    expect(now.settled).toBe(true);
+    expect(now.hidden).toBeUndefined();
+  });
+
+  test("an earlier read's LATE CLEANUP at the same position withdraws nothing; the current read's own withdrawal does", () => {
+    const earlier = page(null, [child(F)], null);
+    const current = page("f0", [child("f2")], null);
+    const now = reported(
+      reported(new Map(), 0, earlier.after, earlier.report),
+      0,
+      current.after,
+      current.report,
     );
+    expect(now.get(0)?.after).toBe("f0");
+    // The earlier read's cleanup, applied after the current read reported.
+    expect(reported(now, 0, null, null)).toBe(now);
+    // Control: the current read withdraws its own report.
+    expect(reported(now, 0, "f0", null).has(0)).toBe(false);
   });
 
   test("the ledger applies a kind's report only for its own reading, whenever the update is applied", () => {

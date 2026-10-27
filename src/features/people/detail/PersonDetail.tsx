@@ -43,10 +43,11 @@ import {
 } from "../model/summary";
 import { Banner, PendingBadge } from "../parts";
 import {
+  type Child,
+  ChildScan,
   ConfirmedAbsence,
   OutstandingChain,
-  ResourceScan,
-  type ScanResult,
+  type Step,
 } from "../reads";
 import {
   type SummaryView,
@@ -132,7 +133,7 @@ function PersonRead({
   const root = useRef<HTMLDivElement>(null);
   useSteadyWhilePressed(root);
   return (
-    <OutstandingChain>
+    <OutstandingChain witness={personId}>
       {(outstanding) => {
         if (cached.status === "loading" || outstanding.status === "loading")
           return <DetailSkeleton />;
@@ -195,6 +196,16 @@ function PersonRead({
             </ConfirmedAbsence>
           );
         }
+        // The unsent changes folded over the person and shown under them were read from a state in which the cache did NOT hold the person,
+        // and they do not create the person either (WEB-11a review 16, R16.1): a later commit removed them, and the person's read has not
+        // answered for it yet. Nothing of theirs is shown until the reads agree (PPL-5); nothing typed is lost (it lives in the drafts).
+        if (
+          outstanding.witnessed === false &&
+          projectedRows(new Set(), changes, "person").every(
+            (row) => row.row.id !== personId,
+          )
+        )
+          return <DetailSkeleton />;
         return (
           <div
             ref={root}
@@ -389,80 +400,144 @@ function FieldSteps({
   // "Try again" after a failed page reads the step afresh (new watches), from the same cursor.
   const [scan, setScan] = useState(0);
   const start = starts.at(-1) ?? null;
-  const byId = changesById(changes);
+  const steps = {
+    starts,
+    onPrevious: () => setStarts(starts.slice(0, -1)),
+    onNext: (next: string) => setStarts([...starts, next]),
+    onRetry: () => setScan((value) => value + 1),
+  };
+  // A person only this device creates has no server fields: its fields are its own unsent creates. A projected person is never a permit
+  // for a cached child (R16.1), so the cache is not read under them.
+  if (person.projected)
+    return (
+      <FieldStep
+        person={person}
+        changes={changes}
+        changesKnown={changesKnown}
+        start={null}
+        step={UNSENT_ONLY}
+        steps={steps}
+      />
+    );
   return (
-    <ResourceScan
+    <ChildScan
       key={scan}
       kind="field"
+      parentKind="person"
       parentId={personId}
       start={start}
       keep={keepAll}
       limit={FIELD_STEP}
       pages={FIELD_STEP_PAGES}
     >
-      {(step) => {
-        const cached = step.rows.map((row) => foldOne(row, byId));
-        // The fields only this device's queued creates project are shown once, with the first step.
-        const rows =
-          start === null
-            ? [
-                ...cached,
-                ...projectedRows(
-                  new Set(step.rows.map((row) => row.id)),
-                  changes,
-                  "field",
-                  personId,
-                ),
-              ]
-            : cached;
-        const active = rows.filter((row) => !row.row.archived);
-        const archived = rows.filter((row) => row.row.archived);
-        return (
-          <>
-            <AudiencedRows
-              step={step}
-              start={start}
-              rows={active}
-              person={person}
-              // "No fields yet" only after a COMPLETED step and every unsent change read (review 6, finding 2): a failed page, one still
-              // loading or an unread change is not "none".
-              settled={step.settled && changesKnown}
-            />
-            {step.status === "failed" ? (
-              <Banner
-                message={copy.FIELDS_READ_FAILED}
-                action={
-                  <Button onClick={() => setScan((value) => value + 1)}>
-                    {copy.TRY_AGAIN}
-                  </Button>
-                }
-              />
-            ) : null}
-            {starts.length > 1 || (step.settled && step.next !== null) ? (
-              <div className="flex flex-wrap gap-2" data-field-steps="">
-                {starts.length > 1 ? (
-                  <Button
-                    data-people-action="previous-fields"
-                    onClick={() => setStarts(starts.slice(0, -1))}
-                  >
-                    {copy.PREVIOUS_FIELDS}
-                  </Button>
-                ) : null}
-                {step.settled && step.next !== null ? (
-                  <Button
-                    data-people-action="next-fields"
-                    onClick={() => setStarts([...starts, step.next])}
-                  >
-                    {copy.NEXT_FIELDS}
-                  </Button>
-                ) : null}
-              </div>
-            ) : null}
-            <ArchivedFields rows={archived} />
-          </>
-        );
-      }}
-    </ResourceScan>
+      {(step) => (
+        <FieldStep
+          person={person}
+          changes={changes}
+          changesKnown={changesKnown}
+          start={start}
+          step={step}
+          steps={steps}
+        />
+      )}
+    </ChildScan>
+  );
+}
+
+/** The step of a person who exists only on this device: nothing cached, read to its end. */
+const UNSENT_ONLY: Step<Child> = {
+  status: "ready",
+  rows: [],
+  settled: true,
+  next: null,
+  end: true,
+};
+
+/**
+ * One step of the person's fields. Each cached field is shown from what ONE read gave with it (`Child`: the row, the person held by that same
+ * read, and the unsent changes over it), so a field changed or added by the commit that removed the person is never shown under the person
+ * read before it (WEB-11a review 16, R16.1; PPL-5). A step whose read no longer holds the person shows nothing at all: not the fields an
+ * earlier page kept, not this device's creates, not "No fields yet".
+ */
+function FieldStep({
+  person,
+  changes,
+  changesKnown,
+  start,
+  step,
+  steps,
+}: {
+  person: ShownRow;
+  changes: Change[];
+  changesKnown: boolean;
+  start: string | null;
+  step: Step<Child>;
+  steps: {
+    starts: readonly (string | null)[];
+    onPrevious(): void;
+    onNext(next: string): void;
+    onRetry(): void;
+  };
+}) {
+  if (step.hidden) return null;
+  const personId = person.row.id;
+  const cached = step.rows.map((child) =>
+    foldOne(child.row, changesById(changesOfAll(child.drafts))),
+  );
+  // The fields only this device's queued creates project are shown once, with the first step.
+  const rows =
+    start === null
+      ? [
+          ...cached,
+          ...projectedRows(
+            new Set(step.rows.map((child) => child.row.id)),
+            changes,
+            "field",
+            personId,
+          ),
+        ]
+      : cached;
+  const active = rows.filter((row) => !row.row.archived);
+  const archived = rows.filter((row) => row.row.archived);
+  return (
+    <>
+      <AudiencedRows
+        settledStep={step.settled}
+        start={start}
+        rows={active}
+        person={person}
+        // "No fields yet" only after a COMPLETED step and every unsent change read (review 6, finding 2): a failed page, one still
+        // loading or an unread change is not "none".
+        settled={step.settled && changesKnown}
+      />
+      {step.status === "failed" ? (
+        <Banner
+          message={copy.FIELDS_READ_FAILED}
+          action={<Button onClick={steps.onRetry}>{copy.TRY_AGAIN}</Button>}
+        />
+      ) : null}
+      {steps.starts.length > 1 || (step.settled && step.next !== null) ? (
+        <div className="flex flex-wrap gap-2" data-field-steps="">
+          {steps.starts.length > 1 ? (
+            <Button
+              data-people-action="previous-fields"
+              onClick={steps.onPrevious}
+            >
+              {copy.PREVIOUS_FIELDS}
+            </Button>
+          ) : null}
+          {step.settled && step.next !== null ? (
+            <Button
+              data-people-action="next-fields"
+              onClick={() => steps.onNext(step.next as string)}
+            >
+              {copy.NEXT_FIELDS}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      <ArchivedFields rows={archived} />
+    </>
   );
 }
 
@@ -472,13 +547,14 @@ function FieldSteps({
  * Read once the step has settled, and only for fields this device has synced.
  */
 function AudiencedRows({
-  step,
+  settledStep,
   start,
   rows,
   person,
   settled,
 }: {
-  step: ScanResult;
+  /** The step's walk is over (only then are its fields' audiences read). */
+  settledStep: boolean;
   start: string | null;
   rows: ShownRow[];
   person: ShownRow;
@@ -486,7 +562,7 @@ function AudiencedRows({
 }) {
   const env = usePeopleEnv();
   const personId = person.row.id;
-  const ids = step.settled
+  const ids = settledStep
     ? rows.filter((row) => !row.projected).map((row) => row.row.id)
     : [];
   const key =

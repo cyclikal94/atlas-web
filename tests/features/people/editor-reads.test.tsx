@@ -51,6 +51,12 @@ const Q = "57575757-5757-4575-8575-575757575757";
 const F = "66666666-6666-4666-8666-666666666666";
 const G = "88888888-8888-4888-8888-888888888888";
 const MERGED = "data.readMerged";
+// Adapted in revision 17 (WEB-11a review 16, R16.1): the editor reads an existing field and its person in ONE read
+// (`data.readMergedUnder`), the detail still reads the person with `data.readMerged`. A fault, hold or freeze of "the read of X" is put on
+// every read that reads X, so each test still reaches the editor's read it names (the selected watch is counted where it was before).
+const MERGED_UNDER = "data.readMergedUnder";
+const readsId = (input: Record<string, unknown>, id: string) =>
+  input.id === id || input.parentId === id;
 const OUTSTANDING = "data.readOutstandingCreates";
 
 function world() {
@@ -102,11 +108,13 @@ const detailShown = (personId = P) =>
 /** A fault on the editor's read of `id` only, counting its visits (the selected fault is positively reached). */
 function faultOn(w: PeopleWorld, id: string) {
   const visits = { count: 0 };
-  w.failRead(MERGED, (input) => {
-    if (input.id !== id) return false;
+  const hit = (input: Record<string, unknown>) => {
+    if (!readsId(input, id)) return false;
     visits.count += 1;
     return true;
-  });
+  };
+  w.failRead(MERGED, hit);
+  w.failRead(MERGED_UNDER, hit);
   return visits;
 }
 const watchesOf = (w: PeopleWorld, plan: string, id?: string) =>
@@ -199,9 +207,32 @@ describe("DA9-04: a failed read of the edited field (or its person) is said, nev
     });
     const d = await showing("editor-read-failed");
     expect(visits.count).toBeGreaterThan(0);
-    expect(within(d).queryByText(EDITOR_PERSON_UNREAD)).not.toBeNull();
+    // Adapted in revision 17 (R16.1): the person and the field are one read of the editor, said as the field's (was EDITOR_PERSON_UNREAD,
+    // when the person had a read of its own). The person-only read of "Add a field" keeps the person's message (the test below).
+    expect(within(d).queryByText(EDITOR_FIELD_UNREAD)).not.toBeNull();
     expect(within(d).queryByText("Saved value")).toBeNull();
     expect(screen.queryByRole("dialog", { name: "Edit field" })).toBe(d);
+    expect(
+      document.querySelector(`[data-person-detail="${P}"]`),
+      "the healthy detail stays",
+    ).not.toBeNull();
+  });
+
+  test("revision 17: Add a field's read of the person alone fails while the detail's read is healthy: the person's read is said", async () => {
+    const w = world();
+    const { router } = await w.mount(`/people/${P}`);
+    await detailShown();
+    w.freezeReads(MERGED);
+    const visits = faultOn(w, P);
+    await act(async () => {
+      await router.navigate({
+        to: "/people/$personId/fields/new",
+        params: { personId: P },
+      });
+    });
+    const d = await showing("editor-read-failed", "Add a field");
+    expect(visits.count).toBeGreaterThan(0);
+    expect(within(d).queryByText(EDITOR_PERSON_UNREAD)).not.toBeNull();
     expect(
       document.querySelector(`[data-person-detail="${P}"]`),
       "the healthy detail stays",
@@ -269,12 +300,12 @@ describe("DA9-05: Try again makes new watches for every failed read; nothing rec
     w.advanceRevision();
     await act(async () => undefined);
     expect(stateOf(screen.getByRole("dialog"))).toBe("editor-read-failed");
-    const fieldWatches = watchesOf(w, MERGED, F);
+    const fieldWatches = watchesOf(w, MERGED_UNDER, F);
     const chainWatches = watchesOf(w, OUTSTANDING);
     fireEvent.click(within(d).getByRole("button", { name: "Try again" }));
     const again = await dialogNamed("Edit Note");
     expect(value(again)).toHaveValue("Saved value");
-    expect(watchesOf(w, MERGED, F)).toBeGreaterThan(fieldWatches);
+    expect(watchesOf(w, MERGED_UNDER, F)).toBeGreaterThan(fieldWatches);
     expect(watchesOf(w, OUTSTANDING)).toBeGreaterThan(chainWatches);
     expect(w.built).toHaveLength(0);
   });
@@ -284,10 +315,10 @@ describe("DA9-05: Try again makes new watches for every failed read; nothing rec
     faultOn(w, F);
     await w.mount(`/people/${P}/fields/${F}`);
     let d = await showing("editor-read-failed");
-    const before = watchesOf(w, MERGED, F);
+    const before = watchesOf(w, MERGED_UNDER, F);
     fireEvent.click(within(d).getByRole("button", { name: "Try again" }));
     await waitFor(() =>
-      expect(watchesOf(w, MERGED, F)).toBeGreaterThan(before),
+      expect(watchesOf(w, MERGED_UNDER, F)).toBeGreaterThan(before),
     );
     d = await showing("editor-read-failed");
     w.restoreReads({ notify: false });
@@ -302,11 +333,11 @@ describe("DA9-05: Try again makes new watches for every failed read; nothing rec
     await w.mount(`/people/${P}/fields/${F}`);
     const d = await showing("editor-read-failed");
     w.restoreReads({ notify: false });
-    const fieldWatches = watchesOf(w, MERGED, F);
+    const fieldWatches = watchesOf(w, MERGED_UNDER, F);
     const chainWatches = watchesOf(w, OUTSTANDING);
     fireEvent.click(within(d).getByRole("button", { name: "Try again" }));
     expect(value(await dialogNamed("Edit Note"))).toHaveValue("Saved value");
-    expect(watchesOf(w, MERGED, F)).toBeGreaterThan(fieldWatches);
+    expect(watchesOf(w, MERGED_UNDER, F)).toBeGreaterThan(fieldWatches);
     expect(watchesOf(w, OUTSTANDING)).toBeGreaterThan(chainWatches);
   });
 });
@@ -424,6 +455,7 @@ describe("DA9-07: loading, later windows and the cap: never 'none', and a failur
   test("a new field reads no target: a failing read of any field does not stop Add a field", async () => {
     const w = world();
     w.failRead(MERGED, (input) => input.id !== P);
+    w.failRead(MERGED_UNDER, (input) => input.id !== P);
     await w.mount(`/people/${P}/fields/new`);
     const d = await dialogNamed("Add a field");
     expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue("");
@@ -468,7 +500,10 @@ describe("DA9-08: one commit publishing the field, its reads delivered in either
         attributes: true,
       });
       // The cache's (or the queue's) existing watches have not delivered the commit yet.
-      w.freezeReads(first === "queue" ? MERGED : OUTSTANDING);
+      if (first === "queue") {
+        w.freezeReads(MERGED);
+        w.freezeReads(MERGED_UNDER);
+      } else w.freezeReads(OUTSTANDING);
       w.handOff(
         [
           fieldRow({

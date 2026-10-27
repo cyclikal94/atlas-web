@@ -1,8 +1,17 @@
 import { useMemo } from "react";
-import type { DraftRow, DraftWithCommand, ResourceId } from "../model/types";
+import type {
+  DraftRow,
+  DraftWithCommand,
+  ResourceId,
+  ResourceKind,
+} from "../model/types";
+import type { FormCopyCursor } from "../plans/form-copies";
 import type { ListedResource } from "../plans/outbox";
 import {
   type CachePosition,
+  type ChildPage,
+  type ChildPageInput,
+  type FormCopiesUnder,
   type Inventory,
   type InventoryInput,
   type OutstandingByKindPage,
@@ -11,6 +20,8 @@ import {
   type OutstandingForResource,
   type OutstandingPage,
   readCachePosition,
+  readChildPage,
+  readFormCopiesUnder,
   readInventory,
   readOutstanding,
   readOutstandingByKind,
@@ -317,8 +328,11 @@ export { useDraftWithCommand } from "./draft-body";
 export function useOutstandingCreates(
   kinds: readonly string[],
   after?: number | null,
+  witness?: { id: ResourceId; kind: ResourceKind },
 ): Loadable<OutstandingCreatesPage> {
   const key = kinds.join("\u0000");
+  const witnessId = witness?.id;
+  const witnessKind = witness?.kind;
   return useWatch(
     (env) => {
       const service = env.service();
@@ -327,10 +341,66 @@ export function useOutstandingCreates(
             incarnationId: service.incarnationId,
             kinds: key === "" ? [] : key.split("\u0000"),
             ...(typeof after === "number" ? { after } : {}),
+            ...(witnessId === undefined || witnessKind === undefined
+              ? {}
+              : { witness: { id: witnessId, kind: witnessKind } }),
           })
         : null;
     },
-    [key, after],
+    [key, after, witnessId, witnessKind],
+  );
+}
+
+/**
+ * One page of `kind` (under `parentId`) with the parents of its rows, and on request the drafts over them, read in ONE transaction
+ * (`readChildPage`, WEB-11a review 16): rows whose parent the cache does not hold as `parentKind` are not answered. A new parent, page or
+ * kind is a new read that starts `loading`.
+ */
+export function useChildPage(
+  options: Omit<ChildPageInput, "incarnationId">,
+): Loadable<ChildPage> {
+  const { kind, parentKind, parentId, after } = options;
+  const kinds = options.kinds?.join("\u0000");
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readChildPage, {
+            incarnationId: service.incarnationId,
+            kind,
+            parentKind,
+            ...(parentId === undefined ? {} : { parentId }),
+            after: after ?? null,
+            ...(kinds === undefined
+              ? {}
+              : { kinds: kinds === "" ? [] : kinds.split("\u0000") }),
+          })
+        : null;
+    },
+    [kind, parentKind, parentId, after, kinds],
+  );
+}
+
+/** A page of form copies with whether the cache held `witness` in the same read (`readFormCopiesUnder`, WEB-11a review 16). */
+export function useFormCopiesUnder(
+  prefix: string,
+  after: FormCopyCursor | null,
+  witness: { id: ResourceId; kind: ResourceKind },
+): Loadable<FormCopiesUnder> {
+  const { id, kind } = witness;
+  return useWatch(
+    (env) => {
+      const service = env.service();
+      return service
+        ? service.store.watch(readFormCopiesUnder, {
+            incarnationId: service.incarnationId,
+            prefix,
+            after,
+            witness: { id, kind },
+          })
+        : null;
+    },
+    [prefix, after, id, kind],
   );
 }
 

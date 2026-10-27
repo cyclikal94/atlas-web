@@ -5,6 +5,8 @@ import {
   createDataEnv,
   DataEnvProvider,
   useCachedResource,
+  useChildPage,
+  useMergedUnder,
   useResourceList,
   useVisibleChildren,
 } from "../../src/data";
@@ -175,6 +177,54 @@ function Children() {
           : out.value === null
             ? "hidden"
             : out.value.rows.map((m) => m.merged.label).join(",")}
+      </p>
+    </>
+  );
+}
+
+/** A person's field page with its parent (WEB-11a review 16, R16.1); `parent` moves while the view stays mounted. */
+function ChildPageOf() {
+  const [parent, setParent] = useState("q");
+  const out = useChildPage({
+    kind: "field",
+    parentKind: "person",
+    parentId: parent,
+  });
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="other-page"
+        onClick={() => setParent("r")}
+      >
+        other
+      </button>
+      <p data-testid="child-page">
+        {out.status !== "ready"
+          ? out.status
+          : `${Object.keys(out.value.parents).join(",") || "none"}:${out.value.page.rows.map((m) => m.merged.label).join(",")}`}
+      </p>
+    </>
+  );
+}
+
+/** A field with its parent in one read (WEB-11a review 16); `field` moves while the view stays mounted. */
+function UnderOf() {
+  const [field, setField] = useState("fq");
+  const out = useMergedUnder(field);
+  return (
+    <>
+      <button
+        type="button"
+        data-testid="other-field"
+        onClick={() => setField("fr")}
+      >
+        other
+      </button>
+      <p data-testid="under">
+        {out.status !== "ready"
+          ? out.status
+          : `${out.value.resource.merged?.label ?? "none"}|${out.value.parent?.merged?.label ?? "none"}`}
       </p>
     </>
   );
@@ -391,6 +441,53 @@ describe("with a database", () => {
     await t.settle();
     // R is not cached as a person: its cached field is not shown.
     expect(screen.getByTestId("children")).toHaveTextContent("hidden");
+  });
+
+  test("R16.1: a field page with its person: another parent is a NEW read that starts loading, never the earlier parent's answer", async () => {
+    const t = await mount({ database: true }, () => <ChildPageOf />);
+    const name = accountDatabaseName(ACCOUNT);
+    t.world.idb.seed(name, "cache", [
+      cacheRow({ id: "q", kind: "person", label: "Q" }),
+      cacheRow({ id: "fq", kind: "field", parent_id: "q", label: "Q's" }),
+      cacheRow({ id: "fr", kind: "field", parent_id: "r", label: "R's" }),
+    ]);
+    await t.env.outbox()?.enqueue({
+      endpoint: "/commands",
+      targets: [],
+      build: () => ({ command: {} }),
+    });
+    await t.settle();
+    expect(screen.getByTestId("child-page")).toHaveTextContent("q:Q's");
+    t.world.idb.autoDrive = false;
+    act(() => screen.getByTestId("other-page").click());
+    expect(screen.getByTestId("child-page")).toHaveTextContent("loading");
+    t.world.idb.autoDrive = true;
+    await t.settle();
+    // R is not cached as a person: nothing of its cached field is answered.
+    expect(screen.getByTestId("child-page")).toHaveTextContent("none:");
+  });
+
+  test("R16.1: a field with its person in one read: another field is a NEW read that starts loading", async () => {
+    const t = await mount({ database: true }, () => <UnderOf />);
+    const name = accountDatabaseName(ACCOUNT);
+    t.world.idb.seed(name, "cache", [
+      cacheRow({ id: "q", kind: "person", label: "Q" }),
+      cacheRow({ id: "fq", kind: "field", parent_id: "q", label: "Q's" }),
+      cacheRow({ id: "fr", kind: "field", parent_id: "r", label: "R's" }),
+    ]);
+    await t.env.outbox()?.enqueue({
+      endpoint: "/commands",
+      targets: [],
+      build: () => ({ command: {} }),
+    });
+    await t.settle();
+    expect(screen.getByTestId("under")).toHaveTextContent("Q's|Q");
+    t.world.idb.autoDrive = false;
+    act(() => screen.getByTestId("other-field").click());
+    expect(screen.getByTestId("under")).toHaveTextContent("loading");
+    t.world.idb.autoDrive = true;
+    await t.settle();
+    expect(screen.getByTestId("under")).toHaveTextContent("R's|none");
   });
 
   test("a person's fields with no database: unavailable, never a page", async () => {

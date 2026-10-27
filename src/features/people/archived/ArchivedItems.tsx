@@ -11,11 +11,7 @@ import {
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { PageHeading } from "../../../components/ui/page-heading";
-import {
-  type CacheRow,
-  useCachedResource,
-  useOptionalDataEnv,
-} from "../../../data";
+import { type CacheRow, useOptionalDataEnv } from "../../../data";
 import { CacheGate } from "../../sync/CacheGate";
 import { useArchiveAction } from "../archive";
 import * as copy from "../copy";
@@ -29,7 +25,12 @@ import {
   type ShownRow,
 } from "../model/project";
 import { PendingBadge } from "../parts";
-import { OutstandingChain, ResourceScan } from "../reads";
+import {
+  type Child,
+  ChildScan,
+  OutstandingChain,
+  ResourceScan,
+} from "../reads";
 import { archivedLedgerKinds, type LedgerReport } from "./ledger";
 
 /** "Kind | Name | Restore" (inline: a one-off column template would add a rule to the shared production stylesheet). */
@@ -332,25 +333,41 @@ function ArchivedStep({
         return (
           <>
             {children(rows, state, onPrevious !== null || next !== null)}
-            {onPrevious !== null || next !== null ? (
-              <li
-                className="flex list-none flex-wrap gap-2"
-                data-ledger-steps={kind}
-              >
-                {onPrevious !== null ? (
-                  <Button onClick={onPrevious}>{copy.PREVIOUS_ITEMS}</Button>
-                ) : null}
-                {next !== null ? (
-                  <Button onClick={() => onNext(next)}>
-                    {copy.NEXT_ITEMS}
-                  </Button>
-                ) : null}
-              </li>
-            ) : null}
+            <StepButtons
+              kind={kind}
+              onPrevious={onPrevious}
+              next={next}
+              onNext={onNext}
+            />
           </>
         );
       }}
     </ResourceScan>
+  );
+}
+
+/** "Previous items" / "Next items" of a kind's ledger steps, when there is a step to move to. */
+function StepButtons({
+  kind,
+  onPrevious,
+  next,
+  onNext,
+}: {
+  kind: "person" | "field";
+  onPrevious: (() => void) | null;
+  next: string | null;
+  onNext(next: string): void;
+}) {
+  if (onPrevious === null && next === null) return null;
+  return (
+    <li className="flex list-none flex-wrap gap-2" data-ledger-steps={kind}>
+      {onPrevious !== null ? (
+        <Button onClick={onPrevious}>{copy.PREVIOUS_ITEMS}</Button>
+      ) : null}
+      {next !== null ? (
+        <Button onClick={() => onNext(next)}>{copy.NEXT_ITEMS}</Button>
+      ) : null}
+    </li>
   );
 }
 
@@ -381,153 +398,73 @@ function ArchivedPeople({
   );
 }
 
-/**
- * What a field's parent read says now (review 5, finding 2): `loading` until it answers, `shown` (a person this device holds and can
- * see), `hidden` (none: PPL-5) or `failed` (it could not be read: never "not visible").
- */
-export type ParentState = "loading" | "shown" | "hidden" | "failed";
+/** A field as one read gave it: its row with the unsent changes read with it applied (`Child`, WEB-11a review 16). */
+const shownChild = (child: Child): ShownRow =>
+  foldOne(child.row, changesById(changesOfAll(child.drafts)));
+const archivedChild = (child: Child): boolean => shownChild(child).row.archived;
 
 /**
- * One field row's report of its parent read, owned by that row's CURRENT read of THAT parent: `owner` is new for every mount and every
- * parent the row reads (a later owner of the field outranks an earlier one), and `parent` is the parent read. A report counts only while
- * its field is listed with that parent; anything else (no report, another parent, an earlier owner) is still loading.
+ * The archived fields (PPL-5: a field is listed only under a person this device holds and can see), named with their person ("Old emergency
+ * contact · Mo"). Each page is read WITH the persons of its fields and the unsent changes over them (`ChildScan`, WEB-11a review 16, R16.1):
+ * a field is listed, counted, labelled and named from that one read, so a field changed by the commit that removed its person is never
+ * listed under the person an earlier read held. A page whose saved changes cannot be read whole is a failed read (never a settled one).
  */
-export interface ParentReport {
-  owner: number;
-  parent: string;
-  state: ParentState;
-}
-let parentOwners = 0;
-
-/**
- * Owner `owner`'s report of `field` (or its withdrawal, null), applied to the CURRENT reports: an earlier owner neither replaces a later
- * one's report nor withdraws it.
- */
-export function parentReported(
-  previous: ReadonlyMap<string, ParentReport>,
-  field: string,
-  owner: number,
-  next: Omit<ParentReport, "owner"> | null,
-): ReadonlyMap<string, ParentReport> {
-  const known = previous.get(field);
-  if (known !== undefined && known.owner > owner) return previous;
-  if (next === null) {
-    if (known?.owner !== owner) return previous;
-    const rest = new Map(previous);
-    rest.delete(field);
-    return rest;
-  }
-  if (
-    known?.owner === owner &&
-    known.parent === next.parent &&
-    known.state === next.state
-  )
-    return previous;
-  return new Map(previous).set(field, { owner, ...next });
-}
-
 function ArchivedFields({
   report,
 }: {
   report(report: LedgerReport | null): void;
 }) {
-  const [parents, setParents] = useState<ReadonlyMap<string, ParentReport>>(
-    () => new Map(),
-  );
-  const onParent = useCallback(
-    (field: string, owner: number, next: Omit<ParentReport, "owner"> | null) =>
-      setParents((previous) => parentReported(previous, field, owner, next)),
-    [],
-  );
+  const [starts, setStarts] = useState<(string | null)[]>([null]);
+  const start = starts.at(-1) ?? null;
+  const onPrevious =
+    starts.length > 1 ? () => setStarts(starts.slice(0, -1)) : null;
   return (
-    <ArchivedSteps kind="field">
-      {(rows, state, more) => {
-        const states = rows.map((row) => {
-          const known = parents.get(row.row.id);
-          return known !== undefined &&
-            known.parent === (row.row.parent_id ?? "")
-            ? known.state
-            : "loading";
-        });
-        const count =
-          states.filter((parent) => parent === "shown").length + (more ? 1 : 0);
-        const known: StepState = states.includes("failed")
-          ? "failed"
-          : states.includes("loading")
-            ? "loading"
-            : "complete";
+    <ChildScan
+      kind="field"
+      parentKind="person"
+      start={start}
+      keep={archivedChild}
+      limit={LEDGER_STEP}
+      pages={LEDGER_STEP_PAGES}
+    >
+      {(step) => {
+        const next = step.settled ? step.next : null;
+        const state: StepState =
+          step.status === "failed"
+            ? "failed"
+            : step.settled
+              ? "complete"
+              : "loading";
+        const more = onPrevious !== null || next !== null;
         return (
-          <Reported
-            count={count}
-            state={
-              state === "failed" || known === "failed"
-                ? "failed"
-                : state === "complete" && known === "complete"
-                  ? "complete"
-                  : "loading"
-            }
-            report={report}
-          >
-            {rows.map((row) => (
-              <FieldLedgerRow
-                key={row.row.id}
-                shown={row}
-                onParent={onParent}
-              />
-            ))}
-          </Reported>
+          <>
+            <Reported
+              count={step.rows.length + (more ? 1 : 0)}
+              state={state}
+              report={report}
+            >
+              {step.rows.map((child) => (
+                <LedgerRow
+                  key={child.row.id}
+                  kindLabel={copy.KIND_FIELD}
+                  name={copy.FIELD_OF(
+                    shownChild(child).row.label,
+                    child.parent.label,
+                  )}
+                  shown={shownChild(child)}
+                />
+              ))}
+            </Reported>
+            <StepButtons
+              kind="field"
+              onPrevious={onPrevious}
+              next={next}
+              onNext={(after) => setStarts([...starts, after])}
+            />
+          </>
         );
       }}
-    </ArchivedSteps>
-  );
-}
-
-/** PPL-5: a field is listed only under a person this device holds and can see. */
-function FieldLedgerRow({
-  shown,
-  onParent,
-}: {
-  shown: ShownRow;
-  onParent(
-    field: string,
-    owner: number,
-    next: Omit<ParentReport, "owner"> | null,
-  ): void;
-}) {
-  const field = shown.row.id;
-  const parentId = shown.row.parent_id ?? "";
-  const parent = useCachedResource(parentId);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new owner for every parent this row reads (and every mount)
-  const owner = useMemo(() => ++parentOwners, [parentId]);
-  const person: CacheRow | null =
-    parent.status === "ready" && parent.value.merged?.kind === "person"
-      ? parent.value.merged
-      : null;
-  // The row and its report come from the SAME read: what is listed is what is counted. A person that could not be read hides the
-  // field's details all the same, but the inventory is then not complete; one still on its way is not complete either.
-  const state: ParentState =
-    parent.status === "loading"
-      ? "loading"
-      : parent.status === "unavailable"
-        ? "failed"
-        : person !== null
-          ? "shown"
-          : "hidden";
-  // Published (and withdrawn) before the browser paints: the ledger never shows an answer of an earlier read as the current one.
-  useLayoutEffect(() => {
-    onParent(field, owner, { parent: parentId, state });
-  }, [onParent, field, owner, parentId, state]);
-  useLayoutEffect(
-    () => () => onParent(field, owner, null),
-    [onParent, field, owner],
-  );
-  if (person === null) return null;
-  return (
-    <LedgerRow
-      kindLabel={copy.KIND_FIELD}
-      name={copy.FIELD_OF(shown.row.label, person.label)}
-      shown={shown}
-    />
+    </ChildScan>
   );
 }
 

@@ -7,7 +7,7 @@ import {
   type FormCopyCursor,
   useCachedResource,
   useDraftWithCommand,
-  useFormCopies,
+  useFormCopiesUnder,
 } from "../../../data";
 import * as copy from "../copy";
 import { type PeopleEnv, usePeopleEnv } from "../env";
@@ -58,16 +58,22 @@ export function HeldChanges({ personId }: { personId: string }) {
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
   const [after, setAfter] = useState<FormCopyCursor | null>(null);
-  const copies = useFormCopies(heldPrefixOf(personId), after);
-  if (copies.status === "loading")
+  // The held copies are read WITH the person's cached row (WEB-11a review 16, R16.1): a copy written after a commit removed the person is
+  // never shown under the person a separate read still holds. Not shown is not discarded: the copies stay, and so does their authority.
+  const read = useFormCopiesUnder(heldPrefixOf(personId), after, {
+    id: personId,
+    kind: "person",
+  });
+  if (read.status === "loading")
     return after === null ? null : (
       <p className="text-[13px] text-ink-2">{copy.HELD_CHECKING}</p>
     );
-  if (copies.status === "unavailable")
-    return copies.reason === "error" ? (
+  if (read.status === "unavailable")
+    return read.reason === "error" ? (
       <p className="text-[13px] text-ink-2">{copy.HELD_LIST_FAILED}</p>
     ) : null;
-  const { copies: rows, next } = copies.value;
+  if (!read.value.witnessed) return null;
+  const { copies: rows, next } = read.value.page;
   if (rows.length === 0 && next === null && after === null) return null;
   return (
     <div className="flex flex-col gap-2" data-held-page="">

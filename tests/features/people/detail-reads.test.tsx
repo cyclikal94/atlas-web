@@ -80,9 +80,10 @@ describe("review 6, finding 2: the fields of a person", () => {
           ? [fieldRow({ id: F, parent_id: P, label: "Stored medical note" })]
           : []),
       ]);
+      // Adapted in revision 17 (R16.1): the detail reads its field pages with their person (`data.readChildPage`, was `readResourceList`).
       if (failed)
         w.failRead(
-          "data.readResourceList",
+          "data.readChildPage",
           (input) => input.kind === "field" && input.parentId === P,
         );
       await w.mount(`/people/${P}`);
@@ -118,9 +119,10 @@ describe("review 6, finding 2: the fields of a person", () => {
       ]);
       await w.mount(`/people/${P}`);
       await waitFor(() => expect(text("Field 100")).not.toBeNull());
+      // Adapted in revision 17 (R16.1): the detail's field pages are `data.readChildPage` reads (was `readResourceList`).
       if (failed)
         w.failRead(
-          "data.readResourceList",
+          "data.readChildPage",
           (input) =>
             input.kind === "field" &&
             input.parentId === P &&

@@ -8,10 +8,13 @@ import {
   type CacheRow,
   type DraftWithCommand,
   type EnqueueRequest,
-  useCachedResource,
+  type Loadable,
+  type MergedResource,
+  type MergedUnder,
   useConflictInbox,
   useDataActions,
   useDraftWithCommand,
+  useMergedUnder,
   useSharingDefaults,
 } from "../../../data";
 import { canonicalBody, ResourcePolicyEditor, untilSent } from "../../sharing";
@@ -68,7 +71,12 @@ import {
   type ProblemSlot,
   reduceFieldForm,
 } from "../model/field-form";
-import { changesOfAll, foldRows, type ShownRow } from "../model/project";
+import {
+  changesOfAll,
+  foldRows,
+  projectedRows,
+  type ShownRow,
+} from "../model/project";
 import {
   draftFieldContent,
   type EditSnapshot,
@@ -177,17 +185,26 @@ function EditorReads({
   retry(): void;
   onClose(): void;
 }) {
-  const person = useCachedResource(personId);
-  const field = useCachedResource(fieldId ?? "");
+  // The person and the field as ONE read saw them (WEB-11a review 16, R16.1): a field changed by the commit that removed its person is
+  // never admitted under the person a separate read still holds. A new field reads the person alone.
+  const read = useMergedUnder(
+    fieldId ?? personId,
+    fieldId === null ? undefined : personId,
+  );
+  const person = partOf(read, (value) =>
+    fieldId === null ? value.resource : value.parent,
+  );
+  const field = partOf(read, (value) => value.resource);
   const draftKey = `field:${personId}:${fieldId ?? "new"}`;
   return (
-    <OutstandingChain>
+    <OutstandingChain witness={personId}>
       {(outstanding) => {
         // The edit's snapshot needs the person, the field and this device's whole chain of saves (finding 5), each READ: a read that
         // failed, or a chain that is more than this page reads, is not an empty one, and nothing is edited on a guessed base (review 7's
         // design assessment, C15; review 9, finding 2). Input kept for the editor stays kept for when the reads succeed.
+        // An existing field's person and field are ONE read: it is said as the field's (the person alone is read only for a new field).
         const reads = editorReads(
-          person,
+          fieldId === null ? person : READ_WITH_FIELD,
           fieldId === null ? null : field,
           outstanding,
         );
@@ -231,10 +248,21 @@ function EditorReads({
           );
         }
         const changes = changesOfAll(outstanding.rows);
-        const personRow = foldRows(
+        const cachedPerson =
           person.status === "ready" && person.value.merged?.kind === "person"
-            ? [person.value.merged]
-            : [],
+            ? person.value.merged
+            : null;
+        // The unsent changes were read from a state without the person, and do not create them (R16.1): a later commit removed the person.
+        // Nothing is shown until the reads agree; the kept input stays kept.
+        if (
+          outstanding.witnessed === false &&
+          projectedRows(new Set(), changes, "person").every(
+            (row) => row.row.id !== personId,
+          )
+        )
+          return null;
+        const personRow = foldRows(
+          cachedPerson === null ? [] : [cachedPerson],
           changes,
           "person",
         ).find((row) => row.row.id === personId);
@@ -244,7 +272,9 @@ function EditorReads({
           fieldId === null
             ? null
             : (foldRows(
-                field.status === "ready" &&
+                // A cached field only under the person the SAME read holds (a person only this device creates has no server fields).
+                cachedPerson !== null &&
+                  field.status === "ready" &&
                   field.value.merged?.kind === "field" &&
                   field.value.merged.parent_id === personId
                   ? [field.value.merged]
@@ -309,6 +339,31 @@ function EditorReads({
       }}
     </OutstandingChain>
   );
+}
+
+const NOTHING: MergedResource = {
+  base: null,
+  effects: [],
+  creates: [],
+  createsTotal: 0,
+  createsNext: null,
+  merged: null,
+};
+
+/** The person's read when it is the field's read too (its state is the field's). */
+const READ_WITH_FIELD: Loadable<MergedResource> = {
+  status: "ready",
+  value: NOTHING,
+};
+
+/** One part of the editor's single read, as a read of its own (a parent the read did not name is nothing). */
+function partOf(
+  read: Loadable<MergedUnder>,
+  part: (value: MergedUnder) => MergedResource | null,
+): Loadable<MergedResource> {
+  return read.status === "ready"
+    ? { status: "ready", value: part(read.value) ?? NOTHING }
+    : read;
 }
 
 type UnreadState =

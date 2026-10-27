@@ -240,6 +240,8 @@ describe("review 4, finding 5: the ledger says 'Nothing archived' only after eve
     const w = peopleWorld();
     w.setCache([person({ id: Q, label: "Archived Ada", archived: true })]);
     w.failRead("data.readResourceList");
+    // Adapted in revision 17 (R16.1): the archived fields are read as `data.readChildPage` (with their persons): every ledger read fails.
+    w.failRead("data.readChildPage");
     await opened(w);
     expect(screen.queryByText(EMPTY)).toBeNull();
     // The failed reads have ended: restoring the store alone changes nothing on the page.
@@ -264,7 +266,8 @@ describe("review 4, finding 5: the ledger says 'Nothing archived' only after eve
   test("one kind fails, the other is read: what was read is listed, and the inventory is said to be incomplete", async () => {
     const w = peopleWorld();
     w.setCache([person({ id: Q, label: "Former lodger", archived: true })]);
-    w.failRead("data.readResourceList", (input) => input.kind === "field");
+    // Adapted in revision 17 (R16.1): the field kind is read as `data.readChildPage` (was `readResourceList`).
+    w.failRead("data.readChildPage", (input) => input.kind === "field");
     await opened(w);
     await waitFor(() =>
       expect(
@@ -284,6 +287,8 @@ describe("review 4, finding 5: the ledger says 'Nothing archived' only after eve
     expect(failedState()).not.toBeNull();
   });
 
+  // Adapted in revision 17 (R16.1): a field's person is read WITH the field (`data.readChildPage`); "its person cannot be read" is that one
+  // read failing (was a fault on the separate `readMerged` of the person). The assertions are unchanged.
   for (const parent of ["failed", "absent"] as const)
     test(`an archived field whose person ${parent === "failed" ? "cannot be read is hidden, and the inventory is incomplete (never 'Nothing archived')" : "is not on this device is hidden (PPL-5): control, a complete empty ledger"}`, async () => {
       const w = peopleWorld();
@@ -297,7 +302,7 @@ describe("review 4, finding 5: the ledger says 'Nothing archived' only after eve
         }),
       ]);
       if (parent === "failed")
-        w.failRead("data.readMerged", (input) => input.id === parentId);
+        w.failRead("data.readChildPage", (input) => input.kind === "field");
       await opened(w);
       expect(screen.queryByText(/Old emergency contact/)).toBeNull();
       if (parent === "failed") {
@@ -310,17 +315,43 @@ describe("review 4, finding 5: the ledger says 'Nothing archived' only after eve
     });
 });
 
-describe("review 5, finding 2: a field's parent report belongs to its CURRENT read (C12, U1-U4, U6)", () => {
+/**
+ * Adapted in revision 17 (WEB-11a review 16, R16.1). Review 5's finding 2 (C12, U1-U4, U6) was about a field row's SEPARATE read of its person:
+ * a report of an earlier read must never count for the field's current person. The ledger now reads each page of fields WITH their persons and
+ * the drafts over them (`data.readChildPage`): a field and its person always come from ONE answer, so there is no separate parent read to gate
+ * and no earlier report to reuse. Each test keeps its schedule and its outcomes; where the original held a NEW parent read, the adaptation
+ * observes every rendered state instead (nothing names the field under its earlier person, nothing claims a complete ledger before the
+ * outcome), and where a NEW read exists (Try again, a service rebinding, another step) it holds THAT read. The originals are kept in
+ * `.agtx/evidence/WEB-11a/revision-17/original-tests/`.
+ */
+describe("review 5, finding 2: a field's parent report belongs to its CURRENT read (C12, U1-U4, U6), adapted to the one read of R16.1", () => {
   const EMPTY = /Nothing archived/;
   const F = "66666666-6666-4666-8666-666666666666";
   const OLD = "12121212-1212-4121-8121-121212121212";
   const NEW = "13131313-1313-4131-8131-131313131313";
+  const CHILD = "data.readChildPage";
+  const fieldPage = (input: Record<string, unknown>) => input.kind === "field";
   const failedState = () =>
     document.querySelector('[data-archived-state="failed"]');
   const settle = () => act(() => new Promise((r) => setTimeout(r, 0)));
-  const readOf = (id: string) => (input: Record<string, unknown>) =>
-    input.id === id;
-  /** The ledger with F archived under OLD, its parent read settled as `prior` (hidden: absent; shown: Mo; failed: the read fails). */
+  /** Every rendered state from now on: the ledger's text and whether it said it failed. */
+  function observed() {
+    const states: Array<{ text: string; failed: boolean }> = [];
+    const observer = new MutationObserver(() =>
+      states.push({
+        text: document.body.textContent ?? "",
+        failed: failedState() !== null,
+      }),
+    );
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+    });
+    return { states, stop: () => observer.disconnect() };
+  }
+  /** The ledger with F archived under OLD, settled as `prior` (hidden: absent; shown: Mo; failed: the page with its person fails). */
   async function settled(
     w: ReturnType<typeof peopleWorld>,
     prior: "hidden" | "shown" | "failed",
@@ -329,7 +360,7 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
       ...(prior === "shown" ? [person({ id: OLD, label: "Mo" })] : []),
       fieldRow({ id: F, parent_id: OLD, label: "Old phone", archived: true }),
     ]);
-    if (prior === "failed") w.failRead("data.readMerged", readOf(OLD));
+    if (prior === "failed") w.failRead(CHILD, fieldPage);
     await w.mount("/settings/archived");
     await screen.findByRole("heading", { level: 1, name: "Archived items" });
     if (prior === "hidden")
@@ -342,15 +373,15 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
       await waitFor(() => expect(failedState()).not.toBeNull());
   }
 
-  // U1/U2: every prior parent state, a new parent whose read is still on its way, then each way it can settle.
+  // U1/U2: every prior state, the field moved to a NEW parent, then each way it can settle.
   for (const prior of ["hidden", "shown", "failed"] as const)
     for (const outcome of ["person", "absent", "failed"] as const)
-      test(`U1/U2: after a ${prior} parent, a NEW parent still loading is never complete; settled ${outcome}, the ledger follows it`, async () => {
+      test(`U1/U2: after a ${prior} parent, a NEW parent is never counted on an earlier read; settled ${outcome}, the ledger follows it`, async () => {
         const w = peopleWorld();
         await settled(w, prior);
+        const seen = observed();
         if (outcome === "person") w.putCache(person({ id: NEW, label: "Bea" }));
-        if (outcome === "failed") w.failRead("data.readMerged", readOf(NEW));
-        w.holdReads("data.readMerged", readOf(NEW));
+        if (outcome === "failed") w.failRead(CHILD, fieldPage);
         w.putCache(
           fieldRow({
             id: F,
@@ -360,15 +391,26 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
             version: 3,
           }),
         );
-        // The new parent's read exists and is still loading.
-        await waitFor(() =>
-          expect(w.gated.some((input) => input.id === NEW)).toBe(true),
-        );
-        await settle();
-        expect(screen.queryByText(EMPTY)).toBeNull();
-        expect(failedState()).toBeNull();
-        expect(screen.queryByText(/Old phone/)).toBeNull();
-        w.releaseReads();
+        if (prior === "failed") {
+          // The failed read has ENDED (a live query ends at its first error): the move changes nothing until Try again, whose NEW read is
+          // loading, never complete.
+          await settle();
+          expect(failedState()).not.toBeNull();
+          if (outcome !== "failed") w.restoreReads({ notify: false });
+          w.holdReads(CHILD, fieldPage);
+          const before = w.gated.length;
+          fireEvent.click(
+            within(failedState() as HTMLElement).getByRole("button", {
+              name: "Try again",
+            }),
+          );
+          await waitFor(() => expect(w.gated.length).toBeGreaterThan(before));
+          await settle();
+          expect(screen.queryByText(EMPTY)).toBeNull();
+          expect(failedState()).toBeNull();
+          expect(screen.queryByText(/Old phone/)).toBeNull();
+          w.releaseReads();
+        }
         if (outcome === "person") {
           await waitFor(() =>
             expect(screen.queryByText("Old phone · Bea")).not.toBeNull(),
@@ -382,13 +424,23 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
           await waitFor(() => expect(failedState()).not.toBeNull());
           expect(screen.queryByText(EMPTY)).toBeNull();
         }
+        seen.stop();
         expect(screen.queryByText(/Old phone · Mo/)).toBeNull();
+        expect(
+          seen.states.some((state) => state.text.includes("Old phone · Mo")),
+          "never the field under its earlier person after the move",
+        ).toBe(false);
+        if (outcome !== "absent")
+          expect(
+            seen.states.some((state) => EMPTY.test(state.text)),
+            "never a complete empty ledger on the way",
+          ).toBe(false);
       });
 
-  test("U1 control: the same field and parent with no new read keeps its settled empty ledger", async () => {
+  test("U1 control: the same field and parent changed, with no new read: one answer, its settled empty ledger kept", async () => {
     const w = peopleWorld();
     await settled(w, "hidden");
-    w.holdReads("data.readMerged", readOf(NEW));
+    w.holdReads(CHILD, fieldPage);
     w.putCache(
       fieldRow({
         id: F,
@@ -407,7 +459,7 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
     test(`U2: the SAME parent read again by a new watch (another service binding) ${held ? "is loading: not complete until it answers" : "control: answering at once, the ledger stays empty"}`, async () => {
       const w = peopleWorld();
       await settled(w, "hidden");
-      if (held) w.holdReads("data.readMerged", readOf(OLD));
+      if (held) w.holdReads(CHILD, fieldPage);
       const store = w.env.serviceStore as unknown as {
         get(): object;
         set(v: unknown): void;
@@ -415,7 +467,7 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
       act(() => store.set({ ...store.get() }));
       if (held) {
         await waitFor(() =>
-          expect(w.gated.some((input) => input.id === OLD)).toBe(true),
+          expect(w.gated.some((input) => input.kind === "field")).toBe(true),
         );
         await settle();
         expect(screen.queryByText(EMPTY)).toBeNull();
@@ -424,58 +476,59 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
       await waitFor(() => expect(screen.queryByText(EMPTY)).not.toBeNull());
     });
 
-  for (const held of [true, false])
-    test(`U3: a field that leaves the list (a queued restore) and comes back ${held ? "reads its parent afresh: never complete on its earlier report" : "control: its fresh read answers, and the ledger is empty again"}`, async () => {
-      const w = peopleWorld();
-      await settled(w, "hidden");
-      w.setDrafts([
-        draftRow({
-          local_id: "restore-f",
-          created_seq: 1,
+  test("U3: a field that leaves the list (a queued restore) and comes back is answered WITH its person by the same read: complete at once, no earlier report", async () => {
+    const w = peopleWorld();
+    await settled(w, "hidden");
+    w.setDrafts([
+      draftRow({
+        local_id: "restore-f",
+        created_seq: 1,
+        command: {
           command: {
-            command: {
-              kind: "archive",
-              id: F,
-              expected_version: 2,
-              archived: false,
-            },
+            kind: "archive",
+            id: F,
+            expected_version: 2,
+            archived: false,
           },
-        }),
-      ]);
-      await settle();
-      // Restored on this device: it is no longer archived, and nothing else is.
-      expect(screen.queryByText(EMPTY)).not.toBeNull();
-      if (held) w.holdReads("data.readMerged", readOf(OLD));
-      w.setDrafts([]);
-      if (held) {
-        await waitFor(() =>
-          expect(w.gated.some((input) => input.id === OLD)).toBe(true),
-        );
-        await settle();
-        expect(screen.queryByText(EMPTY)).toBeNull();
-        w.releaseReads();
-      }
-      await waitFor(() => expect(screen.queryByText(EMPTY)).not.toBeNull());
-    });
+        },
+      }),
+    ]);
+    await settle();
+    // Restored on this device: it is no longer archived, and nothing else is.
+    expect(screen.queryByText(EMPTY)).not.toBeNull();
+    const seen = observed();
+    w.holdReads(CHILD, fieldPage);
+    w.setDrafts([]);
+    await settle();
+    seen.stop();
+    // No new read was needed: the page answered with the field and its (absent) person together.
+    expect(w.gated).toEqual([]);
+    expect(screen.queryByText(EMPTY)).not.toBeNull();
+    expect(seen.states.some((state) => state.text.includes("Old phone"))).toBe(
+      false,
+    );
+  });
 
-  test("U3: a step back to an earlier page reads its parents afresh (no earlier failure reused); the step with more never says empty", async () => {
+  test("U3: a step back to an earlier page reads it afresh (no later failure reused); the step with more never says empty", async () => {
     const w = peopleWorld();
     const ids = Array.from(
       { length: 101 },
       (_, i) => `66666666-6666-4666-8666-${String(100000000000 + i)}`,
     );
-    w.setCache(
-      ids.map((id) =>
+    w.setCache([
+      person({ id: OLD, label: "Mo" }),
+      ...ids.map((id) =>
         fieldRow({ id, parent_id: OLD, label: "Old phone", archived: true }),
       ),
-    );
-    w.failRead("data.readMerged", readOf(OLD));
+    ]);
     await w.mount("/settings/archived");
-    await waitFor(() => expect(failedState()).not.toBeNull());
     fireEvent.click(await screen.findByRole("button", { name: "Next items" }));
     await screen.findByRole("button", { name: "Previous items" });
+    // The later step's read fails.
+    w.failRead(CHILD, (input) => fieldPage(input) && input.after !== null);
+    await waitFor(() => expect(failedState()).not.toBeNull());
     w.restoreReads();
-    w.holdReads("data.readMerged", readOf(OLD));
+    w.holdReads(CHILD, fieldPage);
     const before = w.gated.length;
     fireEvent.click(screen.getByRole("button", { name: "Previous items" }));
     await waitFor(() => expect(w.gated.length).toBeGreaterThan(before));
@@ -493,7 +546,7 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
     expect(screen.queryByText(EMPTY)).toBeNull();
   });
 
-  test("U6: Try again after a parent read failed makes a NEW parent read; until it answers nothing is complete, then the person is listed", async () => {
+  test("U6: Try again after the read with the person failed makes a NEW read; until it answers nothing is complete, then the person is listed", async () => {
     const w = peopleWorld();
     await settled(w, "failed");
     w.putCache(person({ id: OLD, label: "Mo" }));
@@ -501,7 +554,7 @@ describe("review 5, finding 2: a field's parent report belongs to its CURRENT re
     w.restoreReads();
     await settle();
     expect(failedState()).not.toBeNull();
-    w.holdReads("data.readMerged", readOf(OLD));
+    w.holdReads(CHILD, fieldPage);
     const before = w.gated.length;
     fireEvent.click(
       within(failedState() as HTMLElement).getByRole("button", {

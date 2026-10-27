@@ -407,6 +407,20 @@ or a return of the parent alone answers again. Null means only that nothing of t
 read that starts `loading`. People's duplicate and list counts use it (PPL-5). Tests: `tests/data/visible-children.test.ts` (the
 production plan and page commit over the double), `tests/data/hooks.test.tsx` (a new parent never keeps the earlier answer).
 
+**What is shown under a parent, read with the parent (WEB-11a revision 17, review 16 R16.1).** Four READ plans, in `plans/outstanding-reads.ts` and
+`plans/merged-under.ts`, so a screen never pairs a parent from one committed state with a child from another:
+`readChildPage({kind, parentKind, parentId?, after, kinds?})` reads one page as `readResourceList` does, the parents of its rows (and
+`parentId`, ALWAYS, so a live query follows that parent's removal or return even with no children) with their overlays, and on request the
+OUTSTANDING drafts of `kinds` naming the rows it keeps (queued, in flight, blocked, and acknowledged while their first target's effect
+stands; `null` past ten windows of index entries: never a part answered as all). It answers only rows whose parent the cache holds as
+`parentKind`; `next` is the cursor of the page read. `readMergedUnder({id, parentId?})` is `readMerged` of a resource and of its parent (the
+one named, else the one the cached resource names) in one transaction. `readOutstandingCreates` takes an optional `witness` and says whether
+each window's transaction held it; `readFormCopiesUnder` reads copies with such a witness. The data layer says only "the cache held it as
+that kind"; whether that makes a child visible is the feature's rule. `readMergedUnder` and its hook live in a module of their own: the
+shared sharing dialog, part of the first load, uses them, and the larger reads stay in the lazy `outstanding` chunk. Hooks: `useChildPage`,
+`useMergedUnder`, `useFormCopiesUnder` (`ui/outstanding.tsx`, `ui/merged-under.tsx`). Tests: `tests/data/child-reads.test.ts`,
+`tests/data/hooks.test.tsx`.
+
 The approved dense batch (800 changes of 100-item checklists) reproduces the design's figures exactly: each value is 7,402 bytes and 547 nodes, and the page is 455,214 nodes and
 5.83 MiB (`tests/profiling/workloads.test.ts`). It is applied as **one** request at the lowest rung in all three engines (`tests/e2e/fixture.data-sync.spec.ts`, E-C3).
 Whether that suffices on a real constrained device is exactly what the measurement handoff must show (`.agtx/evidence/WEB-09a/profiling/handoff/`), and it has not been run on one.

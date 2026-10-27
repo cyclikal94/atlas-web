@@ -7,11 +7,13 @@ import {
 } from "react";
 import {
   type CacheRow,
+  type ChildPage,
   type DraftWithCommand,
   type Loadable,
   type OutstandingCreatesPage,
   type ResourceKind,
   type ResourcePage,
+  useChildPage,
   useInventory,
   useOutstandingCreates,
   useResourceList,
@@ -39,12 +41,21 @@ export interface ChainResult<Row> {
    * is not there. A later page still loading, absent or failed, or the cap, is not complete (finding 5 of the review of 13 October).
    */
   complete: boolean;
+  /**
+   * False when a page that reported said its witness was missing (WEB-11a review 16, R16.1): a chain read with a `witness` (the person a
+   * screen shows these drafts under) answers false when a page was read from a state in which the cache did not hold that person.
+   */
+  witnessed?: boolean;
 }
 
 export interface Report<Row, Cursor> {
   status: ChainStatus;
   rows: Row[];
   next: Cursor | null;
+  /** With a witness: whether the page's own read held it (false: the page was read from a state without it). */
+  witnessed?: boolean;
+  /** A child page read under a parent the same read did not hold: nothing of the step may be shown (R16.1). */
+  hidden?: boolean;
 }
 
 /**
@@ -59,32 +70,49 @@ export function statusOf(loadable: Loadable<unknown>): ChainStatus {
 }
 
 /** The reports of the pages of a walk, by index, each with the cursor it was read after. */
+export type Reports<Row, Cursor> = ReadonlyMap<
+  number,
+  { after: Cursor | null; report: Report<Row, Cursor> }
+>;
+
+/**
+ * A page's report (or its withdrawal, null) applied to the reports (PURE; exported for its tests). A withdrawal removes only the report of
+ * the SAME read (index and cursor): the late cleanup of an earlier read at that index never removes the current one's (WEB-11a review 5,
+ * finding 2, kept for the reads of R16.1).
+ */
+export function reported<Row, Cursor>(
+  previous: Reports<Row, Cursor>,
+  index: number,
+  after: Cursor | null,
+  next: Report<Row, Cursor> | null,
+): Reports<Row, Cursor> {
+  const known = previous.get(index);
+  if (next === null) {
+    if (known === undefined || known.after !== after) return previous;
+    const out = new Map(previous);
+    out.delete(index);
+    return out;
+  }
+  if (
+    known !== undefined &&
+    known.after === after &&
+    known.report.status === next.status &&
+    known.report.rows === next.rows &&
+    known.report.next === next.next &&
+    known.report.witnessed === next.witnessed &&
+    known.report.hidden === next.hidden
+  )
+    return previous;
+  const out = new Map(previous);
+  out.set(index, { after, report: next });
+  return out;
+}
+
 function useReports<Row, Cursor>() {
-  const [reports, setReports] = useState<
-    ReadonlyMap<number, { after: Cursor | null; report: Report<Row, Cursor> }>
-  >(() => new Map());
+  const [reports, setReports] = useState<Reports<Row, Cursor>>(() => new Map());
   const report = useCallback(
     (index: number, after: Cursor | null, next: Report<Row, Cursor> | null) =>
-      setReports((previous) => {
-        const known = previous.get(index);
-        if (next === null) {
-          if (known === undefined) return previous;
-          const out = new Map(previous);
-          out.delete(index);
-          return out;
-        }
-        if (
-          known !== undefined &&
-          known.after === after &&
-          known.report.status === next.status &&
-          known.report.rows === next.rows &&
-          known.report.next === next.next
-        )
-          return previous;
-        const out = new Map(previous);
-        out.set(index, { after, report: next });
-        return out;
-      }),
+      setReports((previous) => reported(previous, index, after, next)),
     [],
   );
   return { reports, report };
@@ -100,6 +128,7 @@ export function chainResult<Row, Cursor>(
 ): ChainResult<Row> {
   const rows: Row[] = [];
   let after: Cursor | null = null;
+  let witnessed = true;
   for (let index = 0; index < cap; index += 1) {
     const entry = reports.get(index);
     if (entry === undefined || entry.after !== after)
@@ -108,6 +137,7 @@ export function chainResult<Row, Cursor>(
         rows,
         capped: false,
         complete: false,
+        witnessed,
       };
     const { status, next } = entry.report;
     if (status !== "ready")
@@ -116,13 +146,21 @@ export function chainResult<Row, Cursor>(
         rows,
         capped: false,
         complete: false,
+        witnessed,
       };
+    if (entry.report.witnessed === false) witnessed = false;
     rows.push(...entry.report.rows);
     if (next === null)
-      return { status: "ready", rows, capped: false, complete: true };
+      return {
+        status: "ready",
+        rows,
+        capped: false,
+        complete: true,
+        witnessed,
+      };
     after = next;
   }
-  return { status: "ready", rows, capped: true, complete: false };
+  return { status: "ready", rows, capped: true, complete: false, witnessed };
 }
 
 function useChain<Row, Cursor>(cap: number) {
@@ -185,18 +223,29 @@ function ScanPageReader(props: ScanPageProps) {
   return <ScanPageReader {...props} after={next} index={index + 1} />;
 }
 
-/** The step a set of page reports describes (PURE; exported for its tests). */
-export function scanStep(
+/** A step of rows of type `Row` (a `ScanResult`'s fields), with `hidden` when a page said its parent was not held (`ChildScan`). */
+export type Step<Row> = Omit<ScanResult, "rows"> & {
+  rows: Row[];
+  hidden?: true;
+};
+
+/**
+ * The step a set of page reports describes (PURE; exported for its tests). A page that reports `hidden` (a child page read under a parent
+ * that its own read did not hold) ends the step with NOTHING kept: delivered evidence that the parent is gone withdraws what earlier pages
+ * kept (WEB-11a review 16, R16.1).
+ */
+export function scanStep<Row = CacheRow>(
   reports: ReadonlyMap<
     number,
-    { after: string | null; report: Report<CacheRow, string> }
+    { after: string | null; report: Report<Row, string> }
   >,
   start: string | null,
-  keep: (row: CacheRow) => boolean,
+  keep: (row: Row) => boolean,
   limit: number,
   pages: number,
-): ScanResult & { depth: number } {
-  const rows: CacheRow[] = [];
+  idOf: (row: Row) => string = (row) => (row as CacheRow).id,
+): Step<Row> & { depth: number } {
+  const rows: Row[] = [];
   let after = start;
   for (let index = 0; index < pages; index += 1) {
     const entry = reports.get(index);
@@ -213,6 +262,8 @@ export function scanStep(
     const { status, next } = entry.report;
     if (status !== "ready")
       return partial(index === 0 || status === "failed" ? status : "ready");
+    if (entry.report.hidden)
+      return { ...partial("ready"), rows: [], hidden: true };
     for (const row of entry.report.rows) {
       if (!keep(row)) continue;
       rows.push(row);
@@ -221,7 +272,7 @@ export function scanStep(
           status: "ready",
           rows,
           settled: true,
-          next: row.id,
+          next: idOf(row),
           end: false,
           depth: index + 1,
         };
@@ -288,9 +339,136 @@ export function ResourceScan({
   );
 }
 
+// ---- children read with their parent (WEB-11a review 16, R16.1) ---------------------------------------------------------------------
+/**
+ * One row of a `ChildScan` with what ONE read gave with it: its parent and this device's outstanding drafts over it. Whatever a screen
+ * shows of the row (its value, label, archival, the parent's name, a pending mark) comes from this bundle, never from another live read:
+ * a parent read separately may answer for an earlier commit than the row (PPL-5: a field is shown only under a visible person).
+ */
+export interface Child {
+  /** The row with its overlay applied. */
+  row: CacheRow;
+  /** Its parent as the same read held it (the read answers no row whose parent it did not hold as the kind asked). */
+  parent: CacheRow;
+  /** The outstanding drafts naming it, from the same read. */
+  drafts: readonly DraftWithCommand[];
+}
+
+/** A page of children as its reader reports it (PURE; exported for its tests). */
+export function childReport(
+  page: Loadable<ChildPage>,
+  parentId: string | undefined,
+): Report<Child, string> {
+  const status = statusOf(page);
+  if (page.status !== "ready") return { status, rows: [], next: null };
+  const { page: read, parents, drafts } = page.value;
+  // More saved changes over the page than one read answers whole: the page cannot be shown as it is (never a part of them as all).
+  if (drafts === null) return { status: "failed", rows: [], next: null };
+  if (parentId !== undefined && parents[parentId] === undefined)
+    return { status, rows: [], next: read.next, hidden: true };
+  return {
+    status,
+    rows: read.rows.map((listed) => ({
+      row: listed.merged,
+      parent: parents[listed.base.parent_id ?? ""] as CacheRow,
+      drafts: (drafts ?? []).filter((draft) =>
+        draft.index_targets.includes(listed.base.id),
+      ),
+    })),
+    next: read.next,
+  };
+}
+
+interface ChildPageProps {
+  kind: ResourceKind;
+  parentKind: ResourceKind;
+  parentId: string | undefined;
+  kinds: readonly string[];
+  after: string | null;
+  index: number;
+  depth: number;
+  report(
+    index: number,
+    after: string | null,
+    next: Report<Child, string> | null,
+  ): void;
+}
+
+function ChildPageReader(props: ChildPageProps) {
+  const { kind, parentKind, parentId, kinds, after, index, depth, report } =
+    props;
+  const page = useChildPage({
+    kind,
+    parentKind,
+    ...(parentId === undefined ? {} : { parentId }),
+    after,
+    kinds,
+  });
+  const read = useMemo(() => childReport(page, parentId), [page, parentId]);
+  useEffect(() => {
+    report(index, after, read);
+  }, [report, index, after, read]);
+  useEffect(() => () => report(index, after, null), [report, index, after]);
+  if (read.hidden || read.next === null || index + 1 >= depth) return null;
+  return <ChildPageReader {...props} after={read.next} index={index + 1} />;
+}
+
+/**
+ * One step of a walk over the rows of `kind` (under `parentId`) like `ResourceScan`, each page read WITH the parents of its rows and the
+ * outstanding drafts of `kinds` over them (`readChildPage`): a row is offered to `keep` only with its parent held as `parentKind` by the
+ * same read. Under `parentId`, a page that read that parent as not held makes the step `hidden` (nothing kept). The walk moves on by the
+ * cursor of the page READ, so rows that are not shown never keep a later one out of reach.
+ */
+export function ChildScan({
+  kind,
+  parentKind,
+  parentId,
+  kinds = PEOPLE_KINDS,
+  start,
+  keep,
+  limit,
+  pages,
+  children,
+}: {
+  kind: ResourceKind;
+  parentKind: ResourceKind;
+  parentId?: string;
+  kinds?: readonly string[];
+  start: string | null;
+  keep(child: Child): boolean;
+  limit: number;
+  pages: number;
+  children(result: Step<Child>): ReactNode;
+}) {
+  const { reports, report } = useReports<Child, string>();
+  const step = useMemo(
+    () => scanStep(reports, start, keep, limit, pages, childId),
+    [reports, start, keep, limit, pages],
+  );
+  const { depth, ...result } = step;
+  return (
+    <>
+      <ChildPageReader
+        kind={kind}
+        parentKind={parentKind}
+        parentId={parentId}
+        kinds={kinds}
+        after={start}
+        index={0}
+        depth={depth}
+        report={report}
+      />
+      {children(result)}
+    </>
+  );
+}
+
+const childId = (child: Child): string => child.row.id;
+
 // ---- outstanding drafts -----------------------------------------------------------------------------------------------------------
 interface OutstandingPageProps {
   kinds: readonly string[];
+  witness: string | undefined;
   after: number | null;
   index: number;
   cap: number;
@@ -302,19 +480,26 @@ interface OutstandingPageProps {
 }
 
 function OutstandingPageReader(props: OutstandingPageProps) {
-  const { kinds, after, index, cap, report } = props;
+  const { kinds, witness, after, index, cap, report } = props;
   const page: Loadable<OutstandingCreatesPage> = useOutstandingCreates(
     kinds,
     after,
+    witness === undefined ? undefined : { id: witness, kind: "person" },
   );
   const rows = useMemo(
     () => (page.status === "ready" ? page.value.drafts : []),
     [page],
   );
   const next = page.status === "ready" ? page.value.next : null;
+  const witnessed = page.status === "ready" ? page.value.witnessed : undefined;
   useEffect(() => {
-    report(index, after, { status: statusOf(page), rows, next });
-  }, [report, index, after, page, rows, next]);
+    report(index, after, {
+      status: statusOf(page),
+      rows,
+      next,
+      ...(witnessed === undefined ? {} : { witnessed }),
+    });
+  }, [report, index, after, page, rows, next, witnessed]);
   useEffect(() => () => report(index, after, null), [report, index, after]);
   if (next === null || index + 1 >= cap) return null;
   return <OutstandingPageReader {...props} after={next} index={index + 1} />;
@@ -328,14 +513,20 @@ export const PEOPLE_KINDS: readonly string[] = [
   "archive",
 ];
 
-/** This device's outstanding drafts of `kinds`, at most `cap` windows of 100. An absent database is no drafts. */
+/**
+ * This device's outstanding drafts of `kinds`, at most `cap` windows of 100. An absent database is no drafts. With `witness` (a person's id),
+ * each window also reads whether the cache holds that person, in its own transaction: the result's `witnessed` is false when a window was
+ * read from a state without them (R16.1).
+ */
 export function OutstandingChain({
   kinds = PEOPLE_KINDS,
   cap = 10,
+  witness,
   children,
 }: {
   kinds?: readonly string[];
   cap?: number;
+  witness?: string;
   children(result: ChainResult<DraftWithCommand>): ReactNode;
 }) {
   const { result, report } = useChain<DraftWithCommand, number>(cap);
@@ -343,6 +534,7 @@ export function OutstandingChain({
     <>
       <OutstandingPageReader
         kinds={kinds}
+        witness={witness}
         after={null}
         index={0}
         cap={cap}

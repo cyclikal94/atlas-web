@@ -87,8 +87,9 @@ import { ME } from "./records";
 /**
  * The people screens' component world (FIXTURE evidence: it says what the screens do with each input, never what a server answers).
  *
- *  - The data layer is the stub controller (`stubEnv`) with a store double that answers the three read plans the screens use
- *    (`data.readMerged`, `data.readResourceList`, `data.readOutstandingCreates`) from `cache` and `drafts`, live.
+ *  - The data layer is the stub controller (`stubEnv`) with a store double that answers the read plans the screens use (`data.readMerged`,
+ *    `data.readResourceList`, `data.readOutstandingCreates`, and review 16's reads of what is shown under a person, each from ONE state:
+ *    `data.readChildPage`, `data.readMergedUnder`, `data.readFormCopiesUnder` and the drafts' witness) from `cache` and `drafts`, live.
  *  - The outbox is a double whose writes are DECIDED by the real pure plans (review 11, R11.1): the request is snapshotted and checked at
  *    its boundary (`snapshotRequest`, `validateRequestFor`), then `planEnqueue`, `planEdit` and `decideSupersede` decide over what the real
  *    transaction would read (the targets' cached rows, the version records `versions`, the other drafts by `TargetFold`, `draft_seq`; the
@@ -425,11 +426,13 @@ export interface PeopleWorld {
   /**
    * The EXISTING watches of `plan` keep answering what they last answered, until `thawReads` (DA7-12): a commit that plan's live query has
    * not delivered yet, while every other read (and every new watch) sees it. With `match`, only the watches whose input it accepts (review
-   * 15, R15.1: the people list's own read of the people, but not each row's read of its fields).
+   * 15, R15.1: the people list's own read of the people, but not each row's read of its fields). `match` is also given the watch's
+   * number (its index in `watches`): two watches of the same plan and input are two live queries, and one may lag the other (review 16,
+   * R16.1: the detail's read of the drafts and the editor's).
    */
   freezeReads(
     plan: string,
-    match?: (input: Record<string, unknown>) => boolean,
+    match?: (input: Record<string, unknown>, watch: number) => boolean,
   ): void;
   thawReads(): void;
   /** ONE commit: `rows` are cached and the outstanding drafts become `drafts` (a receipt published, as `commitPage` does). */
@@ -478,7 +481,7 @@ export function peopleWorld(
   /** Plans whose EXISTING watches answer what they last answered (`freezeReads`): a commit their live query has not delivered yet. */
   const frozen: Array<{
     plan: string;
-    match: (input: Record<string, unknown>) => boolean;
+    match: (input: Record<string, unknown>, watch: number) => boolean;
   }> = [];
   const faults: Array<{
     plan: string;
@@ -540,6 +543,100 @@ export function peopleWorld(
         kind: input.kind,
         parentId: input.parentId,
       }) as Loadable<unknown>;
+    },
+    // WEB-11a review 16 (R16.1): a page of children with their parents and the drafts over them, from ONE state of the world, as the
+    // production plan reads them in one transaction. A row whose parent the cache does not hold as `parentKind` is not answered; `next` is
+    // the cursor of the page read; more than 1,000 draft entries naming the kept rows answer `drafts: null` (the production bound).
+    "data.readChildPage": (input) => {
+      if (failing) return { status: "unavailable", reason: "error" };
+      const read = plans["data.readResourceList"]?.({
+        kind: input.kind,
+        ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+        after: input.after ?? null,
+      }) as Loadable<{
+        rows: Array<{ base: CacheRow; merged: CacheRow; pending: number }>;
+        next: string | null;
+      }>;
+      if (read.status !== "ready") return read;
+      const parents: Record<string, CacheRow> = {};
+      const ids = new Set<string>(
+        input.parentId === undefined ? [] : [input.parentId as string],
+      );
+      for (const row of read.value.rows)
+        if (row.base.parent_id !== null) ids.add(row.base.parent_id);
+      for (const id of ids) {
+        const row = cache.get(id);
+        if (row !== undefined && row.kind === input.parentKind)
+          parents[id] = row;
+      }
+      const rows = read.value.rows.filter(
+        (row) => (row.base.parent_id ?? "") in parents,
+      );
+      const kinds = input.kinds as readonly string[] | undefined;
+      let drafted: DraftWithCommand[] | null | undefined;
+      if (kinds !== undefined) {
+        const kept = new Set(rows.map((row) => row.base.id));
+        const entries = drafts.reduce(
+          (sum, d) => sum + d.index_targets.filter((t) => kept.has(t)).length,
+          0,
+        );
+        drafted =
+          entries > 1000
+            ? null
+            : drafts
+                .filter(
+                  (d) =>
+                    kinds.includes(d.kind) &&
+                    ["queued", "in_flight", "blocked", "acknowledged"].includes(
+                      d.status,
+                    ) &&
+                    d.index_targets.some((t) => kept.has(t)),
+                )
+                .sort((a, b) => a.created_seq - b.created_seq);
+      }
+      return {
+        status: "ready",
+        value: {
+          page: { rows, next: read.value.next },
+          parents,
+          ...(drafted === undefined ? {} : { drafts: drafted }),
+        },
+      };
+    },
+    // A resource and its parent (`parentId`, else the one the cached resource names) from ONE state, each as `data.readMerged` answers.
+    "data.readMergedUnder": (input) => {
+      const merged = plans["data.readMerged"] as (
+        input: Record<string, unknown>,
+      ) => Loadable<unknown>;
+      const own = merged({ id: input.id });
+      const parentId =
+        (input.parentId as string | undefined) ??
+        cache.get(input.id as string)?.parent_id ??
+        null;
+      const parent = parentId === null ? null : merged({ id: parentId });
+      if (own.status !== "ready") return own;
+      if (parent !== null && parent.status !== "ready") return parent;
+      return {
+        status: "ready",
+        value: {
+          resource: own.value,
+          parent: parent === null ? null : parent.value,
+        },
+      };
+    },
+    "data.readFormCopiesUnder": (input) => {
+      const witness = input.witness as { id: string; kind: string };
+      return {
+        status: "ready",
+        value: {
+          page: copiesPage(
+            input.prefix as string,
+            (input.after as readonly [string, string] | null | undefined) ??
+              null,
+          ),
+          witnessed: cache.get(witness.id)?.kind === witness.kind,
+        },
+      };
     },
     "data.readAppliedRevision": () => ({
       status: "ready",
@@ -624,11 +721,16 @@ export function peopleWorld(
         )
         .sort((a, b) => a.created_seq - b.created_seq);
       const window = live.slice(0, 100);
+      // With a witness, whether the cache holds it as that kind in the SAME state (R16.1).
+      const witness = input.witness as { id: string; kind: string } | undefined;
       return {
         status: "ready",
         value: {
           drafts: window,
           next: live.length > 100 ? (window.at(-1)?.created_seq ?? null) : null,
+          ...(witness === undefined
+            ? {}
+            : { witnessed: cache.get(witness.id)?.kind === witness.kind }),
         },
       };
     },
@@ -640,6 +742,7 @@ export function peopleWorld(
       watch: (plan: { name: string }, input: Record<string, unknown>) => {
         const key = `${plan.name}:${JSON.stringify(input)}`;
         const compute = plans[plan.name];
+        const number = watches.length;
         watches.push({ plan: plan.name, input });
         // A watch that answered a `failRead` fault stays failed (a live query ENDS at its first error): only a new watch reads again.
         let ended = false;
@@ -658,7 +761,8 @@ export function peopleWorld(
             if (
               last !== undefined &&
               frozen.some(
-                (freeze) => freeze.plan === plan.name && freeze.match(input),
+                (freeze) =>
+                  freeze.plan === plan.name && freeze.match(input, number),
               )
             )
               return last;

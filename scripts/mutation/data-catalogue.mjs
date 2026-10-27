@@ -22225,14 +22225,16 @@ export const UNIT = [
     id: "MU-2465",
     title:
       "WEB-11a PPL-5: the archived-items ledger lists a field whose person this device does not hold",
-    file: "src/features/people/archived/ArchivedItems.tsx",
-    tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
-    expect: /a field is listed only under a person this device holds/,
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): a field and its person are ONE read (`readChildPage`), which answers a row only under a parent it holds; the
+    // component-level guard (`if (person === null) return null`) is gone with the separate parent read. Same defect, at its new place.
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /a field whose person the cache does not hold is not answered/,
     patch: (t) =>
       sub(
-        sub(t, "  if (person === null) return null;\n", ""),
-        "name={copy.FIELD_OF(shown.row.label, person.label)}",
-        'name={copy.FIELD_OF(shown.row.label, person?.label ?? "")}',
+        t,
+        '        rows: page.rows.filter((row) => (row.base.parent_id ?? "") in parents),\n',
+        "        rows: page.rows,\n",
       ),
   },
   {
@@ -22543,14 +22545,15 @@ export const UNIT = [
     id: "MU-2486",
     title:
       "WEB-11a R1 finding 7: a step that kept `limit` rows continues after its whole page (the rest of the page is skipped)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the step's cursor is the kept row's `idOf(row)` (the walk is generic over a child bundle); same mutation.
     file: "src/features/people/reads.tsx",
     tests: ["tests/features/people/scan.test.ts"],
     expect: /ends at the last row it kept: the next step begins right after it/,
     patch: (t) =>
       sub(
         t,
-        "          next: row.id,",
-        "          next: entry.report.next ?? row.id,",
+        "          next: idOf(row),",
+        "          next: entry.report.next ?? idOf(row),",
       ),
   },
   {
@@ -22572,14 +22575,15 @@ export const UNIT = [
     id: "MU-2487",
     title:
       "WEB-11a R1 finding 7: a person's fields offer no continuation past their step",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the step's view moved into `FieldStep` (re-indented); same mutation.
     file: "src/features/people/detail/PersonDetail.tsx",
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect: /a person's fields beyond one step are reached with 'Next fields'/,
     patch: (t) =>
       sub(
         t,
-        '                {step.settled && step.next !== null ? (\n                  <Button\n                    data-people-action="next-fields"',
-        '                {false ? (\n                  <Button\n                    data-people-action="next-fields"',
+        '          {step.settled && step.next !== null ? (\n            <Button\n              data-people-action="next-fields"',
+        '          {false ? (\n            <Button\n              data-people-action="next-fields"',
       ),
   },
 
@@ -23880,14 +23884,16 @@ export const UNIT = [
     id: "MU-2836",
     title:
       "WEB-11a R4 F5: a field whose person could not be read is taken as not visible (the inventory claims to be complete)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the person is read WITH the field (`ChildScan`): "could not be read" is that page's failure, now taken as a
+    // settled, complete step (the person not visible) instead of a failed one.
     file: "src/features/people/archived/ArchivedItems.tsx",
     tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
     expect: /cannot be read is hidden, and the inventory is incomplete/,
     patch: (t) =>
       sub(
         t,
-        '      : parent.status === "unavailable"\n        ? "failed"\n',
-        '      : parent.status === "unavailable"\n        ? "hidden"\n',
+        '          step.status === "failed"\n            ? "failed"\n            : step.settled\n',
+        '          (false as boolean)\n            ? "failed"\n            : step.settled || step.status === "failed"\n',
       ),
   },
   {
@@ -23952,43 +23958,47 @@ export const UNIT = [
     id: "MU-2587",
     title:
       "WEB-11a R5 F2: a field's parent read still on its way counts as 'not visible' (the reviewer's defect: 'Nothing archived' on an earlier answer)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the parent's read is the field page's read: one still on its way counts as complete (nothing visible).
     file: "src/features/people/archived/ArchivedItems.tsx",
     tests: ["tests/features/people/duplicates-archive-new.test.tsx"],
     expect:
-      /U1\/U2: after a (hidden|failed) parent|U2: the SAME parent read again by a new watch|U3: a field that leaves the list/,
+      /U1\/U2: after a failed parent|U2: the SAME parent read again by a new watch|U6: Try again after the read/,
     patch: (t) =>
       sub(
         t,
-        '    parent.status === "loading"\n      ? "loading"\n',
-        '    parent.status === "loading"\n      ? "hidden"\n',
+        '            : step.settled\n              ? "complete"\n              : "loading";\n',
+        '            : step.settled\n              ? "complete"\n              : "complete";\n',
       ),
   },
   {
     id: "MU-2588",
     title:
       "WEB-11a R5 F2: an EARLIER owner's late report replaces the current owner's",
-    file: "src/features/people/archived/ArchivedItems.tsx",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the owner of a report is the page read (its position and cursor): an earlier read's report at the same position
+    // is counted for the current step.
+    file: "src/features/people/reads.tsx",
     tests: ["tests/features/people/archive-reports.test.tsx"],
-    expect: /earlier one's LATE REPORT/,
+    expect: /an earlier read's late report at the same position/,
     patch: (t) =>
       sub(
         t,
-        "  if (known !== undefined && known.owner > owner) return previous;\n",
-        "",
+        '    if (entry === undefined || entry.after !== after)\n      return partial(index === 0 ? "loading" : "ready");\n',
+        '    if (entry === undefined)\n      return partial(index === 0 ? "loading" : "ready");\n',
       ),
   },
   {
     id: "MU-2589",
     title:
       "WEB-11a R5 F2: an earlier owner's cleanup withdraws the current owner's report",
-    file: "src/features/people/archived/ArchivedItems.tsx",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): an earlier page read's late cleanup at the same position withdraws the current read's report.
+    file: "src/features/people/reads.tsx",
     tests: ["tests/features/people/archive-reports.test.tsx"],
-    expect: /earlier owner's LATE CLEANUP/,
+    expect: /an earlier read's LATE CLEANUP at the same position/,
     patch: (t) =>
       sub(
         t,
-        "  if (known !== undefined && known.owner > owner) return previous;\n  if (next === null) {\n    if (known?.owner !== owner) return previous;\n",
-        "  if (next === null) {\n    if (known === undefined) return previous;\n",
+        "    if (known === undefined || known.after !== after) return previous;\n",
+        "    if (known === undefined) return previous;\n",
       ),
   },
   {
@@ -24193,6 +24203,7 @@ export const UNIT = [
     id: "MU-2604",
     title:
       "WEB-11a R6 F2: a failed field step is not said (the readable rows look like all of them)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the step's view moved into `FieldStep` (re-indented); same mutation.
     file: "src/features/people/detail/PersonDetail.tsx",
     tests: ["tests/features/people/detail-reads.test.tsx"],
     expect:
@@ -24200,8 +24211,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '            {step.status === "failed" ? (\n',
-        '            {step.status === ("never" as string) ? (\n',
+        '      {step.status === "failed" ? (\n',
+        '      {step.status === ("never" as string) ? (\n',
       ),
   },
   {
@@ -25070,6 +25081,7 @@ export const UNIT = [
     id: "MU-2665",
     title:
       "WEB-11a R9 F2: Try again reads only the unsent changes afresh (the person's and the field's failed watches are above it)",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the chain now carries the person as its witness; same mutation (the reads above it are not renewed).
     file: "src/features/people/field/FieldEditorDialog.tsx",
     tests: ["tests/features/people/editor-reads.test.tsx"],
     expect:
@@ -25081,8 +25093,8 @@ export const UNIT = [
           "  retry,\n  onClose,\n}: {\n  env: PeopleEnv;\n",
           "  retry,\n  onClose,\n  reading,\n}: {\n  reading?: number;\n  env: PeopleEnv;\n",
         ),
-        "  return (\n    <OutstandingChain>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
-        "  return (\n    <OutstandingChain key={reading}>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
+        "  return (\n    <OutstandingChain witness={personId}>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
+        "  return (\n    <OutstandingChain key={reading} witness={personId}>\n      {(outstanding) => {\n        // The edit's snapshot needs the person",
       ),
   },
   {
@@ -25789,6 +25801,290 @@ export const UNIT = [
         "  useStatusInputs,\n  useVisibleChildren,\n",
         "  useStatusInputs,\n  useResourceList,\n",
       ),
+  },
+  // ---- WEB-11a revision 17 (review 16, R16.1; design assessment DA16-01..10, DA16-S1): a field shown only with its person from the same read ----
+  {
+    id: "MU-2840",
+    title:
+      "WEB-11a R16.1 (DA16-02): the field page holds any cached row of the parent's id, whatever its kind",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /a row of the person's id that is not a person: not held/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (row): row is CacheRow => row?.kind === input.parentKind,\n",
+        "      (row): row is CacheRow => row !== undefined,\n",
+      ),
+  },
+  {
+    id: "MU-2841",
+    title:
+      "WEB-11a R16.1 (DA16-05): the drafts of rows the read does not answer (their person not held) are read with the page",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /no drafts of it are read/,
+    patch: (t) =>
+      sub(
+        t,
+        '                .filter((row) => parentIds.has(row.parent_id ?? ""))\n',
+        "                .filter(() => true)\n",
+      ),
+  },
+  {
+    id: "MU-2842",
+    title:
+      "WEB-11a R16.1 (DA16-05): every draft naming a row is folded over it, a conflict and a released acknowledgement included",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /only the outstanding drafts naming a field/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (LIVE.includes(draft.status) ||\n",
+        "      ((true as boolean) ||\n",
+      ),
+  },
+  {
+    id: "MU-2843",
+    title:
+      "WEB-11a R16.1 (DA16-07): more drafts over a page than one read answers whole are answered as all of them",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /more draft entries over the page than one read answers whole/,
+    patch: (t) =>
+      sub(t, "  if (entries.length > NAMING_MOST) return null;\n", ""),
+  },
+  {
+    id: "MU-2844",
+    title:
+      "WEB-11a R16.1 (DA16-04): the person of a page is read only through its children (a person with none is not held, and the live read does not depend on them)",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /a visible person with no fields: held, with an empty page/,
+    patch: (t) =>
+      sub(
+        t,
+        "      input.parentId === undefined ? [] : [input.parentId],\n",
+        "      [],\n",
+      ),
+  },
+  {
+    id: "MU-2845",
+    title:
+      "WEB-11a R16.1 (DA16-08): the editor's read ignores the person its route names (a field only this device creates has no person read with it)",
+    file: "src/data/plans/merged-under.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect: /the parent the caller names is read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const parentId = input.parentId ?? resource.reads.base?.parent_id ?? null;\n",
+        "    const parentId = resource.reads.base?.parent_id ?? null;\n",
+      ),
+  },
+  {
+    id: "MU-2846",
+    title:
+      "WEB-11a R16.1 (DA16-05): the drafts' window says its witness was held whatever its transaction read",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect:
+      /readOutstandingCreates: with a witness the window says whether the cache holds it/,
+    patch: (t) =>
+      sub(
+        t,
+        '          witnessed:\n            (await reader.get("cache", witness.id))?.kind === witness.kind,\n',
+        "          witnessed: true,\n",
+      ),
+  },
+  {
+    id: "MU-2847",
+    title:
+      "WEB-11a R16.1 (DA16-09): held copies are read under any cached row of the person's id, whatever its kind",
+    file: "src/data/plans/outstanding-reads.ts",
+    tests: ["tests/data/child-reads.test.ts"],
+    expect:
+      /readFormCopiesUnder: the copies of a prefix and whether the cache holds the person, as that kind/,
+    patch: (t) =>
+      sub(
+        t,
+        '      (await reader.get("cache", input.witness.id))?.kind ===\n      input.witness.kind,\n',
+        '      (await reader.get("cache", input.witness.id)) !== undefined,\n',
+      ),
+  },
+  {
+    id: "MU-2848",
+    title:
+      "WEB-11a R16.1 (DA16-03, invariant 4): a field page read without the person is reported as an ordinary page (this device's own fields stay shown)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /WITHOUT the person withdraws this device's own unsent field shown before/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (parentId !== undefined && parents[parentId] === undefined)\n    return { status, rows: [], next: read.next, hidden: true };\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2849",
+    title:
+      "WEB-11a R16.1 (DA16-03, invariant 4): a step goes on past a page that no longer holds the parent (what earlier pages kept stays)",
+    file: "src/features/people/reads.tsx",
+    tests: [
+      "tests/features/people/archive-reports.test.tsx",
+      "tests/features/people/parent-read-coherence.test.tsx",
+    ],
+    expect:
+      /a later page whose read no longer holds the parent withdraws|WITHOUT the person withdraws this device's own unsent field/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (entry.report.hidden)\n      return { ...partial("ready"), rows: [], hidden: true };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-2850",
+    title:
+      "WEB-11a R16.1 (DA16-05): the detail shows the unsent changes read from a state without the person under the person's earlier read",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /an unsent field created in another page, read from a state without the person/,
+    patch: (t) =>
+      sub(
+        t,
+        "          outstanding.witnessed === false &&\n",
+        "          (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2851",
+    title:
+      "WEB-11a R16.1 (DA16-08): the editor shows the unsent changes read from a state without the person under the person's earlier read",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /the editor's own read of the unsent changes, newer than its person-and-field read and the detail's: read without the person/,
+    patch: (t) =>
+      sub(
+        t,
+        "          outstanding.witnessed === false &&\n",
+        "          (false as boolean) &&\n",
+      ),
+  },
+  {
+    id: "MU-2852",
+    title:
+      "WEB-11a R16.1 (DA16-06): the editor edits a cached field under a person only this device creates",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect: /only this device creates is never edited or shown in the editor/,
+    patch: (t) =>
+      sub(
+        t,
+        "                cachedPerson !== null &&\n                  field.status",
+        "                field.status",
+      ),
+  },
+  {
+    id: "MU-2853",
+    title:
+      "WEB-11a R16.1 (the review's counterexample, editor): the editor reads the person on its own again, beside the field's read",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /the field's newer value with the person removed \((child-first|the editor's own read first)\)/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const person = partOf(read, (value) =>\n    fieldId === null ? value.resource : value.parent,\n  );\n",
+          "  const person = useCachedResource(personId);\n",
+        ),
+        "  useConflictInbox,\n  useDataActions,\n",
+        "  useCachedResource,\n  useConflictInbox,\n  useDataActions,\n",
+      ),
+  },
+  {
+    id: "MU-2854",
+    title:
+      "WEB-11a R16.1 (DA16-09): held changes are listed whatever the person's read in the same transaction says",
+    file: "src/features/people/detail/HeldChanges.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /removed the person is never listed under the person's earlier read/,
+    patch: (t) => sub(t, "  if (!read.value.witnessed) return null;\n", ""),
+  },
+  {
+    id: "MU-2855",
+    title:
+      "WEB-11a DA16-S1: the shared sharing dialog names and reads a field whatever its person's read in the same transaction",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /embedded: the field changed and its person removed|deep link \/sharing\/items\/<field> with the person not on this device/,
+    patch: (t) =>
+      sub(
+        t,
+        "    resource !== null && (parentId === null || read?.parent?.base)\n",
+        "    resource !== null\n",
+      ),
+  },
+  {
+    id: "MU-2856",
+    title:
+      "WEB-11a R16.1 (DA16-05): the ledger folds no unsent change over a field (its own drafts, read with it, are dropped)",
+    file: "src/features/people/archived/ArchivedItems.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect: /an unsent archive of a field, read with its person \(control\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  foldOne(child.row, changesById(changesOfAll(child.drafts)));\n",
+        "  foldOne(child.row, changesById([]));\n",
+      ),
+  },
+  {
+    id: "MU-2857",
+    title:
+      "WEB-11a R16.1 (DA16-05): the detail folds the separately read chain over a cached field instead of the drafts read with it",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/parent-read-coherence.test.tsx"],
+    expect:
+      /a cached field's unsent change is read WITH the field and its person: shown under the visible person \(control\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    foldOne(child.row, changesById(changesOfAll(child.drafts))),\n",
+        "    foldOne(child.row, changesById(changes)),\n",
+      ),
+  },
+  {
+    id: "MU-2858",
+    title:
+      "WEB-11a R16.1 (DA16-03): the field page's read is not renewed for another person, so it keeps the earlier person's answer",
+    file: "src/data/ui/outstanding.tsx",
+    tests: ["tests/data/hooks.test.tsx"],
+    expect: /a field page with its person: another parent is a NEW read/,
+    patch: (t) =>
+      sub(
+        t,
+        "    [kind, parentKind, parentId, after, kinds],\n",
+        "    [kind, parentKind, after, kinds],\n",
+      ),
+  },
+  {
+    id: "MU-2859",
+    title:
+      "WEB-11a R16.1 (DA16-08): the editor's read is not renewed for another field, so it keeps the earlier field's answer",
+    file: "src/data/ui/merged-under.tsx",
+    tests: ["tests/data/hooks.test.tsx"],
+    expect: /a field with its person in one read: another field is a NEW read/,
+    patch: (t) => sub(t, "    [id, parentId],\n", "    [parentId],\n"),
   },
   ...UNIT_WEB10B,
 ];
@@ -29670,6 +29966,7 @@ export const ENGINE = [
     id: "MU-2742",
     title:
       "WEB-11a R5 F2: (REAL ENGINE) a parent read on its way counts as 'not visible': 'Nothing archived' is shown with the field",
+    // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the parent is read with the field page; a page read on its way counts as complete (as MU-2587).
     file: "src/features/people/archived/ArchivedItems.tsx",
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P31:",
@@ -29677,8 +29974,8 @@ export const ENGINE = [
     patch: (t) =>
       sub(
         t,
-        '    parent.status === "loading"\n      ? "loading"\n',
-        '    parent.status === "loading"\n      ? "hidden"\n',
+        '            : step.settled\n              ? "complete"\n              : "loading";\n',
+        '            : step.settled\n              ? "complete"\n              : "complete";\n',
       ),
   },
   {

@@ -14,7 +14,17 @@ import type {
 import { type Reader, range } from "../store/port";
 import { bulkGetWindowed, WINDOW } from "./bounded-reads";
 import { readPlan } from "./builders";
-import { type ListedResource, listPageSize, type ResourcePage } from "./outbox";
+import {
+  type FormCopiesInput,
+  type FormCopiesPage,
+  readFormCopies,
+} from "./form-copies";
+import {
+  type ListedResource,
+  listPageSize,
+  type ResourcePage,
+  readResourceList,
+} from "./outbox";
 import { readOverlays } from "./overlay-windows";
 
 /**
@@ -480,6 +490,12 @@ export interface OutstandingCreatesInput {
   kinds: readonly string[];
   /** Only drafts after this `created_seq` (a later window); omitted or null: from the oldest. */
   after?: number | null;
+  /**
+   * A resource whose cached row the window's OWN transaction also reads (WEB-11a review 16, R16.1): the page then says whether the cache
+   * held `id` as a `kind` in the state the drafts were read from (`witnessed`). A screen that shows these drafts under a parent shows them
+   * only on that evidence: a parent read by another live query may answer for an earlier or a later commit.
+   */
+  witness?: { id: ResourceId; kind: ResourceKind };
 }
 
 export interface OutstandingCreatesPage {
@@ -487,6 +503,8 @@ export interface OutstandingCreatesPage {
   drafts: DraftWithCommand[];
   /** The `created_seq` to pass back as `after` for the next window, or null when this is the last. */
   next: number | null;
+  /** With a `witness`: whether the cache held it, as that kind, in this window's transaction. Absent without one. */
+  witnessed?: boolean;
 }
 
 const LIVE: readonly DraftStatus[] = ["queued", "in_flight", "blocked"];
@@ -494,12 +512,22 @@ const FAR = Number.MAX_SAFE_INTEGER;
 
 export const readOutstandingCreates = readPlan<
   OutstandingCreatesInput,
-  { drafts: DraftWithCommand[]; next: number | null },
+  OutstandingCreatesPage,
   OutstandingCreatesPage
 >({
   name: "data.readOutstandingCreates",
-  scope: ["drafts", "draft_commands", "pending_effects"],
-  read: (reader, input) => readOutstandingWindow(reader, input),
+  scope: ["drafts", "draft_commands", "pending_effects", "cache"],
+  read: async (reader, input) => {
+    const window = await readOutstandingWindow(reader, input);
+    const witness = input.witness;
+    return witness === undefined
+      ? window
+      : {
+          ...window,
+          witnessed:
+            (await reader.get("cache", witness.id))?.kind === witness.kind,
+        };
+  },
   decide: ({ reads }) => reads,
 });
 
@@ -674,4 +702,186 @@ export const readInventory = readPlan<InventoryInput, Inventory, Inventory>({
     return { resource, pages, outstanding };
   },
   decide: ({ reads }) => reads,
+});
+
+// ---- reads of what is shown under a parent (WEB-11a review 16, R16.1; PPL-5) ---------------------------------------------------------
+/**
+ * What a screen shows under a parent (a person's fields) is read WITH that parent, in the same transaction. Two live queries are delivered
+ * separately (each answers again only when its own commit reaches it), so a parent read by one and children read by another can belong to
+ * two commits: an earlier parent that is still there with a child that a later commit (the same one that removed the parent) added or
+ * changed. These reads never answer such a pair. They read the parent as the cache holds it; WHETHER that makes the children visible is
+ * the screen's rule, said here only as "the cache holds it as `parentKind`" (a person: archival and editability do not change it).
+ */
+
+/** At most this many draft entries naming a page's rows are read in one transaction (the outstanding chain's bound: ten windows). */
+const NAMING_MOST = 10 * WINDOW;
+
+/**
+ * The OUTSTANDING drafts of `kinds` that name any of `ids` (`index_targets`), with their bodies, oldest first: queued, in flight and
+ * blocked, and acknowledged while the `pending_effects` row of their first primary target stands (`readOutstandingCreates`' definition),
+ * inside the caller's transaction. Null when more than `NAMING_MOST` entries name them: never a part of them answered as all of them.
+ */
+async function outstandingNaming(
+  reader: Reader,
+  ids: readonly ResourceId[],
+  kinds: readonly string[],
+): Promise<DraftWithCommand[] | null> {
+  if (ids.length === 0) return [];
+  const entries = await reader.anyOf(
+    "drafts",
+    "index_targets",
+    [...ids].sort(),
+    NAMING_MOST + 1,
+  );
+  if (entries.length > NAMING_MOST) return null;
+  const kept = new Map<LocalId, DraftRow>();
+  for (const draft of entries)
+    if (
+      !kept.has(draft.local_id) &&
+      kinds.includes(draft.kind) &&
+      (LIVE.includes(draft.status) ||
+        (draft.status === "acknowledged" &&
+          (await effectStands(reader, draft.target_resource_ids[0], draft))))
+    )
+      kept.set(draft.local_id, draft);
+  const rows = [...kept.values()].sort(bySeq);
+  const bodies = await bulkGetWindowed(
+    reader,
+    "draft_commands",
+    rows.map((row) => row.local_id),
+  );
+  return rows.flatMap((row, index) => {
+    const body = bodies[index];
+    return body ? [{ ...row, command: body.command }] : [];
+  });
+}
+
+export interface ChildPageInput {
+  incarnationId: string;
+  kind: ResourceKind;
+  /** The kind a row's parent must be cached as for the row to be answered. */
+  parentKind: ResourceKind;
+  /** One parent's children (the `parent_id` index); omitted: every row of `kind` (the `kind` index). */
+  parentId?: ResourceId;
+  after?: ResourceId | null;
+  /** The command kinds of the drafts to read with the page (`drafts`); omitted: none are read. */
+  kinds?: readonly string[];
+}
+
+export interface ChildPage {
+  /**
+   * One page as `readResourceList` reads it (its bound, overlays and order), keeping only the rows whose parent the cache holds as
+   * `parentKind`. `next` is the cursor of the page READ, so a page whose rows are all hidden still moves the walk on (a hidden row never
+   * keeps a later visible one out of reach).
+   */
+  page: ResourcePage;
+  /** The parents of the kept rows (and `parentId`, when the cache holds it as `parentKind`), each with its overlay: absent is not held. */
+  parents: Record<ResourceId, CacheRow>;
+  /** With `kinds`: the outstanding drafts naming a kept row (see `outstandingNaming`); null when too many to read whole. */
+  drafts?: DraftWithCommand[] | null;
+}
+
+/**
+ * A page of `kind` (under `parentId`) with the parents of its rows and, on request, the drafts over them, in ONE transaction: a child is
+ * answered only with its parent from the same commit, and its saved changes from that commit too. `parentId` is ALWAYS read, so a live query
+ * of this plan follows that parent's removal or return even when it has no children.
+ */
+export const readChildPage = readPlan<
+  ChildPageInput,
+  {
+    list: Awaited<ReturnType<typeof readResourceList.read>>;
+    held: CacheRow[];
+    overlays: Map<ResourceId, Overlay>;
+    drafts?: DraftWithCommand[] | null;
+  },
+  ChildPage
+>({
+  name: "data.readChildPage",
+  scope: ["cache", "pending_effects", "drafts", "draft_commands"],
+  read: async (reader, input) => {
+    const list = await readResourceList.read(reader, {
+      incarnationId: input.incarnationId,
+      kind: input.kind,
+      ...(input.parentId === undefined ? {} : { parentId: input.parentId }),
+      after: input.after ?? null,
+    });
+    const ids = new Set<ResourceId>(
+      input.parentId === undefined ? [] : [input.parentId],
+    );
+    for (const row of list.reads.rows)
+      if (row.parent_id !== null) ids.add(row.parent_id);
+    const held = (await reader.bulkGet("cache", [...ids])).filter(
+      (row): row is CacheRow => row?.kind === input.parentKind,
+    );
+    const parentIds = new Set(held.map((row) => row.id));
+    return {
+      list,
+      held,
+      overlays: await readOverlays(
+        reader,
+        [...parentIds],
+        DATA_CONFIG.queueWorkingSet,
+      ),
+      ...(input.kinds === undefined
+        ? {}
+        : {
+            drafts: await outstandingNaming(
+              reader,
+              list.reads.rows
+                .filter((row) => parentIds.has(row.parent_id ?? ""))
+                .map((row) => row.id),
+              input.kinds,
+            ),
+          }),
+    };
+  },
+  decide: ({ reads, input }) => {
+    const parents: Record<ResourceId, CacheRow> = {};
+    for (const base of reads.held)
+      parents[base.id] = applyOverlay(
+        base,
+        reads.overlays.get(base.id) as Overlay,
+      );
+    const page = readResourceList.decide(reads.list, {
+      incarnationId: input.incarnationId,
+      kind: input.kind,
+    }).result;
+    return {
+      page: {
+        rows: page.rows.filter((row) => (row.base.parent_id ?? "") in parents),
+        next: page.next,
+      },
+      parents,
+      ...(reads.drafts === undefined ? {} : { drafts: reads.drafts }),
+    };
+  },
+});
+
+/** A page of form copies (`readFormCopies`) and whether the cache held `witness` as its kind in the same transaction. */
+export interface FormCopiesUnder {
+  page: FormCopiesPage;
+  witnessed: boolean;
+}
+
+/** `readFormCopies` with its parent's cached row read in the same transaction (held changes are shown only under a held person). */
+export const readFormCopiesUnder = readPlan<
+  FormCopiesInput & { witness: { id: ResourceId; kind: ResourceKind } },
+  {
+    page: Awaited<ReturnType<typeof readFormCopies.read>>;
+    witnessed: boolean;
+  },
+  FormCopiesUnder
+>({
+  name: "data.readFormCopiesUnder",
+  scope: ["form_recovery", "cache"],
+  read: async (reader, input) => ({
+    page: await readFormCopies.read(reader, input),
+    witnessed:
+      (await reader.get("cache", input.witness.id))?.kind ===
+      input.witness.kind,
+  }),
+  decide: ({ reads, input }) => ({
+    page: readFormCopies.decide(reads.page, input).result,
+    witnessed: reads.witnessed,
+  }),
 });
