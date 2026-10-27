@@ -71,7 +71,7 @@ function* returnTargets(opener: HTMLElement | null): Generator<HTMLElement> {
       ? ["[data-switch-account]"]
       : []),
     "[data-account-slot]",
-    'nav button[aria-haspopup="dialog"][aria-expanded]',
+    "[data-more-entry]",
     "#main [data-page-heading]",
     "#main",
   ])

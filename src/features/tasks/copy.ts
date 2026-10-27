@@ -44,7 +44,29 @@ export const GROUPS = {
   morning: "Morning",
   afternoon: "Afternoon",
   evening: "Evening",
-  any: "Any time today",
+  any: "Any time",
+} as const;
+/** The time column of a row with no time of day. */
+export const ALL_DAY = "all day";
+export const NOW_LABEL = (time: string) => `Now, ${time}`;
+export const THINGS = (n: number) => (n === 1 ? "1 thing" : `${n} things`);
+export const FOLD_UPCOMING = "Upcoming";
+export const UPCOMING = {
+  id: "upcoming",
+  tomorrow: "Tomorrow",
+  restOfWeek: "Rest of the week",
+  restOfWeekSub: "a line per task, routine ones folded",
+  nextWeeks: "Next weeks",
+  nextWeeksSub: "routine tasks folded",
+  later: "Later",
+  routine: (n: number) => (n === 1 ? "1 routine task" : `${n} routine tasks`),
+  show: "show",
+  hide: "hide",
+  loading: "Loading the days ahead",
+  empty: "Nothing scheduled in the months ahead on this device.",
+  fromDevice:
+    "The days ahead are read from what is saved on this device; the server is asked for today only.",
+  failed: "Atlas couldn't read the days ahead saved on this device.",
 } as const;
 
 export const SUMMARY = (

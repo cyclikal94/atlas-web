@@ -1,6 +1,9 @@
 import {
   CalendarCheck,
+  CalendarDays,
+  CalendarRange,
   ListChecks,
+  ListTodo,
   type LucideIcon,
   Settings,
   Share2,
@@ -9,21 +12,28 @@ import {
 
 export type DestinationId =
   | "today"
-  | "tasks"
+  | "upcoming"
+  | "calendar"
   | "people"
+  | "lists"
+  | "tasks"
   | "sharing"
   | "settings";
 
 export interface Destination {
   id: DestinationId;
-  /** Generic destination name: also used for the tab title, so it never carries account data. */
+  /** Generic destination name: also the tab title and the phone tab, so it never carries account data. */
   label: string;
+  /** The sidebar's wording where it differs from the tab's ("All lists" under Pinned lists). */
+  railLabel?: string;
+  /** The document title where it differs from the label (the page's own heading: "Tasks" for All tasks). */
+  title?: string;
   to: string;
   icon: LucideIcon;
-  /** Today, Tasks and People are tabs on mobile; Sharing and Settings sit in the More sheet. */
+  /** Today, Upcoming, Calendar, People and Lists are tabs on the phone; the rest sit in the More sheet. */
   mobile: "tab" | "more";
-  /** Desktop rail group: two groups split by a divider. */
-  group: 1 | 2;
+  /** Sidebar group: the day views, the lists, then the household and settings. */
+  group: "main" | "lists" | "system";
 }
 
 export const destinations: readonly Destination[] = [
@@ -33,15 +43,23 @@ export const destinations: readonly Destination[] = [
     to: "/today",
     icon: CalendarCheck,
     mobile: "tab",
-    group: 1,
+    group: "main",
   },
   {
-    id: "tasks",
-    label: "Tasks",
-    to: "/tasks",
-    icon: ListChecks,
+    id: "upcoming",
+    label: "Upcoming",
+    to: "/upcoming",
+    icon: CalendarRange,
     mobile: "tab",
-    group: 1,
+    group: "main",
+  },
+  {
+    id: "calendar",
+    label: "Calendar",
+    to: "/calendar",
+    icon: CalendarDays,
+    mobile: "tab",
+    group: "main",
   },
   {
     id: "people",
@@ -49,7 +67,25 @@ export const destinations: readonly Destination[] = [
     to: "/people",
     icon: Users,
     mobile: "tab",
-    group: 1,
+    group: "main",
+  },
+  {
+    id: "lists",
+    label: "Lists",
+    railLabel: "All lists",
+    to: "/tasks/lists",
+    icon: ListTodo,
+    mobile: "tab",
+    group: "lists",
+  },
+  {
+    id: "tasks",
+    label: "All tasks",
+    title: "Tasks",
+    to: "/tasks",
+    icon: ListChecks,
+    mobile: "more",
+    group: "lists",
   },
   {
     id: "sharing",
@@ -57,7 +93,7 @@ export const destinations: readonly Destination[] = [
     to: "/sharing",
     icon: Share2,
     mobile: "more",
-    group: 2,
+    group: "system",
   },
   {
     id: "settings",
@@ -65,13 +101,18 @@ export const destinations: readonly Destination[] = [
     to: "/settings",
     icon: Settings,
     mobile: "more",
-    group: 2,
+    group: "system",
   },
 ];
 
-/** The destination a pathname belongs to, or undefined for an unknown path. */
+/** The destination a pathname belongs to (the longest matching path, so `/tasks/lists` is Lists, not All tasks), or undefined. */
 export function destinationFor(pathname: string): Destination | undefined {
-  return destinations.find(
-    (d) => pathname === d.to || pathname.startsWith(`${d.to}/`),
-  );
+  let best: Destination | undefined;
+  for (const d of destinations)
+    if (
+      (pathname === d.to || pathname.startsWith(`${d.to}/`)) &&
+      (best === undefined || d.to.length > best.to.length)
+    )
+      best = d;
+  return best;
 }

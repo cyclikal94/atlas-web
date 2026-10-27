@@ -6307,7 +6307,7 @@ test.describe("E-T44: the edit visit owns the input typed on it (A10; R34 / DA22
     await page.goBack();
     await expect(page).toHaveURL(new RegExp(`${path}$`));
     await expect(page.locator("[data-task-form]")).toHaveCount(0);
-    await page.getByRole("link", { name: "Tasks", exact: true }).click();
+    await page.getByRole("link", { name: "All tasks", exact: true }).click();
     await expect(page).toHaveURL(/\/tasks$/);
     await restore();
     await page.goBack();
@@ -6327,7 +6327,7 @@ test.describe("E-T44: the edit visit owns the input typed on it (A10; R34 / DA22
     );
     await syncControl(page).click();
     await expect(page).toHaveURL(/\/sync(\?|$)/);
-    await page.getByRole("link", { name: "Tasks", exact: true }).click();
+    await page.getByRole("link", { name: "All tasks", exact: true }).click();
     await expect(page).toHaveURL(/\/tasks$/);
     await page.goBack();
     await expect(page).toHaveURL(/\/sync(\?|$)/);
@@ -6472,7 +6472,7 @@ test.describe("E-T45: a save acknowledged after the person left never moves them
           const control =
             to === "tasks"
               ? Array.from(document.querySelectorAll("a")).find(
-                  (a) => a.textContent?.trim() === "Tasks" && shown(a),
+                  (a) => a.textContent?.trim() === "All tasks" && shown(a),
                 )
               : to === "sync"
                 ? Array.from(

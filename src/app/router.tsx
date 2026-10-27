@@ -6,12 +6,13 @@ import {
   redirect,
 } from "@tanstack/react-router";
 import { joinRoute } from "../features/authentication/route";
+import { calendarRoute } from "../features/calendar/route";
 import { peopleRoute } from "../features/people/route";
 import { settingsRoute } from "../features/settings/route";
 import { sharingRoute } from "../features/sharing/route";
 import { syncRoute } from "../features/sync/route";
 import { listsRoute, tasksRoute } from "../features/tasks/route";
-import { todayRoute } from "../features/today/route";
+import { todayRoute, upcomingRoute } from "../features/today/route";
 import { rootRoute } from "./root-route";
 
 /**
@@ -31,6 +32,8 @@ export function createAppRouter(
   const routeTree = rootRoute.addChildren([
     home,
     todayRoute(rootRoute),
+    upcomingRoute(rootRoute),
+    calendarRoute(rootRoute),
     tasksRoute(rootRoute),
     listsRoute(rootRoute),
     peopleRoute(rootRoute),

@@ -165,14 +165,14 @@ describe("D-10b-1: the Lists routes", () => {
     ).toBe(loading);
   });
 
-  test("the document title and destination stay Tasks", async () => {
+  test("the document title and destination are Lists (its own destination in the Final design)", async () => {
     const t = await mountTasks({ path: "/tasks/lists", rows: [] });
     await t.until(() => document.querySelector("[data-lists-pane]") !== null);
     const { destinationFor } = await import(
       "../../../src/app/shell/destinations"
     );
-    expect(destinationFor("/tasks/lists")?.label).toBe("Tasks");
-    expect(destinationFor(`/tasks/lists/${listId()}`)?.label).toBe("Tasks");
+    expect(destinationFor("/tasks/lists")?.label).toBe("Lists");
+    expect(destinationFor(`/tasks/lists/${listId()}`)?.label).toBe("Lists");
   });
 });
 

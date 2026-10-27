@@ -1,14 +1,15 @@
 import { Link } from "@tanstack/react-router";
-import { AlertTriangle, Check, Minus } from "lucide-react";
 import { useId, useState } from "react";
-import { Badge, type BadgeVariant } from "../../../components/ui/badge";
+import type { BadgeVariant } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
+import { cn } from "../../../lib/utils";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
 import { dayLabel, whoLabel } from "../format";
 import { dateIn, gapShifted, timeIn } from "../model/time";
 import { recordBlock } from "../reasons";
 import type { RowModel } from "../view";
+import { RailRow, TickGlyph } from "./rail";
 
 /** The pill's tone (never colour alone: the words say the state). */
 export function pillTone(pill: RowModel["pill"]): BadgeVariant {
@@ -27,52 +28,22 @@ export function pillTone(pill: RowModel["pill"]): BadgeVariant {
   }
 }
 
-/** The row's leading glyph, decorative: the pill's words carry the state. */
-function RowGlyph({ pill }: { pill: RowModel["pill"] }) {
-  const base = "flex size-6 flex-none items-center justify-center rounded-full";
-  switch (pill) {
-    case "done":
-    case "done_late":
-      return (
-        <span
-          aria-hidden="true"
-          className={`${base} bg-success/12 text-success`}
-        >
-          <Check className="size-3.5" strokeWidth={2.5} />
-        </span>
-      );
-    case "missed":
-      return (
-        <span
-          aria-hidden="true"
-          className={`${base} bg-warning/12 text-warning`}
-        >
-          <Minus className="size-3.5" strokeWidth={2.5} />
-        </span>
-      );
-    case "conflict":
-      return (
-        <span
-          aria-hidden="true"
-          className={`${base} bg-destructive/12 text-destructive`}
-        >
-          <AlertTriangle className="size-3.5" strokeWidth={2.25} />
-        </span>
-      );
-    default:
-      return (
-        <span
-          aria-hidden="true"
-          className={`${base} border-[1.5px] border-input`}
-        />
-      );
-  }
-}
+const PILL_TEXT: Record<BadgeVariant, string> = {
+  default: "text-foreground",
+  secondary: "text-muted-foreground",
+  outline: "text-muted-foreground",
+  accent: "text-primary",
+  success: "text-success",
+  warning: "text-warning",
+  destructive: "text-destructive",
+  muted: "text-muted-foreground",
+};
 
 /**
- * One Today row (WF-TODAY-01): time, title (a link to the task for this day), my state with any pending mark, the carry consequence, who
- * takes part, and the quick action. "Mark done" records in place for a checkbox goal; anything else is recorded on the task (D-10a-12).
- * A disabled action states why beside it.
+ * One row on the rail (WF-TODAY-01): the time (or "all day"), the title (a link to the task for this day), who takes part and my state
+ * in words with any pending mark, and the quick action as the tick at the end. "Mark done" records in place for a checkbox goal; anything
+ * else is recorded on the task (D-10a-12). A disabled tick states why beside it. The same row draws the days ahead (`surface:
+ * "upcoming"`), without the quick action and with the day in the time column where the section spans more than one day.
  */
 export function TodayRow({
   row,
@@ -82,6 +53,8 @@ export function TodayRow({
   actions,
   writable,
   me,
+  surface = "today",
+  timeText,
 }: {
   me: string;
   row: RowModel;
@@ -90,26 +63,27 @@ export function TodayRow({
   now: number;
   actions: Pick<TaskActions, "record">;
   writable: boolean;
+  surface?: "today" | "upcoming";
+  /** The time column, when it is not the row's own time ("Tue 4" in a section that spans days). */
+  timeText?: string;
 }) {
   const titleId = useId();
+  const reasonId = useId();
   const [busy, setBusy] = useState(false);
   const { data } = row;
   const instant = data.slot.instant;
   const overdue =
     (instant !== null && dateIn(instant, zone) < day) ||
     (instant === null && data.slot.date !== null && data.slot.date < day);
-  const when =
-    instant !== null && dateIn(instant, zone) === day
-      ? timeIn(instant, zone)
-      : overdue
-        ? copy.FROM_DAY(
-            dayLabel(
-              instant !== null
-                ? dateIn(instant, zone)
-                : (data.slot.date as string),
-            ),
-          )
-        : copy.GROUPS.any;
+  const timed = instant !== null && dateIn(instant, zone) === day;
+  const time = timeText ?? (timed ? timeIn(instant, zone) : copy.ALL_DAY);
+  const from = overdue
+    ? copy.FROM_DAY(
+        dayLabel(
+          instant !== null ? dateIn(instant, zone) : (data.slot.date as string),
+        ),
+      )
+    : null;
   const explain =
     instant !== null &&
     (gapShifted(data.slot) ||
@@ -120,8 +94,10 @@ export function TodayRow({
     row.personal.kind === "result" && row.personal.provisional;
   const stale = row.personal.kind === "result" && row.personal.stale;
   const participation = data.definition.participation;
-  const reason = recordBlock(row, now, zone, writable);
+  const reason =
+    surface === "today" ? recordBlock(row, now, zone, writable) : null;
   const done = row.outcome === "complete";
+  const past = timed ? instant * 1000 <= now : done;
   const mark = async (complete: boolean) => {
     setBusy(true);
     try {
@@ -136,99 +112,153 @@ export function TodayRow({
     }
   };
   const pillText = `${copy.PILL[row.pill]}${provisional ? ` (${copy.PROVISIONAL})` : ""}`;
+  const tone = pillTone(row.pill);
+  const quiet = row.pill === "to_do" || row.pill === "on_track";
+  // A day ahead is not open yet by definition: only a state that says more is written on its row.
+  const stateShown = !(surface === "upcoming" && row.pill === "not_open");
+  const tickLabel = done ? copy.MARK_NOT_DONE : copy.MARK_DONE;
+  const tick = (disabled: string | null) => (
+    <button
+      type="button"
+      aria-label={tickLabel}
+      aria-describedby={disabled ? `${reasonId} ${titleId}` : titleId}
+      disabled={disabled !== null}
+      data-row-tick=""
+      onClick={() => void mark(!done)}
+      className="flex size-11 flex-none items-center justify-center rounded-full disabled:cursor-not-allowed disabled:opacity-50"
+    >
+      <TickGlyph done={done} />
+    </button>
+  );
+  const quick =
+    surface !== "today" ? null : data.definition.goal.kind === "checkbox" ? (
+      reason !== null ? (
+        <>
+          <span
+            id={reasonId}
+            className="hidden max-w-[180px] truncate text-xs text-muted-foreground tablet:inline"
+          >
+            {reason}
+          </span>
+          {tick(reason)}
+        </>
+      ) : busy ? (
+        <>
+          <span id={reasonId} className="sr-only">
+            {copy.SAVING}
+          </span>
+          {tick(copy.SAVING)}
+        </>
+      ) : (
+        tick(null)
+      )
+    ) : data.definition.goal.kind === "numeric" ? (
+      <Button
+        asChild
+        variant="outline"
+        size="sm"
+        className="rounded-full text-xs"
+        aria-describedby={titleId}
+      >
+        <Link
+          to="/tasks/$taskId"
+          params={{ taskId: row.taskId }}
+          search={{ occurrence: row.id, record: true }}
+        >
+          {copy.RECORD}
+        </Link>
+      </Button>
+    ) : null;
+  const idAttr =
+    surface === "today"
+      ? { "data-today-row": row.id }
+      : { "data-upcoming-row": row.id };
   return (
-    <li
+    <RailRow
       aria-labelledby={titleId}
-      data-today-row={row.id}
+      {...idAttr}
       data-pill={row.pill}
       data-source={row.source}
       data-structure={row.structureFrom}
-      data-version={row.version}
+      data-version={String(row.version)}
       data-can-edit={row.canEdit ? "true" : "false"}
-      className="atlas-transition -mx-4 flex list-none flex-col gap-2 border-b border-border px-4 py-3.5 last:border-b-0 hover:bg-accent tablet:flex-row tablet:items-center tablet:gap-4"
-    >
-      <span className="flex items-center gap-3 tablet:w-32 tablet:flex-none">
-        <RowGlyph pill={row.pill} />
-        <span className="font-num text-xs text-muted-foreground">{when}</span>
-      </span>
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <Link
-          id={titleId}
-          to="/tasks/$taskId"
-          params={{ taskId: row.taskId }}
-          search={{ occurrence: row.id }}
-          className={`atlas-transition truncate text-sm font-medium hover:text-primary ${
-            row.outcome === "complete"
-              ? "text-muted-foreground"
-              : "text-foreground"
-          }`}
-        >
-          {row.title ?? copy.UNTITLED}
-        </Link>
-        <span className="text-xs text-muted-foreground">
-          {copy.PARTICIPATION[participation]}
-          {participation === "personal" ? "" : ` · ${whoLabel(row, me)}`}
-          {" · "}
-          {copy.CARRY[data.definition.carry].line}
+      time={time}
+      past={past}
+      compact={surface === "upcoming"}
+      trailing={
+        <span className="flex flex-none items-center gap-2">
+          {row.pending ? (
+            <span
+              data-pending-mark={row.pending}
+              className="hidden text-xs text-muted-foreground tablet:inline"
+            >
+              {copy.PENDING[row.pending]}
+            </span>
+          ) : null}
+          {quick}
         </span>
+      }
+    >
+      <div className="flex min-w-0 flex-1 flex-col py-1.5">
+        <div className="flex min-w-0 flex-col gap-0.5 tablet:flex-row tablet:items-baseline tablet:gap-3">
+          <Link
+            id={titleId}
+            to="/tasks/$taskId"
+            params={{ taskId: row.taskId }}
+            search={{ occurrence: row.id }}
+            className={cn(
+              "atlas-transition min-w-0 flex-1 truncate text-[15px] leading-6 hover:text-primary",
+              done ? "text-muted-foreground line-through" : "text-foreground",
+            )}
+          >
+            {row.title ?? copy.UNTITLED}
+          </Link>
+          <span className="flex min-w-0 items-baseline gap-1 text-xs text-muted-foreground tablet:max-w-[55%] tablet:flex-none">
+            <span className="truncate">
+              {copy.PARTICIPATION[participation]}
+              {participation === "personal" ? "" : ` · ${whoLabel(row, me)}`}
+              {from ? ` · ${from}` : ""}
+            </span>
+            {stateShown ? (
+              <>
+                <span aria-hidden="true">{" · "}</span>
+                <span
+                  data-row-pill=""
+                  className={cn(
+                    "truncate",
+                    quiet
+                      ? "text-muted-foreground"
+                      : cn("font-medium", PILL_TEXT[tone]),
+                  )}
+                >
+                  {pillText}
+                </span>
+              </>
+            ) : null}
+          </span>
+        </div>
+        {row.pending ? (
+          <span
+            data-pending-mark-narrow=""
+            className="text-xs text-muted-foreground tablet:hidden"
+          >
+            {copy.PENDING[row.pending]}
+          </span>
+        ) : null}
         {stale ? (
           <span className="text-xs text-muted-foreground">{copy.STALE}</span>
         ) : null}
         {explain ? (
           <details className="text-xs text-muted-foreground">
-            <summary className="min-h-11">
+            <summary className="min-h-11 leading-[44px]">
               {copy.WHY_AT(timeIn(instant as number, zone))}
             </summary>
-            <p className="mt-0.5 max-w-[560px] leading-relaxed">
+            <p className="max-w-[560px] pb-2 leading-relaxed">
               {copy.WHY_BODY(data.slot.timezone)}
             </p>
           </details>
         ) : null}
       </div>
-      <span className="flex flex-none flex-col items-start gap-0.5">
-        <Badge data-row-pill="" variant={pillTone(row.pill)}>
-          {pillText}
-        </Badge>
-        {row.pending ? (
-          <span
-            data-pending-mark={row.pending}
-            className="text-xs text-muted-foreground"
-          >
-            {copy.PENDING[row.pending]}
-          </span>
-        ) : null}
-      </span>
-      <span className="flex-none">
-        {data.definition.goal.kind === "checkbox" ? (
-          reason !== null ? (
-            <Button disabled reason={reason} aria-describedby={titleId}>
-              {done ? copy.MARK_NOT_DONE : copy.MARK_DONE}
-            </Button>
-          ) : busy ? (
-            <Button disabled reason={copy.SAVING}>
-              {done ? copy.MARK_NOT_DONE : copy.MARK_DONE}
-            </Button>
-          ) : (
-            <Button
-              variant={done ? "outline" : "default"}
-              aria-describedby={titleId}
-              onClick={() => void mark(!done)}
-            >
-              {done ? copy.MARK_NOT_DONE : copy.MARK_DONE}
-            </Button>
-          )
-        ) : data.definition.goal.kind === "numeric" ? (
-          <Button asChild variant="outline" aria-describedby={titleId}>
-            <Link
-              to="/tasks/$taskId"
-              params={{ taskId: row.taskId }}
-              search={{ occurrence: row.id, record: true }}
-            >
-              {copy.RECORD}
-            </Link>
-          </Button>
-        ) : null}
-      </span>
-    </li>
+    </RailRow>
   );
 }

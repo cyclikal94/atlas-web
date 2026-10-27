@@ -20,7 +20,11 @@ export const deviceZone = (): string => {
   return isKnownZone(zone) ? zone : "UTC";
 };
 
-export function TodayScreen(props: { search: { day?: string; tz?: string } }) {
+export function TodayScreen(props: {
+  search: { day?: string; tz?: string };
+  /** `/upcoming` opens the fold and starts there. */
+  section?: "today" | "upcoming";
+}) {
   return (
     <TasksBoundary>
       <TodayWithDefaults {...props} />
@@ -30,8 +34,10 @@ export function TodayScreen(props: { search: { day?: string; tz?: string } }) {
 
 function TodayWithDefaults({
   search,
+  section = "today",
 }: {
   search: { day?: string; tz?: string };
+  section?: "today" | "upcoming";
 }) {
   const navigate = useNavigate();
   const zone = search.tz ?? deviceZone();
@@ -75,11 +81,12 @@ function TodayWithDefaults({
       day={search.day ?? today}
       zone={zone}
       dayGiven={search.day !== undefined}
+      section={section}
       onChange={(next) => {
         const day = next.day ?? search.day;
         const tz = next.zone ?? search.tz;
         void navigate({
-          to: "/today",
+          to: section === "upcoming" ? "/upcoming" : "/today",
           search: { ...(day ? { day } : {}), ...(tz ? { tz } : {}) },
           replace: true,
         });

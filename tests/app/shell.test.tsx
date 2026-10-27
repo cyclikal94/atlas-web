@@ -75,15 +75,45 @@ describe("layout modes render exactly one primary navigation", () => {
     );
   });
 
-  test("desktop shows the 236px rail with text labels in two groups", async () => {
+  const RAIL_LABELS = [
+    "Today",
+    "Upcoming",
+    "Calendar",
+    "People",
+    "All lists",
+    "All tasks",
+    "Sharing",
+    "Settings",
+  ];
+
+  test("desktop shows the 240px sidebar with text labels in its groups, and the Pinned lists heading", async () => {
     await mount();
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    for (const label of ["Today", "Tasks", "People", "Sharing", "Settings"]) {
+    for (const label of RAIL_LABELS) {
       expect(within(nav).getByRole("link", { name: label })).toHaveTextContent(
         label,
       );
     }
-    expect(nav.parentElement?.className).toContain("w-[236px]");
+    expect(within(nav).getByText("Pinned lists")).toBeInTheDocument();
+    expect(nav.parentElement?.className).toContain("w-[240px]");
+    expect(
+      screen.getByRole("button", { name: "Collapse sidebar" }),
+    ).toHaveAttribute("aria-expanded", "true");
+  });
+
+  test("the sidebar collapses to the icon rail on request and the choice is kept on this device", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav.parentElement?.className).toContain("w-16");
+    expect(within(nav).getByRole("link", { name: "Today" }).textContent).toBe(
+      "",
+    );
+    expect(localStorage.getItem("atlas.sidebar.v1")).toBe("collapsed");
+    fireEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+    expect(nav.parentElement?.className).toContain("w-[240px]");
+    expect(localStorage.getItem("atlas.sidebar.v1")).toBe("expanded");
+    localStorage.removeItem("atlas.sidebar.v1");
   });
 
   test("tablet shows the 64px icon rail: icon-only links with names and 44px targets", async () => {
@@ -91,14 +121,14 @@ describe("layout modes render exactly one primary navigation", () => {
     await mount();
     const nav = screen.getByRole("navigation", { name: "Primary" });
     expect(nav.parentElement?.className).toContain("w-16");
-    for (const label of ["Today", "Tasks", "People", "Sharing", "Settings"]) {
+    for (const label of RAIL_LABELS) {
       const link = within(nav).getByRole("link", { name: label });
       expect(link.textContent).toBe("");
       expect(link.className).toContain("size-11");
     }
   });
 
-  test("mobile shows four bottom tabs (Today, Tasks, People, More) and the sync chip in the top bar", async () => {
+  test("mobile shows five bottom tabs (Today, Upcoming, Calendar, People, Lists), and More with the sync chip in the top bar", async () => {
     media.set({ width: 390 });
     await mount();
     const nav = screen.getByRole("navigation", { name: "Primary" });
@@ -106,13 +136,13 @@ describe("layout modes render exactly one primary navigation", () => {
       within(nav)
         .getAllByRole("link")
         .map((link) => link.textContent),
-    ).toEqual(["Today", "Tasks", "People"]);
-    expect(within(nav).getByRole("button", { name: "More" })).toHaveAttribute(
-      "aria-haspopup",
-      "dialog",
-    );
+    ).toEqual(["Today", "Upcoming", "Calendar", "People", "Lists"]);
+    const banner = screen.getByRole("banner");
     expect(
-      within(screen.getByRole("banner")).getByRole("button", {
+      within(banner).getByRole("button", { name: "More" }),
+    ).toHaveAttribute("aria-haspopup", "dialog");
+    expect(
+      within(banner).getByRole("button", {
         name: /Open sync queue/,
       }),
     ).toBeInTheDocument();
@@ -142,10 +172,9 @@ describe("navigation state is not colour alone (finding F6)", () => {
   test("the active destination carries aria-current, and the others do not", async () => {
     await mount("/tasks");
     const nav = screen.getByRole("navigation", { name: "Primary" });
-    expect(within(nav).getByRole("link", { name: "Tasks" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(
+      within(nav).getByRole("link", { name: "All tasks" }),
+    ).toHaveAttribute("aria-current", "page");
     expect(
       within(nav).getByRole("link", { name: "Today" }),
     ).not.toHaveAttribute("aria-current");
@@ -155,7 +184,7 @@ describe("navigation state is not colour alone (finding F6)", () => {
     await mount("/tasks");
     const link = within(
       screen.getByRole("navigation", { name: "Primary" }),
-    ).getByRole("link", { name: "Tasks" });
+    ).getByRole("link", { name: "All tasks" });
     expect(link.className).toContain("data-[status=active]:font-semibold");
     expect(link.querySelector(".bg-primary")).not.toBeNull();
   });
@@ -176,11 +205,21 @@ describe("navigation state is not colour alone (finding F6)", () => {
     media.set({ width: 390 });
     await mount("/sharing");
     expect(
-      within(screen.getByRole("navigation", { name: "Primary" })).getByRole(
-        "button",
-        { name: "More" },
-      ),
+      within(screen.getByRole("banner")).getByRole("button", {
+        name: "More",
+      }),
     ).toHaveAttribute("data-active");
+  });
+
+  test("/tasks/lists lights Lists, not All tasks", async () => {
+    await mount("/tasks/lists");
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(
+      within(nav).getByRole("link", { name: "All lists" }),
+    ).toHaveAttribute("aria-current", "page");
+    expect(
+      within(nav).getByRole("link", { name: "All tasks" }),
+    ).not.toHaveAttribute("aria-current");
   });
 });
 
@@ -241,12 +280,15 @@ describe("skip link, landmarks and focus", () => {
 });
 
 describe("More sheet (mobile)", () => {
-  test("opens a dialog listing Sharing, Settings and the offline queue, and Escape closes it", async () => {
+  test("opens a dialog listing All tasks, Sharing, Settings and the offline queue, and Escape closes it", async () => {
     media.set({ width: 390 });
     const { onOpenSync } = await mount();
     const more = screen.getByRole("button", { name: "More" });
     fireEvent.click(more);
     const dialog = await screen.findByRole("dialog", { name: "More" });
+    expect(
+      within(dialog).getByRole("link", { name: "All tasks" }),
+    ).toBeInTheDocument();
     expect(
       within(dialog).getByRole("link", { name: "Sharing" }),
     ).toBeInTheDocument();

@@ -7,9 +7,18 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
 
 - **Today (`/today?day=YYYY-MM-DD&tz=Area/City`, WF-TODAY-01).** The day's occurrences in a display zone: filters All / To do / Done /
   Missed, the summary "{done} of {total} done · {to do} still to do" (with "· {n} not known" when a state is not known: unknown is never
-  counted as zero), time-of-day groups, one row per occurrence with my state, a pending mark, the carry consequence, who takes part and the
-  quick action ("Mark done" for a tick goal; "Record" opens the task). States: loading, empty, error (banner with request ID and Try again;
-  cached rows stay under it), offline, and the `pending_tasks` notice.
+  counted as zero), time-of-day groups, one row per occurrence with my state, a pending mark, who takes part and the quick action ("Mark
+  done" as the tick at the end of a row for a tick goal; "Record" opens the task). States: loading, empty, error (banner with request ID
+  and Try again; cached rows stay under it), offline, and the `pending_tasks` notice.
+  - **The Final design (October 2026).** The day is one timeline rail (`today/rail.tsx`): the time column first ("all day" for a row with
+    no time of day), the rail with a node per row (filled once its time has passed, outlined ahead of it), "Any time" under the date, then
+    Morning, Afternoon and Evening; the present as a red mark between the rows whose times bracket it; a gap of two hours or more between
+    timed rows said on a dotted stretch of rail ("5 h 30 m"); a done row strikes its title only. The sticky bar under the date names the
+    section the reader is in and holds the filters. The rail runs past the day into **Upcoming** (`today/Upcoming.tsx`, the fold; open at
+    `/upcoming`, which is the same page started at the fold): Tomorrow with its times of day, the rest of the week a day at a time, the next
+    four weeks, then months, routine (repeating) tasks folded to a count in every block. The days ahead are read from THIS DEVICE only
+    (`useUpcomingView`: one certified snapshot of every cached occurrence dated after the day, composed as an offline day is, re-read on every
+    local commit); `/daily` is a one-day read and is asked for the displayed day alone, and the page says so under the last block.
 - **Tasks (`/tasks`, `/tasks/new`, `/tasks/<id>?occurrence=<id>`, `/tasks/<id>/edit`, WF-TASK-01/02/03).** The list (100 a page, an
   Archived filter), the detail (record card for every goal kind, history with corrections, participation and the joint line, enrolment,
   closure and streak exclusion, archive/restore, sharing through WEB-12a's editor), the form with presets, and the one-day correction.
@@ -19,8 +28,9 @@ dependencies, timers, rotas, streaks), WEB-14b (reminders), WEB-11a (people name
 ## Lists (WEB-10b)
 
 The Lists surface (`/tasks/lists`, `/tasks/lists/<id>`; `create_list`, `edit_list`, `list_item` and the list case of `archive`) is WEB-10b's
-and has its own consumer contract: **[docs/lists.md](lists.md)**. It lives under the Tasks destination (a "Lists" link on the Tasks pane), in
-the same lazy screens chunk. What WEB-10b changed in this slice's code:
+and has its own consumer contract: **[docs/lists.md](lists.md)**. It is its own destination in the shell since the Final design ("All lists"
+under "Pinned lists" in the sidebar, the "Lists" tab on the phone; a list can be pinned to the sidebar from its page, a choice kept on this
+device), in the same lazy screens chunk. What WEB-10b changed in this slice's code:
 
 - **`archive` is now kind-neutral.** `archive({ taskId, archived })` delegates, unchanged, to `archiveResource({ id, archived })`, which a list
   uses too. Its registration's authorised current read (`readArchiveCurrent`) reads `GET /tasks/{id}` first, exactly as before (a `200` is

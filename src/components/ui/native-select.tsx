@@ -8,10 +8,14 @@ import { cn } from "../../lib/utils";
  */
 export function NativeSelect({
   className,
+  wrapperClassName,
   ...props
-}: ComponentProps<"select">) {
+}: ComponentProps<"select"> & {
+  /** The wrapper is full width by default; a toolbar passes its own width. */
+  wrapperClassName?: string;
+}) {
   return (
-    <span className="relative inline-flex w-full">
+    <span className={cn("relative inline-flex w-full", wrapperClassName)}>
       <select
         data-slot="native-select"
         data-field-edge=""

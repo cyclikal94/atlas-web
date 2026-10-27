@@ -1,5 +1,5 @@
-import { Link } from "@tanstack/react-router";
-import { ArrowLeft } from "lucide-react";
+import { Link, useRouterState } from "@tanstack/react-router";
+import { ArrowLeft, Ellipsis } from "lucide-react";
 import { type ReactNode, useRef, useState } from "react";
 import { SkipLink } from "../../components/ui/skip-link";
 import {
@@ -8,6 +8,7 @@ import {
   SyncStatusProvider,
 } from "../../components/ui/sync-status";
 import { useChromeInsets } from "./chrome-insets";
+import { destinationFor } from "./destinations";
 import { type ShellEnv, ShellEnvProvider } from "./env";
 import { useLayoutMode } from "./layout-mode";
 import { MoreSheet } from "./MoreSheet";
@@ -24,8 +25,8 @@ export interface AppShellProps extends ShellEnv {
 }
 
 /**
- * The shared chrome: skip link, rail (236px), icon rail (64px) or bottom tabs, the persistent sync chip
- * and the main landmark. Exactly one primary navigation is rendered for the current width.
+ * The shared chrome: skip link, sidebar (240px), icon rail (64px) or bottom tabs, the persistent sync chip
+ * and the main landmark. On the phone the header also carries "More" (Sharing, Settings, the queue, the account). Exactly one primary navigation is rendered for the current width.
  * It renders no account data itself: the slots are supplied by later slices.
  *
  * The document scrolls, and the chrome stays in the viewport while it does: the rail is sticky and exactly one viewport
@@ -40,6 +41,10 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
   const [header, setHeader] = useState<HTMLElement | null>(null);
   const [tabBar, setTabBar] = useState<HTMLElement | null>(null);
   useChromeInsets(header, tabBar);
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  const inMore = destinationFor(pathname)?.mobile === "more";
   const main = (
     <main
       id="main"
@@ -76,19 +81,29 @@ export function AppShell({ children, mobileBack, ...env }: AppShellProps) {
               ) : (
                 <WorkspaceChip collapsed={false} />
               )}
-              <div className="ml-auto">
+              <div className="ml-auto flex items-center gap-1">
                 <SyncStatusChip variant="topbar" />
+                <button
+                  ref={moreButton}
+                  type="button"
+                  aria-label="More"
+                  aria-haspopup="dialog"
+                  aria-expanded={moreOpen}
+                  data-more-entry=""
+                  data-active={inMore ? "" : undefined}
+                  onClick={() => setMoreOpen(true)}
+                  className="atlas-transition flex size-11 items-center justify-center rounded-full text-foreground hover:bg-accent hover:text-accent-foreground data-[active]:bg-accent data-[active]:text-primary"
+                >
+                  <Ellipsis
+                    aria-hidden="true"
+                    className="size-5"
+                    strokeWidth={1.9}
+                  />
+                </button>
               </div>
             </header>
             {main}
-            {mobileBack ? null : (
-              <TabBar
-                barRef={setTabBar}
-                moreOpen={moreOpen}
-                moreRef={moreButton}
-                onOpenMore={() => setMoreOpen(true)}
-              />
-            )}
+            {mobileBack ? null : <TabBar barRef={setTabBar} />}
             <MoreSheet
               open={moreOpen}
               returnFocusRef={moreButton}

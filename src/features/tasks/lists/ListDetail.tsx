@@ -6,6 +6,12 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  pinList,
+  renamePinnedList,
+  unpinList,
+  usePinnedLists,
+} from "../../../app/shell/preferences";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
 import { PageHeading } from "../../../components/ui/page-heading";
@@ -52,6 +58,12 @@ export function ListDetail({ listId }: { listId: string }) {
   const [focusAfter, setFocusAfter] = useState<string | null>(null);
   const value = view.value;
   const list = value?.list ?? null;
+  // The sidebar's pin for this list (kept on this device): its label follows a rename.
+  const pinned = usePinnedLists().some((pin) => pin.id === listId);
+  const label = list?.row.label ?? null;
+  useEffect(() => {
+    if (pinned && label !== null) renamePinnedList(listId, label);
+  }, [pinned, label, listId]);
   const rows =
     list === null || value === null
       ? []
@@ -168,6 +180,17 @@ export function ListDetail({ listId }: { listId: string }) {
             ) : (
               <Button onClick={openFrom("sharing")}>{DETAIL.sharing}</Button>
             )}
+            <Button
+              aria-pressed={pinned}
+              data-list-pin=""
+              onClick={() =>
+                pinned
+                  ? unpinList(listId)
+                  : pinList({ id: listId, label: row.label })
+              }
+            >
+              {pinned ? DETAIL.unpin : DETAIL.pin}
+            </Button>
             {editable ? (
               <Button onClick={archive}>
                 {row.archived ? DETAIL.restore : DETAIL.archive}

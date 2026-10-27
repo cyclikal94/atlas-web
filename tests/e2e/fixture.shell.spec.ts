@@ -70,7 +70,7 @@ test.describe("layout modes at every breakpoint edge (A3)", () => {
           const rail = await nav.evaluate(
             (element) => element.parentElement?.getBoundingClientRect().width,
           );
-          expect(rail).toBe(236);
+          expect(rail).toBe(240);
         } else if (mode === "tablet") {
           const rail = await nav.evaluate(
             (element) => element.parentElement?.getBoundingClientRect().width,
@@ -78,8 +78,11 @@ test.describe("layout modes at every breakpoint edge (A3)", () => {
           expect(rail).toBe(64);
           for (const label of [
             "Today",
-            "Tasks",
+            "Upcoming",
+            "Calendar",
             "People",
+            "All lists",
+            "All tasks",
             "Sharing",
             "Settings",
           ]) {
@@ -94,7 +97,9 @@ test.describe("layout modes at every breakpoint edge (A3)", () => {
         } else {
           expect(box.y + box.height).toBeGreaterThan(height - 100);
           expect(box.height).toBeGreaterThanOrEqual(48);
-          await expect(nav.getByRole("button", { name: "More" })).toBeVisible();
+          await expect(
+            page.getByRole("banner").getByRole("button", { name: "More" }),
+          ).toBeVisible();
           for (const item of await nav.getByRole("link").all()) {
             expect((await item.boundingBox())?.height).toBeGreaterThanOrEqual(
               48,
@@ -186,7 +191,7 @@ test.describe("keyboard and focus (B8)", () => {
     await page.goto("/today?pending=1");
     await pressTab(page);
     const order: string[] = [];
-    for (let index = 0; index < 8; index += 1) {
+    for (let index = 0; index < 10; index += 1) {
       order.push(
         await page.evaluate(
           () =>
@@ -199,11 +204,14 @@ test.describe("keyboard and focus (B8)", () => {
       );
       await pressTab(page);
     }
-    expect(order.slice(0, 7)).toEqual([
+    expect(order.slice(0, 10)).toEqual([
       "Skip to main content",
       "Today",
-      "Tasks",
+      "Upcoming",
+      "Calendar",
       "People",
+      "All lists",
+      "All tasks",
       "Sharing",
       "Settings",
       expect.stringContaining("waiting to send"),
@@ -215,7 +223,7 @@ test.describe("keyboard and focus (B8)", () => {
   }) => {
     await setup(page, 1440);
     await page.goto("/today");
-    await primaryNav(page).getByRole("link", { name: "Tasks" }).click();
+    await primaryNav(page).getByRole("link", { name: "All tasks" }).click();
     await expect(
       page.getByRole("heading", { level: 1, name: "Tasks" }),
     ).toBeFocused();
@@ -280,14 +288,14 @@ test.describe("keyboard and focus (B8)", () => {
   }) => {
     await setup(page, 390, 844);
     await page.goto("/today");
-    const more = primaryNav(page).getByRole("button", { name: "More" });
+    const more = page.getByRole("banner").getByRole("button", { name: "More" });
     await more.click();
     const dialog = page.getByRole("dialog", { name: "More" });
     await expect(dialog).toBeVisible();
     // Strict on every engine, macOS WebKit included (Option+Tab there): forward, reverse, and a whole turn.
     const ring = await expectFocusLoop(page, dialog);
     expect(ring.join(" | ")).toContain("Close");
-    expect(ring.length, "sync control, Close and the three links").toBe(5);
+    expect(ring.length, "sync control, Close and the four links").toBe(6);
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     await expect(more).toBeFocused();
@@ -368,7 +376,10 @@ test.describe("keyboard and focus (B8)", () => {
   }) => {
     await setup(page, 390, 844);
     await page.goto("/today");
-    await primaryNav(page).getByRole("button", { name: "More" }).click();
+    await page
+      .getByRole("banner")
+      .getByRole("button", { name: "More" })
+      .click();
     await page
       .getByRole("dialog", { name: "More" })
       .getByRole("link", { name: "Settings" })
@@ -410,12 +421,16 @@ test.describe("collapsed rail labels (A5)", () => {
       await expect(page.getByRole("tooltip", { name: "Today" })).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(page.getByRole("tooltip")).toHaveCount(0);
-      const tasks = primaryNav(page).getByRole("link", { name: "Tasks" });
+      const tasks = primaryNav(page).getByRole("link", { name: "All tasks" });
       await tasks.hover();
-      await expect(page.getByRole("tooltip", { name: "Tasks" })).toBeVisible();
+      await expect(
+        page.getByRole("tooltip", { name: "All tasks" }),
+      ).toBeVisible();
       // Hoverable and persistent (WCAG 1.4.13): moving onto the tooltip keeps it.
-      await page.getByRole("tooltip", { name: "Tasks" }).hover();
-      await expect(page.getByRole("tooltip", { name: "Tasks" })).toBeVisible();
+      await page.getByRole("tooltip", { name: "All tasks" }).hover();
+      await expect(
+        page.getByRole("tooltip", { name: "All tasks" }),
+      ).toBeVisible();
       await page.screenshot({
         path: evidencePath(`A5/collapsed-rail-${width}x${height}.png`),
       });
@@ -489,7 +504,10 @@ test.describe("accessibility with real layout (A4)", () => {
       });
       const page = await context.newPage();
       await page.goto("/today?phase=offline&pending=1");
-      await primaryNav(page).getByRole("button", { name: "More" }).click();
+      await page
+        .getByRole("banner")
+        .getByRole("button", { name: "More" })
+        .click();
       await expect(page.getByRole("dialog", { name: "More" })).toBeVisible();
       expect(await runAxe(page), `More, ${scheme}`).toEqual([]);
       await page.screenshot({ path: evidencePath(`A4/more-${scheme}.png`) });
@@ -527,6 +545,8 @@ test.describe("routes", () => {
     await expect(page).toHaveURL(/\/today$/);
     for (const [label, path] of [
       ["Today", "/today"],
+      ["Upcoming", "/upcoming"],
+      ["Calendar", "/calendar"],
       ["Tasks", "/tasks"],
       ["People", "/people"],
       ["Sharing", "/sharing"],

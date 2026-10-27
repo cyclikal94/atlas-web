@@ -8,7 +8,7 @@ import { destinations } from "./destinations";
 import { renderSlot, useShellEnv } from "./env";
 
 /**
- * The mobile More sheet: Sharing, Settings, the offline queue and the account entry, as one dialog
+ * The phone's More sheet (from the header): All tasks, Sharing, Settings, the offline queue and the account entry, as one dialog
  * (trap, Escape, focus return), so it follows the same dialog pattern as every other sheet.
  */
 export function MoreSheet({

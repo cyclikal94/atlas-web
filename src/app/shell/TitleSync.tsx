@@ -13,7 +13,9 @@ export function TitleSync() {
     setProtectedTitle([
       pathname === "/sync"
         ? "Sync"
-        : (destinationFor(pathname)?.label ?? "Not found"),
+        : (destinationFor(pathname)?.title ??
+          destinationFor(pathname)?.label ??
+          "Not found"),
     ]);
   }, [pathname]);
   return null;

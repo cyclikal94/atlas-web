@@ -25,6 +25,8 @@ export const LISTS = {
 export const DETAIL = {
   back: "‹ Lists",
   rename: "Rename",
+  pin: "Pin to sidebar",
+  unpin: "Unpin from sidebar",
   sharing: "Sharing",
   sharingWait: "You can share this list once it has synced.",
   archive: "Archive",
