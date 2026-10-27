@@ -260,7 +260,9 @@ describe("Review this device (G-10)", () => {
     expect(
       sourceText("src/features/settings/sessions-devices/DevicesSection.tsx"),
     ).toMatch(
-      /data-return-focus=\{row\.current \? "device-this" : undefined\}/,
+      // WEB-08d revision 30 (merge adaptation): the same expression; only line breaks inside its braces are allowed, because the
+      // merged row's deeper indentation makes the formatter wrap it.
+      /data-return-focus=\{\s*row\.current \? "device-this" : undefined\s*\}/,
     );
   });
 });

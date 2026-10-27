@@ -1,5 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
-import { configureEvidenceRun } from "./tests/e2e/evidence-run";
+import { configureEvidenceRun, runtimeWitness } from "./tests/e2e/evidence-run";
 import { PARALLEL_UI } from "./tests/e2e/scheduling";
 import { neededTargets } from "./tests/e2e/targets";
 
@@ -36,6 +36,12 @@ const lane = process.env.ATLAS_E2E_LANE;
 if (lane && !["parallel-ui", "serial"].includes(lane))
   throw new Error("Unknown ATLAS_E2E_LANE");
 const requestedWorkers = Number(process.env.ATLAS_E2E_WORKERS ?? "1");
+// WEB-08d revision 21 (R20-N1): the held-operation qualification probes (tests/e2e/probe.held-operation.spec.ts) run only when asked for, as
+// the fixture projects' ONLY file, by scripts/validation/held-operation-probes.mjs. They include cases that fail on purpose, judged one by
+// one by that runner's oracle; no ordinary run discovers them (their name does not match `fixture.*.spec.ts`).
+const probes = process.env.ATLAS_E2E_PROBES;
+if (probes && probes !== "held-operation")
+  throw new Error("Unknown ATLAS_E2E_PROBES");
 if (![1, 2, 3, 4].includes(requestedWorkers))
   throw new Error("ATLAS_E2E_WORKERS must be 1..4");
 
@@ -47,7 +53,11 @@ const projects = browsers.flatMap(({ name, device }) => [
   },
   {
     name: `fixture-${name}`,
-    testMatch: lane === "parallel-ui" ? PARALLEL_UI : /fixture\..*\.spec\.ts/,
+    testMatch: probes
+      ? /(?:^|[/\\])probe\.held-operation\.spec\.ts$/
+      : lane === "parallel-ui"
+        ? PARALLEL_UI
+        : /fixture\..*\.spec\.ts/,
     ...(lane === "serial" ? { testIgnore: PARALLEL_UI } : {}),
     use: { ...device, baseURL: FIXTURE },
   },
@@ -68,7 +78,10 @@ const browserEvidenceRun = configureEvidenceRun();
 export default defineConfig({
   testDir: "./tests/e2e",
   outputDir: `${browserEvidenceRun}/test-results`,
-  metadata: { atlasEvidenceRun: browserEvidenceRun },
+  metadata: {
+    atlasEvidenceRun: browserEvidenceRun,
+    atlasRuntime: runtimeWitness(),
+  },
   globalSetup: "./tests/e2e/evidence-run.ts",
   reporter: "list",
   fullyParallel: false,

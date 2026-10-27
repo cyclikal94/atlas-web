@@ -1051,7 +1051,8 @@ test.describe("E-L11 (R3): a re-authentication refused at activation returns to 
       );
       const back = page.getByRole("dialog", { name: "Signing in" });
       await expect(back).toContainText(
-        "This device has too many active sign-ins for this account.",
+        // WEB-08d D-8d-13 (merged in revision 30): the limit is per account.
+        "This account has reached its limit of active sign-ins.",
         { timeout: 15_000 },
       );
       await expect(page.getByText("Couldn't finish catching up")).toHaveCount(
@@ -1108,7 +1109,8 @@ test.describe("E-L11b (R3, K-2 family): a switch refused at activation returns t
       name: "Sign in to another account",
     });
     await expect(dialog).toContainText(
-      "This device has too many active sign-ins for this account.",
+      // WEB-08d D-8d-13 (merged in revision 30): the limit is per account.
+      "This account has reached its limit of active sign-ins.",
       { timeout: 15_000 },
     );
     await expect(page.getByText("Couldn't finish catching up")).toHaveCount(0);

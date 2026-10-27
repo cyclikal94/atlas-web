@@ -1,5 +1,5 @@
 import type { Page } from "@playwright/test";
-import { expect, test } from "./helpers";
+import { expect, fixturePageReady, test } from "./helpers";
 import { checkSurface, expectPaintedContrast, WIDTHS } from "./surface-checks";
 
 /**
@@ -195,6 +195,7 @@ const SURFACES: Surface[] = [
     region: "main",
     focusHeading: true,
     prepare: async (page) => {
+      await fixturePageReady(page);
       await page
         .getByRole("heading", { level: 1, name: "Sign in again" })
         .waitFor();

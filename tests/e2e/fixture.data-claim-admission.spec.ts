@@ -27,7 +27,6 @@ import {
 import {
   type OutboxReadiness,
   untilDraftWriteCommitted,
-  untilOutboxPlanCalled,
   withSettledOutboxPeers,
 } from "./data-operation-barriers";
 import {
@@ -38,6 +37,12 @@ import {
   untilTreeSettled,
   uuid,
 } from "./data-sync-helpers";
+import {
+  type HeldCall,
+  type HeldOperations,
+  type Hold,
+  withHeldOperations,
+} from "./held-operation";
 import { expect, test } from "./helpers";
 
 /**
@@ -116,7 +121,6 @@ const untilWarning = (
     .toEqual({ notResponding, memoryOnly });
 const untilStatus = (page: Page, id: string, status: string) =>
   expect.poll(() => statusOf(page, id), { timeout: 20_000 }).toBe(status);
-const untilHeld = untilOutboxPlanCalled;
 const untilLanded = (page: Page, text: string) =>
   untilDraftWriteCommitted(page, ACCOUNT, text);
 /** The state stays `stopped` and nothing is sent while the page is observed, however the dispatcher is woken meanwhile. */
@@ -194,19 +198,21 @@ test.describe("E-O10 (revision 28, R46): a stop recorded after the queue read ad
       const { net, page } = await boot(context);
       await context.setOffline(true);
       expect((await enqueue(page, A, "r", "original"))?.kind).toBe("queued");
-      await page.evaluate(() =>
-        window.__atlasData?.holdOutboxPlan("data.readDispatchWindow"),
-      );
-      await context.setOffline(false);
-      await untilHeld(page);
-      await facadeStop(page, mechanism, A, "r");
-      const recorded = {
-        standing: await standing(page, A),
-        warning: await warning(page),
-        hits: await hits(page),
-      };
-      expect(recorded.standing).toEqual(STANDING(mechanism));
-      await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+      // Revision 21 (R20-N1): the held queue read is owned by a scope that releases it by its own token on every path.
+      const recorded = await withHeldOperations(async (holds) => {
+        const read = await holds.holdOutbox(page, "data.readDispatchWindow");
+        await context.setOffline(false);
+        await read.untilHeld();
+        await facadeStop(page, mechanism, A, "r");
+        const recorded = {
+          standing: await standing(page, A),
+          warning: await warning(page),
+          hits: await hits(page),
+        };
+        expect(recorded.standing).toEqual(STANDING(mechanism));
+        await read.release();
+        return recorded;
+      });
       await untilState(page, "stopped");
       await staysHeld(page, net);
       const after = {
@@ -240,13 +246,13 @@ test.describe("E-O10 (revision 28, R46): a stop recorded after the queue read ad
         const { net, page } = await boot(context);
         await context.setOffline(true);
         expect((await enqueue(page, A, "r", "original"))?.kind).toBe("queued");
-        await page.evaluate(() =>
-          window.__atlasData?.holdOutboxPlan("data.readDispatchWindow"),
-        );
-        await context.setOffline(false);
-        await untilHeld(page);
-        await facadeStop(page, mechanism, A, "r");
-        await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+        await withHeldOperations(async (holds) => {
+          const read = await holds.holdOutbox(page, "data.readDispatchWindow");
+          await context.setOffline(false);
+          await read.untilHeld();
+          await facadeStop(page, mechanism, A, "r");
+          await read.release();
+        });
         await untilState(page, "stopped");
         await staysHeld(page, net);
         if (recovery === "the explicit retry")
@@ -277,13 +283,13 @@ test.describe("E-O10 (revision 28, R46): a stop recorded after the queue read ad
       await context.setOffline(true);
       expect((await enqueue(page, A, "r", "first"))?.kind).toBe("queued");
       expect((await enqueue(page, B, "s", "second"))?.kind).toBe("queued");
-      await page.evaluate(() =>
-        window.__atlasData?.holdOutboxPlan("data.readDispatchWindow"),
-      );
-      await context.setOffline(false);
-      await untilHeld(page);
-      await facadeStop(page, mechanism, B, "s");
-      await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
+      await withHeldOperations(async (holds) => {
+        const read = await holds.holdOutbox(page, "data.readDispatchWindow");
+        await context.setOffline(false);
+        await read.untilHeld();
+        await facadeStop(page, mechanism, B, "s");
+        await read.release();
+      });
       await untilStatus(page, A, "acknowledged");
       await untilState(page, "stopped");
       await staysHeld(page, net, 1);
@@ -1003,31 +1009,40 @@ test.describe("E-O10 (revision 31, R50): an older successful write delivered aft
         expect(await enqueue(page, A, "r", "original")).toMatchObject({
           kind: "queued",
         });
-        let older: Promise<unknown> | null = null;
-        if (delayed) {
-          await page.evaluate(() =>
-            window.__atlasData?.holdOutboxPlan("data.editQueuedDraft"),
-          );
-          older = editDraft(page, A, "r", "older-success");
-          await untilHeld(page);
-          await untilLanded(page, "older-success");
-        } else
-          expect((await editDraft(page, A, "r", "older-success"))?.kind).toBe(
-            "edited",
-          );
-        // The NEWER edit fails by `mechanism` after the older write was issued (and, delayed, committed).
-        await facadeStop(page, mechanism, A, "r");
-        const recorded = {
-          standing: await standing(page, A),
-          warning: await warning(page),
-          value: await markerValue(page),
-          hits: await hits(page),
+        // Revision 21 (R20-N1): delayed, the older edit and its held answer are owned by a scope that releases the hold by its own
+        // token and joins the edit on every path; the timely control runs the same steps without one.
+        const run = async (holds: HeldOperations | null) => {
+          let older: HeldCall<unknown> | null = null;
+          let hold: Hold | null = null;
+          if (holds !== null) {
+            hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+            older = holds.launch("the older edit", () =>
+              editDraft(page, A, "r", "older-success"),
+            );
+            await hold.untilHeld();
+            await untilLanded(page, "older-success");
+          } else
+            expect((await editDraft(page, A, "r", "older-success"))?.kind).toBe(
+              "edited",
+            );
+          // The NEWER edit fails by `mechanism` after the older write was issued (and, delayed, committed).
+          await facadeStop(page, mechanism, A, "r");
+          const recorded = {
+            standing: await standing(page, A),
+            warning: await warning(page),
+            value: await markerValue(page),
+            hits: await hits(page),
+          };
+          expect(recorded.standing).toEqual(STANDING(mechanism));
+          if (hold !== null && older !== null) {
+            await hold.release();
+            expect(await older.settled()).toMatchObject({ kind: "edited" });
+          }
+          return recorded;
         };
-        expect(recorded.standing).toEqual(STANDING(mechanism));
-        if (delayed) {
-          await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
-          expect(await older).toMatchObject({ kind: "edited" });
-        }
+        const recorded = delayed
+          ? await withHeldOperations(run)
+          : await run(null);
         await context.setOffline(false);
         await untilState(page, "stopped");
         await staysHeld(page, net);
@@ -1083,35 +1098,43 @@ test.describe("E-O10 (revision 31, R50): an older successful write delivered aft
       expect(await enqueue(page, A, "r", "original")).toMatchObject({
         kind: "queued",
       });
-      let older: Promise<unknown> | null = null;
-      if (delayed) {
-        await page.evaluate(() =>
-          window.__atlasData?.holdOutboxPlan("data.editQueuedDraft"),
-        );
-        older = editDraft(page, A, "r", "older-success");
-        await untilHeld(page);
-        await untilLanded(page, "older-success");
-      } else
-        expect((await editDraft(page, A, "r", "older-success"))?.kind).toBe(
-          "edited",
-        );
-      // The OTHER page's facade fails its own edit of the same draft, and so does the recording of that failure: its marker holds the stop.
-      await arm(other, { id: A, armed: 1, counter: 1 });
-      expect(await editDraft(other, A, "r", "unsaved")).toMatchObject({
-        kind: "refused",
-        reason: "storage",
-      });
-      await expect
-        .poll(() => markers(page), { timeout: 10_000 })
-        .toEqual([`draft:${A}`]);
-      // The storage event reaches this page's facade: the warning is up before the older result is delivered.
-      await untilWarning(page, true, false);
-      const recorded = await markerValue(page);
-      expect(recorded).not.toBeNull();
-      if (delayed) {
-        await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
-        expect(await older).toMatchObject({ kind: "edited" });
-      }
+      // Revision 21 (R20-N1): delayed, the older edit and its held answer are owned by a scope (as above).
+      const run = async (holds: HeldOperations | null) => {
+        let older: HeldCall<unknown> | null = null;
+        let hold: Hold | null = null;
+        if (holds !== null) {
+          hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+          older = holds.launch("the older edit", () =>
+            editDraft(page, A, "r", "older-success"),
+          );
+          await hold.untilHeld();
+          await untilLanded(page, "older-success");
+        } else
+          expect((await editDraft(page, A, "r", "older-success"))?.kind).toBe(
+            "edited",
+          );
+        // The OTHER page's facade fails its own edit of the same draft, and so does the recording of that failure: its marker holds the stop.
+        await arm(other, { id: A, armed: 1, counter: 1 });
+        expect(await editDraft(other, A, "r", "unsaved")).toMatchObject({
+          kind: "refused",
+          reason: "storage",
+        });
+        await expect
+          .poll(() => markers(page), { timeout: 10_000 })
+          .toEqual([`draft:${A}`]);
+        // The storage event reaches this page's facade: the warning is up before the older result is delivered.
+        await untilWarning(page, true, false);
+        const recorded = await markerValue(page);
+        expect(recorded).not.toBeNull();
+        if (hold !== null && older !== null) {
+          await hold.release();
+          expect(await older.settled()).toMatchObject({ kind: "edited" });
+        }
+        return recorded;
+      };
+      const recorded = delayed
+        ? await withHeldOperations(run)
+        : await run(null);
       await context.setOffline(false);
       await untilState(page, "stopped");
       await staysHeld(page, net);
@@ -1154,30 +1177,36 @@ test.describe("E-O10 (revision 31, R50): an older successful write delivered aft
     await facadeStop(page, "marker", A, "r");
     const first = await markerValue(page);
     expect(first).not.toBeNull();
-    await page.evaluate(() =>
-      window.__atlasData?.holdOutboxPlan("data.editQueuedDraft"),
-    );
-    const saved = editDraft(page, A, "r", "saved");
-    await untilHeld(page);
-    await untilLanded(page, "saved");
-    // ANOTHER page's facade fails its own edit of the same draft and writes a NEW instance over the key.
-    await arm(other, { id: A, armed: 1, counter: 1 });
-    expect(await editDraft(other, A, "r", "unsaved-again")).toMatchObject({
-      kind: "refused",
-      reason: "storage",
+    // Revision 21 (R20-N1, the MU-990 case): the edit and its held answer are owned by a scope. When an assertion below fails while the
+    // answer is held, the scope releases the hold by its own token and joins the edit before the failure is reported, so the case reports
+    // that assertion alone (the edit's own failure, if it had one, is a separate error), never a pending `page.evaluate` ended by Playwright.
+    const newer = await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch("the saved edit", () =>
+        editDraft(page, A, "r", "saved"),
+      );
+      await hold.untilHeld();
+      await untilLanded(page, "saved");
+      // ANOTHER page's facade fails its own edit of the same draft and writes a NEW instance over the key.
+      await arm(other, { id: A, armed: 1, counter: 1 });
+      expect(await editDraft(other, A, "r", "unsaved-again")).toMatchObject({
+        kind: "refused",
+        reason: "storage",
+      });
+      await expect
+        .poll(() => markerValue(page), { timeout: 10_000 })
+        .not.toBe(first);
+      // ADAPTED, revision 32 (R52): the other page's failure is a key of its own, beside this page's. The write that was issued over THIS
+      // page's instance ends that one (its exact key) when its result is delivered; the other page's is the newer failure and stands.
+      const newerOnly = (
+        await markerInstances(page, ACCOUNT, `draft:${A}`)
+      ).filter((name) => !(first ?? "").split(",").includes(name));
+      expect(newerOnly).toHaveLength(1);
+      const newer = newerOnly.join(",");
+      await hold.release();
+      expect(await saved.settled()).toMatchObject({ kind: "edited" });
+      return newer;
     });
-    await expect
-      .poll(() => markerValue(page), { timeout: 10_000 })
-      .not.toBe(first);
-    // ADAPTED, revision 32 (R52): the other page's failure is a key of its own, beside this page's. The write that was issued over THIS
-    // page's instance ends that one (its exact key) when its result is delivered; the other page's is the newer failure and stands.
-    const newerOnly = (
-      await markerInstances(page, ACCOUNT, `draft:${A}`)
-    ).filter((name) => !(first ?? "").split(",").includes(name));
-    expect(newerOnly).toHaveLength(1);
-    const newer = newerOnly.join(",");
-    await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
-    expect(await saved).toMatchObject({ kind: "edited" });
     await context.setOffline(false);
     await untilState(page, "stopped");
     await staysHeld(page, net);
@@ -1208,16 +1237,19 @@ test.describe("E-O10 (revision 31, R50): an older successful write delivered aft
       kind: "queued",
     });
     await facadeStop(page, "marker", A, "r");
-    await page.evaluate(() =>
-      window.__atlasData?.holdOutboxPlan("data.editQueuedDraft"),
-    );
-    const saved = editDraft(page, A, "r", "saved");
-    await untilHeld(page);
-    await untilLanded(page, "saved");
-    // Held: nothing has ended the stop yet.
-    expect(await standing(page, A)).toEqual(STANDING("marker"));
-    await page.evaluate(() => window.__atlasData?.releaseOutboxPlan());
-    expect(await saved).toMatchObject({ kind: "edited" });
+    // Revision 21 (R20-N1): the edit and its held answer are owned by a scope (as above).
+    await withHeldOperations(async (holds) => {
+      const hold = await holds.holdOutbox(page, "data.editQueuedDraft");
+      const saved = holds.launch("the saved edit", () =>
+        editDraft(page, A, "r", "saved"),
+      );
+      await hold.untilHeld();
+      await untilLanded(page, "saved");
+      // Held: nothing has ended the stop yet.
+      expect(await standing(page, A)).toEqual(STANDING("marker"));
+      await hold.release();
+      expect(await saved.settled()).toMatchObject({ kind: "edited" });
+    });
     await untilWarning(page, false, false);
     expect(await markers(page)).toEqual([]);
     await context.setOffline(false);

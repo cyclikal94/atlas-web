@@ -253,6 +253,13 @@ export interface SessionSummary {
   expires_at: IsoInstant;
   authentication: "local" | "oidc";
   current: boolean;
+  /**
+   * BE-Q25 (API 0.28.0): the coarse label captured when this session was issued; null for an older session. An UNTRUSTED wire value
+   * passed through as received: the Settings feature decodes it (`decodeClientLabel`). Absent on a server older than 0.28.0.
+   */
+  readonly client?: unknown;
+  /** BE-Q25: the current name of this session's device, untrusted user text (decoded by `decodeDeviceName`), or null. */
+  readonly device_name?: unknown;
 }
 export interface DeviceRow {
   id: DeviceId;
@@ -261,9 +268,23 @@ export interface DeviceRow {
   current: boolean;
   state_token: string;
   summary: DeviceSummary;
+  /** BE-Q25: the device's name, untrusted user text, or null. Display only: it is not part of `state_token`. */
+  readonly name?: unknown;
+  /** BE-Q25: the label of the device's most recently issued session, untrusted, or null. */
+  readonly client?: unknown;
 }
 export interface DevicesRead {
   devices: readonly DeviceRow[];
+  /**
+   * BE-Q25: sync registrations against their limit, as received (decoded by the Settings feature). The member is copied only when the
+   * answer carries it, so "absent" (an older server: unavailable) stays distinguishable from any value the server sent.
+   */
+  readonly sync_capacity?: unknown;
+}
+export interface SessionsRead {
+  sessions: readonly SessionSummary[];
+  /** BE-Q25: live sessions against their limit, as received; absent when the answer has no such member. */
+  readonly session_capacity?: unknown;
 }
 export type OperationStart =
   | { kind: "started"; operation_id: OperationId }
@@ -289,6 +310,16 @@ export type Result<T> =
       status?: number;
       atlasError?: AtlasError;
     };
+/**
+ * WEB-08d (review R3): passed with an ordinary change request by a caller whose intent can end before the request is sent (a dialog
+ * dismissed or replaced, a screen left). Aborting `withdraw` removes the permission to send: a request not yet issued is never issued
+ * and the call returns `not_sent`, wherever it was waiting (the CSRF token, the cover, a lock). It grants nothing: the request is still
+ * stamped, covered and checked as before. It is never a rollback either: a request already issued is not aborted, and its answer is
+ * returned as usual, because the server may have applied it.
+ */
+export interface SendOptions {
+  readonly withdraw?: AbortSignal;
+}
 /** `GET /me`: the contract's own fields and nothing else (no display name, no link date). */
 export interface AccountSummary {
   readonly id: AccountId;
@@ -304,11 +335,26 @@ export interface Operations {
    */
   summariseLocalWork(): Promise<LocalWorkSummary | null>;
   readDevices(): Promise<Result<DevicesRead>>;
-  listSessions(): Promise<Result<{ sessions: readonly SessionSummary[] }>>;
+  listSessions(): Promise<Result<SessionsRead>>;
+  /**
+   * BE-Q25: `PUT /devices/{id}/name` with `{ name }` (the name exactly as given: never trimmed or normalised) or, for null, `DELETE`.
+   * An ordinary stamped call (CSRF, cover, lease, identity checks), released and sealed after its body is read. No Idempotency-Key:
+   * repeating it is harmless. `gone` is a `404 not_found` (the device is no longer listed for this account); any other refusal is
+   * `http` with the Atlas error.
+   */
+  nameDevice(
+    id: DeviceId,
+    name: string | null,
+    send?: SendOptions,
+  ): Promise<Result<"named" | "cleared" | "gone">>;
   /** An ordinary DELETE without a key; refuses `settled.session_id` (use `logout`). */
-  revokeOtherSession(id: SessionId): Promise<Result<"revoked" | "gone">>;
+  revokeOtherSession(
+    id: SessionId,
+    send?: SendOptions,
+  ): Promise<Result<"revoked" | "gone">>;
   retireOtherDevice(
     read: DeviceRow,
+    send?: SendOptions,
   ): Promise<Result<"confirmed_applied" | "superseded" | "rejected_stale">>;
   /** Both raise the fence and envelope in ONE closing-write transaction, then send. The person has confirmed. */
   logout(confirmation: { unsynced: LocalWorkSummary }): Promise<OperationStart>;
@@ -316,17 +362,20 @@ export interface Operations {
     read: DeviceRow;
     unsynced: LocalWorkSummary;
   }): Promise<OperationStart>;
-  changePassword(input: {
-    current: string;
-    next: string;
-  }): Promise<Result<"changed">>;
+  changePassword(
+    input: {
+      current: string;
+      next: string;
+    },
+    send?: SendOptions,
+  ): Promise<Result<"changed">>;
   /**
    * An ordinary GET `/me`, sealed like `listSessions`: nothing is returned for an identity that is no longer settled.
    * Never cached by this module.
    */
   readAccount(): Promise<Result<AccountSummary>>;
   /** `DELETE /oidc/identities` with the body `{ issuer }` the contract requires; the issuer is taken verbatim from `readAccount`. */
-  unlinkOidc(issuer: string): Promise<Result<"unlinked">>;
+  unlinkOidc(issuer: string, send?: SendOptions): Promise<Result<"unlinked">>;
   /** Re-drives every operation fence: at boot, on online, on becoming visible, after a settlement. */
   resume(options?: { force?: boolean }): void;
   readonly pending: Store<
