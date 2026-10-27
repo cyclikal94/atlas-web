@@ -2694,8 +2694,11 @@ test.describe("E-P31: an archived field's new parent is not complete until it is
         const withdrawn = seen.findIndex((s) => !s.empty);
         const listed = seen.findIndex((s) => s.row);
         expect(withdrawn).toBeGreaterThanOrEqual(0);
-        expect(listed).toBeGreaterThan(withdrawn);
-        expect(seen[listed - 1]?.empty).toBe(false);
+        // Adapted in revision 17 (review 16, R16.1): the field and its new person are now ONE answer of the ledger's page read, so
+        // "Nothing archived" is withdrawn in the same state that lists the field (campaign 36: [empty] -> [row] in all three engines), not
+        // in an earlier one while a separate person read loads (the original asserted `listed > withdrawn` and an intermediate state).
+        // Kept: never shown together (above), and never listed before it is withdrawn.
+        expect(listed).toBeGreaterThanOrEqual(withdrawn);
         await expect(empty).toHaveCount(0);
       } else {
         expect(seen.every((s) => s.empty && !s.row)).toBe(true);
