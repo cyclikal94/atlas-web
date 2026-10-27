@@ -13,7 +13,8 @@ import { useOpenImport } from "./import-opener";
 /**
  * The page's import entry (WEB-13b §4.2; the wireframe's "Import — offline-queueable" zone): a real file control behind "browse" is the
  * primary way in; dropping a file on the zone is an enhancement only. A chosen file opens the import dialog with a source to choose. The
- * zone is unavailable, with its reason, when this account has no source it can import into.
+ * zone is unavailable, with its reason, when this account has no source it can import into. Revision 6 (R7): while the zone's import is
+ * kept (the in-dialog sync control), Browse shows it again, and a dropped file is a new file chosen in it.
  */
 export function ImportDropZone() {
   const open = useOpenImport();
@@ -42,7 +43,7 @@ export function ImportDropZone() {
           if (!available) return;
           event.preventDefault();
           const file = event.dataTransfer.files[0];
-          if (file !== undefined) open?.(null, file);
+          if (file !== undefined) open?.open(null, file);
         }}
       >
         <div className="flex flex-wrap items-center gap-2">
@@ -56,13 +57,15 @@ export function ImportDropZone() {
             // Cleared just before the picker opens, never after a choice (WebKit fails reading a File whose input was cleared).
             onChange={(event) => {
               const file = event.target.files?.[0];
-              if (file !== undefined) open?.(null, file);
+              if (file !== undefined) open?.open(null, file);
             }}
           />
           {available ? (
             <Button
               aria-describedby={labelId}
               onClick={() => {
+                // The chooser's import kept by the in-dialog sync control is shown again, without another file (R7).
+                if (open?.resumeChooser() === true) return;
                 const control = input.current;
                 if (control === null) return;
                 control.value = "";

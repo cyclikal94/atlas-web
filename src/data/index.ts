@@ -169,6 +169,7 @@ export {
 } from "./ui/outstanding";
 export {
   type ConflictRow,
+  cacheGateOf,
   DataEnvProvider,
   DataProvider,
   useAccountLabel,

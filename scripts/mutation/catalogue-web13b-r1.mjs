@@ -7,6 +7,7 @@ import { sub } from "./data-catalogue.mjs";
 
 const IMPORT_DIALOG = "src/features/calendars/ImportDialog.tsx";
 const DROP_ZONE = "src/features/calendars/ImportDropZone.tsx";
+const IMPORT_EDITOR = "src/features/calendars/import-editor.ts";
 const ANCHOR_DIALOG = "src/features/calendars/AnchorDialog.tsx";
 const ANCHOR_MODEL = "src/features/calendars/model/anchor.ts";
 const PICKERS = "src/features/calendars/pickers.tsx";
@@ -36,16 +37,23 @@ export const UNIT_13B_R1 = [
     file: IMPORT_DIALOG,
     tests: [T_IMPORT_UI],
     expect: /R1: choosing another file forgets the previous one at once/,
-    patch: (t) => sub(t, "    if (pendingRead.current !== null) return;\n", ""),
+    // Revision 6 (R7): re-expressed at the corrected text (the dialog now asks its editing session whether the latest file is read).
+    patch: (t) => sub(t, "    if (editor.state().reading) return;\n", ""),
   },
   {
     id: "MU-2472",
     title:
       "WEB-13b R1: choosing another file keeps the previous one until the new one has been read",
-    file: IMPORT_DIALOG,
+    // Revision 6 (R7): re-expressed in the editing session, which now owns the chosen file (same defect).
+    file: IMPORT_EDITOR,
     tests: [T_IMPORT_UI],
     expect: /R1: choosing another file forgets the previous one at once/,
-    patch: (t) => sub(t, "    setFile(null);\n", ""),
+    patch: (t) =>
+      sub(
+        t,
+        "        file: null,\n        reading: true,\n",
+        "        reading: true,\n",
+      ),
   },
   {
     id: "MU-2473",
@@ -61,25 +69,27 @@ export const UNIT_13B_R1 = [
     id: "MU-2474",
     title:
       "WEB-13b R3: a queued import closes the dialog whatever was changed in it while it was being stored",
-    file: IMPORT_DIALOG,
+    // Revision 6 (R7): re-expressed in the editing session, which now settles the save it made (same defect).
+    file: IMPORT_EDITOR,
     tests: [T_IMPORT_UI],
     expect:
       /R3: a save that completes after the window was changed|R3: changed and changed back|R3: a file chosen while the save/,
     patch: (t) =>
       sub(
         t,
-        "        if (revision.current === submitted) onClose();\n",
-        "        if (submitted >= 0) onClose();\n",
+        "    if (state.revision === ticket.revision) {\n",
+        "    if (ticket.revision >= 0) {\n",
       ),
   },
   {
     id: "MU-2475",
     title:
       "WEB-13b R3/R2's rule: a stored import's identity is not spent (Import again with the same choices is taken for the stored one)",
-    file: IMPORT_DIALOG,
+    // Revision 6 (R7): re-expressed in the editing session, which now holds the save identity (same defect).
+    file: IMPORT_EDITOR,
     tests: [T_IMPORT_UI],
     expect: /R3: changed and changed back/,
-    patch: (t) => sub(t, "        submission.current.invalidate();\n", ""),
+    patch: (t) => sub(t, "    submission?.invalidate();\n", ""),
   },
   {
     id: "MU-2476",

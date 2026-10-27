@@ -15,9 +15,11 @@ import { createQuotaGuard } from "../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../src/data/engine/sync-channel";
 import { accountDatabaseName } from "../../src/data/model/schema";
 import { w as writes } from "../../src/data/store/port";
+import { forgetImportSessions } from "../../src/features/calendars/import-kept";
 import { forgetIdentityMemories } from "../../src/features/calendars/memory";
 import { registerCalendarCommands } from "../../src/features/calendars/register";
 import { documentRouteChanges } from "../../src/lib/route-changes";
+import type { SyncStatusModel } from "../../src/lib/sync-chip";
 import {
   type ApiCompatibility,
   type Identity,
@@ -164,10 +166,19 @@ export async function calendarWorld(
     /** Revision 4: answers queued BEFORE the screen mounts (its first live read is made as it opens). */
     replies?: ReadonlyArray<readonly [string, WireReply[]]>;
     compat?: ApiCompatibility;
+    /**
+     * WEB-13b revision 6 (R7): the shell's sync control navigates as production's protected tree does (`/sync`, `tab` queue or
+     * conflicts), instead of doing nothing.
+     */
+    productionSync?: boolean;
+    /** The shell's sync status (default: synced, nothing pending): conflicts send the sync control to the conflicts tab. */
+    syncModel?: SyncStatusModel;
   } = {},
 ): Promise<CalendarWorld> {
   // The per-identity memory outlives a mount by design (`memory.ts`); each test starts without one.
   forgetIdentityMemories();
+  // Revision 6 (R7): nor a kept import session (page memory that outlives a mount by design, `import-kept.ts`).
+  forgetImportSessions();
   const world = new DataTestWorld();
   world.idb.autoDrive = true;
   const page = world.page("A");
@@ -281,8 +292,22 @@ export async function calendarWorld(
         <DataEnvProvider env={env}>
           <ShellEnvProvider
             value={{
-              syncModel: { phase: "synced", pendingCount: 0, conflictCount: 0 },
-              onOpenSync: () => {},
+              syncModel: options.syncModel ?? {
+                phase: "synced",
+                pendingCount: 0,
+                conflictCount: 0,
+              },
+              onOpenSync: options.productionSync
+                ? (destination) => {
+                    void router.navigate({
+                      to: "/sync",
+                      search: {
+                        tab:
+                          destination === "conflicts" ? "conflicts" : "queue",
+                      },
+                    });
+                  }
+                : () => {},
             }}
           >
             <RouterProvider router={router} />

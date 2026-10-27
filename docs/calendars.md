@@ -135,7 +135,8 @@ the previous one at once, and nothing is admitted (the button, Enter, a direct s
 settles only what it submitted (R3): a file, source or window changed while it was being stored keeps the dialog open with the newer
 choices and "Import queued as it was when you pressed Import. Your newer changes are still here." The drop zone's dialog offers one page of
 cached sources (100) with "Show previous/next calendars" (`source-pages.tsx`, R4), the chosen one staying an option while another page is
-shown. The file's text lives in the dialog's memory only. The **Imports** panel lists this device's outstanding imports from draft HEADERS only
+shown. The file's text lives in page memory only, in the dialog's editing session (revision 6, R7, below), never in storage, a trace, a log, the
+address or another tab. The **Imports** panel lists this device's outstanding imports from draft HEADERS only
 (`useDraftHeaders` / `readDraftHeaders`; an import's body is never read for a list, and `readOutstanding` asked for a kind no longer
 loads a newer draft of another kind: E6): Queued, Sent (trying again), Sent — couldn't confirm yet (link to the queue), Import accepted,
 refused with its reason (Dismiss), or the capacity words (link to the queue). No count of imported events is ever claimed.
@@ -174,8 +175,23 @@ cancelled panel's late save changes nothing) whichever panel shows it then. Told
 task as it is then (still checked when written). The in-dialog sync control keeps the session for the next panel opened while the task's
 visit goes on (ia.md §1.3.3, I1; `tasks/detail/anchor-kept.ts`, owned by the visit, for the task detail; a panel that left without Cancel
 leaves its input there too; the panel belongs to the visit going on when it opens, even in a section React kept mounted through a departure
-and return, revision 3 R3c; the form's own session for the new-task form); the import dialog
-does not keep input there, as WEB-13a's calendar dialogs do not: the Calendars screen's visit ends at the sync screens (`visit.ts`). The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
+and return, revision 3 R3c; the form's own session for the new-task form).
+
+**The import dialog keeps its input through the in-dialog sync control** (revision 6, review 6 R7; ia.md §1.3.3, the J2 dialog rule). The
+dialog PRESENTS one editing session (`import-editor.ts`): the source (the drop zone's chooser, the source shown kept as its own), the raw
+window, the file and its check, a read under way (one ticket per choice: the latest wins), the inline messages, what the last save said, the
+save being made (one at a time, a ticket captured at the press) and its identity. The session belongs to the import's VISIT
+(`import-kept.ts`): it begins at the Calendars screen, goes on at `/sync` (queue or conflicts) and ends at any other address the document
+reaches, mounted or not. It is NOT the Calendars screen's automatic-read visit (`visit.ts`), which still ends at the sync screens. Back and
+Import events again from the same entry (the same row; the drop zone's Browse, which then asks for no file; a file dropped on the zone is a
+new choice in it) show the same session, with a read or a save that went on meanwhile settled in it: a queued save with nothing edited since
+consumes it, newer input stays with "Import queued as it was…", a refusal stays with its words. A different row is a new import. Cancel,
+Escape and the close icon end it (a save already made stays queued and is announced). Another account or epoch, signing out (observed while
+it is kept), another database incarnation (checked when it is shown or saved) and, while it is kept, the cache being brought up to date end
+it; a revoked session's late save is not announced. The source's state is read afresh whenever it is shown. Sync, reopening and a read
+completing never store anything; a reload or another tab has no session. `tests/features/calendars/import-retention.test.tsx` (I1-I13
+through the production router), `import-editor.test.ts`, `import-kept.test.ts`, E-IMP7 in `tests/e2e/fixture.calendar-import.spec.ts`;
+mutants MU-2637 to MU-2655. WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
 **Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the

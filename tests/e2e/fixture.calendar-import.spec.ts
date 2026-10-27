@@ -596,3 +596,232 @@ test.describe("E-IMP6: the PRODUCTION leader and the page host's registrations",
       .toBe("acknowledged");
   });
 });
+
+test.describe("E-IMP7: the in-dialog sync control keeps the import (revision 6, R7; ia.md §1.3.3, the J2 dialog rule)", () => {
+  /**
+   * Review 6 R7 in a real engine, real File reads and the PRODUCTION router: the import dialog's sync control keeps what the person chose
+   * (file, source, window, a read under way), closes and navigates to `/sync`; Back and opening Import events again show it. Nothing is
+   * stored or sent until Import is pressed, nothing of the file reaches storage or history, and another page or a reload has none of it.
+   */
+  const MARK = "R7-RETAINED-MARK";
+  const text = () => calendarText(1).replace("Bin day 0", MARK);
+  const syncScreen = async (page: Page) => {
+    await expect(page).toHaveURL(/\/sync(?:\?|$)/);
+    await expect(
+      page.getByRole("heading", { name: "Sync", exact: true }),
+    ).toBeVisible();
+  };
+  const viaSync = async (page: Page) => {
+    const dialog = page.getByRole("dialog", { name: "Import events" });
+    await dialog.locator("button[data-sync-tone]").click();
+    await syncScreen(page);
+    await expect(dialog).toBeHidden();
+    await page.goBack();
+    await expect(page).toHaveURL(/settings\/calendars/);
+  };
+  const shown = async (page: Page) => {
+    const dialog = page.getByRole("dialog", { name: "Import events" });
+    await expect(dialog).toBeVisible();
+    const file = dialog.locator("[data-import-file]");
+    return {
+      file: (await file.count()) > 0 ? await file.textContent() : null,
+      from: await dialog.getByLabel("From", { exact: true }).inputValue(),
+      through: await dialog.getByLabel("Through", { exact: true }).inputValue(),
+    };
+  };
+  /** Nothing of the file in storage, history or the address (the drafts store is checked separately). */
+  const leaks = (page: Page) =>
+    page.evaluate((mark) => {
+      const found: string[] = [];
+      for (const store of [localStorage, sessionStorage])
+        for (let i = 0; i < store.length; i += 1) {
+          const key = store.key(i) ?? "";
+          if (`${key}${store.getItem(key)}`.includes(mark)) found.push(key);
+        }
+      if (JSON.stringify(history.state ?? null).includes(mark))
+        found.push("history.state");
+      if (location.href.includes(mark)) found.push("location");
+      return found;
+    }, MARK);
+  const openRow = (page: Page) =>
+    page.getByRole("button", { name: "Import events into Work rota" }).click();
+
+  test("a row's import: file and edited window kept through /sync and Back; nothing stored, sent or written to storage/history", async ({
+    context,
+  }) => {
+    const { page, cal } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    await openRow(page);
+    const dialog = await chooseFile(page, text(), "retained.ics");
+    await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+    await dialog.getByLabel("Through", { exact: true }).fill("2026-12-31");
+    await viaSync(page);
+    await openRow(page);
+    expect(await shown(page)).toEqual({
+      file: expect.stringContaining("retained.ics"),
+      from: "2026-01-01",
+      through: "2026-12-31",
+    });
+    expect(await rows(page, "drafts")).toHaveLength(0);
+    expect(cal.wire.filter((w) => w.method === "POST")).toHaveLength(0);
+    expect(await leaks(page)).toEqual([]);
+    // Then Import stores exactly what was kept.
+    await dialog.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    const stored = await draftOf(page, IMPORT_ENDPOINT);
+    expect(stored?.target_id).toBe(SOURCE);
+  });
+
+  test("control: Cancel discards (the next dialog has no file and the default window)", async ({
+    context,
+  }) => {
+    const { page } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    await openRow(page);
+    const dialog = await chooseFile(page, text(), "retained.ics");
+    await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await openRow(page);
+    const now = await shown(page);
+    expect(now.file).toBeNull();
+    expect(now.from).not.toBe("2026-01-01");
+  });
+
+  test("the drop zone's import (Browse): kept through /sync and Back; Browse shows it again without the file picker", async ({
+    context,
+  }) => {
+    const { page } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    const zone = page.locator("[data-import-drop]");
+    await zone.locator('input[type="file"]').setInputFiles({
+      name: "dropped.ics",
+      mimeType: "text/calendar",
+      buffer: Buffer.from(text(), "utf8"),
+    });
+    const dialog = page.getByRole("dialog", { name: "Import events" });
+    await expect(dialog.locator("[data-import-file]")).toContainText(
+      "dropped.ics",
+    );
+    await dialog.getByLabel("Through", { exact: true }).fill("2026-12-31");
+    await viaSync(page);
+    let pickers = 0;
+    page.on("filechooser", () => {
+      pickers += 1;
+    });
+    await zone.getByRole("button", { name: "browse" }).click();
+    expect(await shown(page)).toMatchObject({
+      file: expect.stringContaining("dropped.ics"),
+      through: "2026-12-31",
+    });
+    expect(pickers).toBe(0);
+    expect(await rows(page, "drafts")).toHaveLength(0);
+  });
+
+  test("a file read still under way at the sync control settles while away (a held read, released at /sync): shown on return, nothing stored", async ({
+    context,
+  }) => {
+    const { page } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    // A test barrier, not a File change: the page's next Blob read waits for `release` (its bytes are the real file's).
+    await page.evaluate(() => {
+      const original = Blob.prototype.arrayBuffer;
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      (window as unknown as { __r7Release: () => void }).__r7Release = release;
+      Blob.prototype.arrayBuffer = async function (this: Blob) {
+        Blob.prototype.arrayBuffer = original;
+        await gate;
+        return original.call(this);
+      };
+    });
+    await openRow(page);
+    const dialog = page.getByRole("dialog", { name: "Import events" });
+    await dialog.locator('input[type="file"]').setInputFiles({
+      name: "slow.ics",
+      mimeType: "text/calendar",
+      buffer: Buffer.from(text(), "utf8"),
+    });
+    await expect(dialog.getByText("Checking the file…")).toBeVisible();
+    await dialog.locator("button[data-sync-tone]").click();
+    await syncScreen(page);
+    await page.evaluate(() =>
+      (window as unknown as { __r7Release: () => void }).__r7Release(),
+    );
+    await page.goBack();
+    await expect(page).toHaveURL(/settings\/calendars/);
+    await openRow(page);
+    await expect(dialog.locator("[data-import-file]")).toContainText(
+      "slow.ics",
+    );
+    await expect(dialog.getByText("Checking the file…")).toBeHidden();
+    expect(await rows(page, "drafts")).toHaveLength(0);
+  });
+
+  test("two pages and a new document: another page never shows this page's kept import; a reloaded page has none; a consented import persists", async ({
+    context,
+  }) => {
+    const { page } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    await openRow(page);
+    const dialog = await chooseFile(page, text(), "page-a.ics");
+    await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+    await dialog.locator("button[data-sync-tone]").click();
+    await syncScreen(page);
+    // A second page of the same browser, at the Calendars screen.
+    const other = await context.newPage();
+    await other.goto(ROUTE);
+    await other.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await other.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(
+      other.getByRole("heading", { level: 1, name: "Calendar sources" }),
+    ).toBeVisible();
+    await openRow(other);
+    expect((await shown(other)).file).toBeNull();
+    const b = await chooseFile(other, calendarText(1), "page-b.ics");
+    await b.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(b).toBeHidden();
+    expect(await rows(other, "drafts")).toHaveLength(1);
+    // Page A still has its own kept import.
+    await page.goBack();
+    await openRow(page);
+    expect(await shown(page)).toMatchObject({
+      file: expect.stringContaining("page-a.ics"),
+      from: "2026-01-01",
+    });
+    await page
+      .getByRole("dialog", { name: "Import events" })
+      .locator("button[data-sync-tone]")
+      .click();
+    await syncScreen(page);
+    await page.goBack();
+    // A new document for page A (the fixture boots only through its session entry, so the reload loads that address): no session survives
+    // it; the stored import does, and holds page B's file only.
+    await page.goto(ROUTE);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Calendar sources" }),
+    ).toBeVisible();
+    await openRow(page);
+    expect((await shown(page)).file).toBeNull();
+    const commands = (await rows(page, "draft_commands")) as Array<{
+      command: { ics?: string };
+    }>;
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.command.ics?.includes(MARK)).toBe(false);
+    expect(await leaks(page)).toEqual([]);
+    expect(await leaks(other)).toEqual([]);
+  });
+});

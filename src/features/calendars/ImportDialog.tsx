@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useSyncExternalStore } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { Dialog } from "../../components/ui/dialog";
@@ -23,7 +23,6 @@ import {
   IMPORT,
   IMPORT_CLOSED_REFRESHING,
   IMPORT_QUEUED,
-  IMPORT_QUEUED_NEWER,
   IMPORT_TITLE,
   NO_SOURCES_TO_IMPORT,
   READING,
@@ -38,21 +37,15 @@ import {
 } from "./copy-import";
 import { Field, FormMessage } from "./fields";
 import { importEnablement } from "./import-action";
+import type { ImportEditor } from "./import-editor";
+import { discardImport, hideImport, showImport } from "./import-kept";
 import {
   CONFIGURE_SOURCE,
   CREATE_SOURCE,
   importRequest,
 } from "./model/commands";
-import {
-  checkWindow,
-  defaultWindow,
-  envelopeBytes,
-  IMPORT_LIMITS,
-  type ImportFileCheck,
-  readImportFile,
-} from "./model/import";
+import { checkWindow, envelopeBytes, IMPORT_LIMITS } from "./model/import";
 import { displayedRow } from "./model/status";
-import { createSubmission } from "./model/submission";
 import { projectSourceCreate } from "./register";
 import { type SourcePage, SourcePages, useSourcePage } from "./source-pages";
 
@@ -130,18 +123,11 @@ export function useImportableSources(): { rows: CacheRow[]; page: SourcePage } {
   return { rows, page };
 }
 
-interface ChosenFile {
-  name: string;
-  /** Mints a new submission for every file read (the text itself is never hashed). */
-  token: number;
-  check: ImportFileCheck;
-}
-
 /**
  * "Import events" (WEB-13b §4.2; Q22 "file imports"): an `.ics` file read and checked ON THIS DEVICE, a coverage window, and one queued
  * import. Nothing is sent from here: Import stores the draft (offline included) and the page's leader sends it, behind the source's own
- * pending create when there is one (case 2). The file's text lives in this dialog's memory only and leaves with it; it is never put in a
- * recovery copy, a trace or a log (E11).
+ * pending create when there is one (case 2). The file's text lives in page memory only, in the dialog's editing session; it is never put
+ * in a recovery copy, a trace, a log, the address or another tab (E11).
  *
  * Explicit consent is the dialog itself: the file's name, size and event count, the source and the window are shown, and nothing is
  * stored until Import is pressed. A save the outbox refuses keeps the dialog open with what was chosen; pressing Import again for the
@@ -152,82 +138,64 @@ interface ChosenFile {
  * imported (the button, Enter or any other submission) until the new one has been read and checked. A save settles only what it
  * submitted (R3, PRODUCT-DECISIONS-20261011): when the file, source or window was changed while it was being stored, the dialog stays
  * open with the newer choices and says that the import was queued as it was pressed.
+ *
+ * Revision 6 (review 6 R7; ia.md §1.3.3, the J2 dialog rule): the dialog is a PRESENTATION of its editing session (`import-editor.ts`),
+ * which the import's visit owns (`import-kept.ts`). The in-dialog sync control keeps the session, closes and navigates; Back and Import
+ * events again show it, with a read or a save that went on meanwhile settled in it. Cancel, Escape and the close icon discard it. The
+ * source's state is read afresh whenever it is shown: a kept choice is never kept permission.
  */
 export function ImportDialog({
   sourceId,
-  file: initialFile,
+  editor,
+  owned,
   onClose,
 }: {
   /** The source, fixed (a row's "Import events"), or null: the person chooses (the drop zone). */
   sourceId: string | null;
-  file?: File;
+  /** The editing session shown. */
+  editor: ImportEditor;
+  /** Whether the session may still be saved (its identity displayed, its database the displayed one), asked at the press. */
+  owned(): boolean;
   onClose(): void;
 }) {
   const env = useOptionalDataEnv();
   const announcer = useAnnouncer();
   const formId = useId();
   const fileInputId = useId();
-  const [chosen, setChosen] = useState<string | null>(sourceId);
+  const editing = useSyncExternalStore(
+    editor.subscribe,
+    editor.state,
+    editor.state,
+  );
+  const {
+    chosen,
+    window: window_,
+    errors,
+    message,
+    busy,
+    file,
+    reading,
+  } = editing;
   const importable = useImportableSources();
   // The drop zone's dialog starts on the first source it may import into.
   const selected = sourceId ?? chosen ?? importable.rows[0]?.id ?? null;
   const { state, refreshing } = useSourceState(selected);
-  const [window_, setWindow] = useState(() => defaultWindow(deviceToday()));
-  const [errors, setErrors] = useState<{
-    file: string | null;
-    from: string | null;
-    through: string | null;
-  }>({ file: null, from: null, through: null });
-  const [message, setMessage] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [file, setFile] = useState<ChosenFile | null>(null);
-  const [reading, setReading] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
-  const tokens = useRef(0);
-  // The file being read now (its token), or null: while set, nothing can be imported (R1). A ref, so a submission in the same turn as the
-  // choice is refused as well.
-  const pendingRead = useRef<number | null>(null);
-  // Every change of what would be imported (file, source, window) moves this: a save settles the dialog only at the revision it submitted.
-  const revision = useRef(0);
-  const submission = useRef(
-    createSubmission<{
-      source: string;
-      from: string;
-      through: string;
-      file: number;
-    }>(() => crypto.randomUUID()),
-  );
-  // A synchronous latch: a second press (or Enter) before the screen shows the first as busy stores nothing more.
-  const saving = useRef(false);
-  const mounted = useRef(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  // This dialog shows the session until it unmounts; leaving without a discard keeps it (`import-kept.ts`). Its own save consuming it
+  // closes this dialog, and only this one (the screen clears the dialog only while it still shows this session).
   useEffect(() => {
-    mounted.current = true;
+    showImport(editor);
+    const off = editor.subscribe((event) => {
+      if (event === "consumed") onCloseRef.current();
+    });
     return () => {
-      mounted.current = false;
+      off();
+      hideImport(editor);
     };
-  }, []);
-
-  const choose = async (picked: File | undefined) => {
-    if (picked === undefined) return;
-    tokens.current += 1;
-    const token = tokens.current;
-    revision.current += 1;
-    pendingRead.current = token;
-    // The previous file is no longer the person's choice: it is forgotten now, not when the new one has been read.
-    setFile(null);
-    setReading(true);
-    setErrors((e) => ({ ...e, file: null }));
-    const check = await readImportFile(picked);
-    // A later choice wins; a read that finishes after the dialog closed shows nothing.
-    if (!mounted.current || token !== tokens.current) return;
-    pendingRead.current = null;
-    setReading(false);
-    setFile({ name: picked.name, token, check });
-  };
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the file the dialog was opened with is read once
-  useEffect(() => {
-    if (initialFile !== undefined) void choose(initialFile);
-  }, []);
+  }, [editor]);
+  const discard = () => discardImport(editor);
 
   // Closed once, with the reason announced, when the cache is being brought up to date under a cached source (the Manage rule, E9).
   const closed = useRef(false);
@@ -235,8 +203,9 @@ export function ImportDialog({
     if (!refreshing || closed.current) return;
     closed.current = true;
     announcer.announce(IMPORT_CLOSED_REFRESHING);
+    discardImport(editor);
     onClose();
-  }, [refreshing, announcer, onClose]);
+  }, [refreshing, announcer, onClose, editor]);
 
   const source = state.kind === "shown" ? state.row : null;
   const enablement =
@@ -256,10 +225,11 @@ export function ImportDialog({
       ? (FILE_PROBLEMS[file.check.reason] ?? null)
       : null;
 
-  const submit = async () => {
-    if (saving.current || !enablement.enabled || source === null) return;
+  const submit = () => {
+    if (!enablement.enabled || source === null) return;
     // While the latest choice is still being read nothing is imported (nor said to be missing), whatever submitted the form.
-    if (pendingRead.current !== null) return;
+    if (editor.state().reading) return;
+    const { file, window: window_ } = editor.state();
     const windowCheck = checkWindow(window_.from, window_.through);
     const windowError = windowCheck.ok
       ? null
@@ -287,7 +257,7 @@ export function ImportDialog({
         IMPORT_LIMITS.envelopeBytes
     )
       next.file = FILE_PROBLEMS.envelope ?? null;
-    setErrors(next);
+    editor.setErrors(next);
     if (
       next.file !== null ||
       next.from !== null ||
@@ -296,61 +266,55 @@ export function ImportDialog({
       !file.check.ok
     )
       return;
-    const outbox = env?.outbox() ?? null;
-    if (outbox === null) {
-      setMessage(NEEDS_DATABASE);
+    // A session of an identity or a database no longer displayed is never saved: it ends, and the dialog closes.
+    if (!owned()) {
+      discardImport(editor);
+      onClose();
       return;
     }
-    const pair = submission.current.attempt({
-      source: source.id,
-      from: window_.from,
-      through: window_.through,
-      file: file.token,
-    });
-    const submitted = revision.current;
-    setBusy(true);
-    setMessage(null);
-    saving.current = true;
-    try {
-      const outcome = await outbox.enqueue(
-        importRequest({
-          sourceId: source.id,
-          ics: file.check.ics,
-          from: window_.from,
-          through: window_.through,
-          localId: pair.key,
-        }),
-      );
-      if (outcome.kind === "queued") {
-        // Its identity is spent: pressing Import again, even for the same choices, is a new import.
-        submission.current.invalidate();
-        announcer.announce(IMPORT_QUEUED);
-        // A save that finished after the dialog closed closes nothing: another dialog may be open by then. One whose choices were changed
-        // meanwhile keeps them (nothing newer is lost) and says what was queued.
-        if (!mounted.current) return;
-        if (revision.current === submitted) onClose();
-        else setMessage(IMPORT_QUEUED_NEWER);
-        return;
-      }
-      if (mounted.current)
-        setMessage(
-          outcome.reason === "denied"
-            ? VIEW_ONLY_IMPORT
-            : refusalMessage(outcome.reason),
-        );
-    } catch {
-      // A request the facade refused as built wrongly, or a failure it did not classify: nothing was stored.
-      if (mounted.current) setMessage(NOT_SAVED);
-    } finally {
-      saving.current = false;
-      if (mounted.current) setBusy(false);
+    const outbox = env?.outbox() ?? null;
+    if (outbox === null) {
+      editor.setMessage(NEEDS_DATABASE);
+      return;
     }
+    const ics = file.check.ics;
+    const { from, through } = window_;
+    const into = source.id;
+    // One save at a time (the session's synchronous latch): a second press, or Enter, before the screen shows the first as busy stores
+    // nothing more. What is saved is what was pressed, captured now; only this save settles the session, and only while it has not ended.
+    editor.submit(
+      { source: into, from, through, file: file.token },
+      async (key) => {
+        try {
+          const outcome = await outbox.enqueue(
+            importRequest({ sourceId: into, ics, from, through, localId: key }),
+          );
+          if (outcome.kind === "queued") return { kind: "queued" };
+          return {
+            kind: "refused",
+            message:
+              outcome.reason === "denied"
+                ? VIEW_ONLY_IMPORT
+                : refusalMessage(outcome.reason),
+          };
+        } catch {
+          // A request the facade refused as built wrongly, or a failure it did not classify: nothing was stored.
+          return { kind: "refused", message: NOT_SAVED };
+        }
+      },
+      () => announcer.announce(IMPORT_QUEUED),
+    );
   };
 
   return (
     <Dialog
       open
       onClose={onClose}
+      onDiscard={discard}
+      // The chooser's source shown is kept as the session's, so the session comes back to it whatever the first page offers then.
+      onRetainDraft={() => {
+        if (sourceId === null && selected !== null) editor.pinSource(selected);
+      }}
       title={IMPORT_TITLE}
       footer={
         <>
@@ -371,7 +335,13 @@ export function ImportDialog({
               {IMPORT}
             </Button>
           )}
-          <Button variant="secondary" onClick={onClose}>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              discard();
+              onClose();
+            }}
+          >
             {CANCEL}
           </Button>
         </>
@@ -383,7 +353,7 @@ export function ImportDialog({
         className="flex flex-col gap-4"
         onSubmit={(event) => {
           event.preventDefault();
-          void submit();
+          submit();
         }}
       >
         <div className="flex flex-col gap-1.5">
@@ -400,10 +370,7 @@ export function ImportDialog({
                 id={`${formId}-source`}
                 data-field-edge=""
                 value={selected ?? ""}
-                onChange={(event) => {
-                  revision.current += 1;
-                  setChosen(event.target.value);
-                }}
+                onChange={(event) => editor.chooseSource(event.target.value)}
                 className="atlas-transition box-border min-h-11 w-full rounded-control border border-field-edge bg-canvas px-3 py-2.5 text-[14px] text-ink-1"
               >
                 {/* The chosen source stays an option while another page of sources is shown. */}
@@ -420,7 +387,7 @@ export function ImportDialog({
               <SourcePages
                 page={importable.page}
                 onPage={() => {
-                  if (chosen === null && selected !== null) setChosen(selected);
+                  if (selected !== null) editor.pinSource(selected);
                 }}
               />
             </>
@@ -461,7 +428,7 @@ export function ImportDialog({
             hidden
             // The value is cleared just before the picker opens (so the same file can be chosen again), never right after a choice:
             // WebKit fails the read of a File whose input was cleared while it is still being read.
-            onChange={(event) => void choose(event.target.files?.[0])}
+            onChange={(event) => editor.choose(event.target.files?.[0])}
           />
           <span className="flex">
             <Button
@@ -491,10 +458,7 @@ export function ImportDialog({
           type="date"
           value={window_.from}
           error={errors.from}
-          onChange={(event) => {
-            revision.current += 1;
-            setWindow((w) => ({ ...w, from: event.target.value }));
-          }}
+          onChange={(event) => editor.editWindow({ from: event.target.value })}
         />
         <Field
           label={THROUGH}
@@ -502,10 +466,9 @@ export function ImportDialog({
           type="date"
           value={window_.through}
           error={errors.through}
-          onChange={(event) => {
-            revision.current += 1;
-            setWindow((w) => ({ ...w, through: event.target.value }));
-          }}
+          onChange={(event) =>
+            editor.editWindow({ through: event.target.value })
+          }
         />
         <p className="text-[12.5px] leading-[1.6] text-ink-2">
           {DIALOG_BOUNDS}

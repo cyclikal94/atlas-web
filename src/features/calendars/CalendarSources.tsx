@@ -12,6 +12,7 @@ import { List } from "../../components/ui/list";
 import { PageHeading } from "../../components/ui/page-heading";
 import {
   type CacheRow,
+  cacheGateOf,
   type DraftWithCommand,
   type ListedResource,
   useCacheGate,
@@ -42,10 +43,17 @@ import {
   SHOW_PREVIOUS,
   WAITING_GROUP,
 } from "./copy";
-import { ImportDialog } from "./ImportDialog";
+import { deviceToday, ImportDialog } from "./ImportDialog";
 import { ImportDropZone } from "./ImportDropZone";
 import { ImportsPanel } from "./ImportsPanel";
-import { ImportOpenerContext, type OpenImport } from "./import-opener";
+import type { ImportEditor } from "./import-editor";
+import {
+  type ImportOwnerContext,
+  importOwned,
+  openImport as openImportSession,
+  resumeChooser,
+} from "./import-kept";
+import { type ImportOpener, ImportOpenerContext } from "./import-opener";
 import { LinkCalendarDialog } from "./LinkCalendarDialog";
 import { ManageSourceDialog } from "./ManageSourceDialog";
 import { identityMemory } from "./memory";
@@ -106,8 +114,8 @@ export function CalendarSources() {
 export type Dialog =
   | { kind: "add" }
   | { kind: "link" }
-  /** WEB-13b: an import into `sourceId` (null: chosen in the dialog), with a file already chosen or dropped. */
-  | { kind: "import"; sourceId: string | null; file?: File }
+  /** WEB-13b: an import into `sourceId` (null: chosen in the dialog); revision 6 (R7): showing its editing session. */
+  | { kind: "import"; sourceId: string | null; editor: ImportEditor }
   | {
       kind: "manage";
       row: CacheRow;
@@ -269,15 +277,48 @@ function Sources() {
   const markAwaiting = useCallback((id: string, version: number) => {
     setAwaiting((previous) => new Map(previous).set(id, version));
   }, []);
-  const openImport = useCallback<OpenImport>(
-    (sourceId, file) =>
-      setDialog(
-        file === undefined
-          ? { kind: "import", sourceId }
-          : { kind: "import", sourceId, file },
-      ),
-    [],
+  // Revision 6 (R7): the import dialog shows an editing session the import's visit owns (`import-kept.ts`), so the in-dialog sync control
+  // keeps it. What it is owned by: the displayed identity (observed while it is kept), the database and the cache gate of now.
+  const session = useSession();
+  const identityKey =
+    api === null ? null : `${api.identity.account}:${api.identity.epoch}`;
+  const ownerContext = useCallback((): ImportOwnerContext | null => {
+    if (identityKey === null || env === null) return null;
+    return {
+      identity: identityKey,
+      identities: session.identity,
+      incarnation: env.service()?.incarnationId ?? null,
+      gate: cacheGateOf(env),
+      today: deviceToday(),
+    };
+  }, [identityKey, env, session]);
+  const opener = useMemo<ImportOpener>(
+    () => ({
+      open: (sourceId, file) => {
+        const context = ownerContext();
+        if (context === null) return;
+        const editor = openImportSession(
+          sourceId === null ? { kind: "chooser" } : { kind: "row", sourceId },
+          context,
+        );
+        // A file chosen or dropped on the zone is the session's newest choice (a kept chooser's source and window stay).
+        if (file !== undefined) editor.choose(file);
+        setDialog({ kind: "import", sourceId, editor });
+      },
+      resumeChooser: () => {
+        const context = ownerContext();
+        const editor = context === null ? null : resumeChooser(context);
+        if (editor === null) return false;
+        setDialog({ kind: "import", sourceId: null, editor });
+        return true;
+      },
+    }),
+    [ownerContext],
   );
+  const closeImport = (editor: ImportEditor) =>
+    setDialog((shown) =>
+      shown?.kind === "import" && shown.editor === editor ? null : shown,
+    );
 
   return (
     <>
@@ -341,7 +382,7 @@ function Sources() {
             {NO_DATABASE}
           </p>
         ) : (
-          <ImportOpenerContext.Provider value={openImport}>
+          <ImportOpenerContext.Provider value={opener}>
             <CacheGate>
               <CachedSources
                 environment={environment}
@@ -366,9 +407,14 @@ function Sources() {
       ) : null}
       {dialog?.kind === "import" ? (
         <ImportDialog
+          key={dialog.editor.session}
           sourceId={dialog.sourceId}
-          {...(dialog.file === undefined ? {} : { file: dialog.file })}
-          onClose={() => setDialog(null)}
+          editor={dialog.editor}
+          owned={() => {
+            const context = ownerContext();
+            return context !== null && importOwned(dialog.editor, context);
+          }}
+          onClose={() => closeImport(dialog.editor)}
         />
       ) : null}
       {dialog?.kind === "link" && api !== null ? (

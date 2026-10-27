@@ -351,6 +351,20 @@ export function useCacheGate(): GateState {
   return useMemo(() => deriveGate(inputs), [inputs]);
 }
 
+/**
+ * The cache gate of `env` outside React (WEB-13b revision 6, R7): read and observed by what outlives the screen that showed it (a kept import
+ * session, while no screen shows the gate).
+ */
+export function cacheGateOf(env: DataEnv): {
+  get(): GateState;
+  subscribe(listener: () => void): () => void;
+} {
+  return {
+    get: () => deriveGate(env.inputs.get()),
+    subscribe: (listener) => env.inputs.subscribe(listener),
+  };
+}
+
 // ---- the queue --------------------------------------------------------------------------------------------------------------------
 export function useQueueSummary(): Loadable<QueueSummary> {
   return useStore(useDataEnv().summary);

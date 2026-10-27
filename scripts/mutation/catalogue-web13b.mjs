@@ -411,14 +411,15 @@ export const UNIT_13B = [
     id: "MU-2464",
     title:
       "WEB-13b §4.2: the import dialog has no synchronous latch (a double press stores two imports)",
-    file: "src/features/calendars/ImportDialog.tsx",
+    // Revision 6 (R7): re-expressed in the editing session, which now holds the one-save-at-a-time latch (same defect).
+    file: "src/features/calendars/import-editor.ts",
     tests: [T_IMPORT_UI],
     expect: /two submissions in the same task enqueue once/,
     patch: (t) =>
       sub(
         t,
-        "    if (saving.current || !enablement.enabled || source === null) return;\n",
-        "    if (!enablement.enabled || source === null) return;\n",
+        "      if (over || waiting !== null || submission === null) return false;\n",
+        "      if (over || submission === null) return false;\n",
       ),
   },
   {

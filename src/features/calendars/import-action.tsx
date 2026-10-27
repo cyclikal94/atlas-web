@@ -47,7 +47,7 @@ export function ImportAction({ source }: { source: CalendarSourceView }) {
   });
   const name = importEventsName(source.label);
   return enablement.enabled ? (
-    <Button aria-label={name} onClick={() => open?.(source.id)}>
+    <Button aria-label={name} onClick={() => open?.open(source.id)}>
       {IMPORT_EVENTS}
     </Button>
   ) : (
