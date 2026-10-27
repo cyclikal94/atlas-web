@@ -494,8 +494,10 @@ describe("review 7's design assessment (DA7-12): a hand-off from the queue to th
         childList: true,
         characterData: true,
       });
+      // Adapted in revision 17 (R16.1): the detail reads its field pages with their person (`data.readChildPage`, was
+      // `readResourceList`), so that is the read held back here; the schedule and assertions are unchanged.
       w.freezeReads(
-        first === "the queue's read" ? "data.readResourceList" : OUTSTANDING,
+        first === "the queue's read" ? "data.readChildPage" : OUTSTANDING,
       );
       w.handOff(
         [

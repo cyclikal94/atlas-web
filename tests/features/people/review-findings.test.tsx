@@ -1200,8 +1200,9 @@ describe("finding 5: a partial read is not a complete inventory", () => {
       input: Record<string, unknown>,
     ) => {
       const watch = original(plan, input);
+      // Adapted in revision 17 (R16.1): the detail's field pages are `data.readChildPage` reads (was `readResourceList`).
       if (
-        plan.name === "data.readResourceList" &&
+        plan.name === "data.readChildPage" &&
         input.parentId === P &&
         input.after
       )

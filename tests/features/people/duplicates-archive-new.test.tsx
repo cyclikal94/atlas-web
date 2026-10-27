@@ -278,6 +278,22 @@ describe("review 4, finding 5: the ledger says 'Nothing archived' only after eve
     expect(screen.queryByText(EMPTY)).toBeNull();
   });
 
+  // Revision 17: the people kind's read failing ALONE (the field kind read). The reviewer's case above fails every read, and the field
+  // kind (now read with its persons, its own state) then shows the failure by itself; this keeps the people kind's own state covered.
+  test("the archive read fails for the people kind alone: never 'Nothing archived', said with Try again", async () => {
+    const w = peopleWorld();
+    w.setCache([person({ id: Q, label: "Archived Ada", archived: true })]);
+    w.failRead("data.readResourceList", (input) => input.kind === "person");
+    await opened(w);
+    expect(screen.queryByText(EMPTY)).toBeNull();
+    expect(failedState()).not.toBeNull();
+    expect(
+      within(failedState() as HTMLElement).getByRole("button", {
+        name: "Try again",
+      }),
+    ).toBeInTheDocument();
+  });
+
   test("the outstanding drafts folded over the rows cannot be read: never 'Nothing archived'", async () => {
     const w = peopleWorld();
     w.setCache([person({ id: P, label: "Mo" })]);
