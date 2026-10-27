@@ -6,6 +6,7 @@
 // code a mutant targets fails LOUDLY here instead of silently turning the mutant into a no-op ("patch applied" is asserted).
 
 import { ENGINE_LIFECYCLE, UNIT_LIFECYCLE } from "./catalogue-web08c.mjs";
+import { ENGINE_LABELS, UNIT_LABELS } from "./catalogue-web08d.mjs";
 import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
 import { ENGINE_R17, UNIT_R17 } from "./catalogue-web10a-r17.mjs";
 import { ENGINE_R18, UNIT_R18 } from "./catalogue-web10a-r18.mjs";
@@ -23327,7 +23328,7 @@ export const UNIT = [
   },
 
   {
-    id: "MU-1701",
+    id: "MU-3701",
     title:
       "WEB-14a revision 3, R3: every success is a terminal act with what the form holds when it answers (input changed after the send is declared clean)",
     file: "src/lib/form-recovery/session.ts",
@@ -23348,7 +23349,7 @@ export const UNIT = [
   },
 
   {
-    id: "MU-1702",
+    id: "MU-3702",
     title:
       "WEB-14a revision 3, R3: a success compares values only (an edit back to the sent text is taken for the sent input)",
     file: "src/lib/form-recovery/session.ts",
@@ -23360,7 +23361,7 @@ export const UNIT = [
   },
 
   {
-    id: "MU-1703",
+    id: "MU-3703",
     title:
       "WEB-14a revision 3, R3: responses are applied in the order they arrive (an older success after a newer one acts again)",
     file: "src/lib/form-recovery/session.ts",
@@ -23376,7 +23377,7 @@ export const UNIT = [
   },
 
   {
-    id: "MU-1704",
+    id: "MU-3704",
     title:
       "WEB-14a revision 3, R10: a ticket completes in the session the hook shows when it answers (context A's success discards context B)",
     file: "src/lib/form-recovery/use-recoverable-form.ts",
@@ -23392,7 +23393,7 @@ export const UNIT = [
   },
 
   {
-    id: "MU-1705",
+    id: "MU-3705",
     title:
       "WEB-14a revision 3, R3/Q8: a completed ticket acts again (a success after a failure discards the copies)",
     file: "src/lib/form-recovery/use-recoverable-form.ts",
@@ -23404,7 +23405,7 @@ export const UNIT = [
   },
 
   {
-    id: "MU-1706",
+    id: "MU-3706",
     title:
       "WEB-14a revision 3, R10/Q8: a ticket taken before the form had a session is not waited for",
     file: "src/lib/form-recovery/use-recoverable-form.ts",
@@ -23421,7 +23422,7 @@ export const UNIT = [
   },
 
   {
-    id: "MU-1707",
+    id: "MU-3707",
     title:
       "WEB-14a revision 3, R10/Q8: a ticket taken before the form had a session joins a session of another form context",
     file: "src/lib/form-recovery/use-recoverable-form.ts",
@@ -27033,6 +27034,7 @@ export const UNIT = [
         "  } else if (false) {\n",
       ),
   },
+  ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];
 
@@ -30603,5 +30605,6 @@ export const ENGINE = [
         "",
       ),
   },
+  ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
 ];

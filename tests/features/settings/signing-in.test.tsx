@@ -45,6 +45,7 @@ import {
   attemptsDouble,
   sessionDouble,
   sessionRow,
+  WITHDRAW,
 } from "../../helpers/session-double";
 
 installMatchMedia({ width: 1440 });
@@ -192,10 +193,13 @@ describe("Signing in: change your password", () => {
     fillPasswords(dialog, "old-password", "😀😀😀");
     submitPassword(dialog);
     await waitFor(() =>
-      expect(session.operations.changePassword).toHaveBeenCalledWith({
-        current: "old-password",
-        next: "😀😀😀",
-      }),
+      expect(session.operations.changePassword).toHaveBeenCalledWith(
+        {
+          current: "old-password",
+          next: "😀😀😀",
+        },
+        WITHDRAW,
+      ),
     );
   });
 
@@ -462,7 +466,7 @@ describe("Signing in: linked accounts", () => {
       screen.getByRole("button", { name: `Remove idp.example.test` }),
     );
     await waitFor(() =>
-      expect(unlinkOidc).toHaveBeenCalledExactlyOnceWith(IDP),
+      expect(unlinkOidc).toHaveBeenCalledExactlyOnceWith(IDP, WITHDRAW),
     );
   });
 
@@ -899,6 +903,7 @@ describe("Signing in: connection-required controls are disabled while offline (r
     await waitFor(() =>
       expect(session.operations.changePassword).toHaveBeenCalledExactlyOnceWith(
         { current: "old-password", next: "brand-new-password" },
+        WITHDRAW,
       ),
     );
   });
@@ -1096,7 +1101,7 @@ describe("Signing in: connection-required controls are disabled while offline (r
     setOnline(true);
     fireEvent.click(remove);
     await waitFor(() =>
-      expect(unlinkOidc).toHaveBeenCalledExactlyOnceWith(IDP),
+      expect(unlinkOidc).toHaveBeenCalledExactlyOnceWith(IDP, WITHDRAW),
     );
   });
 
@@ -1264,7 +1269,7 @@ describe("Signing in: the five-minute window ends while the screen stays open (r
     vi.setSystemTime(Date.now() + OPEN_FOR_MS - 1);
     fireEvent.click(removeRow());
     await act(async () => undefined);
-    expect(unlinkOidc).toHaveBeenCalledExactlyOnceWith(IDP);
+    expect(unlinkOidc).toHaveBeenCalledExactlyOnceWith(IDP, WITHDRAW);
   });
 
   test("a timer that runs before the clock says the window has ended is not trusted: it waits for what remains", async () => {

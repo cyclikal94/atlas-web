@@ -71,7 +71,9 @@ export async function pool(items, jobs, action) {
 }
 
 // Own process groups only. SIGINT/SIGTERM stops jobs as well as preview grandchildren.
-export function processes(root) {
+// `base` (optional) replaces process.env as every child's environment, and `root`/`base` may be functions read at each start: the
+// held-operation runner's frozen execution environment and private snapshot (WEB-08d revision 28). Without them nothing changes.
+export function processes(root, { env: base = null } = {}) {
   const children = new Set();
   const groups = new Set();
   let cancelled = false;
@@ -94,8 +96,11 @@ export function processes(root) {
   function start(command, args, env = {}) {
     if (cancelled) throw new Error("validation cancelled");
     const child = spawn(command, args, {
-      cwd: root,
-      env: { ...process.env, ...env },
+      cwd: typeof root === "function" ? root() : root,
+      env: {
+        ...(typeof base === "function" ? base() : (base ?? process.env)),
+        ...env,
+      },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });

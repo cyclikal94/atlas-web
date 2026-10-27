@@ -66,6 +66,15 @@ export interface OidcFlow {
 export interface Hold {
   release(): void;
   stop(): void;
+  /** How many requests this hold has caught so far (held now, or released). */
+  caught(): number;
+}
+/** What a hold matches on. `page` is the page that issued the request (null when it has none), so a hold can be bound to one tab. */
+export interface HoldMatch {
+  method: string;
+  path: string;
+  n: number;
+  page: Page | null;
 }
 /** Where one request's ANSWER is: processed and not yet sent, held by a `Hold`, or terminal (delivered, aborted, failed to deliver). */
 export type DeliveryState =
@@ -135,17 +144,13 @@ export class AuthStub {
   private counter = 0;
   readonly oidcFlows: OidcFlow[] = [];
   private holds: Array<{
-    match: (r: {
-      method: string;
-      path: string;
-      n: number;
-      page: Page | null;
-    }) => boolean;
+    match: (r: HoldMatch) => boolean;
     gate: Promise<void>;
     open: () => void;
     active: boolean;
     remaining: number;
     handle: Hold;
+    caught: number;
   }> = [];
   private nextOverride: Array<{
     match: (r: { method: string; path: string }) => boolean;
@@ -181,12 +186,7 @@ export class AuthStub {
    * processed on arrival. `page` lets a hold pick one tab's requests.
    */
   hold(
-    match: (r: {
-      method: string;
-      path: string;
-      n: number;
-      page: Page | null;
-    }) => boolean,
+    match: (r: HoldMatch) => boolean,
     times = Number.POSITIVE_INFINITY,
   ): Hold {
     let open: () => void = () => undefined;
@@ -199,8 +199,17 @@ export class AuthStub {
         entry.active = false;
         entry.open();
       },
+      caught: () => entry.caught,
     };
-    const entry = { match, gate, open, active: true, remaining: times, handle };
+    const entry = {
+      match,
+      gate,
+      open,
+      active: true,
+      remaining: times,
+      handle,
+      caught: 0,
+    };
     this.holds.push(entry);
     return handle;
   }
@@ -351,6 +360,7 @@ export class AuthStub {
       hold.remaining -= 1;
       delivery.state = "held";
       delivery.hold = hold.handle;
+      hold.caught += 1;
       await hold.gate;
       delivery.state = "processing";
     }

@@ -57,7 +57,9 @@ if(args[1]==='vite'&&args[2]==='build'){
  record({kind:'test-start',mutant:info.mutant,report:process.env.PLAYWRIGHT_JSON_OUTPUT_FILE,evidence:process.env.ATLAS_EVIDENCE_DIR,url:process.env.ATLAS_FIXTURE_URL});
  await new Promise(r=>setTimeout(r,80));
  const projects=args.filter(a=>a.startsWith('--project=')).map(a=>a.slice(10));
- const report={suites:[{title:'spec',specs:[{title:'required assertion',tests:projects.map(projectName=>({projectName,expectedStatus:'passed',results:[{status:bad?'failed':'passed',errors:bad?[{message:'Error: expect(x).toBe(y)'}]:[]}]}))}]}]};
+ const extra=info.mutant&&process.env.MIXED_ORDER&&info.mutant.split(path.sep).includes(process.env.MIXED_MUTANT??'MU-A');
+ const errors=!bad?[]:!extra?[{message:'Error: expect(x).toBe(y)'}]:process.env.MIXED_ORDER==='error-first'?[{message:'TypeError: independent teardown failure'},{message:'Error: expect(x).toBe(y)'}]:[{message:'Error: expect(x).toBe(y)'},{message:'TypeError: independent teardown failure'}];
+ const report={suites:[{title:'spec',specs:[{title:'required assertion',tests:projects.map(projectName=>({projectName,expectedStatus:'passed',results:[{status:bad?'failed':'passed',errors}]}))}]}]};
  fs.writeFileSync(process.env.PLAYWRIGHT_JSON_OUTPUT_FILE,JSON.stringify(report));record({kind:'test-end',mutant:info.mutant});process.exitCode=bad?1:0;
 }else{throw Error('Unexpected simulator command '+args.join(' '));}
 `;
@@ -125,4 +127,34 @@ test("CLI failed control prevents building any mutants", (t) => {
   assert.equal(r.status, 1);
   assert.equal(r.summary.controls_pass, false);
   assert.equal(r.trace.filter((x) => x.kind === "build").length, 1);
+});
+// WEB-08d revision 18 (design assessment DA-N1, Q9): the ACTUAL native runner over the labelled process simulator. A mutant whose
+// intended assertion arrives with an unrelated error in the SAME case is not caught, the run fails, and (one job) the next mutant is
+// never built or tested. The healthy control above is the paired positive case.
+test("CLI same-case assertion plus unrelated error fails the run and admits no further mutant", (t) => {
+  for (const order of ["assertion-first", "error-first"]) {
+    const r = run(fixture(t), ["--only", "MU-A,MU-B", "--jobs", "1"], {
+      MIXED_ORDER: order,
+    });
+    assert.equal(r.status, 1, order);
+    assert.equal(r.summary.passed, false, order);
+    assert.equal(r.summary.caught, 0, order);
+    const starts = r.trace.filter((x) => x.kind === "test-start");
+    assert.equal(starts.length, 2, `${order}: the control and MU-A only`);
+    assert.ok(
+      !r.trace.some((x) => x.kind === "build" && /MU-B/.test(x.out)),
+      `${order}: MU-B is never built`,
+    );
+    const evidence = /Evidence: (.+)/.exec(r.stdout)[1];
+    const a = JSON.parse(
+      readFileSync(join(evidence, "engine-results.json"), "utf8"),
+    ).results.find((x) => x.id === "MU-A");
+    assert.equal(a.caught, false, order);
+    assert.equal(
+      a.error_kinds.error,
+      3,
+      `${order}: the error of each engine is kept`,
+    );
+    assert.equal(a.engines_with_expected_assertion_observed.length, 3, order);
+  }
 });

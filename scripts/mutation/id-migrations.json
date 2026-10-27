@@ -1,5 +1,5 @@
 {
-  "description": "Local WEB-14a merge of accepted WEB-10a b9fd602f. IDs on accepted main remain unchanged. The 24 colliding WEB-14a entries move by +1000; their patches and expected tests are unchanged. Historical evidence and approval plans retain their original IDs and candidate identity; apply this explicit mapping to future WEB-14a selections, never reinterpret old results as covering main entries.",
+  "description": "Local WEB-14a merge of accepted WEB-10a b9fd602f. IDs on accepted main remain unchanged. The 24 colliding WEB-14a entries move by +1000; their patches and expected tests are unchanged. Historical evidence and approval plans retain their original IDs and candidate identity; apply this explicit mapping to future WEB-14a selections, never reinterpret old results as covering main entries. The accepted WEB-08d merge of 27 October 2026 also moves seven colliding WEB-14a UNIT IDs 1701–1707 to 3701–3707; accepted-main IDs and historical evidence stay unchanged.",
   "mappings": [
     {
       "from": "MU-2012",
@@ -144,6 +144,55 @@
       "to": "MU-3024",
       "layer": "UNIT",
       "reason": "WEB-14a entry collides with a different accepted WEB-10a entry; patch and expected test unchanged"
+    },
+    {
+      "from": "MU-1701",
+      "to": "MU-3701",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
+      "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
+    },
+    {
+      "from": "MU-1702",
+      "to": "MU-3702",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
+      "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
+    },
+    {
+      "from": "MU-1703",
+      "to": "MU-3703",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
+      "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
+    },
+    {
+      "from": "MU-1704",
+      "to": "MU-3704",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
+      "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
+    },
+    {
+      "from": "MU-1705",
+      "to": "MU-3705",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
+      "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
+    },
+    {
+      "from": "MU-1706",
+      "to": "MU-3706",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
+      "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
+    },
+    {
+      "from": "MU-1707",
+      "to": "MU-3707",
+      "layer": "UNIT",
+      "reason": "WEB-14a entry collides with an accepted WEB-08d entry at efeca080; patch and expected tests unchanged",
+      "base": "efeca080e9113d5031f706c0f2fe9b7d0cd0c534"
     }
   ]
 }
