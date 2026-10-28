@@ -364,6 +364,8 @@ export function TimerBlock({
     account: evidence.authority?.account ?? null,
     ended: evidence.authority?.ended ?? new Set(),
     endedLost: evidence.authority?.endedLost ?? false,
+    // Revision 6 (R27): a lost finished session distrusts every positive up to and including its order (`positiveTrusted`).
+    endedThrough: evidence.authority?.endedThrough ?? 0,
   });
   const now = useSecond(running.length > 0);
   const [showSessions, setShowSessions] = useState(false);

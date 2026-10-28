@@ -13,8 +13,10 @@ import {
   readMaterialiseSequences,
   readTaskSequences,
   SEQUENCE_WINDOW,
+  TASK_SEQUENCE_DAYS,
   TASK_SEQUENCE_ROWS,
   TASK_SEQUENCE_TASKS,
+  type TaskSequencesAsk,
   writeMaterialiseDiscovery,
   writeMaterialiseSequence,
 } from "../../src/data/plans/materialise";
@@ -901,6 +903,7 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
         ended_at: day,
       },
       floor: 0,
+      through: 0,
     });
     // The same read's last page completes it: its running list is the day's.
     await observe(day, seen([id(2)], [id(1)], true));
@@ -944,7 +947,7 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
           `aaaaaaaa-0000-4000-8000-${String(i).padStart(12, "0")}`,
         ),
       );
-    expect(await read()).toEqual({ scope: null, floor: first });
+    expect(await read()).toEqual({ scope: null, floor: first, through: 0 });
   });
 
   test(`a list beyond ${TIMER_SCOPE_IDS} sessions is not kept: the floor rises to that read's order instead`, async () => {
@@ -955,6 +958,7 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
     expect(await read()).toEqual({
       scope: { seen: order, order: 0, running: [], ended: [], ended_at: 0 },
       floor: order,
+      through: 0,
     });
   });
 
@@ -964,7 +968,7 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
     expect(
       await observe(a, seen([], [], true), { leaseLive: () => false }),
     ).toMatchObject({ value: { applied: true, scoped: false } });
-    expect(await read()).toEqual({ scope: null, floor: a });
+    expect(await read()).toEqual({ scope: null, floor: a, through: 0 });
     await service.store.run(writeTimerCopy, {
       captured: service.capture(1),
       copy: {
@@ -1000,7 +1004,8 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
       kind: "applied",
       value: { removed: 1, applied: true, scoped: false },
     });
-    expect(await read()).toEqual({ scope: null, floor: b });
+    // Its finished session was not kept either: lost THROUGH b (revision 6, R27), not only below it.
+    expect(await read()).toEqual({ scope: null, floor: b, through: b });
     // Admitted (the ledger of the world), it is recorded.
     const c = await issue();
     expect(
@@ -1018,9 +1023,9 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
     await issue();
     await issue();
     seed({ timer_scopes: { [DAY]: { seen: 2, order: "x" } } });
-    expect(await read()).toEqual({ scope: null, floor: 2 });
+    expect(await read()).toEqual({ scope: null, floor: 2, through: 0 });
     seed({ timer_scopes: { [DAY]: "damaged" }, timer_order: 7 });
-    expect(await read()).toEqual({ scope: null, floor: 7 });
+    expect(await read()).toEqual({ scope: null, floor: 7, through: 0 });
   });
 });
 
@@ -1110,7 +1115,9 @@ describe("W27: the revision and the lift (revision 4, review R20)", () => {
         captured: service.capture(1),
         task_id: TASK,
         discovery:
-          discovery === null ? null : { expected: discovery, next: NEXT },
+          discovery === null
+            ? { kind: "no_stop" as const }
+            : { kind: "stopped" as const, expected: discovery, next: NEXT },
         sequence:
           seq === null
             ? null
@@ -1139,7 +1146,7 @@ describe("W27: the revision and the lift (revision 4, review R20)", () => {
       await service.store.run(liftMaterialiseStops, {
         captured: service.capture(1),
         task_id: OTHER_TASK,
-        discovery: { expected: ENTRY, next: NEXT },
+        discovery: { kind: "stopped", expected: ENTRY, next: NEXT },
         sequence: null,
       }),
     ).toEqual({ kind: "applied", value: { kind: "stale" } });
@@ -1154,6 +1161,56 @@ describe("W27: the revision and the lift (revision 4, review R20)", () => {
     expect(await lift(ENTRY, sequence)).toMatchObject({
       value: { kind: "stale" },
     });
+  });
+
+  /**
+   * Revision 6 (review 6 R30): the press's expectation of the discovery is compared even when nothing of it is replaced: `no_stop` (the
+   * screen showed none) is stale once a stop stands, and the sequence is not lifted beside it; an entry still working (no stop) is not one.
+   */
+  test.each([
+    [
+      "a stopped discovery entry now stands: stale, nothing written",
+      "stopped",
+      "stale",
+    ],
+    [
+      "an entry still working (no stop): the sequence is lifted",
+      "working",
+      "written",
+    ],
+    ["no entry (control): the sequence is lifted", "none", "written"],
+  ])("no_stop expected; %s", async (_, entry, outcome) => {
+    const { t, service, seed, stored } = await bound();
+    const sequence = stoppedRow({ revision: 4 });
+    t.world.idb.seed(DB, "materialise_sequences", [sequence]);
+    if (entry !== "none")
+      seed({
+        materialise_discovery: {
+          [TASK]: entry === "stopped" ? ENTRY : { ...ENTRY, stop: null },
+        },
+      });
+    const before = (
+      t.world.idb.peek(DB, "sync_state", "singleton") as SyncStateRow
+    ).materialise_discovery;
+    expect(
+      await service.store.run(liftMaterialiseStops, {
+        captured: service.capture(1),
+        task_id: TASK,
+        discovery: { kind: "no_stop" },
+        sequence: {
+          key: { task_id: TASK, through_date: sequence.through_date },
+          expected: expectOf(sequence),
+          next: lifted(sequence),
+        },
+      }),
+    ).toEqual({ kind: "applied", value: { kind: outcome } });
+    expect(stored()).toEqual(
+      outcome === "stale" ? sequence : { ...lifted(sequence), revision: 5 },
+    );
+    expect(
+      (t.world.idb.peek(DB, "sync_state", "singleton") as SyncStateRow)
+        .materialise_discovery,
+    ).toEqual(before);
   });
 });
 
@@ -1475,5 +1532,192 @@ describe("W28: the complete account observation and finished sessions (revision 
       timer_order: 9,
     });
     expect((await w.authority()).floor).toBeGreaterThanOrEqual(9);
+  });
+});
+
+/**
+ * Revision 6 (review 6 R27): a lost FINISHED session is lost through the high-water when it was recorded, INCLUSIVELY (`endedThrough`),
+ * whatever path lost it: the history's refused growth, eviction from the bound, a day read's refused scope (at the high-water, not the day
+ * read's own order: a later running read may be in flight). A lost complete observation stays exclusive (the floor), and a record written
+ * before revision 6, or one that does not read, is settled once by the next order issued.
+ */
+describe("W28: terminal loss is inclusive and covers every order issued (revision 6, review R27)", () => {
+  const S = "cccccccc-0000-4000-8000-0000000000f1";
+  async function world() {
+    const b = await bound();
+    const issue = async () => {
+      const out = await b.service.store.run(issueTimerOrder, {
+        captured: b.service.capture(1),
+      });
+      if (out.kind !== "applied") throw new Error("not applied");
+      return out.value.order as number;
+    };
+    const authority = () =>
+      b.service.store.run(readTimerAuthority, {
+        incarnationId: b.service.incarnationId,
+      });
+    const sync = () =>
+      b.t.world.idb.peek(DB, "sync_state", "singleton") as SyncStateRow;
+    return { ...b, issue, authority, sync };
+  }
+
+  test("refused history growth: lost THROUGH every order issued (the latest included), and the exclusive floor too for an older tab", async () => {
+    const w = await world();
+    await w.issue();
+    const n = await w.issue();
+    expect((await w.authority()).endedThrough).toBe(0);
+    await w.service.store.run(recordTimerEnded, {
+      captured: w.service.capture(1),
+      ids: [S],
+      admitted: false,
+    });
+    const after = await w.authority();
+    expect(after).toMatchObject({ endedLost: true, endedThrough: n });
+    expect(after.floor).toBe(n);
+    expect(w.sync().timer_ended).toEqual({ lost: true, ids: [], through: n });
+    // A later read is trusted: its order is above the bound.
+    expect(await w.issue()).toBeGreaterThan(n);
+  });
+
+  test("eviction: lost through the order the evicted session was recorded at; one recorded later is not", async () => {
+    const w = await world();
+    const firstAt = await w.issue();
+    await w.service.store.run(recordTimerEnded, {
+      captured: w.service.capture(1),
+      ids: ["first"],
+    });
+    const laterAt = await w.issue();
+    for (let i = 0; i < TIMER_ENDED_IDS; i += 1)
+      await w.service.store.run(recordTimerEnded, {
+        captured: w.service.capture(1),
+        ids: [`s${i}`],
+      });
+    const now = await w.authority();
+    expect(now.ended).not.toContain("first");
+    expect(now.endedThrough).toBe(firstAt);
+    expect(now.endedThrough).toBeLessThan(laterAt);
+  });
+
+  test.each([
+    ["a finished session", [S], true],
+    [
+      "nothing finished (control): absence only, exclusive at the day read",
+      [],
+      false,
+    ],
+  ])(
+    "a day read at i refused with %s while a running read j > i is in flight",
+    async (_, ended, terminal) => {
+      const w = await world();
+      const i = await w.issue();
+      const j = await w.issue();
+      await w.service.store.run(reconcileTimerCopy, {
+        captured: w.service.capture(1),
+        order: i,
+        drop: () => false,
+        scope: { occurrence_id: "day", complete: true, running: [], ended },
+        admitted: false,
+      });
+      const after = await w.authority();
+      if (terminal) {
+        // Lost through j: the positive the in-flight read may return is not trusted (R27's extension).
+        expect(after.endedThrough).toBe(j);
+        expect(after.endedLost).toBe(true);
+      } else {
+        expect(after.endedThrough).toBe(0);
+        expect(after.endedLost).toBe(false);
+        expect(after.floor).toBe(i);
+      }
+    },
+  );
+
+  test("a record written before revision 6 that lost a session: lost through every order issued, settled ONCE by the next order (which is trusted)", async () => {
+    const w = await world();
+    await w.issue();
+    await w.issue();
+    w.seed({
+      timer_ended: { lost: true, ids: [[S, 1]] } as never,
+      timer_order: 5,
+    });
+    expect(await w.authority()).toMatchObject({
+      ended: [S],
+      endedLost: true,
+      endedThrough: 5,
+    });
+    const next = await w.issue();
+    expect(next).toBe(6);
+    expect(w.sync().timer_ended).toEqual({
+      lost: true,
+      ids: [[S, 1]],
+      through: 5,
+    });
+    // The bound no longer moves with each order issued.
+    await w.issue();
+    expect((await w.authority()).endedThrough).toBe(5);
+  });
+
+  test("an older record that lost nothing reads as nothing lost; a record that does not read is lost through every order issued, then settled", async () => {
+    const w = await world();
+    w.seed({ timer_ended: { lost: false, ids: [[S, 1]] } as never });
+    expect(await w.authority()).toMatchObject({
+      endedLost: false,
+      endedThrough: 0,
+    });
+    w.seed({ timer_ended: "damaged" as never, timer_order: 7 });
+    expect(await w.authority()).toMatchObject({
+      endedLost: true,
+      endedThrough: 7,
+    });
+    expect(await w.issue()).toBe(8);
+    expect(w.sync().timer_ended).toEqual({ lost: true, ids: [], through: 7 });
+    w.seed({ timer_ended: { lost: false, ids: [], through: -1 } as never });
+    expect((await w.authority()).endedLost).toBe(true);
+  });
+});
+
+/**
+ * Revision 6 (review 6 R28): further exact days by key (a selected day, a day a command asked for) and a longer window of latest rows
+ * (the detail's "Show earlier days"), in the same bounded read; `complete` says whether the window holds every row.
+ */
+describe("W27: further exact days and a longer window (revision 6, review R28)", () => {
+  test("exact days are found past the window and absent ones are null; a longer window is one read of the latest rows; bounds hold", async () => {
+    const { t, service } = await bound();
+    const days = Array.from({ length: 20 }, (_, i) =>
+      row({ through_date: `2026-11-${String(1 + i).padStart(2, "0")}` }),
+    );
+    t.world.idb.seed(DB, "materialise_sequences", days);
+    const read = (tasks: TaskSequencesAsk[]) =>
+      service.store.run(readTaskSequences, {
+        incarnationId: service.incarnationId,
+        tasks,
+      });
+    const found = await read([
+      { taskId: TASK, days: ["2026-11-01", "2026-12-25"] },
+    ]);
+    expect(found[TASK]?.days).toEqual({
+      "2026-11-01": days[0],
+      "2026-12-25": null,
+    });
+    expect(found[TASK]?.rows).toEqual(days.slice(-TASK_SEQUENCE_ROWS));
+    expect(found[TASK]?.complete).toBe(false);
+    const longer = await read([{ taskId: TASK, rows: 16 }]);
+    expect(longer[TASK]?.rows).toEqual(days.slice(-16));
+    expect(longer[TASK]?.complete).toBe(false);
+    expect(longer[TASK]?.days).toBeUndefined();
+    const all = await read([{ taskId: TASK, rows: 24 }]);
+    expect(all[TASK]?.rows).toEqual(days);
+    expect(all[TASK]?.complete).toBe(true);
+    await expect(
+      read([
+        {
+          taskId: TASK,
+          days: Array.from(
+            { length: TASK_SEQUENCE_DAYS + 1 },
+            (_, i) => `2026-12-${String(1 + i).padStart(2, "0")}`,
+          ),
+        },
+      ]),
+    ).rejects.toThrow();
+    await expect(read([{ taskId: TASK, rows: 0 }])).rejects.toThrow();
   });
 });

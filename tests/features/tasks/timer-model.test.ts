@@ -7,6 +7,7 @@ import type {
 import {
   copyCorrection,
   keptStands,
+  positiveTrusted,
   runningOn,
   stillRunning,
 } from "../../../src/features/tasks/model/timers";
@@ -603,6 +604,117 @@ describe("R23: the account's observation and finished sessions, one rule", () =>
         copy: null,
         ended: new Set([S]),
         endedLost: true,
+      }).map((s) => s.source),
+    ).toEqual(["draft"]);
+  });
+});
+
+/**
+ * Revision 6 (review 6 R27): the two kinds of loss at their boundaries, for both resolvers and every source. A lost finished session
+ * distrusts every positive up to AND INCLUDING its bound (`endedThrough`); a lost complete observation only those strictly below it (the
+ * floor); a complete observation's absence at an equal order retires nothing; an exact finished session retires its session at any order;
+ * a truly later positive stands; 0 is "nothing lost" (a copy written before the order existed has order 0).
+ */
+describe("R27: terminal loss is inclusive, absence loss exclusive", () => {
+  const S = COPIED;
+  test.each([
+    [
+      "terminal loss n−1, positive n: later, trusted",
+      { endedThrough: 4 },
+      5,
+      true,
+    ],
+    [
+      "terminal loss n, positive n: at the bound, NOT trusted",
+      { endedThrough: 5 },
+      5,
+      false,
+    ],
+    [
+      "terminal loss n+1, positive n: not trusted",
+      { endedThrough: 6 },
+      5,
+      false,
+    ],
+    ["nothing lost (0), positive 0: trusted", { endedThrough: 0 }, 0, true],
+    ["absence lost at n (floor), positive n: trusted", { floor: 5 }, 5, true],
+    [
+      "absence lost at n+1 (floor), positive n: not trusted",
+      { floor: 6 },
+      5,
+      false,
+    ],
+    [
+      "complete account observation at n omits it, positive n: stands",
+      { account: { order: 5, running: [] } },
+      5,
+      true,
+    ],
+    [
+      "complete account observation at n+1 omits it: retired",
+      { account: { order: 6, running: [] } },
+      5,
+      false,
+    ],
+    [
+      "finished exactly, a later positive: retired",
+      { ended: new Set([S]) },
+      9,
+      false,
+    ],
+    [
+      "terminal loss, order unknown: not trusted",
+      { endedLost: true, endedThrough: 3 },
+      null,
+      false,
+    ],
+  ] as const)("%s", (_, extra, order, expected) => {
+    const authority = { scopes: {}, floor: 0, ...extra };
+    // The loss rule alone (no observation or finished listing in the row): it decides exactly.
+    if (!("account" in extra) && !("ended" in extra))
+      expect(positiveTrusted(authority, order)).toBe(expected);
+    expect(stillRunning(authority, OCC, S, order)).toBe(expected);
+    expect(stillRunning(authority, null, S, order)).toBe(expected);
+    const shown = (source: "read" | "copy") =>
+      runningOn(OCC, {
+        drafts: [],
+        read: source === "read" ? [session()] : null,
+        complete: false,
+        copy: source === "copy" ? [copied()] : null,
+        readOrder: source === "read" ? order : null,
+        copyOrder: source === "copy" ? order : null,
+        copyComplete: false,
+        scope: null,
+        floor: "floor" in extra ? extra.floor : 0,
+        account: "account" in extra ? extra.account : null,
+        ended: "ended" in extra ? extra.ended : new Set(),
+        endedLost: "endedLost" in extra ? extra.endedLost : false,
+        endedThrough: "endedThrough" in extra ? extra.endedThrough : 0,
+      }).map((s) => s.id);
+    expect(shown("read")).toEqual(expected ? [S] : []);
+    if (order !== null) expect(shown("copy")).toEqual(expected ? [S] : []);
+  });
+
+  test("a terminal loss does not hide this device's unsettled start (its draft stands until it settles)", () => {
+    const start = draftRow({
+      kind: "start_timer",
+      status: "queued",
+      command: {
+        command: {
+          kind: "start_timer",
+          occurrence_id: OCC,
+          session_id: "cccccccc-0000-4000-8000-0000000000f8",
+          started_at: T0 / 1000 - 5,
+        },
+      } as never,
+    });
+    expect(
+      runningOn(OCC, {
+        drafts: [start as never],
+        read: null,
+        copy: null,
+        endedLost: true,
+        endedThrough: 99,
       }).map((s) => s.source),
     ).toEqual(["draft"]);
   });

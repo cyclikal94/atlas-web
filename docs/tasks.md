@@ -962,7 +962,13 @@ later page) as finished evidence offline, an act re-checking what is STORED afte
 `timer-model`), the finished record's bound, refusal and loss (`materialise-plans`); exact-day recovery on Today, the detail and the
 streak, retention until a position covers a row's own day, admission of a new row, another day of a task as its own work, and
 non-repeating Try again identities (discovery claim, the discovery stop beside a day's stop, a memory stop's id, "none", a claim given to
-an older stop); MU-3121…MU-3145.
+an older stop); MU-3121…MU-3145. Revision 6 (Review 6 R27–R30, design assessment of 28 October 2026): the reviewer's T9 and M11 ported verbatim, M9 and
+M10 with labelled adaptations (M9 presses "Show earlier days"; M10 scripts the resumed day's resend and its position read), each with its
+control, into `timer-block`, `catchup-banner` and `catchup-runner`; the inclusive terminal loss at its boundaries for both resolvers
+(`timer-model`), the account's list at the loss boundary (`timers-page`), refusal, eviction, a day read's refusal at the high-water and
+the settlement of older records (`materialise-plans`); exact selected and asked days, the longer window and its focus, Today's link to the
+task page; another day asked while work is parked or active, the same day coalesced, a press leaving other paused work, the stop of a
+refused row naming its day; the absence a press saw, before the press and under the lock; MU-3146…MU-3166.
 
 ## Limits (WEB-10c)
 
@@ -992,6 +998,12 @@ an older stop); MU-3121…MU-3145.
   nothing is sent). Today and the streak show the stop of the task's own today once this page has read the task, else its latest days as
   read; the detail shows every retained stop of its latest eight days and today, each for its day. A Try again names the stop shown by
   identities that never recur; one pressed on a stop no longer standing exactly so does nothing (the screen shows what stands now).
+- **Revision 6.** Once a finished session could not be kept, no server session read at or before the order it was recorded at is offered
+  (the conservative side, also for unrelated sessions read then: a loss names no session) until a later read. The detail shows its
+  latest eight days, the selected day and the days a command asked for; while the task holds more, "Show earlier days" shows eight more
+  each time, until every retained day is shown, each with its own Try again. Today offers the task's page while the task's day is not
+  known and it holds more days than were read. Resuming a task's paused work never stands in for another day asked of it. A Try again on
+  a day's stop that saw no discovery stop does nothing if one was recorded meanwhile (the screen then shows it).
 - **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
   compatibility are those last rendered (a pause is taken up again when a task screen renders).
 

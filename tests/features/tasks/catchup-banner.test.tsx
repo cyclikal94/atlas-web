@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { MaterialiseSequenceRow } from "../../../src/data/model/types";
@@ -735,4 +735,230 @@ describe("R24: every relevant day's stop stays reachable", () => {
       (await axe(document.querySelector("main") ?? document.body)).violations,
     ).toEqual([]);
   });
+});
+
+/**
+ * Revision 6 (review 6 R28): the detail's latest days are a bounded window, never "every stop". A retained stop beyond it stays reachable:
+ * the selected day and a day a command asked for are read by their own keys, and "Show earlier days" reads the rest (one read of a longer
+ * window, so nothing is skipped), each with its own Try again. Today offers the task's page while its day is not known and the task holds
+ * more days than were read. REVIEW6 M9 is ported: its 7-row control unchanged; its 8-row schedule ADAPTED to press the visible "Show
+ * earlier days" (the design assessment's permitted adaptation) and then to require the ninth day, its Try again and the token it names.
+ */
+describe("R28: every retained day reachable beyond the window", () => {
+  const needs = () =>
+    seededTask({
+      title: "Needs catch-up",
+      definition: {
+        schedule: {
+          start_date: "2026-01-01",
+          time: null,
+          timezone: "UTC",
+          repeat: { frequency: "daily", interval: 1 },
+        },
+      },
+    });
+  const shownDays = (taskId: string) =>
+    [
+      ...document.querySelectorAll<HTMLElement>(
+        `[data-catch-up-task="${taskId}"]`,
+      ),
+    ].map((n) => n.dataset.catchUpDay);
+  const horizon = (task: SeededTask, i: number) => ({
+    ...stopped(task, "horizon"),
+    through_date: addDays(TODAY, 32 + i),
+    sequence_generation: `future-${i}`,
+  });
+
+  test.each([7, 8])(
+    "REVIEW6 M9 (ported; 8 adapted to press Show earlier days): later horizon rows=%s",
+    async (n) => {
+      const task = await needs();
+      const wanted = addDays(TODAY, 1);
+      const target = {
+        ...stopped(task, "bound"),
+        through_date: wanted,
+        sequence_generation: "wanted",
+      };
+      const horizons = Array.from({ length: n }, (_, i) => horizon(task, i));
+      const { api, calls } = counted({
+        readTask: async () => position(task, TODAY, false),
+      });
+      const t = await mountTasks({
+        path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        rows: task.rows,
+        api,
+        sequences: [target, ...horizons],
+      });
+      await t.until(
+        () =>
+          document.querySelectorAll(`[data-catch-up-task="${task.taskId}"]`)
+            .length >= Math.min(n + 1, 8),
+      );
+      await t.settle();
+      expect(calls.materialise).toBe(0);
+      const more = () =>
+        screen.queryByRole("button", { name: CATCH_UP_COPY.showEarlier });
+      if (n === 8) {
+        // The window holds the eight later days; the ninth is offered, never taken for absent.
+        expect(shownDays(task.taskId)).not.toContain(wanted);
+        expect(more()).not.toBeNull();
+        fireEvent.click(more() as HTMLElement);
+        await t.until(() => shownDays(task.taskId).includes(wanted));
+        expect(shownDays(task.taskId)).toContain(wanted);
+      } else expect(more()).toBeNull();
+      const row = document.querySelector<HTMLElement>(
+        `[data-catch-up-task="${task.taskId}"][data-catch-up-day="${wanted}"]`,
+      );
+      expect(row).not.toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Try again" }),
+      ).not.toBeNull();
+      expect(more()).toBeNull();
+      const runner = runnerForAccount(ME);
+      const spy = vi.spyOn(runner as NonNullable<typeof runner>, "tryAgain");
+      fireEvent.click(
+        within(row as HTMLElement).getByRole("button", { name: "Try again" }),
+      );
+      expect(spy).toHaveBeenCalledWith(task.taskId, wanted, {
+        kind: "sequence",
+        generation: "wanted",
+        revision: 0,
+        discovery: null,
+      });
+      expect(calls.materialise).toBe(0);
+    },
+  );
+
+  test("the selected day is read by its own key, whatever later days the task holds and before its zone is known; the rest is offered", async () => {
+    const task = await needs();
+    const selected = task.data.slot.date as string;
+    const own = {
+      ...stopped(task, "bound"),
+      through_date: selected,
+      sequence_generation: "own",
+    };
+    const horizons = Array.from({ length: 8 }, (_, i) => horizon(task, i));
+    const { api } = counted({ readTask: () => new Promise(() => undefined) });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      rows: task.rows,
+      api,
+      sequences: [own, ...horizons],
+    });
+    await t.until(() => shownDays(task.taskId).includes(selected));
+    expect(shownDays(task.taskId)).toContain(selected);
+    expect(shownDays(task.taskId)).toHaveLength(9);
+    // The rows read are not all of them (the selected day was found by key): the rest is still offered, not called complete.
+    expect(
+      screen.queryByRole("button", { name: CATCH_UP_COPY.showEarlier }),
+    ).not.toBeNull();
+  });
+
+  test("a day a command asked this page's runner for is read by its own key (the control: not asked, not shown until offered)", async () => {
+    const task = await needs();
+    const asked = addDays(TODAY, -3);
+    const old = {
+      ...stopped(task, "bound"),
+      through_date: asked,
+      sequence_generation: "asked",
+    };
+    const horizons = Array.from({ length: 8 }, (_, i) => horizon(task, i));
+    const { api } = counted({ readTask: () => new Promise(() => undefined) });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      rows: task.rows,
+      api,
+      sequences: [old, ...horizons],
+    });
+    await t.until(() => shownDays(task.taskId).length === 8);
+    expect(shownDays(task.taskId)).toHaveLength(8);
+    expect(shownDays(task.taskId)).not.toContain(asked);
+    runnerForAccount(ME)?.ensure(task.taskId, "draft", { throughDate: asked });
+    await t.until(() => shownDays(task.taskId).includes(asked));
+    expect(shownDays(task.taskId)).toContain(asked);
+    expect(shownDays(task.taskId)).toHaveLength(9);
+  });
+
+  test("Show earlier days reads the window longer until every retained day is shown; then it leaves and the notice keeps the focus", async () => {
+    const task = await needs();
+    const days = Array.from({ length: 17 }, (_, i) => ({
+      ...stopped(task, "bound"),
+      through_date: addDays(TODAY, 1 + i),
+      sequence_generation: `d${i}`,
+    }));
+    const { api, calls } = counted({
+      readTask: () => new Promise(() => undefined),
+    });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      rows: task.rows,
+      api,
+      sequences: days,
+    });
+    await t.until(() => shownDays(task.taskId).length === 8);
+    expect(shownDays(task.taskId)).toHaveLength(8);
+    const more = () =>
+      screen.queryByRole("button", { name: CATCH_UP_COPY.showEarlier });
+    expect(more()).not.toBeNull();
+    fireEvent.click(more() as HTMLElement);
+    await t.until(() => shownDays(task.taskId).length === 16);
+    expect(shownDays(task.taskId)).toHaveLength(16);
+    expect(more()).not.toBeNull();
+    (more() as HTMLElement).focus();
+    fireEvent.click(more() as HTMLElement);
+    await t.until(() => shownDays(task.taskId).length === 17);
+    expect(shownDays(task.taskId)).toHaveLength(17);
+    await t.settle();
+    expect(more()).toBeNull();
+    expect(new Set(shownDays(task.taskId))).toEqual(
+      new Set(days.map((d) => d.through_date)),
+    );
+    expect(screen.getAllByRole("button", { name: "Try again" })).toHaveLength(
+      17,
+    );
+    expect(document.activeElement).toBe(
+      document.querySelector(`[data-catch-up-notice="${task.taskId}"]`),
+    );
+    expect(calls.materialise).toBe(0);
+    expect(
+      (await axe(document.querySelector("main") ?? document.body)).violations,
+    ).toEqual([]);
+  });
+
+  test.each([
+    [9, true],
+    [8, false],
+  ])(
+    "Today, its day not known yet: %s retained days offer the task's page = %s",
+    async (n, offered) => {
+      const task = await needs();
+      const rows = Array.from({ length: n }, (_, i) => ({
+        ...stopped(task, "bound"),
+        through_date: addDays(TODAY, 1 + i),
+        sequence_generation: `d${i}`,
+      }));
+      const { api } = counted({ readTask: () => new Promise(() => undefined) });
+      api.respond = (q) =>
+        q.scope === "joint" ? daily([task.taskId]) : daily([]);
+      const t = await mountTasks({
+        path: PATH,
+        rows: task.rows,
+        api,
+        sequences: rows,
+      });
+      await t.until(() => shownDays(task.taskId).length === 8);
+      expect(shownDays(task.taskId)).toHaveLength(8);
+      await t.settle();
+      const link = document.querySelector<HTMLAnchorElement>(
+        `a[data-catch-up-more="${task.taskId}"]`,
+      );
+      if (offered) {
+        expect(link).not.toBeNull();
+        expect(link?.getAttribute("href")).toBe(`/tasks/${task.taskId}`);
+        expect(link).toHaveTextContent(
+          CATCH_UP_COPY.everyDay("Needs catch-up"),
+        );
+      } else expect(link).toBeNull();
+    },
+  );
 });

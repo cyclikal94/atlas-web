@@ -814,13 +814,33 @@ the current epoch is shown with no request, one persisted for another epoch is n
   records the loss at every order issued so far. A record that does not read is a loss of every order issued. `readTimerAuthority` returns
   `account`, `ended` and `endedLost` with the copy, scopes and floor: a finished session never runs again, whatever order a positive of it
   has, and once one was lost a positive of unknown order is not trusted.
+* **Revision 6: two kinds of loss (W28; Review 6's R27).** What a lost record could contradict differs. A lost complete observation's
+  ABSENCE at order a retires only positives issued before a, so it stays exclusive (`timer_scope_floor`). A lost FINISHED session may be
+  contradicted by any positive issued up to and including the high-water when it was recorded (the counter, or the copy's fence where a
+  copy was stored above it; a read already in flight included), so `TimerEndedRecord` gains `through` (inclusive; 0: none lost):
+  eviction from the bound sets it to the evicted session's recorded order, a refused or lapsed `recordTimerEnded` to the high-water, and a
+  refused `reconcileTimerCopy` with finished sessions to the high-water too (never only the day read's own order; a complete-absence-only
+  refusal keeps the exclusive floor at its order). The terminal paths still raise the exclusive floor to the same order, so an older tab
+  that knows only the floor keeps its protection. A record written before revision 6 (no `through`) that lost a session, or one that
+  does not read, is read as lost through every order handed out so far and is settled ONCE by the next `issueTimerOrder` (so the bound
+  never moves with each read); an older tab rewriting the record drops `through`, which then reads conservatively the same way.
+  `readTimerAuthority` returns `endedThrough`; `readTimerScope` returns `through`. The slice applies both kinds through one predicate
+  (`positiveTrusted`) in both resolvers.
+* **Revision 6: further exact days, a longer window and the absence a press saw (W27; Review 6's R28/R30).** `readTaskSequences` takes, per
+  task, further exact days by key (`days`, at most `TASK_SEQUENCE_DAYS` = 8: a selected day, days a command asked for; each `null` when
+  absent) and how many latest rows (`rows`, default `TASK_SEQUENCE_ROWS`): the count and the latest rows are read in one transaction, so a
+  longer window is never a page that shifted. `complete` still says whether the window holds every row; incomplete is never "no stop".
+  `liftMaterialiseStops` takes a tagged discovery EXPECTATION (`DiscoveryExpectation`: `stopped` with the entry and its replacement, or
+  `no_stop`) and compares it in the same transaction as the sequence: a stopped discovery entry recorded while a press that saw none waited
+  makes the whole lift stale, so neither record changes.
 * **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `commitMaterialiseSequence`,
   `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve); revision 3: quota reserves in
   `commitTimerCorrection` and `commitMaterialiseDiscovery`; revision 4: `useLatestSequences` (by task, in reads of `SEQUENCE_WINDOW`
   tasks, ready once every read is), `useTimerAuthority` and `commitMaterialiseLift`, replacing `useMaterialiseSequences`, `useTimerCopy` and
   `useTimerScope`; revision 5: `useTaskSequences` (exact days and latest days by task, in reads of `TASK_SEQUENCE_TASKS`) replacing
   `useLatestSequences`, `clearSatisfiedSequences` and `readTaskSequencesNow` replacing `pruneOlderSequences`, `commitMaterialiseSequence`'s
-  quota reserve for a new row, `commitTimerEnded` (with its quota reserve) and `readTimerAuthorityNow`.
+  quota reserve for a new row, `commitTimerEnded` (with its quota reserve) and `readTimerAuthorityNow`; revision 6: `useTaskSequences`
+  merges every ask of a task (its exact day, every further day, the longest window asked).
   `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).
 * **Retention.** Nothing new: a discarded or rejected timer draft's `timer_session` version record is removed by the existing recompute
   (no other draft targets it and nothing is cached for it); the wipe removes both records with the account's database.

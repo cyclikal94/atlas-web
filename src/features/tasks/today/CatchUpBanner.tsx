@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { useEffect, useId, useRef } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
@@ -31,6 +32,10 @@ export const CATCH_UP_COPY = {
   done: "Repeating tasks are up to date.",
   untitled: "a repeating task",
   forDay: (day: string) => `For ${day}`,
+  /** Revision 6 (review R28): a task holds more days than are shown. */
+  earlier: "Atlas is keeping track of earlier days for this task too.",
+  showEarlier: "Show earlier days",
+  everyDay: (title: string) => `See every day for “${title}”`,
   reason: {
     bound:
       "It needed more catching up than Atlas does in one go. Try again to carry on from where it stopped.",
@@ -67,7 +72,9 @@ export interface ShownStop {
 /**
  * The days of a task whose stopped catch-up a screen shows (revision 5, review R24): the exact day it works for (`target`, once known),
  * and, while that day is not known or when the screen shows every retained stop (`every`: the task's detail), the task's latest days as
- * read. A later day (a horizon stop) never stands in for the target: each is reached by its own key.
+ * read. A later day (a horizon stop) never stands in for the target: each is reached by its own key. Revision 6 (review R28): `every` adds
+ * the further exact days read by key (a selected day, a day a command asked for). Rows not read are not "no stop": a screen whose read is
+ * incomplete (`found.complete` false) offers the rest.
  */
 export function recoveryRows(
   found: TaskSequences | undefined,
@@ -76,11 +83,14 @@ export function recoveryRows(
 ): MaterialiseSequenceRow[] {
   if (found === undefined) return [];
   const rows: MaterialiseSequenceRow[] = [];
+  const add = (row: MaterialiseSequenceRow) => {
+    if (!rows.some((r) => r.through_date === row.through_date)) rows.push(row);
+  };
   if (target !== undefined && found.target) rows.push(found.target);
-  if (target === undefined || every)
-    for (const row of found.rows)
-      if (!rows.some((r) => r.through_date === row.through_date))
-        rows.push(row);
+  if (every)
+    for (const row of Object.values(found.days ?? {}))
+      if (row !== null) add(row);
+  if (target === undefined || every) for (const row of found.rows) add(row);
   return rows;
 }
 
@@ -245,6 +255,25 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
           ) : null}
         </div>
       ))}
+      {/* Revision 6 (review R28): a task whose day is not known yet and holds more days than were read: every one is on its page. */}
+      {pendingTasks
+        .filter(
+          (taskId) =>
+            todayOf(taskId) === undefined &&
+            found.get(taskId)?.complete === false,
+        )
+        .map((taskId) => (
+          <Link
+            key={`more|${taskId}`}
+            to="/tasks/$taskId"
+            params={{ taskId }}
+            search={{}}
+            data-catch-up-more={taskId}
+            className="atlas-transition inline-flex min-h-11 w-fit items-center text-[13px] text-ink-1 underline underline-offset-2"
+          >
+            {CATCH_UP_COPY.everyDay(titleOf(taskId))}
+          </Link>
+        ))}
     </section>
   );
 }

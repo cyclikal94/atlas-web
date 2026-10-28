@@ -20,8 +20,10 @@ import {
   type SequenceExpectation,
   type SequenceKey,
   type SequenceWrite,
+  TASK_SEQUENCE_DAYS,
   TASK_SEQUENCE_TASKS,
   type TaskSequences,
+  type TaskSequencesAsk,
   writeMaterialiseDiscovery,
   writeMaterialiseSequence,
 } from "../plans/materialise";
@@ -52,27 +54,36 @@ import { useWatch } from "./react";
  * read is.
  */
 export function useTaskSequences(
-  targets: ReadonlyArray<{ taskId: string; throughDate?: string }>,
+  targets: ReadonlyArray<TaskSequencesAsk>,
 ): Loadable<ReadonlyMap<string, TaskSequences>> {
-  const byTask = new Map<string, string | undefined>();
-  for (const t of targets)
-    if (!byTask.has(t.taskId) || t.throughDate !== undefined)
-      byTask.set(t.taskId, t.throughDate);
-  const key = [...byTask]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([taskId, day]) => `${taskId}|${day ?? ""}`)
-    .join(",");
+  // One ask per task (revision 6, R28): its exact day, EVERY further day asked (none overwrites another) and the most rows asked.
+  const byTask = new Map<string, TaskSequencesAsk>();
+  for (const t of targets) {
+    const held = byTask.get(t.taskId);
+    const throughDate = held?.throughDate ?? t.throughDate;
+    // In the order asked (the first are kept when there are more than one read looks up), then sorted for a stable key.
+    const days = [...new Set([...(held?.days ?? []), ...(t.days ?? [])])]
+      .filter((day) => day !== throughDate)
+      .slice(0, TASK_SEQUENCE_DAYS)
+      .sort();
+    const rows = Math.max(held?.rows ?? 0, t.rows ?? 0);
+    byTask.set(t.taskId, {
+      taskId: t.taskId,
+      ...(throughDate === undefined ? {} : { throughDate }),
+      ...(days.length === 0 ? {} : { days }),
+      ...(rows === 0 ? {} : { rows }),
+    });
+  }
+  const key = JSON.stringify(
+    [...byTask.values()].sort((a, b) =>
+      a.taskId < b.taskId ? -1 : a.taskId > b.taskId ? 1 : 0,
+    ),
+  );
   return useWatch(
     (env) => {
       const service = env.service();
       if (!service) return null;
-      const tasks =
-        key === ""
-          ? []
-          : key.split(",").map((part) => {
-              const [taskId, day] = part.split("|") as [string, string];
-              return day === "" ? { taskId } : { taskId, throughDate: day };
-            });
+      const tasks = JSON.parse(key) as TaskSequencesAsk[];
       const batches: Watchable<Record<string, TaskSequences>>[] = [];
       for (let i = 0; i < tasks.length; i += TASK_SEQUENCE_TASKS)
         batches.push(
@@ -507,10 +518,12 @@ export type {
   SequenceKey,
   SequenceWrite,
   TaskSequences,
+  TaskSequencesAsk,
 } from "../plans/materialise";
 export {
   DISCOVERY_ENTRY_BYTES,
   DISCOVERY_REQUEST_ID,
+  TASK_SEQUENCE_ROWS,
 } from "../plans/materialise";
 export {
   TIMER_COPY_ROWS,

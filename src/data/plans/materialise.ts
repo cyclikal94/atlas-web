@@ -225,20 +225,36 @@ export const readMaterialiseSequences = readPlan<
   decide: ({ reads }) => reads,
 });
 
-/** The most rows of one task a recovery read returns besides its exact day (revision 5): its latest days. */
+/**
+ * The rows of one task a recovery read returns besides its exact days, unless the caller asks for more (revision 5): its latest days. A
+ * screen that shows every retained stop asks for this many more each time the person asks for earlier days (revision 6, R28).
+ */
 export const TASK_SEQUENCE_ROWS = 8;
 /** The most tasks one recovery read covers (a caller with more reads them in several reads). */
 export const TASK_SEQUENCE_TASKS = 25;
+/** The most further exact days of one task a recovery read looks up by key (revision 6, R28: a selected day, days a command asked for). */
+export const TASK_SEQUENCE_DAYS = 8;
 
 /**
  * What a recovery read found of one task (revision 5, review R24): the row of the exact day asked for (`target`: `null` absent; not asked:
- * `undefined`), its latest `TASK_SEQUENCE_ROWS` rows in key order, and whether those are ALL its rows (`complete`). A row is reached by
- * its own key, never because it is the latest: a later day (a horizon stop) cannot hide the day a screen works for.
+ * `undefined`), its latest rows in key order (`TASK_SEQUENCE_ROWS`, or as many as asked), and whether those are ALL its rows (`complete`).
+ * A row is reached by its own key, never because it is the latest: a later day (a horizon stop) cannot hide the day a screen works for.
+ * Revision 6 (review R28): further exact days by key (`days`: each `null` when absent), so a selected day or a day a command asked for is
+ * found however many later rows the task holds. Incomplete rows are never "no stop": the rest is reached by asking for more rows.
  */
 export interface TaskSequences {
   target?: MaterialiseSequenceRow | null;
+  days?: Record<string, MaterialiseSequenceRow | null>;
   rows: MaterialiseSequenceRow[];
   complete: boolean;
+}
+
+/** One task a recovery read is asked for (revision 6, R28: further exact `days` and how many latest `rows`). */
+export interface TaskSequencesAsk {
+  taskId: string;
+  throughDate?: string;
+  days?: readonly string[];
+  rows?: number;
 }
 
 /**
@@ -249,7 +265,7 @@ export interface TaskSequences {
 export const readTaskSequences = readPlan<
   {
     incarnationId: string;
-    tasks: ReadonlyArray<{ taskId: string; throughDate?: string }>;
+    tasks: ReadonlyArray<TaskSequencesAsk>;
   },
   Record<string, TaskSequences>,
   Record<string, TaskSequences>
@@ -260,15 +276,21 @@ export const readTaskSequences = readPlan<
     if (input.tasks.length > TASK_SEQUENCE_TASKS)
       throw new Error("readTaskSequences: more tasks than one read admits");
     const out: Record<string, TaskSequences> = {};
-    for (const { taskId, throughDate } of input.tasks) {
+    for (const { taskId, throughDate, days, rows: asked } of input.tasks) {
       if (out[taskId] !== undefined)
         throw new Error("readTaskSequences: a task asked for twice");
+      const limit = asked ?? TASK_SEQUENCE_ROWS;
+      if (!Number.isSafeInteger(limit) || limit < 1)
+        throw new Error("readTaskSequences: rows must be a positive count");
+      if (days !== undefined && days.length > TASK_SEQUENCE_DAYS)
+        throw new Error("readTaskSequences: more days than one read admits");
       const span = range.between([taskId, ""], [taskId, "￿"]);
       const n = await reader.count(
         "materialise_sequences",
         "[task_id+through_date]",
         span,
       );
+      // One transaction: the count and the latest rows agree, so a longer window is never a page that shifted (revision 6, R28).
       const rows =
         n === 0
           ? []
@@ -276,12 +298,17 @@ export const readTaskSequences = readPlan<
               "materialise_sequences",
               "[task_id+through_date]",
               span,
-              TASK_SEQUENCE_ROWS,
-              Math.max(0, n - TASK_SEQUENCE_ROWS),
+              limit,
+              Math.max(0, n - limit),
             );
+      const exact: Record<string, MaterialiseSequenceRow | null> = {};
+      for (const day of days ?? [])
+        exact[day] =
+          (await reader.get("materialise_sequences", [taskId, day])) ?? null;
       out[taskId] = {
         rows,
-        complete: n <= TASK_SEQUENCE_ROWS,
+        complete: n <= limit,
+        ...(days === undefined ? {} : { days: exact }),
         ...(throughDate === undefined
           ? {}
           : {
@@ -411,13 +438,23 @@ export const writeMaterialiseDiscovery = guardedPlan<
  * and the day's stopped sequence (either may be absent). Both still stand as seen and both are replaced, or nothing is written (`stale`),
  * so a lift never clears one stop and loses the other, and a press can never lift a later stop it did not see (the sequence's revision
  * moves on every write). A discovery lift replaces an existing entry (no growth); a sequence row is the fixed-size W27 row.
+ *
+ * Revision 6 (review R30): what the press expects of the discovery is ALWAYS compared, separately from what it writes: `stopped` (that
+ * very entry, replaced by `next`) or `no_stop` (the screen showed no discovery stop: one recorded since, here or in another tab, makes the
+ * whole lift stale, so the sequence is not lifted beside a stop the person never saw). A missing replacement never means "not checked".
  */
+export type DiscoveryExpectation =
+  | {
+      kind: "stopped";
+      expected: MaterialiseDiscovery;
+      next: MaterialiseDiscovery;
+    }
+  /** No STOPPED discovery entry (an entry still working, with no stop, is not one). */
+  | { kind: "no_stop" };
+
 export interface MaterialiseLift {
   task_id: string;
-  discovery: {
-    expected: MaterialiseDiscovery;
-    next: MaterialiseDiscovery;
-  } | null;
+  discovery: DiscoveryExpectation;
   sequence: {
     key: SequenceKey;
     expected: Exclude<SequenceExpectation, null>;
@@ -444,11 +481,12 @@ export const liftMaterialiseStops = guardedPlan<
     const stale = { result: { kind: "stale" as const } };
     const entries = { ...(sync.materialise_discovery ?? {}) };
     const lift = input.discovery;
-    if (lift !== null) {
-      if (
-        !(input.task_id in entries) ||
-        !sameDiscovery(discoveryOf(entries, input.task_id), lift.expected)
-      )
+    const current = discoveryOf(entries, input.task_id);
+    // Every prerequisite is compared before anything is replaced: the discovery as expected (a stop, or none), then the sequence.
+    if (lift.kind === "no_stop") {
+      if (current?.stop) return stale;
+    } else {
+      if (!(input.task_id in entries) || !sameDiscovery(current, lift.expected))
         return stale;
       entries[input.task_id] = lift.next;
     }
@@ -471,7 +509,7 @@ export const liftMaterialiseStops = guardedPlan<
     }
     return {
       writes,
-      ...(lift === null
+      ...(lift.kind === "no_stop"
         ? {}
         : { sync: { ...sync, materialise_discovery: entries } }),
       result: { kind: "written" as const },

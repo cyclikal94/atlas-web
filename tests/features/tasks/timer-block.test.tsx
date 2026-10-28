@@ -1120,3 +1120,100 @@ describe("R23: the detail judges as the account's list", () => {
     ).toBeNull();
   }, 20_000);
 });
+
+/**
+ * Revision 6 (review 6 R27): a lost finished session distrusts every positive up to AND INCLUDING the order recorded with it, so the
+ * positive issued at the highest order does not survive the loss of its exact terminal fact. REVIEW6 T9 is ported verbatim (the
+ * reviewer's schedules, controls and assertions; only formatting and imports differ): refused growth and eviction at equality, the
+ * admitted record and an unrelated record as controls.
+ */
+describe("REVIEW6 T9 terminal evidence at the highest issued order", () => {
+  test.each(["admitted", "refused", "evicted", "unrelated"])(
+    "history record %s",
+    async (mode) => {
+      const task = await seconds();
+      const session = {
+        id: "cccccccc-0000-4000-8000-000000000091",
+        occurrence_id: task.occurrenceId,
+        started_at: nowSeconds() - 600,
+        stopped_at: null,
+        version: 3,
+      };
+      const api = fakeApi({
+        readTimers: async () => ({
+          ok: true,
+          value: { items: [session], next_after: null },
+        }),
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      const sync = () =>
+        t.world.idb.peek(
+          accountDatabaseName(ME),
+          "sync_state",
+          "singleton",
+        ) as SyncStateRow;
+      await t.until(() => Number(sync().timer_fence) > 0);
+      expect(block()?.dataset.timerBlock).toBe("running");
+      const issued = Number(sync().timer_order);
+      const service = t.data.service() as AccountService;
+      const refused = {
+        quota: {
+          reserve: async () => ({ verdict: "refuse", settle: () => undefined }),
+        },
+      };
+      const result = await commitTimerEnded(
+        (mode === "refused" ? refused : t.data) as never,
+        service,
+        service.capture(1),
+        [
+          mode === "unrelated"
+            ? "cccccccc-0000-4000-8000-000000000092"
+            : session.id,
+        ],
+      );
+      expect(result).toMatchObject({
+        kind: "applied",
+        value: { recorded: mode !== "refused" },
+      });
+      await t.settle();
+      if (mode === "evicted") {
+        expect(block()?.dataset.timerBlock).toBe("idle");
+        // Four further 50-row stopped-history pages, with no new running read/order.
+        for (let p = 0; p < 4; p++) {
+          const ids = Array.from(
+            { length: 50 },
+            (_, i) =>
+              `cccccccc-0000-4000-8000-${String(1000 + p * 50 + i).padStart(12, "0")}`,
+          );
+          expect(
+            await commitTimerEnded(t.data, service, service.capture(1), ids),
+          ).toMatchObject({ kind: "applied", value: { recorded: true } });
+        }
+        await t.settle();
+        expect(
+          (
+            sync().timer_ended as {
+              ids: Array<[string, number]>;
+              lost: boolean;
+            }
+          ).ids.some(([id]: [string, number]) => id === session.id),
+        ).toBe(false);
+      }
+      if (mode === "refused" || mode === "evicted") {
+        expect(sync().timer_scope_floor).toBe(issued);
+        expect(
+          (
+            sync().timer_ended as {
+              ids: Array<[string, number]>;
+              lost: boolean;
+            }
+          ).lost,
+        ).toBe(true);
+      }
+      expect(block()?.dataset.timerBlock).toBe(
+        mode === "unrelated" ? "running" : "idle",
+      );
+    },
+  );
+});

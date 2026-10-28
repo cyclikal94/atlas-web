@@ -1835,3 +1835,357 @@ describe("R26: a press names the stop shown by identities that never recur", () 
     }
   });
 });
+
+/**
+ * Revision 6 (review 6 R30): what a press expects of the discovery (a stop, or NONE) is compared inside the lift's transaction, so a
+ * discovery stop recorded while the press waits for the lock leaves the sequence's stop, its counters and attempt exactly as they were.
+ * REVIEW6 M11 is ported verbatim (the reviewer's schedule and assertions; only formatting and imports differ).
+ */
+describe("REVIEW6 M11 absent discovery at retry admission", () => {
+  test.each([false, true])(
+    "discovery stop appears while waiting=%s",
+    async (appeared) => {
+      const initial = row({
+        phase: "stopped",
+        revision: 2,
+        read_failures: 3,
+        stop: { reason: "unreachable" },
+      });
+      const w = await setup({ seed: [initial] });
+      let unlock!: () => void;
+      let queued = 0;
+      const hold = new Promise<void>((r) => {
+        unlock = r;
+      });
+      const locks = {
+        request: (_n: string, _o: unknown, run: () => Promise<unknown>) => {
+          queued++;
+          return hold.then(run);
+        },
+      } as unknown as LockManager;
+      const runner = w.make({ locks });
+      const seen = seenSequence(initial, null);
+      try {
+        runner.tryAgain(TASK, TODAY, seen);
+        for (let i = 0; i < 100 && queued === 0; i++) {
+          await w.t.settle();
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        expect(queued).toBe(1);
+        expect(w.reads()).toBe(0);
+        expect(w.stored()).toEqual(initial);
+        if (appeared) {
+          const service = w.t.env.service()!;
+          expect(
+            await commitMaterialiseDiscovery(service, service.capture(1), {
+              task_id: TASK,
+              expected: null,
+              next: {
+                retry: 0,
+                failures: 3,
+                stop: { reason: "unreachable" },
+                attempt: "eeeeeeee-0000-4000-8000-000000000099",
+              },
+            }),
+          ).toMatchObject({ kind: "applied", value: { kind: "written" } });
+        }
+        unlock();
+        await w.idle(runner);
+        if (appeared) {
+          expect(w.discovery()?.stop?.reason).toBe("unreachable");
+          expect(w.reads()).toBe(0);
+          expect(w.stored()).toEqual(initial);
+        } else {
+          expect(w.reads()).toBeGreaterThan(0);
+          expect(w.stored()).toBeUndefined();
+        }
+      } finally {
+        unlock();
+        runner.dispose();
+      }
+    },
+  );
+});
+
+describe("R30: the absence a press saw, before it is queued and under the lock", () => {
+  test.each([
+    ["a discovery stop recorded after the screen read, before the press", true],
+    ["none recorded (control): the press lifts and catches up", false],
+  ])("%s", async (_, appeared) => {
+    const initial = row({
+      phase: "stopped",
+      revision: 2,
+      read_failures: 3,
+      stop: { reason: "unreachable" },
+    });
+    const w = await setup({ seed: [initial] });
+    const runner = w.make();
+    const seen = seenSequence(initial, null);
+    try {
+      if (appeared) {
+        const service = w.t.env.service() as AccountService;
+        expect(
+          await commitMaterialiseDiscovery(service, service.capture(1), {
+            task_id: TASK,
+            expected: null,
+            next: {
+              retry: 0,
+              failures: 3,
+              stop: { reason: "unreachable" },
+              attempt: "eeeeeeee-0000-4000-8000-000000000098",
+            },
+          }),
+        ).toMatchObject({ kind: "applied", value: { kind: "written" } });
+      }
+      runner.tryAgain(TASK, TODAY, seen);
+      await w.idle(runner);
+      if (appeared) {
+        expect(w.discovery()?.stop?.reason).toBe("unreachable");
+        expect(w.reads()).toBe(0);
+        expect(w.stored()).toEqual(initial);
+      } else {
+        expect(w.reads()).toBeGreaterThan(0);
+        expect(w.stored()).toBeUndefined();
+      }
+    } finally {
+      runner.dispose();
+    }
+  });
+});
+
+/**
+ * Revision 6 (review 6 R29): resuming a task's paused work never stands in for ANOTHER day asked of it; that day is admitted on its own,
+ * and only the same task and day is coalesced. Paused work is kept under the day it was found to be; a press supersedes paused or
+ * queued work of exactly its own day. REVIEW6 M10 is ported with one labelled ADAPTATION: the resumed day D is `submitting`, so it resends
+ * its stored attempt (same key) and then reads its position (CM-440), which the verbatim script did not provide (it scripted one read for
+ * D, so the read meant for the new day's discovery answered D's resend instead, reporting the new day already covered); one more read of
+ * D is scripted. The premise (D parked, E asked, E unsatisfied, E's own command sent) and the assertions are kept; the original failure
+ * on the revision-5 tree is preserved, and the adapted case fails there too (revision-6 evidence).
+ */
+describe("R29: a different day asked while other work is paused or active", () => {
+  test.each([false, true])(
+    "REVIEW6 M10 (ported, adapted: the resumed day's resend and its position read scripted): earlier work parked=%s",
+    async (parked) => {
+      const later = addDays(TODAY, 1);
+      const w = await setup({
+        script: {
+          positions: [detail("2026-10-01", true)],
+          sends: [parked ? { ok: false, kind: "not_sent" } : OK],
+        },
+      });
+      const runner = w.make();
+      try {
+        runner.ensure(TASK, "draft", { throughDate: TODAY });
+        await w.idle(runner);
+        expect(w.sent).toHaveLength(1);
+        expect(w.stored()?.phase).toBe(parked ? "submitting" : undefined);
+        if (parked)
+          w.script.positions.push(detail(TODAY, false), detail(TODAY, false));
+        w.script.positions.push(detail(TODAY, false), detail(later, false));
+        const before = w.sent.length;
+        runner.ensure(TASK, "draft", { throughDate: later });
+        await w.idle(runner);
+        if (parked) {
+          // D resumed with its own stored attempt: the same key, the same body.
+          expect(w.sent[before]?.command.through_date).toBe(TODAY);
+          expect(w.sent[before]?.key).toBe(w.sent[0]?.key);
+        }
+        expect(
+          w.sent.slice(before).some((x) => x.command.through_date === later),
+        ).toBe(true);
+        expect(w.stored(later)).toBeUndefined();
+      } finally {
+        runner.dispose();
+      }
+    },
+  );
+
+  test.each([
+    ["another day", 2],
+    ["the same day (control): coalesced, resent once with its own key", 1],
+  ])(
+    "while a day's work is ACTIVE (its read held), %s asked",
+    async (_, days) => {
+      const first = addDays(TODAY, 1);
+      const second = days === 2 ? addDays(TODAY, 2) : first;
+      let release: (r: TasksResult<TaskDetail>) => void = () => undefined;
+      const w = await setup({
+        script: {
+          positions: [
+            () =>
+              new Promise<TasksResult<TaskDetail>>((r) => {
+                release = r;
+              }),
+            detail(first, false),
+            detail(first, false),
+            detail(second, false),
+          ],
+        },
+      });
+      const runner = w.make();
+      try {
+        runner.ensure(TASK, "draft", { throughDate: first });
+        for (let i = 0; i < 100 && w.reads() < 1; i += 1) {
+          await w.t.settle();
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        runner.ensure(TASK, "draft", { throughDate: second });
+        release(detail("2026-10-01", true));
+        await w.idle(runner);
+        expect(w.sent.map((s) => s.command.through_date)).toEqual(
+          days === 2 ? [first, second] : [first],
+        );
+      } finally {
+        runner.dispose();
+      }
+    },
+  );
+
+  test("today found by an implicit ask, then paused: the same day asked explicitly resumes it once, with its own key (no second sequence)", async () => {
+    const w = await setup({
+      script: {
+        positions: [detail("2026-10-01", true)],
+        sends: [{ ok: false, kind: "not_sent" }],
+      },
+    });
+    const runner = w.make();
+    try {
+      runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      expect(w.stored()?.phase).toBe("submitting");
+      w.script.positions.push(detail(TODAY, false), detail(TODAY, false));
+      runner.ensure(TASK, "draft", { throughDate: TODAY });
+      await w.idle(runner);
+      expect(w.sent.map((s) => s.command.through_date)).toEqual([TODAY, TODAY]);
+      expect(w.sent[1]?.key).toBe(w.sent[0]?.key);
+      expect(w.stored()).toBeUndefined();
+    } finally {
+      runner.dispose();
+    }
+  });
+
+  test("control: once an implicit ask found its day, the same day asked explicitly while it is worked on is not asked again (no second read; it also holds before revision 6, through `attempted`)", async () => {
+    let release: (r: TasksResult<{ revision: number }>) => void = () =>
+      undefined;
+    const w = await setup({
+      script: {
+        positions: [detail("2026-10-01", true), detail(TODAY, false)],
+        sends: [
+          () =>
+            new Promise<TasksResult<{ revision: number }>>((r) => {
+              release = r;
+            }),
+        ],
+      },
+    });
+    const runner = w.make();
+    try {
+      runner.ensure(TASK, "daily");
+      for (let i = 0; i < 100 && w.sent.length < 1; i += 1) {
+        await w.t.settle();
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      expect(w.sent).toHaveLength(1);
+      runner.ensure(TASK, "draft", { throughDate: TODAY });
+      release(OK);
+      await w.idle(runner);
+      expect(w.reads()).toBe(2);
+      expect(w.sent).toHaveLength(1);
+      expect(w.stored()).toBeUndefined();
+    } finally {
+      runner.dispose();
+    }
+  });
+
+  test("a press on one day leaves work paused before its day was known (another need of the task): it resumes on the next kick", async () => {
+    const stoppedLater = row({
+      through_date: addDays(TODAY, 3),
+      sequence_generation: "later",
+      phase: "stopped",
+      revision: 1,
+      read_failures: 3,
+      stop: { reason: "unreachable" },
+    });
+    const w = await setup({
+      seed: [stoppedLater],
+      script: {
+        positions: [
+          { ok: false, kind: "not_sent" },
+          detail("2026-10-01", true),
+          detail(addDays(TODAY, 3), false),
+          detail("2026-10-01", true),
+          detail(TODAY, false),
+        ],
+      },
+    });
+    const runner = w.make();
+    try {
+      // Paused at its first read: the task's today is not known yet.
+      runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      expect(w.reads()).toBe(1);
+      runner.tryAgain(
+        TASK,
+        stoppedLater.through_date,
+        seenSequence(stoppedLater, null),
+      );
+      await w.idle(runner);
+      expect(w.sent.map((s) => s.command.through_date)).toEqual([
+        stoppedLater.through_date,
+      ]);
+      runner.kick();
+      await w.idle(runner);
+      expect(w.sent.map((s) => s.command.through_date)).toEqual([
+        stoppedLater.through_date,
+        TODAY,
+      ]);
+    } finally {
+      runner.dispose();
+    }
+  });
+
+  test("a stop of a new row the ledger refused names its day; a press on it asks that day again (its command, once admitted)", async () => {
+    const refusedDay = addDays(TODAY, 1);
+    let refuse = true;
+    const quota = {
+      reserve: async (_c: string, bytes: number) => {
+        const no = refuse && bytes === SEQUENCE_ROW_BYTES;
+        return {
+          verdict: no ? "refuse" : "ok",
+          live: () => !no,
+          settle: () => undefined,
+        };
+      },
+    } as never;
+    const w = await setup({
+      script: {
+        positions: [
+          detail("2026-10-01", true),
+          detail("2026-10-01", true),
+          detail(refusedDay, false),
+        ],
+      },
+    });
+    const runner = w.make({ quota: () => quota });
+    try {
+      runner.ensure(TASK, "draft", { throughDate: refusedDay });
+      await w.idle(runner);
+      const held = runner.get().unrecorded.get(TASK);
+      expect(held).toMatchObject({
+        reason: "storage",
+        throughDate: refusedDay,
+      });
+      expect(w.sent).toHaveLength(0);
+      refuse = false;
+      runner.tryAgain(TASK, undefined, {
+        kind: "memory",
+        id: (held as { id: string }).id,
+      });
+      await w.idle(runner);
+      expect(w.sent.map((s) => s.command.through_date)).toEqual([refusedDay]);
+      expect(runner.get().unrecorded.has(TASK)).toBe(false);
+    } finally {
+      runner.dispose();
+    }
+  });
+});

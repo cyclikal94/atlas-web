@@ -1733,3 +1733,73 @@ test.describe("E-M9: an earlier day's unsatisfied stop is kept when today's sequ
       });
     });
 });
+
+test.describe("E-M10: a retained day beyond the detail's window (revision 6: R28)", () => {
+  for (const later of [8, 7] as const)
+    test(`${later} later horizon stops${later === 7 ? " (control)" : ""}: the task's detail reaches tomorrow's stop and its Try again, also after a reload, and sends nothing`, async ({
+      context,
+    }, info) => {
+      const task = repeating(421, "Water the plants");
+      const { page, r10c } = await setup(context, "/tasks", [task], (_, r) => {
+        r.position = () => detailOf(task, { last_date: TODAY, pending: false });
+      });
+      const wanted = plusDays(1);
+      const rows = [
+        stoppedRow(task, wanted, "bound"),
+        ...Array.from({ length: later }, (_, i) =>
+          stoppedRow(task, plusDays(32 + i), "horizon"),
+        ),
+      ];
+      await page.evaluate(
+        async ([acct, seeded]) => {
+          await window.__atlasData?.put(acct, "materialise_sequences", seeded);
+        },
+        [ACCOUNT, rows] as const,
+      );
+      const open = () =>
+        page.evaluate((path) => {
+          history.pushState(null, "", path);
+          dispatchEvent(new PopStateEvent("popstate"));
+        }, `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`);
+      const day = page.locator(
+        `[data-catch-up-task="${task.taskId}"][data-catch-up-day="${wanted}"]`,
+      );
+      // Representation-neutral: every retained stop the detail offers is opened, however it is offered.
+      const reach = async () => {
+        await expect(
+          page.locator(`[data-catch-up-task="${task.taskId}"]`).first(),
+        ).toBeVisible({ timeout: 15_000 });
+        const more = page.getByRole("button", { name: "Show earlier days" });
+        for (let i = 0; i < 3 && (await more.count()) > 0; i += 1) {
+          await more.click();
+          await page.waitForTimeout(300);
+        }
+      };
+      await open();
+      await reach();
+      await expect(day).toBeVisible({ timeout: 10_000 });
+      await expect(
+        day.getByRole("button", { name: "Try again" }),
+      ).toBeEnabled();
+      // Every retained row is still stored (nothing was deleted to make the window fit); read in this tab before the reboot.
+      await expect
+        .poll(async () =>
+          (await storedRows(page, task).catch(() => null))?.map(
+            (r) => r.through_date,
+          ),
+        )
+        .toEqual(rows.map((r) => r.through_date));
+      // A reload of the session page on the detail: the rows come back from real IndexedDB.
+      await reboot(page);
+      await reach();
+      await expect(day).toBeVisible({ timeout: 10_000 });
+      await expect(
+        day.getByRole("button", { name: "Try again" }),
+      ).toBeEnabled();
+      expect(posts(r10c)).toHaveLength(0);
+      recordEvidence(info, "e-m10", {
+        later,
+        log: r10c.log.map(({ from: _from, ...e }) => e),
+      });
+    });
+});

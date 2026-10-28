@@ -11,6 +11,10 @@
 //    no patch can make it joint without adding a read (the shape the decision rules out).
 //  - N-10C-03 (the copy read from another account after a switch): the copy lives in the account's own database and is written only
 //    through W28's guards; the identity cases are MU-10C-12 (plan) and MU-10C-12 (screen), so a native switch adds no sensitivity.
+//  - MU-3164 (revision 6, R29: work whose implicit today resolved keeps its unresolved `currentKey`): the only schedule it changes is the
+//    same day asked explicitly during the `clearSatisfied` await between the zone being found and the day being marked `attempted`; there
+//    the duplicate is ended by `attempted` after one more position read (no send). The IndexedDB double has no resumable hold for that
+//    transaction, so no deterministic test can observe it; the re-key stays as bookkeeping, and its control test passes before and after.
 import { sub } from "./data-catalogue.mjs";
 
 const MODEL = "src/features/tasks/model/materialise.ts";
@@ -529,8 +533,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      if (unpark(taskId)) {\n        publishQueue();\n        pump();\n        return;\n      }\n",
-        "",
+        // Re-anchored (revision 6: the paused work is taken up, then the day asked is admitted on its own).
+        "      const resumed = unpark(taskId);\n",
+        "      const resumed = false;\n",
       ),
   },
   {
@@ -743,7 +748,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      <CatchUpNotice taskId={task.id} title={task.label} />\n",
+        // Re-anchored (revision 6: the notice is keyed by the task and given the selected day).
+        "      <CatchUpNotice\n        key={task.id}\n        taskId={task.id}\n        title={task.label}\n        day={row?.data.slot.date ?? undefined}\n      />\n",
         "",
       ),
   },
@@ -1030,7 +1036,8 @@ export const UNIT_10C = [
           "    if (state.unrecorded.has(item.taskId)) return end(DONE);\n",
           "",
         ),
-        "      if (state.unrecorded.has(taskId)) return;\n",
+        // Re-anchored (revision 6: the admission of a day asked is its own function).
+        "    if (state.unrecorded.has(taskId)) return false;\n",
         "",
       ),
   },
@@ -1499,8 +1506,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "        !sameDiscovery(discoveryOf(entries, input.task_id), lift.expected)",
-        "        false",
+        // Re-anchored (revision 6: the expectation is tagged; the stopped one is compared as before).
+        "      if (!(input.task_id in entries) || !sameDiscovery(current, lift.expected))",
+        "      if (!(input.task_id in entries) || false)",
       ),
   },
   {
@@ -1556,7 +1564,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "              Math.max(0, n - TASK_SEQUENCE_ROWS),\n",
+        // Re-anchored (revision 6: the window's length may be asked for).
+        "              Math.max(0, n - limit),\n",
         "              0,\n",
       ),
   },
@@ -1617,8 +1626,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "  if (order === null) return authority.endedLost !== true;",
-        "  if (order === null) return true;",
+        // Re-anchored (revision 6: the loss rule is shared, `positiveTrusted`; the same fault in this resolver's use of it).
+        "  if (!positiveTrusted(authority, order)) return false;",
+        "  if (order !== null && !positiveTrusted(authority, order)) return false;",
       ),
   },
   {
@@ -1641,7 +1651,13 @@ export const UNIT_10C = [
     file: "src/features/tasks/model/timers.ts",
     tests: ["tests/features/tasks/timer-model.test.ts"],
     expect: /a finished session lost: not trusted/,
-    patch: (t) => sub(t, "      : input.endedLost !== true;", "      : true;"),
+    // Re-anchored (revision 6: the loss rule is shared; the same fault in this resolver's use of it).
+    patch: (t) =>
+      sub(
+        t,
+        "    positiveTrusted(input, known(order) ? order : null);",
+        "    known(order) ? positiveTrusted(input, order) : true;",
+      ),
   },
   {
     id: "MU-3126",
@@ -1686,7 +1702,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "        timer_ended: ended?.ended ?? { ...held.ended, lost: true },",
+        // Re-anchored (revision 6: the refused record also carries its inclusive bound).
+        "        timer_ended: ended?.ended ?? {\n          ...held.ended,\n          lost: true,\n          through: Math.max(held.ended.through, high),\n        },",
         "        timer_ended: ended?.ended ?? held.ended,",
       ),
   },
@@ -1709,8 +1726,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "            : withEnded(held.ended, finished, Math.max(issued, input.order));",
-        "            : null;",
+        // Re-anchored (revision 6: recorded at the high-water).
+        "          finished.length === 0 ? null : withEnded(held.ended, finished, high);",
+        "          null;",
       ),
   },
   {
@@ -1814,7 +1832,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "        complete: n <= TASK_SEQUENCE_ROWS,",
+        // Re-anchored (revision 6: the window's length may be asked for).
+        "        complete: n <= limit,",
         "        complete: true,",
       ),
   },
@@ -1829,11 +1848,16 @@ export const UNIT_10C = [
     ],
     expect:
       /REVIEW5 M6 \(ported\)|a later horizon stop beside today's bound stop/,
+    // Re-anchored (revision 6: the exact days are added between the two).
     patch: (t) =>
       sub(
-        t,
-        "  if (target !== undefined && found.target) rows.push(found.target);\n  if (target === undefined || every)",
-        "  const last = found.rows[found.rows.length - 1];\n  if (last) rows.push(last);\n  if (every)",
+        sub(
+          t,
+          "  if (target !== undefined && found.target) rows.push(found.target);\n",
+          "  const last = found.rows[found.rows.length - 1];\n  if (last) rows.push(last);\n",
+        ),
+        "  if (target === undefined || every) for (const row of found.rows) add(row);",
+        "  if (every) for (const row of found.rows) add(row);",
       ),
   },
   {
@@ -1863,8 +1887,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      if (pending(workKey({ taskId, throughDate: options.throughDate })))",
-        "      if (\n        queue.some((q) => q.taskId === taskId) ||\n        state.current === taskId\n      )",
+        // Re-anchored (revision 6: the admission of a day asked is its own function).
+        "    if (pending(workKey({ taskId, throughDate }))) return false;",
+        "    if (queue.some((q) => q.taskId === taskId) || state.current === taskId)\n      return false;",
       ),
   },
   {
@@ -1943,6 +1968,271 @@ export const UNIT_10C = [
         "      if ((entry.attempt ?? null) === null)",
         "      if (false as boolean)",
       ),
+  },
+  {
+    id: "MU-3146",
+    title:
+      "R27: WEB-10c A15: a lost finished session distrusts only positives strictly BELOW its order (the one at it stays running)",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /terminal loss n, positive n: at the bound|REVIEW6 T9/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return !(through > 0 && order <= through);",
+        "  return !(through > 0 && order < through);",
+      ),
+  },
+  {
+    id: "MU-3147",
+    title:
+      "R27: WEB-10c A15: a day read's refused finished sessions are lost only through its own order (a later running read in flight stays trusted)",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /a day read at i refused with a finished session/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const high = Math.max(highWater(sync), input.order);",
+        "      const high = input.order;",
+      ),
+  },
+  {
+    id: "MU-3148",
+    title:
+      "R27: WEB-10c A15: a lost complete observation distrusts the positive AT its order too (absence made inclusive)",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /absence lost at n \(floor\), positive n: trusted/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (loss.floor !== undefined && order < loss.floor) return false;",
+        "  if (loss.floor !== undefined && order <= loss.floor) return false;",
+      ),
+  },
+  {
+    id: "MU-3149",
+    title: "R27: WEB-10c A15: the detail is not given the terminal-loss bound",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /REVIEW6 T9/,
+    patch: (t) =>
+      sub(t, "    endedThrough: evidence.authority?.endedThrough ?? 0,\n", ""),
+  },
+  {
+    id: "MU-3150",
+    title:
+      "R27: WEB-10c A15: the stored authority carries no terminal-loss bound (the account's list and the act's re-check)",
+    file: "src/features/tasks/timers/copy.ts",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /R27: the account's list at the loss boundary/,
+    patch: (t) => sub(t, "    endedThrough: record.endedThrough,\n", ""),
+  },
+  {
+    id: "MU-3151",
+    title:
+      "R27: WEB-10c A15: a finished session evicted from the bound leaves no inclusive loss",
+    file: "src/data/plans/timer-copy.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /eviction: lost through the order|REVIEW6 T9/,
+    patch: (t) => sub(t, "    through = Math.max(through, gone[1]);\n", ""),
+  },
+  {
+    id: "MU-3152",
+    title:
+      "R27: WEB-10c A15: the history's refused finished record leaves no inclusive loss",
+    file: "src/data/plans/timer-copy.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /refused history growth|REVIEW6 T9/,
+    patch: (t) =>
+      sub(
+        t,
+        "          lost: true,\n          through: Math.max(held.ended.through, high),\n        },\n        timer_scope_floor",
+        "          lost: true,\n          through: held.ended.through,\n        },\n        timer_scope_floor",
+      ),
+  },
+  {
+    id: "MU-3153",
+    title:
+      "R27: WEB-10c A15: a finished record written before revision 6 is never settled (its bound moves with every order issued)",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /settled ONCE/,
+    patch: (t) =>
+      sub(
+        t,
+        "      stored === null || (stored !== undefined && stored.through === null)",
+        "      false",
+      ),
+  },
+  {
+    id: "MU-3154",
+    title:
+      "R27: WEB-10c A15: a finished record written before revision 6 that lost a session reads as nothing lost",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /written before revision 6 that lost a session/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : { ...ended, through: ended.through ?? (ended.lost ? high : 0) },",
+        "        : { ...ended, through: ended.through ?? 0 },",
+      ),
+  },
+  {
+    id: "MU-3155",
+    title:
+      "R28: WEB-10c A1/A19: the detail never offers the days beyond its window",
+    file: "src/features/tasks/catchup/CatchUpNotice.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /REVIEW6 M9 \(ported|Show earlier days reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const more = found !== undefined && !found.complete;",
+        "  const more = false;",
+      ),
+  },
+  {
+    id: "MU-3156",
+    title:
+      "R28: WEB-10c A1/A19: the detail's selected day is not read by its own key",
+    file: "src/features/tasks/detail/TaskDetail.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /the selected day is read by its own key/,
+    patch: (t) =>
+      sub(t, "        day={row?.data.slot.date ?? undefined}\n", ""),
+  },
+  {
+    id: "MU-3157",
+    title:
+      "R28: WEB-10c A1/A7: a day a command asked the runner for is not read by its own key",
+    file: "src/features/tasks/catchup/useCatchUp.ts",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /a day a command asked/,
+    patch: (t) =>
+      sub(
+        t,
+        "              ...[...(state.asked.get(taskId) ?? [])].reverse(),\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3158",
+    title:
+      "R28: WEB-10c A1/A19: the recovery read's further exact days are always absent",
+    file: "src/data/plans/materialise.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/catchup-banner.test.tsx",
+    ],
+    expect:
+      /exact days are found past the window|the selected day is read by its own key/,
+    patch: (t) =>
+      sub(
+        t,
+        '        exact[day] =\n          (await reader.get("materialise_sequences", [taskId, day])) ?? null;',
+        "        exact[day] = null;",
+      ),
+  },
+  {
+    id: "MU-3159",
+    title:
+      "R28: WEB-10c A1/A19: a longer window asked for is read at the default length",
+    file: "src/data/plans/materialise.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/catchup-banner.test.tsx",
+    ],
+    expect: /a longer window is one read|Show earlier days reads/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const limit = asked ?? TASK_SEQUENCE_ROWS;",
+        "      const limit = TASK_SEQUENCE_ROWS;",
+      ),
+  },
+  {
+    id: "MU-3160",
+    title:
+      "R28: WEB-10c A1/A19: Today never offers the task's page while its day is not known and more days are retained",
+    file: "src/features/tasks/today/CatchUpBanner.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /Today, its day not known yet/,
+    patch: (t) =>
+      sub(
+        t,
+        "            todayOf(taskId) === undefined &&\n            found.get(taskId)?.complete === false,",
+        "            false,",
+      ),
+  },
+  {
+    id: "MU-3161",
+    title:
+      "R28: WEB-10c A22: once every day is shown the focus is left on the page's body",
+    file: "src/features/tasks/catchup/CatchUpNotice.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /the notice keeps the focus/,
+    patch: (t) => sub(t, "      notice.current?.focus();\n", ""),
+  },
+  {
+    id: "MU-3162",
+    title:
+      "R29: WEB-10c A1/A3: resuming a task's paused work stands in for another day asked of it",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /REVIEW6 M10 \(ported/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const admitted = admit(taskId, trigger, options.throughDate);",
+        "      const admitted = !resumed && admit(taskId, trigger, options.throughDate);",
+      ),
+  },
+  {
+    id: "MU-3163",
+    title:
+      "R29: WEB-10c A1/A3: a press on one day drops paused work of the task whose day was not known (wildcard)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /a press on one day leaves work paused before its day was known/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (workKey(p) === pressed) parked.delete(key);",
+        "          if (\n            p.taskId === taskId &&\n            (day === undefined ||\n              p.throughDate === undefined ||\n              p.throughDate === day)\n          )\n            parked.delete(key);",
+      ),
+  },
+  {
+    id: "MU-3165",
+    title:
+      "R29: WEB-10c A19: a stop of a new row the ledger refused does not name its day",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /names its day/,
+    patch: (t) => sub(t, "            throughDate: key.through_date,\n", ""),
+  },
+  {
+    id: "MU-3166",
+    title:
+      "R30: WEB-10c A19: a press that saw no discovery stop lifts the sequence beside one recorded since (no_stop not compared)",
+    file: "src/data/plans/materialise.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /no_stop expected; a stopped discovery entry|REVIEW6 M11/,
+    patch: (t) => sub(t, "      if (current?.stop) return stale;\n", ""),
   },
 ];
 

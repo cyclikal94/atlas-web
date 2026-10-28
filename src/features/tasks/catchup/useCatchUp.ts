@@ -132,7 +132,15 @@ export function useCatchUpService(): CatchUpRunner {
   return runner;
 }
 
-export function useCatchUp(taskIds: readonly string[]): CatchUp {
+/**
+ * `more` (revision 6, review R28): what a screen that shows EVERY retained stop asks besides each task's today: further exact days (a
+ * selected day; the days a command asked this page's runner for are added here) and how many of its latest rows (`rows`, grown by the
+ * person's "Show earlier days").
+ */
+export function useCatchUp(
+  taskIds: readonly string[],
+  more?: { days?: readonly string[]; rows?: number },
+): CatchUp {
   const env = useTasksEnv();
   const runner = useCatchUpService();
   const state = useSyncExternalStore(runner.subscribe, runner.get, runner.get);
@@ -143,7 +151,20 @@ export function useCatchUp(taskIds: readonly string[]): CatchUp {
   const records = useTaskSequences(
     taskIds.map((taskId) => {
       const day = todayOf(taskId);
-      return day === undefined ? { taskId } : { taskId, throughDate: day };
+      const days =
+        more === undefined
+          ? []
+          : // The screen's own days first, then the most recently asked.
+            [
+              ...(more.days ?? []),
+              ...[...(state.asked.get(taskId) ?? [])].reverse(),
+            ];
+      return {
+        taskId,
+        ...(day === undefined ? {} : { throughDate: day }),
+        ...(days.length === 0 ? {} : { days }),
+        ...(more?.rows === undefined ? {} : { rows: more.rows }),
+      };
     }),
   );
   const found = useMaterialiseDiscovery();

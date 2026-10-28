@@ -38,9 +38,15 @@ import { guardedPlan, readPlan } from "./builders";
  * kept in `sync_state.timer_ended`, with the order handed out when it was recorded, and taken out of the copy at once. A finished
  * session never runs again, whatever order a positive of it has (unknown included), so these decide for every source: the copy, the
  * account's live list, a day's read now or kept, in any tab and after a reload or going offline. Bounded (`TIMER_ENDED_IDS`): the
- * oldest finished session beyond it goes, and the floor rises to the order handed out when it was recorded (every positive that may
- * have listed it was issued before), and `lost` is set (a positive whose order is unknown is then no longer trusted). A growth the
- * quota ledger did not admit records the same loss instead, at every order handed out so far.
+ * oldest finished session beyond it goes, and `lost` is set (a positive whose order is unknown is then no longer trusted). A growth the
+ * quota ledger did not admit records the same loss instead.
+ *
+ * TWO KINDS OF LOSS (WEB-10c revision 6, review R27): what a lost record could contradict differs. A complete observation's ABSENCE at
+ * order a retires only positives issued BEFORE a, so losing it distrusts orders strictly below a (`timer_scope_floor`, exclusive). A
+ * FINISHED session retires every positive of it whatever its order, and any read issued before the finished fact was recorded (the
+ * highest order handed out then, in flight included) may still list it running; so losing one distrusts every order up to AND INCLUDING
+ * that high-water (`timer_ended.through`, inclusive). A read issued later cannot list it running. The terminal paths still raise the
+ * exclusive floor to the same order, so an older tab that knows only the floor keeps the protection it had.
  */
 export const TIMER_COPY_ROWS = 50;
 
@@ -168,6 +174,12 @@ export interface TimerAccountRecord {
 export interface TimerEndedRecord {
   lost: boolean;
   ids: Array<[string, number]>;
+  /**
+   * Revision 6 (review R27): every order up to AND INCLUDING this one may be contradicted by a finished session that was not kept (0: none
+   * lost). `null`: a record written before revision 6, whose loss bound is not known (`endedOf` reads it as every order handed out so far;
+   * `issueTimerOrder` settles it once).
+   */
+  through: number | null;
 }
 
 export function parseTimerAccount(value: unknown): TimerAccountRecord | null {
@@ -178,6 +190,16 @@ export function parseTimerAccount(value: unknown): TimerAccountRecord | null {
 
 export function parseTimerEnded(value: unknown): TimerEndedRecord | null {
   if (!isObject(value) || typeof value.lost !== "boolean") return null;
+  const through = value.through;
+  if (
+    through !== undefined &&
+    !(
+      typeof through === "number" &&
+      Number.isSafeInteger(through) &&
+      through >= 0
+    )
+  )
+    return null;
   const ids = value.ids;
   if (
     !Array.isArray(ids) ||
@@ -193,26 +215,52 @@ export function parseTimerEnded(value: unknown): TimerEndedRecord | null {
     )
   )
     return null;
-  return { lost: value.lost, ids: ids as Array<[string, number]> };
+  return {
+    lost: value.lost,
+    ids: ids as Array<[string, number]>,
+    through: through === undefined ? null : through,
+  };
 }
+
+/**
+ * Every order handed out or applied so far (revision 6): the counter, or the copy's fence where a copy was stored above it. A finished
+ * fact recorded now may contradict any positive issued up to here.
+ */
+const highWater = (sync: {
+  timer_order?: unknown;
+  timer_fence?: unknown;
+  timer_copy?: unknown;
+}): number => Math.max(orderOf(sync.timer_order), floorOf(sync));
+
+/** A finished record whose loss bound is known (revision 6, R27). */
+type SettledEnded = TimerEndedRecord & { through: number };
 
 /**
  * What the stored finished sessions and account observation leave as authority (revision 5, R23), and the floor whatever of them does
  * not read raises: an unreadable record held authority nobody can see now, so every order handed out so far (`issued`), and `lost`.
+ * Revision 6 (R27): an unreadable finished record, or one written before revision 6 that lost a session, is lost THROUGH every order
+ * handed out so far (`high`, inclusive): which positives it could contradict is not known.
  */
 function endedOf(
-  sync: { timer_ended?: unknown; timer_account?: unknown },
+  sync: {
+    timer_ended?: unknown;
+    timer_account?: unknown;
+    timer_order?: unknown;
+    timer_fence?: unknown;
+    timer_copy?: unknown;
+  },
   issued: number,
 ): {
-  ended: TimerEndedRecord;
+  ended: SettledEnded;
   account: TimerAccountRecord | null;
   floor: number;
 } {
+  const high = highWater(sync);
   const rawEnded = sync.timer_ended;
   const rawAccount = sync.timer_account;
   const ended =
     rawEnded === undefined || rawEnded === null
-      ? { lost: false, ids: [] }
+      ? { lost: false, ids: [], through: 0 }
       : parseTimerEnded(rawEnded);
   const account =
     rawAccount === undefined || rawAccount === null
@@ -221,7 +269,10 @@ function endedOf(
   const accountLost =
     rawAccount !== undefined && rawAccount !== null && account === null;
   return {
-    ended: ended ?? { lost: true, ids: [] },
+    ended:
+      ended === null
+        ? { lost: true, ids: [], through: high }
+        : { ...ended, through: ended.through ?? (ended.lost ? high : 0) },
     account,
     floor: ended === null || accountLost ? issued : 0,
   };
@@ -235,15 +286,16 @@ const idsOf = (ids: readonly unknown[]): string[] => [
 ];
 
 /**
- * `ids` added to the finished sessions (pure; revision 5, R23), recorded at `issued`: kept newest last, at most `TIMER_ENDED_IDS`. The
- * ones that do not fit go oldest first, raising the floor to the order handed out when each was recorded (every positive that may list
- * it was issued no later), and set `lost`.
+ * `ids` added to the finished sessions (pure; revision 5, R23), recorded at `issued` (the high-water when recorded): kept newest last, at
+ * most `TIMER_ENDED_IDS`. The ones that do not fit go oldest first and set `lost`; each is lost THROUGH the order it was recorded at
+ * (revision 6, R27: every positive that may list it was issued no later, that order included), and the exclusive floor rises to it too
+ * (`floor`, for an older tab).
  */
 function withEnded(
-  held: TimerEndedRecord,
+  held: SettledEnded,
   ids: readonly string[],
   issued: number,
-): { ended: TimerEndedRecord; floor: number } {
+): { ended: SettledEnded; floor: number } {
   const fresh = new Set(ids);
   const all: Array<[string, number]> = [
     ...held.ids.filter(([id]) => !fresh.has(id)),
@@ -251,12 +303,14 @@ function withEnded(
   ];
   let floor = 0;
   let lost = held.lost;
+  let through = held.through;
   while (all.length > TIMER_ENDED_IDS) {
     const gone = all.shift() as [string, number];
     floor = Math.max(floor, gone[1]);
+    through = Math.max(through, gone[1]);
     lost = true;
   }
-  return { ended: { lost, ids: all }, floor };
+  return { ended: { lost, ids: all, through }, floor };
 }
 
 /** The copy without the sessions `finished` names (a removal: never a growth). `null`: nothing to change. */
@@ -363,7 +417,20 @@ export const issueTimerOrder = guardedPlan<
   decide: ({ sync }) => {
     const order = Math.max(orderOf(sync.timer_order), floorOf(sync)) + 1;
     if (!Number.isSafeInteger(order)) return { result: { order: null } };
-    return { sync: { ...sync, timer_order: order }, result: { order } };
+    // Revision 6 (R27): a finished record that does not read, or one written before revision 6 that lost a session, is settled ONCE as
+    // lost through every order handed out before this one, so this read and every later one is trusted again (never a bound that moves
+    // with each read).
+    const raw = sync.timer_ended;
+    const stored =
+      raw === undefined || raw === null ? undefined : parseTimerEnded(raw);
+    const settle =
+      stored === null || (stored !== undefined && stored.through === null)
+        ? { timer_ended: endedOf(sync, orderOf(sync.timer_order)).ended }
+        : {};
+    return {
+      sync: { ...sync, ...settle, timer_order: order },
+      result: { order },
+    };
   },
 });
 
@@ -456,9 +523,11 @@ export const reconcileTimerCopy = guardedPlan<
       const admitted =
         input.admitted !== false &&
         (input.leaseLive === undefined || input.leaseLive());
-      // The day's finished sessions are the account's too (revision 5, R23): kept with the scope, under the same admission.
+      // The day's finished sessions are the account's too (revision 5, R23): kept with the scope, under the same admission. They are
+      // recorded at the HIGH-WATER (revision 6, R27): another running read issued after this day's read may be in flight and list them.
       const issued = orderOf(sync.timer_order);
       const held = endedOf(sync, issued);
+      const high = Math.max(highWater(sync), input.order);
       const finished = idsOf(input.scope.ended);
       if (admitted) {
         const out = observe(
@@ -469,9 +538,7 @@ export const reconcileTimerCopy = guardedPlan<
           input.scope,
         );
         const ended =
-          finished.length === 0
-            ? null
-            : withEnded(held.ended, finished, Math.max(issued, input.order));
+          finished.length === 0 ? null : withEnded(held.ended, finished, high);
         next = {
           ...next,
           timer_scopes: out.scopes,
@@ -479,13 +546,27 @@ export const reconcileTimerCopy = guardedPlan<
           ...(ended === null ? {} : { timer_ended: ended.ended }),
         };
         scoped = true;
-      } else
+      }
+      // Not admitted: the day's absence is lost below its read's order (exclusive); its finished sessions are lost through the
+      // high-water (inclusive, R27), never only through the day read's own order.
+      else
         next = {
           ...next,
-          timer_scope_floor: Math.max(floor, held.floor, input.order),
+          timer_scope_floor: Math.max(
+            floor,
+            held.floor,
+            input.order,
+            finished.length === 0 ? 0 : high,
+          ),
           ...(finished.length === 0
             ? {}
-            : { timer_ended: { ...held.ended, lost: true } }),
+            : {
+                timer_ended: {
+                  ...held.ended,
+                  lost: true,
+                  through: Math.max(held.ended.through, high),
+                },
+              }),
         };
     }
     const fence = floorOf(sync);
@@ -518,7 +599,7 @@ export const reconcileTimerCopy = guardedPlan<
  * taken out of the copy in the same transaction. Needs no order (a finished session never runs again) but the read's stamp at issue
  * (INC, CLS, EPO): an answer of a former account, epoch or incarnation records nothing. The record grows the singleton, so the caller
  * admits it through the quota ledger (`leaseLive`); a refusal or a lapsed hold still takes the sessions out of the copy (a removal), and
- * records the loss instead (the floor at every order handed out so far, and `lost`).
+ * records the loss instead: lost THROUGH every order handed out so far (revision 6, R27: inclusive, `through`), and `lost`.
  */
 export const recordTimerEnded = guardedPlan<
   {
@@ -540,19 +621,24 @@ export const recordTimerEnded = guardedPlan<
     const ids = idsOf(input.ids);
     if (ids.length === 0) return { result: { recorded: true, removed: 0 } };
     const issued = orderOf(sync.timer_order);
+    const high = highWater(sync);
     const held = endedOf(sync, issued);
     const out = copyWithout(sync, new Set(ids));
     const floor = Math.max(orderOf(sync.timer_scope_floor), held.floor);
     const admitted =
       input.admitted !== false &&
       (input.leaseLive === undefined || input.leaseLive());
-    const ended = admitted ? withEnded(held.ended, ids, issued) : null;
+    const ended = admitted ? withEnded(held.ended, ids, high) : null;
     return {
       sync: {
         ...sync,
         ...(out === null ? {} : { timer_copy: out.copy }),
-        timer_ended: ended?.ended ?? { ...held.ended, lost: true },
-        timer_scope_floor: Math.max(floor, ended?.floor ?? issued),
+        timer_ended: ended?.ended ?? {
+          ...held.ended,
+          lost: true,
+          through: Math.max(held.ended.through, high),
+        },
+        timer_scope_floor: Math.max(floor, ended?.floor ?? high),
       },
       result: { recorded: ended !== null, removed: out?.removed ?? 0 },
     };
@@ -583,6 +669,8 @@ export interface TimerAuthorityRecord {
   account: TimerAccountRecord | null;
   ended: string[];
   endedLost: boolean;
+  /** Revision 6 (R27): every positive of this order or an EARLIER one may be contradicted by a finished session not kept (0: none). */
+  endedThrough: number;
 }
 export const readTimerAuthority = readPlan<
   { incarnationId: string },
@@ -613,15 +701,19 @@ export const readTimerAuthority = readPlan<
       account: held.account,
       ended: held.ended.ids.map(([id]) => id),
       endedLost: held.ended.lost,
+      endedThrough: held.ended.through,
     };
   },
 });
 
-/** One day's scope (DA-T3) and the floor below which a day's read is no longer trusted for what it saw running. */
+/**
+ * One day's scope (DA-T3), the floor below which a day's read is no longer trusted for what it saw running, and (revision 6, R27) the
+ * order through which it is not trusted either, because a finished session was lost (`through`, inclusive).
+ */
 export const readTimerScope = readPlan<
   { incarnationId: string; occurrenceId: string },
   null,
-  { scope: TimerScopeRecord | null; floor: number }
+  { scope: TimerScopeRecord | null; floor: number; through: number }
 >({
   name: "data.readTimerScope",
   scope: [],
@@ -640,6 +732,7 @@ export const readTimerScope = readPlan<
           ? lostAt(raw, orderOf(sync?.timer_order))
           : 0,
       ),
+      through: endedOf(sync ?? {}, orderOf(sync?.timer_order)).ended.through,
     };
   },
 });

@@ -106,6 +106,31 @@ export interface TimerAuthority {
   ended?: ReadonlySet<string>;
   /** A finished session was not kept: a positive whose order is unknown can no longer be told apart, so it is not trusted. */
   endedLost?: boolean;
+  /**
+   * Revision 6 (review R27): a finished session was not kept, and any positive of this order or an EARLIER one may have listed it running,
+   * so none of them is trusted (inclusive; 0 or absent: none lost). The floor is the other kind of loss (a complete observation's absence,
+   * which says nothing about its own order: exclusive).
+   */
+  endedThrough?: number;
+}
+
+/**
+ * Whether a server positive of `order` may be trusted against what this database LOST (revision 6, review R27): the ONE rule both
+ * resolvers apply. A lost complete observation retired only what was seen before it (`floor`, exclusive); a lost finished session may be
+ * contradicted by any positive issued up to and including the order recorded with it (`endedThrough`, inclusive). A positive whose order
+ * is unknown cannot be told apart from one before a lost finished session, so it is not trusted once one was lost (`endedLost`).
+ */
+export function positiveTrusted(
+  loss: Pick<TimerAuthority, "endedLost" | "endedThrough"> & {
+    floor?: number;
+  },
+  order: number | null,
+): boolean {
+  if (order === null) return loss.endedLost !== true;
+  if (loss.floor !== undefined && order < loss.floor) return false;
+  // 0: nothing lost (a copy written before the order existed has order 0 and is not distrusted by it).
+  const through = loss.endedThrough ?? 0;
+  return !(through > 0 && order <= through);
 }
 
 /** A complete observation of the account's running sessions: its place in the observation order and what it listed. */
@@ -119,8 +144,9 @@ export interface AccountObservation {
  * the rule every consumer applies to every source (the copy, the account's live list, a day's read now or kept), so no consumer offers an
  * action another has retired. Not when any read listed it finished (the account's history or its day's reads); not when its day's latest
  * complete read is LATER and does not list it (a read of another day says nothing about it); not when the account's latest complete
- * observation is LATER and does not list it; not when it was seen below the floor (what may have retired it was not kept). A positive whose
- * order is unknown is retired only by a finished listing, and not trusted once a finished session was lost. `occurrenceId` null: a
+ * observation is LATER and does not list it; not when what may have retired it was not kept (`positiveTrusted`: below the floor, or at or
+ * below `endedThrough`). A positive whose order is unknown is retired only by a finished listing, and not trusted once a finished session
+ * was lost. `occurrenceId` null: a
  * restricted row, whose day is not known (the account's observations and the floor).
  */
 export function stillRunning(
@@ -134,8 +160,8 @@ export function stillRunning(
   const scope =
     occurrenceId === null ? undefined : authority.scopes[occurrenceId];
   if (scope?.ended.includes(sessionId)) return false;
-  if (order === null) return authority.endedLost !== true;
-  if (order < authority.floor) return false;
+  if (!positiveTrusted(authority, order)) return false;
+  if (order === null) return true;
   const account = authority.account;
   if (
     account != null &&
@@ -167,7 +193,8 @@ export function stillRunning(
  * R19: the floor is loss information about every source, not only the day's read). Revision 5 (review R23): the account's latest complete
  * observation (`account`, kept when a partial page replaced the copy) and every session listed finished (`ended`) decide here as they do
  * in `stillRunning`, so the detail and the account's list never disagree; once a finished session was lost (`endedLost`), a read whose
- * order is unknown is not trusted for what it saw running.
+ * order is unknown is not trusted for what it saw running. Revision 6 (review R27): nor is a read or copy of an order at or below
+ * `endedThrough` (a lost finished session's bound is inclusive); both resolvers apply `positiveTrusted`.
  */
 export function runningOn(
   occurrenceId: string,
@@ -193,6 +220,8 @@ export function runningOn(
     ended?: ReadonlySet<string>;
     /** A finished session was not kept (revision 5, R23). */
     endedLost?: boolean;
+    /** Every order up to and including this one may list a finished session that was not kept (revision 6, R27). */
+    endedThrough?: number;
   },
 ): RunningSession[] {
   const out = new Map<string, RunningSession>();
@@ -242,9 +271,7 @@ export function runningOn(
     finished.has(id) ||
     (known(order) && complete.some((o) => o.order > order && !o.lists.has(id)));
   const trusted = (order: number | null | undefined) =>
-    known(order)
-      ? !(input.floor !== undefined && order < input.floor)
-      : input.endedLost !== true;
+    positiveTrusted(input, known(order) ? order : null);
   const readTrusted = trusted(input.readOrder);
   const copyTrusted = trusted(input.copyOrder);
   for (const s of input.copy ?? []) {

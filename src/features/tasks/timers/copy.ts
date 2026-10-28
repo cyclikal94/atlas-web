@@ -65,6 +65,7 @@ export const authorityOf = (record: TimerAuthorityRecord): TimerAuthority => {
     account,
     ended: new Set(record.ended),
     endedLost: record.endedLost,
+    endedThrough: record.endedThrough,
   };
 };
 

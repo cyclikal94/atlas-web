@@ -1102,3 +1102,76 @@ describe("R23: complete and finished evidence for every running row", () => {
     },
   );
 });
+
+/**
+ * Revision 6 (review 6 R27): the account's list judges the same loss: a running row read at the highest order issued is not trusted once
+ * a finished session recorded at that order was lost (refused growth), whichever session it was; an admitted unrelated record is the
+ * control. A loss names no session, so the conservative side is to wait for a later read.
+ */
+describe("R27: the account's list at the loss boundary", () => {
+  test.each([
+    ["its own finished record is refused", "own", false, true],
+    [
+      "an unrelated finished record is refused (the loss names no session)",
+      "other",
+      false,
+      true,
+    ],
+    [
+      "an unrelated finished record is admitted (control)",
+      "other",
+      true,
+      false,
+    ],
+  ] as const)(
+    "a live running row, then %s",
+    async (_, which, admitted, hidden) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      const api = fakeApi({
+        readAccountTimers: async (q) =>
+          q.state === "running"
+            ? page([session])
+            : new Promise(() => undefined),
+      });
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api,
+      });
+      const running = () =>
+        document.querySelector(
+          `[data-timers-running] [data-account-timer="${session.id}"]`,
+        );
+      await t.until(() => running() !== null);
+      await t.until(
+        () =>
+          !!(
+            t.world.idb.peek(
+              accountDatabaseName(ME),
+              "sync_state",
+              "singleton",
+            ) as SyncStateRow | undefined
+          )?.timer_copy,
+      );
+      const service = t.data.service() as AccountService;
+      const refused = {
+        quota: {
+          reserve: async () => ({ verdict: "refuse", settle: () => undefined }),
+        },
+      };
+      const id =
+        which === "own" ? session.id : "cccccccc-0000-4000-8000-0000000000aa";
+      expect(
+        await commitTimerEnded(
+          (admitted ? t.data : refused) as never,
+          service,
+          service.capture(1),
+          [id],
+        ),
+      ).toMatchObject({ kind: "applied", value: { recorded: admitted } });
+      await t.settle();
+      expect(running() === null).toBe(hidden);
+    },
+  );
+});
