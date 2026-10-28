@@ -10,7 +10,11 @@ import {
   type Store,
   type Trace,
 } from "../../session";
-import { DATA_CONFIG, maxResponseBytesFor } from "../model/config";
+import {
+  admissionBytesFor,
+  DATA_CONFIG,
+  maxResponseBytesFor,
+} from "../model/config";
 import type { BlockedBy, BudgetEvent } from "../model/recovery";
 import { isFailureStatus, nextDelay } from "../model/retry";
 import { maxChangesFor, SEGMENT_CONTRACT } from "../model/segmented-sync";
@@ -611,9 +615,11 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
           : { maxChanges: null, allowSegment: false },
     };
 
+    // The estimate is of THIS request's response (R21-QUOTA): a catch-up's `max_changes` bounds it whatever the limit; a snapshot, or a
+    // request without one, keeps the whole-batch estimate.
     const verdict = await deps.quota.check(
       "cache",
-      maxResponseBytesFor(capture.limit, config),
+      admissionBytesFor(capture.limit, issued.segmented.maxChanges, config),
     );
     if (!mayIssue(issued)) return { when: alive(b) ? "now" : "event" };
     if (verdict === "refuse") {

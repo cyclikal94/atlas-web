@@ -4,7 +4,11 @@ import {
   type Store,
   type Trace,
 } from "../../session";
-import { DATA_CONFIG, maxResponseBytesFor } from "../model/config";
+import {
+  admissionBytesFor,
+  DATA_CONFIG,
+  maxResponseBytesFor,
+} from "../model/config";
 import {
   INVALIDATE_PREFIX,
   initialReadRetry,
@@ -754,10 +758,20 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
       expectedPosition: capture.cursor,
     });
 
-    // The quota reserve: data writes refuse BEFORE atlas-auth writes could fail.
+    // 3's request budget, decided ONCE from the capture, before the quota check that judges the response it may bring (R21-QUOTA). WEB-09c:
+    // `max_changes` when the server is known to segment, or a segmented revision is being received.
+    const segmented = maxChangesFor({
+      configured: config.segmentedMaxChanges,
+      capable: deps.segmentedCapable?.() ?? false,
+      stepped: capture.steppedChanges,
+      staged: capture.staged,
+    });
+
+    // The quota reserve: data writes refuse BEFORE atlas-auth writes could fail. The estimate is of THIS request's response: `max_changes`
+    // bounds it whatever the limit, and without one the whole-batch estimate stands.
     const verdict = await deps.quota.check(
       "cache",
-      maxResponseBytesFor(capture.limit),
+      admissionBytesFor(capture.limit, segmented.maxChanges, config),
     );
 
     // The last test before the request, and the quota read above is an asynchronous gap that everything this step decided before it may
@@ -774,13 +788,7 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
 
     setState({ kind: "running", catchingUp: behind });
 
-    // 3: the request. WEB-09c: `max_changes` when the server is known to segment, or a segmented revision is being received.
-    const segmented = maxChangesFor({
-      configured: config.segmentedMaxChanges,
-      capable: deps.segmentedCapable?.() ?? false,
-      stepped: capture.steppedChanges,
-      staged: capture.staged,
-    });
+    // 3: the request, with the budget decided above.
     const url = deps.apiUrl("/sync");
     if (capture.cursor !== null) url.searchParams.set("cursor", capture.cursor);
     url.searchParams.set("limit", String(capture.limit));

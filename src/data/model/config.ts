@@ -185,3 +185,23 @@ export function maxResponseBytesFor(
       config.responseOverhead,
   );
 }
+
+/**
+ * `admissionBytesFor(limit, maxChanges)` (R21-QUOTA, WEB-09c): the response a delta request may bring, for the quota check BEFORE it is
+ * issued. A request that carries `max_changes = m` (the negotiated value, exactly the URL's) is answered with at most `m` changes across
+ * the whole response, ancestors included (BE-Q23 §1), whatever `limit` is; one without it (`null`: no budget, including a continuation
+ * sent without one, which the contract answers with the whole remainder) keeps the whole-batch estimate `maxResponseBytesFor(limit)`.
+ * Advisory only: the check holds no space, and what was actually received is reserved after the response. It is NOT the body ceiling
+ * that refuses a page as a contract violation, which stays `maxResponseBytesFor(limit)`.
+ */
+export function admissionBytesFor(
+  limit: number,
+  maxChanges: number | null,
+  config: DataConfig = DATA_CONFIG,
+): number {
+  if (maxChanges === null) return maxResponseBytesFor(limit, config);
+  return Math.ceil(
+    maxChanges * config.bytesPerChange * config.responseMargin +
+      config.responseOverhead,
+  );
+}

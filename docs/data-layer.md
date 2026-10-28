@@ -446,6 +446,18 @@ parameter (an older server answers an unknown query parameter with `400 malforme
 * **The ladder below `limit = 1`.** A device signal (allocation failure, non-quota abort, watchdog, crash-loop marker, whose marker now records the request's `max_changes`)
   at the lowest rung halves `max_changes` to the contract's minimum of 4 (one change and at most three ancestors) before a floor hit is counted, so the floor is reached only
   at the smallest response the protocol has. Quota and oversize never step down.
+* **The early quota check judges THIS request's response (R21-QUOTA, revision 21).** Both callers decide the request's budget ONCE from the capture (`maxChangesFor`), before
+  the advisory check, and the URL carries that same value. With `max_changes = m` the response holds at most `m` changes across all its batches, ancestors included, whatever
+  the limit, so the check asks for the reserve plus `admissionBytesFor(limit, m)` = `m x bytesPerChange x responseMargin + responseOverhead` of the caller's merged configuration
+  (120,832 bytes at `m = 4`, 1,447,936 at the default 100). A request without a budget (no capability or no configured value, a snapshot, or a continuation sent without one,
+  which asks for the whole remainder) keeps the whole-batch estimate `maxResponseBytesFor(limit)`; an earlier piece's `m` is never reused for it. The revision-20 engines
+  asked for the whole-batch estimate in front of every segmented request, so a valid bounded request was refused as `storage_full` with ample room for it beyond the reserve;
+  quota refusal never steps the budget down, so retrying could not progress. Unchanged: the check holds nothing; the reservation of the bytes actually received (and, for a
+  final snapshot page, the staged bytes) at the commit is the authority and still refuses the page when other writers took the room meanwhile; the authentication reserve,
+  the origin-wide ledger, the body ceiling (`maxResponseBytesFor(limit)`, a contract violation, not an admission) and a refusal leaving no crash marker. Tests:
+  `tests/data/segmented-quota-admission.test.ts` (both callers, the boundaries at the reserve plus the estimate, stepped and default budgets, limit independence, the caller's
+  configuration, no-budget requests and remainders, reload, snapshot, a save taking the room while the response is held) and `tests/e2e/fixture.data-segmented-quota.spec.ts`
+  (the ordinary engine and the production leader's fenced catch-up in three engines, with a declared free-space estimate: an admission calculation, not disk exhaustion).
 * The recovery job's catch-up follows the same rules (W27 for a non-final segment; the final one through W1 in recovery mode); a snapshot never opts in.
 
 ### Device class, step-down and the floor

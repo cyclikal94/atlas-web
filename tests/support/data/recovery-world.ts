@@ -1,4 +1,7 @@
-import { createQuotaGuard } from "../../../src/data/engine/quota-guard";
+import {
+  createQuotaGuard,
+  type QuotaGuard,
+} from "../../../src/data/engine/quota-guard";
 import {
   createRecoveryJob,
   type RecoveryJob,
@@ -91,6 +94,8 @@ export interface RecoveryWorld extends PageWorld {
   markers: WriteFailureMarkers;
   markerStorage: FakeMarkerStorage;
   freeBytes: number | null;
+  /** The job's quota guard (R21-QUOTA, WEB-09c): a test can hold another writer's reservation against it while a response is in flight. */
+  quota: QuotaGuard;
   /** Called at each read of the free space (inside the quota check, before the issue check): a test can move a fact there. */
   beforeEstimate?: () => void;
   token: string;
@@ -213,6 +218,7 @@ export async function recoveryWorld(
     },
     now: () => EPOCH_BASE + world.time,
   });
+  out.quota = quota;
   const deps: RecoveryJobDeps = {
     identity: base.identity,
     view: {
