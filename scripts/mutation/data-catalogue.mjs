@@ -30,6 +30,7 @@ import { UNIT_13B_R7 } from "./catalogue-web13b-r7.mjs";
 import { UNIT_13B_R8 } from "./catalogue-web13b-r8.mjs";
 import { UNIT_13B_R9 } from "./catalogue-web13b-r9.mjs";
 import { UNIT_13B_R10 } from "./catalogue-web13b-r10.mjs";
+import { UNIT_13B_R11 } from "./catalogue-web13b-r11.mjs";
 
 export class PatchError extends Error {}
 
@@ -21879,6 +21880,7 @@ export const UNIT = [
   ...UNIT_13B_R8,
   ...UNIT_13B_R9,
   ...UNIT_13B_R10,
+  ...UNIT_13B_R11,
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];

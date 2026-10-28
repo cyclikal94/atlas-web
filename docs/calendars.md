@@ -210,7 +210,8 @@ witness does not end a later showing that was verified and then followed an ordi
 one); what an earlier read says against its own basis (an invalid cache, a durable streak) still ends it. A NEW session is `acquiring` until
 its opening read, or a reading published while it is shown, tells its database and witness: its source, file and window are shown, Import
 explains why it waits, and nothing reaches the enqueue whatever submits the form; the press then captures that pair (`importAuthority`), and
-`importRequest` requires it. A CACHED source's open dialog whose cache
+`importRequest` requires it. **Revision 11 (review 11 R7f):** the reading that makes it ready tells the dialog (`subscribeImports`), so
+Import is enabled as soon as the history is known, with no other edit or render needed. A CACHED source's open dialog whose cache
 is only unverified waits the same way; a cache known to be invalid is the E9 close. The source's state is read afresh whenever it is shown.
 Sync, reopening and a read completing never store anything; a reload or another tab has no session. `tests/features/calendars/import-retention.test.tsx` (I1-I13
 through the production router; revision 7: L1/L2/L5 through the production `DataProvider` and writers W18/W20/W21/W23; revision 8: the

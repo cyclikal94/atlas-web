@@ -60,6 +60,9 @@ import { isCalendarsPath } from "./visit";
  *    verification never contradicts it). A NEW session is `acquiring` until it knows its database and witness (an opening read, or a
  *    reading published while it is shown): nothing is saved before, whatever submits the form, and the press captures that pair
  *    (`importAuthority`), never an absent one.
+ *  - Revision 11 (review 11 R7f; design assessment C1, invariant 1): every change of `importStatus` is told (`subscribeImports`) once
+ *    the state it follows from is complete, a reading's as much as a showing's or an ending's: the opening read, or a publication, that
+ *    makes a new session ready enables the dialog showing it, with no other render needed.
  * Page memory only: never stored, sent, broadcast, put in history state or logged; a reload or another tab has none. Retained selection
  * is never retained permission: the dialog reads the source's current state whenever it shows the session.
  */
@@ -199,13 +202,24 @@ const newest = (all: readonly Reading[]): number | null =>
   );
 
 /**
+ * Judges `which` by the page's cache as it is read now (`judged`), then tells every dialog when that changed its `importStatus` (revision
+ * 11, review 11 R7f): what a reading establishes (its database adopted, its first basis) makes a new session ready, and nothing else
+ * would tell the dialog still showing it `acquiring`. Ended meanwhile, `release` has told them.
+ */
+function judgeNow(which: Held, context: ImportOwnerContext): void {
+  if (which.editor.ended()) return;
+  const before = importStatus(which.editor);
+  judged(which, context);
+  if (held === which && importStatus(which.editor) !== before) changed();
+}
+
+/**
  * Judges `which` by the page's cache as it is read now (revision 8, R7a/R7b). Shown and verified: it follows (the dialog applies E9
  * itself). Hidden or waiting: a cache known to be invalid ends it, and so does a witness past its basis (invalidated, and perhaps brought
  * up to date, while nothing observed it); facts not established prove nothing, and a reading that agrees proves nothing either (revision
  * 9, R7c): a waiting one shown asks for its showing's read instead.
  */
-function judgeNow(which: Held, context: ImportOwnerContext): void {
-  if (which.editor.ended()) return;
+function judged(which: Held, context: ImportOwnerContext): void {
   const all = readings(which, context);
   // The read made when it opened is what the database said then, whenever it lands.
   if (which.opening) which.basis ??= which.observer?.get().opening ?? null;

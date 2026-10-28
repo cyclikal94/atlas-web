@@ -14,6 +14,7 @@ import * as copy from "../../../src/features/calendars/copy";
 import { SHOW_NEXT_CALENDARS } from "../../../src/features/calendars/copy-anchor";
 import * as words from "../../../src/features/calendars/copy-import";
 import { deviceToday } from "../../../src/features/calendars/ImportDialog";
+import { subscribeImports } from "../../../src/features/calendars/import-kept";
 import { IMPORT_ENDPOINT } from "../../../src/features/calendars/model/commands";
 import { defaultWindow } from "../../../src/features/calendars/model/import";
 import { installMatchMedia } from "../../helpers/match-media";
@@ -1821,4 +1822,204 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
             expect(importDrafts(w)[0]).toMatchObject({ target_id: PENDING });
           expect(w.calls.filter((call) => call.method === "POST")).toEqual([]);
         });
+
+  /**
+   * WEB-13b revision 11 (review 11 R7f; design assessment C1-C2, invariant 1; schedule S1), review 11's notification schedule maintained:
+   * the provider attached again with every readSyncFacts of the page runtime's service held, told apart at the store: a LIVE reading's
+   * read (made for a `watch`, the controller's publication and the observation's) or a ONE-OFF read (`readCache`: the opening read of a
+   * new session's observation). Only the one-off read is delivered, so no publication, edit or other render happens: what makes the new
+   * session ready must tell the dialog itself. Controls: the opening read still held, and failed (`readCache` says nothing): acquiring,
+   * nothing told, the input kept, nothing stored.
+   */
+  function holdFactsReads(w: World) {
+    const service = w.env.service();
+    expect(service).not.toBeNull();
+    const real = (service as NonNullable<typeof service>).store as unknown as {
+      watch: (
+        plan: { name: string },
+        input: unknown,
+      ) => { get(): unknown; subscribe(listener: () => void): () => void };
+      run: (
+        plan: { name: string },
+        input: unknown,
+        ...rest: unknown[]
+      ) => Promise<unknown>;
+    };
+    const watch = real.watch.bind(real);
+    const run = real.run.bind(real);
+    // A live reading reads with the input it was watched with (the store re-runs its plan); a one-off read with its own.
+    const live = new WeakSet<object>();
+    let frozen = false;
+    const held: Array<{
+      once: boolean;
+      deliver: (fail?: boolean) => void;
+    }> = [];
+    vi.spyOn(real, "watch").mockImplementation((plan, input) => {
+      if (plan.name === "data.readSyncFacts" && typeof input === "object")
+        live.add(input as object);
+      const source = watch(plan, input);
+      if (plan.name !== "data.readSyncFacts") return source;
+      let snapshot = source.get();
+      return {
+        get: () => {
+          if (!frozen) snapshot = source.get();
+          return snapshot;
+        },
+        subscribe: (listener: () => void) =>
+          source.subscribe(() => {
+            if (frozen) return;
+            snapshot = source.get();
+            listener();
+          }),
+      };
+    });
+    vi.spyOn(real, "run").mockImplementation((plan, input, ...rest) => {
+      const result = run(plan, input, ...rest);
+      if (plan.name !== "data.readSyncFacts" || !frozen) return result;
+      const once = !(typeof input === "object" && live.has(input as object));
+      return new Promise((resolve, reject) => {
+        held.push({
+          once,
+          deliver: (fail = false) => {
+            result.then(
+              (value) =>
+                fail ? reject(new Error("read failed")) : resolve(value),
+              reject,
+            );
+          },
+        });
+      });
+    });
+    return {
+      freeze() {
+        frozen = true;
+      },
+      /** The one-off reads held. */
+      once: () => held.filter((read) => read.once),
+      /** The live readings' reads held. */
+      live: () => held.filter((read) => !read.once),
+      async deliver(read: { deliver: (fail?: boolean) => void }, fail = false) {
+        held.splice(held.indexOf(read as (typeof held)[number]), 1);
+        await act(async () => {
+          read.deliver(fail);
+        });
+        await w.settle();
+      },
+      async release() {
+        await act(async () => {
+          frozen = false;
+          for (const read of held.splice(0)) read.deliver();
+        });
+        await w.settle();
+      },
+    };
+  }
+
+  for (const witness of [0, 1])
+    for (const opening of ["delivered", "held", "failed"] as const)
+      test(`R7f (row, witness ${witness}): a new import's opening read ${opening === "delivered" ? "delivered alone (no publication, edit or other render) tells the dialog: Import is enabled with the input kept, nothing stored until it is pressed, and then ONE import states that history" : opening === "held" ? "still held (control): acquiring, nothing told, Import disabled, nothing stored" : "failed (control): acquiring, nothing told, Import disabled with the input kept, nothing stored"}`, async () => {
+        const w = await calendarWorld({
+          production: true,
+          productionSync: true,
+          validCache: true,
+          online: false,
+          drafts: [pendingCreate()],
+        });
+        if (witness === 1) {
+          await w.invalidate();
+          await w.recover([]);
+        }
+        expect(w.sync().cache_invalidation_seq ?? 0).toBe(witness);
+        const reads = holdFactsReads(w);
+        await w.detach();
+        reads.freeze();
+        await w.attach();
+        let told = 0;
+        let off = () => {};
+        try {
+          const dialog = await openRow(w, PENDING_ROW);
+          await choose(w, dialog, ICS);
+          await waitFor(() =>
+            expect(shownFile(dialog)).toContain("retained.ics"),
+          );
+          setField(dialog, "From", "2026-01-01");
+          setField(dialog, "Through", "2026-12-31");
+          await w.settle();
+          const outbox = w.env.outbox();
+          if (outbox === null) throw new Error("no outbox");
+          const enqueue = outbox.enqueue.bind(outbox);
+          const stated: unknown[] = [];
+          const spy = vi
+            .spyOn(outbox, "enqueue")
+            .mockImplementation(async (request) => {
+              stated.push(request.continuity);
+              return enqueue(request);
+            });
+          // Acquiring: nothing of the cache's history is known; the ONE one-off read held is the new session's opening read.
+          expect(reads.live().length).toBeGreaterThan(0);
+          expect(reads.once()).toHaveLength(1);
+          expect(w.env.cacheLifetime.get()?.invalidations ?? null).toBeNull();
+          expect(
+            within(dialog).getByRole("button", { name: words.IMPORT }),
+          ).toBeDisabled();
+          expect(
+            within(dialog).getByRole("button", { name: words.IMPORT }),
+          ).toHaveAccessibleDescription(words.IMPORT_CHECKING);
+          off = subscribeImports(() => {
+            told += 1;
+          });
+          const [read] = reads.once();
+          if (read === undefined) throw new Error("no opening read");
+          if (opening !== "held")
+            await reads.deliver(read, opening === "failed");
+          // Only that read went: every live reading is still held, so nothing was published and nothing else rendered the dialog.
+          expect(reads.live().length).toBeGreaterThan(0);
+          expect(w.env.cacheLifetime.get()?.invalidations ?? null).toBeNull();
+          expect(shownFile(dialog)).toContain("retained.ics");
+          expect(field(dialog, "From").value).toBe("2026-01-01");
+          expect(field(dialog, "Through").value).toBe("2026-12-31");
+          expect(spy).not.toHaveBeenCalled();
+          expect(importDrafts(w)).toHaveLength(0);
+          const button = within(dialog).getByRole("button", {
+            name: words.IMPORT,
+          });
+          if (opening !== "delivered") {
+            expect(told).toBe(0);
+            expect(button).toBeDisabled();
+            expect(
+              within(dialog).getByRole("button", { name: words.IMPORT }),
+            ).toHaveAccessibleDescription(words.IMPORT_CHECKING);
+            fireEvent.click(button);
+            fireEvent.submit(present(dialog.querySelector("form")));
+            await w.settle();
+            expect(spy).not.toHaveBeenCalled();
+            expect(importDrafts(w)).toHaveLength(0);
+            expect(screen.queryByRole("dialog")).toBe(dialog);
+          } else {
+            // Told once: the dialog shown before is enabled (not a new one).
+            expect(told).toBe(1);
+            expect(screen.queryByRole("dialog")).toBe(dialog);
+            expect(button).toBeEnabled();
+            expect(button).not.toHaveAccessibleDescription(
+              words.IMPORT_CHECKING,
+            );
+            expect(dialog.textContent).not.toContain(words.IMPORT_CHECKING);
+            press(dialog, words.IMPORT);
+            await w.settle();
+            expect(spy).toHaveBeenCalledTimes(1);
+            expect(stated).toEqual([
+              {
+                incarnationId: w.sync().incarnation_id,
+                invalidations: witness,
+              },
+            ]);
+            expect(importDrafts(w)).toHaveLength(1);
+            expect(importDrafts(w)[0]).toMatchObject({ target_id: PENDING });
+          }
+          expect(w.calls.filter((call) => call.method === "POST")).toEqual([]);
+        } finally {
+          off();
+          await reads.release();
+        }
+      });
 });

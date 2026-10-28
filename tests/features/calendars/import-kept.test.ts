@@ -4,6 +4,7 @@ import {
   pageCacheLifetime,
   publishCacheLifetime,
 } from "../../../src/data/ui/cache-lifetime";
+import type { ImportEditor } from "../../../src/features/calendars/import-editor";
 import {
   discardImport,
   forgetImportSessions,
@@ -16,6 +17,7 @@ import {
   openImport,
   resumeChooser,
   showImport,
+  subscribeImports,
 } from "../../../src/features/calendars/import-kept";
 import type { RouteChanges } from "../../../src/lib/route-changes";
 
@@ -1258,5 +1260,113 @@ describe("R7a/R7b (revision 8): the invalidation witness, the page runtime's ser
       status: "ready",
       continuity: { incarnationId: "i1", invalidations: 4 },
     });
+  });
+
+  /**
+   * WEB-13b revision 11 (review 11 R7f; design assessment C1-C2, invariant 1; schedules S1, S2): what makes a new session ready is TOLD
+   * (`subscribeImports`), once, with its state complete (each notification records the authority as it is then): the opening read, a
+   * publication of the page shown, and the displayed account's first database adopted. Controls: a failed opening read, unknown and other
+   * databases' publications, a repeated and an advancing publication once ready (ready stays ready: nothing to tell, but the press
+   * captures the advanced history), and an identity change before the read lands (told once, ended; the read tells nothing more).
+   */
+  function hearing() {
+    const heard: Array<{ editor: ImportEditor; authority: unknown }> = [];
+    let editor: ImportEditor | null = null;
+    const off = subscribeImports(() => {
+      if (editor !== null)
+        heard.push({ editor, authority: importAuthority(editor) });
+    });
+    withdrawals.push(off);
+    return {
+      of(next: ImportEditor) {
+        editor = next;
+        return heard;
+      },
+    };
+  }
+  const READY = {
+    status: "ready",
+    continuity: { incarnationId: "i1", invalidations: 4 },
+  } as const;
+
+  for (const entry of [ROW, CHOOSER])
+    for (const by of ["opening", "publication"] as const)
+      test(`R7f (${entry.kind}): the ${by === "opening" ? "opening read" : "shown page's publication"} that makes a new session ready TELLS it, once, with its history complete; told nothing before`, async () => {
+        const svc = service();
+        svc.hold();
+        svc.unestablished();
+        const w = pageWorld(svc);
+        const ctl = controller(UNREAD);
+        const listen = hearing();
+        const first = openImport(entry, w.context());
+        await settle();
+        const heard = listen.of(first);
+        first.editWindow({ from: "2026-01-01", through: "2026-12-31" });
+        expect(importStatus(first)).toBe("acquiring");
+        if (by === "opening") {
+          expect(svc.reads).toHaveLength(1);
+          svc.reads.splice(0)[0]?.deliver();
+        } else ctl.set(life());
+        await settle();
+        expect(heard).toEqual([{ editor: first, authority: READY }]);
+        expect(first.state().window.from).toBe("2026-01-01");
+      });
+
+  test("R7f: the displayed account's first database, adopted from a publication with its witness, TELLS the new session ready, once", () => {
+    const w = world();
+    w.cache.set(life({ account: "b", incarnationId: "i3" }));
+    const listen = hearing();
+    const first = openImport(ROW, w.context({ incarnation: null }));
+    const heard = listen.of(first);
+    w.cache.set(life({ account: "b", incarnationId: "i3", invalidations: 7 }));
+    expect(heard).toEqual([]);
+    w.cache.set(life());
+    expect(heard).toEqual([{ editor: first, authority: READY }]);
+  });
+
+  test("R7f controls: a failed opening read, unknown facts and another database's publications tell nothing (acquiring); ready, a repeated or an advancing publication tells nothing more, and the press captures the advanced history", async () => {
+    const svc = service();
+    svc.fail();
+    svc.unestablished();
+    const w = pageWorld(svc);
+    const ctl = controller(UNREAD);
+    const listen = hearing();
+    const first = openImport(ROW, w.context());
+    const heard = listen.of(first);
+    await settle();
+    ctl.set(UNREAD);
+    ctl.set(life({ incarnationId: "i2" }));
+    ctl.set(life({ account: "b", incarnationId: "i3" }));
+    await settle();
+    expect(heard).toEqual([]);
+    expect(importStatus(first)).toBe("acquiring");
+    ctl.set(life());
+    expect(heard).toEqual([{ editor: first, authority: READY }]);
+    ctl.set(life());
+    ctl.set(life({ invalidations: 5 }));
+    await settle();
+    expect(heard).toHaveLength(1);
+    expect(importAuthority(first)).toEqual({
+      status: "ready",
+      continuity: { incarnationId: "i1", invalidations: 5 },
+    });
+  });
+
+  test("R7f control: the identity changes before the opening read lands: told once (ended); the read tells nothing more and makes nothing ready", async () => {
+    const svc = service();
+    svc.hold();
+    svc.unestablished();
+    const w = pageWorld(svc);
+    controller(UNREAD);
+    const listen = hearing();
+    const first = openImport(ROW, w.context());
+    const heard = listen.of(first);
+    await settle();
+    w.identities.set(B);
+    expect(heard).toEqual([{ editor: first, authority: { status: "ended" } }]);
+    svc.reads.splice(0)[0]?.deliver();
+    await settle();
+    expect(heard).toHaveLength(1);
+    expect(importStatus(first)).toBe("ended");
   });
 });
