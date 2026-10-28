@@ -321,6 +321,34 @@ describe("U11: an edit made while a revision is staged keeps its receipt state u
     expectReleased(o);
     expect(o.cache()).toEqual(w.cache());
   });
+
+  test("an edit CLAIMED while the first piece's response is awaited (its request captured BEFORE the claim) keeps its overlay and draft: an equal request_seq is not eligible", async () => {
+    // The inverse of the control "a claim made BEFORE the first request is captured" below: the same enqueue, pieces and receipt, but the
+    // claim falls between W19's capture and W27's staging, so the staged word's request and the claim carry the same request_seq.
+    const w = await world();
+    const id = await enqueueEdit(w);
+    const first = request(
+      w,
+      seg(0, false, [upsert(A, "old", 1), ...others(10, 3)]),
+    );
+    const captured = w.sync().request_seq;
+    await claim(w, id);
+    expect(await apply(w, first)).toBe("staged");
+    const staged = w.rows("delta_staging" as never) as Array<{
+      id: string;
+      request_seq: number;
+    }>;
+    expect(staged.find((row) => row.id === A)?.request_seq).toBe(captured);
+    expect(w.effects()[0]?.submitted_at_request_seq).toBe(captured);
+    expect(await receipt(w, id, 11)).toMatchObject({ displayed: 1 });
+    // has_more: true, so no live edge can stand in for the staged word.
+    expect(await deliver(w, seg(1, true, others(20, 4)))).toBe("committed");
+
+    expect(w.sync()).toMatchObject({ applied_revision: 10, delta_stage: null });
+    expect(cached(w)).toMatchObject({ label: "old", version: 1 });
+    expectRetained(w, id);
+    expect(seen(w)).toBe("new");
+  });
 });
 
 describe("U11 controls: words that CAN reflect the edit release it, as an ordinary page does", () => {
@@ -410,7 +438,7 @@ describe("U11 controls: words that CAN reflect the edit release it, as an ordina
     expect(segmented.effects()).toEqual(whole.effects());
   });
 
-  test("control: a claim made after the first request is CAPTURED but whose receipt arrives between pieces is released, as an ordinary page captured after the claim is", async () => {
+  test("control: a claim made BEFORE the first request is captured, whose receipt arrives between pieces, is released, as an ordinary page captured after the claim is", async () => {
     // The ordinary-page semantics (WEB-04 §5.4): a page whose request was captured after the claim is the account's view for the ids it
     // names. The staged word is judged at its capture, so it is held to exactly that, never to the time it is activated.
     const run = async (segmented: boolean) => {
