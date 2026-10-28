@@ -1,16 +1,25 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
+import type { TimerSeen } from "../../../src/data";
+import {
+  cancelTimer,
+  startTimer,
+  stopTimer,
+} from "../../../src/features/tasks/model/commands";
 import type {
   AccountTimerSession,
   TimerSession,
 } from "../../../src/features/tasks/model/contract";
 import {
   copyCorrection,
+  endStands,
   keptStands,
   positiveTrusted,
   runningOn,
   stillRunning,
+  type TimerAuthority,
 } from "../../../src/features/tasks/model/timers";
+import { withEndExpectation } from "../../../src/features/tasks/timers/copy";
 import { draftRow } from "../../support/data/rows";
 
 /**
@@ -717,5 +726,269 @@ describe("R27: terminal loss is inclusive, absence loss exclusive", () => {
         endedThrough: 99,
       }).map((s) => s.source),
     ).toEqual(["draft"]);
+  });
+});
+
+/**
+ * Revision 7 (review 7 R32): what an end of a timer is admitted against, inside the writing transaction (`EnqueueRequest.expectTimer`).
+ * The session shown carries the order of the observation it was shown from (`RunningSession.order`); `endStands` judges that against the
+ * evidence and the session's drafts as stored then, by the same rules as every screen (`stillRunning`), with this device's own unsettled
+ * start standing by itself and an end already on its way refusing another.
+ */
+describe("R32: an end is admitted against what is stored when it is written", () => {
+  const S = COPIED;
+  const authority = (extra: Partial<TimerAuthority> = {}): TimerAuthority => ({
+    scopes: {},
+    floor: 0,
+    ...extra,
+  });
+  const witness = (order: number | null) => ({
+    occurrenceId: OCC,
+    sessionId: S,
+    order,
+  });
+
+  test("RunningSession.order is the order of the observation each source was shown from (null for this device's start alone)", () => {
+    const start = draftRow({
+      kind: "start_timer",
+      status: "queued",
+      command: {
+        command: {
+          kind: "start_timer",
+          occurrence_id: OCC,
+          session_id: "cccccccc-0000-4000-8000-0000000000f9",
+          started_at: T0 / 1000 - 5,
+        },
+      } as never,
+    });
+    const shown = runningOn(OCC, {
+      drafts: [start as never],
+      read: [
+        {
+          id: "cccccccc-0000-4000-8000-0000000000fa",
+          occurrence_id: OCC,
+          started_at: T0 / 1000 - 60,
+          stopped_at: null,
+          version: 2,
+        },
+      ],
+      copy: [copied()],
+      readOrder: 6,
+      copyOrder: 4,
+    });
+    expect(
+      Object.fromEntries(shown.map((s) => [s.id, [s.source, s.order]])),
+    ).toEqual({
+      [COPIED]: ["copy", 4],
+      "cccccccc-0000-4000-8000-0000000000fa": ["read", 6],
+      "cccccccc-0000-4000-8000-0000000000f9": ["draft", null],
+    });
+    // A read with no order is shown with none (never borrowed from another source).
+    expect(
+      runningOn(OCC, {
+        drafts: [],
+        read: [
+          {
+            id: S,
+            occurrence_id: OCC,
+            started_at: T0 / 1000 - 60,
+            stopped_at: null,
+            version: 2,
+          },
+        ],
+        copy: [copied()],
+        readOrder: null,
+        copyOrder: 4,
+      }).map((s) => [s.source, s.order]),
+    ).toEqual([["read", null]]);
+  });
+
+  test.each([
+    ["nothing retired it", {}, 5, true],
+    ["listed finished", { ended: new Set([S]) }, 5, false],
+    [
+      "listed finished by its day's scope",
+      { scopes: { [OCC]: { order: 1, running: [], ended: [S] } } },
+      5,
+      false,
+    ],
+    [
+      "a later complete account observation omits it (n+1)",
+      { account: { order: 6, running: [] } },
+      5,
+      false,
+    ],
+    [
+      "an account observation at its own order (n)",
+      { account: { order: 5, running: [] } },
+      5,
+      true,
+    ],
+    [
+      "a later complete day observation omits it",
+      { scopes: { [OCC]: { order: 6, running: [], ended: [] } } },
+      5,
+      false,
+    ],
+    [
+      "another day's observation (unrelated)",
+      { scopes: { [OTHER_DAY]: { order: 9, running: [], ended: [] } } },
+      5,
+      true,
+    ],
+    ["floor above it (n+1)", { floor: 6 }, 5, false],
+    ["floor at it (exclusive)", { floor: 5 }, 5, true],
+    ["terminal loss through it (inclusive)", { endedThrough: 5 }, 5, false],
+    ["terminal loss below it (n−1)", { endedThrough: 4 }, 5, true],
+    ["order unknown, nothing lost", {}, null, true],
+    [
+      "order unknown, a finished session lost",
+      { endedLost: true },
+      null,
+      false,
+    ],
+  ] as const)("%s", (_, extra, order, expected) => {
+    expect(
+      endStands(
+        authority(extra as Partial<TimerAuthority>),
+        [],
+        witness(order),
+      ),
+    ).toBe(expected);
+  });
+
+  test("an end already on its way refuses another (any unsettled stop or discard of the session); a settled one does not", () => {
+    for (const kind of ["stop_timer", "cancel_timer"])
+      for (const status of ["queued", "in_flight", "blocked", "acknowledged"])
+        expect(
+          endStands(authority(), [{ kind, status }], witness(5)),
+          `${kind} ${status}`,
+        ).toBe(false);
+    for (const status of ["rejected", "version_conflict"])
+      expect(
+        endStands(authority(), [{ kind: "stop_timer", status }], witness(5)),
+      ).toBe(true);
+  });
+
+  test("this device's unsettled start stands by itself against absence and loss (as on screen), never against a finished listing", () => {
+    const starting = [{ kind: "start_timer", status: "queued" }];
+    for (const extra of [
+      { account: { order: 9, running: [] } },
+      { floor: 9 },
+      { endedThrough: 9, endedLost: true },
+    ]) {
+      expect(endStands(authority(extra), starting, witness(null))).toBe(true);
+      expect(endStands(authority(extra), [], witness(null))).toBe(
+        !("endedLost" in extra),
+      );
+    }
+    expect(
+      endStands(authority({ ended: new Set([S]) }), starting, witness(null)),
+    ).toBe(false);
+    // A start that settled (rejected) is no longer this device's own: the server observation decides.
+    expect(
+      endStands(
+        authority({ account: { order: 9, running: [] } }),
+        [{ kind: "start_timer", status: "rejected" }],
+        witness(5),
+      ),
+    ).toBe(false);
+  });
+});
+
+/**
+ * Revision 7 (review 7 R32): the end request's precondition, built by the task slice for the writing transaction. The session is the
+ * request's OWN version-checked `timer_session` target, so it never names another resource; the transaction's incarnation must be the one
+ * the acted-on observation was ordered in; then `endStands` decides on the singleton as stored (decoded by the one decoder).
+ */
+describe("R32: withEndExpectation", () => {
+  const S = COPIED;
+  const witness = { occurrenceId: OCC, sessionId: S, order: 5 };
+  const input = {
+    occurrenceId: OCC,
+    sessionId: S,
+    progressId: "aaaaaaaa-0000-4000-8000-0000000000e9",
+    streamKnown: false,
+    knownVersion: 3,
+  };
+  const seen = (over: Partial<TimerSeen> = {}): TimerSeen => ({
+    incarnationId: "inc-1",
+    sync: {} as TimerSeen["sync"],
+    drafts: [],
+    ...over,
+  });
+
+  test("Stop, Discard and a 7-day stop carry it, naming their own session; it admits in the incarnation it was shown in only", () => {
+    for (const request of [
+      stopTimer({ ...input, stoppedAt: T0 / 1000 }),
+      cancelTimer(input),
+    ]) {
+      const built = withEndExpectation(request, witness, "inc-1");
+      expect(built.targets).toBe(request.targets);
+      expect(built.expectTimer?.session).toBe(S);
+      expect(built.expectTimer?.admit(seen())).toBe(true);
+      expect(built.expectTimer?.admit(seen({ incarnationId: "inc-2" }))).toBe(
+        false,
+      );
+    }
+  });
+
+  test("decided on the singleton as stored: a finished listing refuses; another order's loss decides as on screen", () => {
+    const built = withEndExpectation(cancelTimer(input), witness, "inc-1");
+    expect(
+      built.expectTimer?.admit(
+        seen({
+          sync: {
+            timer_order: 6,
+            timer_ended: { lost: false, ids: [[S, 6]], through: 0 },
+          } as never,
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      built.expectTimer?.admit(
+        seen({
+          sync: {
+            timer_order: 6,
+            timer_ended: { lost: true, ids: [], through: 4 },
+          } as never,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      built.expectTimer?.admit(
+        seen({
+          sync: {
+            timer_order: 6,
+            timer_ended: { lost: true, ids: [], through: 5 },
+          } as never,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  test("never another resource: a request ending another session, or one with no version-checked session (a start), admits nothing", () => {
+    const other = withEndExpectation(
+      cancelTimer({
+        ...input,
+        sessionId: "cccccccc-0000-4000-8000-0000000000fb",
+      }),
+      witness,
+      "inc-1",
+    );
+    expect(other.expectTimer?.admit(seen())).toBe(false);
+    const start = withEndExpectation(
+      startTimer({
+        occurrenceId: OCC,
+        sessionId: S,
+        progressId: input.progressId,
+        startedAt: T0 / 1000,
+        firstAnyoneStream: false,
+        defaults: null,
+      }),
+      witness,
+      "inc-1",
+    );
+    expect(start.expectTimer?.admit(seen())).toBe(false);
   });
 });

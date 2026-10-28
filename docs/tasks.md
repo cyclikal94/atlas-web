@@ -968,7 +968,15 @@ control, into `timer-block`, `catchup-banner` and `catchup-runner`; the inclusiv
 (`timer-model`), the account's list at the loss boundary (`timers-page`), refusal, eviction, a day read's refusal at the high-water and
 the settlement of older records (`materialise-plans`); exact selected and asked days, the longer window and its focus, Today's link to the
 task page; another day asked while work is parked or active, the same day coalesced, a press leaving other paused work, the stop of a
-refused row naming its day; the absence a press saw, before the press and under the lock; MU-3146…MU-3166.
+refused row naming its day; the absence a press saw, before the press and under the lock; MU-3146…MU-3166. Revision 7 (Review 7 R31/R32,
+design assessment of 28 October 2026): the reviewer's T11 and T10 ported (formatting and a type-only option removed), each with its control,
+into `timer-block`; a failed first page asked again keeping the accepted read's order, offline and a remount after a retirement, a read of
+another bound incarnation hidden and read again (a store-level double); every end entry (Discard, a closed day, both 7-day choices) against
+a stored retirement, an end already queued by another page, this device's unsettled start, and a retirement stored while the save waits
+for its admission (`timer-block`, `timers-page`); the list's own re-check still deciding that a session beyond 7 days recorded finished is not
+asked about (`timers-page`, keeping MU-3132 observable); `endStands`, `RunningSession.order` and `withEndExpectation` (another incarnation,
+another session, a start; `timer-model`); the transactional precondition, its refusal writing nothing, the retry of a save already made,
+every re-admission and the snapshot (`tests/data/outbox-timer-expectation.test.ts`); MU-3167…MU-3182.
 
 ## Limits (WEB-10c)
 
@@ -1004,6 +1012,12 @@ refused row naming its day; the absence a press saw, before the press and under 
   each time, until every retained day is shown, each with its own Try again. Today offers the task's page while the task's day is not
   known and it holds more days than were read. Resuming a task's paused work never stands in for another day asked of it. A Try again on
   a day's stop that saw no discovery stop does nothing if one was recorded meanwhile (the screen then shows it).
+- **Revision 7.** A day's sessions that failed to load (a further page, or the first page read again) leave what was read before as it
+  was read: a session a later complete observation retired stays retired. A read of a database that is no longer the one bound is not
+  shown; the day is read again. Stop, Discard and the 7-day choices, on the detail and the account list, are admitted by the save itself
+  against what is stored at that moment: one pressed on a session recorded finished (or no longer confirmable) by another page, before this
+  screen heard of it, saves nothing and says "This timer may already have ended. Nothing was saved." (provisional copy); an end already on
+  its way refuses another. This device's own unsettled start can still be stopped or discarded.
 - **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
   compatibility are those last rendered (a pause is taken up again when a task screen renders).
 
@@ -1021,6 +1035,7 @@ refused row naming its day; the absence a press saw, before the press and under 
 | "Your timers" in the task list and the timer block; "Restricted — sharing changed since this session" | `/tasks/timers` (native E-TM1) |
 | Rota labels ("You", usernames, "Someone (abcd…)"), "Take turns on this task", the conflict without the other person's name, "Left open", "Projected" | `/tasks/<id>` of an Anyone task (jsdom `rota.test.tsx`, native E-R1) |
 | Streak tiles "Shared" and "You", unit words, five strip states including "Skipped", no run dates, "On this device" offline | `/tasks/<id>/streak` (jsdom `streak-page.test.tsx`, native E-S2) |
+| Revision 7: "This timer may already have ended. Nothing was saved." when Stop, Discard or a 7-day choice meets a retirement stored before the save | `/tasks/<id>` of a seconds task, or `/tasks/timers`, after another page recorded the session finished (jsdom `timer-block.test.tsx`; not rendered natively) |
 
 ## Limits
 

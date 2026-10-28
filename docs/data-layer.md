@@ -833,6 +833,19 @@ the current epoch is shown with no request, one persisted for another epoch is n
   `liftMaterialiseStops` takes a tagged discovery EXPECTATION (`DiscoveryExpectation`: `stopped` with the entry and its replacement, or
   `no_stop`) and compares it in the same transaction as the sequence: a stopped discovery entry recorded while a press that saw none waited
   makes the whole lift stale, so neither record changes.
+* **Revision 7: a timer's end is admitted by its writing transaction (W2 + W28; Review 7's R32).** `EnqueueRequest.expectTimer`
+  (`TimerExpectation`: the session the request ends and the caller's PURE `admit`) is asked by `enqueueDraft` inside the enqueue
+  transaction, AFTER a retry of a save already made under the same local id is recognised (so a save whose answer was lost is never
+  refused by a retirement stored since) and after `observed`. `admit` is given the transaction's own database incarnation, the singleton
+  as stored then (whose timer evidence the caller decodes with `timerAuthorityOf`, the one decoder `readTimerAuthority` also uses; it is
+  exported through `ui/task-records.ts` so it stays out of the initial chunk) and every draft of the session (an `index_targets` read,
+  windowed; the request's own only for a retry already recognised). A false answer refuses with the new `RefusalReason` `timer_ended`
+  and writes nothing (no draft, body, version record or singleton change). Every quota re-admission and fence retry runs the transaction
+  again, so a retirement stored during the waits refuses too; one stored after the write does not rewrite what was admitted.
+  `snapshotRequest` copies the expectation. The data layer decides nothing about what a session's state means: the task slice builds the
+  request (`withEndExpectation`: the session is the request's own version-checked `timer_session` target, the incarnation the acted-on
+  observation was ordered in must be the transaction's, then `endStands`). Enqueue only (end commands are never edited or superseded).
+  The additions cost 78 B of the fixture's initial JavaScript (279,894 B against the one-off 279,900 B ceiling).
 * **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `commitMaterialiseSequence`,
   `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve); revision 3: quota reserves in
   `commitTimerCorrection` and `commitMaterialiseDiscovery`; revision 4: `useLatestSequences` (by task, in reads of `SEQUENCE_WINDOW`

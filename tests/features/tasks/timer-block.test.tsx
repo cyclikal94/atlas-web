@@ -11,6 +11,7 @@ import {
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { SyncStateRow } from "../../../src/data/model/types";
 import type { TasksResult } from "../../../src/features/tasks/api";
+import * as copy from "../../../src/features/tasks/copy";
 import { TIMER_COPY } from "../../../src/features/tasks/detail/Timer";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import {
@@ -471,7 +472,10 @@ describe("R2: the day's complete read and the kept copy", () => {
     await t.until(() => more === 1);
     await t.settle();
     expect(sourceOf(COPIED_ID)).toBe("copy");
-    fireEvent.click(screen.getByRole("button", { name: TIMER_COPY.loadMore }));
+    // The further page is still offered after its failure (revision 7: asserted before it is pressed, not a query error).
+    const again = screen.queryByRole("button", { name: TIMER_COPY.loadMore });
+    expect(again, "Load more is still offered").not.toBeNull();
+    fireEvent.click(again as HTMLElement);
     await t.until(() => block()?.dataset.timerBlock === "idle");
     expect(more).toBe(2);
     expect(sourceOf(COPIED_ID)).toBeNull();
@@ -1216,4 +1220,593 @@ describe("REVIEW6 T9 terminal evidence at the highest issued order", () => {
       );
     },
   );
+});
+
+/**
+ * Revision 7 (review 7 R31): what a read ACCEPTED keeps where it was issued, whatever a later request does. A failed further page (the
+ * reviewer's T11, ported verbatim but for formatting) or a failed first page asked again never turns the same rows into a read with no
+ * order, so a later complete observation that retired them still does. The paired controls list the session in that observation.
+ */
+async function retireByAccount(
+  t: Awaited<ReturnType<typeof mountTasks>>,
+  task: SeededTask,
+  session: TimerSession,
+  retire: boolean,
+) {
+  const service = t.data.service() as AccountService;
+  const order = await issueTimerOrderNow(service, service.capture(1));
+  expect(order).not.toBeNull();
+  const value = await commitTimerCopy(t.data, service, service.capture(1), {
+    format: 2,
+    order: order as number,
+    read_at: Date.now(),
+    complete: true,
+    running: retire ? [] : [copied(task, session.started_at, session.id)],
+  } as never);
+  expect(value).toMatchObject({ kind: "applied", value: { written: true } });
+  await t.settle();
+}
+/** A parser-valid 50-row first page whose LAST row (the cursor) is the running session; the other 49 finished. */
+function pageWithRunning(task: SeededTask, session: TimerSession): TimerPage {
+  const items: TimerSession[] = [
+    ...Array.from({ length: 49 }, (_, i) => ({
+      ...session,
+      id: sid(i + 1),
+      stopped_at: session.started_at + 1,
+    })),
+    session,
+  ];
+  const first = { items, next_after: session.id };
+  expect(parseTimerPage(first, task.occurrenceId, null, 50)).toEqual(first);
+  return first;
+}
+
+describe("R31: a failed request never changes what an accepted read observed", () => {
+  test.each([false, true])(
+    "REVIEW7 T11 (ported): a later-page failure; retired by a newer complete account read = %s",
+    async (retire) => {
+      const task = await seconds();
+      const session = {
+        id: "cccccccc-0000-4000-8000-000000000094",
+        occurrence_id: task.occurrenceId,
+        started_at: nowSeconds() - 600,
+        stopped_at: null,
+        version: 3,
+      };
+      const items: TimerSession[] = [
+        ...Array.from({ length: 49 }, (_, i) => ({
+          ...session,
+          id: `cccccccc-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+          stopped_at: session.started_at + 1,
+        })),
+        session,
+      ];
+      const first = { items, next_after: session.id };
+      // The released contract only supplies a continuation after a full, ordered 50-row page.
+      expect(parseTimerPage(first, task.occurrenceId, null, 50)).toEqual(first);
+      let later = 0;
+      const api = fakeApi({
+        readTimers: async (_id, after) => {
+          if (after) {
+            expect(after).toBe(first.next_after);
+            later++;
+            return { ok: false, kind: "uncertain" };
+          }
+          return { ok: true, value: first };
+        },
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      expect(block()?.dataset.timerBlock).toBe("running");
+      const service = t.data.service() as AccountService;
+      const order = await issueTimerOrderNow(service, service.capture(1));
+      const value = await commitTimerCopy(t.data, service, service.capture(1), {
+        format: 2,
+        order: order as number,
+        read_at: Date.now(),
+        complete: true,
+        running: retire ? [] : [copied(task, session.started_at, session.id)],
+      } as never);
+      expect(value).toMatchObject({
+        kind: "applied",
+        value: { written: true },
+      });
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(retire ? "idle" : "running");
+      fireEvent.click(
+        within(block() as HTMLElement).getByRole("button", {
+          name: TIMER_COPY.sessions,
+        }),
+      );
+      await t.settle();
+      fireEvent.click(
+        within(block() as HTMLElement).getByRole("button", {
+          name: TIMER_COPY.loadMore,
+        }),
+      );
+      await t.settle();
+      expect(later).toBe(1);
+      expect(
+        within(block() as HTMLElement).queryByText(TIMER_COPY.sessionsFailed),
+      ).not.toBeNull();
+      expect(block()?.dataset.timerBlock).toBe(retire ? "idle" : "running");
+    },
+  );
+
+  test.each([false, true])(
+    "a FIRST page asked again (Try again) that fails keeps the accepted read's order; then retired by a newer complete account read = %s",
+    async (retire) => {
+      const task = await seconds();
+      const session = sessionOf(task, 9701);
+      const first = pageWithRunning(task, session);
+      let firsts = 0;
+      let later = 0;
+      const api = fakeApi({
+        readTimers: async (_id, after) => {
+          if (after) {
+            later += 1;
+            return { ok: false, kind: "uncertain" };
+          }
+          firsts += 1;
+          return firsts === 1
+            ? { ok: true, value: first }
+            : { ok: false, kind: "uncertain" };
+        },
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      expect(block()?.dataset.timerBlock).toBe("running");
+      fireEvent.click(
+        within(block() as HTMLElement).getByRole("button", {
+          name: TIMER_COPY.sessions,
+        }),
+      );
+      const more = within(block() as HTMLElement).queryByRole("button", {
+        name: TIMER_COPY.loadMore,
+      });
+      expect(more).not.toBeNull();
+      fireEvent.click(more as HTMLElement);
+      await t.until(() => later === 1);
+      await t.until(
+        () =>
+          within(block() as HTMLElement).queryByText(
+            TIMER_COPY.sessionsFailed,
+          ) !== null,
+      );
+      const again = within(block() as HTMLElement).queryByRole("button", {
+        name: copy.TRY_AGAIN,
+      });
+      expect(again).not.toBeNull();
+      fireEvent.click(again as HTMLElement);
+      await t.until(() => firsts === 2);
+      await t.settle();
+      expect(firsts).toBe(2);
+      expect(
+        within(block() as HTMLElement).queryByText(TIMER_COPY.sessionsFailed),
+      ).not.toBeNull();
+      // The accepted rows are still shown (positive knowledge), under their own order.
+      expect(block()?.dataset.timerBlock).toBe("running");
+      await retireByAccount(t, task, session, retire);
+      expect(block()?.dataset.timerBlock).toBe(retire ? "idle" : "running");
+    },
+  );
+
+  test.each([false, true])(
+    "then offline, and after a remount, the retired session does not come back (retired = %s)",
+    async (retire) => {
+      const task = await seconds();
+      const session = sessionOf(task, 9702);
+      const first = pageWithRunning(task, session);
+      const api = fakeApi({
+        readTimers: async (_id, after) =>
+          after ? { ok: false, kind: "uncertain" } : { ok: true, value: first },
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      await retireByAccount(t, task, session, retire);
+      fireEvent.click(
+        within(block() as HTMLElement).getByRole("button", {
+          name: TIMER_COPY.sessions,
+        }),
+      );
+      const more = within(block() as HTMLElement).queryByRole("button", {
+        name: TIMER_COPY.loadMore,
+      });
+      expect(more).not.toBeNull();
+      fireEvent.click(more as HTMLElement);
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(retire ? "idle" : "running");
+      t.rerender(tasksEnv(api, { online: false }));
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(retire ? "idle" : "running");
+      t.remount();
+      await t.until(() => block() !== null);
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(retire ? "idle" : "running");
+    },
+  );
+
+  test.each([
+    ["another incarnation", true],
+    ["the same service again (control)", false],
+  ])(
+    "a read ordered before the bound database changed to %s is not shown as unordered: it is hidden and the day read again",
+    async (_, other) => {
+      const task = await seconds();
+      const session = sessionOf(task, 9703);
+      let reads = 0;
+      const api = fakeApi({
+        readTimers: async () => {
+          reads += 1;
+          return reads === 1
+            ? { ok: true, value: { items: [session], next_after: null } }
+            : { ok: false, kind: "uncertain" };
+        },
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      expect(reads).toBe(1);
+      const service = t.data.service() as AccountService;
+      // The store the screens subscribe to publishes another binding. A STORE-LEVEL double: the same database's object with another
+      // incarnation id (what the screen sees of a replacement), not a native wipe and reopen.
+      const published = other
+        ? Object.create(service, {
+            incarnationId: { value: `${service.incarnationId}-replaced` },
+          })
+        : service;
+      (
+        t.data.serviceStore as unknown as { set(next: AccountService): void }
+      ).set(published);
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(other ? "idle" : "running");
+      expect(reads).toBe(other ? 2 : 1);
+    },
+  );
+});
+
+/**
+ * Revision 7 (review 7 R32): an end of a timer (Stop, Discard and both 7-day choices) is admitted by the WRITING transaction against the
+ * evidence stored then (`expectTimer`): a retirement another page stored before the press, whose notification has not reached this
+ * screen, queues nothing. The reviewer's T10 is ported verbatim but for formatting; its premise (the double notifies no watcher of a
+ * seeded row) is the account list's maintained non-notifying boundary.
+ */
+const terminal = (sync: SyncStateRow, sessionId: string) => ({
+  ...sync,
+  timer_ended: {
+    lost: false,
+    ids: [[sessionId, Number(sync.timer_order ?? 0)]],
+    through: 0,
+  },
+});
+const lossThrough = (sync: SyncStateRow) => ({
+  ...sync,
+  timer_ended: { lost: true, ids: [], through: sync.timer_order },
+});
+const ends = (t: Awaited<ReturnType<typeof mountTasks>>) =>
+  t
+    .drafts()
+    .filter((d) => d.kind === "stop_timer" || d.kind === "cancel_timer");
+const announced = () =>
+  document.querySelector('[aria-live="assertive"]')?.textContent ?? "";
+
+describe("R32: an end is admitted against what is stored when it is written", () => {
+  test.each(["control", "terminal", "loss"])(
+    "REVIEW7 T10 (ported): stored retirement = %s",
+    async (mode) => {
+      const task = await seconds();
+      const session = {
+        id: "cccccccc-0000-4000-8000-000000000093",
+        occurrence_id: task.occurrenceId,
+        started_at: nowSeconds() - 600,
+        stopped_at: null,
+        version: 3,
+      };
+      const api = fakeApi({
+        readTimers: async () => ({
+          ok: true,
+          value: { items: [session], next_after: null },
+        }),
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      expect(block()?.dataset.timerBlock).toBe("running");
+      const name = accountDatabaseName(ME);
+      const sync = t.world.idb.peek(
+        name,
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      // Same durable state as another page's W28 commit, before its notification is delivered.
+      // The maintained account-list tests use this same double's non-notifying seeding boundary.
+      if (mode !== "control")
+        t.world.idb.seed(name, "sync_state", [
+          {
+            ...sync,
+            timer_ended:
+              mode === "terminal"
+                ? {
+                    lost: false,
+                    ids: [[session.id, sync.timer_order]],
+                    through: 0,
+                  }
+                : { lost: true, ids: [], through: sync.timer_order },
+          },
+        ]);
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe("running");
+      fireEvent.click(
+        within(block() as HTMLElement).getByRole("button", {
+          name: TIMER_COPY.stop,
+        }),
+      );
+      await t.settle();
+      expect(t.drafts().filter((d) => d.kind === "stop_timer")).toHaveLength(
+        mode === "control" ? 1 : 0,
+      );
+    },
+  );
+
+  // Every entry to the shared end: what it queues when the session stands, and nothing (no version raised) when it was retired first.
+  const entries = [
+    ["Discard", "cancel_timer"],
+    ["Stop on a closed day", "stop_timer"],
+    ["Record the first 7 days", "stop_timer"],
+    ["Discard the session (7 days)", "stop_timer"],
+  ] as const;
+  for (const [entry] of entries)
+    test.each(["control", "terminal"])(
+      `${entry}: stored retirement = %s`,
+      async (mode) => {
+        const closes = nowSeconds() - 3600;
+        const task =
+          entry === "Stop on a closed day"
+            ? await seconds({
+                definition: { carry: "close_incomplete" },
+                occurrence: { opens_at: closes - 86_400, closes_at: closes },
+              })
+            : await seconds();
+        const started = entry.includes("7 days")
+          ? nowSeconds() - 8 * 86_400
+          : entry === "Stop on a closed day"
+            ? closes - 7200
+            : nowSeconds() - 600;
+        const session = sessionOf(task, 9710, { started_at: started });
+        const api = fakeApi({
+          readTimers: async () => ({
+            ok: true,
+            value: { items: [session], next_after: null },
+          }),
+        });
+        const t = await mountTasks({ path: path(task), rows: task.rows, api });
+        await t.until(() => block()?.dataset.timerBlock === "running");
+        expect(block()?.dataset.timerBlock).toBe("running");
+        const press = (name: string) => {
+          const button = within(block() as HTMLElement).queryByRole("button", {
+            name,
+          });
+          expect(button, name).not.toBeNull();
+          fireEvent.click(button as HTMLElement);
+        };
+        if (entry.includes("7 days")) press(TIMER_COPY.stop);
+        // The retirement is stored after the screen (and the 7-day question) was shown, before the press; not yet heard of.
+        const name = accountDatabaseName(ME);
+        const sync = t.world.idb.peek(
+          name,
+          "sync_state",
+          "singleton",
+        ) as SyncStateRow;
+        const versions = JSON.stringify(
+          t.world.idb.snapshot(name)?.resource_versions ?? [],
+        );
+        if (mode === "terminal")
+          t.world.idb.seed(name, "sync_state", [terminal(sync, session.id)]);
+        await t.settle();
+        expect(block()?.dataset.timerBlock).toBe("running");
+        press(
+          entry === "Discard"
+            ? TIMER_COPY.discard
+            : entry === "Stop on a closed day"
+              ? TIMER_COPY.stop
+              : entry === "Record the first 7 days"
+                ? TIMER_COPY.recordSeven
+                : TIMER_COPY.discardSession,
+        );
+        await t.settle();
+        if (mode === "terminal") {
+          expect(ends(t)).toHaveLength(0);
+          expect(
+            JSON.stringify(t.world.idb.snapshot(name)?.resource_versions ?? []),
+          ).toBe(versions);
+          expect(announced()).toContain(copy.refusalMessage("timer_ended"));
+          return;
+        }
+        expect(ends(t)).toHaveLength(1);
+        const body = t.bodies()[0]?.command.command;
+        expect(body).toMatchObject({
+          kind:
+            entry === "Discard" || entry === "Discard the session (7 days)"
+              ? "cancel_timer"
+              : "stop_timer",
+          session_id: session.id,
+          expected_version: 3,
+        });
+        if (entry === "Stop on a closed day")
+          expect(body).toMatchObject({ stopped_at: closes - 1 });
+        if (entry === "Record the first 7 days")
+          expect(body).toMatchObject({ stopped_at: started + SEVEN_DAYS });
+      },
+    );
+
+  test("an end another page already queued (not yet heard of here) refuses a second; control: none queued, one is", async () => {
+    for (const queued of [true, false]) {
+      cleanup();
+      forgetTaskMemory();
+      const task = await seconds();
+      const session = sessionOf(task, 9711);
+      const api = fakeApi({
+        readTimers: async () => ({
+          ok: true,
+          value: { items: [session], next_after: null },
+        }),
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      if (queued) {
+        const other = draftRow({
+          kind: "stop_timer",
+          status: "queued",
+          index_targets: [session.id],
+          command: {
+            command: {
+              kind: "stop_timer",
+              occurrence_id: task.occurrenceId,
+              session_id: session.id,
+              expected_version: 3,
+              stopped_at: nowSeconds(),
+            },
+          } as never,
+        });
+        const { command, ...header } = other;
+        t.world.idb.seed(accountDatabaseName(ME), "drafts", [header] as never);
+        t.world.idb.seed(accountDatabaseName(ME), "draft_commands", [
+          { local_id: other.local_id, command },
+        ] as never);
+        await t.settle();
+      }
+      expect(block()?.dataset.timerBlock, `queued=${queued}`).toBe("running");
+      const stop = within(block() as HTMLElement).queryByRole("button", {
+        name: TIMER_COPY.stop,
+      });
+      expect(stop).not.toBeNull();
+      fireEvent.click(stop as HTMLElement);
+      await t.settle();
+      expect(ends(t), `queued=${queued}`).toHaveLength(1);
+      if (!queued)
+        expect(
+          t.drafts().find((d) => d.kind === "stop_timer")?.local_id,
+        ).toBeDefined();
+    }
+  });
+
+  test.each([
+    ["terminal loss and a later complete account observation", false],
+    ["its exact finished listing", true],
+  ])(
+    "this device's unsettled start (offline) stands against %s only if not listed finished",
+    async (_, listed) => {
+      const task = await seconds();
+      const t = await mountTasks({
+        path: path(task),
+        rows: task.rows,
+        env: { online: false },
+      });
+      await t.until(() => block()?.dataset.timerBlock === "idle");
+      const start = within(block() as HTMLElement).queryByRole("button", {
+        name: TIMER_COPY.start,
+      });
+      expect(start).not.toBeNull();
+      fireEvent.click(start as HTMLElement);
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      expect(block()?.dataset.timerBlock).toBe("running");
+      const started = t.bodies()[0]?.command.command;
+      expect(started?.kind).toBe("start_timer");
+      const sessionId = String(started?.session_id);
+      const name = accountDatabaseName(ME);
+      const sync = t.world.idb.peek(
+        name,
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      t.world.idb.seed(name, "sync_state", [
+        listed
+          ? terminal(sync, sessionId)
+          : {
+              ...lossThrough(sync),
+              timer_account: {
+                order: Number(sync.timer_order ?? 0) + 5,
+                running: [],
+              },
+              timer_order: Number(sync.timer_order ?? 0) + 5,
+            },
+      ]);
+      await t.settle();
+      const stop = within(block() as HTMLElement).queryByRole("button", {
+        name: TIMER_COPY.stop,
+      });
+      expect(stop).not.toBeNull();
+      fireEvent.click(stop as HTMLElement);
+      await t.settle();
+      expect(t.drafts().filter((d) => d.kind === "stop_timer")).toHaveLength(
+        listed ? 0 : 1,
+      );
+    },
+  );
+
+  test.each([
+    [
+      "stored while the save waits for its admission (after the screen's read)",
+      true,
+    ],
+    [
+      "stored after the save was written (control: what was admitted stands)",
+      false,
+    ],
+  ])("a retirement %s", async (_, during) => {
+    const task = await seconds();
+    const session = sessionOf(task, 9712);
+    const api = fakeApi({
+      readTimers: async () => ({
+        ok: true,
+        value: { items: [session], next_after: null },
+      }),
+    });
+    let hold: Promise<void> | null = null;
+    let release!: () => void;
+    let held = false;
+    const t = await mountTasks({
+      path: path(task),
+      rows: task.rows,
+      api,
+      quota: (guard) => ({
+        ...guard,
+        reserve: async (kind, bytes) => {
+          if (kind === "input" && hold !== null && !held) {
+            held = true;
+            await hold;
+          }
+          return guard.reserve(kind, bytes);
+        },
+      }),
+    });
+    await t.until(() => block()?.dataset.timerBlock === "running");
+    hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const stop = within(block() as HTMLElement).queryByRole("button", {
+      name: TIMER_COPY.stop,
+    });
+    expect(stop).not.toBeNull();
+    fireEvent.click(stop as HTMLElement);
+    await t.until(() => held);
+    expect(held).toBe(true);
+    const service = t.data.service() as AccountService;
+    if (during)
+      expect(
+        await commitTimerEnded(t.data, service, service.capture(1), [
+          session.id,
+        ]),
+      ).toMatchObject({ kind: "applied", value: { recorded: true } });
+    release();
+    await t.settle();
+    if (!during) {
+      expect(ends(t)).toHaveLength(1);
+      expect(
+        await commitTimerEnded(t.data, service, service.capture(1), [
+          session.id,
+        ]),
+      ).toMatchObject({ kind: "applied", value: { recorded: true } });
+      await t.settle();
+    }
+    expect(ends(t)).toHaveLength(during ? 0 : 1);
+  });
 });

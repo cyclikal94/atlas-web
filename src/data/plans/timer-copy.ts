@@ -1,4 +1,4 @@
-import type { Captured, JsonObject } from "../model/types";
+import type { Captured, JsonObject, SyncStateRow } from "../model/types";
 import { guardedPlan, readPlan } from "./builders";
 
 /**
@@ -672,6 +672,33 @@ export interface TimerAuthorityRecord {
   /** Revision 6 (R27): every positive of this order or an EARLIER one may be contradicted by a finished session not kept (0: none). */
   endedThrough: number;
 }
+/**
+ * PURE. The authority `sync` holds (the decoding `readTimerAuthority` answers): ONE decoder, so the writing transaction of a timer's end
+ * (`EnqueueRequest.expectTimer`, revision 7, review R32) judges what is stored exactly as every screen does.
+ */
+export function timerAuthorityOf(
+  sync: Partial<SyncStateRow> | undefined,
+): TimerAuthorityRecord {
+  const issued = orderOf(sync?.timer_order);
+  const raw: unknown = sync?.timer_scopes;
+  let floor = Math.max(orderOf(sync?.timer_scope_floor), mapLost(raw, issued));
+  const scopes: Record<string, TimerScopeRecord> = {};
+  for (const [id, value] of Object.entries(isObject(raw) ? raw : {})) {
+    const scope = parseTimerScope(value);
+    if (scope !== null) scopes[id] = scope;
+    else floor = Math.max(floor, lostAt(value, issued));
+  }
+  const held = endedOf(sync ?? {}, issued);
+  return {
+    copy: parseTimerCopy(sync?.timer_copy ?? null),
+    scopes,
+    floor: Math.max(floor, held.floor),
+    account: held.account,
+    ended: held.ended.ids.map(([id]) => id),
+    endedLost: held.ended.lost,
+    endedThrough: held.ended.through,
+  };
+}
 export const readTimerAuthority = readPlan<
   { incarnationId: string },
   null,
@@ -680,30 +707,7 @@ export const readTimerAuthority = readPlan<
   name: "data.readTimerAuthority",
   scope: [],
   read: async () => null,
-  decide: ({ sync }) => {
-    const issued = orderOf(sync?.timer_order);
-    const raw: unknown = sync?.timer_scopes;
-    let floor = Math.max(
-      orderOf(sync?.timer_scope_floor),
-      mapLost(raw, issued),
-    );
-    const scopes: Record<string, TimerScopeRecord> = {};
-    for (const [id, value] of Object.entries(isObject(raw) ? raw : {})) {
-      const scope = parseTimerScope(value);
-      if (scope !== null) scopes[id] = scope;
-      else floor = Math.max(floor, lostAt(value, issued));
-    }
-    const held = endedOf(sync ?? {}, issued);
-    return {
-      copy: parseTimerCopy(sync?.timer_copy ?? null),
-      scopes,
-      floor: Math.max(floor, held.floor),
-      account: held.account,
-      ended: held.ended.ids.map(([id]) => id),
-      endedLost: held.ended.lost,
-      endedThrough: held.ended.through,
-    };
-  },
+  decide: ({ sync }) => timerAuthorityOf(sync),
 });
 
 /**

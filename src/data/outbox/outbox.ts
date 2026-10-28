@@ -84,7 +84,12 @@ export type RefusalReason =
    * The request needs write access to a resource that this device last read as `can_edit: false` (`TargetSpec.requiresEdit`, WEB-10a
    * R30), as the writing transaction found it: nothing was stored. The server, not this device, grants access; a later read may.
    */
-  | "denied";
+  | "denied"
+  /**
+   * The request ends a timer session (`EnqueueRequest.expectTimer`) that the writing transaction found no longer standing, or observed
+   * in another database incarnation: nothing was stored (WEB-10c revision 7, review R32). Never resubmitted on the person's behalf.
+   */
+  | "timer_ended";
 
 export type EnqueueOutcome =
   | { kind: "queued"; localId: LocalId; createdSeq: number }

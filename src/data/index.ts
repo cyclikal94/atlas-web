@@ -32,6 +32,8 @@ export type {
   EnqueueRequest,
   TargetNeeds,
   TargetSpec,
+  TimerExpectation,
+  TimerSeen,
 } from "./model/outbox";
 export { OutboxRequestError } from "./model/outbox";
 // ---- status, queue and profile for the UI (plan 5.7, 5.8) -----------------------------------------------------------------------
@@ -233,6 +235,7 @@ export {
   type TimerCopyRecord,
   type TimerScopeObservation,
   type TimerScopeRecord,
+  timerAuthorityOf,
   useMaterialiseDiscovery,
   useTaskSequences,
   useTimerAuthority,

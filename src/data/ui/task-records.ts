@@ -531,4 +531,5 @@ export {
   type TimerCopyRecord,
   type TimerScopeObservation,
   type TimerScopeRecord,
+  timerAuthorityOf,
 } from "../plans/timer-copy";

@@ -427,24 +427,26 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        /read: async \(reader, input\) => \(\{\n {4}existing: await reader\.get\("drafts", input\.localId\),\n {4}touched: await readTouched\(\n {6}reader,\n {6}input\.request\.targets\.map\(\(target\) => target\.resourceId\),\n {6}new Set\(\[input\.localId\]\),\n {4}\),\n {4}observed: await observedNow\(reader, input\.incarnationId, input\.request\),\n {2}\}\),/,
-        `read: async (reader, input) => {
-    const fresh = {
-      existing: await reader.get("drafts", input.localId),
-      touched: await readTouched(
-        reader,
-        input.request.targets.map((target) => target.resourceId),
-        new Set([input.localId]),
-      ),
-    };
-    const slot = globalThis as unknown as { __stale?: Map<string, never> };
-    slot.__stale ??= fresh.touched.versions as Map<string, never>;
-    return {
-      existing: fresh.existing,
-      touched: { ...fresh.touched, versions: slot.__stale as never },
-      observed: await observedNow(reader, input.incarnationId, input.request),
-    };
-  },`,
+        /read: async \(reader, input\) => \(\{\n {4}existing: await reader\.get\("drafts", input\.localId\),\n {4}touched: await readTouched\(\n {6}reader,\n {6}input\.request\.targets\.map\(\(target\) => target\.resourceId\),\n {6}new Set\(\[input\.localId\]\),\n {4}\),\n/,
+        // WEB-10c revision 7: the same stale-base fault, re-expressed so that the reads that follow (`observed`, `timer`) stay as they are.
+        `read: async (reader, input) => ({
+    ...(await (async () => {
+      const fresh = {
+        existing: await reader.get("drafts", input.localId),
+        touched: await readTouched(
+          reader,
+          input.request.targets.map((target) => target.resourceId),
+          new Set([input.localId]),
+        ),
+      };
+      const slot = globalThis as unknown as { __stale?: Map<string, never> };
+      slot.__stale ??= fresh.touched.versions as Map<string, never>;
+      return {
+        existing: fresh.existing,
+        touched: { ...fresh.touched, versions: slot.__stale as never },
+      };
+    })()),
+`,
       ),
   },
 

@@ -1440,11 +1440,7 @@ export const UNIT_10C = [
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /one snapshot/,
     patch: (t) =>
-      sub(
-        t,
-        "      else floor = Math.max(floor, lostAt(value, issued));\n",
-        "",
-      ),
+      sub(t, "    else floor = Math.max(floor, lostAt(value, issued));\n", ""),
   },
   {
     id: "MU-3112",
@@ -1752,7 +1748,8 @@ export const UNIT_10C = [
       "R23: WEB-10c A12/A15: an act re-checks only what the screen rendered, not the authority stored by then",
     file: "src/features/tasks/timers/TimersPage.tsx",
     tests: ["tests/features/tasks/timers-page.test.tsx"],
-    expect: /a Stop whose session is recorded finished while the act waits/,
+    expect:
+      /a Stop whose session is recorded finished while the act waits|the 7-day question/,
     patch: (t) =>
       sub(
         t,
@@ -2233,6 +2230,219 @@ export const UNIT_10C = [
     ],
     expect: /no_stop expected; a stopped discovery entry|REVIEW6 M11/,
     patch: (t) => sub(t, "      if (current?.stop) return stale;\n", ""),
+  },
+  // ---- revision 7 (review 7 R31/R32): accepted-read provenance and the transactional admission of a timer's end ----------------------
+  {
+    id: "MU-3167",
+    title:
+      "R31: WEB-10c A12: a failed request keeps the accepted rows but drops their order (the error state's provenance)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /REVIEW7 T11|FIRST page asked again/,
+    patch: (t) =>
+      sub(
+        t,
+        "accepted: prev.scope === scope ? prev.accepted : null,",
+        "accepted: prev.scope === scope && prev.accepted ? { ...prev.accepted, order: null } : null,",
+      ),
+  },
+  {
+    id: "MU-3168",
+    title:
+      "R31: WEB-10c A12: the shown read's order is exported only while the newest request is ready (status-dependent provenance)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /REVIEW7 T11|FIRST page asked again/,
+    patch: (t) =>
+      sub(
+        t,
+        "order: kept !== null ? kept.order : (accepted?.order ?? null),",
+        'order: kept !== null ? kept.order : shown?.status === "ready" ? (accepted?.order ?? null) : null,',
+      ),
+  },
+  {
+    id: "MU-3169",
+    title:
+      "R31: WEB-10c A15: a read ordered in another incarnation is shown as one with no order (foreign provenance downgraded)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /bound database changed/,
+    patch: (t) =>
+      sub(
+        t,
+        "const accepted = foreign ? null : (shown?.accepted ?? null);",
+        "const accepted = foreign && shown?.accepted ? { ...shown.accepted, order: null } : (shown?.accepted ?? null);",
+      ),
+  },
+  {
+    id: "MU-3170",
+    title:
+      "R31: WEB-10c A15: the day is not read again when the bound database changed under its read",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /bound database changed/,
+    patch: (t) => sub(t, "    if (foreign) void load(null);\n", ""),
+  },
+  {
+    id: "MU-3171",
+    title:
+      "R31: WEB-10c A12: a failed first page drops what was accepted (hides retained positive sessions)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect: /FIRST page asked again/,
+    patch: (t) =>
+      sub(
+        t,
+        "accepted: prev.scope === scope ? prev.accepted : null,",
+        "accepted: null,",
+      ),
+  },
+  {
+    id: "MU-3172",
+    title:
+      "R32: WEB-10c A13: the detail's ends are queued without their precondition (the rendered session decides)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect:
+      /REVIEW7 T10|stored retirement|unsettled start|save waits for its admission/,
+    patch: (t) =>
+      sub(t, "        withEndExpectation(\n", "        ((r) => r)(\n"),
+  },
+  {
+    id: "MU-3173",
+    title:
+      "R32: WEB-10c A13: the list's Stop is queued without the precondition (its own earlier re-check decides)",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /during the save's admission/,
+    patch: (t) =>
+      sub(
+        t,
+        "        withEndExpectation(\n          stopTimer({ ...input, stoppedAt: choice.stoppedAt }),",
+        "        ((r) => r)(\n          stopTimer({ ...input, stoppedAt: choice.stoppedAt }),",
+      ),
+  },
+  {
+    id: "MU-3174",
+    title:
+      "R32: WEB-10c A13: the enqueue transaction does not ask a timer end's precondition",
+    file: "src/data/plans/outbox.ts",
+    tests: [
+      "tests/data/outbox-timer-expectation.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+      "tests/features/tasks/timers-page.test.tsx",
+    ],
+    expect:
+      /refused: nothing is written|re-admission asks again|stored retirement = terminal|during the save's admission/,
+    patch: (t) =>
+      sub(t, "      !timer.admit({", "      false && !timer.admit({"),
+  },
+  {
+    id: "MU-3175",
+    title:
+      "R32: WEB-10c A15: a timer end's precondition admits in another database incarnation than the one its observation was ordered in",
+    file: "src/features/tasks/timers/copy.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /incarnation it was shown in only/,
+    patch: (t) =>
+      sub(t, "        seen.incarnationId === incarnationId &&\n", ""),
+  },
+  {
+    id: "MU-3176",
+    title:
+      "R32: WEB-10c A13: a timer end's precondition is asked before a retry of a save already made is recognised",
+    file: "src/data/plans/outbox.ts",
+    tests: ["tests/data/outbox-timer-expectation.test.ts"],
+    expect: /recognised FIRST/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (planned.kind === "duplicate") {',
+        '    if (input.request.expectTimer && !input.request.expectTimer.admit({ incarnationId: input.incarnationId, sync, drafts: reads.timer ?? [] }))\n      return { result: { kind: "refused", reason: "timer_ended" } };\n    if (planned.kind === "duplicate") {',
+      ),
+  },
+  {
+    id: "MU-3177",
+    title:
+      "R32: WEB-10c A13: a timer end is checked only against the server observation (this device's unsettled start ignored)",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /unsettled start/,
+    patch: (t) => sub(t, "    starting ||\n", "    false ||\n"),
+  },
+  {
+    id: "MU-3178",
+    title:
+      "R32: WEB-10c A13: an end already on its way does not refuse another",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /already on its way|already queued/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (draft.kind === "stop_timer" || draft.kind === "cancel_timer")\n      return false;\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3179",
+    title:
+      "R32: WEB-10c A13: this device's unsettled start is ended although a read listed it finished",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /unsettled start/,
+    patch: (t) =>
+      sub(
+        t,
+        "    authority.ended?.has(witness.sessionId) ||\n    scope?.ended.includes(witness.sessionId)\n",
+        "    false\n",
+      ),
+  },
+  {
+    id: "MU-3180",
+    title:
+      "R32: WEB-10c A13: a session shown from a read carries the copy's order (provenance relabelled)",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /RunningSession\.order/,
+    patch: (t) =>
+      sub(
+        t,
+        "order: known(input.readOrder) ? input.readOrder : null,",
+        "order: known(input.copyOrder) ? input.copyOrder : null,",
+      ),
+  },
+  {
+    id: "MU-3181",
+    title:
+      "R32: WEB-10c A13: a timer end's precondition admits a request that ends another session than the one acted on",
+    file: "src/features/tasks/timers/copy.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /never another resource/,
+    patch: (t) => sub(t, "        session === witness.sessionId &&\n", ""),
+  },
+  {
+    id: "MU-3182",
+    title:
+      "R32: WEB-10c A13: the request's snapshot drops its timer precondition",
+    file: "src/data/model/outbox.ts",
+    tests: ["tests/data/outbox-timer-expectation.test.ts"],
+    expect: /snapshotted with the request|refused: nothing is written/,
+    patch: (t) =>
+      sub(
+        t,
+        "    ...(request.expectTimer && { expectTimer: { ...request.expectTimer } }),\n",
+        "",
+      ),
   },
 ];
 

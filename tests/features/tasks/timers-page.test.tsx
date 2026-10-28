@@ -1175,3 +1175,130 @@ describe("R27: the account's list at the loss boundary", () => {
     },
   );
 });
+
+/**
+ * Revision 7 (review 7 R32): the list's own re-check reads what is stored BEFORE the save waits for its admission; the writing transaction
+ * checks again (`expectTimer`), so a retirement stored during that wait (another page's, here this database's production commit) queues
+ * nothing. Control: one stored after the save was written leaves what was admitted as it is.
+ */
+describe("R32: the list's end is admitted by the writing transaction", () => {
+  test.each([
+    ["during the save's admission (after the list's re-check)", true],
+    ["after the save was written (control)", false],
+  ])("a session recorded finished %s", async (_, during) => {
+    const task = await seededTask({ title: "Practise piano" });
+    const session = available(task);
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        page(q.state === "running" ? [session] : []),
+    });
+    let hold: Promise<void> | null = null;
+    let release!: () => void;
+    let held = false;
+    const t = await mountTasks({
+      path: "/tasks/timers",
+      rows: task.rows,
+      api,
+      quota: (guard) => ({
+        ...guard,
+        reserve: async (kind, bytes) => {
+          if (kind === "input" && hold !== null && !held) {
+            held = true;
+            await hold;
+          }
+          return guard.reserve(kind, bytes);
+        },
+      }),
+    });
+    await t.until(() => rowOf(session.id) !== null);
+    hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const stop = within(rowOf(session.id) as HTMLElement).queryByRole(
+      "button",
+      { name: TIMER_COPY.stop },
+    );
+    expect(stop).not.toBeNull();
+    fireEvent.click(stop as HTMLElement);
+    await t.until(() => held);
+    expect(held, "the save is waiting for its admission").toBe(true);
+    const service = t.data.service() as AccountService;
+    if (during)
+      expect(
+        await commitTimerEnded(t.data, service, service.capture(1), [
+          session.id,
+        ]),
+      ).toMatchObject({ kind: "applied", value: { recorded: true } });
+    release();
+    await t.settle();
+    const stops = () => t.drafts().filter((d) => d.kind === "stop_timer");
+    if (!during) {
+      expect(stops()).toHaveLength(1);
+      expect(
+        await commitTimerEnded(t.data, service, service.capture(1), [
+          session.id,
+        ]),
+      ).toMatchObject({ kind: "applied", value: { recorded: true } });
+      await t.settle();
+    }
+    expect(stops()).toHaveLength(during ? 0 : 1);
+  });
+});
+
+/**
+ * Revision 7: the list's own re-check of what is stored (R23) is no longer the only guard of a queued end (the writing transaction refuses
+ * one too, R32), but it still decides what the press SHOWS: a session beyond 7 days recorded finished before this screen heard of it is
+ * not asked about (no 7-day question for a session that has ended). Control: nothing recorded, the question is asked.
+ */
+describe("R23/R32: the list's re-check decides what a press shows", () => {
+  test.each([
+    ["recorded finished, not yet heard of", true],
+    ["not recorded (control)", false],
+  ])("beyond 7 days, a session %s: the 7-day question", async (_, recorded) => {
+    const task = await seededTask({
+      title: "Practise piano",
+      definition: {
+        goal: {
+          kind: "numeric",
+          minimum: "1800",
+          maximum: null,
+          unit: "seconds",
+        },
+        carry: "retain_one",
+      },
+    });
+    const timer = available(task, { started_at: now() - 8 * 86_400 });
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        page(q.state === "running" ? [timer] : []),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(() => rowOf(timer.id) !== null);
+    if (recorded) {
+      // Another tab recorded it; the double notifies no watcher of a seeded row, so the screen still shows it.
+      t.world.idb.seed(NAME, "sync_state", [
+        {
+          ...(t.world.idb.peek(
+            NAME,
+            "sync_state",
+            "singleton",
+          ) as SyncStateRow),
+          timer_ended: { lost: false, ids: [[timer.id, 1]] },
+        },
+      ]);
+      await t.settle();
+    }
+    expect(rowOf(timer.id), "still shown").not.toBeNull();
+    const stop = within(rowOf(timer.id) as HTMLElement).queryByRole("button", {
+      name: TIMER_COPY.stop,
+    });
+    expect(stop).not.toBeNull();
+    fireEvent.click(stop as HTMLElement);
+    await t.settle();
+    await t.settle();
+    expect(
+      rowOf(timer.id)?.querySelector("[data-timer-seven-days]") != null,
+    ).toBe(!recorded);
+    expect(t.drafts()).toEqual([]);
+  });
+});

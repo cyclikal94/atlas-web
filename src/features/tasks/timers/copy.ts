@@ -1,13 +1,19 @@
 import {
   type AccountService,
   type DataEnv,
+  type EnqueueRequest,
   issueTimerOrderNow,
   type TimerAuthorityRecord,
   type TimerCopyRecord,
+  timerAuthorityOf,
   useTimerAuthority,
 } from "../../../data";
 import { type AccountTimerSession, parseAccountTimer } from "../model/contract";
-import type { TimerAuthority } from "../model/timers";
+import {
+  type EndWitness,
+  endStands,
+  type TimerAuthority,
+} from "../model/timers";
 
 /**
  * The running-timer copy of the displayed account's database (W28, D-10c-4), parsed row by row: a row that does not parse is left out,
@@ -68,6 +74,37 @@ export const authorityOf = (record: TimerAuthorityRecord): TimerAuthority => {
     endedThrough: record.endedThrough,
   };
 };
+
+/**
+ * `request` (an end of a timer: Stop, Discard or a 7-day choice) with the precondition of an end of `witness` (revision 7, review R32):
+ * checked by the writing transaction against the evidence and drafts stored THEN, by the rule every screen applies (`endStands`, through
+ * `authorityOf`). The detail and the account's list both use it. The session is the request's OWN version-checked `timer_session` target,
+ * so the precondition never names another resource; one that is not the acted-on session admits nothing. `incarnationId`: the database
+ * the observation was ordered in (the one bound when it was shown); the transaction's own incarnation must be the same.
+ */
+export function withEndExpectation(
+  request: EnqueueRequest,
+  witness: EndWitness,
+  incarnationId: string,
+): EnqueueRequest {
+  const session = request.targets.find(
+    (target) => target.basis === "timer_session" && target.versionChecked,
+  )?.resourceId;
+  return {
+    ...request,
+    expectTimer: {
+      session: session ?? witness.sessionId,
+      admit: (seen) =>
+        session === witness.sessionId &&
+        seen.incarnationId === incarnationId &&
+        endStands(
+          authorityOf(timerAuthorityOf(seen.sync)),
+          seen.drafts,
+          witness,
+        ),
+    },
+  };
+}
 
 /**
  * The copy and the authority it, and every other server-derived running session, is judged by (revision 4, review R19), from ONE read of

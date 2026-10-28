@@ -49,6 +49,7 @@ import {
   type IssuedRead,
   issueTimerRead,
   useTimerEvidence,
+  withEndExpectation,
 } from "./copy";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
@@ -504,6 +505,16 @@ export function TimersPage() {
       ? running.value.order
       : null;
   standing.current = new Map(shownRunning.map((r) => [r.id, shownOrder]));
+  // The database what is shown was observed in (revision 7, R32): the live list's read, or the one bound (the copy is read from it).
+  const shownIn = useRef("");
+  shownIn.current =
+    (offline
+      ? null
+      : running.value.kind === "ready"
+        ? running.value.incarnation
+        : null) ??
+    data.service()?.incarnationId ??
+    "";
   // The days of the running rows this device holds: a copied row's title offline, and every row's window (a closed day's stop).
   const cached = useCachedResources(
     shownRunning.flatMap((r) =>
@@ -535,6 +546,8 @@ export function TimersPage() {
   const act: Act = async (row, what) => {
     if (busy) return;
     setBusy(true);
+    // Taken at the press, with the order the row was shown at (below): what the act ends was observed in this database.
+    const incarnation = shownIn.current;
     try {
       const stream = await progressId(row.occurrence_id, env.accountId);
       const held = await readResourcesNow(data, [stream, row.occurrence_id]);
@@ -564,16 +577,30 @@ export function TimersPage() {
         streamKnown: held?.has(stream) ?? false,
         knownVersion: row.version,
       };
+      // The re-check above is this screen's; the writing transaction checks again against what is stored THEN (revision 7, R32: any
+      // retirement committed during the waits below, the quota's included, refuses the end), as the detail's ends are.
+      const witness = {
+        occurrenceId: row.occurrence_id,
+        sessionId: row.id,
+        order,
+      };
       if (what === "discard") {
         setChoosing(null);
-        await actions.enqueue(cancelTimer(input), TIMER_COPY.saved);
+        await actions.enqueue(
+          withEndExpectation(cancelTimer(input), witness, incarnation),
+          TIMER_COPY.saved,
+        );
         setAgain((n) => n + 1);
         return;
       }
       if (what === "seven_days") {
         setChoosing(null);
         await actions.enqueue(
-          stopTimer({ ...input, stoppedAt: row.started_at + SEVEN_DAYS }),
+          withEndExpectation(
+            stopTimer({ ...input, stoppedAt: row.started_at + SEVEN_DAYS }),
+            witness,
+            incarnation,
+          ),
           TIMER_COPY.saved,
         );
         setAgain((n) => n + 1);
@@ -585,7 +612,11 @@ export function TimersPage() {
         return;
       }
       await actions.enqueue(
-        stopTimer({ ...input, stoppedAt: choice.stoppedAt }),
+        withEndExpectation(
+          stopTimer({ ...input, stoppedAt: choice.stoppedAt }),
+          witness,
+          incarnation,
+        ),
         TIMER_COPY.saved,
       );
       setAgain((n) => n + 1);

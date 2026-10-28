@@ -188,11 +188,12 @@ describe("the conflict choices after a reload or in another tab (S4)", () => {
     t.world.idb.seed(accountDatabaseName(ME), "drafts", [
       { ...header, command_digest: "digest-2" },
     ] as never);
-    fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: CORRECTION_COPY.saveMine,
-      }),
-    );
+    // The choice must be on screen before it is pressed (WEB-10c revision 7: MU-2086 removes it; that is an assertion, not a query error).
+    const saveMine = within(section() as HTMLElement).queryByRole("button", {
+      name: CORRECTION_COPY.saveMine,
+    });
+    expect(saveMine, "'Save mine' is offered").not.toBeNull();
+    fireEvent.click(saveMine as HTMLElement);
     await t.settle();
     expect(t.drafts().map((d) => [d.local_id, d.command_digest])).toEqual([
       [LOCAL, "digest-2"],

@@ -52,7 +52,9 @@ import {
  * rota answer held across an account switch, with their positive controls; (revision 2) E-M5 a first read that never answers stays
  * stopped across a reload until Try again (R13, DA-M1), and E-TM2 a complete day read retires a cancelled session from the kept copy, so a
  * reload offline does not show it (DA-T1); (revision 3) E-TM3 a complete day read in ANOTHER tab retires what this tab's kept read saw,
- * through the shared store, while one of another day does not (DA-T3, R14). E-M3 (the command path) is not here: the fixture outbox
+ * through the shared store, while one of another day does not (DA-T3, R14); (revision 7) E-TM6 a Stop pressed on a session another
+ * connection recorded finished (a raw IndexedDB write this page's live queries do not hear) is refused by the writing transaction (R32),
+ * with its control. E-M3 (the command path) is not here: the fixture outbox
  * decides `409`s with its own registry, so the page's handler is never asked natively. Its journey (`409 materialisation_required` →
  * catch-up through the day → the SAME key resent → applied) runs in jsdom over the PRODUCTION dispatcher and registry
  * (`catchup-conflicts.test.ts`, revision 1); the first version's claim that the jsdom file covered it was of classification only.
@@ -1800,6 +1802,126 @@ test.describe("E-M10: a retained day beyond the detail's window (revision 6: R28
       recordEvidence(info, "e-m10", {
         later,
         log: r10c.log.map(({ from: _from, ...e }) => e),
+      });
+    });
+});
+
+test.describe("E-TM6: Stop is admitted by the writing transaction against what is stored (revision 7: R32)", () => {
+  for (const retired of [true, false] as const)
+    test(`${retired ? "a session recorded finished by another connection, not yet heard of here" : "control: nothing recorded"}: ${retired ? "Stop saves nothing and says so" : "Stop is queued once"}`, async ({
+      context,
+    }, info) => {
+      const task = buildTask({
+        n: 430,
+        title: "Practise piano",
+        goal: {
+          kind: "numeric",
+          minimum: "1800",
+          maximum: null,
+          unit: "seconds",
+        },
+      });
+      const id = "cccccccc-0000-4000-8000-000000000130";
+      const started = Math.floor(Date.now() / 1000) - 600;
+      const { page, r10c } = await setup(
+        context,
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        [task],
+        (_reads, r) => {
+          r.timers = () => ({
+            status: 200,
+            body: {
+              items: [
+                {
+                  id,
+                  occurrence_id: task.occurrenceId,
+                  started_at: started,
+                  stopped_at: null,
+                  version: 2,
+                },
+              ],
+              next_after: null,
+            },
+          });
+        },
+      );
+      const block = page.locator("[data-timer-block]");
+      await expect(block).toHaveAttribute("data-timer-block", "running");
+      // The day read's own record has landed (its scope), so nothing of this page writes the singleton after the raw write below.
+      await expect
+        .poll(() =>
+          page.evaluate(
+            async ([acct, occ]) => {
+              const rows = (await window.__atlasData?.rows(
+                acct,
+                "sync_state",
+              )) as Array<{ timer_scopes?: Record<string, unknown> }>;
+              return rows?.[0]?.timer_scopes?.[occ] !== undefined;
+            },
+            [ACCOUNT, task.occurrenceId] as const,
+          ),
+        )
+        .toBe(true);
+      // Offline: the kept read stays shown, and a queued stop stays queued (nothing is sent).
+      await goOfflineAtBoundary(page);
+      await expect(block).toHaveAttribute("data-timer-block", "running");
+      if (retired)
+        // Another connection records the session finished: a raw IndexedDB write, which this page's live queries do not hear.
+        await page.evaluate(
+          async ([name, session]) => {
+            const db = await new Promise<IDBDatabase>((resolve, reject) => {
+              const open = indexedDB.open(name);
+              open.onsuccess = () => resolve(open.result);
+              open.onerror = () => reject(open.error);
+            });
+            await new Promise<void>((resolve, reject) => {
+              const tx = db.transaction("sync_state", "readwrite");
+              const store = tx.objectStore("sync_state");
+              const read = store.get("singleton");
+              read.onsuccess = () => {
+                const row = read.result as { timer_order?: number };
+                store.put({
+                  ...row,
+                  timer_ended: {
+                    lost: false,
+                    ids: [[session, row.timer_order ?? 0]],
+                    through: 0,
+                  },
+                });
+              };
+              tx.oncomplete = () => resolve();
+              tx.onerror = () => reject(tx.error);
+            });
+            db.close();
+          },
+          [`atlas-${ACCOUNT}`, id] as const,
+        );
+      await page.waitForTimeout(300);
+      await expect(block, "not heard of yet").toHaveAttribute(
+        "data-timer-block",
+        "running",
+      );
+      await block.getByRole("button", { name: "Stop", exact: true }).click();
+      if (retired) {
+        await expect(page.locator('[aria-live="assertive"]')).toContainText(
+          "This timer may already have ended. Nothing was saved.",
+        );
+        await page.waitForTimeout(300);
+        expect(
+          (await draftsOf(page)).filter((d) => d.kind === "stop_timer"),
+        ).toEqual([]);
+      } else
+        await expect
+          .poll(
+            async () =>
+              (await draftsOf(page)).filter((d) => d.kind === "stop_timer")
+                .length,
+          )
+          .toBe(1);
+      recordEvidence(info, "e-tm6", {
+        retired,
+        log: r10c.log.map(({ from: _from, ...e }) => e),
+        drafts: await draftsOf(page),
       });
     });
 });

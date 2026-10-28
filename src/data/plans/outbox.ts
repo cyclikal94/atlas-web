@@ -209,10 +209,18 @@ export type EnqueueResult =
   /**
    * `changed`: the request stated what its caller saw (`observed`), and this transaction read something else; nothing was written.
    * `denied`: a target the request needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`); nothing was written.
+   * `timer_ended`: the request ends a timer session (`expectTimer`) that, as this transaction read it, no longer stands or was observed in
+   * another database incarnation; nothing was written (WEB-10c revision 7, review R32).
    */
   | {
       kind: "refused";
-      reason: "fenced" | "closing" | "no_base" | "changed" | "denied";
+      reason:
+        | "fenced"
+        | "closing"
+        | "no_base"
+        | "changed"
+        | "denied"
+        | "timer_ended";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -222,6 +230,8 @@ interface EnqueueReads {
   touched: Touched;
   /** The token of what the request said its caller saw, read here (`readObservation`), or null when it said nothing. */
   observed: string | null;
+  /** Every draft that targets the session a timer end names (`expectTimer`), or null when the request names none. */
+  timer: DraftRow[] | null;
 }
 
 /** The observation a request states, read again inside the writing transaction (WEB-13a revision 2), or null when it states none. */
@@ -274,6 +284,16 @@ export const enqueueDraft = singletonPlan<
       new Set([input.localId]),
     ),
     observed: await observedNow(reader, input.incarnationId, input.request),
+    // A timer end's precondition (revision 7, R32) is given every draft of the session it names (its start and ends: a short list). The
+    // save's own draft is among them only for a retry of a save already made, which is recognised before the precondition is asked.
+    timer: input.request.expectTimer
+      ? await collectIndex(
+          reader,
+          "drafts",
+          "index_targets",
+          range.only(input.request.expectTimer.session),
+        )
+      : null,
   }),
   decide: ({ sync, reads, input }) => {
     if (sync === undefined)
@@ -307,6 +327,18 @@ export const enqueueDraft = singletonPlan<
     // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.
     if (!stillObserved(input.request, reads.observed))
       return { result: { kind: "refused", reason: "changed" } };
+    // So does a timer end: what the person acted on must still stand as stored now, in THIS incarnation (`admit`); one admitted before a
+    // retirement was stored stands, one after it is refused, in any tab (revision 7, R32).
+    const timer = input.request.expectTimer;
+    if (
+      timer &&
+      !timer.admit({
+        incarnationId: input.incarnationId,
+        sync,
+        drafts: reads.timer ?? [],
+      })
+    )
+      return { result: { kind: "refused", reason: "timer_ended" } };
     const over = overBound(input, {
       draft: planned.draft,
       command: planned.command,

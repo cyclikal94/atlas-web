@@ -12,7 +12,10 @@ import {
   type DraftRow,
 } from "../../../src/data";
 import type { ReadResult } from "../../../src/data/engine/identity-task";
-import { createQuotaGuard } from "../../../src/data/engine/quota-guard";
+import {
+  createQuotaGuard,
+  type QuotaGuard,
+} from "../../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../../src/data/engine/sync-channel";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { SyncStateRow } from "../../../src/data/model/types";
@@ -436,6 +439,11 @@ export async function mountTasks(options: {
   effects?: object[];
   /** WEB-10c revision 4: further `sync_state` fields seeded as another page left them (the timer order, fence, scopes and floor). */
   sync?: Partial<SyncStateRow>;
+  /**
+   * WEB-10c revision 7: wraps the production quota guard the data env is given (a test that holds a save's admission, R32). Absent: the
+   * guard as before.
+   */
+  quota?: (guard: QuotaGuard) => QuotaGuard;
 }): Promise<Mounted> {
   assertNoOpenActScope("mountTasks");
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
@@ -508,7 +516,9 @@ export async function mountTasks(options: {
     identity,
     loadRuntime: async () => runtime,
     online: new Cell(options.env?.online ?? true),
-    quota: createQuotaGuard({ storage: undefined, now: () => 0 }),
+    quota: (options.quota ?? ((guard) => guard))(
+      createQuotaGuard({ storage: undefined, now: () => 0 }),
+    ),
     ids: { uuid: () => crypto.randomUUID() },
     clock: { iso: () => new Date().toISOString(), now: () => Date.now() },
     fence: () => ({ hasPendingOperation: false, sessionStarted: true }),

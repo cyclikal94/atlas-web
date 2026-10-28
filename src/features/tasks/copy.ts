@@ -116,6 +116,8 @@ export function refusalMessage(reason: string): string | null {
       return "This isn't available on this device yet.";
     case "denied":
       return "You can't change this. Nothing was saved.";
+    case "timer_ended":
+      return "This timer may already have ended. Nothing was saved.";
     case "closed":
     case "identity_changed":
       return null;

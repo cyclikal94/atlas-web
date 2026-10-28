@@ -35,6 +35,11 @@ export interface RunningSession {
   source: "read" | "draft" | "copy";
   /** This device's unsettled start, if any (its pending mark). */
   startDraft: DraftWithCommand | null;
+  /**
+   * The place in the observation order (W28) of the server observation it is shown from (the read's or the copy's), or null when none
+   * gave it one: only this device's start, or a read that genuinely had none. What an end of it is admitted against (revision 7, R32).
+   */
+  order: number | null;
 }
 
 type Obj = Record<string, unknown>;
@@ -285,6 +290,7 @@ export function runningOn(
       version: s.version,
       source: "copy",
       startDraft: null,
+      order: known(input.copyOrder) ? input.copyOrder : null,
     });
   }
   for (const draft of input.drafts) {
@@ -305,6 +311,7 @@ export function runningOn(
       version: known?.version ?? null,
       source: "draft",
       startDraft: draft,
+      order: known?.order ?? null,
     });
   }
   for (const s of input.read ?? []) {
@@ -318,10 +325,60 @@ export function runningOn(
       version: s.version,
       source: "read",
       startDraft: draft,
+      order: known(input.readOrder) ? input.readOrder : null,
     });
   }
   for (const id of ending) out.delete(id);
   return [...out.values()].sort((a, b) => a.startedAt - b.startedAt);
+}
+
+/**
+ * What a person's end of a timer acted on (revision 7, review R32): the session as it was shown, with the place in the observation order
+ * of the observation it was shown from (`RunningSession.order`). `occurrenceId` null: a restricted row (none offers an end).
+ */
+export interface EndWitness {
+  occurrenceId: string | null;
+  sessionId: string;
+  order: number | null;
+}
+
+/**
+ * Whether an end of `witness` may still be queued, judged against what is stored NOW (revision 7, review R32): inside the writing
+ * transaction (`EnqueueRequest.expectTimer`), so a retirement any page stored before it, notified or not, refuses the end. Not when an end
+ * of the session is already on its way (`drafts`: this database's other drafts of the session); not when any read listed it finished; then,
+ * this device's own unsettled start stands by itself (a read issued before the server applied it cannot list it, as in `runningOn`);
+ * otherwise the server observation it was shown from must still stand (`stillRunning`: absence, the floor and terminal loss alike).
+ */
+export function endStands(
+  authority: TimerAuthority,
+  drafts: ReadonlyArray<{ kind: string; status: string }>,
+  witness: EndWitness,
+): boolean {
+  let starting = false;
+  for (const draft of drafts) {
+    if (!UNSETTLED.has(draft.status)) continue;
+    if (draft.kind === "stop_timer" || draft.kind === "cancel_timer")
+      return false;
+    if (draft.kind === "start_timer") starting = true;
+  }
+  const scope =
+    witness.occurrenceId === null
+      ? undefined
+      : authority.scopes[witness.occurrenceId];
+  if (
+    authority.ended?.has(witness.sessionId) ||
+    scope?.ended.includes(witness.sessionId)
+  )
+    return false;
+  return (
+    starting ||
+    stillRunning(
+      authority,
+      witness.occurrenceId,
+      witness.sessionId,
+      witness.order,
+    )
+  );
 }
 
 /** `hh:mm:ss` of a running session (never negative). */

@@ -1,5 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import {
   commitTimerCorrection,
@@ -33,6 +40,7 @@ import {
   type IssuedRead,
   issueTimerRead,
   useTimerEvidence,
+  withEndExpectation,
 } from "../timers/copy";
 import type { PendingMark, RowModel } from "../view";
 import type { DependencyState } from "./Dependencies";
@@ -159,28 +167,49 @@ interface Chain {
 }
 
 /**
+ * What the latest read of the day ACCEPTED, as one value (revision 7, review R31): its pages and cursor, and where it was issued (its place
+ * in the observation order, the database incarnation, when). Kept apart from how the newest request is doing: a request that fails (a
+ * further page, or a first page asked again) changes none of it, so the same rows never lose the order that lets a later observation
+ * retire them, and a failure is never taken for a read with no order. Only another read's accepted first page replaces it, with its own.
+ */
+interface Accepted {
+  pages: TimerSession[][];
+  next: string | null;
+  /** When the read's FIRST page was issued (ms): a later page cannot make it newer than that. */
+  askedAt: number;
+  /** Its place in the observation order (W28), or null: the read genuinely had none (no open service, a store failure at issue). */
+  order: number | null;
+  /** The database incarnation it was issued under, or null (none was bound). */
+  incarnation: string | null;
+}
+
+/**
  * The day's own sessions (`GET /occurrences/{id}/timers`, online, 50 a page): what tells a running session apart on this device.
  *
  * ONE read owns what this shows (review R10): a new read (mount, another identity, day, connection or answered draft, Retry) takes over
  * at once, so an answer to an earlier one, success or failure, is dropped before it reaches the screen, the page memory or the copy; and
  * a further page is accepted only for the chain and cursor that asked for it, one at a time. Each accepted page corrects the copy (W28)
  * under the read's place in the observation order: a session it lists finished, and, once complete, one it does not list; and records
- * what it observed of the day (its scope, revision 3), for every page of this database.
+ * what it observed of the day (its scope, revision 3), for every page of this database. What was accepted keeps its provenance whatever
+ * happens to a later request (revision 7, R31); one ordered in another database incarnation than the one bound now decides nothing here,
+ * and the day is read again.
  */
 function useDaySessions(occurrenceId: string, again: string) {
   const env = useTasksEnv();
   const data = useDataEnv();
+  const store = data.serviceStore;
+  const subscribe = useCallback(
+    (listener: () => void) => store.subscribe(listener),
+    [store],
+  );
+  const current = useCallback(() => store.get(), [store]);
+  const service = useSyncExternalStore(subscribe, current, current);
   const [state, setState] = useState<{
     scope: string;
-    pages: TimerSession[][];
-    next: string | null;
+    accepted: Accepted | null;
     status: "loading" | "ready" | "error" | "offline";
     requestId?: string;
-    /** When the read's FIRST page was issued (ms): a later page cannot make it newer than that. */
-    askedAt?: number;
-    order?: number | null;
-    incarnation?: string | null;
-  }>({ scope: "", pages: [], next: null, status: "loading" });
+  }>({ scope: "", accepted: null, status: "loading" });
   const scope = `${env.identity}\u0000${occurrenceId}`;
   const owner = useRef(0);
   const chain = useRef<Chain | null>(null);
@@ -192,7 +221,7 @@ function useDaySessions(occurrenceId: string, again: string) {
       const mine = owner.current;
       chain.current = null;
       if (!env.online) {
-        setState({ scope, pages: [], next: null, status: "offline" });
+        setState({ scope, accepted: null, status: "offline" });
         return;
       }
       issuedSeq += 1;
@@ -232,14 +261,10 @@ function useDaySessions(occurrenceId: string, again: string) {
         "requestId" in result && result.requestId
           ? { requestId: result.requestId }
           : {};
-      // What was accepted before stays known (positive rows); the read is not complete.
+      // What was accepted stays as it was accepted (positive rows, their order and completeness); nothing new is known.
       setState((prev) => ({
-        ...(after === null
-          ? prev.scope === scope
-            ? prev
-            : { pages: [], next: null }
-          : { pages: link.pages, next: link.next }),
         scope,
+        accepted: prev.scope === scope ? prev.accepted : null,
         status: "error",
         ...requestId,
       }));
@@ -252,12 +277,14 @@ function useDaySessions(occurrenceId: string, again: string) {
     const order = link.read?.order ?? null;
     setState({
       scope,
-      pages: link.pages,
-      next: link.next,
+      accepted: {
+        pages: link.pages,
+        next: link.next,
+        askedAt: link.askedAt,
+        order,
+        incarnation: link.incarnation,
+      },
       status: "ready",
-      askedAt: link.askedAt,
-      order,
-      incarnation: link.incarnation,
     });
     remember(identity, occurrenceId, {
       sessions,
@@ -275,6 +302,17 @@ function useDaySessions(occurrenceId: string, again: string) {
         scope: dayObservation(occurrenceId, sessions, complete),
       });
   };
+  const shown = state.scope === scope ? state : null;
+  const bound = service?.incarnationId ?? null;
+  // A read ordered in another database incarnation than the one bound now: its order means nothing here and what retired its sessions
+  // there cannot be seen (DA-T3), so it is not shown, never shown as unordered (revision 7, R31), and the day is read again.
+  const foreign =
+    shown?.accepted != null &&
+    shown.accepted.incarnation !== null &&
+    bound !== null &&
+    shown.accepted.incarnation !== bound;
+  const accepted = foreign ? null : (shown?.accepted ?? null);
+  const next = accepted?.next ?? null;
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for another identity, day, connection or answered draft
   useEffect(() => {
     void load(null);
@@ -282,40 +320,34 @@ function useDaySessions(occurrenceId: string, again: string) {
       owner.current += 1;
     };
   }, [scope, env.online, again]);
-  const current = state.scope === scope ? state : null;
-  const bound = data.service()?.incarnationId ?? null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read again once when another binding replaced the one the read was ordered in
+  useEffect(() => {
+    if (foreign) void load(null);
+  }, [foreign]);
   const held =
-    current?.status === "offline"
+    shown?.status === "offline"
       ? (keptOf(env.identity).get(occurrenceId) ?? null)
       : null;
   // A read kept from another database incarnation is not shown (DA-T3).
   const kept = keptStands(held, bound) ? held : null;
-  const shownIncarnation =
-    kept !== null ? kept.incarnation : (current?.incarnation ?? null);
   return {
-    status: current?.status ?? "loading",
-    requestId: current?.requestId,
+    status: foreign ? "loading" : (shown?.status ?? "loading"),
+    requestId: shown?.requestId,
     /** Every session accepted (the kept read's offline): positive knowledge, complete or not. */
     sessions:
-      kept !== null ? kept.sessions : current ? current.pages.flat() : [],
+      kept !== null ? kept.sessions : accepted ? accepted.pages.flat() : [],
+    /** The accepted read reached the end of the day's list (whatever a later request did since). */
     complete:
       kept !== null
         ? kept.complete
-        : current !== null &&
-          current.next === null &&
-          current.status === "ready",
+        : accepted !== null && accepted.next === null,
     /** When the sessions shown offline were read (ms), or null for a read now. */
     keptAt: kept?.at ?? null,
-    /** The shown read's place in the observation order (W28), or null (also when it was ordered in another incarnation). */
-    order:
-      shownIncarnation !== null && bound !== null && shownIncarnation !== bound
-        ? null
-        : kept !== null
-          ? kept.order
-          : current?.status === "ready"
-            ? (current.order ?? null)
-            : null,
-    more: current?.next ? () => void load(current.next) : null,
+    /** The shown read's place in the observation order (W28), as it was issued; null only for a read that had none. */
+    order: kept !== null ? kept.order : (accepted?.order ?? null),
+    /** The database incarnation bound now: what an end acted on is checked against it (revision 7, R32). */
+    bound,
+    more: next !== null ? () => void load(next) : null,
     retry: () => void load(null),
   };
 }
@@ -371,6 +403,7 @@ export function TimerBlock({
   const [showSessions, setShowSessions] = useState(false);
   const [sevenDays, setSevenDays] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const acting = useRef(false);
   const conflicted = useDraftWithCommand(
     row.attention !== null && timerKind(row.attention.kind)
       ? row.attention.local_id
@@ -400,11 +433,15 @@ export function TimerBlock({
       (row.data.definition.participation === "anyone" && row.canEdit),
     running,
   });
+  // One act at a time, also between a press and the render that shows it busy (a second activation of the same control admits nothing).
   const run = async (fn: () => Promise<unknown>) => {
+    if (acting.current) return;
+    acting.current = true;
     setBusy(true);
     try {
       await fn();
     } finally {
+      acting.current = false;
       setBusy(false);
     }
   };
@@ -425,6 +462,10 @@ export function TimerBlock({
         TIMER_COPY.saved,
       ),
     );
+  // Stop, Discard and both 7-day choices end what was SHOWN (revision 7, review R32): the writing transaction admits the end only if that
+  // observation still stands against what is stored then (`withEndExpectation`), so a retirement another page stored before the press, whose
+  // notification has not reached this screen, queues nothing. The database it was observed in is the one bound when it was shown.
+  const shownIn = day.bound;
   const end = (session: RunningSession, stoppedAt: number | null) =>
     run(() => {
       const input = {
@@ -434,10 +475,17 @@ export function TimerBlock({
         streamKnown: row.streamPresent || row.streamPending,
         knownVersion: session.source === "draft" ? null : session.version,
       };
-      return actions.enqueue(
+      const request =
         stoppedAt === null
           ? cancelTimer(input)
-          : stopTimer({ ...input, stoppedAt }),
+          : stopTimer({ ...input, stoppedAt });
+      return actions.enqueue(
+        // None bound when it was shown: nothing it was observed in can be confirmed, so the transaction refuses it.
+        withEndExpectation(
+          request,
+          { occurrenceId: row.id, sessionId: session.id, order: session.order },
+          shownIn ?? "",
+        ),
         TIMER_COPY.saved,
       );
     });
