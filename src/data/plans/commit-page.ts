@@ -5,11 +5,17 @@ import {
   invalidateOperation,
   onLocalWriteSuccess,
 } from "../model/retry";
+import {
+  type Continuity,
+  continuityOf,
+  stageOf,
+} from "../model/segmented-sync";
 import type { CacheRow, Captured } from "../model/types";
 import type { ScanOk } from "../scan/scan";
 import { type DecodeDeps, decodeChange, PageInvalid } from "../scan/validate";
-import { PlanRejected } from "../store/port";
+import { PlanRejected, w } from "../store/port";
 import { guardedPlan } from "./builders";
+import { restartStage } from "./delta-segments";
 import {
   hasLocalWork,
   interestingOf,
@@ -33,6 +39,15 @@ import {
  * the ids that have local work are remembered, as small records and never as rows. When the page is written its reconciliation is done in WINDOWS of `queueWorkingSet` rows
  * (`reconcile-windows.ts`), each window's writes made before the next is read: what the transaction holds at once is a window,
  * whatever the size of the queue and whatever the page says. A page that names nothing of the local work reads none of it.
+ *
+ * SEGMENTED REVISIONS (WEB-09c, `model/segmented-sync.ts`). The FINAL segment of a revision delivered in segments is this writer's, and so
+ * is its ACTIVATION: in the same one transaction, every word W27 staged in `delta_staging` is moved into the cache first, a window at a time
+ * (each window deleted from staging as it is moved), recorded as a mention exactly like a decoded change, and then the final segment's own
+ * changes are applied in order. Upserts and removals are absolute per id and staging keeps the last word per id, so the result is the
+ * cache the whole batch would have made, and the person sees the previous revision until this transaction commits and the next one after
+ * it. A failure anywhere rolls the activation back with the staging intact. A page that does not continue the stage (`continuityOf`:
+ * broken) applies nothing: the stage is abandoned and the position goes back to where the revision began (`restartStage`). A non-final
+ * segment is W27's and is refused here (`not_ready: segment`).
  */
 export interface CommitPageInput {
   captured: Captured;
@@ -69,11 +84,18 @@ export type CommitPageResult =
       changes: number;
       /** The highest batch revision on the page, or null for an empty page. */
       revision: number | null;
+      /** Staged words moved into the cache by this commit (the activation of a segmented revision; 0 otherwise). */
+      activated: number;
       hasMore: boolean;
       stats: Reconciled["stats"];
     }
   /** The database is not in a state that takes an ordinary page: nothing was written (apart from the epoch mirror). */
-  | { kind: "not_ready"; reason: "phase" | "cache_status" | "page_phase" }
+  | {
+      kind: "not_ready";
+      reason: "phase" | "cache_status" | "page_phase" | "segment";
+    }
+  /** The page did not continue the staged revision: the stage was abandoned and the position moved back (WEB-09c). */
+  | { kind: "restarted"; reason: string }
   /** The hold the page was admitted under has ended (R28): nothing was written; the engine admits the page again. */
   | { kind: "lease_lapsed" };
 
@@ -86,6 +108,7 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
   },
   scope: [
     "cache",
+    "delta_staging",
     "pending_effects",
     "resource_versions",
     "drafts",
@@ -107,6 +130,12 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
       return { result: { kind: "not_ready", reason: "page_phase" } };
 
     const { scan } = input;
+    const continuity = pageContinuity(sync, scan);
+    if (continuity.kind === "broken")
+      return restartStage(sync, continuity.reason);
+    if (continuity.kind === "start" || continuity.kind === "continue")
+      return { result: { kind: "not_ready", reason: "segment" } };
+    const activation = continuity.kind === "finish" && continuity.staged;
     let revision: number | null = null;
     for (const batch of scan.batches)
       if (revision === null || batch.revision > revision)
@@ -114,10 +143,17 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
     const pageSeq = sync.page_seq + 1;
     const operation = `page:${input.captured.expectedPosition ?? ""}`;
     return {
+      // A stage that is no longer in force (its cursor was replaced) leaves its words behind: they are cleared with any page that commits.
+      // An activation clears them itself, as it moves them.
+      writes:
+        !activation && sync.delta_stage != null
+          ? [w.clear("delta_staging")]
+          : [],
       sync: {
         ...sync,
         // The cursor is stored VERBATIM; an empty page still writes it (it may be a renewed one).
         cursor: scan.nextCursor,
+        delta_stage: null,
         page_seq: pageSeq,
         applied_revision:
           revision === null
@@ -145,6 +181,7 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
         pageSeq,
         changes: scan.totalChanges,
         revision,
+        activated: 0,
         hasMore: scan.hasMore,
         stats: {
           mentioned: 0,
@@ -156,7 +193,7 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
     };
   },
 
-  async apply(sink, { reader, input, result }) {
+  async apply(sink, { reader, sync, input, result }) {
     if (result.kind !== "committed") return result;
     const { scan, bytes } = input;
     const chunkSize = input.applyChunk ?? DATA_CONFIG.applyChunk;
@@ -196,7 +233,41 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
       chunk.clear();
     };
 
+    const record = (id: string, mention: Mention): void => {
+      chunk.set(id, mention);
+    };
+    let activated = 0;
     try {
+      // The activation (WEB-09c): the staged words first, a window at a time, each window moved and then deleted from staging.
+      const continuity = pageContinuity(sync, scan);
+      if (continuity.kind === "finish" && continuity.staged) {
+        for (;;) {
+          const staged = await reader.list("delta_staging", window);
+          if (staged.length === 0) break;
+          for (const word of staged) {
+            if (word.revision !== result.revision)
+              throw new PlanRejected("apply", "staging_revision");
+            let ready: Run | null;
+            if (word.removed || word.row === null) {
+              ready = runs.remove(word.id);
+              record(word.id, { removed: true, version: null });
+            } else {
+              ready = runs.put(word.row);
+              record(word.id, { removed: false, version: word.row.version });
+            }
+            await flush(ready);
+            if (chunk.size >= chunkSize) await lookUp();
+          }
+          await flush(runs.take());
+          await sink.bulkDelete(
+            "delta_staging",
+            staged.map((word) => word.id),
+          );
+          activated += staged.length;
+          if (elapsed() - startedAt > watchdogMs)
+            throw new PlanRejected("apply", "watchdog");
+        }
+      }
       for (let index = 0; index < scan.totalChanges; index += 1) {
         const change = decodeChange(
           bytes,
@@ -208,13 +279,13 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
         let ready: Run | null;
         if (change.kind === "upsert") {
           ready = runs.put(change.row);
-          chunk.set(change.row.id, {
+          record(change.row.id, {
             removed: false,
             version: change.row.version,
           });
         } else {
           ready = runs.remove(change.id);
-          chunk.set(change.id, { removed: true, version: null });
+          record(change.id, { removed: true, version: null });
         }
         await flush(ready);
         if (chunk.size >= chunkSize) await lookUp();
@@ -255,9 +326,20 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
           heldReleased: 0,
           unavailable: 0,
         };
-    return { ...result, stats };
+    return { ...result, activated, stats };
   },
 });
+
+/** Where the page stands against the stage in force (a segment is alone on its page, the scan's rule; a whole page has none). */
+const pageContinuity = (
+  sync: Parameters<typeof stageOf>[0],
+  scan: ScanOk,
+): Continuity =>
+  continuityOf(stageOf(sync), {
+    revision: scan.batches[0]?.revision ?? null,
+    segment:
+      scan.batches.length === 1 ? (scan.batches[0]?.segment ?? null) : null,
+  });
 
 /** One ordered run of the same kind of change. */
 type Run =

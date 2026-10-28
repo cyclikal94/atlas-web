@@ -101,6 +101,8 @@ export async function engineWorld(
     cursor?: string | null;
     /** The kind registries the page's decoding consults (default: empty ones). R44 registers a validator that fails. */
     decode?: EngineDeps["decode"];
+    /** WEB-09c: whether the server is known to segment (`EngineDeps.segmentedCapable`); absent, as in production, it is not. */
+    segmentedCapable?: () => boolean;
   } = {},
 ): Promise<EngineWorld> {
   const base = await pageWorld({ cursor: options.cursor });
@@ -222,6 +224,9 @@ export async function engineWorld(
     markers: out.markers,
     ids: { uuid: () => crypto.randomUUID() },
     elapsed: () => world.time,
+    ...(options.segmentedCapable
+      ? { segmentedCapable: options.segmentedCapable }
+      : {}),
     config: options.config,
   };
   out.engine = createSyncEngine(deps);

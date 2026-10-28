@@ -14,11 +14,17 @@ import { codePointCount } from "./code-points";
  *  - each batch is an object with EXACTLY `revision` (a plain non-negative integer literal) and `changes`, each once;
  *  - each change is a JSON object (its keys and values are pass 2's business);
  *  - nesting depth <= `maxDepth`, batches <= 80, changes per batch <= 800.
+ * SEGMENTED DELIVERY (WEB-09c, BOUNDED-SYNC-PAGINATION-20261027; BE-Q23's provisional contract, `model/segmented-sync.ts`): only when the
+ * caller passes `allowSegment` (the request opted in, or a continuation is held), a batch may also carry `segment`, an object with EXACTLY
+ * `index` (a plain non-negative integer) and `last` (a boolean), each once; a page carrying a segment is a delta page with exactly that one
+ * batch. Without `allowSegment` a `segment` member is an unknown batch key, refused exactly as before.
  * Structural bytes are ASCII and cannot occur inside a multi-byte UTF-8 sequence, so the scan needs no decoding; invalid UTF-8
  * inside a string is found where the string is decoded (pass 2, with a fatal decoder).
  */
 export interface ScanBatch {
   revision: number;
+  /** A piece of a segmented revision (only with `allowSegment`); absent for a whole batch. */
+  segment?: { index: number; last: boolean };
   /** Index of the batch's first element in `elements` (pairs). */
   first: number;
   count: number;
@@ -103,9 +109,10 @@ export function scanSyncPage(
   config: Pick<
     DataConfig,
     "maxDepth" | "maxScanElements" | "maxCursorLength" | "maxChangesPerBatch"
-  > & { maxBatches?: number } = DATA_CONFIG,
+  > & { maxBatches?: number; allowSegment?: boolean } = DATA_CONFIG,
 ): ScanResult {
   const maxBatches = config.maxBatches ?? 80;
+  const allowSegment = config.allowSegment === true;
   const length = bytes.length;
   let pos = 0;
   let containers = 0;
@@ -371,12 +378,59 @@ export function scanSyncPage(
       enter(depth);
     };
 
-    const parseBatch = (): { revision: number; count: number } => {
+    /** `segment`: `{ "index": <integer>, "last": <boolean> }`, exactly those keys, each once (depth 4, like `changes`). */
+    const parseSegment = (): { index: number; last: boolean } => {
+      expect(LBRACE, "a segment object");
+      enterContainer(4);
+      let index: number | null = null;
+      let last: boolean | null = null;
+      ws();
+      if (peek() === RBRACE)
+        fail("structure", "a segment needs index and last");
+      for (;;) {
+        ws();
+        const key = stringText(skipString(), tokenBytes(MAX_KEY_CODE_POINTS));
+        ws();
+        expect(COLON, "':'");
+        ws();
+        values += 1;
+        if (key === "index") {
+          if (index !== null) fail("structure", "duplicate index");
+          index = readInteger();
+        } else if (key === "last") {
+          if (last !== null) fail("structure", "duplicate last");
+          if (peek() === 0x74) {
+            literal("true");
+            last = true;
+          } else if (peek() === 0x66) {
+            literal("false");
+            last = false;
+          } else fail("structure", "last must be a boolean");
+        } else fail("structure", "unknown segment key");
+        ws();
+        if (peek() === COMMA) {
+          pos += 1;
+          continue;
+        }
+        expect(RBRACE, "'}' or ','");
+        break;
+      }
+      if (index === null || last === null)
+        fail("structure", "a segment needs index and last");
+      return { index: index as number, last: last as boolean };
+    };
+
+    const parseBatch = (): {
+      revision: number;
+      count: number;
+      segment: { index: number; last: boolean } | null;
+    } => {
       ws();
       expect(LBRACE, "a batch object");
       enterContainer(3);
       let revision: number | null = null;
       let count: number | null = null;
+      let segment: { index: number; last: boolean } | null = null;
       ws();
       if (peek() === RBRACE)
         fail("structure", "a batch needs revision and changes");
@@ -393,6 +447,9 @@ export function scanSyncPage(
         } else if (key === "changes") {
           if (count !== null) fail("structure", "duplicate changes");
           count = parseChanges();
+        } else if (key === "segment" && allowSegment) {
+          if (segment !== null) fail("structure", "duplicate segment");
+          segment = parseSegment();
         } else fail("structure", "unknown batch key");
         ws();
         if (peek() === COMMA) {
@@ -404,7 +461,7 @@ export function scanSyncPage(
       }
       if (revision === null || count === null)
         fail("structure", "a batch needs revision and changes");
-      return { revision: revision as number, count: count as number };
+      return { revision: revision as number, count: count as number, segment };
     };
 
     const parseBatches = (): ScanBatch[] => {
@@ -420,8 +477,12 @@ export function scanSyncPage(
       for (;;) {
         if (out.length >= maxBatches) fail("limit", "too many batches");
         const first = total;
-        const { revision, count } = parseBatch();
-        out.push({ revision, first, count });
+        const { revision, count, segment } = parseBatch();
+        out.push(
+          segment === null
+            ? { revision, first, count }
+            : { revision, first, count, segment },
+        );
         ws();
         if (peek() === COMMA) {
           pos += 1;
@@ -504,6 +565,12 @@ export function scanSyncPage(
       batches === null
     )
       fail("structure", "the page is missing its fields");
+    const pieces = (batches as ScanBatch[]).filter((b) => b.segment).length;
+    if (
+      pieces > 0 &&
+      (phase !== "delta" || (batches as ScanBatch[]).length !== 1)
+    )
+      fail("structure", "a segment must be the only batch of a delta page");
 
     return {
       ok: true,

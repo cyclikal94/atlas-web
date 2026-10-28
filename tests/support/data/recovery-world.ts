@@ -133,6 +133,8 @@ export async function recoveryWorld(
     config?: RecoveryJobDeps["config"];
     /** The device signals the job classifies (default: none, as in Firefox and WebKit). */
     signals?: RecoveryJobDeps["signals"];
+    /** WEB-09c: whether the server is known to segment (`RecoveryJobDeps.segmentedCapable`); absent, as in production, it is not. */
+    segmentedCapable?: () => boolean;
   } = {},
 ): Promise<RecoveryWorld> {
   const base = await pageWorld({
@@ -370,6 +372,9 @@ export async function recoveryWorld(
       },
     } as RecoveryJobDeps["trace"],
     elapsed: () => world.time,
+    ...(options.segmentedCapable
+      ? { segmentedCapable: options.segmentedCapable }
+      : {}),
     ...(options.config ? { config: options.config } : {}),
   };
   out.job = createRecoveryJob(deps);

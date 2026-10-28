@@ -3,8 +3,11 @@ import { describe, expect, test } from "vitest";
 import { DATA_CONFIG, maxResponseBytesFor } from "../../src/data/model/config";
 import {
   accountDatabaseName,
+  COMPOSITION_BARRIER_VERSION,
   D_INDEX_NAMES,
   DEXIE_SCHEMA,
+  DEXIE_SCHEMA_V1,
+  DEXIE_SCHEMA_V3,
   KEY_PATHS,
   parseSchema,
   SCHEMA_VERSION,
@@ -18,10 +21,27 @@ import {
 
 describe("F-A1: the schema constants equal plan 5.0.1", () => {
   test("ten stores (the nine of version 1 and `draft_commands`), in version 2, and the database name is exactly atlas-<account>", () => {
+    // WEB-09c ADAPTATION (labelled, BOUNDED-SYNC-PAGINATION-20261027): version 4 adds ONE store, `delta_staging`. The original ten-store
+    // assertion is kept unchanged for the version 2-3 schema, and the current schema is asserted to be exactly those ten plus that one.
+    expect(Object.keys(DEXIE_SCHEMA_V3).sort()).toEqual(
+      [
+        "cache",
+        "cache_staging",
+        "draft_commands",
+        "drafts",
+        "form_recovery",
+        "materialise_sequences",
+        "pending_effects",
+        "reminder_firings",
+        "resource_versions",
+        "sync_state",
+      ].sort(),
+    );
     expect([...STORE_NAMES].sort()).toEqual(
       [
         "cache",
         "cache_staging",
+        "delta_staging",
         "draft_commands",
         "drafts",
         "form_recovery",
@@ -40,12 +60,25 @@ describe("F-A1: the schema constants equal plan 5.0.1", () => {
   });
 
   test("version 3 (WEB-10a revision 3) is the composition-generation barrier: it changes no store", () => {
-    expect(SCHEMA_VERSION).toBe(3);
-    expect(SPLIT_BODIES_VERSION).toBeLessThan(SCHEMA_VERSION);
+    // WEB-09c ADAPTATION (labelled): the barrier is still version 3 and still changes no store (version 2 and 3 declare the same
+    // schema); the CURRENT version is 4, which adds `delta_staging` and nothing else (next test).
+    expect(COMPOSITION_BARRIER_VERSION).toBe(3);
+    expect(SPLIT_BODIES_VERSION).toBeLessThan(COMPOSITION_BARRIER_VERSION);
+    expect(COMPOSITION_BARRIER_VERSION).toBeLessThan(SCHEMA_VERSION);
+  });
+
+  test("version 4 (WEB-09c) adds exactly `delta_staging` (id, by revision) and changes no other store; version 1 never had it", () => {
+    expect(SCHEMA_VERSION).toBe(4);
+    const { delta_staging, ...rest } = DEXIE_SCHEMA;
+    expect(delta_staging).toBe("id, revision");
+    expect(rest).toEqual(DEXIE_SCHEMA_V3);
+    expect(Object.keys(DEXIE_SCHEMA_V1)).not.toContain("delta_staging");
+    expect(KEY_PATHS.delta_staging).toBe("id");
   });
 
   test("the Dexie strings and the design's index names (table of 5.0.1)", () => {
-    expect(DEXIE_SCHEMA).toEqual({
+    // WEB-09c ADAPTATION (labelled): the table of 5.0.1 is the version 2-3 schema, unchanged; version 4's one addition is asserted above.
+    expect(DEXIE_SCHEMA_V3).toEqual({
       cache: "id, kind, parent_id, [kind+kind_date]",
       cache_staging:
         "id, kind, parent_id, [kind+kind_date], recovery_generation",

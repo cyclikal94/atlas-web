@@ -13,6 +13,7 @@ import {
 import { DATA_CONFIG, maxResponseBytesFor } from "../model/config";
 import type { BlockedBy, BudgetEvent } from "../model/recovery";
 import { isFailureStatus, nextDelay } from "../model/retry";
+import { maxChangesFor, SEGMENT_CONTRACT } from "../model/segmented-sync";
 import {
   type DeviceSignals,
   isAllocationError,
@@ -20,6 +21,7 @@ import {
 } from "../model/sizing";
 import type { AccountId, Captured } from "../model/types";
 import { commitPage } from "../plans/commit-page";
+import { stageDeltaSegment } from "../plans/delta-segments";
 import {
   activateSnapshot,
   captureRecoveryRequest,
@@ -174,6 +176,8 @@ export interface RecoveryJobDeps {
   trace?: Trace;
   ids: { uuid(): string };
   elapsed?: () => number;
+  /** WEB-09c: whether the server is known to support segmented delivery (the sync engine's `segmentedCapable`). Absent: false. */
+  segmentedCapable?: () => boolean;
   config?: Partial<typeof DATA_CONFIG>;
 }
 
@@ -221,6 +225,8 @@ interface Issued {
   readonly saw: ReadonlyMap<string, MarkerSeen>;
   /** This request holds the one attempt a page load (or "Try again") permits while blocked, returned if nothing is sent. */
   permit: boolean;
+  /** WEB-09c: what the request asked of segmented delivery (catch-up only; a snapshot never opts in). */
+  readonly segmented: ReturnType<typeof maxChangesFor>;
 }
 
 /**
@@ -594,6 +600,15 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       handle: mode === "recovery" ? handle : null,
       saw,
       permit: false,
+      segmented:
+        path === "catch_up"
+          ? maxChangesFor({
+              configured: config.segmentedMaxChanges,
+              capable: deps.segmentedCapable?.() ?? false,
+              stepped: capture.steppedChanges,
+              staged: capture.deltaStaged,
+            })
+          : { maxChanges: null, allowSegment: false },
     };
 
     const verdict = await deps.quota.check(
@@ -626,6 +641,12 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     if (capture.position !== null)
       url.searchParams.set("cursor", capture.position);
     url.searchParams.set("limit", String(capture.limit));
+    // WEB-09c: a catch-up follows a staged segmented revision, or opts in where the server is known to segment. A snapshot never does.
+    if (issued.segmented.maxChanges !== null)
+      url.searchParams.set(
+        SEGMENT_CONTRACT.parameter,
+        String(issued.segmented.maxChanges),
+      );
     let response: Response;
     try {
       response = await deps.fetchFor(
@@ -1243,7 +1264,12 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     if (bytes.length > ceiling) return unrecognised(issued);
     let scan: ScanResult;
     try {
-      scan = scanSyncPage(bytes, config);
+      scan = scanSyncPage(
+        bytes,
+        issued.segmented.allowSegment
+          ? { ...config, allowSegment: true }
+          : config,
+      );
     } catch (error) {
       if (isAllocationError(error))
         return sizingFailure(issued, { kind: "allocation_failed" });
@@ -1281,6 +1307,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
               id: attempt,
               limit,
               startedAt: deps.clock.now(),
+              maxChanges: issued.segmented.maxChanges,
             });
           } catch {
             // A refinement; a page is not refused for want of it.
@@ -1295,25 +1322,34 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
           leaseLive: () => reservation.live(),
         };
         const commitStarted = deps.elapsed?.();
+        // WEB-09c: a non-final segment of a catch-up is staged (W27); its final segment and activation are W1's, in recovery mode.
+        const piece =
+          ok.batches.length === 1 ? ok.batches[0]?.segment : undefined;
         const outcome: CommitOutcome<{ kind: string; hasMore?: boolean }> =
-          issued.path === "catch_up"
-            ? await service.commit(commitPage, {
+          issued.path === "catch_up" && piece !== undefined && !piece.last
+            ? await service.commit(stageDeltaSegment, {
                 ...common,
-                now: deps.clock.iso(),
-                mode: "recovery",
+                now: deps.clock.now(),
               })
-            : ok.hasMore
-              ? await service.commit(commitStagingPage, {
+            : issued.path === "catch_up"
+              ? await service.commit(commitPage, {
                   ...common,
-                  operation: issued.capture.operation,
-                })
-              : await service.commit(activateSnapshot, {
-                  ...common,
-                  operation: issued.capture.operation,
-                  activateOperation: issued.capture.activateOperation as string,
                   now: deps.clock.iso(),
-                  mode: issued.mode,
-                });
+                  mode: "recovery",
+                })
+              : ok.hasMore
+                ? await service.commit(commitStagingPage, {
+                    ...common,
+                    operation: issued.capture.operation,
+                  })
+                : await service.commit(activateSnapshot, {
+                    ...common,
+                    operation: issued.capture.operation,
+                    activateOperation: issued.capture
+                      .activateOperation as string,
+                    now: deps.clock.iso(),
+                    mode: issued.mode,
+                  });
         const kind = outcome.kind === "applied" ? outcome.value.kind : null;
         written =
           kind === "staged" || kind === "activated" || kind === "committed";
@@ -1360,6 +1396,8 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       case "lease_lapsed":
         return paced();
       case "revision_mismatch":
+      // WEB-09c: a page that did not continue the staged revision (the writer moved the position back): an unrecognised answer.
+      case "restarted":
         return unrecognised(issued);
       case "not_ready":
         return value.reason === "page_phase" || value.reason === "final"
@@ -1484,10 +1522,14 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     }
     if (isAllocationFailure(failure))
       return sizingFailure(issued, { kind: "allocation_failed" });
-    await recordSizing(service, {
-      kind: "commit_failed",
-      cause: failure.cause === "abort" ? "abort" : "error",
-    });
+    await recordSizing(
+      service,
+      {
+        kind: "commit_failed",
+        cause: failure.cause === "abort" ? "abort" : "error",
+      },
+      issued.segmented.maxChanges,
+    );
     // The WHOLE page is requested again from the same position (Q24, "Retry applying changes"), up to the local-write bound.
     const final =
       issued.path === "snapshot" &&
@@ -1542,7 +1584,11 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
     issued: Issued,
     outcome: SizingOutcome,
   ): Promise<Next> {
-    const record = await recordSizing(issued.binding.service, outcome);
+    const record = await recordSizing(
+      issued.binding.service,
+      outcome,
+      issued.segmented.maxChanges,
+    );
     if (!alive(issued.binding)) return { when: "event" };
     if (record.kind === "failed")
       return bookkeepingStop(issued, "sizing", record.error);
@@ -1553,6 +1599,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
   async function recordSizing(
     service: AccountService,
     outcome: SizingOutcome,
+    segmented: number | null = null,
   ): Promise<
     { kind: "recorded"; action: string } | { kind: "failed"; error: unknown }
   > {
@@ -1560,6 +1607,7 @@ export function createRecoveryJob(deps: RecoveryJobDeps): RecoveryJob {
       const result = await service.store.run(recordSizingOutcome, {
         incarnationId: service.incarnationId,
         outcome,
+        segmented,
       });
       return { kind: "recorded", action: result.action };
     } catch (error) {

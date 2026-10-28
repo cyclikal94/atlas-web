@@ -37,6 +37,14 @@ export const DATA_CONFIG = Object.freeze({
   maxScanElements: 64_000,
   /** The delta page is written in groups of this many puts. */
   applyChunk: 100,
+  /**
+   * Segmented delta delivery (WEB-09c, BOUNDED-SYNC-PAGINATION-20261027; BE-Q23's provisional contract, `model/segmented-sync.ts`).
+   * `segmentedMaxChanges`: the ONE conservative starting `max_changes` (provisional; the tuning handover in `docs/sync-measurements.md`
+   * settles it), stepped down by device signals only. `segmentedMinApiVersion`: the server `api_version` from which the parameter exists;
+   * `null` until BE-Q23's contract is in a released, reviewed API-types pin, so production never sends a parameter an older server refuses.
+   */
+  segmentedMaxChanges: 100 as number | null,
+  segmentedMinApiVersion: null as string | null,
   /** `/sync` cursor length (`SyncPage.next_cursor` maxLength). */
   maxCursorLength: 512,
   /** The live-edge poll, the post-receipt poll and the back-off. All provisional. */

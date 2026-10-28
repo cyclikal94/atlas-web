@@ -267,6 +267,13 @@ export interface DataHarness {
       seedCursor?: string;
       /** FIXTURE: the yield between pages, for the P-9 comparison. */
       yieldPolicy?: YieldPolicy;
+      /**
+       * FIXTURE (WEB-09c, labelled): the engine is told the server segments (BE-Q23's provisional `max_changes`), as production never is
+       * until the contract is in a released pin. Only a stubbed `/sync` answers it here.
+       */
+      segmentedCapable?: boolean;
+      /** FIXTURE (WEB-09c tuning sweep, labelled): the starting `max_changes` in place of `DATA_CONFIG.segmentedMaxChanges`. */
+      segmentedMaxChanges?: number;
     },
   ): Promise<void>;
   /**
@@ -279,6 +286,8 @@ export interface DataHarness {
       transport: (request: Request) => Promise<Response>;
       seedCursor?: string;
       deviceMemoryGiB?: number;
+      /** FIXTURE (WEB-09c, labelled): as `startSync`'s. */
+      segmentedCapable?: boolean;
     },
   ): Promise<void>;
   stopSync(): void;
@@ -1258,6 +1267,10 @@ interface EngineWiring {
   /** The browser's own `online` event. */
   onOnline(listener: () => void): () => void;
   deviceMemoryGiB?: number;
+  /** FIXTURE (WEB-09c): the engine's `segmentedCapable` answers true. */
+  segmentedCapable?: boolean;
+  /** FIXTURE (WEB-09c tuning sweep): the engine's starting `max_changes` (its `config.segmentedMaxChanges`). */
+  segmentedMaxChanges?: number;
 }
 
 /** The production quota guard, whose next `check` waits while the fixture holds it (R27: the asynchronous gap before a request). */
@@ -1333,6 +1346,12 @@ function startEngine(wiring: EngineWiring): void {
       deviceMemoryGiB: wiring.deviceMemoryGiB,
       hasStorageEstimate: true,
     },
+    ...(wiring.segmentedCapable === true
+      ? { segmentedCapable: () => true }
+      : {}),
+    ...(wiring.segmentedMaxChanges === undefined
+      ? {}
+      : { config: { segmentedMaxChanges: wiring.segmentedMaxChanges } }),
     recovery: defaultRecoverySeam,
     channel: posting,
     markers,
@@ -2250,6 +2269,8 @@ const harness: DataHarness = {
         return () => window.removeEventListener("online", listener);
       },
       deviceMemoryGiB: options?.deviceMemoryGiB,
+      segmentedCapable: options?.segmentedCapable,
+      segmentedMaxChanges: options?.segmentedMaxChanges,
     });
   },
   async startSyncLocal(account, options) {
@@ -2267,6 +2288,7 @@ const harness: DataHarness = {
       subscribe: (listener) => identityStore.subscribe(listener),
       onOnline: () => () => undefined,
       deviceMemoryGiB: options.deviceMemoryGiB,
+      segmentedCapable: options.segmentedCapable,
     });
   },
   setPersistenceFault(mode) {

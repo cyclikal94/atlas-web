@@ -63,6 +63,7 @@ by version 1 in three real engines, `tests/e2e/fixture.data-store.spec.ts`, E-A4
 | `form_recovery` | `[form_context+tab_instance_id]` | `form_context` | the form-recovery port |
 | `sync_state` | `key` (`"singleton"`) | none | the ordinary fields (see below) |
 | `cache_staging`, `materialise_sequences`, `reminder_firings` | | | created empty; owned by WEB-09b, WEB-10c and WEB-14b |
+| `delta_staging` (schema version 4, WEB-09c) | `id` | `revision` | W27 (a non-final segment of a delta revision: the last word per resource id) and W1 (the activation, which moves and deletes it); cleared by W18, W23 and W24's abandonment ("Segmented delta delivery" below) |
 
 **Why a header and a body (D-23).** A command can be large (an import carries up to 1 MiB) and an IndexedDB read returns whole rows, so every scan, count and list of the queue read the bodies of drafts nobody
 was looking at. The header is the small row (about 2 KB) that every queue read, dispatch scan, summary, consent count and page reconciliation uses; the body is read for **one draft at a time**, when it is sent, edited or projected. The header gains a derived `kind` so the
@@ -113,6 +114,7 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
+| W27 | `stageDeltaSegment` (WEB-09c: one non-final segment of a delta revision into `delta_staging`; the final segment and the activation are W1's) | INC, CLS, CAS, GEN, OWN, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -401,6 +403,38 @@ results, not a heap or out-of-memory measurement and not a measurement of the co
 The approved dense batch (800 changes of 100-item checklists) reproduces the design's figures exactly: each value is 7,402 bytes and 547 nodes, and the page is 455,214 nodes and
 5.83 MiB (`tests/profiling/workloads.test.ts`). It is applied as **one** request at the lowest rung in all three engines (`tests/e2e/fixture.data-sync.spec.ts`, E-C3).
 Whether that suffices on a real constrained device is exactly what the measurement hand-over must show (evidence key `WEB-09a:sync-profiling`, owned by WEB-09c: `docs/sync-measurements.md`), and it has not been run on one: WEB-09c measured desktop engines only, and the physical-device runs are WEB-09d's before beta (STAGED-ACCEPTANCE-20261011; OD-1 had escalated the roster).
+
+### Segmented delta delivery (WEB-09c, BOUNDED-SYNC-PAGINATION-20261027)
+
+**What it is for.** A delta revision is indivisible on the wire today: at `limit = 1` the smallest response is one whole revision (up to 800 changes with ancestors). BE-Q23 owns an
+opt-in protocol that splits an oversized revision into ordered SEGMENTS (`max_changes`, `Batch.segment { index, last }`, a continuation cursor). The client's half is here. It is
+built against BE-Q23's **provisional** contract (its plan §5.2, SHA-256 `e088522a…4189`), spelt in ONE module (`model/segmented-sync.ts`), and **switched off in production**:
+the pinned API types (`0.29.0-rc.1`) do not contain it, `DATA_CONFIG.segmentedMinApiVersion` is `null` and the engine's `segmentedCapable` is absent, so no request carries the
+parameter (an older server answers an unknown query parameter with `400 malformed_request`). It is integration only once BE-Q23's contract is released into a reviewed pin.
+
+**The rule: staged, never shown, activated whole.**
+* The request carries `max_changes` (`segmentedMaxChanges`, one conservative provisional value; stepped down by device signals only) when the server is known to segment, and
+  ALWAYS while a revision is staged (the cursor is then a continuation, which only a segmenting server can have issued; without a budget the contract answers the remainder in one
+  final segment). The scan accepts a `segment` member only for such a request, and a page carrying one must be a delta page with that single batch.
+* A non-final segment is **W27**: one transaction decodes it with the ordinary bounded decode and writes the LAST WORD per resource id to `delta_staging` (a chunk at a time),
+  stores the continuation verbatim as `sync_state.cursor` and records `sync_state.delta_stage` (`revision`, `next_index`, `boundary_cursor` where the revision began, the
+  `cursor` it stored, and counts). Nothing the person sees changes: not the cache, `applied_revision`, `last_synced_at`, `page_seq`, the queue, the overlays or the composition
+  generation.
+* The final segment is **W1**, which in the SAME one transaction first moves every staged word into the cache a window (`queueWorkingSet`) at a time, deleting each window
+  from staging as it goes and recording each as a mention like a decoded change, then applies the segment's own changes in order, reconciles exactly as for a whole page,
+  clears the stage and stores the ordinary cursor. Upserts and removals are absolute per id and staging keeps the last word per id, so the cache is the one the whole batch
+  would have made; the person sees the previous revision until the commit and the next one after it; a failure anywhere rolls the activation back with the staging intact.
+* **Continuity is decided by the writer, in its transaction, from the stored stage** (`continuityOf`): out of order, repeated, another revision, a later segment with nothing
+  staged, a whole page while a revision is staged, or a non-final segment that ends the feed is BROKEN: the writer clears the staging and moves the position back to
+  `boundary_cursor` (`restartStage`), and the engine counts an unrecognised answer (so a server that keeps breaking revisions pauses at the ordinary bound; a staged segment
+  does not end the unrecognised streak, only the activation does). A duplicated or late response for a cursor that has moved is dropped by CAS and stages nothing twice.
+* **A stage belongs to the cursor it stored** (`stageOf`): any writer that replaces the cursor (W18's invalidation, W23's snapshot activation, W24's abandonment, a restart)
+  retires it by construction, and those three also clear `delta_staging` in their own transactions. A reload resumes from the stored continuation with the staged words; an
+  expired, pruned or foreign continuation is the server's `410 resync_required` (W18). The staging is per account by construction (one database per account).
+* **The ladder below `limit = 1`.** A device signal (allocation failure, non-quota abort, watchdog, crash-loop marker, whose marker now records the request's `max_changes`)
+  at the lowest rung halves `max_changes` to the contract's minimum of 4 (one change and at most three ancestors) before a floor hit is counted, so the floor is reached only
+  at the smallest response the protocol has. Quota and oversize never step down.
+* The recovery job's catch-up follows the same rules (W27 for a non-final segment; the final one through W1 in recovery mode); a snapshot never opts in.
 
 ### Device class, step-down and the floor
 
@@ -856,6 +890,8 @@ device roster.
 | `stepUpAfterSuccesses` | `null` (disabled) | not specified anywhere | the device roster | — |
 | `floorAfter` | 3 | the design's proposed three-failure family | the device roster | — |
 | `markerMinBytes` | 256 KiB | engineering default | P-2 and P-4 | P-2, P-4 |
+| `segmentedMaxChanges` | 100 | WEB-09c engineering start (BOUNDED-SYNC-PAGINATION-20261027); BE-Q23's provisional range 4-800 | the tuning handover (`docs/sync-measurements.md`), then the device roster | pending |
+| `segmentedMinApiVersion` | `null` (never opts in) | BE-Q23's contract is not in the pinned API types | BE-Q23's released contract and a reviewed pin | — |
 | `syncApplyWatchdogMs` | 20,000 (was 30,000: kept 10 s inside the persistence hold's bound) | engineering default | P-2 | P-2, P-W2 |
 | `maxResponseBytesFor(limit)` | `limit x 800 x 9 KiB x 1.5 + 64 KiB` | contract maxima; 9 KiB from WEB-03 | the captured W2 | P-W2 |
 | `maxChangeBytes`, `maxValueNodes`, `maxDepth` | 64 KiB, 8,192, 24 | engineering default; WEB-03 for the depth | the largest projection per kind (W6) | P-11 (W6) |

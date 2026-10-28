@@ -165,6 +165,56 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > evidence-integrity defect under labelled witness corruption, not an observed browser-clock failure. No measurement was taken under version 14, and no
 > figure here changes.
 
+## Segmented delivery: the tuning and overhead hand-over (BOUNDED-SYNC-PAGINATION-20261027)
+
+*28 October 2026. This section answers the smaller, decision-focused package that the newer authority asks for
+(`approval/bounded-sync-pagination-20261027.json`, SHA-256 `d1298d3e…370b58`; hand-over `delivery/handoffs/bounded-sync-pagination-approved-20261027.md`,
+SHA-256 `43ba7d9f…a0d9d`). Finer pagination is implemented as a safeguard; the measurements choose practical settings, they do not decide whether it may exist.
+The legacy programme below is historical and its open items are NOT passed. The client half is described in `docs/data-layer.md`, "Segmented delta delivery".*
+
+**What is measured, and how.** `tests/e2e/fixture.profile-segments.spec.ts` (runs only with `ATLAS_SEGMENT_SWEEP=<dir>`): the PRODUCTION engine, plans and session
+wrapper in Chromium, Firefox and macOS WebKit, with `/sync` STUBBED by a server that answers BE-Q23's PROVISIONAL contract by splitting exact, hashed fixture bytes.
+Workloads: W1 (the approved 800 x 100-item checklist batch, 6,108,899 bytes, SHA-256 `dfb06a8f…df56e6`) and R201 (one person ancestor and 200 dense checklist fields,
+the ancestor repeated at the head of every segment and counted against the budget, as BE-Q23's closure rule requires). Predeclared sweep: `max_changes` 4, 25, 100,
+200 and whole-batch delivery; five cold runs per cell; per run the request count, the engine's span from its first tick to the activation, each page's bytes, scan and
+commit milliseconds (the engine's own trace), and in Chromium only the sampled JS heap high-water mark above the idle page (a 20 ms sample of the whole heap,
+garbage included: an upper indication, NOT a per-segment memory figure). Host load is recorded at the start and end of every run.
+
+**Status of the figures: NOT tuning evidence yet.** The only runs so far are one-run smoke cells (4, 100, whole) of the qualification plan
+(`.agtx/evidence/WEB-09c/pagination/plan-run-5`), taken on this shared machine with a one-minute load of about 9 to 11 from other cards' work. They show the tool works
+and the shape of the result; they settle nothing. The full sweep must run on an exclusive host (load recorded, no other heavy work) before a value is fixed:
+`ATLAS_E2E_BROWSERS=all ATLAS_SEGMENT_SWEEP=<dir> pnpm exec playwright test tests/e2e/fixture.profile-segments.spec.ts --project fixture-chromium --project
+fixture-firefox --project fixture-webkit --workers 1 --retries 0 --output <dir>/pw` (150 runs; about 10 minutes on this machine).
+
+| Smoke, one run, shared host (indicative only) | requests | largest response | largest staged-segment commit | activation commit | engine span |
+| --- | --- | --- | --- | --- | --- |
+| W1 whole (Chromium / Firefox / WebKit) | 1 | 6,108,895 B | — | 47 / 176 / 137 ms | 197 / 278 / 310 ms |
+| W1 at 100 | 8 | 763,730 B | 10 / 16 / 25 ms | 68 / 123 / 121 ms | 324 / 659 / 502 ms |
+| W1 at 4 | 200 | 30,678 B | 5 / 49 / 20 ms | 70 / 130 / 129 ms | 1,193 / 3,775 / 2,524 ms |
+| R201 whole | 1 | 1,527,497 B | — | 14 / 25 / 32 ms | 60 / 55 / 75 ms |
+| R201 at 100 | 3 | 756,296 B | 10 / 50 / 24 ms | 24 / 100 / 39 ms | 123 / 455 / 164 ms |
+| R201 at 4 | 67 | 23,242 B | 4 / 44 / 14 ms | 25 / 56 / 33 ms | 468 / 3,753 / 874 ms |
+
+**The answers, as far as they go.**
+1. *Starting setting:* `segmentedMaxChanges = 100` (provisional). Reason: it bounds the largest single response to about 0.76 MB for the densest shapes (an
+   eighth of W1's whole batch) and every staged segment's own write to at most about 50 ms on desktop, while costing 8 requests for W1 and 3 for R201; at 4
+   the response is about 30 KB but W1 takes 200 requests and roughly six to fourteen times the whole-batch span. A device signal steps it down (halving) to 4 at
+   `limit = 1` before the floor is counted. It is an engineering choice to be confirmed or changed by the exclusive sweep and then by WEB-09d's devices.
+2. *Per-chunk parse/stage/activation cost:* recorded per page by the tool (above, indicative). **Known bound that segmentation does not remove:** the ACTIVATION is
+   one IndexedDB transaction over the whole revision (that is what makes it atomic). Its JavaScript working set is bounded (staged words are moved a window of
+   `queueWorkingSet` at a time, never as one array), but the transaction's own size in the engine is that of the whole revision, and its commit time is about the
+   whole-batch commit's (above). A device that cannot hold one transaction of one whole revision is not helped by a smaller `max_changes`; that is the floor this
+   design keeps, alongside BE-Q23's single-resource minimum (one change and at most three ancestors).
+3. *Request count and overhead against whole-batch delivery:* `ceil(changes / (m - ancestors))` requests per oversized revision; each is a lease and a round trip
+   (BE-Q23 records the server's per-request cost). Indicative desktop spans above.
+4. *Completion of the real server-generated dense update:* **not run.** It needs BE-Q23's implemented backend and an agreed candidate/backend pair. The synthetic
+   W1 control and R201 complete in every engine at every budget tried (rows checked).
+5. *Interrupted and resumed behaviour:* N1-N4 of `tests/e2e/fixture.data-segmented.spec.ts` (a real reload between segments, an IndexedDB fault during the
+   activation, a second page adopting the staged revision, no partial view), passing in all three engines (FIXTURE, stubbed `/sync`).
+6. *Known unmeasured bounds:* any device (WEB-09d); the real backend's segment sizes and timing (BE-Q23); memory per segment beyond the sampled Chromium heap;
+   multi-tab contention during a long staged revision; the exclusive-host sweep itself.
+
+
 ## Read this first
 
 * **Desktop only.** No real device, floor device, installed web app or browser without a device-memory signal was profiled. BE-B1 item 2 and BE-Q23 M1 are
