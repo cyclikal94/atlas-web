@@ -144,11 +144,12 @@ export const UNIT_13B_R6 = [
     tests: [T_KEPT, T_RET],
     expect: /cache hidden to be brought up to date/,
     patch: (t) =>
-      // Re-anchored in revision 7 (R7): the same defect at the corrected observation of the page's cache lifetime.
+      // Re-anchored in revision 7 (R7): the same defect at the corrected observation of the page's cache lifetime. Re-anchored again in
+      // revision 8 (R7a/R7b): the kept session's subscription to the page's cache lifetime is not made.
       sub(
         t,
-        "      if (!survives(which, cache.get(), context)) release(which);\n",
-        "      if (false) release(which);\n",
+        "  if (context.cache !== null)\n    which.offs.push(context.cache.subscribe(which.judge));\n",
+        "",
       ),
   },
   {

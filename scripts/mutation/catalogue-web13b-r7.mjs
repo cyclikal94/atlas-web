@@ -4,6 +4,10 @@
 // when it opened, which a remount disposes) or removes one boundary of the cache-lifetime observation; `expect` names the tests written
 // for it, so only an assertion of those tests catches it.
 //
+// Revision 8 (review 8 R7a/R7b): the entries whose code revision 8 rewrote are RE-ANCHORED at the corrected code with the same defect
+// (MU-2657/2658/2659/2660/2664/2665/2668), and MU-2666 is RE-EXPRESSED (its old oracle rewarded the loss of input; see its entry). Ids,
+// files and the defects restored are kept; revision 8's own mutants are in `catalogue-web13b-r8.mjs`.
+//
 // Considered and not selected (recorded for the reviewer): notifying the page's listeners for a publication that is not the newest is
 // equivalent, because every judgement reads the newest publication (`pageCacheLifetime.get()`); keeping an ended session's subscriptions is
 // equivalent for the cache (a late judgement of an ended session only ends it again and never touches the held one) and is caught for the
@@ -18,6 +22,7 @@ const FACTS = "src/data/plans/facts.ts";
 const REACT = "src/data/ui/react.tsx";
 const T_RET = "tests/features/calendars/import-retention.test.tsx";
 const T_KEPT = "tests/features/calendars/import-kept.test.ts";
+const T_SNAP = "tests/data/snapshot-plans.test.ts";
 
 export const UNIT_13B_R7 = [
   // Two layers hold this invariant: the continuous observation and the generation compared when the session is shown again. A remount
@@ -29,7 +34,10 @@ export const UNIT_13B_R7 = [
       "WEB-13b R7 (revision 7): the kept import observes the controller mounted when it opened (a remount disposes it; the later invalidation is missed)",
     file: SOURCES,
     tests: [T_RET],
-    expect: /L5: an admitted invalidation whose write failed/,
+    // Revision 8: the page runtime's service now also observes the durable streak (the L5 case above), so the evidence only a mounted
+    // controller has is a fallback marker (`L5 (revision 8)`).
+    expect:
+      /L5: an admitted invalidation whose write failed|known only by its fallback marker at the cache's position/,
     patch: (t) =>
       sub(
         t,
@@ -40,56 +48,66 @@ export const UNIT_13B_R7 = [
   {
     id: "MU-2657",
     title:
-      "WEB-13b R7 (revision 7): a hidden session ignores the cache's generation (an invalidation and recovery nobody observed keep the old input)",
+      "WEB-13b R7 (revision 7): a hidden session ignores the cache's witness (an invalidation and recovery nobody observed keep the old input)",
     file: KEPT,
     tests: [T_KEPT, T_RET],
+    // Re-anchored in revision 8 (R7b): the comparison is of the invalidation witness with the session's basis.
     expect:
-      /L1: the tree gone|NO controller was published|publishes only the final valid state|the chooser's Browse is judged the same way|first valid one is adopted/,
+      /NO controller was published|publishes only the final valid state|the chooser's Browse is judged the same way|L4 control: opened before the cache was ever valid|waiting, the witness read past its basis|the witness ends it|the opening read is the basis/,
     patch: (t) =>
       sub(
         t,
-        "  return life.generation === which.generation;\n",
-        "  return true;\n",
+        "          reading.invalidations !== null &&\n          reading.invalidations > basis),\n",
+        "          false),\n",
       ),
   },
   {
     id: "MU-2658",
     title:
-      "WEB-13b R7 (revision 7): reopening refreshes the session's generation to the cache's now (stale input legitimised on return)",
+      "WEB-13b R7 (revision 7): reopening refreshes the session's basis to the cache's now (stale input legitimised on return)",
     file: KEPT,
     tests: [T_KEPT, T_RET],
-    expect: /L1: the tree gone|the chooser's Browse is judged the same way/,
+    // Re-anchored in revision 8 (R7a): the read made when it is shown again ADOPTS what it finds instead of comparing it with the basis.
+    expect:
+      /it waits for a read made THEN|released after W18 -> W23: it closes/,
     patch: (t) =>
       sub(
         t,
-        "      (verifiable(which, life) && survives(which, life, context)))\n",
-        "      (verifiable(which, life) &&\n        ((which.generation = life?.generation ?? which.generation),\n        survives(which, life, context))))\n",
+        '      if (now > basis) release(which, "expired");\n      else if',
+        "      if (now > basis) which.basis = now;\n      if",
       ),
   },
   {
     id: "MU-2659",
     title:
-      "WEB-13b R7 (revision 7): facts not established yet end a hidden session (every remount discards the kept import)",
+      "WEB-13b R7 (revision 7): facts not established yet end a hidden or waiting session (every remount, or every unread showing, discards the kept import)",
     file: KEPT,
     tests: [T_KEPT, T_RET],
+    // Re-anchored in revision 8 (R7a): unknown readings are treated as an invalidation.
     expect:
-      /L3 control: a remount|L5 control: facts that cannot be read|L1 control \(no invalidation\)|L2: .*\(control: no invalidation\)|L5 control: a failure streak of ANOTHER position/,
+      /L3 control: a remount|L5 control: facts that cannot be read|C3: not ready before its witness can be compared|WAITING|L1 control \(no invalidation\)|L2: .*\(control: no invalidation\)|L5 control: a failure streak of ANOTHER position|released unchanged|first fill only \(control\)|first fill while no controller is mounted keeps it/,
     patch: (t) =>
       sub(
         t,
-        "  if (life.generation === null) return true;\n  if (which.generation === null) {\n",
-        "  if (life.generation === null) return false;\n  if (which.generation === null) {\n",
+        "        reading.invalidated ||\n        (basis !== null &&\n",
+        "        reading.invalidated ||\n        reading.invalidations === null ||\n        (basis !== null &&\n",
       ),
   },
   {
     id: "MU-2660",
     title:
-      "WEB-13b R7 (revision 7): a hidden session ignores a cache KNOWN to be invalid under the same generation (an admitted invalidation not yet written)",
+      "WEB-13b R7 (revision 7): a hidden session ignores a cache KNOWN to be invalid under the same witness (an admitted invalidation not yet written)",
     file: KEPT,
     tests: [T_KEPT, T_RET],
+    // Re-anchored in revision 8 (R7b): the known-invalid reading among the readings judged.
     expect:
-      /L5: an admitted invalidation not yet written|L5: an admitted invalidation whose write failed/,
-    patch: (t) => sub(t, "  if (life.invalidated) return false;\n", ""),
+      /L5: an admitted invalidation not yet written|L5: an admitted invalidation whose write failed|durable streak of an admitted invalidation heard through the service|an invalid cache heard there ends a hidden session|KNOWN invalid when it is shown again|C3: shown through an invalidation, hidden while it stands|an invalidation seen while hidden ends it once/,
+    patch: (t) =>
+      sub(
+        t,
+        "        reading.invalidated ||\n        (basis !== null &&\n",
+        "        (basis !== null &&\n",
+      ),
   },
   {
     id: "MU-2661",
@@ -97,7 +115,10 @@ export const UNIT_13B_R7 = [
       "WEB-13b R7 (revision 7): a controller's cache lifetime never says known-invalid (a failed invalidation's streak, marker or hold is not published)",
     file: ENV,
     tests: [T_RET],
-    expect: /L5: an admitted invalidation whose write failed/,
+    // Revision 8: the page runtime's service now also observes the durable streak (the L5 case above), so the evidence only a mounted
+    // controller has is a fallback marker (`L5 (revision 8)`).
+    expect:
+      /L5: an admitted invalidation whose write failed|known only by its fallback marker at the cache's position/,
     patch: (t) =>
       sub(
         t,
@@ -127,44 +148,49 @@ export const UNIT_13B_R7 = [
   {
     id: "MU-2664",
     title:
-      "WEB-13b R7 (revision 7): the sync facts do not carry the cache's generation (an unobserved invalidation and recovery are invisible)",
+      "WEB-13b R7 (revision 7): the sync facts do not carry the cache's witness (an unobserved invalidation and recovery are invisible)",
     file: FACTS,
-    tests: [T_RET],
-    expect: /L1: the tree gone|L2: the drop zone's kept import, remounted/,
+    tests: [T_RET, T_SNAP],
+    // Re-anchored in revision 8 (R7b): the facts carry the invalidation witness (revision 7: the generation).
+    expect:
+      /WIT-5 read as `invalidations`|L1: the tree gone|L2: the drop zone's kept import, remounted/,
     patch: (t) =>
       sub(
         t,
-        "          recoveryGeneration: sync.recovery_generation,\n",
-        "          recoveryGeneration: 0,\n",
+        "          invalidations: invalidationsOf(sync),\n",
+        "          invalidations: 0,\n",
       ),
   },
   {
     id: "MU-2665",
     title:
-      "WEB-13b R7 (revision 7): a shown session does not follow the valid cache it is shown against (a pending source's dialog kept open through a recovery ends once hidden)",
+      "WEB-13b R7 (revision 7): a shown session does not follow the cache it is shown against (a pending source's dialog kept open through a recovery ends once hidden)",
     file: KEPT,
     tests: [T_KEPT],
+    // Re-anchored in revision 8: the shown session's basis follows the newest witness read.
     expect: /C3 control: shown through the invalidation AND the recovery/,
     patch: (t) =>
       sub(
         t,
-        "    if (life.valid && life.generation !== null)\n      which.generation = life.generation;\n",
-        "    if (life.valid && life.generation !== null)\n      which.generation ??= life.generation;\n",
+        "    if (known !== null && (which.basis === null || known > which.basis))\n",
+        "    if (known !== null && which.basis === null)\n",
       ),
   },
+  // RE-EXPRESSED in revision 8 (review 8 R7a; design assessment C6). Revision 7's MU-2666 removed the `verifiable` precondition of a
+  // reopening and was caught by the C3 oracle that EXPECTED the kept input to be discarded while the new controller's facts were unread
+  // (the loss review 8 reproduced). The old intent, "kept input is not used before its cache can be compared", is now this mutant: the
+  // session shown again does not wait for its verification (it is ready at once). Its oracles assert the SAME session with its input AND
+  // the waiting state, so a mutant that deleted the input would be caught by them too: deletion is never rewarded.
   {
     id: "MU-2666",
     title:
-      "WEB-13b R7 (revision 7): a kept session is shown again before its generation can be compared (a new controller's unread facts)",
+      "WEB-13b R7a (revision 8, re-expressed): a kept session shown again is ready before its basis is verified (unverified input could be saved)",
     file: KEPT,
-    tests: [T_KEPT],
-    expect: /C3: not shown again before its generation can be compared/,
+    tests: [T_KEPT, T_RET],
+    expect:
+      /C3: not ready before its witness can be compared|WAITING|the chooser's Browse while it waits|a read made at an EARLIER showing|shown again while nothing can verify it/,
     patch: (t) =>
-      sub(
-        t,
-        "      (verifiable(which, life) && survives(which, life, context)))\n",
-        "      survives(which, life, context))\n",
-      ),
+      sub(t, "  which.pending = true;\n", "  which.pending = false;\n"),
   },
   {
     id: "MU-2667",
@@ -172,8 +198,10 @@ export const UNIT_13B_R7 = [
       "WEB-13b R7 (revision 7): the mounted controller does not publish its cache lifetime (nothing observes the cache for a kept import)",
     file: REACT,
     tests: [T_RET],
+    // Revision 8: the page runtime's service now also observes the durable streak (the L5 case above), so the evidence only a mounted
+    // controller has is a fallback marker (`L5 (revision 8)`).
     expect:
-      /L1: remounted \(a NEW controller\)|L1 control \(no remount, the review's 422 control\)|cache hidden to be brought up to date|L5: an admitted invalidation whose write failed/,
+      /L1: remounted \(a NEW controller\)|L1 control \(no remount, the review's 422 control\)|cache hidden to be brought up to date|L5: an admitted invalidation whose write failed|known only by its fallback marker at the cache's position/,
     patch: (t) =>
       sub(
         t,
@@ -184,15 +212,17 @@ export const UNIT_13B_R7 = [
   {
     id: "MU-2668",
     title:
-      "WEB-13b R7 (revision 7): showing a kept session again does not judge the cache as it is then (a change no publication announced is missed)",
+      "WEB-13b R7 (revision 7): showing a kept session again does not judge the cache as it is then, while still hidden (a change no publication announced is missed)",
     file: KEPT,
     tests: [T_KEPT],
-    expect: /the chooser's Browse is judged the same way/,
+    // Re-anchored in revision 8: the judgement made before it is shown again. With a basis, the waiting judgement that follows makes the
+    // same comparison (a second layer); without one, only this judgement sees a cache known to be invalid.
+    expect: /KNOWN invalid when it is shown again/,
     patch: (t) =>
       sub(
         t,
-        "      (verifiable(which, life) && survives(which, life, context)))\n",
-        "      verifiable(which, life))\n",
+        "    which.judge();\n    if (held !== which) return null;\n    resume(which, context);\n",
+        "    resume(which, context);\n",
       ),
   },
 ];

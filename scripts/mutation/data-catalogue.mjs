@@ -27,6 +27,7 @@ import { UNIT_13B_R4 } from "./catalogue-web13b-r4.mjs";
 import { UNIT_13B_R5 } from "./catalogue-web13b-r5.mjs";
 import { UNIT_13B_R6 } from "./catalogue-web13b-r6.mjs";
 import { UNIT_13B_R7 } from "./catalogue-web13b-r7.mjs";
+import { UNIT_13B_R8 } from "./catalogue-web13b-r8.mjs";
 
 export class PatchError extends Error {}
 
@@ -15812,9 +15813,10 @@ export const UNIT = [
     tests: ["tests/data/snapshot-plans.test.ts"],
     expect: /R-2 an abandonment/,
     patch: (t) =>
+      // Re-anchored in WEB-13b revision 8 (R7b): the same branch, which now also moves the invalidation witness; the whole branch removed.
       sub(
         t,
-        '        ...(sync.cache_status === "valid"\n          ? { cache_status: "invalid" as const, cursor: null }\n          : {}),',
+        '        ...(sync.cache_status === "valid"\n          ? {\n              cache_status: "invalid" as const,\n              cursor: null,\n              cache_invalidation_seq: nextInvalidation(sync),\n            }\n          : {}),',
         "",
       ),
   },
@@ -21872,6 +21874,7 @@ export const UNIT = [
   ...UNIT_13B_R5,
   ...UNIT_13B_R6,
   ...UNIT_13B_R7,
+  ...UNIT_13B_R8,
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];
@@ -25108,16 +25111,19 @@ export const ENGINE = [
   {
     id: "MU-2122",
     title:
-      "WEB-10a N-CG2: (REAL ENGINE) the schema stays at version 2: an older build's connection is never closed and it can still open",
+      "WEB-10a N-CG2: (REAL ENGINE) the schema stays at the previous version: an older build's connection is never closed and it can still open",
     file: "src/data/model/schema.ts",
     spec: "tests/e2e/fixture.data-composition.spec.ts",
     grep: "E-CG2:",
     expect: /E-CG2:/,
+    // Re-anchored in WEB-13b revision 8 (R7b): the current version is 4 (the invalidation witness's barrier after the composition
+    // generation's 3), so "stays at the previous version" is 3 now (originally 2, when 3 was current). Same defect: the version the
+    // current writers' barrier relies on is never reached, and E-CG2 (adapted: 40, and a version-3 open refused) catches it.
     patch: (t) =>
       sub(
         t,
+        "export const SCHEMA_VERSION = 4;",
         "export const SCHEMA_VERSION = 3;",
-        "export const SCHEMA_VERSION = 2;",
       ),
   },
 

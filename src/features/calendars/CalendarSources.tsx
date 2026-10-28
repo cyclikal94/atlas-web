@@ -290,6 +290,8 @@ function Sources() {
       identities: session.identity,
       incarnation: env.service()?.incarnationId ?? null,
       cache: pageCacheLifetime,
+      // Revision 8 (R7a/R7b): the page runtime's service, observed while the session is kept and read afresh when it is shown again.
+      service: env.service(),
       today: deviceToday(),
     };
   }, [identityKey, env, session]);

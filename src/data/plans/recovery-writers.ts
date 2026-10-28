@@ -1,4 +1,5 @@
 import { DATA_CONFIG } from "../model/config";
+import { nextInvalidation } from "../model/invalidation";
 import type { Mention, Reconciled } from "../model/reconcile";
 import { reconcileVersions } from "../model/reconcile";
 import {
@@ -898,8 +899,14 @@ export const recordRecoveryOutcome = guardedPlan<
         recovery_generation: sync.recovery_generation + 1,
         ...CLEARED_STAGING,
         phase: "snapshot",
+        // A `valid` cache abandoned is a committed invalidation, and its witness moves with it (WEB-13b revision 8, R7b); the restart of
+        // an attempt under a cache that was never valid, or is already invalid, is not one.
         ...(sync.cache_status === "valid"
-          ? { cache_status: "invalid" as const, cursor: null }
+          ? {
+              cache_status: "invalid" as const,
+              cursor: null,
+              cache_invalidation_seq: nextInvalidation(sync),
+            }
           : {}),
       };
     }

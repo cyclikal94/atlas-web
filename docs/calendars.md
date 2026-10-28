@@ -191,15 +191,23 @@ it is kept), another database incarnation (checked when it is shown or saved) an
 up to date end it; a revoked session's late save is not announced. **Revision 7 (review 7 R7):** the cache is observed through the PAGE's
 cache lifetime (`pageCacheLifetime`, `src/data/ui/cache-lifetime.ts`), which every mounted controller publishes in turn, never through the
 controller mounted when the session opened (a remount of the protected tree disposes it while the page's leader goes on syncing). The session
-keeps the durable `recovery_generation` of the valid cache it was last shown against; once hidden, a cache known to be invalid, or valid under
-another generation (invalidated and recovered while no controller, or only a follower's coalesced read, was there to see it), ends it, and it is
-shown again only once its generation can be compared. A remount's first read (facts not established) ends nothing, so ordinary remounts keep it.
-A session opened before the cache was ever valid adopts the first valid generation (the first snapshot moves it). The source's state is read afresh whenever it is shown. Sync, reopening and a read
-completing never store anything; a reload or another tab has no session. `tests/features/calendars/import-retention.test.tsx` (I1-I13
-through the production router; revision 7: L1/L2/L5 through the production `DataProvider` and writers W18/W20/W21/W23),
+keeps the cache's durable INVALIDATION WITNESS (revision 8, review 8 R7b: `sync_state.cache_invalidation_seq`, moved only by a committed
+invalidation; revision 7 kept `recovery_generation`, which a first fill moves too) of the database it was opened or last shown against; once
+hidden, a cache known to be invalid, or a witness past it (invalidated, and perhaps refilled, while no controller, or only a follower's
+coalesced read, was there to see it), ends it. A session opened on an EMPTY cache (a pending source before the first snapshot) is kept through
+the first fill and ended by an invalidation after it. It is also observed through the page runtime's service in hand when it opened
+(`observeCache`), which outlives the protected tree. **Revision 8 (R7a):** shown again, it WAITS until a read of the witness made then (or a
+reading that agrees) verifies its basis: unknown facts (a replacement controller's first read, a failed read) neither discard it nor let it be
+saved; its file and window stay shown, its source is not, Import explains why it waits and Enter stores nothing; a witness past its basis then
+ends it and the dialog closes with "Import closed while your calendar sources are brought up to date." A CACHED source's open dialog whose cache
+is only unverified waits the same way; a cache known to be invalid is the E9 close. The source's state is read afresh whenever it is shown.
+Sync, reopening and a read completing never store anything; a reload or another tab has no session. `tests/features/calendars/import-retention.test.tsx` (I1-I13
+through the production router; revision 7: L1/L2/L5 through the production `DataProvider` and writers W18/W20/W21/W23; revision 8: the
+waiting session, the pending-source first fill versus invalidation, the marker-only L5 and the unverified cached source),
 `import-editor.test.ts`, `import-kept.test.ts`, E-IMP7 and E-IMP8 (a 403 remount then 410/W18/W23, row and chooser, with controls; two pages
-with the follower's cross-tab wakes delivered or held) in `tests/e2e/fixture.calendar-import.spec.ts`; mutants MU-2637 to MU-2655 and
-MU-2656 to MU-2668. WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
+with the follower's cross-tab wakes delivered or held; revision 8: E-IMP9, a pending source on an empty cache, first fill alone versus fill,
+410 and refill, the follower's wakes held) in `tests/e2e/fixture.calendar-import.spec.ts`; mutants MU-2637 to MU-2655, MU-2656 to MU-2668
+(revision 8: re-anchored, MU-2666 re-expressed) and MU-2669 to MU-2687. WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
 **Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the

@@ -297,6 +297,11 @@ export interface SyncStateRow {
    * the cache as it is then, and clears this. Absent: nothing is owed.
    */
   recovery_reconcile_pending?: boolean;
+  /**
+   * WEB-13b revision 8 (review 8 R7b): the cache's invalidation witness, moved by one by every committed invalidation (W18, and W24's
+   * abandonment of a `valid` cache) and by nothing else (`model/invalidation.ts`, `invalidationsOf`). Absent: 0.
+   */
+  cache_invalidation_seq?: number;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

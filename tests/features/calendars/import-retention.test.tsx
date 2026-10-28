@@ -8,6 +8,7 @@ import {
 } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { DraftRow } from "../../../src/data";
+import { invalidateOperation } from "../../../src/data/model/retry";
 import * as copy from "../../../src/features/calendars/copy";
 import { SHOW_NEXT_CALENDARS } from "../../../src/features/calendars/copy-anchor";
 import * as words from "../../../src/features/calendars/copy-import";
@@ -42,9 +43,18 @@ const ICS =
 type World = Awaited<ReturnType<typeof calendarWorld>>;
 const ROW = "Import events into Family calendar";
 
+/**
+ * The dialog shown now, waited for as an ASSERTION (revision 8): a dialog that never appears, or closes at once, fails the expectation
+ * instead of throwing a query error (the merged mutation runner treats an error beside the expected assertion as an invalid run).
+ */
+async function shownDialog(): Promise<HTMLElement> {
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeNull());
+  return screen.queryByRole("dialog") as HTMLElement;
+}
+
 async function openRow(w: World, name = ROW): Promise<HTMLElement> {
   fireEvent.click(await screen.findByRole("button", { name }));
-  const dialog = await screen.findByRole("dialog");
+  const dialog = await shownDialog();
   await w.settle();
   return dialog;
 }
@@ -506,7 +516,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
       });
     });
     await w.settle();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await shownDialog();
     fireEvent.click(
       present(
         within(dialog).queryByRole("button", { name: SHOW_NEXT_CALENDARS }),
@@ -551,7 +561,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
       });
     });
     await w.settle();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await shownDialog();
     const first = (
       within(dialog).getByLabelText(words.SOURCE) as HTMLSelectElement
     ).value;
@@ -587,7 +597,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
       });
     });
     await w.settle();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await shownDialog();
     fireEvent.change(within(dialog).getByLabelText(words.SOURCE), {
       target: { value: rows[2]?.id },
     });
@@ -599,7 +609,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
       });
     });
     await w.settle();
-    const again = await screen.findByRole("dialog");
+    const again = await shownDialog();
     await waitFor(() => expect(shownFile(again)).toContain("second.ics"));
     expect(
       (within(again).getByLabelText(words.SOURCE) as HTMLSelectElement).value,
@@ -616,7 +626,7 @@ describe("R7: entries and current source facts (I3, I4)", () => {
       });
     });
     await w.settle();
-    press(await screen.findByRole("dialog"), "Cancel");
+    press(await shownDialog(), "Cancel");
     await w.settle();
     const picker = vi
       .spyOn(HTMLInputElement.prototype, "click")
@@ -945,8 +955,9 @@ describe("R7 (revision 7): the kept import across a production controller replac
         cache_status: "valid",
         recovery_generation: s.recovery_generation,
       });
+      // Revision 8: the lifetime names the invalidation witness (unchanged, like the generation: the write failed), not the generation.
       expect(w.env.cacheLifetime.get()).toMatchObject({
-        generation: s.recovery_generation,
+        invalidations: s.cache_invalidation_seq ?? 0,
         invalidated: failed,
       });
       // The streak gone again and the generation unchanged: only an observer that saw the known-invalid state can tell (no durable trace).
@@ -983,7 +994,7 @@ describe("R7 (revision 7): the kept import across a production controller replac
       });
     });
     await w.settle();
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await shownDialog();
     await waitFor(() => expect(shownFile(dialog)).toContain("drop.ics"));
     setField(dialog, "Through", "2026-12-31");
     await syncFrom(w, dialog);
@@ -1012,7 +1023,7 @@ describe("R7 (revision 7): the kept import across a production controller replac
           });
         });
         await w.settle();
-        const dialog = await screen.findByRole("dialog");
+        const dialog = await shownDialog();
         expect(field(dialog, "Through").value).toBe(fresh.through);
       } else {
         expect(picker).not.toHaveBeenCalled();
@@ -1022,5 +1033,299 @@ describe("R7 (revision 7): the kept import across a production controller replac
       }
       expect(drafts(w)).toHaveLength(0);
       expect(importPosts(w)).toHaveLength(0);
+    });
+});
+
+/**
+ * WEB-13b revision 8 (review 8 R7a/R7b; design assessment C1-C3, T1, T2, T7): through the PRODUCTION session, router, protected tree and
+ * `DataProvider` (a new controller per mount over the page's runtime) and the real writers W18/W20/W21/W23 over the IndexedDB double.
+ *
+ *  - R7a: a kept import shown again while NOTHING can verify its basis (the new controller's facts, the page runtime's own observation and
+ *    the read made at the showing are all held) WAITS: the person's file and window are shown, its source is not, and nothing is saved
+ *    (the button explains; Enter stores nothing). Released unchanged, it is ready; released after a committed invalidation, it closes and
+ *    says why (expired), and the next Import events is a new session.
+ *  - R7b: review 8's pending-source schedule (an empty cache, the first fill, W18 and a refill while no controller is mounted) maintained,
+ *    with its first-fill-only control.
+ *  - The dialog of a CACHED source whose cache is only unverified (not read yet, an unreadable marker) waits instead of closing (E9 is for
+ *    a cache known to be invalid, its control below).
+ */
+describe("R7a/R7b (revision 8): the kept import waits for its witness; first fill versus invalidation (production composition)", () => {
+  const PENDING = "00000000-0000-4000-8000-0000000000a5";
+  const PENDING_ROW = "Import events into Pending calendar";
+  const pendingCreate = () =>
+    draftRow({
+      local_id: "create-1",
+      endpoint: "/calendar-commands",
+      command: {
+        command: {
+          kind: "create_source",
+          id: PENDING,
+          label: "Pending calendar",
+          timezone: "UTC",
+        },
+      },
+      target_resource_ids: [PENDING],
+      index_targets: [PENDING],
+    });
+  const fresh = defaultWindow(deviceToday());
+  const importDrafts = (w: World) =>
+    drafts(w).filter((row) => row.local_id !== "create-1");
+  /**
+   * Holds every readSyncFacts of the page runtime's service made from now on, while `hold` stands: a live read says "loading" and is not
+   * heard, a one-off read is not delivered. `release` lets them all go and tells every live read.
+   */
+  function holdFacts(w: World) {
+    const service = w.env.service();
+    expect(service).not.toBeNull();
+    // The page runtime's service: every controller of the page, and the kept session's own observation, read through it.
+    const real = (service as NonNullable<typeof service>).store as unknown as {
+      watch: (
+        plan: { name: string },
+        input: unknown,
+      ) => { get(): unknown; subscribe(listener: () => void): () => void };
+      run: (plan: { name: string }, ...rest: unknown[]) => Promise<unknown>;
+    };
+    const watch = real.watch.bind(real);
+    const run = real.run.bind(real);
+    let holding = true;
+    const listeners = new Set<() => void>();
+    const runs: Array<() => void> = [];
+    vi.spyOn(real, "watch").mockImplementation((plan, input) => {
+      const source = watch(plan, input);
+      if (plan.name !== "data.readSyncFacts") return source;
+      return {
+        get: () => (holding ? { status: "loading" } : source.get()),
+        subscribe(listener: () => void) {
+          listeners.add(listener);
+          const off = source.subscribe(() => {
+            if (!holding) listener();
+          });
+          return () => {
+            listeners.delete(listener);
+            off();
+          };
+        },
+      };
+    });
+    vi.spyOn(real, "run").mockImplementation((plan, ...rest) => {
+      const result = run(plan, ...rest);
+      if (plan.name !== "data.readSyncFacts" || !holding) return result;
+      return new Promise((resolve, reject) => {
+        runs.push(() => {
+          result.then(resolve, reject);
+        });
+      });
+    });
+    return {
+      held: () => runs.length,
+      async release() {
+        await act(async () => {
+          holding = false;
+          for (const go of runs.splice(0)) go();
+          for (const listener of [...listeners]) listener();
+        });
+        await w.settle();
+      },
+    };
+  }
+  /** The pending source's import, a file and an edited window, kept by the sync control. */
+  async function keptPending(w: World) {
+    const dialog = await openRow(w, PENDING_ROW);
+    await choose(w, dialog, ICS);
+    await waitFor(() => expect(shownFile(dialog)).toContain("retained.ics"));
+    setField(dialog, "From", "2026-01-01");
+    setField(dialog, "Through", "2026-12-31");
+    await syncFrom(w, dialog);
+    expect(w.path()).toBe("/sync");
+  }
+
+  for (const invalidated of [false, true])
+    test(`R7a: shown again while nothing can verify it, the kept import WAITS (input shown, nothing saved, Enter stores nothing); released ${invalidated ? "after W18 -> W23: it closes, says why, and Import events is a new session" : "unchanged: it is ready with the same input"}`, async () => {
+      const w = await calendarWorld({
+        production: true,
+        productionSync: true,
+        validCache: true,
+        online: false,
+        drafts: [pendingCreate()],
+      });
+      const facts = holdFacts(w);
+      await keptPending(w);
+      await w.remount();
+      if (invalidated) {
+        await w.invalidate();
+        await w.recover([]);
+        expect(w.sync().cache_status).toBe("valid");
+      }
+      await w.traverse(-1);
+      const dialog = await openRow(w, PENDING_ROW);
+      expect(facts.held()).toBeGreaterThan(0);
+      // Waiting: the person's input is there, the source is not shown, and nothing can be saved.
+      expect(shownFile(dialog)).toContain("retained.ics");
+      expect(field(dialog, "From").value).toBe("2026-01-01");
+      expect(field(dialog, "Through").value).toBe("2026-12-31");
+      expect(dialog.querySelector("[data-import-waiting]")?.textContent).toBe(
+        words.IMPORT_CHECKING,
+      );
+      expect(
+        within(dialog).getByRole("button", { name: words.IMPORT }),
+      ).toBeDisabled();
+      fireEvent.submit(present(dialog.querySelector("form")));
+      await w.settle();
+      expect(importDrafts(w)).toHaveLength(0);
+      await facts.release();
+      if (invalidated) {
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        await waitFor(() =>
+          expect(announced()).toBe(words.IMPORT_CLOSED_REFRESHING),
+        );
+        const again = await openRow(w, PENDING_ROW);
+        expect(shownFile(again)).toBeNull();
+        expect(field(again, "From").value).toBe(fresh.from);
+      } else {
+        expect(screen.queryByRole("dialog")).toBe(dialog);
+        expect(dialog.querySelector("[data-import-waiting]")).toBeNull();
+        expect(shownFile(dialog)).toContain("retained.ics");
+        expect(field(dialog, "Through").value).toBe("2026-12-31");
+        expect(
+          within(dialog).getByRole("button", { name: words.IMPORT }),
+        ).toBeEnabled();
+      }
+      expect(importDrafts(w)).toHaveLength(0);
+      expect(w.calls.filter((call) => call.method === "POST")).toEqual([]);
+    });
+
+  for (const invalidate of [false, true])
+    test(`R7b: a pending source's import opened on an EMPTY cache; with no controller mounted, the first fill${invalidate ? ", W18 and a refill: back, Import events is a new session" : " only (control): back, the SAME input"}`, async () => {
+      const w = await calendarWorld({
+        production: true,
+        productionSync: true,
+        online: false,
+        drafts: [pendingCreate()],
+      });
+      await keptPending(w);
+      const initial = w.sync();
+      expect(initial.cache_status).toBe("empty");
+      const incarnation = w.env.service()?.incarnationId;
+      await w.detach();
+      await w.recover([]);
+      expect(w.sync().cache_status).toBe("valid");
+      if (invalidate) {
+        await w.invalidate();
+        expect(w.sync().cache_status).toBe("invalid");
+        await w.recover([]);
+      }
+      const refilled = w.sync();
+      expect(refilled.cache_status).toBe("valid");
+      expect(refilled.recovery_generation).toBeGreaterThan(
+        initial.recovery_generation,
+      );
+      expect(refilled.cache_invalidation_seq ?? 0).toBe(invalidate ? 1 : 0);
+      await w.attach();
+      expect(w.env.service()?.incarnationId).toBe(incarnation);
+      await w.traverse(-1);
+      const again = await openRow(w, PENDING_ROW);
+      if (invalidate) {
+        expect(shownFile(again)).toBeNull();
+        expect(field(again, "From").value).toBe(fresh.from);
+        expect(field(again, "Through").value).toBe(fresh.through);
+      } else {
+        expect(shownFile(again)).toContain("retained.ics");
+        expect(field(again, "From").value).toBe("2026-01-01");
+        expect(field(again, "Through").value).toBe("2026-12-31");
+      }
+      expect(importDrafts(w)).toHaveLength(0);
+      expect(w.calls.filter((call) => call.method === "POST")).toEqual([]);
+    });
+
+  // T5 (design assessment): evidence that ONLY a mounted controller has. An admitted invalidation whose failure counter could not be
+  // written leaves its fallback marker, which the facts do not carry: neither the page runtime's service nor the witness can tell, and the
+  // controller that opened the session is gone. The page's cache lifetime (whichever controller is mounted) is what ends it; the marker
+  // retired again before the session is shown, nothing durable remains to compare (MU-2656, MU-2661).
+  for (const failed of [true, false])
+    test(`L5 (revision 8): after a remount, an admitted invalidation known only by its fallback marker ${failed ? "at the cache's position ends" : "of ANOTHER position (control) keeps"} the kept import, though the marker is gone when it is shown again`, async () => {
+      const w = await calendarWorld({
+        cache: [sourceRow()],
+        production: true,
+        validCache: true,
+        online: false,
+        productionSync: true,
+      });
+      const dialog = await edited(w);
+      await syncFrom(w, dialog);
+      await w.remount();
+      const s = w.sync();
+      const service = w.env.service();
+      expect(service).not.toBeNull();
+      const scope = {
+        account: (service as NonNullable<typeof service>).account,
+        incarnationId: (service as NonNullable<typeof service>).incarnationId,
+      };
+      const operation = invalidateOperation(failed ? s.cursor : "delta-old");
+      let recorded: unknown = null;
+      await act(async () => {
+        recorded = w.host.markers.set(scope, operation).state;
+      });
+      expect(recorded).toBe("recorded");
+      // The page's own marker write announces nothing to its controller; the next read of the facts (here an unchanged commit) derives
+      // the cache again and finds it.
+      await w.commit({ put: { store: "sync_state", rows: [s] } });
+      try {
+        expect(w.env.cacheLifetime.get()).toMatchObject({
+          invalidations: s.cache_invalidation_seq ?? 0,
+          invalidated: failed,
+        });
+        expect(w.sync()).toEqual(s);
+      } finally {
+        await act(async () => {
+          w.host.markers.clear(scope, operation);
+        });
+        await w.commit({ put: { store: "sync_state", rows: [s] } });
+      }
+      expect(w.env.cacheLifetime.get()).toMatchObject({ invalidated: false });
+      await w.traverse(-1);
+      const again = await openRow(w);
+      if (failed)
+        expect(seen(w, again)).toMatchObject({ file: null, from: fresh.from });
+      else
+        expect(seen(w, again)).toMatchObject({
+          file: expect.stringContaining("retained.ics"),
+          from: "2026-01-01",
+        });
+    });
+
+  for (const status of ["unverified", "invalid"] as const)
+    test(`a CACHED source's open dialog when its cache becomes ${status}: ${status === "unverified" ? "it WAITS (the source not shown, nothing saved) and keeps the input; valid again, it is ready" : "it closes and says why (E9, control)"}`, async () => {
+      const w = await calendarWorld({ cache: [sourceRow()], online: false });
+      const dialog = await edited(w);
+      const valid = w.sync();
+      await w.commit({
+        put: {
+          store: "sync_state",
+          rows: [{ ...valid, cache_status: status as never }],
+        },
+      });
+      if (status === "invalid") {
+        await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+        await waitFor(() =>
+          expect(announced()).toBe(words.IMPORT_CLOSED_REFRESHING),
+        );
+        return;
+      }
+      expect(screen.queryByRole("dialog")).toBe(dialog);
+      expect(dialog.querySelector("[data-import-waiting]")).not.toBeNull();
+      expect(dialog.querySelector("[data-import-source]")?.textContent).toBe(
+        "—",
+      );
+      expect(shownFile(dialog)).toContain("retained.ics");
+      expect(
+        within(dialog).getByRole("button", { name: words.IMPORT }),
+      ).toBeDisabled();
+      await w.commit({ put: { store: "sync_state", rows: [valid] } });
+      expect(dialog.querySelector("[data-import-waiting]")).toBeNull();
+      expect(dialog.querySelector("[data-import-source]")?.textContent).toBe(
+        "Family calendar",
+      );
+      expect(field(dialog, "Through").value).toBe("2026-12-31");
+      expect(drafts(w)).toHaveLength(0);
     });
 });

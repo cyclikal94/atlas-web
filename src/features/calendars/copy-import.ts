@@ -53,6 +53,9 @@ export const IMPORT_QUEUED = "Import queued.";
 /** Provisional: an import was queued as it was submitted, and what was changed in the dialog meanwhile is still there, not saved. */
 export const IMPORT_QUEUED_NEWER =
   "Import queued as it was when you pressed Import. Your newer changes are still here.";
+/** Provisional: why Import waits while a kept import, shown again, is checked against the calendar sources stored here (R7a). */
+export const IMPORT_CHECKING =
+  "Import is available once your calendar sources here have been checked.";
 export const IMPORT_CLOSED_REFRESHING =
   "Import closed while your calendar sources are brought up to date.";
 export const NO_SOURCES_TO_IMPORT =

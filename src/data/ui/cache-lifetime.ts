@@ -6,15 +6,16 @@ import type { Store } from "../../session";
  * goes on syncing. Null while the controller is bound to no database.
  *
  * A controller is the protected tree's (`DataProvider` builds one per mount and disposes it at unmount), so no single controller can be
- * observed for a page's lifetime. What CAN be compared across controllers is the durable `recovery_generation`: every invalidation moves it
- * on (W18, an abandonment W24) and the activation that makes the cache valid again keeps it (W23), so a cache read valid under another
- * generation than one read before was not valid all along, even when no controller was there to see it hidden.
+ * observed for a page's lifetime. What CAN be compared across controllers is the durable invalidation witness (revision 8, review 8 R7b:
+ * `sync_state.cache_invalidation_seq`): every committed invalidation moves it on (W18, W24's abandonment of a valid cache) and nothing else
+ * does (a first fill and an empty attempt's restart move `recovery_generation`, which revision 7 compared, but not this), so two readings
+ * that differ saw an invalidation between them, even when no controller was there to see it.
  */
 export interface CacheLifetime {
   readonly account: string;
   readonly incarnationId: string;
-  /** The generation the established sync facts name; null while none are (the first read pending, or failed with none before it). */
-  readonly generation: number | null;
+  /** The invalidation witness the established sync facts name; null while none are (the first read pending, or failed with none before it). */
+  readonly invalidations: number | null;
   /**
    * The cache is KNOWN to be invalid: its status says so, or an invalidation the server admitted has not been written yet (its durable
    * streak, its marker, a hold of this page's engine). A cache that is merely unverified (not read yet, an unreadable marker) is not.

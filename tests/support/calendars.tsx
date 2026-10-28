@@ -16,7 +16,10 @@ import {
 } from "../../src/data";
 import { createQuotaGuard } from "../../src/data/engine/quota-guard";
 import type { SyncChannel } from "../../src/data/engine/sync-channel";
-import { createPageDataHost } from "../../src/data/leader/page-host";
+import {
+  createPageDataHost,
+  type PageDataHost,
+} from "../../src/data/leader/page-host";
 import { snapshotPageOperation } from "../../src/data/model/recovery";
 import { accountDatabaseName } from "../../src/data/model/schema";
 import type { SyncStateRow } from "../../src/data/model/types";
@@ -106,6 +109,8 @@ export interface CalendarWorld {
   env: DataEnv;
   /** Revision 7 (R7): every controller a mount used, in order (one, unless `production`). */
   controllers(): DataEnv[];
+  /** Revision 8 (R7b): the page's host the production provider composes over (its write-failure markers are the page's). */
+  host: PageDataHost;
   online: Cell<boolean>;
   compat: Cell<ApiCompatibility>;
   identity: Cell<Identity | null>;
@@ -417,6 +422,7 @@ export async function calendarWorld(
       return env;
     },
     controllers: () => [...controllers],
+    host,
     sync,
     async invalidate() {
       const s = sync();

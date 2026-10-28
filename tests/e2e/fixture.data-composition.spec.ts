@@ -124,7 +124,7 @@ test.describe("E-CG1: the real adapter advances the local composition generation
   });
 });
 
-test.describe("E-CG2: version 3 closes an older build's connection and an older build cannot open it (Q19)", () => {
+test.describe("E-CG2: version 3 closes an older build's connection and an older build cannot open it (Q19; adapted, WEB-13b revision 8: version 4)", () => {
   test("a version-1 database held open by an older build's connection: this build's open delivers versionchange to it, upgrades, and a version-2 open is refused", async ({
     context,
   }, info) => {
@@ -164,29 +164,37 @@ test.describe("E-CG2: version 3 closes an older build's connection and an older 
       account,
     );
     expect(description?.version).toBe(SCHEMA_VERSION * 10);
-    expect(SCHEMA_VERSION).toBe(3);
+    // ADAPTED (WEB-13b revision 8, review 8 R7b): the current version is 4, the invalidation witness's barrier after the composition
+    // generation's (3). The older connection is closed by this build's open exactly as before, and a version-2 build is refused as
+    // before; a version-3 build (the composition generation without the witness) is now refused too.
+    expect(SCHEMA_VERSION).toBe(4);
     const older = await page.evaluate(
       () => (window as unknown as { __older?: number | null }).__older,
     );
     expect(older).toBe(SCHEMA_VERSION * 10);
-    // A build of version 2 (IndexedDB version 20) cannot open the database any more.
-    const refused = await page.evaluate(
-      (db) =>
-        new Promise<string>((resolve) => {
-          const request = indexedDB.open(db, 20);
-          request.onsuccess = () => {
-            request.result.close();
-            resolve("opened");
-          };
-          request.onerror = () => resolve(request.error?.name ?? "error");
-        }),
-      name,
-    );
+    // A build of version 2 (IndexedDB version 20) or version 3 (30) cannot open the database any more.
+    const refusedAt = (db: string, version: number) =>
+      page.evaluate(
+        ([at, v]) =>
+          new Promise<string>((resolve) => {
+            const request = indexedDB.open(at, v);
+            request.onsuccess = () => {
+              request.result.close();
+              resolve("opened");
+            };
+            request.onerror = () => resolve(request.error?.name ?? "error");
+          }),
+        [db, version] as const,
+      );
+    const refused = await refusedAt(name, 20);
     expect(refused).toBe("VersionError");
+    const refusedV3 = await refusedAt(name, 30);
+    expect(refusedV3).toBe("VersionError");
     recordEvidence(info, "e-cg2", {
       version: description?.version,
       older,
       refused,
+      refusedV3,
     });
   });
 });

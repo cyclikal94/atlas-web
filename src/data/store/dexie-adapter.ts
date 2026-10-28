@@ -3,6 +3,7 @@ import { advanceComposition, advancesComposition } from "../model/composition";
 import { commandKindOf } from "../model/outbox";
 import {
   accountDatabaseName,
+  COMPOSITION_VERSION,
   DEXIE_SCHEMA,
   DEXIE_SCHEMA_V1,
   KEY_PATHS,
@@ -469,7 +470,9 @@ export function createDexieOpener(deps: DexieOpenerDeps): EngineOpener {
           .stores({ ...DEXIE_SCHEMA })
           .upgrade(moveDraftCommands);
         // Version 3 (WEB-10a revision 3) changes no store: it is the barrier that closes every connection of an older build, which
-        // writes without advancing the composition generation (`model/composition.ts`).
+        // writes without advancing the composition generation (`model/composition.ts`). Version 4 (WEB-13b revision 8) is the same
+        // barrier for the cache's invalidation witness (`model/sync-state.ts`).
+        db.version(COMPOSITION_VERSION).stores({ ...DEXIE_SCHEMA });
         db.version(SCHEMA_VERSION).stores({ ...DEXIE_SCHEMA });
         db.on("populate", (tx: Transaction) => {
           // Runs inside the versionchange transaction that CREATES the database. A refusal aborts it: the engine discards the new

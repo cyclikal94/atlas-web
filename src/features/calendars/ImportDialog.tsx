@@ -8,6 +8,7 @@ import {
   useOptionalDataEnv,
   usePendingCreates,
   useResourceView,
+  useStatusInputs,
 } from "../../data";
 import { refusalMessage } from "./AddSourceDialog";
 import { CANCEL, NEEDS_DATABASE, NOT_SAVED } from "./copy";
@@ -21,6 +22,7 @@ import {
   FROM,
   fileSummary,
   IMPORT,
+  IMPORT_CHECKING,
   IMPORT_CLOSED_REFRESHING,
   IMPORT_QUEUED,
   IMPORT_TITLE,
@@ -38,7 +40,13 @@ import {
 import { Field, FormMessage } from "./fields";
 import { importEnablement } from "./import-action";
 import type { ImportEditor } from "./import-editor";
-import { discardImport, hideImport, showImport } from "./import-kept";
+import {
+  discardImport,
+  hideImport,
+  importStatus,
+  showImport,
+  subscribeImports,
+} from "./import-kept";
 import {
   CONFIGURE_SOURCE,
   CREATE_SOURCE,
@@ -63,10 +71,15 @@ export function deviceToday(now: Date = new Date()): string {
  * What the dialog may say of its source NOW (one read, `useResourceView`): the cached row (merged, with a waiting settings change shown),
  * this device's pending create of it, still reading, or gone. A source seen cached that the cache no longer holds is gone; it is never
  * shown from an earlier row.
+ *
+ * Revision 8 (R7a): a cache hidden only because it is not verified yet (a remount's first read, an unreadable marker) is no refresh: the
+ * cached source is WAITED for (nothing of it shown, nothing saved), never closed over. A cache known to be invalid, or stopped at its
+ * floor, is the E9 refresh.
  */
 type SourceState =
   | { kind: "none" }
   | { kind: "reading" }
+  | { kind: "waiting" }
   | { kind: "shown"; row: CacheRow; cached: boolean }
   | { kind: "gone" };
 
@@ -76,6 +89,11 @@ function useSourceState(id: string | null): {
 } {
   const view = useResourceView(id ?? NONE, VIEW_KINDS);
   const gate = useCacheGate();
+  const inputs = useStatusInputs();
+  const unverified =
+    gate === "refreshing" &&
+    inputs.cache === "unverified" &&
+    inputs.engine?.invalidating !== true;
   const seenCached = useRef<string | null>(null);
   if (id === null) return { state: { kind: "none" }, refreshing: false };
   if (view.status === "loading")
@@ -85,6 +103,7 @@ function useSourceState(id: string | null): {
   const { base, merged, create, outstanding } = view.value;
   if (base !== null && merged !== null) {
     seenCached.current = id;
+    if (unverified) return { state: { kind: "waiting" }, refreshing: false };
     return {
       state: {
         kind: "shown",
@@ -179,7 +198,16 @@ export function ImportDialog({
   const importable = useImportableSources();
   // The drop zone's dialog starts on the first source it may import into.
   const selected = sourceId ?? chosen ?? importable.rows[0]?.id ?? null;
-  const { state, refreshing } = useSourceState(selected);
+  const sourceState = useSourceState(selected);
+  const refreshing = sourceState.refreshing;
+  // The session's own state (R7a): shown again and not verified yet, nothing of its source is shown and nothing is saved.
+  const status = useSyncExternalStore(
+    subscribeImports,
+    () => importStatus(editor),
+    () => importStatus(editor),
+  );
+  const state: SourceState =
+    status === "pending" ? { kind: "waiting" } : sourceState.state;
   const fileInput = useRef<HTMLInputElement | null>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -197,15 +225,16 @@ export function ImportDialog({
   }, [editor]);
   const discard = () => discardImport(editor);
 
-  // Closed once, with the reason announced, when the cache is being brought up to date under a cached source (the Manage rule, E9).
+  // Closed once, with the reason announced, when the cache is being brought up to date under a cached source (the Manage rule, E9),
+  // and when the session shown again turns out to have been invalidated while it was kept (R7a/R7b: the owner ended it).
   const closed = useRef(false);
   useEffect(() => {
-    if (!refreshing || closed.current) return;
+    if ((!refreshing && status !== "expired") || closed.current) return;
     closed.current = true;
     announcer.announce(IMPORT_CLOSED_REFRESHING);
     discardImport(editor);
     onClose();
-  }, [refreshing, announcer, onClose, editor]);
+  }, [refreshing, status, announcer, onClose, editor]);
 
   const source = state.kind === "shown" ? state.row : null;
   const enablement =
@@ -215,11 +244,13 @@ export function ImportDialog({
         ? { enabled: false, reason: NO_SOURCES_TO_IMPORT }
         : state.kind === "reading"
           ? { enabled: false, reason: READING }
-          : importEnablement({
-              database: env?.service() != null,
-              canEdit: state.row.can_edit,
-              turnedOff: state.row.archived,
-            });
+          : state.kind === "waiting"
+            ? { enabled: false, reason: IMPORT_CHECKING }
+            : importEnablement({
+                database: env?.service() != null,
+                canEdit: state.row.can_edit,
+                turnedOff: state.row.archived,
+              });
   const fileProblem =
     file !== null && !file.check.ok
       ? (FILE_PROBLEMS[file.check.reason] ?? null)
@@ -227,8 +258,9 @@ export function ImportDialog({
 
   const submit = () => {
     if (!enablement.enabled || source === null) return;
-    // While the latest choice is still being read nothing is imported (nor said to be missing), whatever submitted the form.
-    if (editor.state().reading) return;
+    // While the latest choice is still being read nothing is imported (nor said to be missing), whatever submitted the form; nor while
+    // the session shown again is not verified (asked again at the press, R7a).
+    if (editor.state().reading || importStatus(editor) !== "ready") return;
     const { file, window: window_ } = editor.state();
     const windowCheck = checkWindow(window_.from, window_.through);
     const windowError = windowCheck.ok
@@ -358,6 +390,7 @@ export function ImportDialog({
       >
         <div className="flex flex-col gap-1.5">
           {sourceId === null &&
+          state.kind !== "waiting" &&
           (importable.rows.length > 0 || importable.page.partial) ? (
             <>
               <label
@@ -399,6 +432,14 @@ export function ImportDialog({
               <span data-import-source="" className="text-[14px] text-ink-1">
                 {source?.label ?? "—"}
               </span>
+              {state.kind === "waiting" ? (
+                <span
+                  data-import-waiting=""
+                  className="text-[12.5px] text-ink-2"
+                >
+                  {IMPORT_CHECKING}
+                </span>
+              ) : null}
             </>
           )}
         </div>

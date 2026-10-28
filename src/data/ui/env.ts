@@ -588,7 +588,7 @@ export function createDataEnv(
         : {
             account: current.account,
             incarnationId: current.service.incarnationId,
-            generation: established?.recoveryGeneration ?? null,
+            invalidations: established?.invalidations ?? null,
             invalidated,
             valid: cache === "valid" && !invalidated,
           };

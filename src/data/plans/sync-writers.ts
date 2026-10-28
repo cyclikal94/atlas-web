@@ -1,4 +1,5 @@
 import { DATA_CONFIG } from "../model/config";
+import { nextInvalidation } from "../model/invalidation";
 import {
   failureVersion,
   invalidateOperation,
@@ -422,6 +423,8 @@ export const invalidateRecoveryPosition = guardedPlan<
         cache_status: "invalid",
         cursor: null,
         recovery_generation: generation,
+        // The invalidation witness (WEB-13b revision 8, R7b): committed with the invalidation it records, or not at all.
+        cache_invalidation_seq: nextInvalidation(sync),
         staging_position: null,
         expected_position: null,
         // The write of this invalidation succeeded: that is this operation's success, and it clears this operation's streak.

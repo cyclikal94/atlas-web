@@ -1275,6 +1275,11 @@ export function createSyncEngine(deps: EngineDeps): SyncEngine {
     const run = alive(id) ? ownership : null;
     if (failure.cause === "quota") {
       await recordSizing(service, { kind: "quota" });
+      // DA-N2 (WEB-13b revision 8; handover `delivery/handoffs/web13b-r7b-n2-n3-approved-20261027.md`): the stop is the run's that met
+      // the failure, published only while that run still stands after the sizing record's wait. A run that ended meanwhile (the leader's
+      // unbind, a newer run) publishes nothing over its successor's state; the sizing record it committed stays.
+      if (run === null || run !== ownership || !alive(id) || !service.live)
+        return { when: "event" };
       setState({ kind: "stopped", cause: "storage_full" });
       return { when: "event" };
     }

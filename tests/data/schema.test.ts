@@ -3,6 +3,7 @@ import { describe, expect, test } from "vitest";
 import { DATA_CONFIG, maxResponseBytesFor } from "../../src/data/model/config";
 import {
   accountDatabaseName,
+  COMPOSITION_VERSION,
   D_INDEX_NAMES,
   DEXIE_SCHEMA,
   KEY_PATHS,
@@ -39,9 +40,17 @@ describe("F-A1: the schema constants equal plan 5.0.1", () => {
     );
   });
 
-  test("version 3 (WEB-10a revision 3) is the composition-generation barrier: it changes no store", () => {
-    expect(SCHEMA_VERSION).toBe(3);
-    expect(SPLIT_BODIES_VERSION).toBeLessThan(SCHEMA_VERSION);
+  // ADAPTED (WEB-13b revision 8, review 8 R7b): the current version was 3 (the composition generation's barrier); version 3 is now named
+  // `COMPOSITION_VERSION` and is still declared, and version 4 is the same barrier for the cache's invalidation witness. The original
+  // assertions on version 3 are kept on the constant that now holds it.
+  test("version 3 (WEB-10a revision 3) is the composition-generation barrier: it changes no store (adapted, WEB-13b revision 8)", () => {
+    expect(COMPOSITION_VERSION).toBe(3);
+    expect(SPLIT_BODIES_VERSION).toBeLessThan(COMPOSITION_VERSION);
+  });
+
+  test("version 4 (WEB-13b revision 8) is the invalidation-witness barrier: it changes no store, after the composition barrier", () => {
+    expect(SCHEMA_VERSION).toBe(4);
+    expect(COMPOSITION_VERSION).toBeLessThan(SCHEMA_VERSION);
   });
 
   test("the Dexie strings and the design's index names (table of 5.0.1)", () => {

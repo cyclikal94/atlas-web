@@ -38,7 +38,13 @@ export const UNIT_13B_R1 = [
     tests: [T_IMPORT_UI],
     expect: /R1: choosing another file forgets the previous one at once/,
     // Revision 6 (R7): re-expressed at the corrected text (the dialog now asks its editing session whether the latest file is read).
-    patch: (t) => sub(t, "    if (editor.state().reading) return;\n", ""),
+    // Re-anchored in revision 8 (R7a): the same check, now beside the session's verification; only the read check is removed.
+    patch: (t) =>
+      sub(
+        t,
+        '    if (editor.state().reading || importStatus(editor) !== "ready") return;\n',
+        '    if (importStatus(editor) !== "ready") return;\n',
+      ),
   },
   {
     id: "MU-2472",

@@ -1296,4 +1296,209 @@ test.describe("E-IMP8: the kept import across a protected-tree remount and a cac
         expect(seen.through).not.toBe("2026-12-31");
       }
     });
+
+  /**
+   * E-IMP9 (WEB-13b revision 8, review 8 R7b; design assessment T2/T6): review 8's pending-source schedule in a real engine. The import is
+   * composed by the FOLLOWER page `two` against a PENDING source while the cache is still EMPTY (the first snapshot is held; the source's
+   * create is held in flight), and kept by the sync control. The leader page `one` then completes the first fill and, in the invalidation
+   * variant, meets `410 resync_required` (W18) and fills again (W23), while every cross-tab wake to `two` is HELD, so `two` reads only the
+   * final, valid state: a first fill moves the recovery generation exactly as fill, invalidation and refill do, and only the invalidation
+   * witness tells them apart. Control: the first fill only, held the same way, keeps the import. Row entry only: the drop zone (the
+   * chooser) is shown only over an open cache, so an empty cache offers no chooser to keep.
+   */
+  for (const invalidate of [true, false])
+    test(`E-IMP9 two pages, a pending source on an EMPTY cache: the follower's kept import ${invalidate ? "ends when the leader page fills, invalidates (410) and fills again, its wakes held" : "is kept through the first fill alone (control), its wakes held"}`, async ({
+      context,
+    }) => {
+      test.setTimeout(120_000);
+      const net = await fresh(context);
+      let fill!: (page: ReturnType<typeof snapshotPage>) => void;
+      const firstFill = new Promise<ReturnType<typeof snapshotPage>>(
+        (resolve) => {
+          fill = resolve;
+        },
+      );
+      let refill!: (page: ReturnType<typeof snapshotPage>) => void;
+      const heldRefill = new Promise<ReturnType<typeof snapshotPage>>(
+        (resolve) => {
+          refill = resolve;
+        },
+      );
+      // One answer throughout (a request retried meanwhile gets the same held page): the first snapshot is held until released; once the
+      // first fill is seen (`filled`), the invalidation variant answers its next delta `410` and every later snapshot is the held refill.
+      let filled = false;
+      let resync = false;
+      net.answer = (call) => {
+        if (call.cursor === null) return filled ? heldRefill : firstFill;
+        if (invalidate && filled && !resync) {
+          resync = true;
+          return {
+            status: 410,
+            body: JSON.stringify(atlasBody("resync_required")),
+          };
+        }
+        return deltaPage([], call.cursor);
+      };
+      const cal = await stubCalendars(context);
+      cal.answers.set("/calendar-commands", [
+        { wait: new Promise<never>(() => undefined) },
+      ]);
+      const one = await leaderPage(context, net, "one", undefined, {
+        route: "/settings/calendars",
+      });
+      const twoPage = await context.newPage();
+      await twoPage.addInitScript(HOLD_CHANNELS);
+      const two = await leaderPage(context, net, "two", twoPage, {
+        route: "/settings/calendars",
+      });
+      expect(
+        (await untilLeader(two, (v) => v.attachment === "follower")).role,
+      ).toBe("follower");
+      expect((await leaderOf(one)).role).toBe("leader");
+      // The pending source, created on the follower; its create is sent by the leader and held in flight.
+      await two.getByRole("button", { name: "Add source" }).click();
+      const add = two.getByRole("dialog", { name: "Add source" });
+      await add.getByLabel("Label").fill("Pending calendar");
+      await add.getByLabel("Timezone").fill("Europe/London");
+      await add.getByRole("button", { name: "Create source" }).click();
+      await expect(add).toBeHidden();
+      const before = await rows(two, "sync_state");
+      expect(
+        (before[0] as { cache_status?: string } | undefined)?.cache_status,
+      ).toBe("empty");
+      const dialog = two.getByRole("dialog", {
+        name: "Import events",
+        exact: true,
+      });
+      const row = two.getByRole("button", {
+        name: "Import events into Pending calendar",
+      });
+      await row.click();
+      await dialog.locator('input[type="file"]').setInputFiles({
+        name: "retained.ics",
+        mimeType: "text/calendar",
+        buffer: Buffer.from(calendarText(1).replace("Bin day 0", "IMP9-MARK")),
+      });
+      await expect(dialog.locator("[data-import-file]")).toContainText(
+        "retained.ics",
+      );
+      await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+      await dialog.getByLabel("Through", { exact: true }).fill("2026-12-31");
+      await dialog.locator("button[data-sync-tone]").click();
+      await expect(two).toHaveURL(/\/sync(?:\?|$)/);
+      await two.evaluate(() => {
+        (window as unknown as { __holdChannels: boolean }).__holdChannels =
+          true;
+      });
+      const history: unknown[] = [];
+      // The first fill (a snapshot with one source: an EMPTY initial snapshot restarts rather than making the cache valid).
+      fill(
+        snapshotPage(
+          [{ kind: "upsert", resource: wireSource }],
+          "delta-0",
+          false,
+        ),
+      );
+      await expect
+        .poll(async () => (await rows(one, "sync_state"))[0]?.cache_status, {
+          timeout: 20_000,
+        })
+        .toBe("valid");
+      history.push(await rows(one, "sync_state"));
+      filled = true;
+      if (invalidate) {
+        await one.evaluate(() => window.__atlasFixture?.session?.leaderNudge());
+        await expect
+          .poll(async () => (await rows(one, "sync_state"))[0]?.cache_status, {
+            timeout: 15_000,
+          })
+          .toBe("invalid");
+        history.push(await rows(one, "sync_state"));
+        refill(
+          snapshotPage(
+            [{ kind: "upsert", resource: wireSource }],
+            "delta-refilled",
+            false,
+            21,
+          ),
+        );
+        await expect
+          .poll(async () => (await rows(one, "sync_state"))[0]?.cache_status, {
+            timeout: 15_000,
+          })
+          .toBe("valid");
+        history.push(await rows(one, "sync_state"));
+      }
+      const held = await two.evaluate(() => {
+        const state = window as unknown as {
+          __heldMessages: number;
+          __releaseChannels: () => void;
+        };
+        const count = state.__heldMessages;
+        state.__releaseChannels();
+        return count;
+      });
+      await two.goBack();
+      await expect(two).toHaveURL(/settings\/calendars/);
+      await row.click();
+      await expect(dialog).toBeVisible();
+      const file = dialog.locator("[data-import-file]");
+      const seen = {
+        held,
+        file: (await file.count()) > 0 ? await file.textContent() : null,
+        from: await dialog.getByLabel("From", { exact: true }).inputValue(),
+        through: await dialog
+          .getByLabel("Through", { exact: true })
+          .inputValue(),
+        after: await rows(two, "sync_state"),
+        drafts: (await rows(one, "drafts")) as Array<Record<string, unknown>>,
+        imports: posts(cal, IMPORT_PATH).length,
+        leaked: await one.evaluate(() => {
+          const found: string[] = [];
+          for (const store of [localStorage, sessionStorage])
+            for (let i = 0; i < store.length; i += 1) {
+              const key = store.key(i) ?? "";
+              if (`${key}${store.getItem(key)}`.includes("IMP9-MARK"))
+                found.push(key);
+            }
+          return found;
+        }),
+      };
+      await test.info().attach("observations", {
+        body: JSON.stringify({ invalidate, before, history, seen }, null, 2),
+        contentType: "application/json",
+      });
+      type Sync = {
+        incarnation_id?: string;
+        cache_status?: string;
+        recovery_generation?: number;
+        cache_invalidation_seq?: number;
+      };
+      const first = before[0] as Sync;
+      const last = seen.after[0] as Sync;
+      // One database; the first fill's restarts moved the generation in both variants (while the first snapshot was held, before or
+      // after the import opened), the invalidation moved it again; only the invalidation moved the witness.
+      expect(last.incarnation_id).toBe(first.incarnation_id);
+      expect(last.cache_status).toBe("valid");
+      expect(last.recovery_generation ?? 0).toBeGreaterThan(0);
+      if (invalidate)
+        expect(last.recovery_generation ?? 0).toBeGreaterThan(
+          first.recovery_generation ?? 0,
+        );
+      expect(last.cache_invalidation_seq ?? 0).toBe(invalidate ? 1 : 0);
+      expect(seen.held).toBeGreaterThan(0);
+      expect(seen.drafts.map((d) => d.kind)).toEqual(["create_source"]);
+      expect(seen.imports).toBe(0);
+      expect(seen.leaked).toEqual([]);
+      if (invalidate) {
+        expect(seen.file).toBeNull();
+        expect(seen.from).not.toBe("2026-01-01");
+        expect(seen.through).not.toBe("2026-12-31");
+      } else
+        expect(seen).toMatchObject({
+          file: expect.stringContaining("retained.ics"),
+          from: "2026-01-01",
+          through: "2026-12-31",
+        });
+    });
 });

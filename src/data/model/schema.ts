@@ -102,9 +102,13 @@ export const D_INDEX_NAMES: Readonly<Record<string, string>> = Object.freeze({
  * revision 3) changes no store: it is the upgrade barrier for the local composition generation (`model/composition.ts`). Every writer of
  * this build advances it, a build before it did not, and opening version 3 delivers `versionchange` to an older build's connections,
  * which latch the account `upgrade_pending` and close (an older build cannot open a version-3 database at all), so no writer that leaves
- * the generation alone can commit beside a page that relies on it.
+ * the generation alone can commit beside a page that relies on it. Version 4 (WEB-13b revision 8, review 8 R7b) changes no store either:
+ * it is the same barrier for the cache's invalidation witness (`sync_state.cache_invalidation_seq`, `model/invalidation.ts`), which a
+ * version-3 build's invalidations leave alone. Upgrading needs no data step: an absent witness reads 0, the protocol's starting point.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
+/** The version that introduced the composition generation (its barrier; no store changed). */
+export const COMPOSITION_VERSION = 3;
 /** The version that moved the command bodies to `draft_commands` (its upgrade runs for a version-1 database). */
 export const SPLIT_BODIES_VERSION = 2;
 

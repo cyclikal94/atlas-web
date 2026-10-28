@@ -2,12 +2,17 @@
 import { describe, expect, test } from "vitest";
 import { DATA_CONFIG } from "../../src/data/model/config";
 import {
+  invalidationsOf,
+  nextInvalidation,
+} from "../../src/data/model/invalidation";
+import {
   adoptDecision,
   budgetStep,
   snapshotPageOperation,
 } from "../../src/data/model/recovery";
 import { initialSyncState } from "../../src/data/model/sync-state";
 import type { Captured } from "../../src/data/model/types";
+import { readSyncFacts } from "../../src/data/plans/facts";
 import {
   acquireOwnership,
   activateSnapshot,
@@ -17,6 +22,7 @@ import {
   recordRecoveryOutcome,
   resetRecoveryBudget,
 } from "../../src/data/plans/recovery-writers";
+import { invalidateRecoveryPosition } from "../../src/data/plans/sync-writers";
 import { scanSyncPage } from "../../src/data/scan/scan";
 import {
   createKeyDerivers,
@@ -982,5 +988,169 @@ describe("R: the recovery-scoped retry classes (W24, W25)", () => {
       recovery_attempt_streak: 0,
       sync_error_streak: 2,
     });
+  });
+});
+
+/**
+ * WEB-13b revision 8 (review 8 R7b; design assessment C2, T2, T3): the cache's INVALIDATION WITNESS, `sync_state.cache_invalidation_seq`.
+ * Every committed invalidation moves it by one in its own transaction (W18 for every reason; W24 when it abandons an attempt under a
+ * `valid` cache) and nothing else does: a first fill, an empty attempt's restart, an adoption, a valid takeover, a staged page and the
+ * activation keep it, though several of them move `recovery_generation`. A write that is rolled back or dropped moves nothing.
+ */
+describe("WIT: the invalidation witness (WEB-13b revision 8, R7b)", () => {
+  test("WIT-1 W18 moves the witness by one for every reason, from an absent witness (0) and from a recorded one", async () => {
+    for (const reason of [
+      "resync_required",
+      "construction_defect",
+      "access_changed",
+      "unrecognised_delta",
+    ] as const)
+      for (const seq of [undefined, 7]) {
+        const w = await pageWorld({ cursor: "c" });
+        if (seq !== undefined) w.setSync({ cache_invalidation_seq: seq });
+        const generation = w.sync().recovery_generation;
+        const out = await w.service.commit(invalidateRecoveryPosition, {
+          captured: w.capture(),
+          reason,
+        });
+        expect(out.kind).toBe("applied");
+        expect(w.sync()).toMatchObject({
+          cache_status: "invalid",
+          cache_invalidation_seq: (seq ?? 0) + 1,
+          recovery_generation: generation + 1,
+        });
+      }
+  });
+
+  test("WIT-2 a W18 that fails part-way (rolled back) or is dropped (a position moved on) moves nothing", async () => {
+    const w = await pageWorld({ cursor: "c" });
+    w.setSync({ cache_invalidation_seq: 3 });
+    w.put("pending_effects", [
+      effectRow({ resource_id: uuid(1), display: { label: "x" } }),
+      effectRow({ resource_id: uuid(2), local_id: "d-2", display: null }),
+    ]);
+    w.env.idb.inject({
+      match: (tx) => tx.label === "data.invalidateCache",
+      mode: { kind: "throw_on_write", n: 2, as: "error" },
+      times: 1,
+    });
+    const failed = await w.service.commit(invalidateRecoveryPosition, {
+      captured: w.capture(),
+      reason: "resync_required",
+      window: 1,
+    });
+    await w.env.settle();
+    expect(failed.kind).toBe("failed");
+    expect(w.sync()).toMatchObject({
+      cache_status: "valid",
+      cache_invalidation_seq: 3,
+    });
+    const stale = w.capture();
+    w.setSync({ cursor: "c-9" });
+    const dropped = await w.service.commit(invalidateRecoveryPosition, {
+      captured: stale,
+      reason: "resync_required",
+    });
+    expect(dropped.kind).toBe("dropped");
+    expect(w.sync().cache_invalidation_seq).toBe(3);
+  });
+
+  test("WIT-3 W24: an abandonment under a VALID cache moves it (a cursor defect, the unrecognised bound, a server restart at the attempt bound); under an empty or invalid cache, or without abandoning, it does not", async () => {
+    const cases = [
+      { event: "cursor_defect", fields: {}, moves: true },
+      {
+        event: "cursor_unrecognised",
+        fields: { delta_error_streak: 2 },
+        moves: true,
+      },
+      {
+        event: "server_restart",
+        fields: { recovery_attempt_streak: 2 },
+        moves: true,
+      },
+      { event: "cursor_unrecognised", fields: {}, moves: false },
+      { event: "cursorless_error", fields: {}, moves: false },
+    ] as const;
+    for (const status of ["valid", "empty", "invalid"] as const)
+      for (const { event, fields, moves } of cases) {
+        const w = await pageWorld({ cursor: "c", cacheStatus: status });
+        await own(w);
+        w.setSync({ ...fields, cache_invalidation_seq: 5 });
+        const generation = w.sync().recovery_generation;
+        const out = await w.service.commit(recordRecoveryOutcome, {
+          captured: captureFor(w),
+          event,
+        });
+        expect(out.kind).toBe("applied");
+        const abandoned = out.kind === "applied" && out.value.abandoned;
+        expect(abandoned).toBe(moves);
+        expect(w.sync().recovery_generation).toBe(
+          generation + (abandoned ? 1 : 0),
+        );
+        expect(w.sync().cache_invalidation_seq).toBe(
+          moves && status === "valid" ? 6 : 5,
+        );
+      }
+  });
+
+  test("WIT-4 a first fill keeps it: W20 (restarts and a valid takeover), W21, W22 and the activation W23 move the generation or the cache, not the witness", async () => {
+    const w = await snapshotWorld();
+    w.setSync({ cache_invalidation_seq: 2 });
+    const generation = w.sync().recovery_generation;
+    expect(await own(w)).toMatchObject({ decision: "restart" });
+    // Another page takes the empty attempt over before anything is staged: it restarts again.
+    expect(await own(w, NOW + 1, "token-2")).toMatchObject({
+      decision: "restart",
+    });
+    // The first fill's restarts moved the generation twice, which is why revision 7's comparison could not tell it from an invalidation.
+    expect(w.sync().recovery_generation).toBe(generation + 2);
+    await w.service.store.run(captureRecoveryRequest, {
+      incarnationId: w.service.incarnationId,
+      token: "token-2",
+      path: "snapshot",
+      now: NOW + 1,
+      signals: { hasStorageEstimate: true },
+    });
+    const capture = () => captureFor(w, { ownershipToken: "token-2" });
+    const page = snapshotPage([upsert(1), upsert(2)]);
+    await w.service.commit(commitStagingPage, {
+      ...stagedInput(w, page),
+      captured: capture(),
+    });
+    expect(w.sync().cache_invalidation_seq).toBe(2);
+    const final = snapshotPage([upsert(3)], {
+      hasMore: false,
+      nextCursor: "delta-1",
+    });
+    const out = await w.service.commit(activateSnapshot, {
+      ...activationInput(w, final),
+      captured: capture(),
+    });
+    expect(out).toMatchObject({ kind: "applied" });
+    expect(w.sync()).toMatchObject({
+      cache_status: "valid",
+      cache_invalidation_seq: 2,
+    });
+    // A valid takeover by another page keeps it too.
+    await own(w, NOW + 2, "token-3");
+    expect(w.sync().cache_invalidation_seq).toBe(2);
+  });
+
+  test("WIT-5 read as `invalidations`: absent is 0, a value that is not a non-negative safe integer is unknown (null), and a writer then starts again above 0", async () => {
+    const row = initialSyncState("i");
+    expect(invalidationsOf(row)).toBe(0);
+    expect(invalidationsOf({ ...row, cache_invalidation_seq: 9 })).toBe(9);
+    for (const corrupt of [-1, 1.5, Number.NaN, 2 ** 60])
+      expect(
+        invalidationsOf({ ...row, cache_invalidation_seq: corrupt }),
+      ).toBeNull();
+    expect(nextInvalidation({ ...row, cache_invalidation_seq: -1 })).toBe(1);
+    expect(nextInvalidation({ ...row, cache_invalidation_seq: 9 })).toBe(10);
+    const w = await pageWorld({ cursor: "c" });
+    w.setSync({ cache_invalidation_seq: 11 });
+    const facts = await w.service.store.run(readSyncFacts, {
+      incarnationId: w.service.incarnationId,
+    });
+    expect(facts?.invalidations).toBe(11);
   });
 });

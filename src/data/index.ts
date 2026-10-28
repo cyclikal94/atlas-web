@@ -172,6 +172,14 @@ export {
   useOutstanding as useOutstandingResources,
   useOutstandingByKind,
 } from "./ui/outstanding";
+// WEB-13b revision 8 (R7b): only the kept import (the calendars chunk) observes the page's cache itself.
+export {
+  type CacheObservation,
+  type CacheObserver,
+  type CacheService,
+  observeCache,
+  readInvalidations,
+} from "./ui/page-cache-observer";
 export {
   type ConflictRow,
   DataEnvProvider,
