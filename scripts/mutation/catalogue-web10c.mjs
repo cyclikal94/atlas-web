@@ -365,14 +365,16 @@ export const UNIT_10C = [
     id: "MU-3026",
     title:
       "MU-10C-26: WEB-10c A17 (D-10c-9): an uncertain consent is retried with a new key",
-    file: "src/features/tasks/detail/Rota.tsx",
     tests: ["tests/features/tasks/rota.test.tsx"],
     expect: /MU-10C-25\/26/,
+    // Re-anchored (revision 8, R33): the attempt is taken by `memory.ts` `startRota`; the fault forgets the held one, so every send
+    // (Try again included) is a new key.
+    file: "src/features/tasks/memory.ts",
     patch: (t) =>
       sub(
         t,
-        "  const attempt = nextAttempt(\n    attemptOf(env.identity, memoryKey),\n    command,\n    env.newId,\n  );",
-        "  const attempt = nextAttempt(null, command, env.newId);",
+        "  const next = nextAttempt(held, body, newKey);",
+        "  const next = nextAttempt(null, body, newKey);",
       ),
   },
   {
@@ -2442,6 +2444,150 @@ export const UNIT_10C = [
         t,
         "    ...(request.expectTimer && { expectTimer: { ...request.expectTimer } }),\n",
         "",
+      ),
+  },
+  // ---- revision 8 (review 8, R33: a rota answer settles only its own attempt) ----------------------------------------------------
+  {
+    id: "MU-3183",
+    title:
+      "R33: WEB-10c A17 (D-10c-9): any answer of a rota command settles whatever attempt is held (an earlier change's ends a later one)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /REVIEW8 T1[35]/,
+    patch: (t) =>
+      sub(
+        t,
+        '    attempt.phase !== "pending" ||\n    memory.rota.get(command)?.attempt !== attempt\n',
+        '    attempt.phase !== "pending"\n',
+      ),
+  },
+  {
+    id: "MU-3184",
+    title:
+      "R33: WEB-10c A17/A18: a rota answer activates its identity's page memory (another identity's attempt is dropped)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /an earlier identity's answer neither reaches/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const memory = memories.get(identity);\n  if (\n    memory === undefined ||\n    attempt.phase !== "pending" ||',
+        '  const memory = memoryOf(identity);\n  if (\n    memory === undefined ||\n    attempt.phase !== "pending" ||',
+      ),
+  },
+  {
+    id: "MU-3185",
+    title:
+      "R33: WEB-10c A17: a rota answer settles the attempt held with the same BODY (a later attempt's new key is ended by an earlier one)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /settles its attempt, not a body/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.rota.get(command)?.attempt !== attempt\n",
+        "    memory.rota.get(command)?.attempt?.body !== attempt.body\n",
+      ),
+  },
+  {
+    id: "MU-3186",
+    title:
+      "R33: WEB-10c A17: a settled rota answer is not told to the screens (only the mount that sent it, if still there, shows it)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    // The task screen re-renders for other reasons in jsdom (its own reads), which picks the hold up anyway: the witnesses are the
+    // owner's subscribers and the rota hook (revision 8 diag/mutants-1: SURVIVED against the screen case alone; kept).
+    expect: /a settlement is told once|told, not polled/,
+    patch: (t) =>
+      sub(t, "  rotaChanged();\n  return true;\n}", "  return true;\n}"),
+  },
+  {
+    id: "MU-3187",
+    title:
+      "R33: WEB-10c A17: a late UNCERTAIN rota answer is kept whatever is held (it downgrades a definite answer or replaces a later change)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /REVIEW8 T1[35].*uncertain|settles its attempt, not a body/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.rota.get(command)?.attempt !== attempt\n",
+        '    (outcome.kind !== "uncertain" &&\n      memory.rota.get(command)?.attempt !== attempt)\n',
+      ),
+  },
+  {
+    id: "MU-3188",
+    title:
+      "R33: WEB-10c A17 (WEB-10a decision 44): a successful order save closes the dialog although the person edited past it",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /edited past while it was pending/,
+    patch: (t) =>
+      sub(
+        t,
+        '    completeKept(ticket, out.kind === "ok");\n',
+        '    completeKept(ticket, out.kind === "ok");\n    if (out.kind === "ok") onClose();\n',
+      ),
+  },
+  {
+    id: "MU-3189",
+    title:
+      "R33: WEB-10c A17 (D-10c-9): the same rota change asked again while it is pending is sent again (a second flight of one key)",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /asked again while it is pending/,
+    patch: (t) => sub(t, "  if (flying !== undefined) return flying;\n", ""),
+  },
+  {
+    id: "MU-3190",
+    title:
+      "R33: WEB-10c A17 (B2): the consent's Try again is offered while the page cannot write",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /Try again sends nothing while the page cannot write/,
+    patch: (t) =>
+      sub(t, "          {blocked !== null ? (", "          {false ? ("),
+  },
+  {
+    id: "MU-3191",
+    title:
+      "R33: WEB-10c A17: a rota change answered by success is not read again by the screen showing the task now",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /the screen showing the task NOW|edited past while it was pending/,
+    patch: (t) =>
+      sub(
+        t,
+        "        reread.includes(out.kind) ? taskId : null,",
+        "        null,",
+      ),
+  },
+  {
+    id: "MU-3192",
+    title:
+      "R33: WEB-10c A17: an order save that consumed the order the person is at leaves the dialog open",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /edited past while it was pending/,
+    patch: (t) =>
+      sub(
+        t,
+        "        onClose();\n        return null;\n",
+        "        return null;\n",
+      ),
+  },
+  {
+    id: "MU-3193",
+    title:
+      "R33: WEB-10c A17: a rota answer given before the screen mounted is said again there",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /not said again there/,
+    patch: (t) =>
+      sub(
+        t,
+        "hold.outcome !== null && hold.outcome.serial > since",
+        "hold.outcome !== null && hold.outcome.serial >= 0",
       ),
   },
 ];

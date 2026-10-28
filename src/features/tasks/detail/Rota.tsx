@@ -1,4 +1,10 @@
-import { useEffect, useId, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
@@ -8,8 +14,19 @@ import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel } from "../format";
 import { completeKept, keptKey, useKeptInput } from "../kept-input";
-import { noteIfRefused } from "../memory";
-import { type Attempt, nextAttempt } from "../model/attempt";
+import {
+  dismissRota,
+  noteIfRefused,
+  type RotaAttempt,
+  type RotaHold,
+  type RotaOutcome,
+  rotaHoldOf,
+  rotaReadsOf,
+  rotaSerial,
+  settleRota,
+  startRota,
+  subscribeRota,
+} from "../memory";
 import type {
   OccurrenceData,
   RotaState,
@@ -77,53 +94,74 @@ export const ROTA_COPY = {
   you: "You",
 } as const;
 
-// ---- page memory: one attempt per body (D-10c-9; WEB-10a `model/attempt.ts`) -------------------------------------------------------
-const attempts = new Map<string, Attempt>();
-let attemptsFor = "";
-function attemptOf(identity: string, key: string): Attempt | null {
-  if (attemptsFor !== identity) {
-    attempts.clear();
-    attemptsFor = identity;
-  }
-  return attempts.get(key) ?? null;
+// ---- page memory: one attempt per body (D-10c-9; WEB-10a `model/attempt.ts`), held and settled by `memory.ts` (review 8, R33) ----------
+/** The request on its way for each pending attempt: the same change asked again while it is pending joins it (never a second flight). */
+const flights = new WeakMap<RotaAttempt, Promise<Send>>();
+
+/** What the page holds for `command` now, as every screen showing it is told (whichever screen sent the change). */
+function useRotaHold(identity: string, command: string): RotaHold {
+  const hold = () => rotaHoldOf(identity, command);
+  return useSyncExternalStore(subscribeRota, hold, hold);
 }
-function holdAttempt(identity: string, key: string, attempt: Attempt | null) {
-  attemptOf(identity, key);
-  if (attempt === null) attempts.delete(key);
-  else attempts.set(key, attempt);
-}
+
+/** The outcome a screen mounted at serial `since` shows: one settled after it mounted (an earlier screen's own note is not carried over). */
+const shownSince = (hold: RotaHold, since: number): RotaOutcome | null =>
+  hold.outcome !== null && hold.outcome.serial > since ? hold.outcome : null;
 
 type Send =
   | { kind: "ok" }
   | { kind: "conflict" }
   | { kind: "refused"; requestId?: string }
   | { kind: "uncertain" }
-  | { kind: "offline" };
+  | { kind: "not_sent" };
 
 /**
  * One online-only access command, one attempt per canonical body: an uncertain answer keeps the attempt (its key and body), so "Try again"
- * resends exactly that; a definite answer ends it, and the next change is a new key. Offline, nothing is sent.
+ * resends exactly that; a definite answer ends it, and the next change is a new key. Offline or not writable, nothing is sent (the screens
+ * say why), Try again included.
+ *
+ * Review 8, R33: the answer settles only ITS attempt (`settleRota`): a change sent after the person went away and came back, while this one
+ * was still on its way, is a new attempt, and this one's late answer, whatever it is, leaves it held with its own body and key. `reread`:
+ * the answers after which the rota is read again (by the screen showing it then).
  */
 async function sendAccess(
   env: ReturnType<typeof useTasksEnv>,
+  taskId: string,
   memoryKey: string,
   command: SetRotaCommand | RotaConsentCommand,
+  reread: ReadonlyArray<Send["kind"]>,
 ): Promise<Send> {
-  if (!env.online) return { kind: "offline" };
-  const attempt = nextAttempt(
-    attemptOf(env.identity, memoryKey),
+  if (!env.online || !env.writable) return { kind: "not_sent" };
+  const identity = env.identity;
+  const { attempt, joined } = startRota(
+    identity,
+    memoryKey,
     command,
     env.newId,
   );
-  holdAttempt(env.identity, memoryKey, attempt);
-  const result: TasksResult<TaskResult> = await env.api.access(
-    JSON.parse(attempt.body),
-    attempt.key,
-  );
-  if (result.ok) {
-    holdAttempt(env.identity, memoryKey, null);
-    return { kind: "ok" };
-  }
+  const flying = joined ? flights.get(attempt) : undefined;
+  if (flying !== undefined) return flying;
+  const flight = env.api
+    .access(JSON.parse(attempt.body), attempt.key)
+    .then((result: TasksResult<TaskResult>): Send => {
+      const out = sendOf(result);
+      settleRota(
+        identity,
+        memoryKey,
+        attempt,
+        out.kind === "ok"
+          ? { kind: "saved" }
+          : (out as { kind: RotaOutcome["kind"]; requestId?: string }),
+        reread.includes(out.kind) ? taskId : null,
+      );
+      return out;
+    });
+  flights.set(attempt, flight);
+  return flight;
+}
+
+function sendOf(result: TasksResult<TaskResult>): Send {
+  if (result.ok) return { kind: "ok" };
   switch (result.kind) {
     case "uncertain":
     case "not_sent":
@@ -132,10 +170,8 @@ async function sendAccess(
       return { kind: "uncertain" };
     case "conflict":
     case "operation_conflict":
-      holdAttempt(env.identity, memoryKey, null);
       return { kind: "conflict" };
     default:
-      holdAttempt(env.identity, memoryKey, null);
       return {
         kind: "refused",
         ...(result.requestId ? { requestId: result.requestId } : {}),
@@ -163,7 +199,10 @@ export function useRota(taskId: string) {
   }>({ scope: "", rota: { kind: "loading" }, enrolled: null });
   const scope = `${env.identity}\u0000${taskId}`;
   const owner = useRef(0);
-  const [again, setAgain] = useState(0);
+  const [asked, setAsked] = useState(0);
+  // A rota change answered so that the rota changed asks again too, whichever screen sent it (review 8, R33: `settleRota`'s `reread`).
+  const reads = () => rotaReadsOf(env.identity, taskId);
+  const again = asked + useSyncExternalStore(subscribeRota, reads, reads);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for another identity, the connection or a change made
   useEffect(() => {
     owner.current += 1;
@@ -199,7 +238,7 @@ export function useRota(taskId: string) {
     reload: () => {
       // The pair on its way is no longer the one asked for, even before the next read begins.
       owner.current += 1;
-      setAgain((n) => n + 1);
+      setAsked((n) => n + 1);
     },
   };
 }
@@ -236,40 +275,78 @@ export function RotaPanel({
   const names = useUsernames();
   const { rota, enrolled, reload } = useRota(row.taskId);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
+  // Taken synchronously: a second activation in the same turn sends nothing.
+  const flying = useRef(false);
   const [open, setOpen] = useState(false);
   const consentKey = `${row.taskId}:consent`;
-  const pending = attemptOf(env.identity, consentKey);
+  // The consent and the order as the page holds them (review 8, R33): this panel shows and announces what was answered since it mounted,
+  // whichever mount sent it; an earlier change's late answer settles nothing of a later one.
+  const consentHold = useRotaHold(env.identity, consentKey);
+  const orderHold = useRotaHold(env.identity, `${row.taskId}:order`);
+  const since = useRef(rotaSerial());
+  const announced = useRef(since.current);
+  const said = shownSince(consentHold, since.current);
+  const pending =
+    consentHold.attempt?.phase === "uncertain" ? consentHold.attempt : null;
+  const note =
+    said === null
+      ? null
+      : said.kind === "conflict"
+        ? ROTA_COPY.changed
+        : said.kind === "refused"
+          ? ROTA_COPY.refused
+          : said.kind === "uncertain"
+            ? ROTA_COPY.uncertain
+            : null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: announced once per outcome settled while this panel is mounted
+  useEffect(() => {
+    for (const [said, of] of [
+      [consentHold.outcome, "consent"],
+      [orderHold.outcome, "order"],
+    ] as const) {
+      if (said === null || said.serial <= announced.current) continue;
+      announced.current = Math.max(announced.current, said.serial);
+      if (of === "order") {
+        if (said.kind === "saved")
+          announcer.announce(ROTA_COPY.saved, "polite");
+      } else if (said.kind !== "saved")
+        announcer.announce(
+          said.kind === "conflict" ? ROTA_COPY.changed : ROTA_COPY.uncertain,
+          "assertive",
+        );
+    }
+  }, [consentHold.outcome, orderHold.outcome]);
   const turn = row.data.rota;
   const state = rota.kind === "ready" ? rota.value : null;
   const consent = async (accepted: boolean, resend: boolean) => {
-    if (state === null || busy) return;
+    if (state === null || flying.current) return;
+    // Try again resends the change held uncertain NOW, or nothing (one answered meanwhile is not sent again as another change).
+    const held = rotaHoldOf(env.identity, consentKey).attempt;
+    if (resend && held?.phase !== "uncertain") return;
+    flying.current = true;
     setBusy(true);
-    setNote(null);
     const command: RotaConsentCommand = {
       kind: "rota_consent",
       task_id: row.taskId,
       expected_version: state.consent_version,
       accepted,
     };
-    const out = await sendAccess(
+    // The rota is read again after a success or a conflict (`settleRota`), by the panel showing it then.
+    await sendAccess(
       env,
+      row.taskId,
       consentKey,
-      resend && pending ? JSON.parse(pending.body) : command,
+      resend && held ? JSON.parse(held.body) : command,
+      ["ok", "conflict"],
     );
+    flying.current = false;
     setBusy(false);
-    if (out.kind === "ok") reload();
-    else if (out.kind === "conflict") {
-      setNote(ROTA_COPY.changed);
-      reload();
-    } else if (out.kind === "refused") setNote(ROTA_COPY.refused);
-    else setNote(ROTA_COPY.uncertain);
-    if (out.kind !== "ok" && out.kind !== "offline")
-      announcer.announce(
-        out.kind === "conflict" ? ROTA_COPY.changed : ROTA_COPY.uncertain,
-        "assertive",
-      );
   };
+  const blocked = !env.online
+    ? ROTA_COPY.offline
+    : !env.writable
+      ? copy.NOT_WRITABLE
+      : null;
   const reason = !env.online
     ? ROTA_COPY.offline
     : !env.writable
@@ -325,9 +402,17 @@ export function RotaPanel({
       ) : null}
       {pending !== null && note === ROTA_COPY.uncertain ? (
         <span>
-          <Button onClick={() => void consent(state?.accepted ?? false, true)}>
-            {copy.TRY_AGAIN}
-          </Button>
+          {blocked !== null ? (
+            <Button disabled reason={blocked}>
+              {copy.TRY_AGAIN}
+            </Button>
+          ) : (
+            <Button
+              onClick={() => void consent(state?.accepted ?? false, true)}
+            >
+              {copy.TRY_AGAIN}
+            </Button>
+          )}
         </span>
       ) : null}
       {rota.kind === "error" ? (
@@ -394,21 +479,34 @@ function RotaDialog({
   onSaved(): void;
 }) {
   const env = useTasksEnv();
-  const announcer = useAnnouncer();
   const orderKey = `${taskId}:order`;
-  // The unsaved order is kept for the screen's logical visit (WEB-10a decisions 44 and 48), against the version it was edited on.
+  // The unsaved order is kept for the screen's logical visit (WEB-10a decisions 44 and 48), against the version it was edited on. A save
+  // that consumed it closes the dialog only if it is the one the person is at now (`useKeptInput`: an earlier dialog's answer, the person
+  // gone and back meanwhile, closes nothing; review 8, R33).
   const input = useKeptInput<{ base: number; order: string[] }>(
     keptKey(env.identity, `rota:${taskId}`),
     env.identity,
     () => ({ base: state.version, order: [...state.participants] }),
-    { consumed: () => null },
+    {
+      consumed: () => {
+        onClose();
+        return null;
+      },
+    },
   );
-  const [outcome, setOutcome] = useState<
-    | null
-    | { kind: "conflict" }
-    | { kind: "refused"; requestId?: string }
-    | { kind: "uncertain" }
-  >(null);
+  // What the order's change was answered, as the page holds it, since this dialog opened (an edit or a reload puts it away).
+  const hold = useRotaHold(env.identity, orderKey);
+  const since = useRef(rotaSerial());
+  const said = shownSince(hold, since.current);
+  const outcome =
+    said === null || said.kind === "saved"
+      ? null
+      : said.kind === "refused"
+        ? {
+            kind: "refused" as const,
+            ...(said.requestId ? { requestId: said.requestId } : {}),
+          }
+        : { kind: said.kind };
   const label = (id: string) => labelOf(id, env.accountId, names, anonymous);
   // "Reload" after another editor's change: the order starts again from the latest saved one (the edit is never merged into it).
   const [reloading, setReloading] = useState(false);
@@ -416,7 +514,7 @@ function RotaDialog({
   useEffect(() => {
     if (!reloading || state.version === input.value.base) return;
     setReloading(false);
-    setOutcome(null);
+    dismissRota(env.identity, orderKey);
     input.edit(() => ({ base: state.version, order: [...state.participants] }));
   }, [reloading, state.version]);
   const order = input.value.order;
@@ -441,6 +539,9 @@ function RotaDialog({
     eligible: editor ? state.eligible_participants : null,
   });
   const save = async (resend: boolean) => {
+    // Try again resends the change held uncertain NOW, or nothing.
+    const held = rotaHoldOf(env.identity, orderKey).attempt;
+    if (resend && held?.phase !== "uncertain") return;
     const ticket = input.submit();
     if (ticket === null) return;
     const command: SetRotaCommand = {
@@ -449,32 +550,18 @@ function RotaDialog({
       expected_version: input.value.base,
       participants: order,
     };
-    const held = attemptOf(env.identity, orderKey);
+    // A success reads the rota again and is announced by the panel; it consumes the order this save submitted (closing the dialog, above).
     const out = await sendAccess(
       env,
+      taskId,
       orderKey,
       resend && held ? JSON.parse(held.body) : command,
+      ["ok"],
     );
     completeKept(ticket, out.kind === "ok");
-    if (out.kind === "ok") {
-      announcer.announce(ROTA_COPY.saved, "polite");
-      onSaved();
-      onClose();
-      return;
-    }
-    setOutcome(
-      out.kind === "conflict"
-        ? { kind: "conflict" }
-        : out.kind === "refused"
-          ? {
-              kind: "refused",
-              ...(out.requestId ? { requestId: out.requestId } : {}),
-            }
-          : { kind: "uncertain" },
-    );
   };
   const edit = (next: string[]) => {
-    setOutcome(null);
+    dismissRota(env.identity, orderKey);
     input.edit((v) => ({ ...v, order: next }));
   };
   const reason = !env.online
@@ -524,9 +611,15 @@ function RotaDialog({
               <span className="text-[12.5px] text-ink-2">
                 {ROTA_COPY.uncertain}
               </span>
-              <Button variant="quiet" onClick={() => void save(true)}>
-                {copy.TRY_AGAIN}
-              </Button>
+              {hold.attempt?.phase !== "uncertain" ? null : !env.writable ? (
+                <Button disabled reason={copy.NOT_WRITABLE}>
+                  {copy.TRY_AGAIN}
+                </Button>
+              ) : (
+                <Button variant="quiet" onClick={() => void save(true)}>
+                  {copy.TRY_AGAIN}
+                </Button>
+              )}
             </span>
           ) : null}
           <div className="flex flex-wrap justify-end gap-2">

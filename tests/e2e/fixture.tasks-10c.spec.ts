@@ -656,6 +656,144 @@ test.describe("E-R1: the rota (A17)", () => {
   });
 });
 
+// ---- revision 8 (review 8 R33, A17): a rota answer told to the screen showing the task now -------------------------------------
+
+/**
+ * E-R2 (review 8 R33; design assessment Q-R1/Q-R3) in the real engines: change A (the consent, or a saved turn order) is held, the person
+ * goes to Tasks by the detail's own link and comes back with browser Back (one document, so the same page memory), and only then is A
+ * answered. Uncertain: the screen showing the task NOW offers Try again, which resends A's body under A's key (before revision 8 only the
+ * screen that sent A, unmounted by then, was told, so nothing was offered). Control, success: nothing to retry, the rota is read again by
+ * the screen now showing it, and the order dialog the person opened since stays open. The ordering of an EARLIER answer against a LATER
+ * change (whose key it must not end) is jsdom's (`rota.test.tsx` R33, REVIEW8 T13/T15 ported): a stale answer correctly changes nothing
+ * visible, so a native run would have no endpoint proving it had been processed before the retry. FIXTURE evidence.
+ */
+test.describe("E-R2: a rota change answered after the person went away and came back (A17; review 8 R33)", () => {
+  const OTHER_ID = "22222222-2222-4222-8222-222222222222";
+  for (const caller of ["consent", "order"] as const)
+    for (const answer of ["uncertain", "success"] as const)
+      test(`${caller}: A, held while the person went to Tasks and back, is answered ${answer}`, async ({
+        context,
+      }) => {
+        const task = repeating(
+          caller === "consent" ? 446 : 447,
+          "Take the bins out",
+        );
+        (task.data.definition as { participation: string }).participation =
+          "anyone";
+        for (const u of task.upserts as Array<{
+          resource: { kind: string; value: Record<string, unknown> };
+        }>) {
+          if (u.resource.kind === "execution")
+            u.resource.value.participation = "anyone";
+          if (u.resource.kind === "occurrence")
+            (
+              u.resource.value.definition as { participation: string }
+            ).participation = "anyone";
+        }
+        const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+        const hold = held<void>();
+        let calls = 0;
+        const { page, r10c } = await setup(
+          context,
+          path,
+          [task],
+          (_reads, r) => {
+            r.enrolment = () => ({
+              status: 200,
+              body: {
+                version: 1,
+                active: true,
+                aggregate_consent: true,
+                policy: { grants: [], exclude_accounts: [] },
+              },
+            });
+            r.rota = () => ({
+              status: 200,
+              body: {
+                version: 1,
+                participants: [ACCOUNT],
+                consent_version: 2,
+                accepted: false,
+                eligible_participants: [ACCOUNT, OTHER_ID],
+              },
+            });
+            r.access = async () => {
+              calls += 1;
+              if (calls === 1) {
+                await hold.promise;
+                return answer === "success"
+                  ? { status: 200, body: { revision: 4 } }
+                  : refusal(503, "unavailable");
+              }
+              return { status: 200, body: { revision: 5 } };
+            };
+          },
+        );
+        const kind = caller === "consent" ? "rota_consent" : "set_rota";
+        const sent = () => r10c.log.filter((e) => e.what === `POST ${kind}`);
+        const rotaReads = () =>
+          r10c.log.filter((e) => e.what === `GET /tasks/${task.taskId}/rota`)
+            .length;
+        const consent = page.getByLabel("Take turns on this task");
+        await expect(consent).toBeEnabled();
+        const order = page.getByRole("button", { name: "Turn order…" });
+        if (caller === "consent") await consent.click();
+        else {
+          await order.click();
+          await expect(page.locator("[data-rota-dialog]")).toBeVisible();
+          await page.getByRole("button", { name: /^Add: / }).click();
+          await page.getByRole("button", { name: "Save order" }).click();
+        }
+        await expect.poll(() => sent().length).toBe(1);
+        if (caller === "order") {
+          // The dialog is modal: the person closes it (the save goes on) before leaving by the detail's link.
+          await page.getByRole("button", { name: "Cancel" }).click();
+          await expect(page.locator("[data-rota-dialog]")).toHaveCount(0);
+        }
+        // One document throughout: page memory is kept, as an ordinary navigation keeps it.
+        await page.evaluate(() => {
+          (window as unknown as { __r33: number }).__r33 = 1;
+        });
+        await page.getByRole("link", { name: "‹ Tasks" }).click();
+        await expect(page).toHaveURL(/\/tasks$/);
+        await expect(page.locator("[data-rota-panel]")).toHaveCount(0);
+        await page.goBack();
+        await expect(page).toHaveURL(new RegExp(`/tasks/${task.taskId}`));
+        await expect(consent).toBeEnabled();
+        expect(
+          await page.evaluate(
+            () => (window as unknown as { __r33?: number }).__r33,
+          ),
+        ).toBe(1);
+        if (caller === "order") {
+          await order.click();
+          await expect(page.locator("[data-rota-dialog]")).toBeVisible();
+        }
+        const scope =
+          caller === "consent"
+            ? page.locator("[data-rota-panel]")
+            : page.getByRole("dialog");
+        const retry = scope.getByRole("button", { name: "Try again" });
+        await expect(retry).toHaveCount(0);
+        const readsBefore = rotaReads();
+        hold.release();
+        if (answer === "uncertain") {
+          await expect(retry).toBeVisible();
+          await retry.click();
+          await expect.poll(() => sent().length).toBe(2);
+          expect(sent()[1]?.key, "A's own key").toBe(sent()[0]?.key);
+          expect(sent()[1]?.body).toEqual(sent()[0]?.body);
+        } else {
+          await expect.poll(rotaReads).toBeGreaterThan(readsBefore);
+          await expect(retry).toHaveCount(0);
+          if (caller === "order")
+            await expect(page.locator("[data-rota-dialog]")).toBeVisible();
+          expect(sent().length).toBe(1);
+        }
+        expect(await draftsOf(page)).toEqual([]);
+      });
+});
+
 // ---- revision 1 (review R9, A18): identity schedules in the real engines -----------------------------------------------------------
 
 /**

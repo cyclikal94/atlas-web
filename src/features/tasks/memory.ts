@@ -1,6 +1,6 @@
 import type { Policy } from "../../data";
 import type { EnrolCommand } from "./api";
-import { canonicalBody } from "./model/attempt";
+import { canonicalBody, nextAttempt } from "./model/attempt";
 import type { Enrolment, Outcome } from "./model/contract";
 
 /**
@@ -83,12 +83,42 @@ export interface EnrolmentRead {
   seq: number;
 }
 
+/**
+ * An online-only rota change (`rota_consent`, `set_rota`; D-10c-9) of one task command (`<task>:consent`, `<task>:order`) this page is
+ * sending or could not confirm, per identity (review 8, R33; design assessment Q-R1..Q-R4). The OBJECT is the attempt's identity: a send
+ * takes a new one (the same key only for the same body as an uncertain one), and only the answer to the object still held settles it. So an
+ * earlier change's late answer, after the person went away, came back and sent another change, ends nothing of the later one (its body
+ * and key stay for Try again), and a later activation of the same identity is a new memory no earlier answer can reach. Page memory only,
+ * like the enrolment's attempt: an ordinary remount keeps it, a reload or another identity starts without it.
+ */
+export interface RotaAttempt {
+  readonly key: string;
+  readonly body: string;
+  readonly phase: "pending" | "uncertain";
+}
+
+/** How the held attempt of a rota command was last answered. `serial` is page-wide and never reused (see `rotaSerial`). */
+export interface RotaOutcome {
+  readonly kind: "saved" | "conflict" | "refused" | "uncertain";
+  readonly requestId?: string;
+  readonly serial: number;
+}
+
+/** What the page holds for one rota command: the attempt, and the outcome its screen shows (null: nothing to say). */
+export interface RotaHold {
+  readonly attempt: RotaAttempt | null;
+  readonly outcome: RotaOutcome | null;
+}
+
 interface IdentityMemory {
   refused: Map<string, "forbidden" | "not_found">;
   joint: Map<string, JointAnswer>;
   enrolment: Map<string, EnrolmentAttempt>;
   cycles: Map<string, EnrolmentCycle>;
   drafts: Map<string, EnrolmentDraft>;
+  rota: Map<string, RotaHold>;
+  /** Per task: how many settled rota changes asked for the rota to be read again. */
+  rotaReads: Map<string, number>;
 }
 
 let limit = 2_000;
@@ -107,6 +137,8 @@ function memoryOf(identity: string): IdentityMemory {
       enrolment: new Map(),
       cycles: new Map(),
       drafts: new Map(),
+      rota: new Map(),
+      rotaReads: new Map(),
     };
     memories.set(identity, memory);
   }
@@ -467,6 +499,106 @@ export function discardEnrolmentDraft(
     memory.drafts.delete(taskId);
     enrolmentChanged();
   }
+}
+
+// ---- rota changes (review 8, R33) ---------------------------------------------------------------------------------------------------
+
+const NO_ROTA: RotaHold = Object.freeze({ attempt: null, outcome: null });
+let rotaSerials = 0;
+const rotaListeners = new Set<() => void>();
+const rotaChanged = (): void => {
+  for (const listener of [...rotaListeners]) listener();
+};
+export function subscribeRota(listener: () => void): () => void {
+  rotaListeners.add(listener);
+  return () => rotaListeners.delete(listener);
+}
+
+/** The latest outcome's serial: a screen shows (and announces) only an outcome settled after it mounted, whichever screen sent it. */
+export const rotaSerial = (): number => rotaSerials;
+
+export const rotaHoldOf = (identity: string, command: string): RotaHold =>
+  memoryOf(identity).rota.get(command) ?? NO_ROTA;
+
+export const rotaReadsOf = (identity: string, taskId: string): number =>
+  memoryOf(identity).rotaReads.get(taskId) ?? 0;
+
+/**
+ * Takes the attempt for `command` before it is sent. The same body as the attempt PENDING is that attempt, joined (`joined`: nothing is
+ * sent again, never a second flight of one key); the same body as an uncertain one keeps its key; any other body is a new attempt with a
+ * new key, which replaces the one held (a pending one's answer then settles nothing). The outcome shown is cleared.
+ */
+export function startRota(
+  identity: string,
+  command: string,
+  body: unknown,
+  newKey: () => string,
+): { attempt: RotaAttempt; joined: boolean } {
+  const memory = memoryOf(identity);
+  const held = memory.rota.get(command)?.attempt ?? null;
+  const next = nextAttempt(held, body, newKey);
+  if (held !== null && held.phase === "pending" && next === held)
+    return { attempt: held, joined: true };
+  const attempt: RotaAttempt = Object.freeze({
+    key: next.key,
+    body: next.body,
+    phase: "pending",
+  });
+  bounded(memory.rota, command, Object.freeze({ attempt, outcome: null }));
+  rotaChanged();
+  return { attempt, joined: false };
+}
+
+/**
+ * The answer to `attempt`, in ONE transition told to every screen once: only the attempt still held for that identity's memory is settled
+ * (false otherwise: an earlier attempt, another identity's, or one already answered; nothing changes). Uncertain keeps it (Try again resends
+ * its body and key); a definite answer ends it. `reread`, a task id: its rota is read again by the screen showing it now.
+ */
+export function settleRota(
+  identity: string,
+  command: string,
+  attempt: RotaAttempt,
+  outcome: { kind: RotaOutcome["kind"]; requestId?: string },
+  reread: string | null,
+): boolean {
+  const memory = memories.get(identity);
+  if (
+    memory === undefined ||
+    attempt.phase !== "pending" ||
+    memory.rota.get(command)?.attempt !== attempt
+  )
+    return false;
+  rotaSerials += 1;
+  memory.rota.set(
+    command,
+    Object.freeze({
+      attempt:
+        outcome.kind === "uncertain"
+          ? Object.freeze({ ...attempt, phase: "uncertain" as const })
+          : null,
+      outcome: Object.freeze({
+        kind: outcome.kind,
+        ...(outcome.requestId ? { requestId: outcome.requestId } : {}),
+        serial: rotaSerials,
+      }),
+    }),
+  );
+  if (reread !== null)
+    bounded(memory.rotaReads, reread, (memory.rotaReads.get(reread) ?? 0) + 1);
+  rotaChanged();
+  return true;
+}
+
+/** The person moved on from what the command's last answer said (an edit, a reload): the outcome goes, the attempt stays. */
+export function dismissRota(identity: string, command: string): void {
+  const memory = memoryOf(identity);
+  const hold = memory.rota.get(command);
+  if (hold === undefined || hold.outcome === null) return;
+  memory.rota.set(
+    command,
+    Object.freeze({ attempt: hold.attempt, outcome: null }),
+  );
+  rotaChanged();
 }
 
 /** For tests: forget everything (and, given, hold at most `capacity` enrolment changes and drafts). */

@@ -803,6 +803,11 @@ are focused evidence, never integration acceptance.*
   what that gives ("Already set" from this device's days, "Projected" for the next days, as the server dates them from the schedule's own
   start, a missing month-day skipped; "Left open" for someone who has not agreed, an editor's empty eligibility list meaning nobody has), and
   "Save order" (`set_rota`, online only). Both access commands use WEB-10a's attempt model (one key per body, the same key on Try again).
+  Revision 8 (review 8 R33): the page holds each command's attempt (`memory.ts` `startRota`/`settleRota`, per identity), and an answer
+  settles only the attempt it answers, so an earlier change's late answer never ends a later one sent after the person went away and came
+  back. The same change asked again while it is pending joins it (no second request); the screen showing the task when it is answered shows
+  it (and reads the rota again after a success, or a consent conflict); a saved order closes the dialog only if it consumed the order the
+  person is at; Try again is disabled with its reason while the page cannot write.
 - **Streak (WF-TASK-06, CM-368/395, TASK-5).** `/tasks/$taskId/streak` (`streak/StreakPage.tsx`, the detail's "Streak" link): the server's
   current and best runs (both scopes for a shared task: "Shared" and "You"); a joint null is "Withheld — someone keeps their part private",
   a personal null "Unknown", never 0; the last 30 opened periods of MY result from this device, oldest first, five states each with a mark and a
@@ -976,7 +981,13 @@ a stored retirement, an end already queued by another page, this device's unsett
 for its admission (`timer-block`, `timers-page`); the list's own re-check still deciding that a session beyond 7 days recorded finished is not
 asked about (`timers-page`, keeping MU-3132 observable); `endStands`, `RunningSession.order` and `withEndExpectation` (another incarnation,
 another session, a start; `timer-model`); the transactional precondition, its refusal writing nothing, the retry of a save already made,
-every re-admission and the snapshot (`tests/data/outbox-timer-expectation.test.ts`); MU-3167…MU-3182.
+every re-admission and the snapshot (`tests/data/outbox-timer-expectation.test.ts`); MU-3167…MU-3182. Revision 8 (Review 8 R33, design
+assessment of 28 October 2026): the reviewer's T13 (consent) and T15 (order) ported into `rota.test.tsx`, each with its pending and
+uncertain controls, the order's conflict, refusal and uncertain answers added; the screen showing the task told of an answer to a change
+another mount sent (and its success control read again); an answer given before the screen mounted not said again, its uncertain change
+keeping its key; the same change asked again while pending joined; a save edited past while pending (and its unedited control); Try again
+while the page cannot write; the owner's own transitions (an answer settles its attempt, not a body; another identity and a later activation;
+one command beside the other); MU-3183…MU-3193, MU-3026 re-anchored.
 
 ## Limits (WEB-10c)
 
@@ -1018,6 +1029,10 @@ every re-admission and the snapshot (`tests/data/outbox-timer-expectation.test.t
   against what is stored at that moment: one pressed on a session recorded finished (or no longer confirmable) by another page, before this
   screen heard of it, saves nothing and says "This timer may already have ended. Nothing was saved." (provisional copy); an end already on
   its way refuses another. This device's own unsettled start can still be stopped or discarded.
+- **Revision 8.** A rota change's attempt is page memory, per identity (as before): a reload or another identity forgets it, and nothing is
+  resent automatically; separate tabs hold separate attempts. A change answered before the task screen mounted is not said again there (an
+  uncertain one is still sent with its key when the same change is made again). An order saved while the person had edited it further
+  leaves the dialog open on the newer edit (it is not merged; Save then meets the saved order's version).
 - **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
   compatibility are those last rendered (a pause is taken up again when a task screen renders).
 

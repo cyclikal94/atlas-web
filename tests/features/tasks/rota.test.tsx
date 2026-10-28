@@ -16,7 +16,15 @@ import type {
 } from "../../../src/features/tasks/api";
 import { ROTA_COPY, useRota } from "../../../src/features/tasks/detail/Rota";
 import { TasksEnvProvider } from "../../../src/features/tasks/env";
-import { forgetTaskMemory } from "../../../src/features/tasks/memory";
+import {
+  forgetTaskMemory,
+  type RotaHold,
+  rotaHoldOf,
+  rotaReadsOf,
+  settleRota,
+  startRota,
+  subscribeRota,
+} from "../../../src/features/tasks/memory";
 import type {
   RotaState,
   TaskDefinition,
@@ -36,6 +44,7 @@ import { installMatchMedia } from "../../helpers/match-media";
 import {
   fakeApi,
   ME,
+  type Mounted,
   mountTasks,
   OTHER,
   type SeededTask,
@@ -791,5 +800,473 @@ describe("R18: the other schedules of one read's ownership", () => {
     expect(result.current.enrolled).toBe(false);
     await act(async () => release(enrolled(true)));
     expect(result.current.enrolled).toBe(false);
+  });
+});
+
+/**
+ * Revision 8 (review 8 R33, family `rota-write-attempt-response-ownership`; design assessment Q-R1..Q-R5): an answer settles only the rota
+ * attempt it answers. REVIEW8 T13/T15, ported: change A is held, the person goes to Tasks and comes back (the same identity and service),
+ * the rota is read at a newer version and a different change B answers uncertain; A's late answer (success, conflict, refusal, uncertain,
+ * or none) never takes B's place, so Try again resends B's body AND key. Added: the order's conflict, refusal and uncertain answers; the
+ * screen now showing the task is told of an answer to a change another mount sent; the same change asked again while it is pending joins
+ * it (one flight, one key); a save the person edited past while it was pending saves but does not close the dialog on the newer edit;
+ * Try again sends nothing while the page cannot write; and the owner's own transitions (attempt, not body; identity lifetime; command).
+ */
+describe("R33: a rota answer settles only its own attempt", () => {
+  type Sent = { command: Record<string, unknown>; key: string };
+  type Old = "pending" | "uncertain" | "success" | "conflict" | "refused";
+  const answerOf = (old: Old): TasksResult<TaskResult> =>
+    old === "success"
+      ? { ok: true, value: { revision: 9 } }
+      : ({
+          ok: false,
+          kind:
+            old === "uncertain"
+              ? "uncertain"
+              : old === "conflict"
+                ? "conflict"
+                : "forbidden",
+        } as never);
+
+  /** The task screen with a rota whose read follows `state`; the first access call is held until `release`, later ones answer `later`. */
+  async function world(
+    state: { current: Partial<RotaState> },
+    later: () => TasksResult<TaskResult> = () => ({
+      ok: false,
+      kind: "uncertain",
+    }),
+  ) {
+    const task = await anyone();
+    const sent: Sent[] = [];
+    let reads = 0;
+    let release: (r: TasksResult<TaskResult>) => void = () => undefined;
+    const api = fakeApi({
+      readRota: async () => {
+        reads += 1;
+        return rota(state.current);
+      },
+      readEnrolment: async () => enrolled(true) as never,
+      access: async (command, key) => {
+        sent.push({ command: command as never, key });
+        if (sent.length === 1)
+          return new Promise<TasksResult<TaskResult>>((resolve) => {
+            release = resolve;
+          });
+        return later();
+      },
+    });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    const ready = () =>
+      panel()?.dataset.rotaPanel === "ready" &&
+      !(screen.getByLabelText(ROTA_COPY.takeTurns) as HTMLInputElement)
+        .disabled;
+    await t.until(ready);
+    expect(ready(), "the rota is ready to change").toBe(true);
+    const incarnation = t.data.service()?.incarnationId;
+    return {
+      t,
+      task,
+      sent,
+      reads: () => reads,
+      release: (r: TasksResult<TaskResult>) => release(r),
+      ready,
+      /** Tasks and back, the same identity and service (an ordinary navigation, not a reload). */
+      async away() {
+        await act(async () => {
+          await t.router.navigate({ to: "/tasks" });
+        });
+        await t.settle();
+        expect(panel(), "the task screen was left").toBeNull();
+        await act(async () => {
+          await t.router.navigate({
+            to: `/tasks/${task.taskId}`,
+            search: { occurrence: task.occurrenceId },
+          } as never);
+        });
+        await t.until(ready);
+        expect(ready(), "back on the task, its rota ready").toBe(true);
+        expect(t.data.service()?.incarnationId).toBe(incarnation);
+      },
+    };
+  }
+  const tryAgain = () => screen.queryByRole("button", { name: "Try again" });
+  async function openOrder(t: Mounted) {
+    const opener = screen.queryByRole("button", { name: ROTA_COPY.order });
+    expect(opener, "the turn order can be opened").not.toBeNull();
+    fireEvent.click(opener as HTMLElement);
+    await t.until(() => document.querySelector("[data-rota-dialog]") !== null);
+    expect(document.querySelector("[data-rota-dialog]")).not.toBeNull();
+  }
+  function press(name: string) {
+    const button = screen.queryByRole("button", { name });
+    expect(button, `"${name}" is offered`).not.toBeNull();
+    fireEvent.click(button as HTMLElement);
+  }
+
+  test.each<Old>(["pending", "uncertain", "success", "conflict", "refused"])(
+    "REVIEW8 T13 (ported): consent B, sent after a return while A was on its way, keeps its key when A answers late = %s",
+    async (old) => {
+      const state = {
+        current: { consent_version: 3, accepted: false } as Partial<RotaState>,
+      };
+      const w = await world(state);
+      fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+      await w.t.until(() => w.sent.length === 1);
+      expect(w.sent.length).toBe(1);
+      state.current = { consent_version: 4, accepted: true };
+      await w.away();
+      expect(screen.getByLabelText(ROTA_COPY.takeTurns)).toBeChecked();
+      fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+      await w.t.until(() => w.sent.length === 2 && tryAgain() !== null);
+      expect(w.sent[1]?.command).toEqual({
+        kind: "rota_consent",
+        task_id: w.task.taskId,
+        expected_version: 4,
+        accepted: false,
+      });
+      expect(w.sent[1]?.key).not.toBe(w.sent[0]?.key);
+      if (old !== "pending") {
+        w.release(answerOf(old));
+        await w.t.settle();
+      }
+      press("Try again");
+      await w.t.until(() => w.sent.length === 3);
+      expect(w.sent.length).toBe(3);
+      expect(w.sent[2]?.command).toEqual(w.sent[1]?.command);
+      expect(w.sent[2]?.key, "B's own key, whatever A answered").toBe(
+        w.sent[1]?.key,
+      );
+      expect(w.t.drafts()).toEqual([]);
+      if (old === "pending") w.release(answerOf("uncertain"));
+    },
+  );
+
+  test.each<Old>(["pending", "uncertain", "success", "conflict", "refused"])(
+    "REVIEW8 T15 (ported, conflict/refused/uncertain added): order B, saved after a return while A was on its way, keeps its key when A answers late = %s",
+    async (old) => {
+      const state = {
+        current: {
+          version: 2,
+          participants: [ME],
+          eligible_participants: [ME, OTHER],
+        } as Partial<RotaState>,
+      };
+      const w = await world(state);
+      await openOrder(w.t);
+      press(`${ROTA_COPY.add}: Someone (2222…)`);
+      press(ROTA_COPY.save);
+      await w.t.until(() => w.sent.length === 1);
+      expect(w.sent.length).toBe(1);
+      state.current = {
+        version: 3,
+        participants: [ME, OTHER],
+        eligible_participants: [ME, OTHER],
+      };
+      await w.away();
+      await openOrder(w.t);
+      press(`${ROTA_COPY.remove}: Someone (2222…)`);
+      press(ROTA_COPY.save);
+      await w.t.until(() => w.sent.length === 2 && tryAgain() !== null);
+      expect(w.sent[1]?.command).toEqual({
+        kind: "set_rota",
+        task_id: w.task.taskId,
+        expected_version: 3,
+        participants: [ME],
+      });
+      expect(w.sent[1]?.key).not.toBe(w.sent[0]?.key);
+      if (old !== "pending") {
+        w.release(answerOf(old));
+        await w.t.settle();
+      }
+      // A's late answer, a success included, neither closes B's dialog nor puts away its uncertain outcome.
+      expect(document.querySelector("[data-rota-dialog]")).not.toBeNull();
+      press("Try again");
+      await w.t.until(() => w.sent.length === 3);
+      expect(w.sent.length).toBe(3);
+      expect(w.sent[2]?.command).toEqual(w.sent[1]?.command);
+      expect(w.sent[2]?.key, "B's own key, whatever A answered").toBe(
+        w.sent[1]?.key,
+      );
+      expect(w.t.drafts()).toEqual([]);
+      if (old === "pending") w.release(answerOf("uncertain"));
+    },
+  );
+
+  test.each(["uncertain", "success"] as const)(
+    "the screen showing the task NOW is told how a change another mount sent was answered = %s",
+    async (old) => {
+      const state = {
+        current: { consent_version: 3, accepted: false } as Partial<RotaState>,
+      };
+      const w = await world(state);
+      fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+      await w.t.until(() => w.sent.length === 1);
+      expect(w.sent.length).toBe(1);
+      await w.away();
+      const readsBefore = w.reads();
+      expect(tryAgain(), "nothing answered yet").toBeNull();
+      w.release(answerOf(old));
+      if (old === "uncertain") {
+        await w.t.until(() => tryAgain() !== null);
+        expect(
+          tryAgain(),
+          "the answer is shown where the person is",
+        ).not.toBeNull();
+        expect(panel()?.querySelector("[data-rota-note]")).toHaveTextContent(
+          ROTA_COPY.uncertain,
+        );
+        press("Try again");
+        await w.t.until(() => w.sent.length === 2);
+        expect(w.sent[1]?.command).toEqual(w.sent[0]?.command);
+        expect(w.sent[1]?.key, "A's own key").toBe(w.sent[0]?.key);
+      } else {
+        // Control: a success is read again by the panel now showing the task, and offers nothing to retry.
+        await w.t.until(() => w.reads() > readsBefore);
+        expect(w.reads()).toBeGreaterThan(readsBefore);
+        expect(tryAgain()).toBeNull();
+        expect(w.sent.length).toBe(1);
+      }
+    },
+  );
+
+  test("an answer given before the screen mounted is not said again there; its uncertain change still keeps its key for the same body", async () => {
+    const state = {
+      current: { consent_version: 3, accepted: false } as Partial<RotaState>,
+    };
+    const w = await world(state);
+    fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+    await w.t.until(() => w.sent.length === 1);
+    w.release(answerOf("uncertain"));
+    await w.t.until(() => tryAgain() !== null);
+    expect(tryAgain(), "said where it was answered").not.toBeNull();
+    await w.away();
+    expect(tryAgain(), "not said again after a return").toBeNull();
+    expect(panel()?.querySelector("[data-rota-note]")).toBeNull();
+    fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+    await w.t.until(() => w.sent.length === 2);
+    expect(w.sent[1]?.command).toEqual(w.sent[0]?.command);
+    expect(w.sent[1]?.key, "the same body is the same attempt").toBe(
+      w.sent[0]?.key,
+    );
+  });
+
+  test("the same change asked again while it is pending is that change: nothing more is sent, and its answer is the one shown", async () => {
+    const state = {
+      current: { consent_version: 3, accepted: false } as Partial<RotaState>,
+    };
+    const w = await world(state);
+    fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+    await w.t.until(() => w.sent.length === 1);
+    await w.away();
+    // The rota still reads as before A (it is on its way): ticking again is the same body as A.
+    fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+    await w.t.settle();
+    expect(w.sent.length, "never a second flight of one change").toBe(1);
+    w.release(answerOf("uncertain"));
+    await w.t.until(() => tryAgain() !== null);
+    press("Try again");
+    await w.t.until(() => w.sent.length === 2);
+    expect(w.sent[1]?.command).toEqual(w.sent[0]?.command);
+    expect(w.sent[1]?.key).toBe(w.sent[0]?.key);
+  });
+
+  test.each([true, false])(
+    "a save edited past while it was pending saves but keeps the newer edit open; control (not edited) closes the dialog = %s",
+    async (edited) => {
+      const state = {
+        current: {
+          version: 2,
+          participants: [ME, OTHER],
+          eligible_participants: [ME, OTHER, THIRD],
+        } as Partial<RotaState>,
+      };
+      const w = await world(state);
+      await openOrder(w.t);
+      press(`${ROTA_COPY.add}: Someone (3333…)`);
+      press(ROTA_COPY.save);
+      await w.t.until(() => w.sent.length === 1);
+      if (edited) press(`${ROTA_COPY.remove}: Someone (2222…)`);
+      const readsBefore = w.reads();
+      state.current = {
+        version: 3,
+        participants: [ME, OTHER, THIRD],
+        eligible_participants: [ME, OTHER, THIRD],
+      };
+      w.release(answerOf("success"));
+      await w.t.until(() => w.reads() > readsBefore);
+      await w.t.settle();
+      expect(w.reads(), "the rota is read again after the success").toBe(
+        readsBefore + 1,
+      );
+      if (edited) {
+        expect(document.querySelector("[data-rota-dialog]")).not.toBeNull();
+        const people = [
+          ...document.querySelectorAll("[data-rota-order] [data-rota-person]"),
+        ].map((li) => li.getAttribute("data-rota-person"));
+        expect(people, "the newer edit is still there").toEqual([ME, THIRD]);
+      } else expect(document.querySelector("[data-rota-dialog]")).toBeNull();
+      expect(w.sent.length).toBe(1);
+    },
+  );
+
+  test("Try again sends nothing while the page cannot write (its reason said); writable again, it resends the change held", async () => {
+    const state = {
+      current: { consent_version: 3, accepted: false } as Partial<RotaState>,
+    };
+    const w = await world(state, () => ({ ok: true, value: { revision: 9 } }));
+    fireEvent.click(screen.getByLabelText(ROTA_COPY.takeTurns));
+    await w.t.until(() => w.sent.length === 1);
+    w.release(answerOf("uncertain"));
+    await w.t.until(() => tryAgain() !== null);
+    w.t.rerender(tasksEnv(w.t.api, { writable: false }));
+    await w.t.settle();
+    const blocked = tryAgain() as HTMLButtonElement | null;
+    expect(blocked, "Try again is still shown").not.toBeNull();
+    expect(blocked?.disabled, "but not while the page cannot write").toBe(true);
+    fireEvent.click(blocked as HTMLElement);
+    await w.t.settle();
+    expect(w.sent.length).toBe(1);
+    w.t.rerender(tasksEnv(w.t.api));
+    await w.t.settle();
+    press("Try again");
+    await w.t.until(() => w.sent.length === 2);
+    expect(w.sent[1]?.key).toBe(w.sent[0]?.key);
+  });
+
+  describe("the owner (`memory.ts`)", () => {
+    const I = `${ME}:1`;
+    const J = `${OTHER}:1`;
+    const body = (accepted: boolean) => ({
+      kind: "rota_consent",
+      task_id: "t-1",
+      expected_version: 3,
+      accepted,
+    });
+    let n = 0;
+    const key = () => `k-${++n}`;
+
+    test("an answer settles its attempt, not a body: a later attempt of the same body (a new key) is not settled by the earlier one", () => {
+      const a = startRota(I, "t-1:consent", body(true), key).attempt;
+      expect(settleRota(I, "t-1:consent", a, { kind: "saved" }, null)).toBe(
+        true,
+      );
+      const c = startRota(I, "t-1:consent", body(true), key);
+      expect(c.joined).toBe(false);
+      expect(c.attempt.key, "a definite answer ended A's key").not.toBe(a.key);
+      expect(settleRota(I, "t-1:consent", a, { kind: "saved" }, null)).toBe(
+        false,
+      );
+      expect(
+        settleRota(I, "t-1:consent", a, { kind: "uncertain" }, null),
+        "a late uncertain answer never downgrades",
+      ).toBe(false);
+      expect(rotaHoldOf(I, "t-1:consent").attempt).toBe(c.attempt);
+      // Control: C's own answer settles it.
+      expect(
+        settleRota(I, "t-1:consent", c.attempt, { kind: "uncertain" }, null),
+      ).toBe(true);
+      expect(rotaHoldOf(I, "t-1:consent").attempt).toMatchObject({
+        key: c.attempt.key,
+        phase: "uncertain",
+      });
+    });
+
+    test("an earlier identity's answer neither reaches nor clears another identity's attempt, nor a later activation of its own", () => {
+      const a = startRota(I, "t-1:consent", body(true), key).attempt;
+      const b = startRota(J, "t-1:consent", body(true), key).attempt;
+      expect(settleRota(I, "t-1:consent", a, { kind: "saved" }, "t-1")).toBe(
+        false,
+      );
+      expect(rotaHoldOf(J, "t-1:consent").attempt, "J's attempt stays").toBe(b);
+      expect(rotaReadsOf(J, "t-1")).toBe(0);
+      // I shown again: a new memory; A's answer reaches nothing there either.
+      expect(rotaHoldOf(I, "t-1:consent").attempt).toBeNull();
+      expect(settleRota(I, "t-1:consent", a, { kind: "uncertain" }, null)).toBe(
+        false,
+      );
+      expect(rotaHoldOf(I, "t-1:consent").attempt).toBeNull();
+    });
+
+    test("a settlement is told once, after it is held: every screen sees the settled hold (no screen is left showing the pending one)", () => {
+      const a = startRota(I, "t-1:consent", body(true), key).attempt;
+      const seen: Array<RotaHold> = [];
+      const stop = subscribeRota(() => seen.push(rotaHoldOf(I, "t-1:consent")));
+      expect(settleRota(I, "t-1:consent", a, { kind: "uncertain" }, null)).toBe(
+        true,
+      );
+      expect(seen.length).toBe(1);
+      expect(seen[0]?.attempt).toMatchObject({
+        key: a.key,
+        phase: "uncertain",
+      });
+      expect(seen[0]?.outcome?.kind).toBe("uncertain");
+      // Control: an answer that settles nothing tells nothing.
+      expect(settleRota(I, "t-1:consent", a, { kind: "saved" }, null)).toBe(
+        false,
+      );
+      expect(seen.length).toBe(1);
+      stop();
+    });
+
+    test("a settled change that asks for the rota again is read again by the hook showing it (told, not polled); control: one asking nothing is not", async () => {
+      let calls = 0;
+      const api = fakeApi({
+        readRota: async () => {
+          calls += 1;
+          return rota();
+        },
+        readEnrolment: async () => enrolled(true) as never,
+      });
+      const env = tasksEnv(api);
+      const wrapper = ({ children }: { children: ReactNode }) => (
+        <TasksEnvProvider value={env}>{children}</TasksEnvProvider>
+      );
+      renderHook(() => useRota("t-1"), { wrapper });
+      await act(async () => undefined);
+      expect(calls).toBe(1);
+      const a = startRota(env.identity, "t-1:consent", body(true), key).attempt;
+      await act(async () => undefined);
+      expect(calls, "taking an attempt asks nothing").toBe(1);
+      await act(async () => {
+        settleRota(env.identity, "t-1:consent", a, { kind: "saved" }, "t-1");
+      });
+      expect(calls).toBe(2);
+      const b = startRota(
+        env.identity,
+        "t-1:consent",
+        body(false),
+        key,
+      ).attempt;
+      await act(async () => {
+        settleRota(env.identity, "t-1:consent", b, { kind: "refused" }, null);
+      });
+      expect(calls).toBe(2);
+    });
+
+    test("one command's answer leaves the task's other command alone; the uncertain one keeps its key for the same body", () => {
+      const consent = startRota(I, "t-1:consent", body(true), key).attempt;
+      const order = startRota(
+        I,
+        "t-1:order",
+        {
+          kind: "set_rota",
+          task_id: "t-1",
+          expected_version: 2,
+          participants: [],
+        },
+        key,
+      ).attempt;
+      expect(
+        settleRota(I, "t-1:consent", consent, { kind: "uncertain" }, null),
+      ).toBe(true);
+      expect(rotaHoldOf(I, "t-1:order").attempt).toBe(order);
+      const again = startRota(I, "t-1:consent", body(true), key);
+      expect(again.attempt.key).toBe(consent.key);
+      expect(again.attempt.phase).toBe("pending");
+      const other = startRota(I, "t-1:consent", body(false), key);
+      expect(other.attempt.key, "another body, another key").not.toBe(
+        consent.key,
+      );
+    });
   });
 });
