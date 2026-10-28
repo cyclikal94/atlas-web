@@ -887,6 +887,8 @@ describe("review 3 finding 1: leaving the page is not a discard (H1, H3, H11)", 
     );
     w.onBeforeWrite(() => w.unmount());
     await runHeldChange(w.env, shown, w.run, w.deps);
+    // An assertion before the run reads it (MU-2474, MU-2801; WEB-11a revision 18).
+    expect(w.storedHeld()).not.toBeNull();
     const again = w.storedHeld() as HeldChange;
     const row = w.stored();
     const w2 = { ...w.deps, mounted: () => true };
@@ -1278,6 +1280,8 @@ describe("review 3: an unresolved attempt outlives its content (C3c; H6-H8)", ()
     const w2 = world();
     const retired = await w2.hold(held({ attempt: ATTEMPT }));
     const record = await discardHold(w2.env.held, retired);
+    // An assertion, not a setup throw (MU-2806; WEB-11a revision 18).
+    expect(record.kind).toBe("retired");
     if (record.kind !== "retired") throw new Error("setup");
     expect((await forgetRecord(w2.env.held, record.copy)).kind).toBe("ended");
   });
@@ -1755,6 +1759,8 @@ describe("review 4 finding 3: automatic cleanup never forgets an unresolved atte
     const w = world();
     const a = await w.hold(held({ holdId: "hold-a", attempt: A1 }));
     const record = await discardHold(w.env.held, a);
+    // An assertion, not a setup throw (MU-2806; WEB-11a revision 18).
+    expect(record.kind).toBe("retired");
     if (record.kind !== "retired") throw new Error("setup");
     const d = await promote(
       w,
@@ -1842,6 +1848,8 @@ describe("review 4 finding 4: 'Check now' observes, it never attributes or ends 
     const w = world();
     const a = await w.hold(held({ attempt: A1 }));
     const record = await discardHold(w.env.held, a);
+    // An assertion, not a setup throw (MU-2806; WEB-11a revision 18).
+    expect(record.kind).toBe("retired");
     if (record.kind !== "retired") throw new Error("setup");
     w.sharing.next.policy.push(ok({ version: 6, policy: HOME_VIEW }));
     expect(await checkRetired(w.env, record.copy)).toEqual({
@@ -1872,6 +1880,8 @@ describe("review 4 finding 4: 'Check now' observes, it never attributes or ends 
     const w = world();
     const a = await w.hold(held({ attempt: A1 }));
     const record = await discardHold(w.env.held, a);
+    // An assertion, not a setup throw (MU-2806; WEB-11a revision 18).
+    expect(record.kind).toBe("retired");
     if (record.kind !== "retired") throw new Error("setup");
     w.sharing.next.policy.push(
       ok({ version: 8, policy: { grants: [], exclude_accounts: ["x"] } }),

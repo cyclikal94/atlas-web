@@ -351,7 +351,12 @@ describe("finding 1: an edit keeps the versions and audience it began on", () =>
       w.setDrafts([queuedUpdate("L", 1, 4), queuedUpdate("M", 2, 5)]);
       w.versions.set(F, 6);
       fireEvent.click(within(d).getByRole("button", { name: "Save" }));
-      await within(d).findByText("This field changed since you opened it");
+      // An assertion, not a query that throws: a run of MU-2470 is judged by its failures (WEB-11a revision 18).
+      await waitFor(() =>
+        expect(
+          within(d).queryByText("This field changed since you opened it"),
+        ).not.toBeNull(),
+      );
       expect(w.built).toEqual([]);
     }
   });
@@ -1160,7 +1165,10 @@ describe("finding 4 (continued): a person's field steps", () => {
     ]);
     const { router } = await w.mount(`/people/${P}`);
     await screen.findByText("Ada field 000");
-    fireEvent.click(screen.getByRole("button", { name: "Next fields" }));
+    // An assertion, not a query that throws (MU-2487; WEB-11a revision 18).
+    const next = screen.queryByRole("button", { name: "Next fields" });
+    expect(next).not.toBeNull();
+    fireEvent.click(next as HTMLElement);
     await screen.findByText("Ada field 149");
     await act(async () => {
       await router.navigate({
@@ -1323,7 +1331,8 @@ describe("finding 6: a held change is durable for its account", () => {
       const { w, d } = await holdOffline();
       w.heldSaves.push(answer);
       fireEvent.click(within(d).getByRole("button", { name: "Hold as draft" }));
-      await within(d).findByText(text);
+      // An assertion, not a query that throws (MU-2482; WEB-11a revision 18).
+      await waitFor(() => expect(within(d).queryByText(text)).not.toBeNull());
       expect(screen.getByRole("dialog")).toBeInTheDocument();
       expect(w.held()).toEqual([]);
       cleanup();
@@ -1513,7 +1522,8 @@ describe("review 2, finding 4: held changes past any number of ended ones stay r
       screen.getByRole("button", { name: "Back to the first held changes" }),
     );
     await waitFor(() => expect(heldRow()).toBeNull());
-  });
+    // About 1 s; a mutant that runs every recovered hold (MU-2790) takes about 12 s and must end by its assertions, not time out.
+  }, 30_000);
 });
 
 describe("finding 7: every record stays reachable", () => {
@@ -1686,9 +1696,12 @@ describe("review 3, finding 1: leaving the page never discards a held change (H1
         1,
       ),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Show more held changes" }),
-    );
+    // An assertion, not a query that throws (MU-2784; WEB-11a revision 18).
+    const more = screen.queryByRole("button", {
+      name: "Show more held changes",
+    });
+    expect(more).not.toBeNull();
+    fireEvent.click(more as HTMLElement);
     await waitFor(() => expect(heldRow()).toBeNull());
     await act(async () => read.release(ok({ version: 6, policy: HOME_VIEW })));
     await settle();
@@ -1702,7 +1715,8 @@ describe("review 3, finding 1: leaving the page never discards a held change (H1
     );
     await waitFor(() => expect(w.built).toHaveLength(1));
     expect(w.sharing.sent).toHaveLength(1);
-  });
+    // About 0.6 s; a mutant that runs every recovered hold (MU-2790) takes about 5 s and must end by its assertions, not time out.
+  }, 30_000);
 });
 
 describe("review 3, finding 2: one current hold per field (H4)", () => {
@@ -2391,9 +2405,12 @@ describe("review 5, finding 1: a run that ends in ANY way lets the next authoris
     };
     await w.mount(`/people/${P}`);
     await waitFor(() => expect(entered).toBe(true));
-    fireEvent.click(
-      screen.getByRole("button", { name: "Show more held changes" }),
-    );
+    // An assertion, not a query that throws (MU-2784; WEB-11a revision 18).
+    const more = screen.queryByRole("button", {
+      name: "Show more held changes",
+    });
+    expect(more).not.toBeNull();
+    fireEvent.click(more as HTMLElement);
     await waitFor(() => expect(rowOf(B)).not.toBeNull());
     expect(rowOf(HOLD)).toBeNull();
     await settle();
@@ -2618,7 +2635,10 @@ describe("review 12: a held change without a recorded predecessor (v 4) is shown
     await waitFor(() => expect(heldRow()).not.toBeNull());
     const row = heldRow() as HTMLElement;
     expect(row.hasAttribute("data-held-unbound")).toBe(false);
-    expect(within(row).getByRole("button", { name: "Send now" })).toBeTruthy();
+    // An assertion, not a query that throws (MU-2790; WEB-11a revision 18).
+    expect(
+      within(row).queryByRole("button", { name: "Send now" }),
+    ).not.toBeNull();
   });
 
   test("an earlier policy attempt that may have been made is shown with it, and kept when it is discarded", async () => {

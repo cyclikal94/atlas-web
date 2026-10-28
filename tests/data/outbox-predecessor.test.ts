@@ -546,7 +546,8 @@ for (const kind of ["field", "rename"] as const)
         (await w.outbox.enqueue({ ...k.request("M"), localId: "M" })).kind,
       ).toBe("queued");
       page.release();
-      expect((await saving).kind).toBe("refused");
+      // An assertion, not a rejection (MU-2682, MU-2683; WEB-11a revision 18).
+      await expect(saving).resolves.toMatchObject({ kind: "refused" });
       expect(w.drafts().map((d) => d.local_id)).toEqual(["L", "M"]);
     });
 
@@ -580,12 +581,13 @@ for (const kind of ["field", "rename"] as const)
     test("a discarded predecessor is refused (a missing save is never taken as unchanged)", async () => {
       const { w, k, opened } = await seeded(kind);
       expect((await w.outbox.discard("L")).kind).toBe("discarded");
-      expect(
-        await w.outbox.enqueue({
+      // An assertion, not a rejection (MU-2682, MU-2683; WEB-11a revision 18).
+      await expect(
+        w.outbox.enqueue({
           ...k.request("C", baseGuard(opened.expectedBase)),
           ...followsOf(opened, k.id),
         }),
-      ).toEqual({ kind: "refused", reason: "predecessor_changed" });
+      ).resolves.toEqual({ kind: "refused", reason: "predecessor_changed" });
     });
 
     test("a retry of a save that was already made is recognised first (its predecessor changed since)", async () => {
