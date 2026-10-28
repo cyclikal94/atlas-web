@@ -196,14 +196,21 @@ invalidation; revision 7 kept `recovery_generation`, which a first fill moves to
 hidden, a cache known to be invalid, or a witness past it (invalidated, and perhaps refilled, while no controller, or only a follower's
 coalesced read, was there to see it), ends it. A session opened on an EMPTY cache (a pending source before the first snapshot) is kept through
 the first fill and ended by an invalidation after it. It is also observed through the page runtime's service in hand when it opened
-(`observeCache`), which outlives the protected tree. **Revision 8 (R7a):** shown again, it WAITS until a read of the witness made then (or a
-reading that agrees) verifies its basis: unknown facts (a replacement controller's first read, a failed read) neither discard it nor let it be
+(`observeCache`), which outlives the protected tree. **Revision 9 (C2):** Import states the history the session was verified against
+(`EnqueueRequest.continuity`, its database and basis, captured at the press) and the enqueue's own transaction refuses it (`expired`, nothing
+stored) when another page invalidated the cache in between, whatever this page has heard; the session then ends and the dialog closes with
+the same announcement. A save already queued is never undone, and a retry of it is still recognised. **Revision 8 (R7a):** shown again, it WAITS until a read of the witness made then
+verifies its basis (**revision 9, review 9 R7c:** ONLY that read, made for this showing through a live service of its database; a
+publication that agrees, such as an old controller's, may end it but never makes it ready, so nothing is queued before that read lands; a
+read that fails, or no live service, keeps it waiting; a remount of the dialog after a real hiding waits the same way): unknown facts (a replacement controller's first read, a failed read) neither discard it nor let it be
 saved; its file and window stay shown, its source is not, Import explains why it waits and Enter stores nothing; a witness past its basis then
 ends it and the dialog closes with "Import closed while your calendar sources are brought up to date." A CACHED source's open dialog whose cache
 is only unverified waits the same way; a cache known to be invalid is the E9 close. The source's state is read afresh whenever it is shown.
 Sync, reopening and a read completing never store anything; a reload or another tab has no session. `tests/features/calendars/import-retention.test.tsx` (I1-I13
 through the production router; revision 7: L1/L2/L5 through the production `DataProvider` and writers W18/W20/W21/W23; revision 8: the
-waiting session, the pending-source first fill versus invalidation, the marker-only L5 and the unverified cached source),
+waiting session, the pending-source first fill versus invalidation, the marker-only L5 and the unverified cached source; revision 9: R7c, an
+old agreeing publication with the showing's read held, row and chooser, click/Enter/programmatic submission, with its unchanged control; C2/T5,
+another page's W18 and refill unheard before Import, fresh and resumed, with controls; `tests/data/outbox-continuity.test.ts` for W2),
 `import-editor.test.ts`, `import-kept.test.ts`, E-IMP7 and E-IMP8 (a 403 remount then 410/W18/W23, row and chooser, with controls; two pages
 with the follower's cross-tab wakes delivered or held; revision 8: E-IMP9, a pending source on an empty cache, first fill alone versus fill,
 410 and refill, the follower's wakes held) in `tests/e2e/fixture.calendar-import.spec.ts`; mutants MU-2637 to MU-2655, MU-2656 to MU-2668

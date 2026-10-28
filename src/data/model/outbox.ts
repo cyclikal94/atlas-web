@@ -155,6 +155,20 @@ export interface EnqueueRequest {
    * change committed in between (another page's edit of the same draft) is never overwritten by a body built from the older read.
    */
   expectDraft?(draft: DraftRow): boolean;
+  /**
+   * A content-free precondition of the cache's HISTORY (WEB-13b revision 9, design assessment C2, invariant 6), for an enqueue (W2) only:
+   * the database incarnation and invalidation witness (`SyncFacts.invalidations`) the caller verified its choice against, captured once
+   * when the person pressed and never refreshed. The draft is written only if the enqueue transaction reads the SAME pair, on every
+   * attempt (a fence's retry, a quota hold's readmission); otherwise nothing is written and the answer is `refused / expired`: the cache
+   * was invalidated since. A retry of a save that was already made is recognised first, so an admitted save is never refused afterwards.
+   */
+  continuity?: Continuity;
+}
+
+/** What `EnqueueRequest.continuity` states: one database's incarnation and its invalidation witness. */
+export interface Continuity {
+  readonly incarnationId: string;
+  readonly invalidations: number;
 }
 
 /**
@@ -510,6 +524,14 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
           expectDraft: (draft: DraftRow) =>
             request.expectDraft?.call(request, draft) === true,
         }),
+    ...(request.continuity === undefined
+      ? {}
+      : {
+          continuity: {
+            incarnationId: request.continuity.incarnationId,
+            invalidations: request.continuity.invalidations,
+          },
+        }),
   };
 }
 
@@ -547,6 +569,15 @@ export function validateRequest(request: EnqueueRequest): void {
     )
       throw new OutboxRequestError("join_requires_edit");
   if (versioned > 1) throw new OutboxRequestError("two_versioned_primaries");
+  const continuity = request.continuity;
+  if (
+    continuity !== undefined &&
+    (typeof continuity.incarnationId !== "string" ||
+      continuity.incarnationId === "" ||
+      !Number.isSafeInteger(continuity.invalidations) ||
+      continuity.invalidations < 0)
+  )
+    throw new OutboxRequestError("continuity");
 }
 
 /** Resolves a templated endpoint, or returns `null` for a draft that cannot be addressed. */

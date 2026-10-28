@@ -42,7 +42,9 @@ import { importEnablement } from "./import-action";
 import type { ImportEditor } from "./import-editor";
 import {
   discardImport,
+  expireImport,
   hideImport,
+  importContinuity,
   importStatus,
   showImport,
   subscribeImports,
@@ -162,6 +164,10 @@ export function useImportableSources(): { rows: CacheRow[]; page: SourcePage } {
  * which the import's visit owns (`import-kept.ts`). The in-dialog sync control keeps the session, closes and navigates; Back and Import
  * events again show it, with a read or a save that went on meanwhile settled in it. Cancel, Escape and the close icon discard it. The
  * source's state is read afresh whenever it is shown: a kept choice is never kept permission.
+ *
+ * Revision 9 (review 9 R7c; design assessment C1/C2): a session shown again waits for a read made for that showing (`import-kept.ts`),
+ * and Import states the cache's history the session was verified against (`EnqueueRequest.continuity`, captured at the press): the
+ * enqueue's own transaction refuses it (`expired`) when the cache was invalidated in between, and the dialog then closes and says why.
  */
 export function ImportDialog({
   sourceId,
@@ -312,6 +318,8 @@ export function ImportDialog({
     const ics = file.check.ics;
     const { from, through } = window_;
     const into = source.id;
+    // The cache's history it was verified against, as it is now (revision 9, C2): the enqueue's own transaction must read the same.
+    const continuity = importContinuity(editor) ?? undefined;
     // One save at a time (the session's synchronous latch): a second press, or Enter, before the screen shows the first as busy stores
     // nothing more. What is saved is what was pressed, captured now; only this save settles the session, and only while it has not ended.
     editor.submit(
@@ -319,9 +327,18 @@ export function ImportDialog({
       async (key) => {
         try {
           const outcome = await outbox.enqueue(
-            importRequest({ sourceId: into, ics, from, through, localId: key }),
+            importRequest({
+              sourceId: into,
+              ics,
+              from,
+              through,
+              localId: key,
+              continuity,
+            }),
           );
           if (outcome.kind === "queued") return { kind: "queued" };
+          // Invalidated since it was verified: the session ends, and the dialog closes and says why (as when it is shown again).
+          if (outcome.reason === "expired") expireImport(editor);
           return {
             kind: "refused",
             message:

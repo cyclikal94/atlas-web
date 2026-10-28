@@ -1,5 +1,6 @@
 import type {
   CacheRow,
+  Continuity,
   EnqueueRequest,
   JsonObject,
   LocalId,
@@ -156,6 +157,8 @@ export function importRequest(input: {
   from: string;
   through: string;
   localId?: LocalId;
+  /** The cache's history the kept session was verified against, captured at the press (revision 9, C2): W2 compares it. */
+  continuity?: Continuity;
 }): EnqueueRequest {
   const { sourceId, ics, from, through } = input;
   return {
@@ -173,6 +176,7 @@ export function importRequest(input: {
     ],
     build: () => ({ command: { ics, from, through } }),
     ...(input.localId === undefined ? {} : { localId: input.localId }),
+    ...(input.continuity === undefined ? {} : { continuity: input.continuity }),
   };
 }
 

@@ -6,6 +6,7 @@ import {
   isSendableStatus,
   type Selection,
 } from "../model/dispatch";
+import { invalidationsOf } from "../model/invalidation";
 import {
   candidateRows,
   type DraftWrite,
@@ -209,10 +210,17 @@ export type EnqueueResult =
   /**
    * `changed`: the request stated what its caller saw (`observed`), and this transaction read something else; nothing was written.
    * `denied`: a target the request needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`); nothing was written.
+   * `expired`: the request stated the cache's history (`continuity`), and this transaction read another; nothing was written.
    */
   | {
       kind: "refused";
-      reason: "fenced" | "closing" | "no_base" | "changed" | "denied";
+      reason:
+        | "fenced"
+        | "closing"
+        | "no_base"
+        | "changed"
+        | "denied"
+        | "expired";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | Readmit;
@@ -235,6 +243,15 @@ async function observedNow(
     await readObservation(reader, incarnationId, request.observed.resourceId)
   ).token;
 }
+
+/**
+ * Whether the cache's history is the one a request states (`continuity`, WEB-13b revision 9 C2): the same incarnation and invalidation
+ * witness as this transaction's singleton (always, when it states none). An unknown witness is never the same.
+ */
+const sameHistory = (request: EnqueueRequest, sync: SyncStateRow): boolean =>
+  request.continuity === undefined ||
+  (request.continuity.incarnationId === sync.incarnation_id &&
+    request.continuity.invalidations === invalidationsOf(sync));
 
 /** Whether a request that states an observation was made from what the transaction read (always, when it states none). */
 const stillObserved = (
@@ -304,6 +321,10 @@ export const enqueueDraft = singletonPlan<
         },
       };
     }
+    // After the duplicate, too, the history it states (WEB-13b revision 9, C2): a save admitted before the cache was invalidated is
+    // recognised, never refused afterwards.
+    if (!sameHistory(input.request, sync))
+      return { result: { kind: "refused", reason: "expired" } };
     // After the duplicate: a retry of a save that was made is recognised, although its own write changed what its caller saw.
     if (!stillObserved(input.request, reads.observed))
       return { result: { kind: "refused", reason: "changed" } };

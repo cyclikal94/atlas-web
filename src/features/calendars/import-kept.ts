@@ -2,8 +2,9 @@ import {
   type CacheLifetimes,
   type CacheObserver,
   type CacheService,
+  type Continuity,
   observeCache,
-  readInvalidations,
+  readCache,
 } from "../../data";
 import {
   documentRouteChanges,
@@ -40,9 +41,18 @@ import { isCalendarsPath } from "./visit";
  *    against (its BASIS: a shown dialog applies E9 itself, and a pending source's dialog stays open while the cache is brought up to
  *    date); once hidden, a cache known to be invalid, or a witness past its basis, ends it. It is also observed through the page runtime's
  *    service in hand when it opened (`observeCache`), which outlives the protected tree, and whose read made at the opening is a basis
- *    whenever it lands. Shown again, it WAITS (`importStatus` "pending") until a read made then (`readInvalidations`), or a reading
- *    that agrees, says its basis still stands: unknown facts (a replacement controller's first read, a failed read) neither discard it
- *    nor let it be saved; its input stays shown meanwhile. A witness past its basis then ends it (the dialog closes and says why).
+ *    whenever it lands. Shown again, it WAITS (`importStatus` "pending") until a read made then (`readCache`) says its basis still
+ *    stands: unknown facts (a replacement controller's first read, a failed read) neither discard it nor let it be saved; its input
+ *    stays shown meanwhile. A witness past its basis then ends it (the dialog closes and says why).
+ *  - Revision 9 (review 9 R7c; design assessment C1, invariants 2, 4, 5): ONLY that read verifies it. A publication or a live reading that
+ *    agrees with its basis carries no evidence of when it was read (an old controller's, the observer's last one), so it can end a session
+ *    (a cache known invalid, a witness past its basis) but never make one ready. The read belongs to its showing (a ticket): hidden again,
+ *    discarded or ended, it no longer verifies anything, though what it read still ends the session when it tells an invalidation. A read
+ *    that fails, or a showing with no live service of its database, leaves it waiting (input kept, nothing saved); a later publication asks
+ *    again, one read at a time. With no basis, only the witness's first value (0: nothing was ever invalidated in that database) verifies.
+ *    The dialog shown again by a remount of itself (not by Import events) after it was really hidden is verified the same way; the
+ *    hide-and-show that Strict Mode replays within one turn is no hiding. A service of its database that ended is replaced, when the page
+ *    has another, by an observation of that one (its opening read, made after the hiding, is never a basis).
  * Page memory only: never stored, sent, broadcast, put in history state or logged; a reload or another tab has none. Retained selection
  * is never retained permission: the dialog reads the source's current state whenever it shows the session.
  */
@@ -79,16 +89,25 @@ interface Held {
   incarnation: string | null;
   /** Opened at the Calendars screen: it has a visit, and is kept while not shown. */
   readonly inside: boolean;
+  /** The context it was last shown in: its service is the one a showing's read is made through. */
+  context: ImportOwnerContext;
   /** Whether a dialog shows it now. */
   shown: boolean;
+  /** Hidden past the turn that hid it (not a replay of its dialog's mount): shown again, it is verified afresh. */
+  parked: boolean;
   /** Shown again and not yet verified against its basis: its input is shown, nothing is saved. */
   pending: boolean;
   /** The invalidation witness of its database it was opened or last shown against (null: none known yet). Frozen while hidden. */
   basis: number | null;
-  /** The page runtime's service observed since it opened (null: none was in hand). */
+  /** The service observed (null: none in hand). */
   observer: CacheObserver | null;
-  /** The resume whose fresh read may still verify it. */
+  observed: CacheService | null;
+  /** Whether the observation is the one begun when it opened (its opening read may be the basis), not a later rebinding. */
+  opening: boolean;
+  /** The showing whose read may still verify it. */
   ticket: number;
+  /** A read for that showing is under way. */
+  verifying: boolean;
   /** Judges it by the page's cache as it is now (ends it if that says so). */
   judge: () => void;
   readonly offs: Array<() => void>;
@@ -175,13 +194,14 @@ const newest = (all: readonly Reading[]): number | null =>
 /**
  * Judges `which` by the page's cache as it is read now (revision 8, R7a/R7b). Shown and verified: it follows (the dialog applies E9
  * itself). Hidden or waiting: a cache known to be invalid ends it, and so does a witness past its basis (invalidated, and perhaps brought
- * up to date, while nothing observed it); a reading that agrees verifies a waiting one; facts not established prove nothing.
+ * up to date, while nothing observed it); facts not established prove nothing, and a reading that agrees proves nothing either (revision
+ * 9, R7c): a waiting one shown asks for its showing's read instead.
  */
 function judgeNow(which: Held, context: ImportOwnerContext): void {
   if (which.editor.ended()) return;
   const all = readings(which, context);
   // The read made when it opened is what the database said then, whenever it lands.
-  which.basis ??= which.observer?.get().opening ?? null;
+  if (which.opening) which.basis ??= which.observer?.get().opening ?? null;
   if (which.shown && !which.pending) {
     const known = newest(all);
     if (known !== null && (which.basis === null || known > which.basis))
@@ -201,40 +221,85 @@ function judgeNow(which: Held, context: ImportOwnerContext): void {
     release(which, "expired");
     return;
   }
-  if (which.pending && all.some((reading) => reading.invalidations === basis)) {
+  if (which.pending && which.shown) verify(which);
+}
+
+/** Whether `service` is a live service of `which`'s database. */
+const serves = (which: Held, service: CacheService | null): boolean =>
+  service !== null &&
+  !service.ended &&
+  service.incarnationId === which.incarnation;
+
+/**
+ * Asks for the read that may verify `which`'s showing (R7c): one at a time, through the live service of its database it was last shown
+ * with (none: it waits). Whenever it lands, a cache known invalid or another witness than its basis ends it (the read was made after it was
+ * hidden: an invalidation since); only the same witness, read for the showing still waiting, by a service still live, makes it ready.
+ */
+function verify(which: Held): void {
+  const service = which.context.service ?? null;
+  if (which.verifying || !serves(which, service)) return;
+  const ticket = which.ticket;
+  which.verifying = true;
+  void readCache(service as CacheService).then((now) => {
+    if (which.ticket === ticket) which.verifying = false;
+    if (held !== which || which.editor.ended() || now === null) return;
+    const basis = which.basis;
+    if (
+      now.invalidated ||
+      (basis !== null &&
+        now.invalidations !== null &&
+        now.invalidations !== basis)
+    ) {
+      release(which, "expired");
+      return;
+    }
+    if (
+      which.ticket !== ticket ||
+      !which.pending ||
+      !which.shown ||
+      !serves(which, service) ||
+      now.invalidations === null ||
+      (basis === null && now.invalidations !== 0)
+    )
+      return;
+    // No basis: the witness's first value says that nothing was ever invalidated in this database, so nothing was missed either.
+    which.basis = now.invalidations;
     which.pending = false;
     changed();
-  }
+  });
+}
+
+/** Observes `service` instead of the service `which` observed, once that one has ended (another service of the same database). */
+function rebind(which: Held, service: CacheService | null): void {
+  if (
+    !serves(which, service) ||
+    service === which.observed ||
+    (which.observed !== null && !which.observed.ended)
+  )
+    return;
+  if (which.opening) which.basis ??= which.observer?.get().opening ?? null;
+  // Its opening read is made after the hiding: never a basis.
+  which.opening = false;
+  which.observer?.dispose();
+  const observer = observeCache(service as CacheService);
+  which.observer = observer;
+  which.observed = service;
+  observer.subscribe(which.judge);
 }
 
 /**
- * Shows `which` again: it waits until its basis is verified, by a read of the witness made NOW through the displayed database's service
- * (a publication may predate a commit), or by a reading that agrees. A witness past its basis ends it, whenever that read lands. With no
- * basis there is nothing to compare: a session hidden before any reading of its database (none was established, and its opening read
- * never landed) follows the first one.
+ * Shows `which` again: it WAITS until a read made for this showing through the displayed database's service verifies its basis (R7a,
+ * R7c). Publications may end it meanwhile, never verify it.
  */
 function resume(which: Held, context: ImportOwnerContext): void {
+  which.context = context;
   which.shown = true;
-  const basis = which.basis;
-  if (basis === null) return;
+  which.parked = false;
   which.pending = true;
   tickets += 1;
-  const ticket = tickets;
-  which.ticket = ticket;
-  const service = context.service ?? null;
-  if (
-    service !== null &&
-    !service.ended &&
-    service.incarnationId === which.incarnation
-  )
-    void readInvalidations(service).then((now) => {
-      if (held !== which || which.editor.ended() || now === null) return;
-      if (now > basis) release(which, "expired");
-      else if (which.ticket === ticket && which.pending) {
-        which.pending = false;
-        changed();
-      }
-    });
+  which.ticket = tickets;
+  which.verifying = false;
+  rebind(which, context.service ?? null);
   which.judge();
 }
 
@@ -270,8 +335,7 @@ function current(
     isCalendarsPath(observed().pathname()) &&
     owns(which, context)
   ) {
-    which.judge();
-    if (held !== which) return null;
+    // Judged as it is now by `resume` (a cache known invalid, or a witness past its basis, ends it), then it waits for its read.
     resume(which, context);
     if (held !== which) return null;
     changed();
@@ -299,23 +363,27 @@ export function openImport(
   });
   const changes = observed();
   const service = context.service ?? null;
+  // The page runtime's service of the displayed database, observed from now on (it outlives the protected tree).
+  const observing =
+    service !== null &&
+    !service.ended &&
+    service.incarnationId === context.incarnation;
   const which: Held = {
     editor,
     entry,
     identity: context.identity,
     incarnation: context.incarnation,
     inside: isCalendarsPath(changes.pathname()),
+    context,
     shown: true,
+    parked: false,
     pending: false,
     basis: null,
-    // The page runtime's service of the displayed database, observed from now on (it outlives the protected tree).
-    observer:
-      service !== null &&
-      !service.ended &&
-      service.incarnationId === context.incarnation
-        ? observeCache(service)
-        : null,
+    observer: observing ? observeCache(service) : null,
+    observed: observing ? service : null,
+    opening: true,
     ticket: 0,
+    verifying: false,
     judge: () => judgeNow(which, context),
     offs: [],
   };
@@ -335,8 +403,8 @@ export function openImport(
   // invalidation, seen as it happens or told by the witness afterwards (another controller, or none, may have been mounted meanwhile).
   if (context.cache !== null)
     which.offs.push(context.cache.subscribe(which.judge));
-  if (which.observer !== null)
-    which.offs.push(which.observer.subscribe(which.judge));
+  // Heard until the observation is disposed (a rebinding, the session's end).
+  which.observer?.subscribe(which.judge);
   which.judge();
   changed();
   return editor;
@@ -351,9 +419,17 @@ export function resumeChooser(
     : null;
 }
 
-/** A dialog shows `editor` (again: a remount of the same dialog). */
+/**
+ * A dialog shows `editor` (again: a remount of the same dialog). Hidden past its turn, it is shown again only as Import events would show
+ * it: waiting for its showing's read (R7c).
+ */
 export function showImport(editor: ImportEditor): void {
-  if (held?.editor === editor) held.shown = true;
+  const which = held;
+  if (which === null || which.editor !== editor || which.shown) return;
+  which.shown = true;
+  if (!which.parked) return;
+  resume(which, which.context);
+  if (held === which) changed();
 }
 
 /** The dialog showing `editor` leaves the screen without discarding it: it stays kept (if it has a visit). */
@@ -361,9 +437,17 @@ export function hideImport(editor: ImportEditor): void {
   const which = held;
   if (which === null || which.editor !== editor) return;
   which.shown = false;
-  if (!which.inside) release(which);
+  if (!which.inside) {
+    release(which);
+    return;
+  }
   // What the cache says at the moment it is hidden counts too (an invalidation the shown dialog stayed open through, R7).
-  else which.judge();
+  which.judge();
+  // Still hidden once this turn is over: parked, so a remount of its dialog verifies it afresh (R7c; meanwhile its showing's read verifies
+  // nothing, since it is not shown). A hide and a show in the same turn (Strict Mode's replay of the dialog's mount) is no hiding.
+  queueMicrotask(() => {
+    if (held === which && !which.shown) which.parked = true;
+  });
 }
 
 /**
@@ -396,6 +480,30 @@ export function importOwned(
   if (!revokedIn(which, context)) return !editor.ended();
   release(which, "revoked");
   return false;
+}
+
+/**
+ * The cache's history `editor` may be saved against (revision 9, review 9 R7c; design assessment C2, invariant 6), captured at the press
+ * and stated to the enqueue (`EnqueueRequest.continuity`), which writes nothing unless its own transaction reads the same: its database
+ * and the witness of its basis. Null when nothing is known yet (a new session no reading has reached, never hidden: no history kept to
+ * compare) or while it waits (nothing is saved then).
+ */
+export function importContinuity(editor: ImportEditor): Continuity | null {
+  const which = held;
+  if (
+    which === null ||
+    which.editor !== editor ||
+    which.pending ||
+    which.incarnation === null ||
+    which.basis === null
+  )
+    return null;
+  return { incarnationId: which.incarnation, invalidations: which.basis };
+}
+
+/** The enqueue said the cache was invalidated since `editor`'s basis (`expired`): its session ends, and the dialog closes and says why. */
+export function expireImport(editor: ImportEditor): void {
+  if (held?.editor === editor) release(held, "expired");
 }
 
 /** Cancel, Escape, the close icon or the cache being brought up to date: `editor`'s session ends (a save it made stays queued). */

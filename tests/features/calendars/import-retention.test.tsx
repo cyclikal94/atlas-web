@@ -1328,4 +1328,233 @@ describe("R7a/R7b (revision 8): the kept import waits for its witness; first fil
       expect(field(dialog, "Through").value).toBe("2026-12-31");
       expect(drafts(w)).toHaveLength(0);
     });
+
+  /**
+   * WEB-13b revision 9 (review 9 R7c; design assessment C1, C6; schedule T1), review 9's schedule maintained: every readSyncFacts of the
+   * page runtime's service from the sync control on is FROZEN (a live read keeps the snapshot it had, and is not heard; a one-off read is
+   * not delivered), so the controller's publication stays the OLD valid cache with the basis's witness, which agrees. Writers still run.
+   */
+  function freezeFacts(w: World) {
+    const service = w.env.service();
+    expect(service).not.toBeNull();
+    const real = (service as NonNullable<typeof service>).store as unknown as {
+      watch: (
+        plan: { name: string },
+        input: unknown,
+      ) => { get(): unknown; subscribe(listener: () => void): () => void };
+      run: (plan: { name: string }, ...rest: unknown[]) => Promise<unknown>;
+    };
+    const watch = real.watch.bind(real);
+    const run = real.run.bind(real);
+    let frozen = false;
+    const runs: Array<() => void> = [];
+    vi.spyOn(real, "watch").mockImplementation((plan, input) => {
+      const source = watch(plan, input);
+      if (plan.name !== "data.readSyncFacts") return source;
+      let snapshot = source.get();
+      return {
+        get: () => {
+          if (!frozen) snapshot = source.get();
+          return snapshot;
+        },
+        subscribe: (listener: () => void) =>
+          source.subscribe(() => {
+            if (frozen) return;
+            snapshot = source.get();
+            listener();
+          }),
+      };
+    });
+    vi.spyOn(real, "run").mockImplementation((plan, ...rest) => {
+      const result = run(plan, ...rest);
+      if (plan.name !== "data.readSyncFacts" || !frozen) return result;
+      return new Promise((resolve, reject) => {
+        runs.push(() => {
+          result.then(resolve, reject);
+        });
+      });
+    });
+    return {
+      freeze() {
+        frozen = true;
+      },
+      held: () => runs.length,
+      async release() {
+        await act(async () => {
+          frozen = false;
+          for (const go of runs.splice(0)) go();
+        });
+        await w.settle();
+      },
+    };
+  }
+  const zoneInput = () =>
+    present(
+      present(document.querySelector("[data-import-drop]")).querySelector(
+        'input[type="file"]',
+      ),
+    ) as HTMLInputElement;
+  const browse = () =>
+    present(
+      present(document.querySelector("[data-import-drop]")).querySelector(
+        "button",
+      ),
+    );
+
+  for (const entry of ["row", "chooser"] as const)
+    for (const invalidated of [false, true])
+      test(`R7c (${entry}): shown again with an old agreeing publication and its read held, the kept import WAITS: click, Enter and a programmatic submission store nothing; released ${invalidated ? "after W18 and a refill: it closes, says why, and nothing is ever stored" : "unchanged (control): ready, and Import stores ONE import"}`, async () => {
+        const w = await calendarWorld({
+          production: true,
+          productionSync: true,
+          validCache: true,
+          online: false,
+          drafts: [pendingCreate()],
+        });
+        const facts = freezeFacts(w);
+        let dialog: HTMLElement;
+        if (entry === "row") {
+          dialog = await openRow(w, PENDING_ROW);
+          await choose(w, dialog, ICS);
+        } else {
+          await screen.findByText(words.DROP_PROMPT);
+          await act(async () => {
+            fireEvent.change(zoneInput(), {
+              target: {
+                files: [
+                  new File([ICS], "retained.ics", { type: "text/calendar" }),
+                ],
+              },
+            });
+          });
+          await w.settle();
+          dialog = await shownDialog();
+          fireEvent.change(within(dialog).getByLabelText(words.SOURCE), {
+            target: { value: PENDING },
+          });
+        }
+        await waitFor(() =>
+          expect(shownFile(dialog)).toContain("retained.ics"),
+        );
+        setField(dialog, "From", "2026-01-01");
+        setField(dialog, "Through", "2026-12-31");
+        await syncFrom(w, dialog);
+        expect(w.path()).toBe("/sync");
+        const before = w.sync().cache_invalidation_seq ?? 0;
+        facts.freeze();
+        if (invalidated) {
+          await w.invalidate();
+          await w.recover([]);
+        }
+        expect(w.sync().cache_status).toBe("valid");
+        expect(w.sync().cache_invalidation_seq ?? 0).toBe(
+          invalidated ? before + 1 : before,
+        );
+        await w.traverse(-1);
+        if (entry === "row") await openRow(w, PENDING_ROW);
+        else {
+          fireEvent.click(browse());
+          await w.settle();
+        }
+        const again = await shownDialog();
+        // The showing's read is held: nothing but the old publication, which agrees, is known.
+        expect(facts.held()).toBeGreaterThan(0);
+        expect(shownFile(again)).toContain("retained.ics");
+        expect(field(again, "From").value).toBe("2026-01-01");
+        expect(field(again, "Through").value).toBe("2026-12-31");
+        expect(again.querySelector("[data-import-waiting]")?.textContent).toBe(
+          words.IMPORT_CHECKING,
+        );
+        const button = within(again).getByRole("button", {
+          name: words.IMPORT,
+        });
+        expect(button).toBeDisabled();
+        fireEvent.click(button);
+        const form = present(again.querySelector("form")) as HTMLFormElement;
+        fireEvent.submit(form);
+        await act(async () => {
+          form.requestSubmit();
+        });
+        await w.settle();
+        expect(importDrafts(w)).toHaveLength(0);
+        await facts.release();
+        if (invalidated) {
+          await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+          await waitFor(() =>
+            expect(announced()).toBe(words.IMPORT_CLOSED_REFRESHING),
+          );
+        } else {
+          expect(screen.queryByRole("dialog")).toBe(again);
+          expect(again.querySelector("[data-import-waiting]")).toBeNull();
+          press(again, words.IMPORT);
+          await w.settle();
+        }
+        expect(importDrafts(w)).toHaveLength(invalidated ? 0 : 1);
+        if (!invalidated)
+          expect(importDrafts(w)[0]).toMatchObject({ target_id: PENDING });
+        expect(w.calls.filter((call) => call.method === "POST")).toEqual([]);
+      });
+
+  /**
+   * WEB-13b revision 9 (design assessment C2, invariant 6; schedule T5; MORNING-TASK-APPROVALS-20261028): the verification and the enqueue
+   * are separate transactions. A ready dialog (shown from its opening, or verified after the sync control) whose page hears nothing more
+   * (facts frozen), another page's W18 and refill committed meanwhile: Import states the history it was verified against
+   * (`EnqueueRequest.continuity`) and W2 refuses it (`expired`): nothing stored, the dialog closes and says why. Control: no invalidation,
+   * one import.
+   */
+  for (const resumed of [false, true])
+    for (const invalidated of [false, true])
+      test(`C2/T5 (${resumed ? "verified after the sync control" : "shown from its opening"}): ready, the page hearing nothing more, ${invalidated ? "another page's W18 and refill committed: Import stores NOTHING (expired), closes and says why" : "no invalidation (control): Import stores ONE import"}`, async () => {
+        const w = await calendarWorld({
+          production: true,
+          productionSync: true,
+          validCache: true,
+          online: false,
+          drafts: [pendingCreate()],
+        });
+        const facts = freezeFacts(w);
+        let dialog = await openRow(w, PENDING_ROW);
+        await choose(w, dialog, ICS);
+        await waitFor(() =>
+          expect(shownFile(dialog)).toContain("retained.ics"),
+        );
+        setField(dialog, "From", "2026-01-01");
+        setField(dialog, "Through", "2026-12-31");
+        if (resumed) {
+          await syncFrom(w, dialog);
+          await w.traverse(-1);
+          dialog = await openRow(w, PENDING_ROW);
+          await w.settle();
+        }
+        expect(dialog.querySelector("[data-import-waiting]")).toBeNull();
+        expect(
+          within(dialog).getByRole("button", { name: words.IMPORT }),
+        ).toBeEnabled();
+        facts.freeze();
+        if (invalidated) {
+          await w.invalidate();
+          await w.recover([]);
+        }
+        expect(w.sync().cache_status).toBe("valid");
+        expect(w.sync().cache_invalidation_seq ?? 0).toBe(invalidated ? 1 : 0);
+        // Nothing of it reached the page: the dialog is as it was.
+        expect(screen.queryByRole("dialog")).toBe(dialog);
+        press(dialog, words.IMPORT);
+        await w.settle();
+        if (invalidated) {
+          await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+          await waitFor(() =>
+            expect(announced()).toBe(words.IMPORT_CLOSED_REFRESHING),
+          );
+        }
+        expect(importDrafts(w)).toHaveLength(invalidated ? 0 : 1);
+        expect(
+          (w.rows("draft_commands") as Array<{ local_id: string }>).filter(
+            (row) => row.local_id !== "create-1",
+          ),
+        ).toHaveLength(invalidated ? 0 : 1);
+        await facts.release();
+        expect(importDrafts(w)).toHaveLength(invalidated ? 0 : 1);
+        expect(w.calls.filter((call) => call.method === "POST")).toEqual([]);
+      });
 });

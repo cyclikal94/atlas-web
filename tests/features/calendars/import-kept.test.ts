@@ -439,7 +439,11 @@ describe("R7 (revision 7): the page's cache lifetime, across controllers (L3-L5)
   // were unread, to END the kept session and open an empty one: the loss review 8 reproduced. Its intent (the kept input is not used before
   // its cache can be compared) is kept as the session WAITING: the same session, its input intact, nothing saved; the comparison then
   // resumes it, or ends it when the witness moved (next test).
-  test("C3: not ready before its witness can be compared: Import events while the new controller's facts are unread shows the SAME session, waiting; the same witness then resumes it (adapted, revision 8)", () => {
+  // ADAPTED AGAIN (revision 9, review 9 R7c; design assessment C6, invariant 2). Revision 8's last step expected the controller's
+  // publication that agrees (`next.set(life())`) to make it ready: the shortcut review 9 reproduced (a publication says nothing of when it
+  // was read). With no service in hand here, nothing can verify it: it keeps WAITING, with its input. The ready path is a read made for
+  // the showing (`R7c` below).
+  test("C3: not ready before its witness can be compared: Import events while the new controller's facts are unread shows the SAME session, waiting; a publication that agrees does not make it ready (adapted, revision 9)", () => {
     const w = pageWorld();
     const old = controller(life());
     const first = kept(w);
@@ -455,7 +459,8 @@ describe("R7 (revision 7): the page's cache lifetime, across controllers (L3-L5)
       through: "2026-12-31",
     });
     next.set(life());
-    expect(importStatus(first)).toBe("ready");
+    expect(importStatus(first)).toBe("pending");
+    expect(first.ended()).toBe(false);
   });
 
   test("C3: waiting, the witness read past its basis ends it (expired), and the next Import events is a new session", () => {
@@ -541,7 +546,7 @@ describe("R7 (revision 7): the page's cache lifetime, across controllers (L3-L5)
 /**
  * WEB-13b revision 8 (review 8 R7a/R7b; design assessment C1-C3, T1, T2, T4, T9): the session's BASIS is the cache's invalidation witness
  * of its database, and it is also observed through the page runtime's service in hand when it opened (`observeCache`), which outlives the
- * protected tree; shown again, it waits for a read made then (`readInvalidations`). The service here is a double whose reads are made at
+ * protected tree; shown again, it waits for a read made then (`readCache`). The service here is a double whose reads are made at
  * their call (IndexedDB's ordering: a read sees what was committed before it was created) and delivered when the test lets them.
  */
 describe("R7a/R7b (revision 8): the invalidation witness, the page runtime's service and the waiting session", () => {
@@ -757,7 +762,10 @@ describe("R7a/R7b (revision 8): the invalidation witness, the page runtime's ser
     expect(importStatus(first)).toBe("expired");
   });
 
-  test("R7a: shown again while no read can be made (the service it observed has ended) and no reading agrees: WAITING, never discarded, never ready; a reading that agrees resumes it", async () => {
+  // ADAPTED (revision 9, review 9 R7c). Revision 8's last step expected a publication that agrees to resume it (the shortcut review 9
+  // reproduced). Same steps up to it; it keeps waiting. Its intent (it resumes once something can say its basis stands) is now a showing
+  // with a live service of its database, whose read verifies it.
+  test("R7a: shown again while no read can be made (the service it observed has ended) and no reading agrees: WAITING, never discarded, never ready; a publication that agrees does not resume it, a read made at a later showing does (adapted, revision 9)", async () => {
     const svc = service();
     const w = pageWorld(svc);
     const ctl = controller(life());
@@ -772,7 +780,19 @@ describe("R7a/R7b (revision 8): the invalidation witness, the page runtime's ser
     expect(first.ended()).toBe(false);
     expect(first.state().window.through).toBe("2026-12-31");
     next.set(life());
+    await settle();
+    expect(importStatus(first)).toBe("pending");
+    // The page's next service of the same database (the old one ended): shown again with it, its read verifies the basis.
+    const replacement = service();
+    hideImport(first);
+    w.route.go("/sync");
+    back(w);
+    expect(openImport(ROW, w.context({ service: replacement.double }))).toBe(
+      first,
+    );
+    await settle();
     expect(importStatus(first)).toBe("ready");
+    expect(first.state().window.through).toBe("2026-12-31");
   });
 
   test("R7a: a read made at an EARLIER showing that lands late does not verify the later showing", async () => {
@@ -789,7 +809,9 @@ describe("R7a/R7b (revision 8): the invalidation witness, the page runtime's ser
     back(w);
     openImport(ROW, w.context());
     const stale = svc.reads.splice(0);
-    expect(stale).toHaveLength(1);
+    // Revision 9 (adapted count): the showing's read, and the opening read of the observation the session now begins of that service
+    // (it had none), which is never a basis (made after the hiding).
+    expect(stale).toHaveLength(2);
     hideImport(first);
     w.route.go("/sync");
     back(w);
@@ -846,5 +868,243 @@ describe("R7a/R7b (revision 8): the invalidation witness, the page runtime's ser
     const v = pageWorld(other);
     openImport(ROW, v.context());
     expect(other.watchers()).toBe(0);
+  });
+
+  /*
+   * WEB-13b revision 9 (review 9 R7c; design assessment C1, C6, invariants 2, 4, 5; schedules T1, T3, T4, T10): ONLY a read made for the
+   * showing verifies a session shown again. The publication that agrees with its basis (here the controller's `life()`, witness 4, the same
+   * as when it was hidden) is OLD: the commits below are quiet, so neither it nor the live reading heard them. Every assertion of the
+   * waiting state is made BEFORE the showing's read is delivered.
+   */
+  for (const entry of [ROW, CHOOSER])
+    for (const invalidated of [false, true])
+      test(`R7c (${entry.kind}): an old publication that agrees does not make it ready before the showing's read lands; that read ${invalidated ? "after W18 and a refill (witness 5) ends it" : "unchanged (control) makes it ready"}`, async () => {
+        const svc = service();
+        const w = pageWorld(svc);
+        controller(life());
+        const first = await kept(w, entry);
+        svc.hold();
+        if (invalidated) {
+          svc.commit({ cacheStatus: "invalid", invalidations: 5 }, true);
+          svc.commit({ cacheStatus: "valid" }, true);
+        }
+        back(w);
+        const again =
+          entry.kind === "chooser"
+            ? resumeChooser(w.context())
+            : openImport(ROW, w.context());
+        expect(again).toBe(first);
+        await settle();
+        // Held: the old agreeing publication is all there is, and it verifies nothing.
+        expect(svc.reads).toHaveLength(1);
+        expect(importStatus(first)).toBe("pending");
+        expect(first.ended()).toBe(false);
+        expect(first.state().window.from).toBe("2026-01-01");
+        for (const read of svc.reads.splice(0)) read.deliver();
+        await settle();
+        expect(importStatus(first)).toBe(invalidated ? "expired" : "ready");
+        expect(first.ended()).toBe(invalidated);
+      });
+
+  for (const tells of [true, false])
+    test(`R7c: hidden again (parked) while its read is under way, that read ${tells ? "telling an invalidation still ends it" : "agreeing verifies nothing; the next showing's read does"}`, async () => {
+      const svc = service();
+      const w = pageWorld(svc);
+      controller(life());
+      const first = await kept(w);
+      svc.hold();
+      if (tells) svc.commit({ cacheStatus: "valid", invalidations: 5 }, true);
+      back(w);
+      openImport(ROW, w.context());
+      const early = svc.reads.splice(0);
+      expect(early).toHaveLength(1);
+      hideImport(first);
+      w.route.go("/sync");
+      // Past the turn that hid it: parked.
+      await settle();
+      for (const read of early) read.deliver();
+      await settle();
+      if (tells) {
+        expect(importStatus(first)).toBe("expired");
+        return;
+      }
+      expect(importStatus(first)).toBe("pending");
+      back(w);
+      expect(openImport(ROW, w.context())).toBe(first);
+      await settle();
+      expect(importStatus(first)).toBe("pending");
+      expect(svc.reads).toHaveLength(1);
+      svc.reads[0]?.deliver();
+      await settle();
+      expect(importStatus(first)).toBe("ready");
+    });
+
+  test("R7c: a read that fails leaves it waiting; a later publication asks again, one read at a time, and that read verifies it", async () => {
+    const svc = service();
+    const w = pageWorld(svc);
+    const ctl = controller(life());
+    const first = await kept(w);
+    svc.fail();
+    back(w);
+    openImport(ROW, w.context());
+    await settle();
+    expect(importStatus(first)).toBe("pending");
+    expect(first.ended()).toBe(false);
+    svc.fail(false);
+    svc.hold();
+    // A hint, not a proof: it asks for another read.
+    ctl.set(life());
+    ctl.set(life());
+    expect(svc.reads).toHaveLength(1);
+    expect(importStatus(first)).toBe("pending");
+    svc.reads[0]?.deliver();
+    await settle();
+    expect(importStatus(first)).toBe("ready");
+  });
+
+  for (const variant of ["invalid", "streak", "lower"] as const)
+    test(`R7c: the showing's read ends it when it says ${variant === "invalid" ? "the cache is invalid" : variant === "streak" ? "an admitted invalidation is not written yet (its durable streak)" : "a witness BELOW its basis (another history)"}, though no publication heard it`, async () => {
+      const svc = service();
+      const w = pageWorld(svc);
+      controller(life());
+      const first = await kept(w);
+      svc.commit(
+        variant === "invalid"
+          ? { cacheStatus: "invalid" }
+          : variant === "streak"
+            ? { invalidating: true }
+            : { invalidations: 1 },
+        true,
+      );
+      back(w);
+      openImport(ROW, w.context());
+      await settle();
+      expect(importStatus(first)).toBe("expired");
+    });
+
+  for (const zero of [true, false])
+    test(`R7c: with no basis (hidden before any reading landed), a showing's read of ${zero ? "the witness's first value (0) verifies it" : "another value keeps it waiting (never ended) until its opening read lands as its basis; the next read then verifies it"}`, async () => {
+      const svc = service();
+      svc.commit({ invalidations: zero ? 0 : 3 });
+      svc.hold();
+      svc.unestablished();
+      const w = pageWorld(svc);
+      const first = openImport(ROW, w.context({ cache: null }));
+      hideImport(first);
+      w.route.go("/sync");
+      back(w);
+      expect(openImport(ROW, w.context({ cache: null }))).toBe(first);
+      // The opening read and the showing's read, both held.
+      const [opening, showing] = svc.reads.splice(0);
+      showing?.deliver();
+      await settle();
+      expect(importStatus(first)).toBe(zero ? "ready" : "pending");
+      if (zero) return;
+      expect(first.ended()).toBe(false);
+      opening?.deliver();
+      await settle();
+      expect(importStatus(first)).toBe("pending");
+      expect(svc.reads).toHaveLength(1);
+      svc.reads[0]?.deliver();
+      await settle();
+      expect(importStatus(first)).toBe("ready");
+    });
+
+  test("R7c (C3): with no basis and no observation at its opening, the observation begun at a later showing is no basis: another witness keeps it waiting", async () => {
+    const svc = service();
+    svc.commit({ invalidations: 3 });
+    const w = pageWorld(svc);
+    const first = openImport(ROW, w.context({ cache: null, service: null }));
+    hideImport(first);
+    w.route.go("/sync");
+    back(w);
+    expect(openImport(ROW, w.context({ cache: null }))).toBe(first);
+    await settle();
+    // Observed from now on (its opening read lands, 3), and read for the showing (3): neither says what it was when it was hidden.
+    expect(svc.watchers()).toBe(1);
+    expect(importStatus(first)).toBe("pending");
+    expect(first.ended()).toBe(false);
+  });
+
+  test("R7c: what an ENDED service last read no longer stands: shown through its invalidation and the refill another controller published, hidden afterwards, it is kept", async () => {
+    const svc = service();
+    const w = pageWorld(svc);
+    const ctl = controller(life());
+    const first = openImport(ROW, w.context());
+    await settle();
+    // Heard through the service while shown (a pending source's dialog stays open through a refresh): known invalid, witness 5.
+    svc.commit({ cacheStatus: "invalid", invalidations: 5 });
+    expect(first.ended()).toBe(false);
+    svc.end();
+    // The refill, published by the page's controller: shown, the session follows it (its basis 5).
+    ctl.set(life({ invalidations: 5 }));
+    hideImport(first);
+    w.route.go("/sync");
+    expect(first.ended()).toBe(false);
+    expect(importStatus(first)).toBe("ready");
+  });
+
+  test("R7c: the dialog remounted after it was really hidden waits for its read; Strict Mode's hide and show in one turn is no hiding (control)", async () => {
+    const svc = service();
+    const w = pageWorld(svc);
+    controller(life());
+    const first = openImport(ROW, w.context());
+    await settle();
+    svc.hold();
+    hideImport(first);
+    showImport(first);
+    await settle();
+    expect(importStatus(first)).toBe("ready");
+    expect(svc.reads).toHaveLength(0);
+    hideImport(first);
+    await settle();
+    showImport(first);
+    expect(importStatus(first)).toBe("pending");
+    expect(svc.reads).toHaveLength(1);
+    svc.reads[0]?.deliver();
+    await settle();
+    expect(importStatus(first)).toBe("ready");
+  });
+
+  test("R7c: a read whose service ended before it landed verifies nothing", async () => {
+    const svc = service();
+    const w = pageWorld(svc);
+    controller(life());
+    const first = await kept(w);
+    svc.hold();
+    back(w);
+    openImport(ROW, w.context());
+    expect(svc.reads).toHaveLength(1);
+    svc.end();
+    svc.reads[0]?.deliver();
+    await settle();
+    expect(importStatus(first)).toBe("pending");
+    expect(first.ended()).toBe(false);
+  });
+
+  test("R7c (C3): the service it observed ended: shown with the page's next service of the same database, it observes that one; another database's service is neither read nor observed", async () => {
+    const svc = service();
+    const w = pageWorld(svc);
+    controller(life());
+    const first = await kept(w);
+    svc.end();
+    const other = service("i2");
+    back(w);
+    expect(openImport(ROW, w.context({ service: other.double }))).toBe(first);
+    await settle();
+    expect(other.watchers()).toBe(0);
+    expect(importStatus(first)).toBe("pending");
+    const replacement = service();
+    hideImport(first);
+    w.route.go("/sync");
+    back(w);
+    openImport(ROW, w.context({ service: replacement.double }));
+    await settle();
+    expect(replacement.watchers()).toBe(1);
+    expect(importStatus(first)).toBe("ready");
+    hideImport(first);
+    w.route.go("/sync");
+    replacement.commit({ cacheStatus: "invalid", invalidations: 5 });
+    expect(importStatus(first)).toBe("expired");
   });
 });

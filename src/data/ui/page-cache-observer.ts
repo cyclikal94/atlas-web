@@ -33,15 +33,29 @@ export type CacheService = Pick<
   "store" | "incarnationId" | "ended" | "onEnd"
 >;
 
-/** The witness as ONE read made now says (null: the read failed, or the database has no singleton): a resume's fresh authority. */
-export async function readInvalidations(
+/** What ONE read of the sync facts says: the witness, and whether the cache is known to be invalid (as `CacheObservation`). */
+export interface CacheReading {
+  readonly invalidations: number | null;
+  readonly invalidated: boolean;
+}
+
+/**
+ * The cache as ONE read made now says (null: the read failed, or the database has no singleton): a resume's fresh authority (revision 9,
+ * review 9 R7c), which a publication cannot be, since nothing says when it was read.
+ */
+export async function readCache(
   service: CacheService,
-): Promise<number | null> {
+): Promise<CacheReading | null> {
   try {
     const facts = await service.store.run(readSyncFacts, {
       incarnationId: service.incarnationId,
     });
-    return facts?.invalidations ?? null;
+    return facts === null
+      ? null
+      : {
+          invalidations: facts.invalidations,
+          invalidated: facts.cacheStatus === "invalid" || facts.invalidating,
+        };
   } catch {
     return null;
   }
@@ -68,7 +82,9 @@ export function observeCache(service: CacheService): CacheObserver {
     for (const off of offs.splice(0)) off();
   };
   if (!service.ended) {
-    void readInvalidations(service).then((opening) => set({ opening }));
+    void readCache(service).then((opening) =>
+      set({ opening: opening?.invalidations ?? null }),
+    );
     const source = service.store.watch(readSyncFacts, {
       incarnationId: service.incarnationId,
     });
@@ -93,8 +109,9 @@ export function observeCache(service: CacheService): CacheObserver {
       };
     },
     dispose() {
-      end();
+      // Disposed: nothing is heard any more, its own ending included.
       listeners.clear();
+      end();
     },
   };
 }

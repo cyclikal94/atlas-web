@@ -119,8 +119,13 @@ export const UNIT_13B_R8 = [
     file: KEPT,
     tests: [T_KEPT],
     expect: /the opening read is the basis whenever it lands/,
+    // Re-anchored in revision 9 (R7c): the judgement's adoption of the opening read (a rebinding keeps its own, for the old observation).
     patch: (t) =>
-      sub(t, "  which.basis ??= which.observer?.get().opening ?? null;\n", ""),
+      sub(
+        t,
+        "  // The read made when it opened is what the database said then, whenever it lands.\n  if (which.opening) which.basis ??= which.observer?.get().opening ?? null;\n",
+        "",
+      ),
   },
   {
     id: "MU-2679",
@@ -130,20 +135,23 @@ export const UNIT_13B_R8 = [
     tests: [T_KEPT],
     expect:
       /observed while no controller is mounted|heard through the service|the observation ends with the service/,
+    // Re-anchored in revision 9 (R7c): the observation begun at the opening.
     patch: (t) =>
       sub(
         t,
-        "        ? observeCache(service)\n        : null,\n",
-        "        ? null\n        : null,\n",
+        "    observer: observing ? observeCache(service) : null,\n",
+        "    observer: null,\n",
       ),
   },
   {
     id: "MU-2681",
     title:
-      "WEB-13b R7a (revision 8): what an ended service read still stands for its database (a stale reading verifies a waiting session)",
+      "WEB-13b R7a (revision 8, re-expressed in revision 9): what an ended service read still stands for its database (a stale reading verifies a waiting session; since R7c, when no publication verifies, it ENDS a session shown through the refresh it no longer describes)",
     file: OBSERVER,
     tests: [T_KEPT],
-    expect: /WAITING|the chooser's Browse while it waits/,
+    // Re-expressed in revision 9 (R7c): the same patch SURVIVED (driver run 2026-10-28T09-54-29.553Z-fc5c2a04) once publications stopped
+    // verifying; its consequence now is a stale `invalidated` ending a session at its hiding.
+    expect: /what an ENDED service last read no longer stands/,
     patch: (t) =>
       sub(t, "    set({ invalidations: null, invalidated: false });\n", ""),
   },
@@ -168,12 +176,14 @@ export const UNIT_13B_R8 = [
       "WEB-13b R7a (revision 8): a read made at an earlier showing verifies a later one",
     file: KEPT,
     tests: [T_KEPT],
-    expect: /a read made at an EARLIER showing/,
+    expect:
+      /a read made at an EARLIER showing|agreeing verifies nothing; the next showing's read does/,
+    // Re-anchored in revision 9 (R7c): the showing's ticket in `verify`.
     patch: (t) =>
       sub(
         t,
-        "      else if (which.ticket === ticket && which.pending) {\n",
-        "      else if (which.pending) {\n",
+        "      which.ticket !== ticket ||\n      !which.pending ||\n",
+        "      !which.pending ||\n",
       ),
   },
   {

@@ -28,6 +28,7 @@ export type { Observation } from "./model/observation";
 export type {
   Bases,
   BuildResult,
+  Continuity,
   EnqueueRequest,
   TargetNeeds,
   TargetSpec,
@@ -176,9 +177,10 @@ export {
 export {
   type CacheObservation,
   type CacheObserver,
+  type CacheReading,
   type CacheService,
   observeCache,
-  readInvalidations,
+  readCache,
 } from "./ui/page-cache-observer";
 export {
   type ConflictRow,

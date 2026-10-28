@@ -1298,6 +1298,187 @@ test.describe("E-IMP8: the kept import across a protected-tree remount and a cac
     });
 
   /**
+   * E-IMP10 (WEB-13b revision 9, design assessment C2/T5; MORNING-TASK-APPROVALS-20261028): the verification and the enqueue are separate
+   * transactions, in a real engine's IndexedDB. The FOLLOWER page `two` has its import dialog OPEN and ready (a cached source, a file and a
+   * window), and every cross-tab wake to it is HELD, so it hears nothing more. The leader page `one` meets `410 resync_required` (W18) and
+   * fills the cache again (W23). Then `two` presses Import: the enqueue's own transaction, in `two`, reads the singleton the leader wrote, and
+   * the history the import states (`EnqueueRequest.continuity`, witness 0) is no longer it (witness 1), so nothing is stored, the dialog
+   * closes and says why. Control: the leader only syncs (no invalidation): one import is stored (its sending held in flight).
+   */
+  for (const invalidate of [true, false])
+    test(`E-IMP10 two pages: the follower's OPEN import, its wakes held, ${invalidate ? "pressed after the leader page invalidates (410) and refills: refused in its own transaction (expired), nothing stored, the dialog closes and says why" : "pressed while the leader page only syncs (control): one import stored"}`, async ({
+      context,
+    }) => {
+      test.setTimeout(120_000);
+      const net = await fresh(context);
+      net.answer = (call) =>
+        call.cursor === null
+          ? snapshotPage(
+              [{ kind: "upsert", resource: wireSource }],
+              "delta-0",
+              false,
+            )
+          : deltaPage([], call.cursor);
+      const cal = await stubCalendars(context);
+      cal.answers.set(IMPORT_PATH, [
+        { wait: new Promise<never>(() => undefined) },
+      ]);
+      const one = await leaderPage(context, net, "one", undefined, {
+        route: "/settings/calendars",
+      });
+      await expect(one.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible({
+        timeout: 30_000,
+      });
+      const twoPage = await context.newPage();
+      await twoPage.addInitScript(HOLD_CHANNELS);
+      const two = await leaderPage(context, net, "two", twoPage, {
+        route: "/settings/calendars",
+      });
+      await expect(two.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible({
+        timeout: 30_000,
+      });
+      expect(
+        (await untilLeader(two, (v) => v.attachment === "follower")).role,
+      ).toBe("follower");
+      expect((await leaderOf(one)).role).toBe("leader");
+      const before = await rows(two, "sync_state");
+      const dialog = two.getByRole("dialog", {
+        name: "Import events",
+        exact: true,
+      });
+      await two
+        .getByRole("button", { name: "Import events into Work rota" })
+        .click();
+      await dialog.locator('input[type="file"]').setInputFiles({
+        name: "verified.ics",
+        mimeType: "text/calendar",
+        buffer: Buffer.from(calendarText(1).replace("Bin day 0", "IMP10-MARK")),
+      });
+      await expect(dialog.locator("[data-import-file]")).toContainText(
+        "verified.ics",
+      );
+      await dialog.getByLabel("From", { exact: true }).fill("2026-01-01");
+      await dialog.getByLabel("Through", { exact: true }).fill("2026-12-31");
+      const press = dialog.getByRole("button", { name: "Import", exact: true });
+      await expect(press).toBeEnabled();
+      await two.evaluate(() => {
+        (window as unknown as { __holdChannels: boolean }).__holdChannels =
+          true;
+      });
+      const history: unknown[] = [];
+      let resync = false;
+      let snapshot!: (page: ReturnType<typeof snapshotPage>) => void;
+      const heldSnapshot = new Promise<ReturnType<typeof snapshotPage>>(
+        (resolve) => {
+          snapshot = resolve;
+        },
+      );
+      net.answer = (call) => {
+        if (invalidate && !resync) {
+          resync = true;
+          return {
+            status: 410,
+            body: JSON.stringify(atlasBody("resync_required")),
+          };
+        }
+        return call.cursor === null ? heldSnapshot : deltaPage([], call.cursor);
+      };
+      await one.evaluate(() => window.__atlasFixture?.session?.leaderNudge());
+      if (!invalidate)
+        await expect
+          .poll(() => net.calls.filter((c) => c.page === "one").length, {
+            timeout: 15_000,
+          })
+          .toBeGreaterThan(1);
+      else {
+        await expect
+          .poll(async () => (await rows(one, "sync_state"))[0]?.cache_status, {
+            timeout: 15_000,
+          })
+          .toBe("invalid");
+        history.push(await rows(one, "sync_state"));
+        await expect
+          .poll(() => net.calls.filter((c) => c.cursor === null).length, {
+            timeout: 15_000,
+          })
+          .toBe(2);
+        snapshot(
+          snapshotPage(
+            [{ kind: "upsert", resource: wireSource }],
+            "delta-refreshed",
+            false,
+            21,
+          ),
+        );
+        await expect
+          .poll(async () => (await rows(one, "sync_state"))[0]?.cache_status, {
+            timeout: 15_000,
+          })
+          .toBe("valid");
+        history.push(await rows(one, "sync_state"));
+      }
+      // Heard nothing: the dialog is open and ready as it was (the cached source's E9 close never ran).
+      await expect(dialog).toBeVisible();
+      await expect(press).toBeEnabled();
+      const heldBefore = await two.evaluate(
+        () => (window as unknown as { __heldMessages: number }).__heldMessages,
+      );
+      await press.click();
+      if (invalidate) {
+        await expect(dialog).toBeHidden();
+        await expect(two.locator('[aria-live="polite"]')).toContainText(
+          "Import closed while your calendar sources are brought up to date.",
+        );
+      } else await expect(dialog).toBeHidden();
+      const importDrafts = async () =>
+        ((await rows(one, "drafts")) as Array<Record<string, unknown>>).filter(
+          (d) => d.endpoint === IMPORT_ENDPOINT,
+        );
+      if (!invalidate)
+        await expect.poll(async () => (await importDrafts()).length).toBe(1);
+      const seen = {
+        heldBefore,
+        after: await rows(two, "sync_state"),
+        imports: (await importDrafts()).length,
+        bodies: (await rows(one, "draft_commands")).length,
+        posts: posts(cal, IMPORT_PATH).length,
+        leaked: await one.evaluate(() => {
+          const found: string[] = [];
+          for (const store of [localStorage, sessionStorage])
+            for (let i = 0; i < store.length; i += 1) {
+              const key = store.key(i) ?? "";
+              if (`${key}${store.getItem(key)}`.includes("IMP10-MARK"))
+                found.push(key);
+            }
+          return found;
+        }),
+      };
+      await two.evaluate(() =>
+        (
+          window as unknown as { __releaseChannels: () => void }
+        ).__releaseChannels(),
+      );
+      await test.info().attach("observations", {
+        body: JSON.stringify({ invalidate, before, history, seen }, null, 2),
+        contentType: "application/json",
+      });
+      type Sync = { incarnation_id?: string; cache_invalidation_seq?: number };
+      expect((seen.after[0] as Sync).incarnation_id).toBe(
+        (before[0] as Sync).incarnation_id,
+      );
+      expect((seen.after[0] as Sync).cache_invalidation_seq ?? 0).toBe(
+        invalidate ? 1 : 0,
+      );
+      expect(seen.leaked).toEqual([]);
+      if (invalidate) {
+        expect(seen.heldBefore).toBeGreaterThan(0);
+        expect(seen.imports).toBe(0);
+        expect(seen.bodies).toBe(0);
+        expect(seen.posts).toBe(0);
+      } else expect(seen.imports).toBe(1);
+    });
+
+  /**
    * E-IMP9 (WEB-13b revision 8, review 8 R7b; design assessment T2/T6): review 8's pending-source schedule in a real engine. The import is
    * composed by the FOLLOWER page `two` against a PENDING source while the cache is still EMPTY (the first snapshot is held; the source's
    * create is held in flight), and kept by the sync control. The leader page `one` then completes the first fill and, in the invalidation

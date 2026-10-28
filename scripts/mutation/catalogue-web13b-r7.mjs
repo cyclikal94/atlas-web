@@ -68,13 +68,14 @@ export const UNIT_13B_R7 = [
     file: KEPT,
     tests: [T_KEPT, T_RET],
     // Re-anchored in revision 8 (R7a): the read made when it is shown again ADOPTS what it finds instead of comparing it with the basis.
+    // Re-anchored again in revision 9 (R7c): the same adoption in `verify`, the only read that can verify a showing now.
     expect:
-      /it waits for a read made THEN|released after W18 -> W23: it closes/,
+      /it waits for a read made THEN|released after W18 -> W23: it closes|that read after W18 and a refill \(witness 5\) ends it|a witness BELOW its basis/,
     patch: (t) =>
       sub(
         t,
-        '      if (now > basis) release(which, "expired");\n      else if',
-        "      if (now > basis) which.basis = now;\n      if",
+        '        now.invalidations !== basis)\n    ) {\n      release(which, "expired");',
+        '        ((which.basis = now.invalidations), false))\n    ) {\n      release(which, "expired");',
       ),
   },
   {
@@ -133,7 +134,13 @@ export const UNIT_13B_R7 = [
     file: KEPT,
     tests: [T_KEPT],
     expect: /C3: shown through an invalidation/,
-    patch: (t) => sub(t, "  else which.judge();\n", ""),
+    // Re-anchored in revision 9 (R7c): the hide's judgement now precedes its parking.
+    patch: (t) =>
+      sub(
+        t,
+        "  which.judge();\n  // Still hidden once this turn is over",
+        "  // Still hidden once this turn is over",
+      ),
   },
   {
     id: "MU-2663",
@@ -217,12 +224,15 @@ export const UNIT_13B_R7 = [
     tests: [T_KEPT],
     // Re-anchored in revision 8: the judgement made before it is shown again. With a basis, the waiting judgement that follows makes the
     // same comparison (a second layer); without one, only this judgement sees a cache known to be invalid.
+    // Re-anchored again in revision 9 (R7c): `resume` now judges every showing as waiting (basis or not), so that earlier judgement was a
+    // redundant layer (this mutant SURVIVED, driver run 2026-10-28T09-34-17.080Z-f4744cd4) and was removed; the defect is now the showing's
+    // own judgement skipped (its read still asked for).
     expect: /KNOWN invalid when it is shown again/,
     patch: (t) =>
       sub(
         t,
-        "    which.judge();\n    if (held !== which) return null;\n    resume(which, context);\n",
-        "    resume(which, context);\n",
+        "  rebind(which, context.service ?? null);\n  which.judge();\n}\n",
+        "  rebind(which, context.service ?? null);\n  if (which.pending && which.shown) verify(which);\n}\n",
       ),
   },
 ];
