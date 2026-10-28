@@ -1,5 +1,5 @@
 import { useNavigate } from "@tanstack/react-router";
-import { useId, useReducer, useRef, useState } from "react";
+import { useEffect, useId, useReducer, useRef, useState } from "react";
 import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
@@ -34,7 +34,9 @@ import { Choices, FieldError, useOutboxSave } from "../parts";
 /**
  * "New person" (§4.2). Name, who can see the person ("Use my defaults — {resolved}" / "Only you") and an optional first note. Saved as ONE
  * queued `/commands` batch, `create_person` then `create_field` (SHARE-10), offline-capable. A hidden note keeps its text and is not sent
- * (PRODUCT-DECISIONS item 2). The in-dialog sync control keeps the draft for this identity; Cancel, Escape and the close icon discard it.
+ * (PRODUCT-DECISIONS item 2). What is typed is kept for this identity as it is typed, with its editing session, so the sync control or a
+ * remount (a 403, or the list moving at the tablet width) keeps the latest input and the same session (review 19, finding 1); Cancel,
+ * Escape and the close icon discard it.
  * A save ends only the editing session it was made in (`lifetime.ts`, review 6, finding 1): a form opened after Cancel is another one.
  * And a session saves once at a time (review 7, finding 1): a form reopened while its save runs shows it saving, and admits no second
  * create; a retry of the same input is the same request (the same person, note and local ids), so a save that was written but whose
@@ -95,6 +97,19 @@ function NewPersonForm({ onClose }: { onClose(): void }) {
     keep: () => setRefusal(copy.LATER_EDITS_KEPT),
     report: (update) => setRefusal(update.refusal),
   });
+
+  // The latest input is kept as it changes, not only by the sync control: a remount restores the same session with what was typed last
+  // (review 19, finding 1), so its running save, prepared request and completion stay attached to it. Only the session's form keeps it:
+  // once the session ended (Cancel, Escape, the close icon) this form no longer owns it and keeps nothing again (review 8, finding 1), and
+  // an older form never overwrites a later session's. An untouched new form keeps nothing.
+  useEffect(() => {
+    if (!owns()) return;
+    if (state.revision === 0 && !restored.current) return;
+    env.memory.drafts.set(RETAINED, {
+      session,
+      form: state,
+    } satisfies RetainedPerson);
+  }, [env, session, state, owns]);
 
   const resolved = personDefaultsLabel(defaults.record);
   const defaultsUnknown =

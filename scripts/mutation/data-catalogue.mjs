@@ -26247,6 +26247,89 @@ export const UNIT = [
         "",
       ),
   },
+  {
+    id: "MU-2870",
+    title:
+      "WEB-11a R19.1: New person keeps its input only through the sync control (the reviewed defect: a remount loses what was typed and its session)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: [
+      "tests/features/people/completion-lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /keeps its latest input and session across a remount (the same identity's tree remounted|the list moved at the tablet width)|New person remounted while its save runs remounted and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "    env.memory.drafts.set(RETAINED, {\n      session,\n      form: state,\n    } satisfies RetainedPerson);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2871",
+    title:
+      "WEB-11a R19.1: New person keeps only what the form opened with (input typed later, after an earlier sync-control snapshot, is lost)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect:
+      /typed after an earlier sync-control snapshot, then (remounted|moved at the tablet width): the later input/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [env, session, state, owns]);\n",
+        "    // biome-ignore lint/correctness/useExhaustiveDependencies: mutant\n  }, [env, session, owns]);\n",
+      ),
+  },
+  {
+    id: "MU-2872",
+    title:
+      "WEB-11a R19.1: an untouched New person is kept too (a remounted empty form says its unsaved changes were kept)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: ["tests/features/people/completion-lifetime.test.tsx"],
+    expect: /control: an untouched form remounted keeps nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (state.revision === 0 && !restored.current) return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2873",
+    title:
+      "WEB-11a R19.1: a restored New person begins a new session (its running save, prepared request and completion are no longer its own)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: [
+      "tests/features/people/completion-lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /reopened with the name, the note and the same session|remounted and reopened while its save runs: it shows saving|kept by the sync control and reopened while its save runs/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const [session] = useState(() => sessionOf(retained) ?? env.newId());\n",
+        "  const [session] = useState(() => env.newId());\n",
+      ),
+  },
+  {
+    id: "MU-2874",
+    title:
+      "WEB-11a R19.1: a restored New person opens empty (the kept form is ignored, though its session is restored)",
+    file: "src/features/people/list/NewPersonDialog.tsx",
+    tests: [
+      "tests/features/people/completion-lifetime.test.tsx",
+      "tests/features/people/session-admission.test.tsx",
+    ],
+    expect:
+      /reopened with the name, the note and the same session|typed after an earlier sync-control snapshot|while the form is remounted and reopened: told to the reopened form/,
+    patch: (t) =>
+      sub(
+        t,
+        "    retained?.form ?? newPersonForm(),\n",
+        "    newPersonForm(),\n",
+      ),
+  },
 
   ...UNIT_LABELS,
   ...UNIT_WEB10B,

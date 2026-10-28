@@ -278,6 +278,134 @@ describe("review 7, finding 1: New person admits one save per session", () => {
   });
 });
 
+/**
+ * Review 19, finding 1 (`people-retained-form-pending-admission`): the same schedules as above, with the form REMOUNTED (the same identity's
+ * tree mounted again over its page memory, as after a 403) instead of kept by the sync control. Before the correction the remounted form
+ * began a new session, so Save was enabled beside the running save.
+ */
+describe("review 19, finding 1: New person remounted while its save runs", () => {
+  const remount = async (w: PeopleWorld) => {
+    cleanup();
+    return w.mount("/people");
+  };
+
+  for (const note of [false, true])
+    test(`${note ? "with a first note: " : ""}remounted and reopened while its save runs: it shows saving, admits nothing more, and the completion closes it onto the saved person`, async () => {
+      const w = peopleWorld();
+      w.setCache([]);
+      w.env.setDefaults(record());
+      const g = holdEnqueue(w);
+      await w.mount("/people");
+      let d = await newPerson();
+      fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+        target: { value: "One person" },
+      });
+      if (note) {
+        fireEvent.click(
+          within(d).getByRole("button", { name: "Add a first note" }),
+        );
+        fireEvent.change(within(d).getByRole("textbox", { name: /note/i }), {
+          target: { value: "First note" },
+        });
+      }
+      fireEvent.click(saveButton(d));
+      await waitFor(() => expect(g.state.entered).toBe(1));
+      const { router } = await remount(w);
+      d = await newPerson();
+      expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue(
+        "One person",
+      );
+      expect(saveButton(d)).toBeDisabled();
+      expect(within(d).getByText(SAVING)).toBeInTheDocument();
+      fireEvent.click(saveButton(d));
+      fireEvent.submit(
+        within(d)
+          .getByRole("textbox", { name: "Name" })
+          .closest("form") as HTMLFormElement,
+      );
+      await g.release();
+      await waitFor(() => expect(w.built).toHaveLength(1));
+      expect(g.asked).toHaveLength(1);
+      const commands = (w.built[0]?.command.commands ?? []) as unknown[];
+      expect(commands).toHaveLength(note ? 2 : 1);
+      await waitFor(() =>
+        expect(screen.queryByRole("dialog", { name: "New person" })).toBeNull(),
+      );
+      expect(router.state.location.pathname).toMatch(/^\/people\/.+/);
+      expect(w.people.memory.drafts.get("new-person")).toBeUndefined();
+    });
+
+  for (const answer of ["refused", "threw"] as const)
+    test(`a save ${answer === "refused" ? "refused (quota)" : "that threw (its answer lost)"} while the form is remounted and reopened: told to the reopened form, input kept, and the retry of the same input is the same request`, async () => {
+      const w = peopleWorld();
+      w.setCache([]);
+      w.env.setDefaults(record());
+      if (answer === "refused")
+        w.outcomes.push({ kind: "refused", reason: "quota" });
+      const g = holdEnqueue(w, { throws: answer === "threw" });
+      await w.mount("/people");
+      let d = await newPerson();
+      fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+        target: { value: "One person" },
+      });
+      fireEvent.click(saveButton(d));
+      await waitFor(() => expect(g.state.entered).toBe(1));
+      await remount(w);
+      d = await newPerson();
+      expect(saveButton(d)).toBeDisabled();
+      await g.release();
+      await waitFor(() =>
+        expect(
+          within(d).queryByText(
+            answer === "refused" ? REFUSED.quota : REFUSED.storage,
+          ),
+          "the refusal is told to the reopened form",
+        ).not.toBeNull(),
+      );
+      expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue(
+        "One person",
+      );
+      expect(w.built).toHaveLength(0);
+      expect(saveButton(d)).toBeEnabled();
+      fireEvent.click(saveButton(d));
+      await waitFor(() => expect(w.built).toHaveLength(1));
+      expect(g.asked).toHaveLength(2);
+      expect(g.asked[1]?.localId).toBeDefined();
+      expect(g.asked[1]?.localId).toBe(g.asked[0]?.localId);
+      expect(w.built[0]?.localId).toBe(g.asked[0]?.localId);
+    });
+
+  test("remounted, reopened and cancelled while its save runs: the next form is a new session, not held back", async () => {
+    const w = peopleWorld();
+    w.setCache([]);
+    w.env.setDefaults(record());
+    const g = holdEnqueue(w);
+    await w.mount("/people");
+    let d = await newPerson();
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "One person" },
+    });
+    fireEvent.click(saveButton(d));
+    await waitFor(() => expect(g.state.entered).toBe(1));
+    await remount(w);
+    d = await newPerson();
+    expect(saveButton(d)).toBeDisabled();
+    fireEvent.click(within(d).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    d = await newPerson();
+    expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue("");
+    fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+      target: { value: "Second person" },
+    });
+    expect(saveButton(d)).toBeEnabled();
+    await g.release();
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue(
+      "Second person",
+    );
+  });
+});
+
 describe("review 7, finding 1: the field editor admits one save per session", () => {
   for (const remounted of [true, false])
     test(`a queued create ${remounted ? "remounted (a 403 elsewhere) while its save runs: the restored editor shows it saving and admits nothing" : "control: pressed again in the same editor"}`, async () => {

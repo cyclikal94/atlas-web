@@ -57,6 +57,8 @@ import {
  * person from the same read, across two real pages (R16.1, DA16-S1, A14).
  * Review 17 (27 October 2026): E-P41 retained rejections over a field never make it unreachable on the detail or in the archived ledger,
  * read through real IndexedDB's multi-entry target index (R17.1, A2, A12, A19).
+ * Review 19 (28 October 2026): E-P42 New person keeps its latest input and session across the production remounts (the list moving at the
+ * tablet width, the protected tree after a 403), against the sync control (R19.1, A8, A21).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -3700,5 +3702,101 @@ test.describe("E-P41: retained history never hides a cached field, in real Index
         2 * count,
       );
       recordEvidence(info, "e-p41", { count, stored: stored.length });
+    });
+});
+
+test.describe("E-P42: New person keeps what was typed across a remount of the same identity (A8, A21; review 19, R19.1)", () => {
+  for (const boundary of ["sync control", "tablet width", "403"] as const)
+    test(`${boundary === "sync control" ? "control, kept by the sync control" : boundary === "tablet width" ? "1440×900 to 834×1112: the list moves and the form is remounted" : "a 403 remounts the protected tree"}: reopened with the name and note, then saved as one batch`, async ({
+      context,
+    }, info) => {
+      // The 403 is held until the input is typed: the remount it causes must come AFTER the input exists, or there is nothing to lose.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { page, served } = await setup(
+        context,
+        "/people",
+        [personP(P, "Existing person")],
+        boundary === "403"
+          ? {
+              arrange: (s) =>
+                s.summaryScript.push({
+                  status: 403,
+                  body: atlas("forbidden"),
+                  after: held,
+                }),
+            }
+          : {},
+      );
+      const open = async () => {
+        await page.locator('[data-people-action="new-person"]').first().click();
+        return page.getByRole("dialog", { name: "New person" });
+      };
+      let dialog = await open();
+      await dialog.getByRole("textbox", { name: "Name" }).fill("Unsent person");
+      await dialog.getByRole("button", { name: "Add a first note" }).click();
+      await dialog
+        .getByRole("textbox", { name: "First note" })
+        .fill("Unsent note");
+      await dialog.evaluate((el) => el.setAttribute("data-e-p42-before", ""));
+      if (boundary === "sync control") {
+        await dialog.getByRole("button", { name: /sync/i }).click();
+        await expect(page.locator("[data-e-p42-before]")).toHaveCount(0);
+        await navigateInApp(page, "/people");
+      } else if (boundary === "tablet width") {
+        await page.setViewportSize({ width: 834, height: 1112 });
+        await expect(page.locator("[data-e-p42-before]")).toHaveCount(0);
+      } else {
+        await expect
+          .poll(() =>
+            served.log.some((line) => line.startsWith("GET /people/summaries")),
+          )
+          .toBe(true);
+        release();
+        await expect(page.locator("[data-e-p42-before]")).toHaveCount(0);
+      }
+      // The remount closed the form (whether it is open is the list's); it is reopened by hand.
+      dialog = page.getByRole("dialog", { name: "New person" });
+      if ((await dialog.count()) === 0) dialog = await open();
+      await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue(
+        "Unsent person",
+      );
+      await expect(
+        dialog.getByRole("textbox", { name: "First note" }),
+      ).toHaveValue("Unsent note");
+      await expect(dialog).toContainText("Your unsaved changes were kept.");
+      await expect(dialog.getByRole("button", { name: "Save" })).toBeEnabled();
+      await dialog.getByRole("button", { name: "Save" }).click();
+      await expect(dialog).toBeHidden();
+      // Read through the harness's own handle when the page holds none (after the 403 the tree's service is a new one), as E-P2b does.
+      const stored = (name: "drafts" | "draft_commands") =>
+        page.evaluate(
+          async ([a, store]) => {
+            const data = window.__atlasData;
+            if (!data) return [];
+            if (!data.stores.has(a)) {
+              data.setIdentity(a);
+              await data.open(a);
+            }
+            return data.rows(a, store);
+          },
+          [ME, name] as const,
+        );
+      const drafts = (await stored("drafts")) as Array<{ kind: string }>;
+      expect(drafts.map((d) => d.kind)).toEqual(["create_person"]);
+      const [body] = (await stored("draft_commands")) as Array<{
+        command: {
+          commands: Array<{ kind: string; name?: string; value?: string }>;
+        };
+      }>;
+      expect(
+        body?.command.commands.map((c) => [c.kind, c.name ?? c.value]),
+      ).toEqual([
+        ["create_person", "Unsent person"],
+        ["create_field", "Unsent note"],
+      ]);
+      recordEvidence(info, "e-p42", { boundary, log: served.log });
     });
 });

@@ -277,7 +277,9 @@ reopens it with its draft), and `/settings/archived`.
 - **D-11a-24** (review 6 of 23 October 2026, finding 1) A save's completion ends only the EDITING SESSION it was made in (`lifetime.ts`).
   The field editor, New person and the rename form keep their input under a draft key with a session id; a remount of the tree or going
   away and back restores the same session, while Cancel, Escape and the close icon end it (the next "Add a field", "New person" or Rename
-  begins another). The mounted form of a session registers itself in page memory (`memory.sessions`, the latest mount wins, a mount
+  begins another). Each keeps its input AS IT IS TYPED, not only when the sync control is used (review 19, finding 1: New person kept
+  only the sync control's snapshot, so a remount lost later input and began a new session beside a running save); an untouched New
+  person keeps nothing. The mounted form of a session registers itself in page memory (`memory.sessions`, the latest mount wins, a mount
   withdraws only itself). When a save completes, `completeSession` ends that session only: its kept input is forgotten and the form that
   shows it now (if any) closes, onto the saved person for New person; input typed after the saved revision stays, with "Saved. Your later
   changes are still here and aren't saved yet."; a session that already ended or was replaced, or another identity, is not touched (the
