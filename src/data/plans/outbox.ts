@@ -843,9 +843,9 @@ export function draftStopped(
 
 /**
  * `markInFlight`: ONE transaction flips `queued` to `in_flight` and inserts one candidate row per primary target, with
- * `submitted_at_page_seq = sync_state.page_seq`. A resend (the draft is already `in_flight`) inserts only the rows that are missing
- * and never overwrites `submitted_at_page_seq` (a mention of the resource BEFORE this page must not clear the overlay of a change
- * sent after it).
+ * `submitted_at_page_seq = sync_state.page_seq` and `submitted_at_request_seq = sync_state.request_seq` (R20-SEG). A resend (the draft is
+ * already `in_flight`) inserts only the rows that are missing and never overwrites either (a mention of the resource BEFORE this page must
+ * not clear the overlay of a change sent after it).
  *
  * The claim is where a send is ADMITTED, so it is where a stop is enforced (R46, revision 28): the dispatcher chose this draft from a
  * read made before, and another writer may have stopped it since (the facade's edit failed three times, or recorded its stop in the
@@ -907,9 +907,11 @@ export const markInFlight = guardedPlan<
       return { result: { kind: "stopped" } };
     const flipped = draft.status === "queued";
     const have = new Set(reads.effects.map((row) => row.resource_id));
-    const missing = candidateRows(draft, sync.page_seq).filter(
-      (row) => !have.has(row.resource_id),
-    );
+    const missing = candidateRows(
+      draft,
+      sync.page_seq,
+      sync.request_seq,
+    ).filter((row) => !have.has(row.resource_id));
     const claimed: DraftRow = flipped
       ? { ...draft, status: "in_flight" }
       : draft;

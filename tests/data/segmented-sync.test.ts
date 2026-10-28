@@ -198,12 +198,18 @@ function seedLocalWork(w: PageWorld): void {
       resource_id: uuid(2),
       local_id: "d1",
       display: { label: "shown" },
-      no_publication_floor: 1,
+      // Claimed at request 0, receipted while request 2 was in flight (its floor): see the chronology below.
+      submitted_at_request_seq: 0,
+      no_publication_floor: 2,
     }),
   ]);
   w.put("resource_versions", [
     versionRow({ resource_id: uuid(3), locally_assumed_version: 1 }),
   ]);
+  // The order is stated (R20-SEG: a staged word is evidence only about a row claimed before its request was captured). d1 was claimed at
+  // request 0 and receipted while request 2, which carries every piece of the revision, was in flight: the staged words reach it (2 > 0),
+  // and the final piece is not the live edge's proof for it (2 > 2 is false), so its release is by mention alone, as this test always was.
+  w.setSync({ request_seq: 2 });
 }
 
 describe("U1: the scan reads a segment only where it was asked for", () => {

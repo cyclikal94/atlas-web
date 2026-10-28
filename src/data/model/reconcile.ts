@@ -15,12 +15,42 @@ import type { DraftRow, PendingEffectRow, ResourceVersionRow } from "./types";
  *  - RELEASE (b): the same transaction moves a draft's `held_pending_cache` to `unavailable_outcome`;
  *  - reconciles `resource_versions` for the ids it names, and removes whatever is now finished.
  *
+ * A STAGED word (WEB-09c, R20-SEG) is the exception to "present-moment": the activation of a segmented revision moves into the cache words
+ * that earlier requests delivered, possibly long before, so such a word is evidence only about a candidate that already existed when its
+ * request was captured (`stagedMentionReaches`). To any other candidate the page does not name the id.
+ *
  * The cache itself is written by the caller, one change at a time. Nothing here reads a clock or the database.
  */
 export interface Mention {
   /** The page's final word on the id: removed, or upserted at this version. */
   removed: boolean;
   version: number | null;
+  /**
+   * Present only for a word STAGED by an earlier segment of the revision and moved into the cache by the activation: the `request_seq` its
+   * request was captured with (null: unknown). Absent: the page's own word (an ordinary page, or the final segment), the present-moment view.
+   */
+  stagedRequestSeq?: number | null;
+}
+
+/**
+ * Whether `mention` is evidence about the candidate `row` (R20-SEG). The page's own words always are. A staged word is only when its request
+ * was captured STRICTLY after the row was created (`submitted_at_request_seq`): a request captured at or before the claim cannot reflect a
+ * command sent after it, and applying its word would retire the overlay, the held flag and then the draft of an edit the server has
+ * acknowledged, over content older than that edit. A row without the claim's witness uses its receipt's floor, which is later than the claim
+ * and so only stricter; a row with neither (in flight, written before the witness) is not reached. The comparison is the live edge's: strict,
+ * on the durable, monotone `request_seq`, never a batch revision (a delta batch can carry present-moment content under an older label).
+ */
+export function stagedMentionReaches(
+  mention: Mention,
+  row: PendingEffectRow,
+): boolean {
+  if (mention.stagedRequestSeq === undefined) return true;
+  const since = row.submitted_at_request_seq ?? row.no_publication_floor;
+  return (
+    mention.stagedRequestSeq !== null &&
+    since !== null &&
+    mention.stagedRequestSeq > since
+  );
 }
 
 export interface PageFacts {
@@ -137,7 +167,10 @@ export function reconcileEffects(input: EffectsInput): EffectsReconciled {
 
   for (const e of effects) {
     let row = e;
-    const mention = mentions.get(e.resource_id);
+    const word = mentions.get(e.resource_id);
+    // A staged word this row is not reached by leaves the id unnamed for it: the live edge decides, as if the piece came before the row.
+    const mention =
+      word !== undefined && stagedMentionReaches(word, e) ? word : undefined;
     if (mention) {
       // Release (a), first, per id. It settles this row's fate for the page entirely.
       row = { ...row, last_mentioned_page_seq: facts.pageSeq, display: null };

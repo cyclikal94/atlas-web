@@ -36,6 +36,12 @@ export interface DeltaStagingRow<Row> {
   revision: number;
   removed: boolean;
   row: Row | null;
+  /**
+   * The `request_seq` the request that delivered this word was captured with (R20-SEG): WHEN the word was true, which the activation needs
+   * because a staged word may be much older than the candidates it meets. Null: the request had none; absent (a row staged before it):
+   * unknown. Either way the word is evidence about no candidate (`stagedMentionReaches`).
+   */
+  request_seq?: number | null;
 }
 
 /** A segment as the scan read it. */

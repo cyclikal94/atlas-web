@@ -12,7 +12,8 @@ import { guardedPlan } from "./builders";
  * W27: one NON-FINAL segment of a delta revision into `delta_staging` (WEB-09c, segmented delivery; `model/segmented-sync.ts`).
  *
  * ONE transaction stages the segment and moves the position: the segment's changes are decoded one at a time from the offsets the scan recorded
- * (the same bounded decode as W1) and written as the LAST WORD per resource id, chunk by chunk, so nothing larger than a chunk is ever in hand;
+ * (the same bounded decode as W1) and written as the LAST WORD per resource id, chunk by chunk, so nothing larger than a chunk is ever in hand,
+ * each with the `request_seq` of the request that delivered it (R20-SEG: when the word was true, for the activation's reconciliation);
  * `sync_state.cursor` becomes the segment's continuation VERBATIM and `delta_stage` records where the revision began and which segment comes
  * next. NOTHING the person can see changes: not the cache, not `applied_revision`, `last_synced_at` or `page_seq`, not the queue, the
  * overlays or the composition generation. The final segment is W1's (`commitPage`), which applies every staged word and its own changes in
@@ -173,8 +174,10 @@ export const stageDeltaSegment = guardedPlan<
     const watchdogMs = input.watchdogMs ?? DATA_CONFIG.syncApplyWatchdogMs;
     const elapsed = input.elapsed ?? (() => performance.now());
     const startedAt = elapsed();
-    // The last word per id within one chunk; a later chunk's (or segment's) put of the same id replaces it, in order.
+    // The last word per id within one chunk; a later chunk's (or segment's) put of the same id replaces it, in order, and with it the
+    // request it came from: the activation judges each word by when it was true (R20-SEG, `stagedMentionReaches`).
     const words = new Map<string, DeltaStagingStoreRow>();
+    const requestSeq = input.captured.requestSeq;
     const flush = async (): Promise<void> => {
       if (words.size === 0) return;
       const rows = [...words.values()];
@@ -196,8 +199,20 @@ export const stageDeltaSegment = guardedPlan<
         words.set(
           id,
           change.kind === "upsert"
-            ? { id, revision: result.revision, removed: false, row: change.row }
-            : { id, revision: result.revision, removed: true, row: null },
+            ? {
+                id,
+                revision: result.revision,
+                removed: false,
+                row: change.row,
+                request_seq: requestSeq,
+              }
+            : {
+                id,
+                revision: result.revision,
+                removed: true,
+                row: null,
+                request_seq: requestSeq,
+              },
         );
         if (words.size >= chunkSize) await flush();
         if ((index + 1) % chunkSize === 0 && elapsed() - startedAt > watchdogMs)

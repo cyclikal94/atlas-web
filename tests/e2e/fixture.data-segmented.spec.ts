@@ -291,3 +291,242 @@ test.describe("N1-N4: a revision delivered in segments is staged, never shown, a
     });
   });
 });
+
+/**
+ * N5 and N6 (R20-SEG of the review of 28 October 2026): an edit made WHILE a revision is staged, through the production engine, the public
+ * enqueue facade, the outbox dispatcher and the receipt writer, in a real engine's IndexedDB. The review's native schedule, kept: segment 0 of
+ * revision 10 carries A = old; the edit is then sent and acknowledged (revision 11); the final segment does not name A and announces more
+ * (`has_more`); later requests are held with 503s, so the state after the activation is read before anything newer is served. A staged word
+ * older than the claim must not retire the acknowledged edit. Controls: ordinary pages (revision 10 before the edit, 11 after it) and a fresh
+ * word of A in the final segment. N6 puts a REAL reload between the receipt and the final segment: the staged words' requests and the claim's
+ * witness are durable, so the decision is the same.
+ */
+const A = "00000000-0000-4000-8000-000000000001";
+const id = (n: number) =>
+  `00000000-0000-4000-8000-${n.toString().padStart(12, "0")}`;
+const person = (rid: string, label: string, version: number) => ({
+  kind: "upsert",
+  resource: {
+    id: rid,
+    kind: "person",
+    parent_id: null,
+    label,
+    value: null,
+    version,
+    can_edit: true,
+    archived: false,
+    policy_version: 1,
+  },
+});
+const held = () =>
+  Array.from({ length: 12 }, () => () => ({ status: 503, body: "{}" }));
+type Mode = "ordinary" | "fresh" | "stale";
+const pieceBody = (
+  mode: Mode,
+  index: number,
+  changes: unknown[],
+  next: string,
+): string =>
+  JSON.stringify({
+    phase: "delta",
+    batches: [
+      {
+        revision: mode === "ordinary" && index === 1 ? 11 : 10,
+        changes,
+        ...(mode === "ordinary"
+          ? {}
+          : { segment: { index, last: index === 1 } }),
+      },
+    ],
+    next_cursor: next,
+    has_more: true,
+  });
+interface Local {
+  drafts: Array<Record<string, unknown>>;
+  effects: Array<Record<string, unknown>>;
+  cache: Array<{ id: string; label: string; version: number }>;
+  sync: Record<string, unknown>;
+}
+const local = (page: Page): Promise<Local> =>
+  page.evaluate(async (acct) => {
+    const data = window.__atlasData;
+    return {
+      drafts: ((await data?.rows(acct, "drafts")) ?? []) as Array<
+        Record<string, unknown>
+      >,
+      effects: ((await data?.rows(acct, "pending_effects")) ?? []) as Array<
+        Record<string, unknown>
+      >,
+      cache: ((await data?.rows(acct, "cache")) ?? []) as Array<{
+        id: string;
+        label: string;
+        version: number;
+      }>,
+      sync: ((await data?.syncState(acct)) ?? {}) as Record<string, unknown>,
+    };
+  }, ACCOUNT);
+
+/** Revision 10's first piece (staged, or an ordinary page), the edit sent and acknowledged; returns the state just after the receipt. */
+async function editBetweenPieces(
+  page: Page,
+  net: Awaited<ReturnType<typeof stubNetwork>>,
+  mode: Mode,
+): Promise<Local> {
+  const first = pieceBody(
+    mode,
+    0,
+    [
+      person(A, "old", 1),
+      ...[10, 11, 12].map((n) => person(id(n), "early", 1)),
+    ],
+    "c1",
+  );
+  net.script.push(() => ({ status: 200, body: first }), ...held());
+  await page.evaluate(
+    (acct) =>
+      window.__atlasData?.startSync(acct, {
+        seedCursor: "cursor-0",
+        segmentedCapable: true,
+        segmentedMaxChanges: 4,
+      }),
+    ACCOUNT,
+  );
+  await expect.poll(async () => (await local(page)).sync.cursor).toBe("c1");
+  await page.evaluate(() => window.__atlasData?.stopSync());
+  await page.evaluate(
+    async ({ acct, rid }) => {
+      // The previous complete revision held A at version 1: the staged piece repeats that older content.
+      await window.__atlasData?.put(acct, "cache", [
+        {
+          id: rid,
+          kind: "person",
+          parent_id: null,
+          label: "old",
+          value: null,
+          version: 1,
+          can_edit: true,
+          archived: false,
+          kind_date: null,
+        },
+      ]);
+      await window.__atlasData?.startOutbox(acct);
+    },
+    { acct: ACCOUNT, rid: A },
+  );
+  net.commandScript.push(() => ({
+    status: 200,
+    body: JSON.stringify({ revision: mode === "ordinary" ? 12 : 11 }),
+  }));
+  const queued = await page.evaluate(
+    (rid) =>
+      window.__atlasData?.enqueue({
+        endpoint: "/commands",
+        targets: [
+          {
+            resourceId: rid,
+            role: "primary",
+            basis: "resource",
+            versionChecked: true,
+          },
+        ],
+        command: { kind: "edit", id: rid, base: { $base: rid }, label: "new" },
+        displayPatch: { [rid]: { label: "new" } },
+      }),
+    A,
+  );
+  expect(queued?.kind).toBe("queued");
+  await expect
+    .poll(async () => (await local(page)).drafts)
+    .toMatchObject([{ status: "acknowledged" }]);
+  const after = await local(page);
+  expect(after.effects).toMatchObject([
+    { resource_id: A, display: { label: "new" } },
+  ]);
+  return after;
+}
+
+/** The second piece (the final segment, or the next ordinary page), served once, then held; returns the state after it applied. */
+async function finish(
+  page: Page,
+  net: Awaited<ReturnType<typeof stubNetwork>>,
+  mode: Mode,
+): Promise<Local> {
+  net.script.length = 0;
+  const last = pieceBody(
+    mode,
+    1,
+    [
+      person(id(2), "other", 1),
+      person(id(20), "later", 1),
+      person(id(21), "later", 1),
+      mode === "fresh" ? person(A, "new", 2) : person(id(29), "later", 1),
+    ],
+    "c2",
+  );
+  net.script.push(() => ({ status: 200, body: last }), ...held());
+  await page.evaluate(
+    (acct) =>
+      window.__atlasData?.startSync(acct, {
+        segmentedCapable: true,
+        segmentedMaxChanges: 4,
+      }),
+    ACCOUNT,
+  );
+  await expect
+    .poll(async () => (await local(page)).sync)
+    .toMatchObject({ cursor: "c2", delta_stage: null });
+  await page.evaluate(() => window.__atlasData?.stopSync());
+  return local(page);
+}
+
+const expectOutcome = (after: Local, mode: Mode) => {
+  expect(after.cache.find((row) => row.id === A)?.label).toBe(
+    mode === "fresh" ? "new" : "old",
+  );
+  if (mode === "fresh") {
+    expect(after.drafts).toEqual([]);
+    expect(after.effects).toEqual([]);
+  } else {
+    expect(after.drafts).toMatchObject([{ status: "acknowledged" }]);
+    expect(after.effects).toMatchObject([
+      {
+        resource_id: A,
+        display: { label: "new" },
+        last_mentioned_page_seq: null,
+      },
+    ]);
+  }
+};
+
+test.describe("N5 and N6: an edit acknowledged while a revision is staged keeps its receipt state (R20-SEG)", () => {
+  for (const mode of ["stale", "ordinary", "fresh"] as const)
+    test(`N5 ${mode}: ${mode === "stale" ? "an older staged word does not retire the later edit" : mode === "fresh" ? "control: the final segment's fresh word releases it" : "control: ordinary pages keep it"}`, async ({
+      context,
+    }, info) => {
+      const net = await stubNetwork(context);
+      await seedSettled(context);
+      const page = await bootSession(context);
+      const before = await editBetweenPieces(page, net, mode);
+      const after = await finish(page, net, mode);
+      expectOutcome(after, mode);
+      recordEvidence(info, `segmented-receipt-${mode}`, {
+        before,
+        after,
+        commands: net.commands.length,
+      });
+    });
+
+  test("N6: a real reload between the receipt and the final segment changes nothing of the decision", async ({
+    context,
+  }, info) => {
+    const net = await stubNetwork(context);
+    await seedSettled(context);
+    const page = await bootSession(context);
+    const before = await editBetweenPieces(page, net, "stale");
+    await page.evaluate(() => window.__atlasData?.stopOutbox());
+    await reboot(page);
+    const after = await finish(page, net, "stale");
+    expectOutcome(after, "stale");
+    recordEvidence(info, "segmented-receipt-reload", { before, after });
+  });
+});

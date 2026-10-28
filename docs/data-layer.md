@@ -63,7 +63,7 @@ by version 1 in three real engines, `tests/e2e/fixture.data-store.spec.ts`, E-A4
 | `form_recovery` | `[form_context+tab_instance_id]` | `form_context` | the form-recovery port |
 | `sync_state` | `key` (`"singleton"`) | none | the ordinary fields (see below) |
 | `cache_staging`, `materialise_sequences`, `reminder_firings` | | | created empty; owned by WEB-09b, WEB-10c and WEB-14b |
-| `delta_staging` (schema version 4, WEB-09c) | `id` | `revision` | W27 (a non-final segment of a delta revision: the last word per resource id) and W1 (the activation, which moves and deletes it); cleared by W18, W23 and W24's abandonment ("Segmented delta delivery" below) |
+| `delta_staging` (schema version 4, WEB-09c) | `id` | `revision` | W27 (a non-final segment of a delta revision: the last word per resource id, with the `request_seq` of the request that delivered it) and W1 (the activation, which moves and deletes it); cleared by W18, W23 and W24's abandonment ("Segmented delta delivery" below) |
 
 **Why a header and a body (D-23).** A command can be large (an import carries up to 1 MiB) and an IndexedDB read returns whole rows, so every scan, count and list of the queue read the bodies of drafts nobody
 was looking at. The header is the small row (about 2 KB) that every queue read, dispatch scan, summary, consent count and page reconciliation uses; the body is read for **one draft at a time**, when it is sent, edited or projected. The header gains a derived `kind` so the
@@ -424,6 +424,18 @@ parameter (an older server answers an unknown query parameter with `400 malforme
   from staging as it goes and recording each as a mention like a decoded change, then applies the segment's own changes in order, reconciles exactly as for a whole page,
   clears the stage and stores the ordinary cursor. Upserts and removals are absolute per id and staging keeps the last word per id, so the cache is the one the whole batch
   would have made; the person sees the previous revision until the commit and the next one after it; a failure anywhere rolls the activation back with the staging intact.
+* **A staged word is judged by WHEN it was true (R20-SEG, revision 20).** The cache takes every staged word; the local work does not. A delta page's words are the account's
+  present-moment view of the ids it names (release (a)), but a staged word was delivered by an EARLIER request, possibly long before the activation, and an edit may have been
+  sent and acknowledged in between. Each staged word therefore carries the `request_seq` of the request that delivered it (`delta_staging.request_seq`, the last word's), each
+  candidate row the `request_seq` of its claim (`pending_effects.submitted_at_request_seq`, written once by `markInFlight`), and a staged word is a mention only for a row
+  whose claim came BEFORE the word's request was captured: `word.request_seq > submitted_at_request_seq`, strictly, the live edge's comparison on the same durable, monotone
+  counter (`stagedMentionReaches` in `model/reconcile.ts`). To any other row the id is unnamed by the activation, so its overlay, held flag and draft stay until content that
+  can reflect the edit arrives (a later page, the final segment's own word, a fresh word of a later segment) or the live edge resolves it, exactly as if the earlier pieces had
+  been applied before the row existed. A row without the claim's witness (written before it) uses its receipt's floor, which is later and so only stricter; one with neither is
+  not reached. A batch revision is never the comparison (a delta batch can carry present-moment content under an older label, the 40/50/60 case). The final segment's own
+  words, ordinary pages and the snapshot's receipt boundary are unchanged; the recovery catch-up still leaves the bookkeeping to W26, whose `receipt_revision <= applied_revision`
+  stays sound here because a receipt at or below the revision being delivered committed before any piece of that revision was generated. Tests:
+  `tests/data/segmented-receipts.test.ts` (U11) and N5/N6 in `tests/e2e/fixture.data-segmented.spec.ts`.
 * **Continuity is decided by the writer, in its transaction, from the stored stage** (`continuityOf`): out of order, repeated, another revision, a later segment with nothing
   staged, a whole page while a revision is staged, or a non-final segment that ends the feed is BROKEN: the writer clears the staging and moves the position back to
   `boundary_cursor` (`restartStage`), and the engine counts an unrecognised answer (so a server that keeps breaking revisions pauses at the ordinary bound; a staged segment

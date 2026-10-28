@@ -45,7 +45,10 @@ import {
  * (each window deleted from staging as it is moved), recorded as a mention exactly like a decoded change, and then the final segment's own
  * changes are applied in order. Upserts and removals are absolute per id and staging keeps the last word per id, so the result is the
  * cache the whole batch would have made, and the person sees the previous revision until this transaction commits and the next one after
- * it. A failure anywhere rolls the activation back with the staging intact. A page that does not continue the stage (`continuityOf`:
+ * it. A failure anywhere rolls the activation back with the staging intact. The CACHE takes every staged word; the LOCAL WORK does not
+ * (R20-SEG): a staged word may be older than an edit made while the revision was arriving, so it is a mention only for the candidates that
+ * existed when its request was captured (`stagedMentionReaches`). For any other, the final segment's own words and the live edge decide,
+ * exactly as if the earlier pieces had been applied before the candidate existed. A page that does not continue the stage (`continuityOf`:
  * broken) applies nothing: the stage is abandoned and the position goes back to where the revision began (`restartStage`). A non-final
  * segment is W27's and is refused here (`not_ready: segment`).
  */
@@ -248,12 +251,22 @@ export const commitPage = guardedPlan<CommitPageInput, null, CommitPageResult>({
             if (word.revision !== result.revision)
               throw new PlanRejected("apply", "staging_revision");
             let ready: Run | null;
+            // A staged word is evidence only about the candidates that existed when its request was captured (R20-SEG).
+            const stagedRequestSeq = word.request_seq ?? null;
             if (word.removed || word.row === null) {
               ready = runs.remove(word.id);
-              record(word.id, { removed: true, version: null });
+              record(word.id, {
+                removed: true,
+                version: null,
+                stagedRequestSeq,
+              });
             } else {
               ready = runs.put(word.row);
-              record(word.id, { removed: false, version: word.row.version });
+              record(word.id, {
+                removed: false,
+                version: word.row.version,
+                stagedRequestSeq,
+              });
             }
             await flush(ready);
             if (chunk.size >= chunkSize) await lookUp();

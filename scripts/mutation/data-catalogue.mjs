@@ -275,8 +275,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        /const missing = candidateRows\(draft, sync\.page_seq\)\.filter\(\s*\(row\) => !have\.has\(row\.resource_id\),\s*\);/,
-        "const missing = candidateRows(draft, sync.page_seq);",
+        /const missing = candidateRows\(\s*draft,\s*sync\.page_seq,\s*sync\.request_seq,\s*\)\.filter\(\s*\(row\) => !have\.has\(row\.resource_id\),?\s*\);/,
+        "const missing = candidateRows(draft, sync.page_seq, sync.request_seq);",
       ),
   },
   {

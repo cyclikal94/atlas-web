@@ -154,6 +154,12 @@ export interface PendingEffectRow {
   created_at: IsoInstant;
   /** Written once, never overwritten by a resend. */
   submitted_at_page_seq: number;
+  /**
+   * WEB-09c (R20-SEG): `sync_state.request_seq` when the row was created (the claim), written once like `submitted_at_page_seq`. A word
+   * STAGED from a request captured at or before it is not evidence about this row (`stagedMentionReaches`). Absent on a row written before
+   * it: unknown (the receipt's floor, which comes later, stands in).
+   */
+  submitted_at_request_seq?: number;
   last_mentioned_page_seq: number | null;
   display: ProjectionPatch | null;
   resolved: "no_publication" | null;
