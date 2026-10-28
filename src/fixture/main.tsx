@@ -12,10 +12,8 @@ import {
   mountProtectedTree,
 } from "../protected-surface/gate";
 import { SessionProvider } from "../session";
-import { ControlsGallery } from "./ControlsGallery";
 import { type FixtureData, fixtureData } from "./data-env";
-import { GateGallery } from "./GateGallery";
-import { mountNeutralPage } from "./neutral-page";
+import { FixturePageReady } from "./page-ready";
 import { fixtureSession } from "./session-double";
 import type { SessionHarness } from "./session-harness/main";
 import "../styles/index.css";
@@ -140,9 +138,14 @@ function FixtureApp() {
   );
 }
 
+// The diagnostic pages (`/__neutral`, `/__controls`, `/__gate`) never render beside the shell, so they load on demand: the initial
+// JavaScript the fixture budget measures (perf-budget.json) is then the signed-in shell's, not the shell's plus every gallery's
+// (WEB-08d review r18 M1). They mark themselves ready once mounted (src/fixture/page-ready.tsx); specs wait for that.
 if (location.pathname === "/__neutral") {
   // One neutral state or the resume gate, for rendered checks (src/fixture/neutral-page.tsx).
-  mountNeutralPage(params);
+  void import("./neutral-page").then(({ mountNeutralPage }) =>
+    mountNeutralPage(params),
+  );
 } else if (location.pathname === "/__data") {
   // The data harness (the production Dexie adapter, host and open predicate in a real engine): src/fixture/data-harness.
   document.getElementById("neutral-root")?.replaceChildren();
@@ -164,6 +167,31 @@ if (location.pathname === "/__neutral") {
 ) {
   // The session harness (real adapters, real engine, no backend): see src/fixture/session-harness.
   void import("./session-harness/main");
+} else if (
+  location.pathname === "/__controls" ||
+  location.pathname === "/__gate"
+) {
+  const page =
+    location.pathname === "/__controls"
+      ? import("./ControlsGallery").then(({ ControlsGallery }) => (
+          <ControlsGallery />
+        ))
+      : import("./GateGallery").then(({ GateGallery }) => (
+          <DataEnvProvider env={data.env}>
+            <GateGallery />
+          </DataEnvProvider>
+        ));
+  void page.then((gallery) => {
+    const root = getProtectedRoot();
+    document.getElementById("neutral-root")?.replaceChildren();
+    liftGate(root);
+    mountProtectedTree(
+      root,
+      <ProtectedProviders>
+        <FixturePageReady>{gallery}</FixturePageReady>
+      </ProtectedProviders>,
+    );
+  });
 } else {
   const root = getProtectedRoot();
   // The real lifecycle (WEB-08a) decides when the boot gate goes; the fixture clears it and lifts the gate at once.
@@ -172,15 +200,7 @@ if (location.pathname === "/__neutral") {
   mountProtectedTree(
     root,
     <ProtectedProviders>
-      {location.pathname === "/__controls" ? (
-        <ControlsGallery />
-      ) : location.pathname === "/__gate" ? (
-        <DataEnvProvider env={data.env}>
-          <GateGallery />
-        </DataEnvProvider>
-      ) : (
-        <FixtureApp />
-      )}
+      <FixtureApp />
     </ProtectedProviders>,
   );
 }

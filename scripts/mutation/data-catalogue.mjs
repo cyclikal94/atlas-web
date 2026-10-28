@@ -6,6 +6,7 @@
 // code a mutant targets fails LOUDLY here instead of silently turning the mutant into a no-op ("patch applied" is asserted).
 
 import { ENGINE_LIFECYCLE, UNIT_LIFECYCLE } from "./catalogue-web08c.mjs";
+import { ENGINE_LABELS, UNIT_LABELS } from "./catalogue-web08d.mjs";
 import { ENGINE_R16, UNIT_R16 } from "./catalogue-web10a-r16.mjs";
 import { ENGINE_R17, UNIT_R17 } from "./catalogue-web10a-r17.mjs";
 import { ENGINE_R18, UNIT_R18 } from "./catalogue-web10a-r18.mjs";
@@ -21845,6 +21846,8 @@ export const UNIT = [
   ...UNIT_R24,
   ...UNIT_R25,
   ...UNIT_R26,
+
+  ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];
 
@@ -25316,5 +25319,7 @@ export const ENGINE = [
   ...ENGINE_R21,
   ...ENGINE_R22,
   ...ENGINE_R23,
+
+  ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
 ];

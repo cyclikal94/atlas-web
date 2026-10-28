@@ -19,6 +19,7 @@ import {
   deviceRow,
   sessionDouble,
   sessionRow,
+  WITHDRAW,
 } from "../../helpers/session-double";
 
 installMatchMedia({ width: 1440 });
@@ -134,24 +135,35 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
     expect(await screen.findByText("Another device")).toBeInTheDocument();
   });
 
-  test("rows carry neutral labels from real fields only (gaps G-1 to G-3)", async () => {
+  // WEB-08d: G-1 to G-3 are superseded (BE-Q25 labels, names and capacities). Their neutral rows remain the FALLBACK for an answer
+  // without the BE-Q25 members (a 0.27 server), and that is what this test now pins; the labelled rows are in session-labels.test.tsx.
+  test("rows carry neutral labels from real fields only (gaps G-1 to G-3; WEB-08d: the fallback for an answer without BE-Q25 members)", async () => {
     await mount({
       listSessions: vi.fn(async () => twoSessions()),
       readDevices: vi.fn(async () => twoDevices()),
     });
+    // Titles, plus the "This browser" tag on the current row (WEB-08d D-8d-05 replaces "Current session").
     const sessions = await screen.findAllByText(
       /^(This browser|Another sign-in)$/,
     );
-    expect(sessions).toHaveLength(2);
-    expect(screen.getByText("Current session")).toBeInTheDocument();
+    expect(sessions).toHaveLength(3);
+    expect(
+      document.querySelectorAll(
+        "[data-session-row=current] [data-current-tag]",
+      ),
+    ).toHaveLength(1);
     expect(
       screen.getAllByText(/Password · Signed in .* · Expires in/),
     ).toHaveLength(1);
     expect(
       screen.getByText(/Single sign-on · Signed in 3 days ago/),
     ).toBeInTheDocument();
-    expect(screen.getByText("This device")).toBeInTheDocument();
-    expect(screen.getByText("Current device")).toBeInTheDocument();
+    expect(
+      document.querySelector("[data-device-row=current]")?.textContent,
+    ).toContain("This device");
+    expect(
+      document.querySelectorAll("[data-device-row=current] [data-current-tag]"),
+    ).toHaveLength(1);
     expect(
       screen.getByText(/2 active sessions · Last synced/),
     ).toBeInTheDocument();
@@ -160,12 +172,23 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
       screen.getByText("0 active sessions · Never synced"),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Retire this other device" }),
+      screen.getByRole("button", {
+        name: "Retire another device, never synced",
+      }),
     ).toBeEnabled();
-    // Nothing the contract cannot supply is invented.
+    // Nothing the contract cannot supply is invented: without the members, both capacities are unavailable and naming is not offered.
     expect(document.body.textContent).not.toMatch(
       /room for|of 5|Chrome|macOS|iPhone/,
     );
+    expect(
+      document.querySelector("[data-capacity=sessions]")?.textContent,
+    ).toBe("We can't show how many sign-ins this account can have.");
+    expect(document.querySelector("[data-capacity=devices]")?.textContent).toBe(
+      "We can't show how many devices can sync.",
+    );
+    expect(
+      screen.queryAllByRole("button", { name: /^(Re)?[Nn]ame / }),
+    ).toHaveLength(0);
   });
 
   test("when only the person's own rows exist, they are the lists", async () => {
@@ -173,7 +196,7 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
       listSessions: vi.fn(async () => ok({ sessions: [sessionRow()] })),
       readDevices: vi.fn(async () => ok({ devices: [deviceRow()] })),
     });
-    await screen.findByText("This browser");
+    await screen.findAllByText("This browser");
     expect(document.querySelectorAll("[data-session-row]")).toHaveLength(1);
     expect(document.querySelectorAll("[data-device-row]")).toHaveLength(1);
   });
@@ -188,7 +211,10 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
       listSessions,
       readDevices: vi.fn(async () => twoDevices()),
     });
-    const banner = await screen.findByText(
+    // Adapted, labelled (WEB-08d revision 3): the lookup is scoped to the page (<main>). LoadFailed also announces this sentence in the
+    // assertive live region one animation frame later, so an unscoped lookup found TWO elements whenever that frame ran before it (a
+    // loaded machine: driver run 1 of revision 3; reproduced deterministically in .agtx/evidence/revision-3/diag-name-device). Intent unchanged.
+    const banner = await within(screen.getByRole("main")).findByText(
       "Couldn't load your sign-ins — please try again.",
     );
     expect(screen.getByText("Request ID: req-1")).toBeInTheDocument();
@@ -214,8 +240,11 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
       })),
       readDevices: vi.fn(async () => twoDevices()),
     });
+    // Adapted, labelled (WEB-08d revision 3): the lookup is scoped to the page (<main>). LoadFailed also announces this sentence in the
+    // assertive live region one animation frame later, so an unscoped lookup found TWO elements whenever that frame ran before it (a
+    // loaded machine: driver run 1 of revision 3; reproduced deterministically in .agtx/evidence/revision-3/diag-name-device). Intent unchanged.
     expect(
-      await screen.findByText(
+      await within(screen.getByRole("main")).findByText(
         "You're offline, so we can't load your sign-ins right now.",
       ),
     ).toBeInTheDocument();
@@ -255,7 +284,7 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
     });
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "Sign out this other sign-in",
+        name: /^Sign out another sign-in, signed in /,
       }),
     );
     await waitFor(() => expect(revokeOtherSession).toHaveBeenCalledTimes(2));
@@ -271,13 +300,13 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
       readDevices: vi.fn(async () => twoDevices()),
     });
     const button = await screen.findByRole("button", {
-      name: "Sign out this other sign-in",
+      name: /^Sign out another sign-in, signed in /,
     });
     // StrictMode loads twice, so count the reload relative to the moment of the click.
     const before = listSessions.mock.calls.length;
     fireEvent.click(button);
     await waitFor(() =>
-      expect(revokeOtherSession).toHaveBeenCalledWith("sess-2"),
+      expect(revokeOtherSession).toHaveBeenCalledWith("sess-2", WITHDRAW),
     );
     await waitFor(() =>
       expect(listSessions.mock.calls.length).toBe(before + 1),
@@ -292,7 +321,7 @@ describe("WF-SETTINGS-02 Sessions & devices (F-SET)", () => {
     });
     fireEvent.click(
       await screen.findByRole("button", {
-        name: "Sign out this other sign-in",
+        name: /^Sign out another sign-in, signed in /,
       }),
     );
     expect(
@@ -311,10 +340,13 @@ describe("logout confirmation (F-SET, gap G-12)", () => {
       readDevices: vi.fn(async () => twoDevices()),
       ...operations,
     });
-    const row = (await screen.findByText("This browser")).closest(
-      "li",
+    await screen.findAllByText("This browser");
+    const row = document.querySelector(
+      "[data-session-row=current]",
     ) as HTMLElement;
-    fireEvent.click(within(row).getByRole("button", { name: "Sign out" }));
+    fireEvent.click(
+      within(row).getByRole("button", { name: "Sign out of this browser" }),
+    );
     const dialog = await screen.findByRole("dialog", { name: "Log out?" });
     return { ...mounted, dialog };
   };
@@ -546,12 +578,12 @@ describe("device retirement (F-SET)", () => {
       listSessions: vi.fn(async () => twoSessions()),
     });
     const trigger = await screen.findByRole("button", {
-      name: "Retire this other device",
+      name: "Retire another device, never synced",
     });
     const before = readDevices.mock.calls.length;
     fireEvent.click(trigger);
     const dialog = await screen.findByRole("dialog", {
-      name: "Retire this other device?",
+      name: "Retire another device?",
     });
     // It touches nothing on this browser, so there is no unsynced-work warning.
     expect(within(dialog).queryByText(/cannot be recovered/)).toBeNull();
@@ -561,6 +593,7 @@ describe("device retirement (F-SET)", () => {
     await waitFor(() =>
       expect(retireOtherDevice).toHaveBeenCalledWith(
         expect.objectContaining({ id: "dev-2", state_token: "tok-2" }),
+        WITHDRAW,
       ),
     );
     await waitFor(() => expect(readDevices.mock.calls.length).toBe(before + 1));
@@ -580,7 +613,9 @@ describe("device retirement (F-SET)", () => {
       listSessions: vi.fn(async () => twoSessions()),
     });
     fireEvent.click(
-      await screen.findByRole("button", { name: "Retire this other device" }),
+      await screen.findByRole("button", {
+        name: "Retire another device, never synced",
+      }),
     );
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(
@@ -601,7 +636,9 @@ describe("device retirement (F-SET)", () => {
       listSessions: vi.fn(async () => twoSessions()),
     });
     fireEvent.click(
-      await screen.findByRole("button", { name: "Retire this other device" }),
+      await screen.findByRole("button", {
+        name: "Retire another device, never synced",
+      }),
     );
     const dialog = await screen.findByRole("dialog");
     fireEvent.click(
@@ -623,7 +660,7 @@ describe("device retirement (F-SET)", () => {
       listSessions: vi.fn(async () => twoSessions()),
     });
     const disabled = await screen.findAllByRole("button", {
-      name: /^Retire this (other )?device$/,
+      name: /^Retire (this device|another device, never synced)$/,
     });
     for (const button of disabled) expect(button).toBeDisabled();
     expect(
@@ -637,7 +674,7 @@ describe("device retirement (F-SET)", () => {
       window.dispatchEvent(new Event("online"));
     });
     for (const button of screen.getAllByRole("button", {
-      name: /^Retire this (other )?device$/,
+      name: /^Retire (this device|another device, never synced)$/,
     }))
       expect(button).toBeEnabled();
   });

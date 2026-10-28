@@ -178,6 +178,17 @@ export const DEFAULT_STACKS = [
     mutates:
       "tasks, evidence, sharing and enrolment; paced by its stack ledger",
   },
+  // WEB-08d (BE-Q25): labels, device names and both capacities. They sign in repeatedly (a second activation, raw sessions, two
+  // devices), rename and retire devices and change a password, so they have a backend of their own (as on the WEB-08d branch
+  // before the accepted WEB-08c runner was adopted, where their stack was `-labels` too).
+  {
+    name: "labels",
+    suffix: "-labels",
+    files: [SPEC("web08d-labels")],
+    oidc: false,
+    mutates:
+      "sessions and device names of their accounts, retirements, a password change",
+  },
   // WEB-10b: list journeys (100 tasks seeded in I-LS3) have their own backend, accounts and pacing state.
   {
     name: "lists",

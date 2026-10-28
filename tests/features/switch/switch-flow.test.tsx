@@ -510,7 +510,9 @@ describe("the switch is an ordinary sign-in, and its outcome belongs to the flow
     switchFlow.fail(OWNER, { id: "device_capacity" });
     mount(<SwitchFlow owner={OWNER} />);
     expect(
-      await screen.findByText(/This device has too many active sign-ins/),
+      await screen.findByText(
+        /This account has reached its limit of active sign-ins/ /* WEB-08d D-8d-13 copy, merged in revision 30 */,
+      ),
     ).toBeInTheDocument();
   });
 

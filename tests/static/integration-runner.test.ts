@@ -424,11 +424,11 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
           stacks.map((s) => [s.name, inBrowser(s.keys, browser).length]),
         ),
       ).toEqual({
-        base: 25,
-        pages: 13,
+        base: 28,
+        pages: 18,
         "password-path": 8,
         i14e: 4,
-        i14d: 2,
+        i14d: 4,
         data: 32,
         calendar: 13,
         traces: 16,
@@ -440,12 +440,12 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
-        // WEB-10a revision 27 (R39): I-T12's supersession case is the 22nd task case.
         tasks: 22,
+        labels: 15,
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(230);
+      expect(inBrowser(whole, browser)).toHaveLength(255);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -498,13 +498,15 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       expect(was).toBe("base");
       moved[name] = (moved[name] ?? 0) + 1;
     }
-    // Per engine: sharing 7, snapshot 6 (R17), pages 13 and password-path 8 (the measured base overrun).
+    // Per engine: sharing 7, snapshot 6 (R17), pages 18 (13, and revision 34's five I-13 premise controls) and password-path 8 (the
+    // measured base overrun).
     expect(moved).toEqual({
       sharing: 21,
       snapshot: 18,
-      pages: 39,
+      pages: 54,
       "password-path": 24,
       tasks: 66,
+      labels: 45,
       lists: 24,
     });
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
@@ -617,8 +619,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 230,
-        passed: 224,
+        planned_cases: 255,
+        passed: 249,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -1236,6 +1238,7 @@ test("the manifest names each stack once, with the older result-file names uncha
     "-sharing",
     "-snapshot",
     "-tasks",
+    "-labels",
     "-lists",
   ]);
   expect(DEFAULT_STACKS.filter((s) => s.oidc).map((s) => s.name)).toEqual([

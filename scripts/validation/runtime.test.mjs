@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -225,6 +226,102 @@ test("missing executables fail and owned long-running children are cleaned up", 
   assert.throws(() => process.kill(live.child.pid, 0), { code: "ESRCH" });
 });
 
+// WEB-08d revision 28: the held-operation runner gives its children a frozen environment and its execution snapshot's directory (both
+// read at each start); without the option every child still gets this process's environment and the fixed root.
+// Revision 29 (review r28 R28-N2): `output` is the merged log, so the child's record travels in its own exclusively written file
+// and the log only has to keep the launcher's lines. The child writes one deterministic warning before and one after its record,
+// whatever the host's proxy mode, and a missing record, a malformed one or a non-zero exit still fails.
+const INHERITANCE_WARNING =
+  "(node:1) [UNDICI-EHPA] Warning: EnvHttpProxyAgent is experimental, expect them to change at any time.";
+async function inheritanceRecord(proc, file) {
+  const print = `const w=(s)=>process.stderr.write(s+"\\n");w(${JSON.stringify(`${INHERITANCE_WARNING} (before)`)});require("node:fs").writeFileSync(process.argv[1],JSON.stringify({cwd:process.cwd(),inherited:process.env.ATLAS_PROCESSES_INHERITED??null,base:process.env.ATLAS_PROCESSES_BASE??null,call:process.env.ATLAS_PROCESSES_CALL??null}),{flag:"wx"});w(${JSON.stringify(`${INHERITANCE_WARNING} (after)`)});`;
+  const result = await proc.run(process.execPath, ["-e", print, file], {
+    ATLAS_PROCESSES_CALL: "call",
+  });
+  assert.equal(result.code, 0, result.output);
+  assert.equal(result.signal, null, result.output);
+  for (const when of ["before", "after"])
+    assert.ok(
+      result.output.includes(`${INHERITANCE_WARNING} (${when})`),
+      `the merged log keeps the child's warning (${when}): ${result.output}`,
+    );
+  return JSON.parse(readFileSync(file, "utf8"));
+}
+test("processes() keeps the inherited environment by default and uses a given base environment and root instead", async (t) => {
+  const root = fixture(t);
+  const other = mkdtempSync(join(tmpdir(), "atlas-processes-root-"));
+  t.after(() => rmSync(other, { recursive: true, force: true }));
+  const records = mkdtempSync(join(tmpdir(), "atlas-processes-records-"));
+  t.after(() => rmSync(records, { recursive: true, force: true }));
+  const had = Object.hasOwn(process.env, "ATLAS_PROCESSES_INHERITED");
+  const previous = process.env.ATLAS_PROCESSES_INHERITED;
+  process.env.ATLAS_PROCESSES_INHERITED = "inherited";
+  t.after(() => {
+    if (had) process.env.ATLAS_PROCESSES_INHERITED = previous;
+    else delete process.env.ATLAS_PROCESSES_INHERITED;
+  });
+  const plain = processes(root);
+  t.after(() => plain.close());
+  const a = await inheritanceRecord(plain, join(records, "inherited.json"));
+  assert.deepEqual(a, {
+    cwd: realpathSync(root),
+    inherited: "inherited",
+    base: null,
+    call: "call",
+  });
+  let dir = root;
+  const frozen = processes(() => dir, {
+    env: () => ({ PATH: process.env.PATH, ATLAS_PROCESSES_BASE: "base" }),
+  });
+  t.after(() => frozen.close());
+  dir = other;
+  const b = await inheritanceRecord(frozen, join(records, "frozen.json"));
+  assert.deepEqual(b, {
+    cwd: realpathSync(other),
+    inherited: null,
+    base: "base",
+    call: "call",
+  });
+});
+// The record's framing is not a log filter: a child that writes nothing, writes a malformed record or exits non-zero after a valid
+// one is still a failure of this helper.
+test("the environment record helper refuses a missing, malformed or failed child record", async (t) => {
+  const records = mkdtempSync(join(tmpdir(), "atlas-processes-records-"));
+  t.after(() => rmSync(records, { recursive: true, force: true }));
+  const proc = processes(records);
+  t.after(() => proc.close());
+  const fake = (body) => ({
+    run: (command, args, env) =>
+      proc.run(command, ["-e", body, ...args.slice(2)], env),
+  });
+  const warn = (when) =>
+    `process.stderr.write(${JSON.stringify(`${INHERITANCE_WARNING} (${when})\n`)});`;
+  await assert.rejects(
+    inheritanceRecord(
+      fake(`${warn("before")}${warn("after")}`),
+      join(records, "missing.json"),
+    ),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    inheritanceRecord(
+      fake(
+        `${warn("before")}require("node:fs").writeFileSync(process.argv[1],"{");${warn("after")}`,
+      ),
+      join(records, "malformed.json"),
+    ),
+    SyntaxError,
+  );
+  await assert.rejects(
+    inheritanceRecord(
+      fake(
+        `${warn("before")}require("node:fs").writeFileSync(process.argv[1],"{}");${warn("after")}process.exit(3)`,
+      ),
+      join(records, "failed.json"),
+    ),
+    assert.AssertionError,
+  );
+});
 test("a valid assertion cannot conceal an unrelated runtime timeout", () => {
   const mixed = report("failed", "Error: expect(x)");
   mixed.suites[0].specs.push({
@@ -388,4 +485,104 @@ test("interrupting a plan cannot produce a passing partial ledger", async (t) =>
     true,
   );
   assert.equal(readFileSync(join(path, "results.json"), "utf8"), preserved);
+});
+
+// WEB-08d revision 18 (design assessment DA-N1, Q9): every Playwright error of a case is judged on its own. Reports below follow the
+// installed Playwright 1.63 JSON reporter (results[].errors[], one entry per error of the body, hooks and fixtures).
+test("DA-N1: an intended assertion beside an unrelated error of the SAME case is not a catch, in either order", () => {
+  const mutant = { expect: /required assertion/ };
+  const EXPECT = "Error: expect(received).toBe(expected)";
+  const TEARDOWN = "TypeError: independent teardown failure";
+  const sameCase = (errors) => {
+    const r = report("failed");
+    for (const t of r.suites[0].specs[0].tests)
+      t.results = [
+        { status: "failed", errors: errors.map((message) => ({ message })) },
+      ];
+    return r;
+  };
+  // Positive controls: one assertion, and two assertions of the same case, in every engine.
+  for (const errors of [[EXPECT], [EXPECT, EXPECT]]) {
+    const v = classifyMutant(
+      mutant,
+      inspectReport(sameCase(errors), browsers, 1),
+      browsers,
+    );
+    assert.equal(v.caught, true, errors.join(" | "));
+    assert.equal(v.error_kinds.assertion, errors.length * browsers.length);
+  }
+  for (const errors of [
+    [EXPECT, TEARDOWN],
+    [TEARDOWN, EXPECT],
+    [EXPECT, "Error: page.goto: net::ERR_CONNECTION_REFUSED"],
+  ]) {
+    const seen = inspectReport(sameCase(errors), browsers, 1);
+    assert.ok(
+      seen.cases.every((c) => c.kind === "error" && c.errors.length === 2),
+      errors.join(" | "),
+    );
+    const v = classifyMutant(mutant, seen, browsers);
+    assert.equal(v.caught, false, errors.join(" | "));
+    assert.deepEqual(v.engines_with_expected_assertion, []);
+    assert.deepEqual(
+      v.engines_with_expected_assertion_observed.sort(),
+      browsers.map((b) => `fixture-${b}`),
+      "the assertion is kept as an observation",
+    );
+    assert.equal(v.error_kinds.error, browsers.length);
+  }
+  // Only one engine's case carries the extra error: still not a catch.
+  const oneEngine = sameCase([EXPECT]);
+  oneEngine.suites[0].specs[0].tests[2].results[0].errors.push({
+    message: TEARDOWN,
+  });
+  assert.equal(
+    classifyMutant(mutant, inspectReport(oneEngine, browsers, 1), browsers)
+      .caught,
+    false,
+  );
+  // A failed case with no error at all is not an assertion.
+  assert.equal(
+    classifyMutant(mutant, inspectReport(sameCase([]), browsers, 1), browsers)
+      .caught,
+    false,
+  );
+});
+
+test("DA-N1: `error` is read only when a reporter gives no `errors` array, and a passing case that reports errors is damaged", () => {
+  const legacy = report("failed");
+  for (const t of legacy.suites[0].specs[0].tests)
+    t.results = [
+      { status: "failed", error: { message: "Error: expect(x).toBe(y)" } },
+    ];
+  const fallback = inspectReport(legacy, browsers, 1);
+  assert.ok(
+    fallback.cases.every(
+      (c) => c.kind === "assertion" && c.errors.length === 1,
+    ),
+  );
+  const both = report("failed");
+  for (const t of both.suites[0].specs[0].tests)
+    t.results = [
+      {
+        status: "failed",
+        error: { message: "Error: expect(x).toBe(y)" },
+        errors: [
+          { message: "Error: expect(x).toBe(y)" },
+          { message: "TypeError: teardown" },
+        ],
+      },
+    ];
+  const seen = inspectReport(both, browsers, 1);
+  assert.ok(
+    seen.cases.every((c) => c.errors.length === 2 && c.kind === "error"),
+    "`error` is not a second copy",
+  );
+  const damaged = report("passed");
+  damaged.suites[0].specs[0].tests[0].results[0].errors = [
+    { message: "TypeError: late" },
+  ];
+  const d = inspectReport(damaged, browsers, 0);
+  assert.equal(d.complete, false);
+  assert.equal(d.controlOk, false);
 });

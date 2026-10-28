@@ -13,6 +13,7 @@ import {
   checkNewPassword,
   FIELD_MESSAGE,
 } from "../../authentication/validation";
+import { useInteractions } from "../sessions-devices/ownership";
 import { untilSent } from "../sessions-devices/until-sent";
 import { leavesOutcomeUnknown } from "./outcome";
 import { Unconfirmed } from "./Unconfirmed";
@@ -70,6 +71,7 @@ function messageForStatus(status: number | undefined): MessageId {
  */
 export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
   const session = useSession();
+  const interactions = useInteractions();
   const announcer = useAnnouncer();
   const online = useOnline();
   const [current, setCurrent] = useState("");
@@ -119,16 +121,27 @@ export function ChangePasswordForm({ hasPassword }: { hasPassword: boolean }) {
     if (!fresh.ok) return fail("next", FIELD_MESSAGE[fresh.reason]);
     inflight.current = true;
     setPhase({ kind: "busy" });
-    const result = await untilSent(() =>
-      session.operations.changePassword({
-        current: old.value,
-        next: fresh.value,
-      }),
+    // WEB-08d review R3: a change refused before it was sent is tried again only while this form is mounted; leaving the screen
+    // withdraws one still waiting to be issued. One already sent is never withdrawn: its answer decides.
+    const interaction = interactions.begin();
+    const result = await untilSent(
+      () =>
+        session.operations.changePassword(
+          { current: old.value, next: fresh.value },
+          { withdraw: interaction.withdraw },
+        ),
+      { isCurrent: interaction.current },
     ).catch(() => null);
+    // WEB-08d review R4: asked BEFORE ending it. A form that was dismissed, left or replaced, or whose identity moved on, may not show
+    // the outcome: the announcer outlives the form, so an old answer would speak over whatever the person is doing now. The session
+    // still observes what the request did (a success or a 401 ends the session everywhere, the neutral state takes over).
+    const owned = interaction.current();
+    interaction.end();
     inflight.current = false;
-    // A password never outlives its submit.
+    // A password never outlives its submit. These are this form's own fields: a reopened form is another one, which this cannot touch.
     setCurrent("");
     setNext("");
+    if (!owned) return setPhase({ kind: "idle" });
     if (result === null || leavesOutcomeUnknown(result))
       return setPhase({ kind: "unconfirmed" });
     if (result.ok) return setPhase({ kind: "idle" });

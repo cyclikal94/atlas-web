@@ -46,8 +46,9 @@ export const MESSAGE_TEXT: Readonly<Record<MessageId, string>> = {
   wrong_origin:
     "This server doesn't accept sign-in from this address. Ask whoever runs it to check its public address.",
   not_set_up: "Browser sign-in isn't set up on this server.",
+  // WEB-08d (D-8d-13): BE-Q25 defines the limit as live sessions per ACCOUNT, not per device. [P]
   device_capacity:
-    "This device has too many active sign-ins for this account. End one from Settings in another session, or try again later.",
+    "This account has reached its limit of active sign-ins. Sign out of one in Settings → Sessions & devices from another session, or try again later.",
   temporarily_unavailable:
     "Atlas is temporarily unavailable. Try again shortly.",
   unreachable: "We couldn't reach Atlas. Check your connection and try again.",
