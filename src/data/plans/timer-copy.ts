@@ -31,6 +31,16 @@ import { guardedPlan, readPlan } from "./builders";
  * the quota ledger did not admit) raises `sync_state.timer_scope_floor` to the order it concerned instead, and a day's read issued before
  * the floor is no longer trusted for a session it saw running (it may have been retired by what was lost). Authority is never dropped
  * silently, so nothing a later read retired can come back.
+ *
+ * ACCOUNT AND FINISHED (WEB-10c revision 5, review R23): the latest COMPLETE account observation is kept apart from the copy
+ * (`sync_state.timer_account`: its order and the sessions it listed), so a later partial first page, which replaces the copy, never
+ * erases what the complete one proved; and every session a read listed FINISHED (a page of the account's history, a day's read) is
+ * kept in `sync_state.timer_ended`, with the order handed out when it was recorded, and taken out of the copy at once. A finished
+ * session never runs again, whatever order a positive of it has (unknown included), so these decide for every source: the copy, the
+ * account's live list, a day's read now or kept, in any tab and after a reload or going offline. Bounded (`TIMER_ENDED_IDS`): the
+ * oldest finished session beyond it goes, and the floor rises to the order handed out when it was recorded (every positive that may
+ * have listed it was issued before), and `lost` is set (a positive whose order is unknown is then no longer trusted). A growth the
+ * quota ledger did not admit records the same loss instead, at every order handed out so far.
  */
 export const TIMER_COPY_ROWS = 50;
 
@@ -144,6 +154,124 @@ const lostAt = (raw: unknown, issued: number): number =>
  */
 const mapLost = (raw: unknown, issued: number): number =>
   raw !== undefined && raw !== null && !isObject(raw) ? issued : 0;
+
+/** At most this many finished sessions are kept in `timer_ended`; the one recorded longest ago goes first. */
+export const TIMER_ENDED_IDS = 200;
+
+/** The latest complete observation of the account's running sessions (revision 5, R23). */
+export interface TimerAccountRecord {
+  order: number;
+  running: string[];
+}
+
+/** Sessions listed finished (revision 5, R23), each with the order handed out when it was recorded; `lost`: one was not kept. */
+export interface TimerEndedRecord {
+  lost: boolean;
+  ids: Array<[string, number]>;
+}
+
+export function parseTimerAccount(value: unknown): TimerAccountRecord | null {
+  if (!isObject(value) || orderOf(value.order) === 0) return null;
+  if (!isIds(value.running, TIMER_COPY_ROWS)) return null;
+  return { order: orderOf(value.order), running: value.running };
+}
+
+export function parseTimerEnded(value: unknown): TimerEndedRecord | null {
+  if (!isObject(value) || typeof value.lost !== "boolean") return null;
+  const ids = value.ids;
+  if (
+    !Array.isArray(ids) ||
+    ids.length > TIMER_ENDED_IDS ||
+    !ids.every(
+      (e) =>
+        Array.isArray(e) &&
+        e.length === 2 &&
+        typeof e[0] === "string" &&
+        e[0].length <= 64 &&
+        Number.isSafeInteger(e[1]) &&
+        (e[1] as number) >= 0,
+    )
+  )
+    return null;
+  return { lost: value.lost, ids: ids as Array<[string, number]> };
+}
+
+/**
+ * What the stored finished sessions and account observation leave as authority (revision 5, R23), and the floor whatever of them does
+ * not read raises: an unreadable record held authority nobody can see now, so every order handed out so far (`issued`), and `lost`.
+ */
+function endedOf(
+  sync: { timer_ended?: unknown; timer_account?: unknown },
+  issued: number,
+): {
+  ended: TimerEndedRecord;
+  account: TimerAccountRecord | null;
+  floor: number;
+} {
+  const rawEnded = sync.timer_ended;
+  const rawAccount = sync.timer_account;
+  const ended =
+    rawEnded === undefined || rawEnded === null
+      ? { lost: false, ids: [] }
+      : parseTimerEnded(rawEnded);
+  const account =
+    rawAccount === undefined || rawAccount === null
+      ? null
+      : parseTimerAccount(rawAccount);
+  const accountLost =
+    rawAccount !== undefined && rawAccount !== null && account === null;
+  return {
+    ended: ended ?? { lost: true, ids: [] },
+    account,
+    floor: ended === null || accountLost ? issued : 0,
+  };
+}
+
+/** Session ids as a read listed them: strings of at most 64 characters, once each (anything else is not a session id). */
+const idsOf = (ids: readonly unknown[]): string[] => [
+  ...new Set(
+    ids.filter((id): id is string => typeof id === "string" && id.length <= 64),
+  ),
+];
+
+/**
+ * `ids` added to the finished sessions (pure; revision 5, R23), recorded at `issued`: kept newest last, at most `TIMER_ENDED_IDS`. The
+ * ones that do not fit go oldest first, raising the floor to the order handed out when each was recorded (every positive that may list
+ * it was issued no later), and set `lost`.
+ */
+function withEnded(
+  held: TimerEndedRecord,
+  ids: readonly string[],
+  issued: number,
+): { ended: TimerEndedRecord; floor: number } {
+  const fresh = new Set(ids);
+  const all: Array<[string, number]> = [
+    ...held.ids.filter(([id]) => !fresh.has(id)),
+    ...ids.map((id): [string, number] => [id, issued]),
+  ];
+  let floor = 0;
+  let lost = held.lost;
+  while (all.length > TIMER_ENDED_IDS) {
+    const gone = all.shift() as [string, number];
+    floor = Math.max(floor, gone[1]);
+    lost = true;
+  }
+  return { ended: { lost, ids: all }, floor };
+}
+
+/** The copy without the sessions `finished` names (a removal: never a growth). `null`: nothing to change. */
+function copyWithout(
+  sync: { timer_copy?: unknown },
+  finished: ReadonlySet<string>,
+): { copy: TimerCopyRecord; removed: number } | null {
+  const stored = parseTimerCopy(sync.timer_copy ?? null);
+  if (stored === null || finished.size === 0) return null;
+  const running = stored.running.filter(
+    (row) => !(typeof row.id === "string" && finished.has(row.id)),
+  );
+  const removed = stored.running.length - running.length;
+  return removed === 0 ? null : { copy: { ...stored, running }, removed };
+}
 
 /** What a read of one day observed, for its scope: `running`/`ended` as listed by every page accepted so far. */
 export interface TimerScopeObservation {
@@ -265,11 +393,19 @@ export const writeTimerCopy = guardedPlan<
       return { result: { written: false, stored } };
     if (input.leaseLive !== undefined && !input.leaseLive())
       return { result: { written: false, stored, lapsed: true } };
+    // A complete copy is also the account's latest complete observation (revision 5, R23), kept when a later partial page replaces it;
+    // only while every row names its session (otherwise what it listed is not known).
+    const ids = copy?.complete ? idsOf(copy.running.map((row) => row.id)) : [];
+    const account =
+      copy?.complete && ids.length === copy.running.length
+        ? { timer_account: { order: copy.order, running: ids } }
+        : {};
     return {
       sync: {
         ...sync,
         timer_copy: copy,
         timer_fence: Math.max(floor, copy?.order ?? 0),
+        ...account,
       },
       result: { written: true, stored: copy },
     };
@@ -320,22 +456,37 @@ export const reconcileTimerCopy = guardedPlan<
       const admitted =
         input.admitted !== false &&
         (input.leaseLive === undefined || input.leaseLive());
+      // The day's finished sessions are the account's too (revision 5, R23): kept with the scope, under the same admission.
+      const issued = orderOf(sync.timer_order);
+      const held = endedOf(sync, issued);
+      const finished = idsOf(input.scope.ended);
       if (admitted) {
         const out = observe(
           isObject(sync.timer_scopes) ? sync.timer_scopes : {},
-          floor,
-          orderOf(sync.timer_order),
+          Math.max(floor, held.floor),
+          issued,
           input.order,
           input.scope,
         );
+        const ended =
+          finished.length === 0
+            ? null
+            : withEnded(held.ended, finished, Math.max(issued, input.order));
         next = {
           ...next,
           timer_scopes: out.scopes,
-          timer_scope_floor: out.floor,
+          timer_scope_floor: Math.max(out.floor, ended?.floor ?? 0),
+          ...(ended === null ? {} : { timer_ended: ended.ended }),
         };
         scoped = true;
       } else
-        next = { ...next, timer_scope_floor: Math.max(floor, input.order) };
+        next = {
+          ...next,
+          timer_scope_floor: Math.max(floor, held.floor, input.order),
+          ...(finished.length === 0
+            ? {}
+            : { timer_ended: { ...held.ended, lost: true } }),
+        };
     }
     const fence = floorOf(sync);
     const stored = parseTimerCopy(sync.timer_copy ?? null);
@@ -362,6 +513,52 @@ export const reconcileTimerCopy = guardedPlan<
   },
 });
 
+/**
+ * Revision 5 (review R23): sessions a read of the account's HISTORY (`state=stopped`) listed, recorded as finished (`timer_ended`) and
+ * taken out of the copy in the same transaction. Needs no order (a finished session never runs again) but the read's stamp at issue
+ * (INC, CLS, EPO): an answer of a former account, epoch or incarnation records nothing. The record grows the singleton, so the caller
+ * admits it through the quota ledger (`leaseLive`); a refusal or a lapsed hold still takes the sessions out of the copy (a removal), and
+ * records the loss instead (the floor at every order handed out so far, and `lost`).
+ */
+export const recordTimerEnded = guardedPlan<
+  {
+    captured: Captured;
+    ids: readonly string[];
+    /** The quota ledger refused the record's growth. */
+    admitted?: boolean;
+    leaseLive?: () => boolean;
+  },
+  null,
+  { recorded: boolean; removed: number }
+>({
+  name: "data.recordTimerEnded",
+  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  scope: [],
+  durability: "default",
+  read: async () => null,
+  decide: ({ sync, input }) => {
+    const ids = idsOf(input.ids);
+    if (ids.length === 0) return { result: { recorded: true, removed: 0 } };
+    const issued = orderOf(sync.timer_order);
+    const held = endedOf(sync, issued);
+    const out = copyWithout(sync, new Set(ids));
+    const floor = Math.max(orderOf(sync.timer_scope_floor), held.floor);
+    const admitted =
+      input.admitted !== false &&
+      (input.leaseLive === undefined || input.leaseLive());
+    const ended = admitted ? withEnded(held.ended, ids, issued) : null;
+    return {
+      sync: {
+        ...sync,
+        ...(out === null ? {} : { timer_copy: out.copy }),
+        timer_ended: ended?.ended ?? { ...held.ended, lost: true },
+        timer_scope_floor: Math.max(floor, ended?.floor ?? issued),
+      },
+      result: { recorded: ended !== null, removed: out?.removed ?? 0 },
+    };
+  },
+});
+
 export const readTimerCopy = readPlan<
   { incarnationId: string },
   null,
@@ -382,6 +579,10 @@ export interface TimerAuthorityRecord {
   copy: TimerCopyRecord | null;
   scopes: Record<string, TimerScopeRecord>;
   floor: number;
+  /** Revision 5 (R23): the latest complete account observation, and the sessions listed finished (`lost`: one was not kept). */
+  account: TimerAccountRecord | null;
+  ended: string[];
+  endedLost: boolean;
 }
 export const readTimerAuthority = readPlan<
   { incarnationId: string },
@@ -404,10 +605,14 @@ export const readTimerAuthority = readPlan<
       if (scope !== null) scopes[id] = scope;
       else floor = Math.max(floor, lostAt(value, issued));
     }
+    const held = endedOf(sync ?? {}, issued);
     return {
       copy: parseTimerCopy(sync?.timer_copy ?? null),
       scopes,
-      floor,
+      floor: Math.max(floor, held.floor),
+      account: held.account,
+      ended: held.ended.ids.map(([id]) => id),
+      endedLost: held.ended.lost,
     };
   },
 });

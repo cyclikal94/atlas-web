@@ -5,6 +5,7 @@ import {
   type AccountService,
   commitTimerCopy,
   commitTimerCorrection,
+  commitTimerEnded,
   issueTimerOrderNow,
 } from "../../../src/data";
 import { accountDatabaseName } from "../../../src/data/model/schema";
@@ -1041,4 +1042,81 @@ describe("R19: a refused scope retires the copy's session too", () => {
     await t.settle();
     expect(block()?.dataset.timerBlock).toBe(expected);
   });
+});
+
+/**
+ * Revision 5 (review 5 R23): the detail judges by the account's evidence as the account's list does: a session any read listed finished
+ * is not running (whatever its order, live or kept), and the account's latest complete observation stands after a partial page replaced
+ * the copy.
+ */
+describe("R23: the detail judges as the account's list", () => {
+  test.each([
+    ["the account's history recorded it finished", true],
+    ["nothing recorded it (control)", false],
+  ])(
+    "a session %s: running neither online nor offline",
+    async (_, ended) => {
+      const task = await seconds();
+      const session = sessionOf(task, 9901);
+      const api = fakeApi({
+        readTimers: async () => ({
+          ok: true,
+          value: { items: [session], next_after: null },
+        }),
+      });
+      const t = await mountTasks({ path: path(task), rows: task.rows, api });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      if (ended) {
+        const service = t.data.service() as AccountService;
+        expect(
+          await commitTimerEnded(t.data, service, service.capture(1), [
+            session.id,
+          ]),
+        ).toMatchObject({ kind: "applied", value: { recorded: true } });
+      }
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(ended ? "idle" : "running");
+      t.rerender(tasksEnv(api, { online: false }));
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe(ended ? "idle" : "running");
+    },
+    20_000,
+  );
+
+  test("a later complete account copy, then a PARTIAL one: the session stays retired offline", async () => {
+    const task = await seconds();
+    const session = sessionOf(task, 9902);
+    const api = fakeApi({
+      readTimers: async () => ({
+        ok: true,
+        value: { items: [session], next_after: null },
+      }),
+    });
+    const t = await mountTasks({ path: path(task), rows: task.rows, api });
+    await t.until(() => block()?.dataset.timerBlock === "running");
+    await t.until(() => ((syncOf(t).timer_fence as number) ?? 0) > 0);
+    const service = t.data.service() as AccountService;
+    for (const [complete, running] of [
+      [true, []],
+      [false, [copied(task, nowSeconds() - 60, sid(9903))]],
+    ] as const) {
+      const captured = service.capture(1);
+      const order = (await issueTimerOrderNow(service, captured)) as number;
+      expect(
+        await commitTimerCopy(t.data, service, captured, {
+          format: 2,
+          order,
+          read_at: Date.now(),
+          complete,
+          running: running as never,
+        }),
+      ).toEqual({ kind: "applied", value: { written: true } });
+    }
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    expect(
+      document.querySelector(`[data-timer-session="${session.id}"]`),
+    ).toBeNull();
+  }, 20_000);
 });

@@ -14,8 +14,14 @@ import { guardedPlan, readPlan } from "./builders";
  *
  * Every write is guarded as a response-derived one (INC, CLS, EPO, and the service's G1/G2/G5 through `AccountService.commit`), the
  * person's "Try again" included: an answer of a former account, epoch or database incarnation, or one that lands while a wipe is closing,
- * writes nothing. The rows are a few hundred bytes each, one per task with a sequence and day, and older ones of a task are pruned when a
- * newer one begins, so like `claimFormWriter` they are a fixed-size write, not admitted through the quota ledger (docs/data-layer.md).
+ * writes nothing.
+ *
+ * RETENTION (WEB-10c revision 5, reviews R24 and R25; WEB-04 §5.8): a row is removed only when its OWN need is satisfied: its sequence
+ * found the position covering its day, or a later day's sequence of the task found a position that covers it too
+ * (`deleteSatisfiedSequences`, each row compared as the caller decided on it). A stop (the bound, no progress, the horizon, capacity, a
+ * refusal, no answer) is kept with its attempt, whatever later day begins. So rows are no longer bounded by the number of tasks: a NEW
+ * row grows the store, and the caller admits it through the origin's quota ledger first (`leaseLive`; `admitted: false` when the ledger
+ * refused it); a growth not admitted is `refused`, with nothing written. Replacing or deleting a row needs no admission.
  */
 export type SequenceKey = Pick<
   MaterialiseSequenceRow,
@@ -38,7 +44,12 @@ export type SequenceExpectation = null | {
 export type SequenceWrite =
   | { kind: "written"; stored: MaterialiseSequenceRow | null }
   /** The stored row is not the one expected: nothing was written. */
-  | { kind: "stale"; stored: MaterialiseSequenceRow | null };
+  | { kind: "stale"; stored: MaterialiseSequenceRow | null }
+  /** A new row whose growth the quota ledger did not admit (revision 5): nothing was written. */
+  | { kind: "refused"; stored: null };
+
+/** What one new row is admitted at (revision 5): its fields, an attempt's key and body, and a stop's request id. */
+export const SEQUENCE_ROW_BYTES = 1024;
 
 /** The most rows a read of the store returns (the queue's working set): a task has at most a few, the account at most one per task. */
 export const SEQUENCE_WINDOW = 100;
@@ -78,13 +89,17 @@ export const writeMaterialiseSequence = guardedPlan<
     expected: SequenceExpectation;
     /** The replacement row (its key must be `key`), or `null` to delete: the sequence is over. */
     next: MaterialiseSequenceRow | null;
+    /** The quota ledger refused a new row's growth (revision 5). */
+    admitted?: boolean;
+    /** The reservation's `live()`, for a new row; absent: not admitted through the ledger (a test of the plan alone). */
+    leaseLive?: () => boolean;
   },
   // Wrapped: a guarded plan reads `undefined` as "no singleton", and an absent row is an answer here.
   { row: MaterialiseSequenceRow | undefined },
   SequenceWrite
 >({
   name: "data.writeMaterialiseSequence",
-  // A fixed-size row (a few hundred bytes, one per task and day while it catches up): classed as a cache write, not admitted (R28).
+  // A row of a few hundred bytes per task and day while it catches up: a new one is admitted as a cache write (revision 5).
   meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: ["materialise_sequences"],
   durability: "strict",
@@ -109,6 +124,12 @@ export const writeMaterialiseSequence = guardedPlan<
       next.through_date !== input.key.through_date
     )
       return { result: { kind: "stale", stored } };
+    if (
+      reads === undefined &&
+      (input.admitted === false ||
+        (input.leaseLive !== undefined && !input.leaseLive()))
+    )
+      return { result: { kind: "refused", stored: null } };
     // The revision is the store's, never the caller's (review R20): one more than the row replaced, 1 for a new one. A revision that
     // cannot move any more is not overwritten (nothing is written; the caller adopts what is stored).
     const revision = reads === undefined ? 0 : sequenceRevision(reads);
@@ -123,34 +144,49 @@ export const writeMaterialiseSequence = guardedPlan<
 });
 
 /**
- * Housekeeping when a new day's sequence of a task begins: deletes that task's sequences of EARLIER days that are not running (stopped or
- * ready), at most one window per call. A sequence that is sending or awaiting its read is left to finish.
+ * Revision 5 (reviews R24 and R25, WEB-04 §5.8): removes rows of ONE task whose need the caller established is SATISFIED (a position read
+ * that covers each row's day; the caller decides, the data layer only compares), each only while it is still the row the caller decided
+ * on (its expectation, revision included): a row another page lifted, advanced or made again since is left as it is. At most
+ * `SEQUENCE_WINDOW` rows per call. Removing rows needs no admission.
  */
-export const pruneMaterialiseSequences = guardedPlan<
-  { captured: Captured; task_id: string; before: string },
-  MaterialiseSequenceRow[],
+export const deleteSatisfiedSequences = guardedPlan<
+  {
+    captured: Captured;
+    task_id: string;
+    rows: ReadonlyArray<{
+      through_date: string;
+      expected: Exclude<SequenceExpectation, null>;
+    }>;
+  },
+  Array<MaterialiseSequenceRow | undefined>,
   { removed: number }
 >({
-  name: "data.pruneMaterialiseSequences",
+  name: "data.deleteSatisfiedSequences",
   meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: null },
   scope: ["materialise_sequences"],
   durability: "strict",
-  read: (reader, input) =>
-    reader.byIndex(
-      "materialise_sequences",
-      "[task_id+through_date]",
-      range.between([input.task_id, ""], [input.task_id, input.before], {
-        upperOpen: true,
-      }),
-      SEQUENCE_WINDOW,
-    ),
-  decide: ({ reads }) => {
-    const gone = reads.filter(
-      (row) => row.phase === "stopped" || row.phase === "ready",
+  read: async (reader, input) => {
+    if (input.rows.length > SEQUENCE_WINDOW)
+      throw new Error(
+        "deleteSatisfiedSequences: more rows than one write admits",
+      );
+    const out: Array<MaterialiseSequenceRow | undefined> = [];
+    for (const row of input.rows)
+      out.push(
+        await reader.get("materialise_sequences", [
+          input.task_id,
+          row.through_date,
+        ]),
+      );
+    return out;
+  },
+  decide: ({ reads, input }) => {
+    const gone = input.rows.filter((row, i) =>
+      matchesExpectation(reads[i], row.expected),
     );
     return {
       writes: gone.map((row) =>
-        w.delete("materialise_sequences", [row.task_id, row.through_date]),
+        w.delete("materialise_sequences", [input.task_id, row.through_date]),
       ),
       result: { removed: gone.length },
     };
@@ -189,39 +225,73 @@ export const readMaterialiseSequences = readPlan<
   decide: ({ reads }) => reads,
 });
 
+/** The most rows of one task a recovery read returns besides its exact day (revision 5): its latest days. */
+export const TASK_SEQUENCE_ROWS = 8;
+/** The most tasks one recovery read covers (a caller with more reads them in several reads). */
+export const TASK_SEQUENCE_TASKS = 25;
+
 /**
- * Revision 4 (review R21): the LATEST day's sequence of each named task, whatever else the account holds, so a stop of a task the screen
- * shows is reachable however many other tasks' rows sort before it. Bounded per read: at most `SEQUENCE_WINDOW` tasks (a caller with more
- * reads them in several reads), each found with a count of its key range and one row at its end (no bodies but that one are read).
+ * What a recovery read found of one task (revision 5, review R24): the row of the exact day asked for (`target`: `null` absent; not asked:
+ * `undefined`), its latest `TASK_SEQUENCE_ROWS` rows in key order, and whether those are ALL its rows (`complete`). A row is reached by
+ * its own key, never because it is the latest: a later day (a horizon stop) cannot hide the day a screen works for.
  */
-export const readLatestSequences = readPlan<
-  { incarnationId: string; taskIds: readonly string[] },
-  Record<string, MaterialiseSequenceRow>,
-  Record<string, MaterialiseSequenceRow>
+export interface TaskSequences {
+  target?: MaterialiseSequenceRow | null;
+  rows: MaterialiseSequenceRow[];
+  complete: boolean;
+}
+
+/**
+ * Revision 5 (review R24; revision 4, review R21): the recovery rows of each named task, whatever else the account holds: the exact day
+ * asked for, and the task's latest days. Bounded per read: at most `TASK_SEQUENCE_TASKS` tasks, each found with a count of its key range,
+ * at most `TASK_SEQUENCE_ROWS` rows at its end and one row by key.
+ */
+export const readTaskSequences = readPlan<
+  {
+    incarnationId: string;
+    tasks: ReadonlyArray<{ taskId: string; throughDate?: string }>;
+  },
+  Record<string, TaskSequences>,
+  Record<string, TaskSequences>
 >({
-  name: "data.readLatestSequences",
+  name: "data.readTaskSequences",
   scope: ["materialise_sequences"],
   read: async (reader, input) => {
-    const tasks = [...new Set(input.taskIds)];
-    if (tasks.length > SEQUENCE_WINDOW)
-      throw new Error("readLatestSequences: more tasks than one read admits");
-    const out: Record<string, MaterialiseSequenceRow> = {};
-    for (const taskId of tasks) {
+    if (input.tasks.length > TASK_SEQUENCE_TASKS)
+      throw new Error("readTaskSequences: more tasks than one read admits");
+    const out: Record<string, TaskSequences> = {};
+    for (const { taskId, throughDate } of input.tasks) {
+      if (out[taskId] !== undefined)
+        throw new Error("readTaskSequences: a task asked for twice");
       const span = range.between([taskId, ""], [taskId, "￿"]);
       const n = await reader.count(
         "materialise_sequences",
         "[task_id+through_date]",
         span,
       );
-      if (n === 0) continue;
-      const [last] = await reader.byIndex(
-        "materialise_sequences",
-        "[task_id+through_date]",
-        span,
-        1,
-        n - 1,
-      );
-      if (last !== undefined) out[taskId] = last;
+      const rows =
+        n === 0
+          ? []
+          : await reader.byIndex(
+              "materialise_sequences",
+              "[task_id+through_date]",
+              span,
+              TASK_SEQUENCE_ROWS,
+              Math.max(0, n - TASK_SEQUENCE_ROWS),
+            );
+      out[taskId] = {
+        rows,
+        complete: n <= TASK_SEQUENCE_ROWS,
+        ...(throughDate === undefined
+          ? {}
+          : {
+              target:
+                (await reader.get("materialise_sequences", [
+                  taskId,
+                  throughDate,
+                ])) ?? null,
+            }),
+      };
     }
     return out;
   },

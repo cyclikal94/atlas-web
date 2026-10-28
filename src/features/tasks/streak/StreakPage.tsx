@@ -45,7 +45,12 @@ import {
   tally,
   unitOf,
 } from "../model/streak";
-import { CATCH_UP_COPY, type ShownReason } from "../today/CatchUpBanner";
+import {
+  CATCH_UP_COPY,
+  recoveryRows,
+  type ShownReason,
+  stopsFor,
+} from "../today/CatchUpBanner";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const STREAK_COPY = {
@@ -214,9 +219,8 @@ const requiresCatchUp = (result: TasksResult<TaskStreak>) =>
  */
 function useStreakFigures(taskId: string, shared: boolean) {
   const env = useTasksEnv();
-  const { runner, state, records, discovery, discoveryRead } = useCatchUp([
-    taskId,
-  ]);
+  const { runner, state, records, todayOf, discovery, discoveryRead } =
+    useCatchUp([taskId]);
   const position = useCachePosition();
   // Committed CONTENT asks again (WEB-10a decision 25); the position's first load is not a change.
   const revision =
@@ -320,10 +324,13 @@ function useStreakFigures(taskId: string, shared: boolean) {
 
   const waiting =
     read.personal.kind === "catching_up" || read.joint?.kind === "catching_up";
-  // The task's latest day, read by task (review R21).
-  const record =
+  // The row of the day the streak needs caught up, its task's today, read by its own key (revision 5, R24; by task, R21): unknown until
+  // this page's runner has read the task, and then a later day's stop never stands in for it.
+  const today = todayOf(taskId);
+  const found =
     records.status === "ready" ? records.value.get(taskId) : undefined;
-  const sequencesRead = records.status === "ready";
+  const record = today === undefined ? undefined : (found?.target ?? undefined);
+  const sequencesRead = records.status === "ready" && today !== undefined;
   // Ask the runner once per visit; read again once when it has finished (no live sequence for the task, none running here).
   useEffect(() => {
     if (!waiting || !env.online) return;
@@ -359,55 +366,29 @@ function useStreakFigures(taskId: string, shared: boolean) {
     taskId,
     refresh,
   ]);
-  const stoppedRecord =
-    waiting && record?.phase === "stopped" && record.stop !== null
-      ? record
-      : null;
-  const discovered = discovery[taskId]?.stop;
-  // What a "Try again" on the stop shown names (review R20).
-  const seen: SeenStop = stoppedRecord
-    ? {
-        kind: "sequence",
-        generation: stoppedRecord.sequence_generation,
-        revision: stoppedRecord.revision ?? 0,
-      }
-    : discovered
-      ? { kind: "discovery", retry: discovery[taskId]?.retry ?? 0 }
-      : { kind: "memory" };
-  const memoryStop = !waiting
-    ? undefined
-    : discovered
-      ? {
-          reason: discovered.reason,
-          ...(discovered.request_id
-            ? { requestId: discovered.request_id }
-            : {}),
-        }
-      : state.unrecorded.get(taskId);
-  const stop: Read | null = stoppedRecord?.stop
+  // The stop shown, chosen as every screen chooses it (revision 5, reviews R24 and R26): the row of the task's today once its day is known
+  // (else its latest days as read), else its stopped discovery, else this page's memory stop; with what a "Try again" on it names.
+  const shown = waiting
+    ? stopsFor(taskId, recoveryRows(found, today), state, discovery)[0]
+    : undefined;
+  const seen: SeenStop = shown?.seen ?? { kind: "none" };
+  const stop: Read | null = shown
     ? {
         kind: "stopped",
-        reason: stoppedRecord.stop.reason,
-        ...(stoppedRecord.stop.request_id
-          ? { requestId: stoppedRecord.stop.request_id }
-          : {}),
-        day: stoppedRecord.through_date,
+        reason: shown.reason,
+        ...(shown.requestId ? { requestId: shown.requestId } : {}),
+        ...(shown.throughDate === undefined ? {} : { day: shown.throughDate }),
       }
-    : memoryStop
-      ? {
-          kind: "stopped",
-          reason: memoryStop.reason,
-          ...(memoryStop.requestId ? { requestId: memoryStop.requestId } : {}),
-        }
-      : null;
+    : null;
   return {
     personal: stop ?? read.personal,
     joint: read.joint === null ? null : (stop ?? read.joint),
     retry: refresh,
     tryAgain: (day?: string) => {
       visit.current.reread = false;
-      // A stop of this visit's own reads (a second 409) names no record: the runner asks afresh.
-      runner.tryAgain(taskId, day, stop === null ? undefined : seen);
+      // A stop of this visit's own reads (a second 409) names no record: the runner asks afresh, only while no stop stands (revision 5,
+      // R26: a stop that appeared since is not lifted by a press on another).
+      runner.tryAgain(taskId, day, stop === null ? { kind: "none" } : seen);
     },
   };
 }

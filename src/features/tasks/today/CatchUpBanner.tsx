@@ -4,9 +4,15 @@ import { Button } from "../../../components/ui/button";
 import {
   type MaterialiseDiscovery,
   type MaterialiseSequenceRow,
+  type TaskSequences,
   useCachedResources,
 } from "../../../data";
-import type { RunnerState, SeenStop } from "../catchup/runner";
+import {
+  type RunnerState,
+  type SeenStop,
+  seenDiscovery,
+  seenSequence,
+} from "../catchup/runner";
 import { useCatchUp } from "../catchup/useCatchUp";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -24,6 +30,7 @@ export const CATCH_UP_COPY = {
     "Repeating tasks will be brought up to date when Atlas can reach the server.",
   done: "Repeating tasks are up to date.",
   untitled: "a repeating task",
+  forDay: (day: string) => `For ${day}`,
   reason: {
     bound:
       "It needed more catching up than Atlas does in one go. Try again to carry on from where it stopped.",
@@ -46,8 +53,8 @@ export const CATCH_UP_COPY = {
 export type ShownReason = StopReason | "storage";
 
 /**
- * A task's stopped catch-up, as this page knows it: its latest day's record when stopped, else its stopped discovery (the first read; any
- * page's record, review R13), else a discovery stop held in this page's memory only (its record could not be written).
+ * A task's stopped catch-up, as this page knows it: a day's record when stopped, else its stopped discovery (the first read; any page's
+ * record, review R13), else a discovery stop held in this page's memory only (its record could not be written).
  */
 export interface ShownStop {
   taskId: string;
@@ -57,45 +64,74 @@ export interface ShownStop {
   /** What a "Try again" pressed on it names (review R20): this very stop, never a later one that looks the same. */
   seen: SeenStop;
 }
-export function stopFor(
+/**
+ * The days of a task whose stopped catch-up a screen shows (revision 5, review R24): the exact day it works for (`target`, once known),
+ * and, while that day is not known or when the screen shows every retained stop (`every`: the task's detail), the task's latest days as
+ * read. A later day (a horizon stop) never stands in for the target: each is reached by its own key.
+ */
+export function recoveryRows(
+  found: TaskSequences | undefined,
+  target: string | undefined,
+  every = false,
+): MaterialiseSequenceRow[] {
+  if (found === undefined) return [];
+  const rows: MaterialiseSequenceRow[] = [];
+  if (target !== undefined && found.target) rows.push(found.target);
+  if (target === undefined || every)
+    for (const row of found.rows)
+      if (!rows.some((r) => r.through_date === row.through_date))
+        rows.push(row);
+  return rows;
+}
+
+/**
+ * Every stop of a task a screen shows, each with what a "Try again" on it names (revision 5, review R26): a day's stopped sequence with the
+ * discovery stop shown beside it; else the stopped discovery; else the page's memory stop.
+ */
+export function stopsFor(
   taskId: string,
-  latest: ReadonlyMap<string, MaterialiseSequenceRow>,
+  rows: readonly MaterialiseSequenceRow[],
   state: RunnerState,
   discovery: Readonly<Record<string, MaterialiseDiscovery>> = {},
-): ShownStop | null {
-  const row = latest.get(taskId);
-  if (row?.phase === "stopped" && row.stop !== null)
-    return {
-      taskId,
-      throughDate: row.through_date,
-      reason: row.stop.reason,
-      requestId: row.stop.request_id,
-      seen: {
-        kind: "sequence",
-        generation: row.sequence_generation,
-        revision: row.revision ?? 0,
-      },
-    };
+): ShownStop[] {
   const entry = discovery[taskId];
-  const found = entry?.stop;
-  if (entry && found)
-    return {
-      taskId,
-      throughDate: undefined,
-      reason: found.reason,
-      requestId: found.request_id,
-      seen: { kind: "discovery", retry: entry.retry },
-    };
-  const memory = state.unrecorded.get(taskId);
-  return memory === undefined
-    ? null
-    : {
+  const found = entry?.stop ? entry : null;
+  const days = rows.flatMap((row) =>
+    row.phase === "stopped" && row.stop !== null
+      ? [
+          {
+            taskId,
+            throughDate: row.through_date,
+            reason: row.stop.reason,
+            requestId: row.stop.request_id,
+            seen: seenSequence(row, found),
+          },
+        ]
+      : [],
+  );
+  if (days.length > 0) return days;
+  if (found?.stop)
+    return [
+      {
         taskId,
         throughDate: undefined,
-        reason: memory.reason,
-        requestId: memory.requestId,
-        seen: { kind: "memory" },
-      };
+        reason: found.stop.reason,
+        requestId: found.stop.request_id,
+        seen: seenDiscovery(found),
+      },
+    ];
+  const memory = state.unrecorded.get(taskId);
+  return memory === undefined
+    ? []
+    : [
+        {
+          taskId,
+          throughDate: undefined,
+          reason: memory.reason,
+          requestId: memory.requestId,
+          seen: { kind: "memory", id: memory.id },
+        },
+      ];
 }
 
 /**
@@ -109,7 +145,8 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
   const env = useTasksEnv();
   const announcer = useAnnouncer();
   const heading = useId();
-  const { runner, state, records, discovery } = useCatchUp(pendingTasks);
+  const { runner, state, records, todayOf, discovery } =
+    useCatchUp(pendingTasks);
   const titles = useCachedResources(pendingTasks);
   const key = pendingTasks.join(",");
   const reachable = env.online && env.writable;
@@ -130,20 +167,22 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
     seen.current = { finished: state.finished, stops: state.stops };
   }, [state.finished, state.stops, announcer]);
   if (pendingTasks.length === 0) return null;
-  const latest: ReadonlyMap<string, MaterialiseSequenceRow> =
+  const found: ReadonlyMap<string, TaskSequences> =
     records.status === "ready" ? records.value : new Map();
+  // Each task's rows for the day Today works for: its today once known, else its latest days as read (revision 5, R24).
+  const rowsOf = (taskId: string) =>
+    recoveryRows(found.get(taskId), todayOf(taskId));
   const titleOf = (taskId: string): string => {
     const row = titles.status === "ready" ? titles.value[taskId] : null;
     return row?.merged.label ?? CATCH_UP_COPY.untitled;
   };
-  const stopped = pendingTasks.flatMap((taskId) => {
-    const stop = stopFor(taskId, latest, state, discovery);
-    return stop === null ? [] : [stop];
-  });
+  const stopped = pendingTasks.flatMap((taskId) =>
+    stopsFor(taskId, rowsOf(taskId), state, discovery),
+  );
   const working = pendingTasks.filter(
     (taskId) =>
       state.active.includes(taskId) ||
-      (latest.get(taskId)?.phase ?? "stopped") !== "stopped",
+      rowsOf(taskId).some((row) => row.phase !== "stopped"),
   );
   return (
     <section
@@ -176,10 +215,11 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
       ) : null}
       {stopped.map((stop) => (
         <div
-          key={stop.taskId}
+          key={`${stop.taskId}|${stop.throughDate ?? ""}`}
           className="flex flex-col gap-1"
           data-catch-up-stopped={stop.reason}
           data-catch-up-task={stop.taskId}
+          data-catch-up-day={stop.throughDate}
         >
           <p className="text-[13px] font-medium text-ink-1">
             {CATCH_UP_COPY.stopped(titleOf(stop.taskId))}

@@ -2,8 +2,13 @@ import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
 import type { CacheRow } from "../../../src/data";
+import { commitMaterialiseDiscovery } from "../../../src/data";
+import type { AccountService } from "../../../src/data/engine/account-service";
 import type { TasksResult } from "../../../src/features/tasks/api";
-import { forgetCatchUp } from "../../../src/features/tasks/catchup/useCatchUp";
+import {
+  forgetCatchUp,
+  runnerForAccount,
+} from "../../../src/features/tasks/catchup/useCatchUp";
 import * as copy from "../../../src/features/tasks/copy";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import type {
@@ -371,6 +376,69 @@ describe("R13: a stopped discovery is not a finished catch-up", () => {
     // Online again the streak is read once (its own reconnect), and the stop stands: no catch-up, no further read.
     expect(streaks).toBeLessThanOrEqual(shown + 1);
   });
+
+  /**
+   * Revision 5: once this page's runner has read the task (its day is known), a discovery stop another page records afterwards still
+   * holds the streak: it is shown and never read past (the day being known is not a finished catch-up).
+   */
+  test("a stop another page records AFTER this page knew the task's day: shown, and the streak is not read past it", async () => {
+    const task = await repeating(["complete"]);
+    let streaks = 0;
+    let conflict = false;
+    const api = fakeApi({
+      readStreak: async () => {
+        streaks += 1;
+        return conflict ? MATERIALISE : streak(1, 1);
+      },
+      readTask: async () => ({
+        ok: true,
+        value: {
+          task: task.rows[0] as never,
+          execution: task.rows[1] as never,
+          materialisation: { last_date: TODAY, pending: false },
+        },
+      }),
+    });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}/streak`,
+      rows: task.rows,
+      api,
+    });
+    await t.until(() => scope("personal")?.dataset.streakState === "ready");
+    const runner = runnerForAccount(ME) as NonNullable<
+      ReturnType<typeof runnerForAccount>
+    >;
+    runner.ensure(task.taskId, "daily");
+    await t.until(() => runner.get().zones.has(task.taskId));
+    await t.until(() => runner.get().active.length === 0);
+    expect(runner.get().zones.get(task.taskId)).toBe("UTC");
+    const service = t.data.service() as AccountService;
+    expect(
+      await commitMaterialiseDiscovery(service, service.capture(1), {
+        task_id: task.taskId,
+        expected: null,
+        next: {
+          retry: 0,
+          failures: 3,
+          stop: { reason: "unreachable" },
+          attempt: "eeeeeeee-0000-4000-8000-000000000130",
+        },
+      }),
+    ).toMatchObject({ kind: "applied", value: { kind: "written" } });
+    conflict = true;
+    fireEvent.focus(window);
+    await t.until(() => scope("personal")?.dataset.streakState === "stopped");
+    await t.settle();
+    const shown = streaks;
+    await t.settle();
+    await t.settle();
+    expect(
+      scope("personal")
+        ?.querySelector("[data-streak-stopped]")
+        ?.getAttribute("data-streak-stopped"),
+    ).toBe("unreachable");
+    expect(streaks, "no reread past the stop").toBe(shown);
+  });
 });
 
 describe("offline and identity", () => {
@@ -685,5 +753,75 @@ describe("R21: the streak's recorded stop, whatever other tasks hold", () => {
         ?.querySelector("[data-streak-stopped]")
         ?.getAttribute("data-streak-stopped"),
     ).toBe("bound");
+  });
+});
+
+/**
+ * Revision 5 (review 5 R24): the streak needs its task's TODAY caught up, so once the runner has read the task it shows that day's stop,
+ * never a later day's (a horizon stop) that happens to sort last.
+ */
+describe("R24: the streak's stop is its task's today", () => {
+  test.each([
+    ["a later horizon stop beside today's bound stop", true],
+    ["today's bound stop alone (control)", false],
+  ])("%s: today's stop and its Try again are shown", async (_, later) => {
+    const task = await repeating(["complete"]);
+    const today = {
+      task_id: task.taskId,
+      through_date: TODAY,
+      sequence_generation: "g",
+      phase: "stopped",
+      attempt: null,
+      read_seq: 1,
+      successful_calls: 8,
+      last_known_position: "2026-01-01",
+      started_at: 1,
+      read_failures: 0,
+      stop: { reason: "bound" },
+      trigger: "streak",
+    };
+    const future = {
+      ...today,
+      through_date: addDays(TODAY, 32),
+      sequence_generation: "future",
+      stop: { reason: "horizon" },
+    };
+    let reads = 0;
+    const api = fakeApi({
+      readStreak: async () => MATERIALISE,
+      readTask: async () => {
+        reads += 1;
+        return {
+          ok: true,
+          value: {
+            task: task.rows[0] as never,
+            execution: task.rows[1] as never,
+            materialisation: { last_date: "2026-01-01", pending: true },
+          },
+        };
+      },
+    });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}/streak`,
+      rows: task.rows,
+      api,
+      sequences: later ? [today, future] : [today],
+    });
+    await t.until(
+      () =>
+        reads > 0 &&
+        scope("personal")?.querySelector("[data-streak-stopped]") != null &&
+        scope("personal")
+          ?.querySelector("[data-streak-stopped]")
+          ?.getAttribute("data-streak-stopped") === "bound",
+    );
+    expect(
+      scope("personal")
+        ?.querySelector("[data-streak-stopped]")
+        ?.getAttribute("data-streak-stopped"),
+    ).toBe("bound");
+    expect(
+      screen.getAllByRole("button", { name: copy.TRY_AGAIN }).length,
+    ).toBeGreaterThan(0);
   });
 });

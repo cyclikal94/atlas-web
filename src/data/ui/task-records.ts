@@ -9,16 +9,19 @@ import type {
 import {
   DISCOVERY_ENTRY_BYTES,
   type DiscoveryWrite,
+  deleteSatisfiedSequences,
   liftMaterialiseStops,
   type MaterialiseLift,
-  pruneMaterialiseSequences,
-  readLatestSequences,
   readMaterialiseDiscovery,
   readMaterialiseSequence,
-  SEQUENCE_WINDOW,
+  readMaterialiseSequences,
+  readTaskSequences,
+  SEQUENCE_ROW_BYTES,
   type SequenceExpectation,
   type SequenceKey,
   type SequenceWrite,
+  TASK_SEQUENCE_TASKS,
+  type TaskSequences,
   writeMaterialiseDiscovery,
   writeMaterialiseSequence,
 } from "../plans/materialise";
@@ -26,6 +29,7 @@ import {
   issueTimerOrder,
   readTimerAuthority,
   reconcileTimerCopy,
+  recordTimerEnded,
   type TimerAuthorityRecord,
   type TimerCopyRecord,
   type TimerScopeObservation,
@@ -42,25 +46,39 @@ import { useWatch } from "./react";
  */
 
 /**
- * The latest day's sequence of each of `taskIds`, live: re-read when the store changes, in this page or another (revision 4, review R21:
- * by task, never a prefix of the account's rows, so another task's rows cannot hide a stop). Read `SEQUENCE_WINDOW` tasks at a time, each
- * read bounded; the result is ready only once every read is.
+ * The recovery rows of each task asked for, live: re-read when the store changes, in this page or another (revision 5, review R24; by
+ * task, revision 4's R21, so another task's rows cannot hide a stop): the row of the exact day a screen works for (`throughDate`, when it
+ * is known) and the task's latest days. Read `TASK_SEQUENCE_TASKS` tasks at a time, each read bounded; the result is ready only once every
+ * read is.
  */
-export function useLatestSequences(
-  taskIds: readonly string[],
-): Loadable<ReadonlyMap<string, MaterialiseSequenceRow>> {
-  const key = [...new Set(taskIds)].sort().join(",");
+export function useTaskSequences(
+  targets: ReadonlyArray<{ taskId: string; throughDate?: string }>,
+): Loadable<ReadonlyMap<string, TaskSequences>> {
+  const byTask = new Map<string, string | undefined>();
+  for (const t of targets)
+    if (!byTask.has(t.taskId) || t.throughDate !== undefined)
+      byTask.set(t.taskId, t.throughDate);
+  const key = [...byTask]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([taskId, day]) => `${taskId}|${day ?? ""}`)
+    .join(",");
   return useWatch(
     (env) => {
       const service = env.service();
       if (!service) return null;
-      const tasks = key === "" ? [] : key.split(",");
-      const batches: Watchable<Record<string, MaterialiseSequenceRow>>[] = [];
-      for (let i = 0; i < tasks.length; i += SEQUENCE_WINDOW)
+      const tasks =
+        key === ""
+          ? []
+          : key.split(",").map((part) => {
+              const [taskId, day] = part.split("|") as [string, string];
+              return day === "" ? { taskId } : { taskId, throughDate: day };
+            });
+      const batches: Watchable<Record<string, TaskSequences>>[] = [];
+      for (let i = 0; i < tasks.length; i += TASK_SEQUENCE_TASKS)
         batches.push(
-          service.store.watch(readLatestSequences, {
+          service.store.watch(readTaskSequences, {
             incarnationId: service.incarnationId,
-            taskIds: tasks.slice(i, i + SEQUENCE_WINDOW),
+            tasks: tasks.slice(i, i + TASK_SEQUENCE_TASKS),
           }),
         );
       return allOf(batches);
@@ -69,16 +87,16 @@ export function useLatestSequences(
   );
 }
 
-const NO_SEQUENCES: Loadable<ReadonlyMap<string, MaterialiseSequenceRow>> = {
+const NO_SEQUENCES: Loadable<ReadonlyMap<string, TaskSequences>> = {
   status: "ready",
   value: new Map(),
 };
 
 /** Several watches as one: ready when all are (their rows merged), else the first that is not; the same object while none changes. */
 function allOf(
-  parts: readonly Watchable<Record<string, MaterialiseSequenceRow>>[],
-): Watchable<ReadonlyMap<string, MaterialiseSequenceRow>> {
-  let seen: readonly Loadable<Record<string, MaterialiseSequenceRow>>[] = [];
+  parts: readonly Watchable<Record<string, TaskSequences>>[],
+): Watchable<ReadonlyMap<string, TaskSequences>> {
+  let seen: readonly Loadable<Record<string, TaskSequences>>[] = [];
   let out = NO_SEQUENCES;
   return {
     get() {
@@ -89,7 +107,7 @@ function allOf(
       const pending = now.find((v) => v.status !== "ready");
       if (pending !== undefined) out = pending as typeof out;
       else {
-        const rows = new Map<string, MaterialiseSequenceRow>();
+        const rows = new Map<string, TaskSequences>();
         for (const v of now)
           if (v.status === "ready")
             for (const [taskId, row] of Object.entries(v.value))
@@ -152,7 +170,10 @@ const settled = <O>(
       ? { kind: "dropped" }
       : { kind: "failed" };
 
-/** W27's compare-and-set write, through the service's commit (G1, G2, G5 and the plan's INC, CLS, EPO). Never throws. */
+/**
+ * W27's compare-and-set write, through the service's commit (G1, G2, G5 and the plan's INC, CLS, EPO). A NEW row grows the store: with
+ * `env`, it is admitted through the origin's quota ledger first (revision 5), and a refusal is `refused` (nothing written). Never throws.
+ */
 export async function commitMaterialiseSequence(
   service: AccountService,
   captured: Captured,
@@ -161,13 +182,31 @@ export async function commitMaterialiseSequence(
     expected: SequenceExpectation;
     next: MaterialiseSequenceRow | null;
   },
+  env: Pick<DataEnv, "quota"> | null = null,
 ): Promise<RecordCommit<SequenceWrite>> {
+  const grows = input.expected === null && input.next !== null;
+  let reservation: Awaited<ReturnType<DataEnv["quota"]["reserve"]>> | null =
+    null;
+  let written = false;
   try {
-    return settled(
-      await service.commit(writeMaterialiseSequence, { captured, ...input }),
-    );
+    if (grows && env !== null)
+      reservation = await env.quota.reserve("cache", SEQUENCE_ROW_BYTES);
+    const lease = reservation;
+    const out = await service.commit(writeMaterialiseSequence, {
+      captured,
+      ...input,
+      ...(lease === null
+        ? {}
+        : lease.verdict === "refuse"
+          ? { admitted: false }
+          : { leaseLive: () => lease.live() }),
+    });
+    written = out.kind === "applied" && out.value.kind === "written";
+    return settled(out);
   } catch {
     return { kind: "failed" };
+  } finally {
+    reservation?.settle(written ? "written" : "not_written");
   }
 }
 
@@ -189,18 +228,42 @@ export async function commitMaterialiseLift(
   }
 }
 
-/** W27's housekeeping: the task's stopped or ready sequences of days before `before`. Never throws. */
-export async function pruneOlderSequences(
+/**
+ * W27 (revision 5): removes the task's rows whose need the caller established is satisfied, each only while it is still the row decided
+ * on (`deleteSatisfiedSequences`). Never throws.
+ */
+export async function clearSatisfiedSequences(
   service: AccountService,
   captured: Captured,
-  input: { task_id: string; before: string },
+  input: {
+    task_id: string;
+    rows: ReadonlyArray<{
+      through_date: string;
+      expected: Exclude<SequenceExpectation, null>;
+    }>;
+  },
 ): Promise<RecordCommit<{ removed: number }>> {
   try {
     return settled(
-      await service.commit(pruneMaterialiseSequences, { captured, ...input }),
+      await service.commit(deleteSatisfiedSequences, { captured, ...input }),
     );
   } catch {
     return { kind: "failed" };
+  }
+}
+
+/** One task's rows as stored now, in key order (its earliest `SEQUENCE_WINDOW`); `undefined`: the store could not be read. */
+export async function readTaskSequencesNow(
+  service: AccountService,
+  taskId: string,
+): Promise<MaterialiseSequenceRow[] | undefined> {
+  try {
+    return await service.store.run(readMaterialiseSequences, {
+      incarnationId: service.incarnationId,
+      taskId,
+    });
+  } catch {
+    return undefined;
   }
 }
 
@@ -315,7 +378,9 @@ export async function commitTimerCorrection(
     try {
       reservation = await env.quota.reserve(
         "cache",
-        utf8Length(JSON.stringify(input.scope)) + SCOPE_OVERHEAD,
+        utf8Length(JSON.stringify(input.scope)) +
+          SCOPE_OVERHEAD +
+          endedBytes(input.scope.ended),
       );
     } catch {
       reservation = null;
@@ -338,6 +403,67 @@ export async function commitTimerCorrection(
 
 /** A scope's own fields beside its lists (orders and names): what a new day's record adds beyond the ids it lists. */
 const SCOPE_OVERHEAD = 128;
+
+/** What recording `ids` as finished adds to `timer_ended` at most (revision 5, R23): each id with the largest order it can carry. */
+const endedBytes = (ids: readonly string[]) =>
+  ids.length === 0
+    ? 0
+    : utf8Length(
+        JSON.stringify(ids.map((id) => [id, Number.MAX_SAFE_INTEGER])),
+      );
+
+/**
+ * W28 (revision 5, review R23): the sessions a page of the account's history listed, recorded as finished and taken out of the copy
+ * (`recordTimerEnded`), the growth admitted as a cache write through the origin's quota ledger first; a refusal still takes them out of
+ * the copy and records the loss. `captured` is the stamp of the history read's issue. Never throws.
+ */
+export async function commitTimerEnded(
+  env: Pick<DataEnv, "quota">,
+  service: AccountService,
+  captured: Captured,
+  ids: readonly string[],
+): Promise<RecordCommit<{ recorded: boolean; removed: number }>> {
+  let reservation: Awaited<ReturnType<DataEnv["quota"]["reserve"]>> | null =
+    null;
+  let recorded = false;
+  try {
+    try {
+      reservation = await env.quota.reserve("cache", endedBytes(ids));
+    } catch {
+      reservation = null;
+    }
+    const lease = reservation?.verdict === "refuse" ? null : reservation;
+    const out = await service.commit(recordTimerEnded, {
+      captured,
+      ids,
+      admitted: lease !== null,
+      ...(lease === null ? {} : { leaseLive: () => lease.live() }),
+    });
+    if (out.kind === "applied")
+      recorded = (out.value as { recorded: boolean }).recorded;
+    return settled(out);
+  } catch {
+    return { kind: "failed" };
+  } finally {
+    reservation?.settle(recorded ? "written" : "not_written");
+  }
+}
+
+/**
+ * W28's authority as stored NOW (revision 5, review R23): what an act re-checks after its own waits, so a correction whose watch has not
+ * been delivered yet still counts. `undefined`: the store could not be read.
+ */
+export async function readTimerAuthorityNow(
+  service: AccountService,
+): Promise<TimerAuthorityRecord | undefined> {
+  try {
+    return await service.store.run(readTimerAuthority, {
+      incarnationId: service.incarnationId,
+    });
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * W28: replaces the running-timer copy with `copy` (or removes it), admitted as a cache write through the origin's quota ledger first (a
@@ -380,6 +506,7 @@ export type {
   SequenceExpectation,
   SequenceKey,
   SequenceWrite,
+  TaskSequences,
 } from "../plans/materialise";
 export {
   DISCOVERY_ENTRY_BYTES,

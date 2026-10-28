@@ -5,17 +5,18 @@ import {
   getPageDataHost,
   type Loadable,
   type MaterialiseDiscovery,
-  type MaterialiseSequenceRow,
   readResourcesNow,
+  type TaskSequences,
   useDataEnv,
-  useLatestSequences,
   useMaterialiseDiscovery,
+  useTaskSequences,
 } from "../../../data";
 import type { TasksApi } from "../api";
 import { type TasksEnv, useTasksEnv } from "../env";
 import { commandOf, QUEUED_KINDS } from "../model/commands";
 import { parseOccurrenceData } from "../model/contract";
 import { isContractDate } from "../model/primitives";
+import { todayIn } from "../model/time";
 import {
   type CatchUpRunner,
   createCatchUpRunner,
@@ -96,10 +97,15 @@ export interface CatchUp {
   runner: CatchUpRunner;
   state: RunnerState;
   /**
-   * The latest day's durable sequence of each task asked for (every page's), live. Revision 4 (review R21): read by task, so no other
-   * task's rows can hide one of these; `loading` until every read has answered (never read as "no sequence").
+   * The durable recovery rows of each task asked for (every page's), live (revision 5, review R24; by task since revision 4's R21): the
+   * row of the task's today, once its day is known, and its latest days. `loading` until every read has answered (never "no sequence").
    */
-  records: Loadable<ReadonlyMap<string, MaterialiseSequenceRow>>;
+  records: Loadable<ReadonlyMap<string, TaskSequences>>;
+  /**
+   * The exact day this screen works for, for a task (revision 5, R24): its today in its own zone, once this page's runner has read the
+   * task (`undefined` before: never the device's own date).
+   */
+  todayOf(taskId: string): string | undefined;
   /** The account's failed discoveries by task (every page's; review R13), live; empty until read (`discoveryRead` false). */
   discovery: Readonly<Record<string, MaterialiseDiscovery>>;
   discoveryRead: boolean;
@@ -127,15 +133,26 @@ export function useCatchUpService(): CatchUpRunner {
 }
 
 export function useCatchUp(taskIds: readonly string[]): CatchUp {
+  const env = useTasksEnv();
   const runner = useCatchUpService();
   const state = useSyncExternalStore(runner.subscribe, runner.get, runner.get);
-  const records = useLatestSequences(taskIds);
+  const todayOf = (taskId: string) => {
+    const zone = state.zones.get(taskId);
+    return zone === undefined ? undefined : todayIn(zone, env.now());
+  };
+  const records = useTaskSequences(
+    taskIds.map((taskId) => {
+      const day = todayOf(taskId);
+      return day === undefined ? { taskId } : { taskId, throughDate: day };
+    }),
+  );
   const found = useMaterialiseDiscovery();
   const discovery = found.status === "ready" ? found.value : NONE;
   return {
     runner,
     state,
     records,
+    todayOf,
     discovery,
     discoveryRead: found.status === "ready",
   };

@@ -111,8 +111,8 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
-| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key, and since revision 4 its `revision`; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop; revision 3: and its admitted read's `attempt`, a new task's entry admitted as a cache write); `liftMaterialiseStops` (revision 4: "Try again" over a stopped discovery entry and the day's stopped sequence as ONE compare-and-set) | INC, CLS, EPO |
-| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; revision 3: the day's observation in `sync_state.timer_scopes`, admitted as a cache write, or the floor; revision 4: the correction applies whatever the fence) | INC, CLS, EPO |
+| W27 | `writeMaterialiseSequence`, `deleteSatisfiedSequences` (revision 5; it replaces revision 1's `pruneMaterialiseSequences`) (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key, and since revision 4 its `revision`; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop; revision 3: and its admitted read's `attempt`, a new task's entry admitted as a cache write); `liftMaterialiseStops` (revision 4: "Try again" over a stopped discovery entry and the day's stopped sequence as ONE compare-and-set); revision 5: a NEW row is admitted as a cache write, and a row is removed only when a position read covers its own day | INC, CLS, EPO |
+| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; revision 3: the day's observation in `sync_state.timer_scopes`, admitted as a cache write, or the floor; revision 4: the correction applies whatever the fence; revision 5: the account's latest complete observation in `sync_state.timer_account` and the finished sessions in `sync_state.timer_ended`); `recordTimerEnded` (revision 5: the account history's finished sessions, admitted as a cache write) | INC, CLS, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -742,8 +742,7 @@ the current epoch is shown with no request, one persisted for another epoch is n
   so that `guardedPlan`'s "an undefined read is a drop" rule does not drop the write of a row that is absent. `pruneMaterialiseSequences`
   removes a task's rows for earlier days that are not running. Read plans `readMaterialiseSequence` and `readMaterialiseSequences` (at most
   `SEQUENCE_WINDOW` = 100). Every write goes through `AccountService.commit` with INC, CLS and EPO, the person's "Try again" included.
-  Rows are a few hundred bytes and pruned, so the write is classed fixed-size (like `claimFormWriter`), not admitted through the quota
-  ledger (`plan-inventory.test.ts`'s FIXED_SIZE).
+  Revision 1 classed the write fixed-size because rows were pruned; revision 5 keeps unsatisfied rows, so a new row is admitted (below).
 * **W28, `plans/timer-copy.ts`.** `sync_state.timer_copy` (optional, no migration; the precedent of W14's `sync_state.defaults`): ONE
   record `{ format: 1, read_at, complete, running }` (format 2 adds `order` since revision 2) holding at most `TIMER_COPY_ROWS` = 50 opaque rows, the last COMPLETE first page of
   `GET /timer-sessions?state=running`. Response-derived (INC, CLS, EPO); its growth is admitted like a cache page (the caller reserves the
@@ -794,11 +793,34 @@ the current epoch is shown with no request, one persisted for another epoch is n
   `readTimerAuthority` reads the copy, every readable scope and the floor (raised by every scope that does not read) in ONE transaction
   (`TimerAuthorityRecord`, `useTimerAuthority`): the task slice judges every server-derived running session (the copy, the account's live
   list, a day's read now or kept) by one rule against it, so the floor is the copy's rule too.
+* **Revision 5: retention, exact days and growth (W27; Review 5's R24/R25, WEB-04 §5.8).** A row is never removed because a later day
+  of its task begins: revision 1's `pruneMaterialiseSequences` deleted a task's earlier stopped or ready rows when a later day's sequence
+  began, which lost unsatisfied stops and their uncertain attempts (R25). It is replaced by `deleteSatisfiedSequences`: it removes rows of
+  ONE task that the caller established SATISFIED (a position read covering each row's own day; the slice's `satisfied`, so a future day
+  needs the position itself and `pending: false` covers only today or earlier), each only while it still matches the caller's expectation
+  (revision included), at most `SEQUENCE_WINDOW` per call. Rows therefore grow with unsatisfied days, so `writeMaterialiseSequence` admits
+  a NEW row through the quota ledger (`SEQUENCE_ROW_BYTES`, `leaseLive`; `refused` when not admitted, nothing written; replacing or
+  deleting a row is not growth): it moved from `FIXED_SIZE` to `ADMITTED` in `plan-inventory.test.ts`. `readTaskSequences` replaces
+  revision 4's `readLatestSequences`: for each named task (at most `TASK_SEQUENCE_TASKS` = 25 per read) the row of the exact day asked for
+  (`target`: `null` absent), its latest `TASK_SEQUENCE_ROWS` = 8 rows and whether those are all of them (`complete`), so a later day (a
+  horizon stop) never hides the day a screen works for (R24).
+* **Revision 5: the complete account observation and finished sessions (W28; Review 5's R23).** `writeTimerCopy` also keeps the latest
+  COMPLETE copy's order and session ids in `sync_state.timer_account` (`TimerAccountRecord`, only when every row names its session), which
+  a later partial copy replaces never. `sync_state.timer_ended` (`TimerEndedRecord` = `{ lost, ids: [id, order recorded at][] }`, at most
+  `TIMER_ENDED_IDS` = 200) keeps every session a read listed FINISHED: `recordTimerEnded` (a page of the account's history, stamped at its
+  issue, growth admitted as a cache write) records them and takes them out of the copy in the same transaction; `reconcileTimerCopy`
+  records a day read's finished sessions too (under the scope's reservation). Beyond the bound the one recorded longest ago goes, the
+  floor rises to the order handed out when it was recorded and `lost` is set; a refused growth takes the sessions out of the copy and
+  records the loss at every order issued so far. A record that does not read is a loss of every order issued. `readTimerAuthority` returns
+  `account`, `ended` and `endedLost` with the copy, scopes and floor: a finished session never runs again, whatever order a positive of it
+  has, and once one was lost a positive of unknown order is not trusted.
 * **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `commitMaterialiseSequence`,
   `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve); revision 3: quota reserves in
   `commitTimerCorrection` and `commitMaterialiseDiscovery`; revision 4: `useLatestSequences` (by task, in reads of `SEQUENCE_WINDOW`
   tasks, ready once every read is), `useTimerAuthority` and `commitMaterialiseLift`, replacing `useMaterialiseSequences`, `useTimerCopy` and
-  `useTimerScope`.
+  `useTimerScope`; revision 5: `useTaskSequences` (exact days and latest days by task, in reads of `TASK_SEQUENCE_TASKS`) replacing
+  `useLatestSequences`, `clearSatisfiedSequences` and `readTaskSequencesNow` replacing `pruneOlderSequences`, `commitMaterialiseSequence`'s
+  quota reserve for a new row, `commitTimerEnded` (with its quota reserve) and `readTimerAuthorityNow`.
   `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).
 * **Retention.** Nothing new: a discarded or rejected timer draft's `timer_session` version record is removed by the existing recompute
   (no other draft targets it and nothing is cached for it); the wipe removes both records with the account's database.

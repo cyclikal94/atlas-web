@@ -360,6 +360,10 @@ export function TimerBlock({
     copyComplete: copied?.complete ?? false,
     scope: evidence.authority?.scopes[row.id] ?? null,
     floor: evidence.authority?.floor ?? Number.POSITIVE_INFINITY,
+    // The account's latest complete observation and every session listed finished (revision 5, review R23), as the account's list.
+    account: evidence.authority?.account ?? null,
+    ended: evidence.authority?.ended ?? new Set(),
+    endedLost: evidence.authority?.endedLost ?? false,
   });
   const now = useSecond(running.length > 0);
   const [showSessions, setShowSessions] = useState(false);

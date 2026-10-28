@@ -1,7 +1,12 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { commitTimerCorrection, issueTimerOrderNow } from "../../../src/data";
+import {
+  commitTimerCopy,
+  commitTimerCorrection,
+  commitTimerEnded,
+  issueTimerOrderNow,
+} from "../../../src/data";
 import type { AccountService } from "../../../src/data/engine/account-service";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { SyncStateRow } from "../../../src/data/model/types";
@@ -751,6 +756,349 @@ describe("R19: one authority for every running row", () => {
       });
       await t.settle();
       expect(rowOf(session.id) === null).toBe(refused);
+    },
+  );
+});
+
+/**
+ * Revision 5 (review 5 R23): the account's latest COMPLETE observation and every session the history listed finished decide for every
+ * running row, live or copied, in this tab and others, offline and after a reload. REVIEW5 T7 and T8 are ported verbatim.
+ */
+describe("R23: complete and finished evidence for every running row", () => {
+  const sync = (t: Awaited<ReturnType<typeof mountTasks>>) =>
+    t.world.idb.peek(NAME, "sync_state", "singleton") as SyncStateRow;
+  test.each([false, true])(
+    "REVIEW5 T7 (ported): later complete account observation omits session=%s",
+    async (omitted) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      const api = fakeApi({
+        readAccountTimers: async (q) =>
+          page(q.state === "running" ? [session] : []),
+      });
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api,
+      });
+      await t.until(() => rowOf(session.id) !== null);
+      expect(rowOf(session.id)).not.toBeNull();
+      const service = t.data.service() as AccountService;
+      const captured = service.capture(1);
+      const order = await issueTimerOrderNow(service, captured);
+      expect(order).toBeGreaterThan(0);
+      const out = await commitTimerCopy(t.data, service, captured, {
+        format: 2,
+        order: order as number,
+        read_at: Date.now(),
+        complete: true,
+        running: omitted ? [] : [session],
+      });
+      expect(out).toEqual({ kind: "applied", value: { written: true } });
+      await t.settle();
+      expect(
+        (sync(t).timer_copy as { running: unknown[] }).running,
+      ).toHaveLength(omitted ? 0 : 1);
+      expect(
+        document.querySelector(
+          `[data-timers-running] [data-account-timer="${session.id}"]`,
+        ) === null,
+      ).toBe(omitted);
+    },
+  );
+
+  test.each([false, true])(
+    "REVIEW5 T8 (ported): history terminal knowledge survives offline=%s",
+    async (listed) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      let release!: (r: TasksResult<AccountTimerPage>) => void;
+      const api = fakeApi({
+        readAccountTimers: async (q) =>
+          q.state === "running"
+            ? page([session])
+            : new Promise((r) => {
+                release = r;
+              }),
+      });
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api,
+      });
+      await t.until(
+        () => rowOf(session.id) !== null && typeof release === "function",
+      );
+      expect(rowOf(session.id)).not.toBeNull();
+      await t.until(() => !!sync(t)?.timer_copy);
+      expect(sync(t).timer_copy).toBeTruthy();
+      release(
+        page(
+          listed
+            ? [
+                {
+                  ...session,
+                  stopped_at: now() - 30,
+                  version: 5,
+                  can_modify: false,
+                },
+              ]
+            : [],
+        ),
+      );
+      await t.until(
+        () => document.querySelector('[data-timers-history="ready"]') !== null,
+      );
+      expect(
+        document.querySelector('[data-timers-history="ready"]'),
+      ).not.toBeNull();
+      expect(
+        document.querySelector(
+          `[data-timers-running] [data-account-timer="${session.id}"]`,
+        ) === null,
+      ).toBe(listed);
+      t.rerender(tasksEnv(api, { online: false }));
+      await t.settle();
+      expect(
+        document.querySelector('[data-timers-running="offline"]'),
+      ).not.toBeNull();
+      expect(
+        document.querySelector(
+          `[data-timers-running] [data-account-timer="${session.id}"]`,
+        ) === null,
+      ).toBe(listed);
+    },
+  );
+
+  test.each([
+    ["the store fails it", true],
+    ["it is written (control)", false],
+  ])(
+    "online: the history's finished record when %s: this page's own history still hides the session",
+    async (_, failing) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      // Every history read is held until the fault is armed (the protected tree may mount twice early: release them all).
+      const held: Array<(r: TasksResult<AccountTimerPage>) => void> = [];
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api: fakeApi({
+          readAccountTimers: async (q) =>
+            q.state === "running"
+              ? page([session])
+              : new Promise((r) => {
+                  held.push(r);
+                }),
+        }),
+      });
+      await t.until(() => rowOf(session.id) !== null && held.length > 0);
+      const remove = t.world.idb.inject({
+        match: (tx) => failing && tx.label === "data.recordTimerEnded",
+        mode: "error",
+      });
+      for (const release of held.reverse())
+        release(
+          page([{ ...session, stopped_at: now() - 30, can_modify: false }]),
+        );
+      try {
+        await t.until(
+          () =>
+            document.querySelector('[data-timers-history="ready"]') !== null,
+        );
+        await t.settle();
+        expect(
+          ((sync(t).timer_ended as { ids?: unknown[] } | undefined)?.ids ?? [])
+            .length,
+          "recorded",
+        ).toBe(failing ? 0 : 1);
+        expect(
+          document.querySelector(
+            `[data-timers-running] [data-account-timer="${session.id}"]`,
+          ),
+        ).toBeNull();
+      } finally {
+        remove();
+      }
+    },
+  );
+
+  test("a later PARTIAL first page replacing the copy does not undo what the complete one proved", async () => {
+    const task = await seededTask({ title: "Practise piano" });
+    const session = available(task);
+    const other = available(task, {
+      id: "cccccccc-0000-4000-8000-000000000019",
+    });
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        page(q.state === "running" ? [session] : []),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(() => rowOf(session.id) !== null);
+    const service = t.data.service() as AccountService;
+    const commit = async (complete: boolean, running: object[]) => {
+      const captured = service.capture(1);
+      const order = (await issueTimerOrderNow(service, captured)) as number;
+      expect(
+        await commitTimerCopy(t.data, service, captured, {
+          format: 2,
+          order,
+          read_at: Date.now(),
+          complete,
+          running: running as never,
+        }),
+      ).toEqual({ kind: "applied", value: { written: true } });
+    };
+    await commit(true, []);
+    await t.until(() => rowOf(session.id) === null);
+    await commit(false, [other]);
+    await t.settle();
+    expect((sync(t).timer_copy as { complete: boolean }).complete).toBe(false);
+    expect(rowOf(session.id), "online").toBeNull();
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    expect(rowOf(session.id), "offline").toBeNull();
+    expect(rowOf(other.id), "the partial page's own row").not.toBeNull();
+  });
+
+  test.each([
+    ["a restricted session the history lists stopped", true],
+    ["one it does not list (control)", false],
+  ])("offline: %s", async (_, listed) => {
+    const task = await seededTask({ title: "Practise piano" });
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        q.state === "running"
+          ? page([restricted])
+          : page(listed ? [{ ...restricted, stopped_at: now() - 30 }] : []),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(
+      () =>
+        document.querySelector('[data-timers-history="ready"]') !== null &&
+        !!sync(t)?.timer_copy,
+    );
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    expect(
+      document.querySelector('[data-timers-running="offline"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector(
+        `[data-timers-running] [data-account-timer="${restricted.id}"]`,
+      ) === null,
+    ).toBe(listed);
+  });
+
+  test.each([
+    ["listed stopped on a LATER page of the history (Load more)", true],
+    ["not listed (control)", false],
+  ])("offline: a session %s", async (_, listed) => {
+    const task = await seededTask({ title: "Practise piano" });
+    const session = available(task);
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        q.state === "running"
+          ? page([session])
+          : q.after === undefined
+            ? { ok: true, value: { items: [], next_after: "c1" } }
+            : page(
+                listed
+                  ? [{ ...session, stopped_at: now() - 30, can_modify: false }]
+                  : [],
+              ),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(
+      () =>
+        screen.queryByRole("button", { name: TIMERS_COPY.loadMore }) !== null &&
+        !!sync(t)?.timer_copy,
+    );
+    const more = screen.getAllByRole("button", { name: TIMERS_COPY.loadMore });
+    fireEvent.click(more[more.length - 1] as HTMLElement);
+    await t.until(
+      () =>
+        screen.queryAllByRole("button", { name: TIMERS_COPY.loadMore })
+          .length === 0,
+    );
+    await t.settle();
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.settle();
+    expect(
+      document.querySelector(
+        `[data-timers-running] [data-account-timer="${session.id}"]`,
+      ) === null,
+    ).toBe(listed);
+  });
+
+  test.each([
+    ["once this screen has heard of it", true],
+    ["before this screen hears of it", false],
+  ])(
+    "a Stop whose session is recorded finished while the act waits queues nothing, %s",
+    async (_, delivered) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      const api = fakeApi({
+        readAccountTimers: async (q) =>
+          page(q.state === "running" ? [session] : []),
+      });
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api,
+      });
+      await t.until(() => rowOf(session.id) !== null);
+      const digest = crypto.subtle.digest.bind(crypto.subtle);
+      let release!: () => void;
+      let holding = true;
+      const spy = vi
+        .spyOn(crypto.subtle, "digest")
+        .mockImplementation(async (algorithm, data) => {
+          if (!holding) return digest(algorithm, data);
+          holding = false;
+          await new Promise<void>((r) => {
+            release = r;
+          });
+          return digest(algorithm, data);
+        });
+      try {
+        fireEvent.click(
+          within(rowOf(session.id) as HTMLElement).getByRole("button", {
+            name: TIMER_COPY.stop,
+          }),
+        );
+        await t.until(() => !holding);
+        const service = t.data.service() as AccountService;
+        if (delivered)
+          expect(
+            await commitTimerEnded(t.data, service, service.capture(1), [
+              session.id,
+            ]),
+          ).toMatchObject({ kind: "applied", value: { recorded: true } });
+        else {
+          // Another tab recorded it; its notification has not reached this screen (the double notifies no watcher of a seeded row), so
+          // the screen still shows the row: the act must decide on what is STORED.
+          t.world.idb.seed(NAME, "sync_state", [
+            {
+              ...sync(t),
+              timer_ended: { lost: false, ids: [[session.id, 1]] },
+            },
+          ]);
+          await t.settle();
+          expect(rowOf(session.id), "not heard of yet").not.toBeNull();
+        }
+        release();
+        await t.settle();
+        await t.settle();
+        expect(t.drafts().filter((d) => d.kind === "stop_timer")).toHaveLength(
+          0,
+        );
+      } finally {
+        release?.();
+        spy.mockRestore();
+      }
     },
   );
 });

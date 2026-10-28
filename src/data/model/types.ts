@@ -267,6 +267,14 @@ export interface SyncStateRow {
   timer_scopes?: Record<string, unknown>;
   timer_scope_floor?: number;
   /**
+   * WEB-10c revision 5 (W28, review R23): the latest COMPLETE observation of the account's running sessions (`TimerAccountRecord`: its
+   * order and the sessions it listed), kept apart from `timer_copy` so a later partial first page never erases what it proved; and the
+   * sessions any read listed FINISHED (the account's history, a day's read), which never run again (`timer_ended`, bounded). Read
+   * tolerantly; absent: none.
+   */
+  timer_account?: unknown;
+  timer_ended?: unknown;
+  /**
    * WEB-10c revision 2 (W27, review R13, design assessment DA-M1): the catch-up DISCOVERY of each task (its first read, before its day is
    * known) that has failed: the consecutive uncertain answers it met and, once they reached the bound or a definite refusal came, its
    * stop. Kept across reloads and tabs, so the budget never starts again by itself; only the person's "Try again" (a new `retry`) does.

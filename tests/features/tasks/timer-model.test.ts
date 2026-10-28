@@ -512,3 +512,98 @@ describe("R19: stillRunning, one rule for every source", () => {
     expect(stillRunning(null, A, S, null)).toBe(true);
   });
 });
+
+/**
+ * Revision 5 (review 5 R23): the account's latest complete observation and the finished sessions decide in `stillRunning` (the account's
+ * list) and in `runningOn` (the detail) alike, for every source.
+ */
+describe("R23: the account's observation and finished sessions, one rule", () => {
+  const S = COPIED;
+  const base = { scopes: {}, floor: 0 };
+  test.each([
+    [
+      "the account's later complete observation omits it",
+      { account: { order: 4, running: [] } },
+      3,
+      false,
+    ],
+    [
+      "the account's later complete observation lists it",
+      { account: { order: 4, running: [S] } },
+      3,
+      true,
+    ],
+    [
+      "the account's observation is not later (equal)",
+      { account: { order: 3, running: [] } },
+      3,
+      true,
+    ],
+    [
+      "listed finished by any read, whatever its order",
+      { ended: new Set([S]) },
+      9,
+      false,
+    ],
+    ["listed finished, order unknown", { ended: new Set([S]) }, null, false],
+    [
+      "order unknown, a finished session lost: not trusted",
+      { endedLost: true },
+      null,
+      false,
+    ],
+    ["order unknown, nothing lost", { endedLost: false }, null, true],
+    [
+      "ordered, a finished session lost: the floor decides",
+      { endedLost: true },
+      3,
+      true,
+    ],
+  ] as const)("%s", (_, extra, order, expected) => {
+    const authority = { ...base, ...extra };
+    expect(stillRunning(authority, OCC, S, order)).toBe(expected);
+    // Restricted (day unknown): the account's evidence decides alike.
+    expect(stillRunning(authority, null, S, order)).toBe(expected);
+    // The detail: its day's read listing the session running at that order, and the copy listing it, judged by the same evidence.
+    const shown = (source: "read" | "copy") =>
+      runningOn(OCC, {
+        drafts: [],
+        read: source === "read" ? [session()] : null,
+        complete: false,
+        copy: source === "copy" ? [copied()] : null,
+        readOrder: source === "read" ? order : null,
+        copyOrder: source === "copy" ? order : null,
+        copyComplete: false,
+        scope: null,
+        floor: 0,
+        account: "account" in extra ? extra.account : null,
+        ended: "ended" in extra ? extra.ended : new Set(),
+        endedLost: "endedLost" in extra ? extra.endedLost : false,
+      }).map((s) => s.id);
+    expect(shown("read")).toEqual(expected ? [S] : []);
+    if (order !== null) expect(shown("copy")).toEqual(expected ? [S] : []);
+  });
+  test("this device's unsettled start stays though a finished listing names another session", () => {
+    const start = draftRow({
+      kind: "start_timer",
+      status: "queued",
+      command: {
+        command: {
+          kind: "start_timer",
+          occurrence_id: OCC,
+          session_id: "cccccccc-0000-4000-8000-0000000000f9",
+          started_at: T0 / 1000 - 5,
+        },
+      } as never,
+    });
+    expect(
+      runningOn(OCC, {
+        drafts: [start as never],
+        read: null,
+        copy: null,
+        ended: new Set([S]),
+        endedLost: true,
+      }).map((s) => s.source),
+    ).toEqual(["draft"]);
+  });
+});

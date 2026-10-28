@@ -1,11 +1,13 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
+import { commitMaterialiseDiscovery } from "../../../src/data";
 import type { AccountService } from "../../../src/data/engine/account-service";
 import type {
   MaterialiseDiscovery,
   MaterialiseSequenceRow,
   SyncStateRow,
 } from "../../../src/data/model/types";
+import { SEQUENCE_ROW_BYTES } from "../../../src/data/plans/materialise";
 import type {
   MaterialiseCommand,
   TasksApi,
@@ -14,6 +16,8 @@ import type {
 import {
   type CatchUpRunner,
   createCatchUpRunner,
+  seenDiscovery,
+  seenSequence,
 } from "../../../src/features/tasks/catchup/runner";
 import type { TaskDetail } from "../../../src/features/tasks/model/contract";
 import { attemptBody } from "../../../src/features/tasks/model/materialise";
@@ -869,8 +873,10 @@ describe("R13: a stopped discovery stays stopped until Try again", () => {
     runner.ensure(TASK, "daily");
     await w.idle(runner);
     expect(w.reads()).toBe(1);
+    // Revision 5 (R26): every memory stop carries its own identity.
     expect(runner.get().unrecorded.get(TASK)).toEqual({
       reason: "unreachable",
+      id: expect.any(String),
     });
     // The admitted read's entry, its answer unrecorded: no stop, no count.
     expect(w.discovery()).toMatchObject({ failures: 0, stop: null });
@@ -1032,7 +1038,10 @@ describe("R16: a first read is admitted before it is sent", () => {
     first.ensure(TASK, "daily");
     await w.idle(first);
     expect(w.reads()).toBe(0);
-    expect(first.get().unrecorded.get(TASK)).toEqual({ reason: "storage" });
+    expect(first.get().unrecorded.get(TASK)).toEqual({
+      reason: "storage",
+      id: expect.any(String),
+    });
     first.ensure(TASK, "streak");
     first.kick();
     await w.idle(first);
@@ -1302,6 +1311,7 @@ describe("R20: one stop, one fresh budget", () => {
         kind: "sequence" as const,
         generation: first.sequence_generation,
         revision: first.revision ?? 0,
+        discovery: null,
       };
       a.tryAgain(TASK, TODAY, seenFirst);
       await w.idle(a);
@@ -1325,6 +1335,7 @@ describe("R20: one stop, one fresh budget", () => {
         kind: "sequence",
         generation: second.sequence_generation,
         revision: second.revision ?? 0,
+        discovery: null,
       });
       await w.idle(a);
       expect(w.sent.map((x) => x.key)).toEqual(Array(6).fill(KEY));
@@ -1366,6 +1377,7 @@ describe("R20: one stop, one fresh budget", () => {
         kind: "sequence" as const,
         generation: "g-old",
         revision: 5,
+        discovery: null,
       };
       try {
         a.tryAgain(TASK, TODAY, seen);
@@ -1387,4 +1399,439 @@ describe("R20: one stop, one fresh budget", () => {
       }
     },
   );
+});
+
+/**
+ * Revision 5 (review 5 R24–R26, design assessment of 28 October 2026). R25: a stop is never deleted because a later day begins; rows go
+ * only when a position read covers their own day, each compared as read; a new row is admitted first. R24: another day of a task is its
+ * own work. R26: a "Try again" names the stop shown by identities that never recur. REVIEW5 M7 is ported verbatim; M8 with its displayed
+ * token built as the screens now build it (the verbatim literal names no claim; see the execution report).
+ */
+describe("R25: an unsatisfied stop is kept whatever later day begins", () => {
+  test.each([false, true])(
+    "REVIEW5 M7 (ported): new later horizon sequence=%s must preserve unsatisfied old stop",
+    async (later) => {
+      const attempt = {
+        key: "eeeeeeee-0000-4000-8000-000000000001",
+        body: attemptBody(TASK, TODAY),
+      };
+      const initial = row({
+        phase: "stopped",
+        attempt,
+        read_failures: 3,
+        stop: { reason: "unreachable" },
+      });
+      const w = await setup({
+        seed: [initial],
+        script: { positions: [detail("2026-10-01", true)] },
+      });
+      const runner = w.make();
+      try {
+        runner.ensure(TASK, "draft", {
+          throughDate: later ? addDays(TODAY, 32) : TODAY,
+        });
+        await w.idle(runner);
+        expect(w.reads()).toBe(1);
+        expect(w.sent).toHaveLength(0);
+        if (later)
+          expect(w.stored(addDays(TODAY, 32))?.stop?.reason).toBe("horizon");
+        expect(w.stored()).toEqual(initial);
+      } finally {
+        runner.dispose();
+      }
+    },
+  );
+
+  test("a later day's success removes the days its position covers; a later day it does not cover stays", async () => {
+    const before = addDays(TODAY, -2);
+    const yesterday = addDays(TODAY, -1);
+    const ahead = addDays(TODAY, 5);
+    const w = await setup({
+      seed: [
+        row({
+          through_date: before,
+          phase: "stopped",
+          stop: { reason: "bound" },
+        }),
+        row({
+          through_date: yesterday,
+          phase: "stopped",
+          stop: { reason: "no_progress" },
+        }),
+        row({
+          through_date: ahead,
+          phase: "stopped",
+          stop: { reason: "bound" },
+        }),
+      ],
+      script: {
+        positions: [detail("2026-10-01", true), detail(TODAY, false)],
+      },
+    });
+    const runner = w.make();
+    try {
+      runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      expect(w.sent).toHaveLength(1);
+      expect(w.stored()).toBeUndefined();
+      expect(w.stored(before)).toBeUndefined();
+      expect(w.stored(yesterday)).toBeUndefined();
+      // Its day is beyond the position reached: still its own need, kept.
+      expect(w.stored(ahead)?.stop?.reason).toBe("bound");
+    } finally {
+      runner.dispose();
+    }
+  });
+
+  test.each([
+    ["refused", true],
+    ["admitted (control)", false],
+  ])("a new day's row the quota ledger %s", async (_, refuse) => {
+    const w = await setup({
+      script: {
+        positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+      },
+    });
+    const sizes: number[] = [];
+    const quota = {
+      reserve: async (_c: string, bytes: number) => {
+        sizes.push(bytes);
+        const no = refuse && bytes === SEQUENCE_ROW_BYTES;
+        return {
+          verdict: no ? "refuse" : "ok",
+          live: () => !no,
+          settle: () => undefined,
+        };
+      },
+    } as never;
+    const runner = w.make({ quota: () => quota });
+    try {
+      runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      // The first read; admitted, the position read after its one call too.
+      expect(w.reads()).toBe(refuse ? 1 : 2);
+      expect(sizes).toContain(SEQUENCE_ROW_BYTES);
+      if (refuse) {
+        expect(w.stored()).toBeUndefined();
+        expect(w.sent).toHaveLength(0);
+        expect(runner.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      } else {
+        expect(w.sent).toHaveLength(1);
+        expect(w.stored()?.stop?.reason).toBe("no_progress");
+      }
+    } finally {
+      runner.dispose();
+    }
+  });
+});
+
+describe("R24: another day of a task is its own work", () => {
+  test.each([
+    ["two days asked together: both are caught up", 2],
+    ["the same day asked twice (control): one sequence", 1],
+  ])("%s", async (_, days) => {
+    const first = addDays(TODAY, 1);
+    const second = days === 2 ? addDays(TODAY, 2) : first;
+    const w = await setup({
+      script: {
+        positions: Array.from({ length: 4 }, () => detail("2026-10-01", true)),
+      },
+    });
+    const runner = w.make();
+    try {
+      runner.ensure(TASK, "draft", { throughDate: first });
+      runner.ensure(TASK, "draft", { throughDate: second });
+      await w.idle(runner);
+      expect(w.sent.map((s) => s.command.through_date)).toEqual(
+        days === 2 ? [first, second] : [first],
+      );
+      expect(w.stored(first)?.stop?.reason).toBe("no_progress");
+      expect(w.stored(second)?.stop?.reason).toBe("no_progress");
+    } finally {
+      runner.dispose();
+    }
+  });
+});
+
+describe("R26: a press names the stop shown by identities that never recur", () => {
+  const queuedLocks = () => {
+    let unlock!: () => void;
+    let holder: Promise<unknown> = new Promise<void>((r) => {
+      unlock = r;
+    });
+    let queued = 0;
+    const locks = {
+      request: (_n: string, _o: unknown, run: () => Promise<unknown>) => {
+        queued += 1;
+        const mine = holder.then(run);
+        holder = mine.catch(() => undefined);
+        return mine;
+      },
+    } as unknown as LockManager;
+    return { locks, unlock: () => unlock(), queued: () => queued };
+  };
+  const stopEntry = (attempt: string | null) =>
+    ({
+      retry: 0,
+      failures: 3,
+      stop: { reason: "unreachable" as const },
+      ...(attempt === null ? {} : { attempt }),
+    }) as MaterialiseDiscovery;
+  const seedDiscovery = async (
+    w: Awaited<ReturnType<typeof setup>>,
+    entry: MaterialiseDiscovery,
+    expected: MaterialiseDiscovery | null = null,
+  ) => {
+    const service = w.t.env.service() as AccountService;
+    const out = await commitMaterialiseDiscovery(service, service.capture(1), {
+      task_id: TASK,
+      expected,
+      next: entry,
+    });
+    expect(out).toMatchObject({ kind: "applied", value: { kind: "written" } });
+  };
+
+  test.each([false, true])(
+    "REVIEW5 M8 (ported; the displayed token as the screens build it): a displayed discovery stop since replaced=%s",
+    async (replaced) => {
+      const w = await setup();
+      const first = stopEntry("eeeeeeee-0000-4000-8000-000000000001");
+      await seedDiscovery(w, first);
+      // Adaptation: the reviewer's literal `{ kind: "discovery", retry: 0 }` names no claim; the screens now name the one shown.
+      const seen = seenDiscovery(w.discovery() as MaterialiseDiscovery);
+      const other = w.make();
+      const fresh = w.make();
+      const stale = w.make();
+      try {
+        if (replaced) {
+          other.tryAgain(TASK, undefined, seen);
+          await w.idle(other);
+          expect(w.reads()).toBe(1);
+          expect(w.discovery()).toBeUndefined();
+          w.script.positions.push(UNCERTAIN, UNCERTAIN, UNCERTAIN);
+          fresh.ensure(TASK, "daily");
+          await w.idle(fresh);
+          expect(w.discovery()?.stop?.reason).toBe("unreachable");
+          expect(w.discovery()?.retry).toBe(0);
+          expect(w.discovery()?.attempt).not.toBe(first.attempt);
+        }
+        const before = w.reads();
+        w.script.positions.push(UNCERTAIN, UNCERTAIN, UNCERTAIN);
+        stale.tryAgain(TASK, undefined, seen);
+        await w.idle(stale);
+        expect(w.reads() - before).toBe(replaced ? 0 : 3);
+      } finally {
+        other.dispose();
+        fresh.dispose();
+        stale.dispose();
+      }
+    },
+  );
+
+  test.each([
+    ["two pages hold the same displayed discovery stop", 2],
+    ["one page (control)", 1],
+  ])(
+    "presses on one discovery stop queued under the held lock: %s -> one budget",
+    async (_, pages) => {
+      const w = await setup({
+        script: {
+          positions: [
+            UNCERTAIN,
+            UNCERTAIN,
+            UNCERTAIN,
+            UNCERTAIN,
+            UNCERTAIN,
+            UNCERTAIN,
+          ] as never,
+        },
+      });
+      await seedDiscovery(w, stopEntry("eeeeeeee-0000-4000-8000-000000000002"));
+      const seen = seenDiscovery(w.discovery() as MaterialiseDiscovery);
+      const held = queuedLocks();
+      const a = w.make({ locks: held.locks });
+      const b = w.make({ locks: held.locks });
+      try {
+        a.tryAgain(TASK, undefined, seen);
+        if (pages === 2) b.tryAgain(TASK, undefined, seen);
+        for (let i = 0; i < 100 && held.queued() < pages; i++) {
+          await w.t.settle();
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        expect(held.queued()).toBe(pages);
+        expect(w.reads()).toBe(0);
+        held.unlock();
+        await w.idle(a);
+        await w.idle(b);
+        expect(w.reads()).toBe(3);
+        expect(w.discovery()?.stop?.reason).toBe("unreachable");
+      } finally {
+        held.unlock();
+        a.dispose();
+        b.dispose();
+      }
+    },
+  );
+
+  test.each([
+    ["shown without one: a discovery stop recorded since is not lifted", false],
+    ["shown with it (control): both are lifted", true],
+  ])("a day's stop %s", async (_, shownWith) => {
+    const attempt = {
+      key: "eeeeeeee-0000-4000-8000-000000000003",
+      body: attemptBody(TASK, TODAY),
+    };
+    const w = await setup({
+      seed: [
+        row({
+          phase: "stopped",
+          attempt,
+          read_failures: 3,
+          stop: { reason: "unreachable" },
+          revision: 2,
+        }),
+      ],
+      script: { positions: [detail("2026-10-01", true)] },
+    });
+    const stopped = w.stored() as MaterialiseSequenceRow;
+    if (!shownWith) {
+      const seen = seenSequence(stopped, null);
+      await seedDiscovery(w, stopEntry("eeeeeeee-0000-4000-8000-000000000004"));
+      const runner = w.make();
+      try {
+        runner.tryAgain(TASK, TODAY, seen);
+        await w.idle(runner);
+        expect(w.reads()).toBe(0);
+        expect(w.sent).toHaveLength(0);
+        expect(w.stored()).toEqual(stopped);
+        expect(w.discovery()?.stop?.reason).toBe("unreachable");
+      } finally {
+        runner.dispose();
+      }
+      return;
+    }
+    await seedDiscovery(w, stopEntry("eeeeeeee-0000-4000-8000-000000000004"));
+    const seen = seenSequence(stopped, w.discovery());
+    const runner = w.make();
+    try {
+      runner.tryAgain(TASK, TODAY, seen);
+      await w.idle(runner);
+      expect(w.reads()).toBeGreaterThan(0);
+      expect(w.sent.map((s) => s.key)).toContain(attempt.key);
+      expect(w.discovery()?.stop ?? null).toBeNull();
+    } finally {
+      runner.dispose();
+    }
+  });
+
+  test("a memory stop's press names it: a press on an earlier one lifts nothing; on the one held now, it asks again", async () => {
+    const w = await setup();
+    let asked = 0;
+    const refuse = {
+      reserve: async () => {
+        asked += 1;
+        return {
+          verdict: "refuse",
+          live: () => false,
+          settle: () => undefined,
+        };
+      },
+    } as never;
+    const runner = w.make({ quota: () => refuse });
+    try {
+      runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      const earlier = runner.get().unrecorded.get(TASK);
+      expect(earlier?.reason).toBe("storage");
+      runner.tryAgain(TASK, undefined, {
+        kind: "memory",
+        id: earlier?.id as string,
+      });
+      await w.idle(runner);
+      expect(asked).toBe(2);
+      const now = runner.get().unrecorded.get(TASK);
+      expect(now?.id).not.toBe(earlier?.id);
+      runner.tryAgain(TASK, undefined, {
+        kind: "memory",
+        id: earlier?.id as string,
+      });
+      await w.idle(runner);
+      expect(asked, "a press on the earlier stop asks nothing").toBe(2);
+      runner.tryAgain(TASK, undefined, {
+        kind: "memory",
+        id: now?.id as string,
+      });
+      await w.idle(runner);
+      expect(asked).toBe(3);
+      expect(w.reads()).toBe(0);
+    } finally {
+      runner.dispose();
+    }
+  });
+
+  test.each([
+    ["a stop stands since: nothing is lifted or asked", true],
+    ["none stands (control): the work is asked afresh", false],
+  ])("a press made where no stop was shown: %s", async (_, stands) => {
+    const w = await setup({
+      ...(stands
+        ? {
+            seed: [
+              row({
+                phase: "stopped",
+                read_failures: 3,
+                stop: { reason: "unreachable" },
+              }),
+            ],
+          }
+        : {}),
+      script: {
+        positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+      },
+    });
+    const runner = w.make();
+    try {
+      runner.tryAgain(TASK, TODAY, { kind: "none" });
+      await w.idle(runner);
+      if (stands) {
+        expect(w.reads()).toBe(0);
+        expect(w.stored()?.phase).toBe("stopped");
+      } else expect(w.reads()).toBeGreaterThan(0);
+    } finally {
+      runner.dispose();
+    }
+  });
+
+  test("a discovery stop written before claims is given one by the next work (nothing sent, no count changed); a press naming no claim then lifts nothing", async () => {
+    const w = await setup({
+      script: { positions: [UNCERTAIN, UNCERTAIN, UNCERTAIN] as never },
+    });
+    await seedDiscovery(w, stopEntry(null));
+    const legacy = seenDiscovery(w.discovery() as MaterialiseDiscovery);
+    expect(legacy).toMatchObject({ attempt: null });
+    const runner = w.make();
+    try {
+      runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      expect(w.reads()).toBe(0);
+      expect(w.discovery()).toMatchObject({
+        retry: 0,
+        failures: 3,
+        stop: { reason: "unreachable" },
+        attempt: expect.any(String),
+      });
+      runner.tryAgain(TASK, undefined, legacy);
+      await w.idle(runner);
+      expect(w.reads()).toBe(0);
+      runner.tryAgain(
+        TASK,
+        undefined,
+        seenDiscovery(w.discovery() as MaterialiseDiscovery),
+      );
+      await w.idle(runner);
+      expect(w.reads()).toBe(3);
+    } finally {
+      runner.dispose();
+    }
+  });
 });

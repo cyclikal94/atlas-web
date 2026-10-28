@@ -1458,3 +1458,278 @@ test.describe("E-M7: a stop behind many other tasks' rows (revision 4: R21)", ()
       });
     });
 });
+
+// Tolerant: a moment in which the page's tree remounts has no open store (the read answers nothing then; a poll asks again).
+const syncEnded = (page: Page) =>
+  page
+    .evaluate(async (acct) => {
+      const rows = (await window.__atlasData?.rows(
+        acct,
+        "sync_state",
+      )) as Array<{
+        timer_copy?: unknown;
+        timer_ended?: { ids?: Array<[string, number]> };
+      }>;
+      return {
+        copy: rows?.[0]?.timer_copy != null,
+        ended: (rows?.[0]?.timer_ended?.ids ?? []).map(([id]) => id),
+      };
+    }, ACCOUNT)
+    .catch(() => ({ copy: false, ended: [] as string[] }));
+
+test.describe("E-TM5: a session the account's history listed finished stays finished offline after a reload (revision 5: R23)", () => {
+  for (const listed of [true, false] as const)
+    test(`the history ${listed ? "lists" : "does not list (control)"} the copied session stopped: offline after a reload it is ${listed ? "not" : "still"} shown running`, async ({
+      context,
+    }, info) => {
+      const task = buildTask({
+        n: 418,
+        title: "Practise piano",
+        goal: {
+          kind: "numeric",
+          minimum: "1800",
+          maximum: null,
+          unit: "seconds",
+        },
+      });
+      const id = "cccccccc-0000-4000-8000-000000000118";
+      const row = (stopped: number | null) => ({
+        access: "available",
+        id,
+        occurrence_id: task.occurrenceId,
+        task_id: task.taskId,
+        task_title: "Practise piano",
+        slot_date: TODAY,
+        started_at: Math.floor(Date.now() / 1000) - 600,
+        stopped_at: stopped,
+        version: stopped === null ? 2 : 3,
+        can_modify: stopped === null,
+      });
+      const { page, r10c } = await setup(
+        context,
+        "/tasks/timers",
+        [task],
+        (_reads, r) => {
+          r.accountTimers = (q) => ({
+            status: 200,
+            body: {
+              items:
+                q.state === "running"
+                  ? [row(null)]
+                  : listed
+                    ? [row(Math.floor(Date.now() / 1000) - 30)]
+                    : [],
+              next_after: null,
+            },
+          });
+        },
+      );
+      await expect(page.locator("[data-timers-history=ready]")).toBeVisible();
+      await expect.poll(async () => (await syncEnded(page)).copy).toBe(true);
+      // Online both builds hide a session this page's own history lists stopped; what is under test is what survives the reload.
+      // (Representation-neutral precondition: no wait on the new finished record; a moment for the page's writes to land.)
+      if (listed)
+        await expect(
+          page.locator(`[data-timers-running] [data-account-timer="${id}"]`),
+        ).toHaveCount(0);
+      await page.waitForTimeout(1_000);
+      await reboot(page);
+      await goOfflineAtBoundary(page);
+      await page.evaluate(() => {
+        history.pushState(null, "", "/tasks");
+        dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await expect(page.locator("[data-task-list]")).toBeVisible();
+      await page.evaluate(() => {
+        history.pushState(null, "", "/tasks/timers");
+        dispatchEvent(new PopStateEvent("popstate"));
+      });
+      await expect(page.locator("[data-timers-running=offline]")).toBeVisible();
+      const shown = page.locator(
+        `[data-timers-running] [data-account-timer="${id}"]`,
+      );
+      if (listed) {
+        await page.waitForTimeout(1_000);
+        await expect(shown).toHaveCount(0);
+      } else
+        await expect(shown.getByRole("button", { name: "Stop" })).toBeVisible();
+      recordEvidence(info, "e-tm5", {
+        listed,
+        stored: await syncEnded(page),
+        log: r10c.log.map(({ from: _from, ...e }) => e),
+      });
+    });
+});
+
+const stoppedRow = (
+  task: BuiltTask,
+  through: string,
+  reason: string,
+  over: Record<string, unknown> = {},
+) => ({
+  task_id: task.taskId,
+  through_date: through,
+  sequence_generation: `g-${through}`,
+  phase: "stopped",
+  attempt: null,
+  read_seq: 1,
+  successful_calls: 8,
+  last_known_position: yesterday(10),
+  started_at: 1,
+  read_failures: 0,
+  stop: { reason },
+  trigger: "daily",
+  ...over,
+});
+const storedRows = (page: Page, task: BuiltTask) =>
+  page.evaluate(
+    async ([acct, taskId]) =>
+      (
+        ((await window.__atlasData?.rows(acct, "materialise_sequences")) ??
+          []) as Array<{
+          task_id: string;
+          through_date: string;
+          phase: string;
+          attempt: { key: string } | null;
+        }>
+      ).filter((r) => r.task_id === taskId),
+    [ACCOUNT, task.taskId] as const,
+  );
+const plusDays = (n: number) =>
+  new Date(Date.parse(`${TODAY}T00:00:00Z`) + n * 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+
+test.describe("E-M8: today's stop beside a later day's stop (revision 5: R24)", () => {
+  for (const later of [true, false] as const)
+    test(`${later ? "a later horizon stop sorts last" : "today's stop alone (control)"}: Today shows today's stop with Try again and sends nothing`, async ({
+      context,
+    }, info) => {
+      const task = repeating(419, "Water the plants");
+      const { page, r10c } = await setup(
+        context,
+        "/tasks",
+        [task],
+        (reads, r) => {
+          reads.respond = (q) =>
+            dailyPage(
+              [view(task)],
+              q.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+            );
+          r.position = () =>
+            detailOf(task, { last_date: yesterday(10), pending: true });
+        },
+      );
+      const rows = [
+        stoppedRow(task, TODAY, "bound"),
+        ...(later ? [stoppedRow(task, plusDays(32), "horizon")] : []),
+      ];
+      await page.evaluate(
+        async ([acct, seeded]) => {
+          await window.__atlasData?.put(acct, "materialise_sequences", seeded);
+        },
+        [ACCOUNT, rows] as const,
+      );
+      await page.evaluate((day) => {
+        history.pushState(null, "", `/today?day=${day}&tz=UTC`);
+        dispatchEvent(new PopStateEvent("popstate"));
+      }, TODAY);
+      // Representation-neutral: the stop shown with today's reason (a later horizon stop has another reason and no Try again).
+      const notice = page.locator(
+        `[data-catch-up-task="${task.taskId}"][data-catch-up-stopped="bound"]`,
+      );
+      await expect(notice).toBeVisible({ timeout: 15_000 });
+      await expect
+        .poll(() => positionReads(r10c, task).length)
+        .toBeGreaterThan(0);
+      await expect(page.locator("[data-pending-tasks]")).toHaveAttribute(
+        "data-catch-up",
+        "idle",
+      );
+      await expect(
+        notice.getByRole("button", { name: "Try again" }),
+      ).toBeEnabled();
+      expect(posts(r10c)).toHaveLength(0);
+      expect((await storedRows(page, task)).map((r) => r.through_date)).toEqual(
+        rows.map((r) => r.through_date),
+      );
+      recordEvidence(info, "e-m8", {
+        later,
+        log: r10c.log.map(({ from: _from, ...e }) => e),
+      });
+    });
+});
+
+test.describe("E-M9: an earlier day's unsatisfied stop is kept when today's sequence begins (revision 5: R25)", () => {
+  for (const covered of [false, true] as const)
+    test(`today's sequence ${covered ? "covers it (control): the earlier row goes" : "does not cover it: the earlier stop and its attempt stay"}`, async ({
+      context,
+    }, info) => {
+      const task = repeating(420, "Water the plants");
+      const earlier = yesterday(2);
+      let reads = 0;
+      const { page, r10c } = await setup(context, "/tasks", [task], (r, x) => {
+        r.respond = (q) =>
+          dailyPage(
+            [view(task)],
+            q.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+          );
+        // The first read finds work to do; the read after the one call either covers today (and so the earlier day) or moved nothing.
+        x.position = () => {
+          reads += 1;
+          return detailOf(
+            task,
+            reads === 1 || !covered
+              ? { last_date: yesterday(10), pending: true }
+              : { last_date: TODAY, pending: false },
+          );
+        };
+      });
+      const key = "eeeeeeee-0000-4000-8000-000000000120";
+      await page.evaluate(
+        async ([acct, seeded]) => {
+          await window.__atlasData?.put(acct, "materialise_sequences", seeded);
+        },
+        [
+          ACCOUNT,
+          <object[]>[
+            stoppedRow(task, earlier, "unreachable", {
+              attempt: {
+                key,
+                body: JSON.stringify({
+                  kind: "materialise",
+                  limit: 16,
+                  task_id: task.taskId,
+                  through_date: earlier,
+                }),
+              },
+              read_failures: 3,
+            }),
+          ],
+        ] as const,
+      );
+      await page.evaluate((day) => {
+        history.pushState(null, "", `/today?day=${day}&tz=UTC`);
+        dispatchEvent(new PopStateEvent("popstate"));
+      }, TODAY);
+      await expect.poll(() => posts(r10c).length).toBe(1);
+      await expect(page.locator("[data-pending-tasks]")).toHaveAttribute(
+        "data-catch-up",
+        "idle",
+        { timeout: 15_000 },
+      );
+      const stored = async () =>
+        (await storedRows(page, task)).find((r) => r.through_date === earlier);
+      if (covered) await expect.poll(stored).toBeUndefined();
+      else {
+        await page.waitForTimeout(1_000);
+        expect((await stored())?.attempt?.key).toBe(key);
+        expect((await stored())?.phase).toBe("stopped");
+      }
+      recordEvidence(info, "e-m9", {
+        covered,
+        rows: await storedRows(page, task),
+        log: r10c.log.map(({ from: _from, ...e }) => e),
+      });
+    });
+});

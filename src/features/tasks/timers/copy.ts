@@ -2,6 +2,7 @@ import {
   type AccountService,
   type DataEnv,
   issueTimerOrderNow,
+  type TimerAuthorityRecord,
   type TimerCopyRecord,
   useTimerAuthority,
 } from "../../../data";
@@ -44,6 +45,30 @@ function parsed(copy: TimerCopyRecord | null): TimerCopy | null {
 }
 
 /**
+ * The authority a stored snapshot gives (revisions 4 and 5, reviews R19 and R23): every day's scope, the floor, the account's latest
+ * complete observation and the sessions listed finished. One builder, so the live screens and an act's re-check judge alike.
+ */
+export const authorityOf = (record: TimerAuthorityRecord): TimerAuthority => {
+  // The account's observation was taken from the copy stored with its order: when a row of that copy does not read here, what it listed
+  // is not known, so its absences decide nothing (review R14). One a later partial page replaced stands by itself.
+  const copy = parsed(record.copy);
+  const account =
+    record.account !== null &&
+    copy !== null &&
+    copy.order === record.account.order &&
+    !copy.complete
+      ? null
+      : record.account;
+  return {
+    scopes: record.scopes,
+    floor: record.floor,
+    account,
+    ended: new Set(record.ended),
+    endedLost: record.endedLost,
+  };
+};
+
+/**
  * The copy and the authority it, and every other server-derived running session, is judged by (revision 4, review R19), from ONE read of
  * the displayed account's database: the detail's block and the account's list use the same snapshot and the same rule (`stillRunning`).
  * `authority` is null while that read is not answered (loading, or the store failed): then no copy is shown and no ordered positive is
@@ -55,10 +80,7 @@ export function useTimerEvidence(): {
 } {
   const read = useTimerAuthority();
   if (read.status !== "ready") return { copy: null, authority: null };
-  return {
-    copy: parsed(read.value.copy),
-    authority: { scopes: read.value.scopes, floor: read.value.floor },
-  };
+  return { copy: parsed(read.value.copy), authority: authorityOf(read.value) };
 }
 
 /** The epoch of a displayed identity (`account:epoch`). */

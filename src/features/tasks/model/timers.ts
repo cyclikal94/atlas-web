@@ -97,14 +97,31 @@ export interface DayScope {
 export interface TimerAuthority {
   scopes: Readonly<Record<string, DayScope>>;
   floor: number;
+  /**
+   * Revision 5 (review R23): the latest COMPLETE observation of the account's running sessions (kept when a later partial page replaced
+   * the copy): a session it does not list was not running at its order, whichever day it belongs to.
+   */
+  account?: AccountObservation | null;
+  /** Sessions any read listed finished (the account's history, a day's read): they never run again, whatever else says so. */
+  ended?: ReadonlySet<string>;
+  /** A finished session was not kept: a positive whose order is unknown can no longer be told apart, so it is not trusted. */
+  endedLost?: boolean;
+}
+
+/** A complete observation of the account's running sessions: its place in the observation order and what it listed. */
+export interface AccountObservation {
+  order: number;
+  running: readonly string[];
 }
 
 /**
- * Whether a session a server read listed RUNNING at `order` still stands against `authority` (revision 4, review R19): the rule every
- * consumer applies to every source (the copy, the account's live list, a day's read now or kept), so no consumer offers an action another
- * has retired. Not when its day's reads listed it finished; not when its day's latest complete read is LATER and does not list it (a read
- * of another day says nothing about it); not when it was seen below the floor (what may have retired it was not kept). A positive whose
- * order is unknown is retired only by a finished listing. `occurrenceId` null: a restricted row, whose day is not known (the floor alone).
+ * Whether a session a server read listed RUNNING at `order` still stands against `authority` (revision 4, review R19; revision 5, R23):
+ * the rule every consumer applies to every source (the copy, the account's live list, a day's read now or kept), so no consumer offers an
+ * action another has retired. Not when any read listed it finished (the account's history or its day's reads); not when its day's latest
+ * complete read is LATER and does not list it (a read of another day says nothing about it); not when the account's latest complete
+ * observation is LATER and does not list it; not when it was seen below the floor (what may have retired it was not kept). A positive whose
+ * order is unknown is retired only by a finished listing, and not trusted once a finished session was lost. `occurrenceId` null: a
+ * restricted row, whose day is not known (the account's observations and the floor).
  */
 export function stillRunning(
   authority: TimerAuthority | null,
@@ -113,11 +130,19 @@ export function stillRunning(
   order: number | null,
 ): boolean {
   if (authority === null) return order === null;
+  if (authority.ended?.has(sessionId)) return false;
   const scope =
     occurrenceId === null ? undefined : authority.scopes[occurrenceId];
   if (scope?.ended.includes(sessionId)) return false;
-  if (order === null) return true;
+  if (order === null) return authority.endedLost !== true;
   if (order < authority.floor) return false;
+  const account = authority.account;
+  if (
+    account != null &&
+    account.order > order &&
+    !account.running.includes(sessionId)
+  )
+    return false;
   return !(
     scope !== undefined &&
     scope.order > order &&
@@ -139,7 +164,10 @@ export function stillRunning(
  * retired by absence (nothing says which came first); nor is this device's unsettled start, which stays until its draft settles (its read
  * is asked again when the draft's state changes, and a read issued before the server applied the start cannot know it). A day's read
  * issued before `floor` is not trusted for what it saw running: what may have retired it was not kept; nor is the copy (revision 4, review
- * R19: the floor is loss information about every source, not only the day's read).
+ * R19: the floor is loss information about every source, not only the day's read). Revision 5 (review R23): the account's latest complete
+ * observation (`account`, kept when a partial page replaced the copy) and every session listed finished (`ended`) decide here as they do
+ * in `stillRunning`, so the detail and the account's list never disagree; once a finished session was lost (`endedLost`), a read whose
+ * order is unknown is not trusted for what it saw running.
  */
 export function runningOn(
   occurrenceId: string,
@@ -159,11 +187,20 @@ export function runningOn(
     scope?: DayScope | null;
     /** The order below which the day's read is not trusted for a running session (W28's floor). */
     floor?: number;
+    /** The account's latest complete observation (revision 5, R23), or null. */
+    account?: AccountObservation | null;
+    /** Sessions any read listed finished (revision 5, R23). */
+    ended?: ReadonlySet<string>;
+    /** A finished session was not kept (revision 5, R23). */
+    endedLost?: boolean;
   },
 ): RunningSession[] {
   const out = new Map<string, RunningSession>();
   const ending = new Set<string>();
-  const finished = new Set<string>(input.scope?.ended ?? []);
+  const finished = new Set<string>([
+    ...(input.scope?.ended ?? []),
+    ...(input.ended ?? []),
+  ]);
   for (const draft of input.drafts) {
     const t = timerCommandOf(draft);
     if (t === null || t.occurrence !== occurrenceId) continue;
@@ -196,11 +233,18 @@ export function runningOn(
       order: input.scope.order,
       lists: new Set(input.scope.running),
     });
+  if (input.account != null)
+    complete.push({
+      order: input.account.order,
+      lists: new Set(input.account.running),
+    });
   const retired = (id: string, order: number | null | undefined) =>
     finished.has(id) ||
     (known(order) && complete.some((o) => o.order > order && !o.lists.has(id)));
   const trusted = (order: number | null | undefined) =>
-    !(known(order) && input.floor !== undefined && order < input.floor);
+    known(order)
+      ? !(input.floor !== undefined && order < input.floor)
+      : input.endedLost !== true;
   const readTrusted = trusted(input.readOrder);
   const copyTrusted = trusted(input.copyOrder);
   for (const s of input.copy ?? []) {

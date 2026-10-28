@@ -15,6 +15,7 @@ import type {
   OccurrencePage,
   TaskDetail,
 } from "../../../src/features/tasks/model/contract";
+import { addDays } from "../../../src/features/tasks/model/time";
 import { CATCH_UP_COPY } from "../../../src/features/tasks/today/CatchUpBanner";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
@@ -583,10 +584,155 @@ describe("R20: Try again names the stop it was pressed on", () => {
     const button = screen.queryByRole("button", { name: "Try again" });
     expect(button, "with Try again").not.toBeNull();
     fireEvent.click(button as HTMLElement);
+    // Revision 5 (R26): it also names the discovery stop shown beside it (none here).
     expect(spy).toHaveBeenCalledWith(task.taskId, TODAY, {
       kind: "sequence",
       generation: "g",
       revision: 7,
+      discovery: null,
     });
+  });
+});
+
+/**
+ * Revision 5 (review 5 R24): a stop is reached by its own day. A later day (a horizon stop) never stands in for the day a screen works
+ * for: Today shows its task's today once known; the detail shows every retained stop, each for its day, each Try again naming its own.
+ * REVIEW5 M6 is ported verbatim.
+ */
+describe("R24: every relevant day's stop stays reachable", () => {
+  const needs = () =>
+    seededTask({
+      title: "Needs catch-up",
+      definition: {
+        schedule: {
+          start_date: "2026-01-01",
+          time: null,
+          timezone: "UTC",
+          repeat: { frequency: "daily", interval: 1 },
+        },
+      },
+    });
+  test.each([false, true])(
+    "REVIEW5 M6 (ported): later horizon stop hides today's bound stop=%s",
+    async (later) => {
+      const task = await needs();
+      const target = stopped(task, "bound");
+      const future = {
+        ...stopped(task, "horizon"),
+        through_date: addDays(TODAY, 32),
+        sequence_generation: "future",
+      };
+      const { api, calls } = counted({
+        readTask: async () => position(task, "2026-01-01", true),
+      });
+      api.respond = (q) =>
+        q.scope === "joint" ? daily([task.taskId]) : daily([]);
+      const t = await mountTasks({
+        path: PATH,
+        rows: task.rows,
+        api,
+        sequences: later ? [target, future] : [target],
+      });
+      await t.until(
+        () => calls.readTask > 0 && banner()?.dataset.catchUp === "idle",
+      );
+      expect(calls.readTask).toBeGreaterThan(0);
+      expect(banner()?.dataset.catchUp).toBe("idle");
+      expect(calls.materialise).toBe(0);
+      expect(
+        document.querySelector(`[data-catch-up-task="${task.taskId}"]`),
+      ).not.toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Try again" }),
+      ).not.toBeNull();
+    },
+  );
+
+  test("once its day is known, Today shows that day's stop: an earlier day's retained stop is not Today's (the detail still shows both)", async () => {
+    const task = await needs();
+    const yesterday = {
+      ...stopped(task, "bound"),
+      through_date: addDays(TODAY, -1),
+      sequence_generation: "y",
+    };
+    const today = stopped(task, "no_progress");
+    const { api, calls } = counted({
+      readTask: async () => position(task, "2026-01-01", true),
+    });
+    api.respond = (q) =>
+      q.scope === "joint" ? daily([task.taskId]) : daily([]);
+    const t = await mountTasks({
+      path: PATH,
+      rows: task.rows,
+      api,
+      sequences: [yesterday, today],
+    });
+    await t.until(
+      () =>
+        calls.readTask > 0 &&
+        banner()?.dataset.catchUp === "idle" &&
+        document.querySelectorAll(`[data-catch-up-task="${task.taskId}"]`)
+          .length === 1,
+    );
+    expect(
+      [
+        ...document.querySelectorAll<HTMLElement>(
+          `[data-catch-up-task="${task.taskId}"]`,
+        ),
+      ].map((n) => [n.dataset.catchUpDay, n.dataset.catchUpStopped]),
+    ).toEqual([[TODAY, "no_progress"]]);
+    expect(calls.materialise).toBe(0);
+  });
+
+  test("the task's detail: each retained stop for its own day, a horizon one without Try again; each Try again names its own stop", async () => {
+    const task = await needs();
+    const yesterday = addDays(TODAY, -1);
+    const earlier = {
+      ...stopped(task, "bound"),
+      through_date: yesterday,
+      revision: 3,
+    };
+    const future = {
+      ...stopped(task, "horizon"),
+      through_date: addDays(TODAY, 32),
+      sequence_generation: "future",
+    };
+    const { api } = counted({
+      readTask: () => new Promise(() => undefined),
+    });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      rows: task.rows,
+      api,
+      sequences: [earlier, future],
+    });
+    await t.until(
+      () =>
+        document.querySelectorAll(`[data-catch-up-task="${task.taskId}"]`)
+          .length === 2,
+    );
+    const days = [
+      ...document.querySelectorAll<HTMLElement>(
+        `[data-catch-up-task="${task.taskId}"]`,
+      ),
+    ].map((n) => [n.dataset.catchUpDay, n.dataset.catchUpStopped]);
+    expect(days).toEqual([
+      [yesterday, "bound"],
+      [addDays(TODAY, 32), "horizon"],
+    ]);
+    const buttons = screen.getAllByRole("button", { name: "Try again" });
+    expect(buttons).toHaveLength(1);
+    const runner = runnerForAccount(ME);
+    const spy = vi.spyOn(runner as NonNullable<typeof runner>, "tryAgain");
+    fireEvent.click(buttons[0] as HTMLElement);
+    expect(spy).toHaveBeenCalledWith(task.taskId, yesterday, {
+      kind: "sequence",
+      generation: "g",
+      revision: 3,
+      discovery: null,
+    });
+    expect(
+      (await axe(document.querySelector("main") ?? document.body)).violations,
+    ).toEqual([]);
   });
 });

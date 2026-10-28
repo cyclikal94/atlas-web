@@ -955,7 +955,14 @@ R19–R22): the reviewer's T5, T6, M4, M5 and S1 ported with their controls into
 retirement while an act waits), the sequence revision and the combined lift, the latest row by task and the authority snapshot
 (`materialise-plans`), Try again naming the stop shown, the streak read's ownership across offline and reconnect; native E-TM4 (another
 tab's day read retires the live account row), E-M6 (two real tabs, one real lock: one fresh budget) and E-M7 (a stop behind 100 other
-tasks' rows in real IndexedDB); MU-3102…MU-3120.
+tasks' rows in real IndexedDB); MU-3102…MU-3120. Revision 5 (Review 5 R23–R26, design assessment of 28 October 2026): the reviewer's T7,
+T8, M6 and M7 ported verbatim and M8 with its displayed token built as the screens build it, each with its control, into `timers-page`,
+`catchup-banner` and `catchup-runner`; the account's complete observation surviving a partial page, history pages (restricted rows, a
+later page) as finished evidence offline, an act re-checking what is STORED after its waits, the detail judging alike (`timer-block`,
+`timer-model`), the finished record's bound, refusal and loss (`materialise-plans`); exact-day recovery on Today, the detail and the
+streak, retention until a position covers a row's own day, admission of a new row, another day of a task as its own work, and
+non-repeating Try again identities (discovery claim, the discovery stop beside a day's stop, a memory stop's id, "none", a claim given to
+an older stop); MU-3121…MU-3145.
 
 ## Limits (WEB-10c)
 
@@ -977,6 +984,14 @@ tasks' rows in real IndexedDB); MU-3102…MU-3120.
   the detail both hide a copied session (the conservative side) until a newer read. A "Try again" lifts only the stop it was pressed on; a
   stop that came back meanwhile shows again and needs its own press. Today, the detail and the streak read each task's own latest catch-up
   record, in reads of at most 100 tasks.
+- **Revision 5.** A session any read listed finished (the account's history, a day's read) is not shown running anywhere, online, offline
+  or after a reload; at most 200 such sessions are kept, and once one goes, a session of unknown order is not offered either (the
+  conservative side). An act re-checks what is stored after its waits, so a Stop of a session recorded finished meanwhile queues
+  nothing. A catch-up record is kept until a position read covers its own day, so a task stopped on many days keeps one record per day; a
+  new day's record is admitted first (on a device the quota ledger refuses, "This device is short of storage space…" with Try again, and
+  nothing is sent). Today and the streak show the stop of the task's own today once this page has read the task, else its latest days as
+  read; the detail shows every retained stop of its latest eight days and today, each for its day. A Try again names the stop shown by
+  identities that never recur; one pressed on a stop no longer standing exactly so does nothing (the screen shows what stands now).
 - **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
   compatibility are those last rendered (a pause is taken up again when a task screen renders).
 

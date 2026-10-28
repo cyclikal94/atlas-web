@@ -1,5 +1,6 @@
 import {
   type AccountService,
+  clearSatisfiedSequences,
   commitMaterialiseDiscovery,
   commitMaterialiseLift,
   commitMaterialiseSequence,
@@ -7,9 +8,9 @@ import {
   DISCOVERY_REQUEST_ID,
   type MaterialiseDiscovery,
   type MaterialiseSequenceRow,
-  pruneOlderSequences,
   readMaterialiseDiscoveryNow,
   readMaterialiseSequenceNow,
+  readTaskSequencesNow,
   type SequenceKey,
 } from "../../../data";
 import type { MaterialiseCommand, TasksApi, TasksResult } from "../api";
@@ -28,6 +29,7 @@ import {
   recover,
   type SendAnswer,
   type Sequence,
+  satisfied,
   submit,
 } from "../model/materialise";
 import { todayIn } from "../model/time";
@@ -70,6 +72,18 @@ import { todayIn } from "../model/time";
  * reopened one) is dropped unrecorded, and the work is asked again under the new binding. A new binding retires what this page
  * remembered of the old one (`attempted`, `settledThrough`, `unrecorded`, paused work), and a "Try again" pressed on the old one lifts
  * nothing in the new one. A moment with no service bound is a pause.
+ *
+ * RETENTION AND TARGETS (revision 5, reviews R24 and R25; WEB-04 §5.8): work is per task AND day (`[task, through_date]`): a second day of
+ * a task asked for while another is queued, worked on or paused is kept as its own work, never absorbed. A stopped row is never deleted
+ * because a later day begins: a row goes only when a position read shows its own day covered (its sequence's, or any read of the task:
+ * `clearSatisfied`, each row compared as read). A new row grows the store and is admitted through the quota ledger first; one not
+ * admitted sends nothing (a `storage` stop of this page). The zone each task's read found (`zones`) lets a screen name the exact day it
+ * works for.
+ *
+ * CONSENT (revision 5, review R26): a "Try again" names the stop the screen SHOWED by identities that never recur: a discovery stop by its
+ * retry AND the claim it stopped on (a fresh claim per read, so a discovery that succeeded and stopped again is another stop), a day's
+ * sequence by its generation and revision together with the discovery stop shown in front of it (or none), a page's memory stop by its
+ * own id, and "no stop shown" explicitly. A press whose stop no longer stands exactly so lifts nothing and sends nothing.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -110,23 +124,68 @@ export interface RunnerState {
   finished: number;
   /** A stop was recorded or met on this page (its count moves once per stop, for an announcement). */
   stops: number;
+  /**
+   * The zone each task's read found on this page, under the binding displayed (revision 5, R24): a screen working for the task's today
+   * names that exact day (`todayIn(zone, now)`); a task not read yet has none (its day is not known: never the device's own date).
+   */
+  zones: ReadonlyMap<string, string>;
 }
 
 export interface UnrecordedStop {
-  /** `storage`: the task's entry could not be admitted (the quota ledger refused its growth), so nothing was sent (revision 3, R16). */
+  /**
+   * `storage`: the task's entry, or a new day's row, could not be admitted (the quota ledger refused its growth), so nothing was sent
+   * (revision 3, R16; revision 5).
+   */
   reason: "unreachable" | "rejected" | "storage";
   requestId?: string;
+  /** This stop's own identity (revision 5, R26): a fresh one for every stop held, so a press on an earlier one never lifts a later one. */
+  id: string;
+}
+
+/** A discovery stop as shown (revision 5, R26): its retry and the claim it stopped on, which is never reused. */
+export interface DiscoveryToken {
+  retry: number;
+  attempt: string | null;
 }
 
 /**
- * The stop a "Try again" was pressed on, as the screen showed it (revision 4, review R20): a day's sequence by its generation and
- * revision (every write moves the revision, so a later stop is never this one), a discovery by its entry's retry generation, or a stop
- * held in a page's memory only.
+ * The stop a "Try again" was pressed on, as the screen showed it (revision 4, review R20; revision 5, R26): a day's sequence by its
+ * generation and revision (every write moves the revision, so a later stop is never this one) and the discovery stop shown in front of it
+ * (`null`: none was); a discovery by its retry and claim; a stop held in a page's memory by its id; or none at all (the screen showed no
+ * stop of the task: a stop that appeared since is not lifted).
  */
 export type SeenStop =
-  | { kind: "sequence"; generation: string; revision: number }
-  | { kind: "discovery"; retry: number }
-  | { kind: "memory" };
+  | {
+      kind: "sequence";
+      generation: string;
+      revision: number;
+      discovery: DiscoveryToken | null;
+    }
+  | ({ kind: "discovery" } & DiscoveryToken)
+  | { kind: "memory"; id: string }
+  | { kind: "none" };
+
+/** What a discovery stop shown names (revision 5, R26). One builder for every screen. */
+export const discoveryToken = (
+  entry: MaterialiseDiscovery,
+): DiscoveryToken => ({ retry: entry.retry, attempt: entry.attempt ?? null });
+
+/** What a press on a day's stopped sequence names, with the discovery stop shown beside it, if any (revision 5, R26). */
+export const seenSequence = (
+  row: MaterialiseSequenceRow,
+  discovery: MaterialiseDiscovery | null | undefined,
+): SeenStop => ({
+  kind: "sequence",
+  generation: row.sequence_generation,
+  revision: row.revision ?? 0,
+  discovery: discovery?.stop ? discoveryToken(discovery) : null,
+});
+
+/** What a press on a discovery stop names (revision 5, R26). */
+export const seenDiscovery = (entry: MaterialiseDiscovery): SeenStop => ({
+  kind: "discovery",
+  ...discoveryToken(entry),
+});
 
 export interface CatchUpRunner {
   readonly identity: string;
@@ -260,33 +319,51 @@ interface Binding {
 }
 
 /**
- * What a press made on `seen` lifts of what is stored now (review R20), or `null` when the stop the screen showed no longer stands: a
- * day's stop only while it is that very row (generation and revision), with the discovery stop in front of it (its work cannot go on
- * without it); a discovery stop only while it is that entry; a memory stop lifts nothing durable.
+ * What a press made on `seen` lifts of what is stored now (review R20; revision 5, R26), or `null` when the stop the screen showed no
+ * longer stands EXACTLY so: a day's stop only while it is that very row (generation and revision) and the discovery stop in front of it
+ * is the one shown with it (or there is still none, as shown); a discovery stop only while it is that entry's stop on that very claim; a
+ * memory stop only while it is the one held; "none" only while no stop of the task stands. The discovery is compared by its claim, which
+ * is never reused, so a discovery that succeeded (its entry gone) and stopped again is never the stop an earlier screen showed.
  */
 function pressedOn(
   seen: SeenStop,
   discovery: MaterialiseDiscovery | null,
   sequence: Sequence | null,
+  memory: UnrecordedStop | undefined,
 ): {
   discovery: MaterialiseDiscovery | null;
   sequence: Sequence | null;
 } | null {
+  const stands = (token: DiscoveryToken | null) =>
+    token === null
+      ? !discovery?.stop
+      : !!discovery?.stop &&
+        discovery.retry === token.retry &&
+        (discovery.attempt ?? null) === (token.attempt ?? null);
   switch (seen.kind) {
     case "sequence":
       return sequence !== null &&
         sequence.sequence_generation === seen.generation &&
-        (sequence.revision ?? 0) === seen.revision
+        (sequence.revision ?? 0) === seen.revision &&
+        stands(seen.discovery ?? null)
         ? { discovery: discovery?.stop ? discovery : null, sequence }
         : null;
     case "discovery":
-      return discovery?.stop && discovery.retry === seen.retry
-        ? { discovery, sequence: null }
-        : null;
+      return stands(seen) ? { discovery, sequence: null } : null;
     case "memory":
-      return { discovery: null, sequence: null };
+      return memory?.id === seen.id
+        ? { discovery: null, sequence: null }
+        : null;
+    case "none":
+      return !discovery?.stop && sequence === null && memory === undefined
+        ? { discovery: null, sequence: null }
+        : null;
   }
 }
+
+/** The key of one piece of work (revision 5, R24/R25): its task and the day asked for (`""`: its today, once its zone is known). */
+const workKey = (item: { taskId: string; throughDate?: string | undefined }) =>
+  `${item.taskId}|${item.throughDate ?? ""}`;
 
 const NO_DISCOVERY: MaterialiseDiscovery = {
   retry: 0,
@@ -336,7 +413,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     unrecorded: new Map(),
     finished: 0,
     stops: 0,
+    zones: new Map(),
   };
+  /** The key of the work being done now (revision 5): another day of the same task is other work. */
+  let currentKey: string | null = null;
   let disposed = false;
   let running = false;
   const abort = new AbortController();
@@ -348,22 +428,24 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const park = (item: Item, throughDate: string | undefined) => {
     if (disposed) return;
     const day = throughDate ?? item.throughDate;
-    parked.set(item.taskId, {
+    parked.set(workKey(item), {
       ...item,
       ...(day === undefined ? {} : { throughDate: day }),
       resume: day !== undefined,
     });
   };
-  /** Paused work back in the queue, first (it was asked first), unless the task is queued or worked on already. */
+  /** The work is queued or being done already (the same task and day). */
+  const pending = (key: string) =>
+    currentKey === key || queue.some((q) => workKey(q) === key);
+  /** Paused work back in the queue, first (it was asked first), unless the same task and day is queued or worked on already. */
   const unpark = (taskId?: string) => {
-    const items = [...parked.values()].filter(
-      (p) => taskId === undefined || p.taskId === taskId,
+    const entries = [...parked].filter(
+      ([, p]) => taskId === undefined || p.taskId === taskId,
     );
-    for (const item of items) parked.delete(item.taskId);
-    const fresh = items.filter(
-      (p) =>
-        !queue.some((q) => q.taskId === p.taskId) && state.current !== p.taskId,
-    );
+    for (const [key] of entries) parked.delete(key);
+    const fresh = entries
+      .filter(([key]) => !pending(key))
+      .map(([, item]) => item);
     if (fresh.length > 0) queue.unshift(...fresh);
     return fresh.length > 0;
   };
@@ -377,11 +459,17 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       ],
       current,
     });
-  const unrecord = (taskId: string, value?: UnrecordedStop) => {
+  const unrecord = (taskId: string, value?: Omit<UnrecordedStop, "id">) => {
     const next = new Map(state.unrecorded);
     if (value === undefined) next.delete(taskId);
-    else next.set(taskId, value);
+    // A fresh identity for every stop held (revision 5, R26): a press on an earlier one names another.
+    else next.set(taskId, { ...value, id: deps.newId() });
     set({ unrecorded: next });
+  };
+  /** The zone a task's read found, for the screens (revision 5, R24). */
+  const zoneFound = (taskId: string, zone: string) => {
+    if (state.zones.get(taskId) === zone) return;
+    set({ zones: new Map(state.zones).set(taskId, zone) });
   };
 
   /** This runner may still act: not disposed, the service it writes through still the displayed one. */
@@ -414,16 +502,17 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     if (bound !== null) {
       attempted.clear();
       settledThrough.clear();
-      for (const [taskId, item] of parked)
-        parked.set(taskId, {
-          taskId,
+      for (const [key, item] of parked)
+        parked.set(key, {
+          taskId: item.taskId,
           trigger: item.trigger,
           manual: false,
           ...(item.throughDate === undefined
             ? {}
             : { throughDate: item.throughDate }),
         });
-      if (state.unrecorded.size > 0) set({ unrecorded: new Map() });
+      if (state.unrecorded.size > 0 || state.zones.size > 0)
+        set({ unrecorded: new Map(), zones: new Map() });
     }
     bound = service;
   };
@@ -443,6 +532,58 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     });
     if (out.kind !== "applied") return null;
     return { stored: out.value.stored };
+  };
+  /**
+   * A NEW row (revision 5): its growth admitted through the quota ledger first. `refused`: not admitted, nothing written; `null`: not
+   * applied; on `stale`, what is stored now (adopted).
+   */
+  const create = async (
+    service: AccountService,
+    captured: ReturnType<AccountService["capture"]>,
+    key: SequenceKey,
+    next: Sequence,
+  ): Promise<{ stored: Sequence | null } | "refused" | null> => {
+    const quota = deps.quota?.() ?? null;
+    const out = await commitMaterialiseSequence(
+      service,
+      captured,
+      { key, expected: null, next },
+      quota === null ? null : { quota },
+    );
+    if (out.kind !== "applied") return null;
+    if (out.value.kind === "refused") return "refused";
+    return { stored: out.value.stored };
+  };
+  /**
+   * Revision 5 (reviews R24 and R25, WEB-04 §5.8): `position`, as a read of the task answered it (`captured`: its stamp), covers these
+   * rows' days too: each is removed, only while it is still the row read (another page's lift, advance or new row of it stays). Rows not
+   * covered stay, whatever their phase; a store failure removes nothing (the rows stay until a later read).
+   */
+  const clearSatisfied = async (
+    at: Binding,
+    captured: ReturnType<AccountService["capture"]>,
+    taskId: string,
+    position: Position,
+    today: string,
+    except?: string,
+  ) => {
+    const rows = await readTaskSequencesNow(at.service, taskId);
+    if (rows === undefined || !owns(at)) return;
+    const done = rows.filter(
+      (row) =>
+        row.through_date !== except &&
+        satisfied(position, row.through_date, today),
+    );
+    if (done.length === 0) return;
+    await clearSatisfiedSequences(at.service, captured, {
+      task_id: taskId,
+      rows: done.map((row) => ({
+        through_date: row.through_date,
+        expected: expectationOf(row) as NonNullable<
+          ReturnType<typeof expectationOf>
+        >,
+      })),
+    });
   };
 
   const readPosition = async (taskId: string): Promise<PositionRead> => {
@@ -518,6 +659,16 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         if (out === null) return unapplied(at);
         row = out.stored;
         if (row === null) {
+          // The position covers this day; the task's other days it covers are satisfied too (revision 5).
+          if (next === null && read.answer.kind === "ok")
+            await clearSatisfied(
+              at,
+              captured,
+              key.task_id,
+              read.answer.position,
+              todayOf(),
+              key.through_date,
+            );
           set({ finished: state.finished + 1 });
           return DONE;
         }
@@ -532,7 +683,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   };
 
   /** A discovery stop that could not be recorded: kept in this page's memory, which refuses automatic work alike. */
-  const stopInMemory = (taskId: string, stop: UnrecordedStop) => {
+  const stopInMemory = (taskId: string, stop: Omit<UnrecordedStop, "id">) => {
     unrecord(taskId, stop);
     set({ stops: state.stops + 1 });
     return DONE;
@@ -615,7 +766,21 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     if (!owns(at)) return end(lost(at));
     if (entries === undefined) return end(PAUSED);
     let entry: MaterialiseDiscovery | null = entries[item.taskId] ?? null;
-    if (entry?.stop) return end(DONE);
+    if (entry?.stop) {
+      // A stop written before claims existed names no claim: it is given one, sending nothing and changing no count, so a press can
+      // name it by an identity that never recurs (revision 5, R26). Until that is written, only a press naming no claim lifts it.
+      if ((entry.attempt ?? null) === null)
+        await commitMaterialiseDiscovery(
+          at.service,
+          at.service.capture(deps.epoch),
+          {
+            task_id: item.taskId,
+            expected: entry,
+            next: { ...entry, attempt: deps.newId() },
+          },
+        );
+      return end(DONE);
+    }
     const quota = deps.quota?.() ?? null;
     /** `next` over the entry this work admitted, through its own service, stamped as given (an answer: its read's issue). */
     const record = async (
@@ -663,7 +828,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       const base = entry ?? NO_DISCOVERY;
       const failures =
         read.answer.kind === "uncertain" ? base.failures + 1 : base.failures;
-      const stop: UnrecordedStop | null =
+      const stop: Omit<UnrecordedStop, "id"> | null =
         read.answer.kind !== "uncertain"
           ? {
               reason: "rejected",
@@ -728,8 +893,20 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     if (!owns(at)) return lost(at);
     if (read.answer.kind !== "ok" || read.zone === null) return PAUSED;
     const zone = read.zone;
+    zoneFound(item.taskId, zone);
     const today = () => todayIn(zone, deps.now());
     const throughDate = item.throughDate ?? today();
+    // What the position read covers of the task's OTHER days is satisfied (revision 5): those rows go, a stopped one included. This day's
+    // own row is decided by its sequence below, as before (adopted, resent with its own key, or read).
+    await clearSatisfied(
+      at,
+      captured,
+      item.taskId,
+      read.answer.position,
+      today(),
+      throughDate,
+    );
+    if (!owns(at)) return lost(at);
     const key: SequenceKey = {
       task_id: item.taskId,
       through_date: throughDate,
@@ -782,6 +959,15 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         const out = await commit(service, captured, key, stored, next);
         if (out === null) return owns(at) ? paused : lost(at);
         if (out.stored === null) {
+          if (next === null)
+            await clearSatisfied(
+              at,
+              captured,
+              key.task_id,
+              answer.position,
+              today(),
+              key.through_date,
+            );
           set({ finished: state.finished + 1 });
           return DONE;
         }
@@ -802,14 +988,15 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       set({ finished: state.finished + 1 });
       return DONE;
     }
-    const created = await commit(service, captured, key, null, fresh);
+    // A new row grows the store: admitted first (revision 5). Earlier days are NOT removed because this one begins (review R25): each
+    // stays, with its attempt, until a read shows its own day covered.
+    const created = await create(service, captured, key, fresh);
+    if (created === "refused")
+      return owns(at)
+        ? stopInMemory(item.taskId, { reason: "storage" })
+        : lost(at);
     if (created === null) return owns(at) ? paused : lost(at);
     if (created.stored === null) return DONE;
-    // Housekeeping: the task's earlier days that are not running.
-    void pruneOlderSequences(service, service.capture(deps.epoch), {
-      task_id: item.taskId,
-      before: throughDate,
-    });
     if (created.stored.phase === "stopped") {
       set({ stops: state.stops + 1 });
       return DONE;
@@ -820,6 +1007,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const loop = async (): Promise<void> => {
     while (queue.length > 0 && mayRun()) {
       const item = queue.shift() as Item;
+      currentKey = workKey(item);
       publishQueue(item.taskId);
       let outcome: Outcome;
       try {
@@ -841,9 +1029,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
             ? {}
             : { throughDate: item.throughDate }),
         };
-        if (item.rebound) parked.set(item.taskId, again);
+        if (item.rebound) parked.set(workKey(item), again);
         else queue.unshift(again);
       }
+      currentKey = null;
       publishQueue(null);
     }
   };
@@ -885,7 +1074,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         pump();
         return;
       }
-      if (queue.some((q) => q.taskId === taskId) || state.current === taskId)
+      // The same task and day is queued or worked on already (another day of the task is other work: revision 5, R24/R25).
+      if (pending(workKey({ taskId, throughDate: options.throughDate })))
         return;
       // A discovery stop this page could not record admits nothing automatic either (a recorded one is refused where the work begins).
       if (state.unrecorded.has(taskId)) return;
@@ -934,16 +1124,39 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
             if (stored?.phase === "stopped") sequence = stored;
           }
           if (seen !== undefined) {
-            const shown = pressedOn(seen, discovery, sequence);
+            const shown = pressedOn(
+              seen,
+              discovery,
+              sequence,
+              state.unrecorded.get(taskId),
+            );
             if (shown === null) return;
             ({ discovery, sequence } = shown);
           }
-        }
+        } else if (
+          seen !== undefined &&
+          seen.kind === "memory" &&
+          state.unrecorded.get(taskId)?.id !== seen.id
+        )
+          return;
         if (disposed) return;
-        // The person's act supersedes paused work on the task: it is asked for again, once.
-        parked.delete(taskId);
+        // The person's act supersedes paused work on the task and day: it is asked for again, once.
+        for (const [key, p] of parked)
+          if (
+            p.taskId === taskId &&
+            (day === undefined ||
+              p.throughDate === undefined ||
+              p.throughDate === day)
+          )
+            parked.delete(key);
         const retry = { discovery, sequence, service };
-        const queued = queue.find((q) => q.taskId === taskId);
+        const queued = queue.find(
+          (q) =>
+            q.taskId === taskId &&
+            (day === undefined ||
+              q.throughDate === undefined ||
+              q.throughDate === day),
+        );
         if (queued !== undefined) {
           queued.manual = true;
           queued.retry = retry;

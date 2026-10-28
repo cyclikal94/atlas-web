@@ -131,12 +131,14 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
   // WEB-10c: the catch-up sequences (a compare-and-set of the reserved store) and the running-timer copy (one record, a cache write).
   // Revision 2: the discovery entries (W27, in the singleton) and the timer observation order and its corrections (W28, fixed-size).
   W27: {
-    name: "writeMaterialiseSequence / pruneMaterialiseSequences / writeMaterialiseDiscovery / liftMaterialiseStops",
+    // Revision 5 (reviews R24/R25): satisfied rows are deleted by an expectation-checked plan; nothing prunes by date any more.
+    name: "writeMaterialiseSequence / deleteSatisfiedSequences / writeMaterialiseDiscovery / liftMaterialiseStops",
     guards: ["INC", "CLS", "EPO"],
     durability: "strict",
   },
   W28: {
-    name: "writeTimerCopy / issueTimerOrder / reconcileTimerCopy",
+    // Revision 5 (review R23): the account history's finished sessions.
+    name: "writeTimerCopy / issueTimerOrder / reconcileTimerCopy / recordTimerEnded",
     guards: ["INC", "CLS", "EPO"],
     durability: "default",
   },
@@ -309,6 +311,11 @@ describe("F-S7: the writer inventory", () => {
       "data.reconcileTimerCopy",
       // WEB-10c revision 3: a NEW task's discovery entry grows the singleton (no fixed cap now, R16), admitted by the runner before its read.
       "data.writeMaterialiseDiscovery",
+      // WEB-10c revision 5 (R25): rows are kept until their own need is satisfied, so a NEW catch-up row grows the store: admitted by the
+      // runner before it is written (it was a fixed-size write while a later day pruned the earlier ones).
+      "data.writeMaterialiseSequence",
+      // WEB-10c revision 5 (R23): the account history's finished sessions grow the singleton, admitted by the timers page.
+      "data.recordTimerEnded",
     ];
     // A fixed few hundred bytes, once per page context and form (the writer claim) or in place in the singleton `sync_state` row (the
     // verified name and the device id): no caller-sized growth, covered by the reserve's slack and the allowance each save carries.
@@ -316,8 +323,6 @@ describe("F-S7: the writer inventory", () => {
       "data.claimFormWriter",
       "data.writeProfile",
       "data.recordDeviceVerification",
-      // WEB-10c: one catch-up row of a few hundred bytes per task and day while it catches up, pruned when a later day begins.
-      "data.writeMaterialiseSequence",
       // WEB-10c revision 4 (review R20): "Try again" replaces that row and an EXISTING discovery entry in one compare-and-set (no growth).
       "data.liftMaterialiseStops",
     ];

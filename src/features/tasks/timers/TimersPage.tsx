@@ -1,10 +1,20 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { Button } from "../../../components/ui/button";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
+  type AccountService,
   commitTimerCopy,
+  commitTimerEnded,
   readResourcesNow,
+  readTimerAuthorityNow,
   TIMER_COPY_ROWS,
   useAllOutstandingByKind,
   useCachedResources,
@@ -33,7 +43,13 @@ import {
 } from "../model/timers";
 import { taskPath } from "../route";
 import type { PendingMark } from "../view";
-import { type IssuedRead, issueTimerRead, useTimerEvidence } from "./copy";
+import {
+  authorityOf,
+  epochOf,
+  type IssuedRead,
+  issueTimerRead,
+  useTimerEvidence,
+} from "./copy";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const TIMERS_COPY = {
@@ -68,6 +84,11 @@ type Section =
       more: "idle" | "loading" | "error";
       /** The read's place in the observation order (W28; its first page's, for every page of it), or null (review R19). */
       order: number | null;
+      /**
+       * The database incarnation it was ordered in, or null (none was bound). Its order means nothing in another one (revision 5, R23):
+       * once another is bound, its rows are not shown and the list is read again.
+       */
+      incarnation: string | null;
     }
   | { kind: "error"; requestId?: string };
 
@@ -88,6 +109,13 @@ const merge = (
 function useSection(state: "running" | "stopped", again: string) {
   const env = useTasksEnv();
   const data = useDataEnv();
+  const store = data.serviceStore;
+  const subscribe = useCallback(
+    (listener: () => void) => store.subscribe(listener),
+    [store],
+  );
+  const current = useCallback(() => store.get(), [store]);
+  const bound = useSyncExternalStore(subscribe, current, current);
   const [section, setSection] = useState<{ scope: string; value: Section }>({
     scope: "",
     value: { kind: "loading" },
@@ -98,12 +126,23 @@ function useSection(state: "running" | "stopped", again: string) {
     owner: number;
     next: string | null;
     loading: boolean;
+    incarnation: string | null;
   } | null>(null);
   const load = async (after: string | null) => {
     const identity = env.identity;
-    let link: { owner: number; next: string | null; loading: boolean };
+    let link: {
+      owner: number;
+      next: string | null;
+      loading: boolean;
+      incarnation: string | null;
+    };
     // The running list's first page is the copy this device keeps (W28): its place in the observation order is taken at ISSUE.
     let issued: IssuedRead | null = null;
+    // A history read's stamp at issue (revision 5, R23): what it lists finished is recorded only for the binding it was asked under.
+    let history: {
+      service: AccountService;
+      captured: ReturnType<AccountService["capture"]>;
+    } | null = null;
     const readAt = env.now();
     if (after === null) {
       owner.current += 1;
@@ -113,12 +152,14 @@ function useSection(state: "running" | "stopped", again: string) {
         setSection({ scope, value: { kind: "offline" } });
         return;
       }
-      link = { owner: mine, next: null, loading: true };
+      link = { owner: mine, next: null, loading: true, incarnation: null };
       chain.current = link;
       if (state === "running") {
         issued = await issueTimerRead(data, identity);
         if (owner.current !== mine) return;
       }
+      link.incarnation =
+        issued?.service.incarnationId ?? data.service()?.incarnationId ?? null;
     } else {
       const held = chain.current;
       if (
@@ -130,6 +171,11 @@ function useSection(state: "running" | "stopped", again: string) {
         return;
       held.loading = true;
       link = held;
+    }
+    if (state === "stopped") {
+      const service = data.service();
+      if (service)
+        history = { service, captured: service.capture(epochOf(identity)) };
     }
     const result = await env.api.readAccountTimers({
       state,
@@ -174,9 +220,17 @@ function useSection(state: "running" | "stopped", again: string) {
           order: first
             ? (issued?.order ?? null)
             : (prev.value as Extract<Section, { kind: "ready" }>).order,
+          incarnation: link.incarnation,
         },
       };
     });
+    // Every accepted page of the history is evidence for every source (revision 5, review R23): a session it lists finished never runs
+    // again, so it is recorded (and taken out of the copy), for this tab's list offline, other tabs, the detail and a reload.
+    if (history !== null && data.service() === history.service) {
+      const ids = result.value.items.map((row) => row.id);
+      if (ids.length > 0)
+        void commitTimerEnded(data, history.service, history.captured, ids);
+    }
     // Every accepted FIRST page of the running list is the copy this device keeps (bounded), for a reload offline.
     if (issued !== null && data.service() === issued.service)
       void commitTimerCopy(data, issued.service, issued.captured, {
@@ -187,6 +241,13 @@ function useSection(state: "running" | "stopped", again: string) {
         running: result.value.items.slice(0, TIMER_COPY_ROWS) as never,
       });
   };
+  // A read ordered in another database incarnation than the one bound now is not shown, and the list is read again (revision 5, R23).
+  const held = section.scope === scope ? section.value : null;
+  const rebound =
+    held?.kind === "ready" &&
+    held.incarnation !== null &&
+    bound !== null &&
+    held.incarnation !== bound.incarnationId;
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again for another identity, a connection or a change of mine
   useEffect(() => {
     void load(null);
@@ -194,8 +255,11 @@ function useSection(state: "running" | "stopped", again: string) {
       owner.current += 1;
     };
   }, [scope, env.online, again]);
-  const value =
-    section.scope === scope ? section.value : { kind: "loading" as const };
+  // biome-ignore lint/correctness/useExhaustiveDependencies: read again once when another binding replaced the one the read was ordered in
+  useEffect(() => {
+    if (rebound) void load(null);
+  }, [rebound]);
+  const value = held !== null && !rebound ? held : { kind: "loading" as const };
   return {
     value,
     more:
@@ -431,9 +495,15 @@ export function TimersPage() {
         )
       : [];
   const shownRunning = offline ? copiedRows : runningRows;
-  // What an act may still end once its own reads are answered (review R19: a correction can land while it waits).
-  const standing = useRef(new Set<string>());
-  standing.current = new Set(shownRunning.map((r) => r.id));
+  // What an act may still end once its own reads are answered (review R19: a correction can land while it waits), with the order each
+  // was seen at, so the act can judge it again against the authority stored by then (revision 5, review R23).
+  const standing = useRef(new Map<string, number | null>());
+  const shownOrder = offline
+    ? (copied?.order ?? null)
+    : running.value.kind === "ready"
+      ? running.value.order
+      : null;
+  standing.current = new Map(shownRunning.map((r) => [r.id, shownOrder]));
   // The days of the running rows this device holds: a copied row's title offline, and every row's window (a closed day's stop).
   const cached = useCachedResources(
     shownRunning.flatMap((r) =>
@@ -470,8 +540,20 @@ export function TimersPage() {
       const held = await readResourcesNow(data, [stream, row.occurrence_id]);
       const day = held?.get(row.occurrence_id)?.merged;
       const parsed = day ? parseOccurrenceData(day.value) : null;
-      // Retired while this waited: nothing is queued (the row has gone from the screen with its actions).
-      if (!standing.current.has(row.id)) {
+      // Retired while this waited: nothing is queued (the row has gone from the screen with its actions). Judged again against the
+      // authority as stored NOW (revision 5, R23), so a correction committed whose watch has not reached this screen yet counts too.
+      const service = data.service();
+      const stored =
+        service === null || service === undefined
+          ? undefined
+          : await readTimerAuthorityNow(service);
+      const order = standing.current.get(row.id);
+      if (
+        order === undefined ||
+        stored === undefined ||
+        !stillRunning(authorityOf(stored), row.occurrence_id, row.id, order) ||
+        !standing.current.has(row.id)
+      ) {
         setChoosing(null);
         return;
       }

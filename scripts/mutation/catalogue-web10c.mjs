@@ -980,9 +980,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        // Re-anchored (revision 3).
-        "    if (entry?.stop) return end(DONE);\n",
-        "",
+        // Re-anchored (revisions 3 and 5).
+        "    if (entry?.stop) {\n",
+        "    if (false as boolean && entry?.stop) {\n",
       ),
   },
   {
@@ -1040,7 +1040,9 @@ export const UNIT_10C = [
       "R13: WEB-10c A5: the streak reads past a stopped discovery as if the catch-up had finished",
     file: "src/features/tasks/streak/StreakPage.tsx",
     tests: ["tests/features/tasks/streak-page.test.tsx"],
-    expect: /the streak shows the recorded stop/,
+    // Revision 5: while the task's day is unknown the streak waits anyway; the stop must still hold once the day is known.
+    expect:
+      /the streak shows the recorded stop|a stop another page records AFTER this page knew the task's day/,
     patch: (t) => sub(t, "      discovery[taskId]?.stop != null ||\n", ""),
   },
   {
@@ -1053,8 +1055,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "  if (entry && found)",
-        "  if (false as boolean && entry && found)",
+        // Re-anchored (revision 5: `stopsFor`).
+        "  if (found?.stop)\n    return [",
+        "  if (false as boolean && found?.stop)\n    return [",
       ),
   },
   {
@@ -1334,7 +1337,8 @@ export const UNIT_10C = [
       "R19: WEB-10c A15: a session the page's own history lists stopped is still shown running",
     file: "src/features/tasks/timers/TimersPage.tsx",
     tests: ["tests/features/tasks/timers-page.test.tsx"],
-    expect: /history has listed stopped/,
+    // Revision 5: the durable finished record hides it too; the page's own history still must when that record cannot be written.
+    expect: /history has listed stopped|the store fails it/,
     patch: (t) => sub(t, "    !stopped.has(row.id) &&\n", ""),
   },
   {
@@ -1347,8 +1351,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      if (!standing.current.has(row.id)) {",
-        "      if (false as boolean) {",
+        // Re-anchored (revision 5: the whole re-check after the act's waits).
+        "        order === undefined ||\n        stored === undefined ||\n        !stillRunning(authorityOf(stored), row.occurrence_id, row.id, order) ||\n        !standing.current.has(row.id)\n      ) {",
+        "        false as boolean\n      ) {",
       ),
   },
   {
@@ -1546,8 +1551,14 @@ export const UNIT_10C = [
       "R21: WEB-10c A1/A19: a task's FIRST day is read as its latest (a later day's stop or progress hidden)",
     file: "src/data/plans/materialise.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
-    expect: /found past any number/,
-    patch: (t) => sub(t, "        n - 1,\n", "        0,\n"),
+    // Re-anchored (revision 5: the task's latest days are read from its end).
+    expect: /the exact day past any number/,
+    patch: (t) =>
+      sub(
+        t,
+        "              Math.max(0, n - TASK_SEQUENCE_ROWS),\n",
+        "              0,\n",
+      ),
   },
   {
     id: "MU-3120",
@@ -1561,6 +1572,376 @@ export const UNIT_10C = [
         t,
         "        if (!mine.live || owner.current !== mine || identity.current !== asked)",
         "        if (identity.current !== asked)",
+      ),
+  },
+  // ---- revision 5 (review 5 R23-R26) -------------------------------------------------------------------------------------
+  {
+    id: "MU-3121",
+    title:
+      "R23: WEB-10c A12/A15: the account's later complete observation does not retire a running row it omits",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timers-page.test.tsx",
+    ],
+    expect:
+      /REVIEW5 T7 \(ported\)|the account's later complete observation omits it/,
+    patch: (t) =>
+      sub(
+        t,
+        "    account != null &&\n    account.order > order &&",
+        "    false as boolean &&\n    account != null &&\n    account.order > order &&",
+      ),
+  },
+  {
+    id: "MU-3122",
+    title:
+      "R23: WEB-10c A12/A15: a session any read listed finished still runs for the account's list (its history forgotten)",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timers-page.test.tsx",
+    ],
+    expect:
+      /REVIEW5 T8 \(ported\)|listed finished by any read|a restricted session the history lists stopped/,
+    patch: (t) =>
+      sub(t, "  if (authority.ended?.has(sessionId)) return false;\n", ""),
+  },
+  {
+    id: "MU-3123",
+    title:
+      "R23: WEB-10c A15: once a finished session was lost, a positive of unknown order is still trusted",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /a finished session lost: not trusted/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (order === null) return authority.endedLost !== true;",
+        "  if (order === null) return true;",
+      ),
+  },
+  {
+    id: "MU-3124",
+    title:
+      "R23: WEB-10c A15: the detail keeps running a session the account's history listed finished",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect:
+      /the account's history recorded it finished|listed finished by any read/,
+    patch: (t) => sub(t, "    ...(input.ended ?? []),\n", ""),
+  },
+  {
+    id: "MU-3125",
+    title:
+      "R23: WEB-10c A15: the detail trusts a read of unknown order after a finished session was lost",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /a finished session lost: not trusted/,
+    patch: (t) => sub(t, "      : input.endedLost !== true;", "      : true;"),
+  },
+  {
+    id: "MU-3126",
+    title:
+      "R23: WEB-10c A12/A15: a later PARTIAL first page erases what the complete observation proved",
+    file: "src/data/plans/timer-copy.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/timers-page.test.tsx",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect:
+      /never the observation|a later PARTIAL first page|then a PARTIAL one/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ...account,\n",
+        "        ...(copy?.complete ? account : { timer_account: null }),\n",
+      ),
+  },
+  {
+    id: "MU-3127",
+    title:
+      "R23: WEB-10c A15: the history's finished sessions are left in the copy",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /history's finished sessions are recorded/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const out = copyWithout(sync, new Set(ids));",
+        "    const out = null as ReturnType<typeof copyWithout>;",
+      ),
+  },
+  {
+    id: "MU-3128",
+    title:
+      "R23: WEB-10c A15: a finished record the quota ledger refused records no loss",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /history's finished sessions are recorded/,
+    patch: (t) =>
+      sub(
+        t,
+        "        timer_ended: ended?.ended ?? { ...held.ended, lost: true },",
+        "        timer_ended: ended?.ended ?? held.ended,",
+      ),
+  },
+  {
+    id: "MU-3129",
+    title:
+      "R23: WEB-10c A15: a finished session evicted beyond the bound raises no floor",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /beyond the bound the one recorded longest ago goes/,
+    patch: (t) => sub(t, "    floor = Math.max(floor, gone[1]);\n", ""),
+  },
+  {
+    id: "MU-3130",
+    title:
+      "R23: WEB-10c A15: a day's read does not record its finished sessions for the account",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /a day's read records the sessions it listed finished/,
+    patch: (t) =>
+      sub(
+        t,
+        "            : withEnded(held.ended, finished, Math.max(issued, input.order));",
+        "            : null;",
+      ),
+  },
+  {
+    id: "MU-3131",
+    title:
+      "R23: WEB-10c A15: a page of the account's history records nothing (its finished sessions known to this page alone)",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect:
+      /REVIEW5 T8 \(ported\)|a restricted session the history lists stopped|listed stopped on a LATER page/,
+    patch: (t) =>
+      sub(
+        t,
+        "        void commitTimerEnded(data, history.service, history.captured, ids);",
+        "        void ids;",
+      ),
+  },
+  {
+    id: "MU-3132",
+    title:
+      "R23: WEB-10c A12/A15: an act re-checks only what the screen rendered, not the authority stored by then",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /a Stop whose session is recorded finished while the act waits/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !stillRunning(authorityOf(stored), row.occurrence_id, row.id, order) ||",
+        "        false ||",
+      ),
+  },
+  {
+    id: "MU-3133",
+    title:
+      "R25: WEB-10c A3/A4 (WEB-04 §5.8): another day's row is removed without its need being covered",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /REVIEW5 M7 \(ported\)|a later day it does not cover stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "        satisfied(position, row.through_date, today),",
+        "        true,",
+      ),
+  },
+  {
+    id: "MU-3134",
+    title:
+      "R25: WEB-10c A3/A4: a satisfied row is removed though another page changed it since",
+    file: "src/data/plans/materialise.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /satisfied rows are removed only as decided on/,
+    patch: (t) =>
+      sub(
+        t,
+        "      matchesExpectation(reads[i], row.expected),",
+        "      reads[i] !== undefined,",
+      ),
+  },
+  {
+    id: "MU-3135",
+    title:
+      "R25: WEB-10c A3: a new day's row is written without the quota ledger's admission",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /a new day's row the quota ledger refused/,
+    patch: (t) =>
+      sub(
+        t,
+        "      { key, expected: null, next },\n      quota === null ? null : { quota },",
+        "      { key, expected: null, next },\n      null,",
+      ),
+  },
+  {
+    id: "MU-3136",
+    title:
+      "R25: WEB-10c A3: a new row the ledger did not admit is written anyway",
+    file: "src/data/plans/materialise.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /a NEW row is admitted/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (\n      reads === undefined &&\n      (input.admitted === false ||",
+        "    if (\n      false as boolean &&\n      reads === undefined &&\n      (input.admitted === false ||",
+      ),
+  },
+  {
+    id: "MU-3137",
+    title:
+      "R24: WEB-10c A1/A19: the recovery read reports a task's latest days as all of them",
+    file: "src/data/plans/materialise.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /the exact day past any number/,
+    patch: (t) =>
+      sub(
+        t,
+        "        complete: n <= TASK_SEQUENCE_ROWS,",
+        "        complete: true,",
+      ),
+  },
+  {
+    id: "MU-3138",
+    title:
+      "R24: WEB-10c A1/A19: Today shows its task's LATEST day in place of the day it works for (a horizon stop hides it)",
+    file: "src/features/tasks/today/CatchUpBanner.tsx",
+    tests: [
+      "tests/features/tasks/catchup-banner.test.tsx",
+      "tests/features/tasks/streak-page.test.tsx",
+    ],
+    expect:
+      /REVIEW5 M6 \(ported\)|a later horizon stop beside today's bound stop/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (target !== undefined && found.target) rows.push(found.target);\n  if (target === undefined || every)",
+        "  const last = found.rows[found.rows.length - 1];\n  if (last) rows.push(last);\n  if (every)",
+      ),
+  },
+  {
+    id: "MU-3139",
+    title:
+      "R24: WEB-10c A1: the zone a read found is not published, so no screen knows the exact day",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /once its day is known, Today shows that day's stop/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (state.zones.get(taskId) === zone) return;",
+        "    return;",
+      ),
+  },
+  {
+    id: "MU-3140",
+    title:
+      "R24: WEB-10c A1/A3: another day of a task asked while one is worked on is absorbed",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /two days asked together/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (pending(workKey({ taskId, throughDate: options.throughDate })))",
+        "      if (\n        queue.some((q) => q.taskId === taskId) ||\n        state.current === taskId\n      )",
+      ),
+  },
+  {
+    id: "MU-3141",
+    title:
+      "R26: WEB-10c A18/A19: a discovery press is matched by its retry alone (a later stop of a reset counter lifted)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /REVIEW5 M8 \(ported/,
+    patch: (t) =>
+      sub(
+        t,
+        "        discovery.retry === token.retry &&\n        (discovery.attempt ?? null) === (token.attempt ?? null);",
+        "        discovery.retry === token.retry;",
+      ),
+  },
+  {
+    id: "MU-3142",
+    title:
+      "R26: WEB-10c A19: a day's stop press lifts a discovery stop recorded after the screen showed none",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /shown without one: a discovery stop recorded since is not lifted/,
+    patch: (t) =>
+      sub(t, "        stands(seen.discovery ?? null)", "        true"),
+  },
+  {
+    id: "MU-3143",
+    title:
+      "R26: WEB-10c A19: a press on an earlier memory stop lifts the one held now",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /a memory stop's press names it/,
+    patch: (t) =>
+      sub(t, "      return memory?.id === seen.id\n", "      return true\n"),
+  },
+  {
+    id: "MU-3144",
+    title:
+      "R26: WEB-10c A19: a press made where no stop was shown lifts a stop that stands since",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /a stop stands since: nothing is lifted or asked/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return !discovery?.stop && sequence === null && memory === undefined\n",
+        "      return true\n",
+      ),
+  },
+  {
+    id: "MU-3145",
+    title:
+      "R26: WEB-10c A19: a discovery stop written before claims is never given one (its press names no identity)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [
+      "tests/features/tasks/materialise-model.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect: /a discovery stop written before claims/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if ((entry.attempt ?? null) === null)",
+        "      if (false as boolean)",
       ),
   },
 ];
