@@ -371,6 +371,143 @@ test("P-2 collector natively (revision 18): healthy and one-lapse iterations com
   }
 });
 
+/**
+ * Revision 19 (review 19 R19-P2, design assessment C2, Q11): the same short LABELLED schedules through the writer's collector and port.
+ * The healthy collection's retained witnesses are checked here against the page's own trace by hand (every line non-negative, in order
+ * and inside its mark and read within the trace's 1 ms rounding), independently of the shared rule. The faults are review 19's corrected
+ * native edit, made on the page read the collector receives: its read time set to its mark's. Each fault is counted and proved effective
+ * (the retained commit lies more than the rounding after the claimed read); it is made at the first warm-up and the first measured
+ * iteration through the normal poll, and at the last measured ordinary iteration through the forced read the collector takes when the
+ * poll fails. Each must stop the collection AT that iteration, with nothing further queued. Not a measurement.
+ */
+test("P-2 collector natively (revision 19): healthy witnesses lie inside their observations; a read edited to its mark, by the poll at the first warm-up or a measured iteration or by the forced read, stops the collection there", async ({
+  context,
+}) => {
+  test.setTimeout(240_000);
+  const net = await stubNetwork(context);
+  await seedSettled(context);
+  const page = await bootSession(context);
+  await startLeader(page);
+  await waitForState(page, "idle");
+  let round = 2_000;
+  const shapes = (): P2Shape[] => {
+    round += 10;
+    const base = round;
+    return [
+      {
+        name: "ordinary-100",
+        body: (i) => ordinaryPage(100, base + i),
+        warmup: 2,
+        samples: 2,
+      },
+      {
+        name: "dense-100",
+        body: () => denseChecklistPage(100),
+        warmup: 1,
+        samples: 1,
+      },
+    ];
+  };
+  const options = { longTasks: false, timeout: 60_000, polling: 10 };
+  const msOf = (line: string) => Number(/^(-?\d+)ms /.exec(line)?.[1]);
+  type Read = {
+    mark: { from: number; at: number };
+    read: { to: number; at: number };
+    lines: string[];
+  };
+  const injecting = (at: number, path: "poll" | "run") => {
+    const base = p2PortOf(page, net);
+    let reads = 0;
+    let nudges = 0;
+    const edits: Array<{ read_at: number; commit_ms: number }> = [];
+    const edit = (r: Read | null) => {
+      if (!r) return r;
+      reads += 1;
+      if (reads - 1 !== at) return r;
+      const x = { ...r, read: { ...r.read, at: r.mark.at } };
+      const commit = x.lines.find(
+        (l) => l.split(" ")[1] === "data.sync_commit",
+      );
+      const commitMs = msOf(commit ?? "");
+      // The fault took effect beyond the trace's rounding: the retained commit is after the claimed read.
+      expect(commitMs - x.read.at).toBeGreaterThan(1);
+      edits.push({ read_at: x.read.at, commit_ms: commitMs });
+      return x;
+    };
+    const port: P2Port = {
+      ...base,
+      poll: async (fn, arg, o) => {
+        if (path === "run") throw new Error("injected: the poll timed out");
+        return edit((await base.poll(fn, arg, o)) as Read | null) as never;
+      },
+      run: async (fn, arg) => {
+        if ((fn as unknown) === nudgeP2Iteration) nudges += 1;
+        const r = await base.run(fn, arg);
+        return (
+          (fn as unknown) === readP2Iteration ? edit(r as Read | null) : r
+        ) as never;
+      },
+    };
+    return { port, edits, nudges: () => nudges, reads: () => reads };
+  };
+  // Healthy: the shared rule accepted every iteration; the page's own trace corroborates each witness by hand.
+  const healthy = injecting(-1, "poll");
+  const c = await collectP2Iterations(healthy.port, shapes(), options);
+  expect(c.failure, JSON.stringify(c.failure)).toBeNull();
+  expect(c.iterations).toHaveLength(6);
+  expect(healthy.edits).toHaveLength(0);
+  const trace = (await page.evaluate(
+    () => window.__atlasData?.engineTrace ?? [],
+  )) as string[];
+  const margins: Array<{ before: number; after: number }> = [];
+  for (const e of c.iterations) {
+    const times = trace.slice(e.mark.from, e.read.to).map(msOf);
+    expect(times.length).toBeGreaterThan(0);
+    expect(times.every((t) => Number.isFinite(t) && t >= 0)).toBe(true);
+    expect(times).toEqual([...times].sort((a, b) => a - b));
+    margins.push({
+      before: Math.min(...times) - e.mark.at,
+      after: e.read.at - Math.max(...times),
+    });
+  }
+  expect(margins.every((m) => m.before >= -1 && m.after >= -1)).toBe(true);
+  test.info().annotations.push({
+    type: "p2-healthy-margins",
+    description: JSON.stringify(margins),
+  });
+  for (const [at, path, shape, index, warmup] of [
+    [0, "poll", "ordinary-100", 0, true],
+    [2, "poll", "ordinary-100", 2, false],
+    [3, "run", "ordinary-100", 3, false],
+  ] as const) {
+    const p = injecting(at, path);
+    const f = await collectP2Iterations(p.port, shapes(), options);
+    expect(p.edits, `${path} ${at}`).toHaveLength(1);
+    expect(p.reads()).toBe(at + 1);
+    expect(f.failure).toMatchObject({
+      shape,
+      index,
+      warmup,
+      phase: "selection",
+    });
+    expect(f.failure?.problem).toMatch(
+      /^a trace line \(\d+\) follows the sample's read$/,
+    );
+    expect(f.iterations).toHaveLength(at);
+    const w = f.failure?.witness as Read & { served: number };
+    expect(w.read.at).toBe(w.mark.at);
+    expect(w.served).toBe(1);
+    // Nothing further was queued or nudged after the failed iteration.
+    expect(p.nudges()).toBe(at + 1);
+    expect(net.script).toHaveLength(0);
+    test.info().annotations.push({
+      type: `p2-injected-${path}-${at}`,
+      description: JSON.stringify(p.edits),
+    });
+    await waitForState(page, "idle");
+  }
+});
+
 test("P-4/P-10 natively: a step that ended with no request is the sample's failure, also on a late read; a lapsed step is a complete latency sample; an engine restart since the mark is refused", async ({
   context,
 }) => {

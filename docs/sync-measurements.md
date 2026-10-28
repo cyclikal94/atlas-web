@@ -157,6 +157,13 @@ block BE-B1/BE-Q23 scoped technical completion, but those cards still need the r
 > Its support named measured samples only, so an otherwise complete package (all three engines) still resolved 796 cells and supported the desktop
 > decision. Revision 18 validates every iteration, warm-ups included, and keeps the whole collection with its first failure (`p2-sample/2`, contract
 > version 13, below). No measurement was taken under version 12, and no figure here changes.
+>
+> **Status after review 19 (revision 19, 26 October 2026).** Review 19 found that the P-2 rule checked each iteration's frames and trace positions but
+> not the trace's times: a read claiming to end before the commit it retains, a mark after that commit, a step end timed before its commit and a negative
+> commit time each still resolved 758 ok + 38 unavailable cells and supported the desktop decision, and the actual writer accepted an edited read on all
+> three engines. Revision 19 holds every line of an iteration's slice to its own observation (`p2-sample/4`, contract version 15, below). This was an
+> evidence-integrity defect under labelled witness corruption, not an observed browser-clock failure. No measurement was taken under version 14, and no
+> figure here changes.
 
 ## Read this first
 
@@ -689,7 +696,7 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   follow the previous read on the same lifetime (`p2SequenceProblem`). Admission rounds that lapse and are retried inside the request leave one committed
   result and remain valid. Three exhausted rounds fail that iteration whatever the engine's later retry does. The first failure in any phase (mark, nudge,
   idle wait, read, selection, long-task read) stops the whole collection, later shapes included; nothing is skipped, replaced or retried. The writer first
-  writes the raw trace (create-once) and the stamped `raw/P-2.samples.<engine>.json` (`p2-sample/2`), then asserts. That file holds the schedule, every
+  writes the raw trace (create-once) and the stamped `raw/P-2.samples.<engine>.json` (`p2-sample/2`; `/4` since revision 19), then asserts. That file holds the schedule, every
   attempted iteration's mark, read, served-body observation and selection, the first failure, any secondary error, and the trace's line count and
   SHA-256. The writer publishes series only after a complete collection. The contract re-derives every iteration from the trace with the same rules. In
   strict mode it takes the schedule from the programme (four ordinary shapes 20 + 300; dense 5 + 60, 5 + 40, 3 + 25, 3 + 15), never from a row. One
@@ -710,6 +717,19 @@ and the device reader (`scripts/lib/profile-outcome-rules.mjs`), against facts t
   counts, warm-ups, workloads, timers and thresholds are unchanged: no figure is derived from the time origin (they rest on the page clock,
   ResourceTiming and the engine trace). Version-13 support (`sync-request-sample/3`, `draft-request-sample/5`, `p2-sample/2`) compared the
   time origin, so it resolves incomplete and stays history.
+* **Each P-2 iteration's trace lies inside its own observation (revision 19, review 19 R19-P2; contract version 15).** `p2-sample/4` adds
+  one relation to the iteration rule, judged on the WHOLE slice from the mark to the read (lines before the selected commit and after its
+  end included) by the writer's collector, for the normal poll and the forced read alike, and again by the contract: every line carries a
+  time and an event; the times are non-negative (the trace is the page clock's `Math.round(performance.now())`); they never go back
+  (equal rounded times are valid, with no allowance between two rounded lines); and each lies within [mark, read] widened only by the
+  trace's own 1 ms rounding (the frames carry the page clock unrounded). A contradiction is that iteration's failure: the collection stops
+  there with the witness kept, and every P-2 cell of the engine is invalid. The first commit from the mark, earlier noncommitting steps,
+  admission retries inside one request, the page/engine identity, the finite recorded time origin (never compared), values, counts,
+  workloads and timers are unchanged; P-2 still takes no operation from a tick. `p2-sample/3` (contract 14) accepted such contradictions,
+  so it resolves incomplete and stays history. The P-2 writer keeps ONE measuring page: its seeding page closes before collection, and the
+  stubbed `/sync` script is the browser context's, not a page's, so served counts and bytes do not prove request ownership among several
+  active sync writers. Measuring concurrent writers would need per-request ownership and an agreed workload; that is outside this card's
+  current scope, and the chronology relation does not certify it.
 * **Device results are schema 4 (revision 12; schema 3 below is its predecessor).** An engine run's detail is the state it ended in and must show its outcome (an admitted run idle; a refused one stopped,
   backing off, paused or waiting for a valid cache; waiting for the session or the network is no verdict), and every run carries its first commit, which an
   admitted run's figures must equal; W5 and killed attempts carry none. Schema 4 adds the run's own observation (made by the page with the same cold

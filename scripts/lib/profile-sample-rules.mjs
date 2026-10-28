@@ -49,12 +49,17 @@
 // correction, measured), so an equality refused unchanged documents as replaced ones. A reload or replacement always brings a new page id.
 // Methods `sync-request-sample/4`, `draft-request-sample/6` and `p2-sample/3`; the earlier versions compared the time origin and stay history.
 //
+// Revision 19 (review 19 R19-P2, design assessment C1/C3, invariant 2): `p2-sample/4` holds every line of a P-2 iteration's slice to its
+// own observation, as the sync rule does: timed, non-negative, never going back and inside [mark, read] within the trace's 1 ms rounding.
+// `p2-sample/3` checked the frames and trace positions but not the trace times, so a read claiming to precede the commit it retains, a mark
+// after that commit, an end timed before it and a negative commit time were all accepted. Selection, values and counts are unchanged.
+//
 // Pending (the operation has not finished) is distinct from invalid (it finished, or the witness shows it cannot be the sample's).
 
 export const SYNC_WITNESS_METHOD = "sync-request-sample/4";
 export const DRAFT_WITNESS_METHOD = "draft-request-sample/6";
-/** P-2's collection support (revision 18): every attempted iteration of every shape, warm-ups included, and the first failure. */
-export const P2_SAMPLE_METHOD = "p2-sample/3";
+/** P-2's collection support (revision 18; `/4` revision 19): every attempted iteration of every shape, warm-ups included, and the first failure. */
+export const P2_SAMPLE_METHOD = "p2-sample/4";
 /**
  * The pathnames the measurement writers store for their requests (`new URL(entry.name).pathname`): `apiUrl("/sync")` and
  * `apiUrl("/commands")` under `API_BASE` (src/lib/api-client/wire.ts; tests/profiling/profile-samples.test.ts checks the route). A query
@@ -1010,13 +1015,28 @@ function p2FrameProblem(f, position, what) {
 }
 
 /**
+ * The P-2 slice's chronology (revision 19; review 19 R19-P2, design assessment C1, invariant 2): the shared sync rule (`chronologyProblem`:
+ * every line timed, the rounded times never going back, each inside [mark.at, read.at] within the trace's own rounding) over the WHOLE
+ * slice, lines before the selected commit and after its end included, and every time non-negative: the trace is the page clock's
+ * (`Math.round(performance.now())`), so a negative time is no page time even where the mark's rounding allowance would admit it (a mark at 0
+ * admits −1). Null, or the problem. Revision 18's `p2-sample/3` judged positions only, so a read timed before the commit it retains, a mark
+ * after it and an end timed before its commit were accepted.
+ */
+function p2ChronologyProblem(w) {
+  for (const [i, line] of w.lines.entries())
+    if (eventOf(line) !== null && msOf(line) < 0)
+      return `a trace line (${w.mark.from + i}) is timed before the page's clock began`;
+  return chronologyProblem(w);
+}
+
+/**
  * One P-2 iteration (warm-ups included) as a page commit of `bytes` (revision 18, design assessment invariants 2 and 3). The witness is
  * `{ mark, read, lines, served, pending }`: the mark and the read of one page lifetime (`page`, `time_origin` (recorded), `epochs` = engine starts
  * recorded, `generation` = the current start's), `lines` = the engine trace from `mark.from` to `read.to` exactly, `served` = how often
  * the iteration's own scripted body was answered (the Node side counts it) and `pending` = scripted answers still queued at the read.
  *
  * Complete: one lifetime (the page instance and engine starts unchanged; the engine started), the read after the mark in position and
- * time, the body served once with nothing else queued, the FIRST `data.sync_commit` from the mark on applied and committed of exactly
+ * time, every line of the slice timed inside them and in order (`p2ChronologyProblem`, revision 19), the body served once with nothing else queued, the FIRST `data.sync_commit` from the mark on applied and committed of exactly
  * `bytes` with finite, non-negative scan and commit times, and the first step end after it `data.sync_next` recording idle. Its values are
  * that commit's own timings; its selection, the two absolute trace positions. Pending: no commit yet, or no end after it yet. Admission
  * rounds that lapse inside the request and are retried leave one committed result: valid. Three exhausted rounds are this iteration's
@@ -1045,6 +1065,8 @@ export function p2IterationSelection(w, bytes) {
     );
   if (!isCount(w.served) || !isCount(w.pending) || !isCount(bytes))
     return invalid("its served-body observation is malformed");
+  const disorder = p2ChronologyProblem(w);
+  if (disorder) return invalid(disorder);
   let commit = -1;
   let end = -1;
   for (const [k, line] of w.lines.entries()) {

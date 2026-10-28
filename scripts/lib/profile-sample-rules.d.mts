@@ -1,6 +1,6 @@
 export const SYNC_WITNESS_METHOD: "sync-request-sample/4";
 export const DRAFT_WITNESS_METHOD: "draft-request-sample/6";
-export const P2_SAMPLE_METHOD: "p2-sample/3";
+export const P2_SAMPLE_METHOD: "p2-sample/4";
 export const SYNC_PATH: "/api/experimental/v1/sync";
 export const COMMANDS_PATH: "/api/experimental/v1/commands";
 export const TRACE_ROUNDING_MS: number;

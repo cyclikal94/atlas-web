@@ -1254,8 +1254,9 @@ function p2Bytes(shape, index) {
 }
 
 /**
- * P-2's collection (revision 18; review 18 R18-P2, design assessment invariants 1-7, C3; contract version 13, and 14 after A18-T1/A18-T2).
- * `raw/P-2.samples.<engine>.json` (`p2-sample/3`; the page instance, not the time origin, is the lifetime) declares the schedule and keeps EVERY attempted iteration, warm-ups included, with its mark, read, served-body observation
+ * P-2's collection (revision 18; review 18 R18-P2, design assessment invariants 1-7, C3; contract version 13, 14 after A18-T1/A18-T2, and 15
+ * after revision 19's R19-P2). `raw/P-2.samples.<engine>.json` (`p2-sample/4`; the page instance, not the time origin, is the lifetime;
+ * every trace line of an iteration inside its mark and read, in order) declares the schedule and keeps EVERY attempted iteration, warm-ups included, with its mark, read, served-body observation
  * and selection, and the first failure; it is bound to `raw/P-2.trace.<engine>.txt` by line count and SHA-256. Each iteration is re-derived
  * from the trace with the writer's own rule (`p2IterationSelection`: one lifetime, the first commit from its mark on, applied and committed
  * of its served bytes, regenerated here, ending idle) and the sequence rule (each mark follows the previous read, warm-ups and shape

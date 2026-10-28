@@ -108,9 +108,14 @@ export const EVIDENCE_OWNER = "WEB-09c";
  * id) and the engine or dispatcher starts, compared exactly; the time origin is recorded and must be finite, but is never compared, because
  * macOS WebKit moves it with the disciplined wall clock on an unchanged document. Supports `sync-request-sample/4`,
  * `draft-request-sample/6` and `p2-sample/3`; values, selections, counts and timers are unchanged. Version 13 evidence (no Air request was
- * recorded under it) compared the time origin, resolves incomplete and stays history, unchanged.
+ * recorded under it) compared the time origin, resolves incomplete and stays history, unchanged. Version 15 (WEB-09c revision 19, review 19
+ * R19-P2, design assessment C1/C3): P-2's support is `p2-sample/4`, which holds every trace line of an iteration's slice to that iteration's
+ * mark and read (timed, non-negative, in order, inside them within the trace's 1 ms rounding); `sync-request-sample/4` and
+ * `draft-request-sample/6` are unchanged, as are values, selections, counts and timers. Version 14's `p2-sample/3` accepted trace times that
+ * contradicted their own observation (a read before the commit it retains); version 14 evidence (no Air request was recorded under it)
+ * resolves incomplete and stays history, unchanged.
  */
-export const CONTRACT_VERSION = 14;
+export const CONTRACT_VERSION = 15;
 export const CLAIM_FILE = "writer.lock";
 /** The files every stage appends rows to; a sealed stage records which lines are its own. */
 export const SHARED_ROWS = [

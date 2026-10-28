@@ -145,7 +145,7 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
     polling: 5,
   });
   // The whole collection is kept BEFORE anything is asserted: the raw engine trace of the run (create-once) and the stamped support
-  // (`p2-sample/3`: the schedule, every attempted iteration and the first failure, bound to that trace by its line count and SHA-256),
+  // (`p2-sample/4`: the schedule, every attempted iteration and the first failure, bound to that trace by its line count and SHA-256),
   // from which the contract re-derives every iteration and the scan and commit series. A secondary error never replaces the failure.
   const secondary: string[] = [];
   let trace: string | null = null;

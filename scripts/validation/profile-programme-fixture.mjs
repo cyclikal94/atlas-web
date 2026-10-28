@@ -53,6 +53,8 @@
 // measured samples only (warm-up lines were traced, never supported).
 // Revision 18 (A18-T1/A18-T2; contract version 14): `p2-sample/3`, `sync-request-sample/4` and `draft-request-sample/6`, the same documents;
 // the page instance is the identity and the (constant) time origin is recorded, not compared.
+// Revision 19 (review 19 R19-P2; contract version 15): `p2-sample/4`, the same documents. The generated P-2 trace already lies inside each
+// iteration's observation (mark `ms + 1`, lines 2, 5 and 8 ms later, read 1 ms after the end), so only the method and contract literals change.
 //
 // `writeProgramme(dir, options)` writes a whole evidence directory whose every required observation is present, well formed, consistent
 // with its raw samples and windows, and (unless `busy` says otherwise) taken with no foreign heavy work. Cases then remove or alter one
@@ -725,7 +727,7 @@ export function writeProgramme(
     const p2Text = p2Trace.join("\n");
     put(`raw/P-2.trace.${engine}.txt`, p2Text);
     json(`raw/P-2.samples.${engine}.json`, {
-      method: "p2-sample/3",
+      method: "p2-sample/4",
       engine,
       schedule: P2_SCHEDULE.map(([shape, samples, warmup]) => ({
         shape,
@@ -2154,7 +2156,7 @@ export function writeProgramme(
       evidence_key: "WEB-09a:sync-profiling",
       owner: "WEB-09c",
       stage,
-      contract_version: 14,
+      contract_version: 15,
       invocation,
       isolation_context: {
         schema: "atlas-profile-isolation-context/1",

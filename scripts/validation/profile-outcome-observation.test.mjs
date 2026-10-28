@@ -311,10 +311,10 @@ const LIVE = (engine) => `P-W2 W2 live application[${engine}]`;
 
 // ---- controls -----------------------------------------------------------------------------------------------------------------------
 
-test("control: the complete synthetic programme's every outcome cell is ok under contract version 14; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
+test("control: the complete synthetic programme's every outcome cell is ok under contract version 15; assembled, it supports the desktop decision and passes the strict validator and the standalone device-results mode; one contradicted device file is refused there", (t) => {
   const dir = scratch(t);
   writeComplete(dir);
-  assert.equal(evidence.CONTRACT_VERSION, 14);
+  assert.equal(evidence.CONTRACT_VERSION, 15);
   assert.equal(device.DEVICE_SCHEMA, 4);
   const r = contract.resolveEvidence(dir);
   assert.equal(r.complete, true);
@@ -1579,9 +1579,10 @@ test("case (DA-3): one contradicted device engine outcome in the package makes i
 // ---- versions -----------------------------------------------------------------------------------------------------------------------
 
 // Revision 16 (adapted): version 10 (revision 15) joins the list and the current version is 11. Revision 17 (adapted, version literals
-// only): version 11 (revision 16) joins the list and the current version is 12.
-test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12), 8 (revision 13), 9 (revision 14), 10 (revision 15), 11 (revision 16), 12 (revision 17) and 13 (revision 18 before A18-T2) are not evidence of version 14", (t) => {
-  for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]) {
+// only): version 11 (revision 16) joins the list and the current version is 12. Revision 19 (adapted, version literals only): version 14
+// (revision 18 after A18-T2) joins the list and the current version is 15.
+test("case: stages recorded under contract versions 3 (review 9's Air request), 4 (revision 9), 5 (revision 10), 6 (revision 11), 7 (revision 12), 8 (revision 13), 9 (revision 14), 10 (revision 15), 11 (revision 16), 12 (revision 17), 13 (revision 18 before A18-T2) and 14 (revision 18) are not evidence of version 15", (t) => {
+  for (const version of [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]) {
     const dir = `${scratch(t)}-${version}`;
     writeComplete(dir);
     t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -1594,7 +1595,7 @@ test("case: stages recorded under contract versions 3 (review 9's Air request), 
       r.cells.some((c) =>
         c.reasons
           .join(" ")
-          .includes(`recorded under contract ${version}, not 14`),
+          .includes(`recorded under contract ${version}, not 15`),
       ),
     );
   }
@@ -1715,6 +1716,9 @@ test("case R12-M2 (DA-M1): revision 11's selection (a sample's figures taken fro
   // REVISION 18 ADAPTATION (labelled; `p2-sample/2`): the first measured dense-100 iteration now cites the NEXT iteration's commit and
   // end (its read extended over them) and its scan value is that commit's. Revision 12 refused it as "not the first commit after the
   // sample began"; the rule now re-derives the first commit from the iteration's own slice and refuses the recorded selection.
+  // REVISION 19 ADAPTATION (labelled; review 19 R19-P2, `p2-sample/4`): the extended read now ends when the lines it is extended over were
+  // traced (the next iteration's read time). Revision 18 moved its position only, so the read retained lines timed after it: the new
+  // chronology rule refused that first, before the selection this case is about. Edit, series and expected reason are otherwise unchanged.
   const dir = scratch(t);
   writeComplete(dir);
   const file = p2Support(dir, "webkit");
@@ -1726,7 +1730,7 @@ test("case R12-M2 (DA-M1): revision 11's selection (a sample's figures taken fro
   const lines = readFileSync(p2Trace(dir, "webkit"), "utf8").split("\n");
   const later = payloadOf(lines[second.selected.commit]);
   first.selected = { ...second.selected };
-  first.read = { ...first.read, to: second.read.to };
+  first.read = { ...first.read, to: second.read.to, at: second.read.at };
   writeFileSync(file, `${JSON.stringify(support, null, 2)}\n`);
   rewriteSeries(dir, P2_SCAN, "webkit", (s) => [later.scan_ms, ...s.slice(1)]);
   const r = contract.resolveEvidence(dir);
@@ -3982,7 +3986,15 @@ test("case R18-C2 (design assessment C2/C3, invariants 1, 3, 6): the support's o
         // Revision 18 (A18-T1/A18-T2, adapted): `/2` compared the time origin and is history, like `/1`.
         v.method = "p2-sample/2";
       },
-      /is not p2-sample\/3/,
+      /is not p2-sample\/4/,
+    ],
+    [
+      "previous method",
+      (v) => {
+        // Revision 19 (R19-P2): `/3` accepted trace times outside their own observation and is history, like `/2`.
+        v.method = "p2-sample/3";
+      },
+      /is not p2-sample\/4/,
     ],
     [
       "unbound trace",
@@ -4148,4 +4160,186 @@ test("case R18-C4 (design assessment C3): the stamp binds the support to its row
     reasons(trace(contract.resolveEvidence(dir3, { relaxed: true }))),
     /declares a schedule the programme does not take/,
   );
+});
+
+// ---- revision 19 (review 19 R19-P2, design assessment C1-C3, invariants 2 and 5, Q12): each P-2 iteration's trace inside its observation ---
+//
+// Review 19: the P-2 rule checked the frames and trace positions but not the trace's times, so a read claiming to end before the commit it
+// retains, a mark after that commit, an end timed before it and a negative commit time each resolved 758 ok + 38 unavailable with desktop
+// support. The synthetic programme's first ordinary-100 warm-up is exactly review 19's iteration (mark 1001, tick 1003, commit 1006, idle
+// end 1009, read 1010). Each case changes only times, regenerating the trace binding where the trace changes, so no lifetime, position,
+// byte, value or binding check can be the reason; selections, values, counts and series are untouched.
+
+/** Moves one iteration's frame time (`mark` or `read`) in its support. */
+const retimeP2Frame = (dir, engine, shape, index, frame, at) =>
+  editJson(p2Support(dir, engine), (v) => {
+    const e = v.iterations.find((x) => x.shape === shape && x.index === index);
+    assert.ok(e, `no iteration ${shape} ${index}`);
+    e[frame].at = at;
+  });
+/** Re-times one of an iteration's selected trace lines (`commit` or `end`) and regenerates the binding. */
+const retimeP2Line = (dir, engine, shape, index, which, ms) => {
+  const e = p2Entry(dir, engine, shape, index);
+  editP2Trace(dir, engine, (lines) => {
+    const before = lines[e.selected[which]];
+    assert.match(before, /^\d+ms data\.sync_(commit|next) /);
+    lines[e.selected[which]] = before.replace(/^\d+ms /, `${ms}ms `);
+    return lines;
+  });
+  rebindP2(dir, engine);
+};
+const msOfLine = (dir, engine, position) =>
+  Number(
+    readFileSync(p2Trace(dir, engine), "utf8")
+      .split("\n")
+      [position].split("ms ")[0],
+  );
+
+test("case R19-C1 (review 19 R19-P2): the review's four contradictions on the first warm-up of every engine are each refused in all 99 P-2 cells end to end; desktop support is withheld and both validator modes refuse", (t) => {
+  const FIRST = /ordinary-100 iteration 0 \(a warm-up\): its page is invalid: /;
+  for (const [label, edit, reason] of [
+    [
+      "read at 1002 before the commit at 1006",
+      (dir, engine) =>
+        retimeP2Frame(dir, engine, "ordinary-100", 0, "read", 1002),
+      /a trace line \(1\) follows the sample's read/,
+    ],
+    [
+      "mark at 1009 after the commit at 1006",
+      (dir, engine) =>
+        retimeP2Frame(dir, engine, "ordinary-100", 0, "mark", 1009),
+      /a trace line \(0\) precedes the sample's mark/,
+    ],
+    [
+      "end at 1004 after a commit at 1006",
+      (dir, engine) =>
+        retimeP2Line(dir, engine, "ordinary-100", 0, "end", 1004),
+      /the trace's times go back \(line 2\)/,
+    ],
+    [
+      "commit at -100",
+      (dir, engine) =>
+        retimeP2Line(dir, engine, "ordinary-100", 0, "commit", -100),
+      /a trace line \(1\) is timed before the page's clock began/,
+    ],
+  ]) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    for (const engine of programme.ENGINES) {
+      // The review's healthy iteration, exactly: the edit is the only contradiction.
+      const e = p2Entry(dir, engine, "ordinary-100", 0);
+      assert.deepEqual(
+        [e.mark.at, e.read.at, e.selected],
+        [1001, 1010, { commit: 1, end: 2 }],
+      );
+      assert.deepEqual(
+        [0, 1, 2].map((p) => msOfLine(dir, engine, p)),
+        [1003, 1006, 1009],
+      );
+      edit(dir, engine);
+    }
+    const r = contract.resolveEvidence(dir);
+    const p2 = programme.ENGINES.flatMap((e) => p2Cells(r, e)).sort();
+    assert.equal(p2.length, 99, label);
+    assert.deepEqual(unsatisfied(r), p2, label);
+    for (const id of p2) {
+      assert.equal(cell(r, id).status, "invalid", `${label}: ${id}`);
+      assert.match(reasons(cell(r, id)), FIRST, `${label}: ${id}`);
+      assert.match(reasons(cell(r, id)), reason, `${label}: ${id}`);
+    }
+    assert.ok(
+      r.cells
+        .filter((c) => c.item !== "P-2")
+        .every((c) => ["ok", "unavailable"].includes(c.status)),
+      label,
+    );
+    refusedEndToEnd(dir);
+  }
+});
+
+test("case R19-C2 (design assessment Q12): a contradiction at a measured position, a later shape's warm-up or the final iteration is refused in that engine's 33 P-2 cells only, end to end; a later healthy iteration never repairs it", (t) => {
+  for (const [label, engine, edit, where] of [
+    [
+      "first measured iteration, read before its commit",
+      "chromium",
+      (dir) => {
+        const e = p2Entry(dir, "chromium", "ordinary-100", 20);
+        retimeP2Frame(
+          dir,
+          "chromium",
+          "ordinary-100",
+          20,
+          "read",
+          e.mark.at + 1,
+        );
+      },
+      /ordinary-100 iteration 20: its page is invalid: a trace line \(\d+\) follows the sample's read/,
+    ],
+    [
+      "later shape's warm-up, mark after its commit",
+      "firefox",
+      (dir) => {
+        const e = p2Entry(dir, "firefox", "dense-400", 2);
+        retimeP2Frame(
+          dir,
+          "firefox",
+          "dense-400",
+          2,
+          "mark",
+          msOfLine(dir, "firefox", e.selected.commit) + 2,
+        );
+      },
+      /dense-400 iteration 2 \(a warm-up\): its page is invalid: a trace line \(\d+\) precedes the sample's mark/,
+    ],
+    [
+      "final iteration of the programme, end before its commit",
+      "webkit",
+      (dir) => {
+        const v = readJson(p2Support(dir, "webkit"));
+        const last = v.iterations.at(-1);
+        retimeP2Line(
+          dir,
+          "webkit",
+          last.shape,
+          last.index,
+          "end",
+          msOfLine(dir, "webkit", last.selected.commit) - 1,
+        );
+      },
+      /: its page is invalid: the trace's times go back \(line \d+\)/,
+    ],
+  ]) {
+    const dir = `${scratch(t)}-${label.replace(/\W+/g, "-")}`;
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    writeComplete(dir);
+    edit(dir);
+    const r = contract.resolveEvidence(dir);
+    assert.equal(p2Cells(r, engine).length, 33, label);
+    assert.deepEqual(unsatisfied(r), p2Cells(r, engine), label);
+    for (const id of p2Cells(r, engine))
+      assert.match(reasons(cell(r, id)), where, `${label}: ${id}`);
+    refusedEndToEnd(dir);
+  }
+});
+
+test("control R19-K1 (design assessment Q2/Q12): ties and the trace's 1 ms rounding at both frame edges keep every selection and value; the package supports the desktop decision and both validator modes pass", (t) => {
+  const dir = scratch(t);
+  writeComplete(dir);
+  for (const engine of programme.ENGINES) {
+    // Tick 1003 one rounding below a mark at 1004; end 1009 one rounding above a read at 1008.
+    retimeP2Frame(dir, engine, "ordinary-100", 0, "mark", 1004);
+    retimeP2Frame(dir, engine, "ordinary-100", 0, "read", 1008);
+    // A commit and its end traced in the same rounded millisecond.
+    const e = p2Entry(dir, engine, "ordinary-100", 20);
+    retimeP2Line(
+      dir,
+      engine,
+      "ordinary-100",
+      20,
+      "end",
+      msOfLine(dir, engine, e.selected.commit),
+    );
+  }
+  supportedEndToEnd(dir, "rounding edges and ties");
 });

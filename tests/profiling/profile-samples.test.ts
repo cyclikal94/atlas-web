@@ -3394,12 +3394,22 @@ const P2_PAGES = {
   readP2Iteration: isolated(readP2Iteration),
   readP2LongTasks: isolated(readP2LongTasks),
 };
-/** The witness of an iteration marked at `from`: the page read (forced) and a body served once with nothing queued, unless stated. */
+/**
+ * The witness of an iteration marked at `from`: the page read (forced) and a body served once with nothing queued, unless stated.
+ * REVISION 19 HARNESS CORRECTION (labelled; review 19 R19-P2, design assessment C4): the mark is the iteration's start, so it is timed at
+ * `markAt` (default 0, the fresh page clock every case starts its trace on), not at the page clock when this helper runs: the cases script
+ * the trace first, so revision 18's mark was taken after the commit it selected, a chronology no writer produces and `p2-sample/4` refuses.
+ * Every schedule, expected value and problem is unchanged; the read is still taken at the page clock after the scripted lines.
+ */
 const p2WitnessAt = (
   from: number,
-  o: { served?: number; pending?: number } = {},
+  o: { served?: number; pending?: number; markAt?: number } = {},
 ): P2Witness => {
-  const m = { ...P2_PAGES.markP2Iteration(), from } as P2MarkFrame;
+  const m = {
+    ...P2_PAGES.markP2Iteration(),
+    from,
+    at: o.markAt ?? 0,
+  } as P2MarkFrame;
   const r = P2_PAGES.readP2Iteration({ mark: m, force: true });
   if (!r) throw new Error("no read");
   return { ...r, served: o.served ?? 1, pending: o.pending ?? 0 };
@@ -3412,7 +3422,7 @@ describe("P-2: one iteration's own page (p2IterationSelection over the page read
     line(2, "data.sync_tick", { why: "now", coalesced: false });
     committed(10, 5_000, 3, 7);
     line(11, "data.sync_next", { when: "after", state: "idle" });
-    const s = p2IterationSelection(p2WitnessAt(from), 5_000);
+    const s = p2IterationSelection(p2WitnessAt(from, { markAt: 1 }), 5_000);
     expect(s).toEqual({
       status: "complete",
       problem: null,
@@ -3490,7 +3500,8 @@ describe("P-2: one iteration's own page (p2IterationSelection over the page read
     line(2, "data.sync_tick", { why: "now", coalesced: false });
     committed(10, 5_000, 0, 0);
     line(11, "data.sync_next", { when: "after", state: "idle" });
-    const w = p2WitnessAt(0);
+    // Marked at 1 (revision 19): a read 0.001 ms before it is still a page time, so the frame order, not the read's form, refuses it.
+    const w = p2WitnessAt(0, { markAt: 1 });
     const sel = (edit: (x: P2Witness) => void, bytes = 5_000) => {
       const x = structuredClone(w);
       edit(x);
@@ -3586,6 +3597,210 @@ describe("P-2: one iteration's own page (p2IterationSelection over the page read
     expect(p2SequenceProblem(read, { ...mark, at: 19.999 })).toBe(
       "its mark does not follow the previous iteration's read",
     );
+  });
+});
+
+// ---- P-2 chronology (revision 19; review 19 R19-P2, design assessment C1, invariant 2, Q1-Q5) ------------------------------------------
+// Each witness is written out here, its expected answer by hand: the frames of one page lifetime, a slice of trace lines at absolute
+// positions from 40, the body served once with nothing queued. Only the times move, so no lifetime, slice, body or value guard can be
+// the reason a case is refused. The trace rounds the page clock to whole milliseconds; the frames carry it unrounded.
+
+const P2_LIFETIME = {
+  page: "page-1",
+  time_origin: 1_700_000_000_000.5,
+  epochs: 1,
+  generation: 1,
+};
+const tl = (ms: number | string, event: string, data?: unknown) =>
+  `${ms}ms ${event} ${data === undefined ? "" : JSON.stringify(data)}`;
+const TICK = { why: "now", coalesced: false };
+const PAGE = {
+  bytes: 5_000,
+  scan_ms: 3,
+  commit_ms: 7,
+  kind: "applied",
+  value: "committed",
+};
+const IDLE = { when: "after", state: "idle" };
+const chronoWitness = (
+  markAt: number,
+  lines: string[],
+  readAt: number,
+): P2Witness => ({
+  mark: { ...P2_LIFETIME, from: 40, at: markAt } as P2MarkFrame,
+  read: {
+    ...P2_LIFETIME,
+    to: 40 + lines.length,
+    at: readAt,
+  } as P2Witness["read"],
+  lines,
+  served: 1,
+  pending: 0,
+});
+/** Review 19's healthy iteration: mark 1001, tick 1003, commit 1006, idle end 1009, read 1010. */
+const healthy = (
+  o: {
+    tick?: number | string;
+    commit?: number | string;
+    end?: number | string;
+  } = {},
+) => [
+  tl(o.tick ?? 1003, "data.sync_tick", TICK),
+  tl(o.commit ?? 1006, "data.sync_commit", PAGE),
+  tl(o.end ?? 1009, "data.sync_next", IDLE),
+];
+const COMPLETE = {
+  status: "complete",
+  problem: null,
+  selected: { commit: 41, end: 42 },
+  values: { scan_ms: 3, commit_ms: 7 },
+};
+
+describe("P-2: every line of an iteration's slice lies inside its own observation, in order (p2-sample/4; revision 19, R19-P2)", () => {
+  it("control (Q1): review 19's healthy iteration is complete with its own selection and values", () => {
+    expect(
+      p2IterationSelection(chronoWitness(1001, healthy(), 1010), 5_000),
+    ).toEqual(COMPLETE);
+  });
+
+  it("control (Q2): ties and the trace's 1 ms rounding at each edge are valid; a time just beyond either edge, or one going back, is not", () => {
+    const sel = (markAt: number, lines: string[], readAt: number) =>
+      p2IterationSelection(chronoWitness(markAt, lines, readAt), 5_000);
+    // One rounded millisecond for all three lines and both frames; zero-duration timings.
+    expect(
+      sel(1005, healthy({ tick: 1005, commit: 1005, end: 1005 }), 1005),
+    ).toEqual(COMPLETE);
+    // A line rounded down to 1 ms before an unrounded mark, and one rounded up to 1 ms after an unrounded read.
+    expect(sel(1003.9, healthy({ tick: 1003 }), 1010).status).toBe("complete");
+    expect(sel(1004, healthy({ tick: 1003 }), 1010).status).toBe("complete");
+    expect(sel(1001, healthy({ end: 1011 }), 1010).status).toBe("complete");
+    // Just beyond: the allowance is the trace's rounding only.
+    expect(sel(1004.01, healthy({ tick: 1003 }), 1010).problem).toBe(
+      "a trace line (40) precedes the sample's mark",
+    );
+    expect(sel(1001, healthy({ end: 1011 }), 1009.99).problem).toBe(
+      "a trace line (42) follows the sample's read",
+    );
+    // Equal rounded times are valid; one rounded line before the previous one is not (no allowance between rounded lines).
+    expect(sel(1001, healthy({ commit: 1006, end: 1006 }), 1010).status).toBe(
+      "complete",
+    );
+    expect(sel(1001, healthy({ commit: 1006, end: 1005 }), 1010).problem).toBe(
+      "the trace's times go back (line 42)",
+    );
+  });
+
+  it("case (Q3, review 19's schedules): a read before the commit it retains, a mark after it, an end timed before it and a negative commit time are each invalid for their chronology", () => {
+    const sel = (markAt: number, lines: string[], readAt: number) =>
+      p2IterationSelection(chronoWitness(markAt, lines, readAt), 5_000);
+    expect(sel(1001, healthy(), 1002)).toMatchObject({
+      status: "invalid",
+      problem: "a trace line (41) follows the sample's read",
+      selected: null,
+      values: null,
+    });
+    expect(sel(1009, healthy(), 1010).problem).toBe(
+      "a trace line (40) precedes the sample's mark",
+    );
+    // The reversal alone, every line inside [mark, read].
+    expect(sel(1001, healthy({ end: 1004 }), 1010).problem).toBe(
+      "the trace's times go back (line 42)",
+    );
+    expect(sel(1001, healthy({ commit: -100 }), 1010).problem).toBe(
+      "a trace line (41) is timed before the page's clock began",
+    );
+    // At a mark of 0 the rounding allowance would admit −1: the page clock never reads a negative time.
+    expect(sel(0, healthy({ tick: -1, commit: 0, end: 0 }), 1).problem).toBe(
+      "a trace line (40) is timed before the page's clock began",
+    );
+    expect(sel(0, healthy({ tick: 0, commit: 0, end: 0 }), 0)).toMatchObject({
+      status: "complete",
+    });
+  });
+
+  it("case (Q4): the WHOLE slice is judged: an untimed or malformed line, a malformed first commit before a healthy one, a reversed prefix and a line after the selected end outside the read are invalid, never skipped, pending or repaired", () => {
+    const sel = (lines: string[], readAt = 1030, markAt = 1001) =>
+      p2IterationSelection(chronoWitness(markAt, lines, readAt), 5_000);
+    expect(
+      sel([tl("x", "data.sync_tick", TICK), ...healthy().slice(1)]).problem,
+    ).toBe("a trace line (40) carries no time or event");
+    expect(
+      sel([`data.sync_tick ${JSON.stringify(TICK)}`, ...healthy().slice(1)])
+        .problem,
+    ).toBe("a trace line (40) carries no time or event");
+    expect(
+      sel([tl(1003.5, "data.sync_tick", TICK), ...healthy().slice(1)]).problem,
+    ).toBe("a trace line (40) carries no time or event");
+    // A first commit with no time, then a healthy commit and end: revision 18 skipped the untimed line and selected the second commit.
+    expect(
+      sel([
+        tl(1003, "data.sync_tick", TICK),
+        `data.sync_commit ${JSON.stringify(PAGE)}`,
+        tl(1020, "data.sync_commit", PAGE),
+        tl(1021, "data.sync_next", IDLE),
+      ]).problem,
+    ).toBe("a trace line (41) carries no time or event");
+    // An earlier noncommitting step whose lines go back, before a healthy commit.
+    expect(
+      sel([
+        tl(1004, "data.sync_tick", TICK),
+        tl(1003, "data.sync_next", { when: "after", state: "running" }),
+        ...healthy({ tick: 1005 }),
+      ]).problem,
+    ).toBe("the trace's times go back (line 41)");
+    // A later step's tick after the selected end, outside the read.
+    expect(sel([...healthy(), tl(1040, "data.sync_tick", TICK)]).problem).toBe(
+      "a trace line (43) follows the sample's read",
+    );
+    // No commit yet is pending only when the slice is sound: a tick outside the read makes it invalid.
+    expect(sel([tl(1003, "data.sync_tick", TICK)])).toMatchObject({
+      status: "pending",
+    });
+    expect(sel([tl(1003, "data.sync_tick", TICK)], 1001.5)).toMatchObject({
+      status: "invalid",
+      problem: "a trace line (40) follows the sample's read",
+    });
+  });
+
+  it("control (Q5): an earlier noncommitting step, an untimed tick never required, zero timings and a time origin that moved on the same page keep the operation and its values; a lapsed first commit before a later good one stays invalid", () => {
+    const sel = (lines: string[], edit: (w: P2Witness) => void = () => {}) => {
+      const w = chronoWitness(1001, lines, 1030);
+      edit(w);
+      return p2IterationSelection(w, 5_000);
+    };
+    expect(
+      sel([
+        tl(1002, "data.sync_tick", TICK),
+        tl(1002, "data.sync_next", { when: "after", state: "running" }),
+        ...healthy(),
+      ]),
+    ).toEqual({ ...COMPLETE, selected: { commit: 43, end: 44 } });
+    // P-2 does not take its operation from a tick (review 19's boundary observation: no new P-4 latency rule).
+    expect(sel(healthy().slice(1))).toEqual({
+      ...COMPLETE,
+      selected: { commit: 40, end: 41 },
+    });
+    expect(
+      sel([
+        tl(1006, "data.sync_commit", { ...PAGE, scan_ms: 0, commit_ms: 0 }),
+        tl(1006, "data.sync_next", IDLE),
+      ]),
+    ).toEqual({
+      ...COMPLETE,
+      selected: { commit: 40, end: 41 },
+      values: { scan_ms: 0, commit_ms: 0 },
+    });
+    expect(sel(healthy(), (w) => (w.read.time_origin += 1))).toEqual(COMPLETE);
+    expect(
+      sel([
+        tl(1003, "data.sync_tick", TICK),
+        tl(1006, "data.sync_commit", { ...PAGE, value: "lease_lapsed" }),
+        tl(1009, "data.sync_next", { when: "after", state: "running" }),
+        tl(1020, "data.sync_tick", { why: "timer", coalesced: false }),
+        tl(1022, "data.sync_commit", PAGE),
+        tl(1023, "data.sync_next", IDLE),
+      ]).problem,
+    ).toBe("its commit wrote no page (applied/lease_lapsed)");
   });
 });
 
@@ -4066,5 +4281,225 @@ describe("P-2: the shared collector the writer calls, every iteration (revision 
       problem:
         "its body was answered 0 times, not once: the commit is not its page's",
     });
+  });
+});
+
+// ---- P-2 chronology through the collector (revision 19; review 19 R19-P2, design assessment C2, Q6/Q7) ----------------------------------
+// The edits act on the page read the collector receives (the normal poll, or the forced read after the poll fails), as review 19's
+// corrected native probe did. Each case counts the edits it made and checks the edited line lies more than the trace's 1 ms rounding
+// outside its frame (or behind its predecessor), so a case cannot pass on an edit that never happened.
+
+type P2Read = Pick<P2Witness, "mark" | "read" | "lines">;
+const msAt = (l: string) => Number(/^(-?\d+)ms /.exec(l)?.[1]);
+const retime = (l: string, ms: number) => l.replace(/^-?\d+ms /, `${ms}ms `);
+const commitAt = (r: P2Read) =>
+  r.lines.findIndex((l) => l.split(" ")[1] === "data.sync_commit");
+const P2_FAULTS: Array<
+  [string, (r: P2Read) => P2Read, (r: P2Read) => boolean, RegExp]
+> = [
+  [
+    "a read timed at its mark (review 19's native edit)",
+    (r) => ({ ...r, read: { ...r.read, at: r.mark.at } }),
+    (r) => msAt(r.lines[commitAt(r)] ?? "") > r.read.at + 1,
+    /^a trace line \(\d+\) follows the sample's read$/,
+  ],
+  [
+    "a mark after the commit",
+    // Review 19's late mark (commit 1006, mark 1009, read 1010): the read stays after the mark, so only the trace can refuse it.
+    (r) => {
+      const c = msAt(r.lines[commitAt(r)] ?? "");
+      return {
+        ...r,
+        mark: { ...r.mark, at: c + 3 },
+        read: { ...r.read, at: Math.max(r.read.at, c + 4) },
+      };
+    },
+    (r) => msAt(r.lines[commitAt(r)] ?? "") < r.mark.at - 1,
+    /^a trace line \(\d+\) precedes the sample's mark$/,
+  ],
+  [
+    "an end timed before its commit",
+    (r) => {
+      const c = commitAt(r);
+      const lines = [...r.lines];
+      lines[c + 1] = retime(lines[c + 1] ?? "", msAt(lines[c] ?? "") - 2);
+      return { ...r, lines };
+    },
+    (r) =>
+      msAt(r.lines[commitAt(r) + 1] ?? "") < msAt(r.lines[commitAt(r)] ?? ""),
+    /^the trace's times go back \(line \d+\)$/,
+  ],
+  [
+    "a negative commit time",
+    (r) => {
+      const c = commitAt(r);
+      const lines = [...r.lines];
+      lines[c] = retime(lines[c] ?? "", -100);
+      return { ...r, lines };
+    },
+    (r) => msAt(r.lines[commitAt(r)] ?? "") < 0,
+    /^a trace line \(\d+\) is timed before the page's clock began$/,
+  ],
+];
+const P2_ORDER = [
+  ["A", 0],
+  ["A", 1],
+  ["A", 2],
+  ["A", 3],
+  ["A", 4],
+  ["B", 0],
+  ["B", 1],
+  ["B", 2],
+] as const;
+
+describe("P-2: a contradictory read stops the collection at its iteration, whichever read path took it (revision 19, R19-P2)", () => {
+  beforeEach(() => {
+    actions = [];
+    at = 1_000;
+    p2Queue = [];
+    p2Enqueues = 0;
+    p2Scan = 0;
+    (window as unknown as { __long: number[] }).__long = [];
+  });
+
+  for (const [fault, edit, applied, problem] of P2_FAULTS)
+    for (const [title, failing, warmup] of [
+      ["the FIRST warm-up", 1, true],
+      ["the LAST warm-up of the first shape", 2, true],
+      ["the first measured iteration", 3, false],
+      ["the first shape's final measured iteration", 5, false],
+      ["the later shape's warm-up", 6, true],
+      ["the final measured iteration", 8, false],
+    ] as const)
+      it(`case (Q6): ${fault} at ${title}, read by the normal poll, fails the collection there with the edited witness; nothing after it is accepted`, async () => {
+        harness.onNudge = () => actions.push(...p2Step());
+        const port = p2Port();
+        const poll = port.poll;
+        let reads = 0;
+        let edits = 0;
+        port.poll = async (fn, arg, o) => {
+          const r = (await poll(fn, arg, o)) as P2Read;
+          reads += 1;
+          if (reads !== failing) return r as never;
+          const x = edit(r);
+          expect(applied(x), "the edit took effect beyond the rounding").toBe(
+            true,
+          );
+          expect(applied(r), "the unedited read was sound").toBe(false);
+          edits += 1;
+          return x as never;
+        };
+        const c = await collectP2Iterations(port, P2_SCHEDULE(), P2_OPTIONS);
+        expect(edits).toBe(1);
+        const [shape, index] = P2_ORDER[failing - 1] ?? [];
+        expect(c.iterations.map((e) => [e.shape, e.index])).toEqual(
+          P2_ORDER.slice(0, failing - 1).map((x) => [...x]),
+        );
+        expect(c.failure).toMatchObject({
+          shape,
+          index,
+          warmup,
+          phase: "selection",
+        });
+        expect(c.failure?.problem).toMatch(problem);
+        expect(applied(c.failure?.witness as P2Read)).toBe(true);
+        expect([harness.nudges, p2Enqueues]).toEqual([failing, failing]);
+        // Only measured iterations before the failure contributed values: a measured failure adds none.
+        const measured = P2_ORDER.slice(0, failing - 1).filter(
+          ([s, i]) => i >= (s === "A" ? 2 : 1),
+        ).length;
+        expect([
+          ...(c.series.A?.scan ?? []),
+          ...(c.series.B?.scan ?? []),
+        ]).toHaveLength(measured);
+        expect([
+          ...(c.series.A?.wall ?? []),
+          ...(c.series.B?.wall ?? []),
+        ]).toHaveLength(measured);
+      });
+
+  it("control/case (Q7): when the poll fails, the forced read is judged by the same rule: a sound forced read completes the collection, a contradictory one fails it", async () => {
+    for (const contradict of [false, true]) {
+      restartTrace();
+      actions = [];
+      p2Queue = [];
+      p2Enqueues = 0;
+      harness.nudges = 0;
+      at = 1_000;
+      harness.onNudge = () => actions.push(...p2Step());
+      const port = p2Port();
+      const run = port.run;
+      let forced = 0;
+      let edits = 0;
+      port.poll = async () => {
+        throw new Error("Timeout 30000ms exceeded");
+      };
+      port.run = async (fn, arg) => {
+        if (fn.toString() !== readP2Iteration.toString()) return run(fn, arg);
+        // The forced read happens once the step has ended (the poll's own wait is what failed).
+        while (actions.length > 0) actions.shift()?.();
+        const r = (await run(fn, arg)) as P2Read;
+        forced += 1;
+        if (!contradict || forced !== 3) return r as never;
+        edits += 1;
+        const x = { ...r, read: { ...r.read, at: r.mark.at } };
+        expect(msAt(x.lines[commitAt(x)] ?? "")).toBeGreaterThan(x.read.at + 1);
+        return x as never;
+      };
+      const c = await collectP2Iterations(port, P2_SCHEDULE(), P2_OPTIONS);
+      if (!contradict) {
+        expect(c.failure).toBeNull();
+        expect(forced).toBe(8);
+        expect(c.iterations).toHaveLength(8);
+        continue;
+      }
+      expect(edits).toBe(1);
+      expect(forced).toBe(3);
+      expect(c.failure).toMatchObject({
+        shape: "A",
+        index: 2,
+        warmup: false,
+        phase: "selection",
+      });
+      expect(c.failure?.problem).toMatch(
+        /^a trace line \(\d+\) follows the sample's read$/,
+      );
+      expect(c.iterations).toHaveLength(2);
+      expect(c.series.A?.scan).toEqual([]);
+    }
+  });
+
+  it("case (Q7): an idle wait that fails stays the failure even when the forced evidence read is sound; that read is kept as its witness, never accepted as the iteration", async () => {
+    harness.onNudge = () => actions.push(...p2Step());
+    const port = p2Port();
+    const run = port.run;
+    let forced = 0;
+    port.settle = async () => {
+      while (actions.length > 0) actions.shift()?.();
+      throw new Error("expect.poll: Timeout 120000ms exceeded");
+    };
+    port.run = async (fn, arg) => {
+      if (fn.toString() === readP2Iteration.toString()) forced += 1;
+      return run(fn, arg);
+    };
+    const c = await collectP2Iterations(port, P2_SCHEDULE(), P2_OPTIONS);
+    expect(forced).toBe(1);
+    expect(c.failure).toMatchObject({
+      shape: "A",
+      index: 0,
+      warmup: true,
+      phase: "settle",
+    });
+    const w = c.failure?.witness as P2Witness;
+    // The forced read is sound and would have been complete: it is evidence, not a sample.
+    expect(
+      p2IterationSelection(
+        w,
+        w.served === 1
+          ? new TextEncoder().encode(P2_SCHEDULE()[0]?.body(0) ?? "").length
+          : -1,
+      ).status,
+    ).toBe("complete");
+    expect(c.iterations).toHaveLength(0);
   });
 });

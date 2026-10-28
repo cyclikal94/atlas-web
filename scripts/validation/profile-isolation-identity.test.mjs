@@ -1197,8 +1197,8 @@ test("case: a stage recorded under contract version 2 (the Air attempt's) is not
     r.cells.some(
       (c) =>
         c.stage === "integration" &&
-        // Revision 18 (adapted, version literal only): the current contract is 14.
-        c.reasons.join(" ").includes("recorded under contract 2, not 14"),
+        // Revision 18 (adapted, version literal only): the current contract is 14. Revision 19 (likewise): 15.
+        c.reasons.join(" ").includes("recorded under contract 2, not 15"),
     ),
     "the stage's own cell names the contract version",
   );
