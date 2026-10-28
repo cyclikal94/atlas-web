@@ -44,7 +44,7 @@ import {
   discardImport,
   expireImport,
   hideImport,
-  importContinuity,
+  importAuthority,
   importStatus,
   showImport,
   subscribeImports,
@@ -250,7 +250,7 @@ export function ImportDialog({
         ? { enabled: false, reason: NO_SOURCES_TO_IMPORT }
         : state.kind === "reading"
           ? { enabled: false, reason: READING }
-          : state.kind === "waiting"
+          : state.kind === "waiting" || status === "acquiring"
             ? { enabled: false, reason: IMPORT_CHECKING }
             : importEnablement({
                 database: env?.service() != null,
@@ -265,8 +265,10 @@ export function ImportDialog({
   const submit = () => {
     if (!enablement.enabled || source === null) return;
     // While the latest choice is still being read nothing is imported (nor said to be missing), whatever submitted the form; nor while
-    // the session shown again is not verified (asked again at the press, R7a).
-    if (editor.state().reading || importStatus(editor) !== "ready") return;
+    // the session shown again is not verified (asked again at the press, R7a), nor while a new one does not know the cache's history yet
+    // (revision 10, R7e). What is asked here is what is saved with.
+    const authority = importAuthority(editor);
+    if (editor.state().reading || authority.status !== "ready") return;
     const { file, window: window_ } = editor.state();
     const windowCheck = checkWindow(window_.from, window_.through);
     const windowError = windowCheck.ok
@@ -318,8 +320,9 @@ export function ImportDialog({
     const ics = file.check.ics;
     const { from, through } = window_;
     const into = source.id;
-    // The cache's history it was verified against, as it is now (revision 9, C2): the enqueue's own transaction must read the same.
-    const continuity = importContinuity(editor) ?? undefined;
+    // The cache's history it was verified against, captured with the press (revision 9, C2): the enqueue's own transaction must read the
+    // same. Never absent (revision 10, R7e).
+    const { continuity } = authority;
     // One save at a time (the session's synchronous latch): a second press, or Enter, before the screen shows the first as busy stores
     // nothing more. What is saved is what was pressed, captured now; only this save settles the session, and only while it has not ended.
     editor.submit(

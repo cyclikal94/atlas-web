@@ -10,6 +10,7 @@ import {
   hideImport,
   type ImportEntry,
   type ImportOwnerContext,
+  importAuthority,
   importOwned,
   importStatus,
   openImport,
@@ -1106,5 +1107,156 @@ describe("R7a/R7b (revision 8): the invalidation witness, the page runtime's ser
     w.route.go("/sync");
     replacement.commit({ cacheStatus: "invalid", invalidations: 5 });
     expect(importStatus(first)).toBe("expired");
+  });
+
+  /**
+   * WEB-13b revision 10 (review 10 R7d; design assessment C1, invariants 2 and 5; schedules M1, M2): a read is judged against the basis
+   * it was ASKED for. Shown again twice, each showing asks for a read (held); the later showing's read verifies it, and shown and ready it
+   * follows an ordinary refresh (its basis advances, C3). The earlier showing's read of the old witness is then no invalidation, in either
+   * delivery order; delivered first it verifies nothing.
+   */
+  for (const entry of [ROW, CHOOSER])
+    for (const order of ["after", "before"] as const)
+      for (const refreshed of [false, true])
+        test(`R7d (${entry.kind}): an earlier showing's read of its own basis, delivered ${order} the later showing's, ${refreshed ? "after a refresh the ready session followed" : "with no refresh (control)"}, keeps it ready`, async () => {
+          const svc = service();
+          const w = pageWorld(svc);
+          controller(life());
+          const first = await kept(w, entry);
+          svc.hold();
+          back(w);
+          expect(openImport(entry, w.context())).toBe(first);
+          const [earlier] = svc.reads.splice(0);
+          hideImport(first);
+          w.route.go("/sync");
+          await settle();
+          back(w);
+          expect(openImport(entry, w.context())).toBe(first);
+          const [later] = svc.reads.splice(0);
+          expect(earlier?.value?.invalidations).toBe(4);
+          expect(later?.value?.invalidations).toBe(4);
+          if (order === "before") {
+            earlier?.deliver();
+            await settle();
+            expect(importStatus(first)).toBe("pending");
+          }
+          later?.deliver();
+          await settle();
+          expect(importStatus(first)).toBe("ready");
+          if (refreshed) {
+            svc.commit({ cacheStatus: "invalid", invalidations: 5 });
+            svc.commit({ cacheStatus: "valid" });
+          }
+          expect(importStatus(first)).toBe("ready");
+          if (order === "after") {
+            earlier?.deliver();
+            await settle();
+          }
+          expect(importStatus(first)).toBe("ready");
+          expect(first.ended()).toBe(false);
+          expect(first.state().window.from).toBe("2026-01-01");
+        });
+
+  /**
+   * The paired oracle (M2): what an earlier showing's read says against its OWN basis still ends the session, though a later showing was
+   * verified meanwhile (a stale ticket is no reason to discard evidence). It read the cache known invalid (an admitted invalidation not
+   * written yet, or the cache's status) while the session was not verified; the later showing's read, once that had cleared, agrees.
+   */
+  for (const said of ["streak", "invalid"] as const)
+    test(`R7d (M2): an earlier showing's read that says ${said === "streak" ? "an admitted invalidation was not written yet" : "the cache was invalid"} ends the session after a later showing was verified; it never comes back`, async () => {
+      const svc = service();
+      const w = pageWorld(svc);
+      controller(life());
+      const first = await kept(w);
+      svc.hold();
+      svc.commit(
+        said === "streak" ? { invalidating: true } : { cacheStatus: "invalid" },
+        true,
+      );
+      back(w);
+      expect(openImport(ROW, w.context())).toBe(first);
+      const [earlier] = svc.reads.splice(0);
+      svc.commit({ invalidating: false, cacheStatus: "valid" }, true);
+      hideImport(first);
+      w.route.go("/sync");
+      await settle();
+      back(w);
+      expect(openImport(ROW, w.context())).toBe(first);
+      svc.reads.splice(0)[0]?.deliver();
+      await settle();
+      expect(importStatus(first)).toBe("ready");
+      earlier?.deliver();
+      await settle();
+      expect(importStatus(first)).toBe("expired");
+      expect(first.ended()).toBe(true);
+      svc.commit({ invalidations: 4 });
+      expect(importStatus(first)).toBe("expired");
+    });
+
+  test("R7d: a showing's read asked before its basis was known (its opening read landing meanwhile) decides nothing: it asks again with that basis, and that read verifies it", async () => {
+    const svc = service();
+    svc.commit({ invalidations: 3 });
+    svc.hold();
+    svc.unestablished();
+    const w = pageWorld(svc);
+    const first = openImport(ROW, w.context({ cache: null }));
+    hideImport(first);
+    w.route.go("/sync");
+    back(w);
+    expect(openImport(ROW, w.context({ cache: null }))).toBe(first);
+    const [opening, showing] = svc.reads.splice(0);
+    opening?.deliver();
+    await settle();
+    // The opening read is its basis now (3), but the showing's read was asked without one: still one read at a time.
+    expect(svc.reads).toHaveLength(0);
+    showing?.deliver();
+    await settle();
+    expect(importStatus(first)).toBe("pending");
+    expect(svc.reads).toHaveLength(1);
+    svc.reads[0]?.deliver();
+    await settle();
+    expect(importStatus(first)).toBe("ready");
+  });
+
+  /**
+   * WEB-13b revision 10 (review 10 R7e; design assessment C2, invariants 6 and 7; schedule M3): a NEW session (a row or the chooser) whose
+   * database history no reading has told yet is `acquiring`: no authority, no continuity to save with. Its opening read, or a reading
+   * published while it is shown, establishes it; an existing non-zero witness is no evidence against it.
+   */
+  for (const entry of [ROW, CHOOSER])
+    for (const by of ["opening", "publication"] as const)
+      test(`R7e (${entry.kind}): a new session is acquiring until its ${by === "opening" ? "opening read" : "shown page's publication"} tells the history; then ready with that history (witness 4, never invalidated here)`, async () => {
+        const svc = service();
+        svc.hold();
+        svc.unestablished();
+        const w = pageWorld(svc);
+        const ctl = controller(UNREAD);
+        const first = openImport(entry, w.context());
+        await settle();
+        first.editWindow({ from: "2026-01-01", through: "2026-12-31" });
+        expect(importStatus(first)).toBe("acquiring");
+        expect(importAuthority(first)).toEqual({ status: "acquiring" });
+        if (by === "opening") svc.reads.splice(0)[0]?.deliver();
+        else ctl.set(life());
+        await settle();
+        expect(importAuthority(first)).toEqual({
+          status: "ready",
+          continuity: { incarnationId: "i1", invalidations: 4 },
+        });
+        expect(first.state().window.from).toBe("2026-01-01");
+      });
+
+  test("R7e: no reading of its own database (no database yet; only another account's publication): acquiring; the displayed account's first database published establishes it", () => {
+    const w = world();
+    w.cache.set(life({ account: "b", incarnationId: "i3" }));
+    const first = openImport(ROW, w.context({ incarnation: null }));
+    expect(importStatus(first)).toBe("acquiring");
+    expect(importAuthority(first)).toEqual({ status: "acquiring" });
+    // Its own account's first database (as `revokedIn` adopts it), and that database's witness.
+    w.cache.set(life());
+    expect(importAuthority(first)).toEqual({
+      status: "ready",
+      continuity: { incarnationId: "i1", invalidations: 4 },
+    });
   });
 });

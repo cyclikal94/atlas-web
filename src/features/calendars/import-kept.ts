@@ -53,6 +53,13 @@ import { isCalendarsPath } from "./visit";
  *    The dialog shown again by a remount of itself (not by Import events) after it was really hidden is verified the same way; the
  *    hide-and-show that Strict Mode replays within one turn is no hiding. A service of its database that ended is replaced, when the page
  *    has another, by an observation of that one (its opening read, made after the hiding, is never a basis).
+ *  - Revision 10 (review 10 R7d/R7e; design assessment C1-C2, invariants 2, 5-7): a read is judged against the basis it was ASKED for
+ *    (fixed when it is made), never against the basis as it is when the read lands: a session verified at a later showing follows an
+ *    ordinary refresh while it is shown (its basis advances), and an older showing's read of the old witness is no invalidation. What an
+ *    older read says against its own basis still ends the session (IndexedDB runs it before every read made after it, so a later
+ *    verification never contradicts it). A NEW session is `acquiring` until it knows its database and witness (an opening read, or a
+ *    reading published while it is shown): nothing is saved before, whatever submits the form, and the press captures that pair
+ *    (`importAuthority`), never an absent one.
  * Page memory only: never stored, sent, broadcast, put in history state or logged; a reload or another tab has none. Retained selection
  * is never retained permission: the dialog reads the source's current state whenever it shows the session.
  */
@@ -232,18 +239,19 @@ const serves = (which: Held, service: CacheService | null): boolean =>
 
 /**
  * Asks for the read that may verify `which`'s showing (R7c): one at a time, through the live service of its database it was last shown
- * with (none: it waits). Whenever it lands, a cache known invalid or another witness than its basis ends it (the read was made after it was
- * hidden: an invalidation since); only the same witness, read for the showing still waiting, by a service still live, makes it ready.
+ * with (none: it waits). Whenever it lands, a cache known invalid or another witness than the basis it was asked for ends it (the read was
+ * made after it was hidden: an invalidation since); only the same witness, read for the showing still waiting, by a service still live,
+ * makes it ready. That basis is fixed when it is asked (R7d): a later showing verified meanwhile may have followed a refresh since.
  */
 function verify(which: Held): void {
   const service = which.context.service ?? null;
   if (which.verifying || !serves(which, service)) return;
   const ticket = which.ticket;
+  const basis = which.basis;
   which.verifying = true;
   void readCache(service as CacheService).then((now) => {
     if (which.ticket === ticket) which.verifying = false;
     if (held !== which || which.editor.ended() || now === null) return;
-    const basis = which.basis;
     if (
       now.invalidated ||
       (basis !== null &&
@@ -258,10 +266,15 @@ function verify(which: Held): void {
       !which.pending ||
       !which.shown ||
       !serves(which, service) ||
-      now.invalidations === null ||
-      (basis === null && now.invalidations !== 0)
+      now.invalidations === null
     )
       return;
+    // Its basis became known while the read was made (its opening read landed): asked without it, the read says nothing; ask again.
+    if (which.basis !== basis) {
+      verify(which);
+      return;
+    }
+    if (basis === null && now.invalidations !== 0) return;
     // No basis: the witness's first value says that nothing was ever invalidated in this database, so nothing was missed either.
     which.basis = now.invalidations;
     which.pending = false;
@@ -451,16 +464,39 @@ export function hideImport(editor: ImportEditor): void {
 }
 
 /**
- * What the dialog showing `editor` may do with it (R7a): `ready`, `pending` (shown again, its basis not verified yet: its input is shown,
- * but neither unverified cached content nor a save), `expired` (the cache was invalidated while it was hidden or waiting) or `ended`.
+ * What the dialog showing `editor` may do with it (R7a): `ready` (with the cache's history it is saved against), `acquiring` (revision
+ * 10, R7e: a new session that does not know its database and witness yet: its source and input are shown, nothing is saved), `pending`
+ * (shown again, its basis not verified yet: its input is shown, but neither unverified cached content nor a save), `expired` (the cache
+ * was invalidated while it was hidden or waiting) or `ended`.
  */
-export function importStatus(
-  editor: ImportEditor,
-): "ready" | "pending" | "expired" | "ended" {
-  if (expiredEditors.has(editor)) return "expired";
-  if (editor.ended()) return "ended";
-  return held?.editor === editor && held.pending ? "pending" : "ready";
+export type ImportAuthority =
+  | { readonly status: "ready"; readonly continuity: Continuity }
+  | { readonly status: "acquiring" | "pending" | "expired" | "ended" };
+
+/**
+ * `editor`'s authority as it is now, asked once at the press and saved with (design assessment C2, invariant 7): the history it states to
+ * the enqueue (`EnqueueRequest.continuity`, its database and the witness of its basis), which writes nothing unless its own transaction
+ * reads the same. Never a save without one.
+ */
+export function importAuthority(editor: ImportEditor): ImportAuthority {
+  if (expiredEditors.has(editor)) return { status: "expired" };
+  const which = held;
+  if (editor.ended() || which === null || which.editor !== editor)
+    return { status: "ended" };
+  if (which.pending) return { status: "pending" };
+  if (which.incarnation === null || which.basis === null)
+    return { status: "acquiring" };
+  return {
+    status: "ready",
+    continuity: {
+      incarnationId: which.incarnation,
+      invalidations: which.basis,
+    },
+  };
 }
+
+export const importStatus = (editor: ImportEditor): ImportAuthority["status"] =>
+  importAuthority(editor).status;
 
 /** Hears every change of `importStatus`. */
 export function subscribeImports(listener: () => void): () => void {
@@ -480,25 +516,6 @@ export function importOwned(
   if (!revokedIn(which, context)) return !editor.ended();
   release(which, "revoked");
   return false;
-}
-
-/**
- * The cache's history `editor` may be saved against (revision 9, review 9 R7c; design assessment C2, invariant 6), captured at the press
- * and stated to the enqueue (`EnqueueRequest.continuity`), which writes nothing unless its own transaction reads the same: its database
- * and the witness of its basis. Null when nothing is known yet (a new session no reading has reached, never hidden: no history kept to
- * compare) or while it waits (nothing is saved then).
- */
-export function importContinuity(editor: ImportEditor): Continuity | null {
-  const which = held;
-  if (
-    which === null ||
-    which.editor !== editor ||
-    which.pending ||
-    which.incarnation === null ||
-    which.basis === null
-  )
-    return null;
-  return { incarnationId: which.incarnation, invalidations: which.basis };
 }
 
 /** The enqueue said the cache was invalidated since `editor`'s basis (`expired`): its session ends, and the dialog closes and says why. */

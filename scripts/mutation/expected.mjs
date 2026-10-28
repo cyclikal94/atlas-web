@@ -1,7 +1,7 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2018;
+export const EXPECTED_UNIT = 2024;
 export const EXPECTED_ENGINE = 264;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
@@ -19,3 +19,6 @@ export const EXPECTED_ENGINE = 264;
 // corrected code (same defects); MU-2666 re-expressed (its old oracle rewarded the loss of input). WEB-13b now 156 unit, 4 engine.
 // WEB-13b revision 9 (review 9 R7c; C2 by MORNING-TASK-APPROVALS-20261028): +20 unit (MU-2688..MU-2707) in `catalogue-web13b-r9.mjs`;
 // MU-2658, MU-2662 (r7), MU-2676, MU-2678, MU-2679 (r8) re-anchored at the corrected code (same defects). WEB-13b now 176 unit, 4 engine.
+// WEB-13b revision 10 (review 10 R7d/R7e): +6 unit (MU-2708..MU-2712, MU-2714; MU-2713 retired as equivalent after it ran) in
+// `catalogue-web13b-r10.mjs`; MU-2471 (r1), MU-2689 and MU-2706 (r9) re-anchored at the corrected code (same defects). WEB-13b now 182
+// unit, 4 engine.

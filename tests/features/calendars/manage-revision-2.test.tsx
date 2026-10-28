@@ -23,6 +23,7 @@ import {
   sourceRow,
   type WireReply,
 } from "../../support/calendars";
+import { historyOf } from "../../support/data/continuity";
 
 /**
  * WEB-13a revision 2 (review r1 R6–R8 and the design assessment's schedules S1–S16), through the PRODUCTION screen, controller, plans
@@ -318,6 +319,7 @@ describe("the values a Save restates come from ONE read and are checked in its t
         ics: "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
         from: "2026-01-01",
         through: "2026-12-31",
+        continuity: historyOf(w),
       }),
     );
     // WEB-13b adaptation (labelled): the queued import is now ALSO listed by WEB-13b's Imports panel under the source's label, so the

@@ -42,11 +42,12 @@ export const UNIT_13B_R9 = [
     tests: [T_KEPT],
     expect:
       /another value keeps it waiting|is no basis: another witness keeps it waiting/,
+    // Re-anchored in revision 10 (R7d): the same check, after the read asked without a basis is told to ask again.
     patch: (t) =>
       sub(
         t,
-        "      (basis === null && now.invalidations !== 0)\n",
-        "      false\n",
+        "    if (basis === null && now.invalidations !== 0) return;\n",
+        "",
       ),
   },
   {
@@ -275,11 +276,12 @@ export const UNIT_13B_R9 = [
     file: DIALOG,
     tests: [T_RET],
     expect: /another page's W18 and refill committed: Import stores NOTHING/,
+    // Re-anchored in revision 10 (R7e): the history now comes with the authority asked at the press; the same omission.
     patch: (t) =>
       sub(
         t,
-        "    const continuity = importContinuity(editor) ?? undefined;\n",
-        "    const continuity = importContinuity(editor) && undefined;\n",
+        "    const { continuity } = authority;\n",
+        "    const continuity = undefined;\n",
       ),
   },
   {

@@ -204,17 +204,26 @@ verifies its basis (**revision 9, review 9 R7c:** ONLY that read, made for this 
 publication that agrees, such as an old controller's, may end it but never makes it ready, so nothing is queued before that read lands; a
 read that fails, or no live service, keeps it waiting; a remount of the dialog after a real hiding waits the same way): unknown facts (a replacement controller's first read, a failed read) neither discard it nor let it be
 saved; its file and window stay shown, its source is not, Import explains why it waits and Enter stores nothing; a witness past its basis then
-ends it and the dialog closes with "Import closed while your calendar sources are brought up to date." A CACHED source's open dialog whose cache
+ends it and the dialog closes with "Import closed while your calendar sources are brought up to date." **Revision 10 (review 10 R7d/R7e):** a
+showing's read is judged against the basis it was ASKED for, never the basis as it is when it lands, so an earlier showing's read of the old
+witness does not end a later showing that was verified and then followed an ordinary refresh (a pending source's dialog stays open through
+one); what an earlier read says against its own basis (an invalid cache, a durable streak) still ends it. A NEW session is `acquiring` until
+its opening read, or a reading published while it is shown, tells its database and witness: its source, file and window are shown, Import
+explains why it waits, and nothing reaches the enqueue whatever submits the form; the press then captures that pair (`importAuthority`), and
+`importRequest` requires it. A CACHED source's open dialog whose cache
 is only unverified waits the same way; a cache known to be invalid is the E9 close. The source's state is read afresh whenever it is shown.
 Sync, reopening and a read completing never store anything; a reload or another tab has no session. `tests/features/calendars/import-retention.test.tsx` (I1-I13
 through the production router; revision 7: L1/L2/L5 through the production `DataProvider` and writers W18/W20/W21/W23; revision 8: the
 waiting session, the pending-source first fill versus invalidation, the marker-only L5 and the unverified cached source; revision 9: R7c, an
 old agreeing publication with the showing's read held, row and chooser, click/Enter/programmatic submission, with its unchanged control; C2/T5,
-another page's W18 and refill unheard before Import, fresh and resumed, with controls; `tests/data/outbox-continuity.test.ts` for W2),
+another page's W18 and refill unheard before Import, fresh and resumed, with controls; revision 10: R7d, an earlier showing's read delivered
+before and after the later showing's, with and without a visible refresh, and R7e, a new row import with every facts read held, at witness 0
+and 1, then one press with and without W18 before W2, the chooser's entry absent until the cache gate opens; `tests/data/outbox-continuity.test.ts` for W2),
 `import-editor.test.ts`, `import-kept.test.ts`, E-IMP7 and E-IMP8 (a 403 remount then 410/W18/W23, row and chooser, with controls; two pages
 with the follower's cross-tab wakes delivered or held; revision 8: E-IMP9, a pending source on an empty cache, first fill alone versus fill,
 410 and refill, the follower's wakes held) in `tests/e2e/fixture.calendar-import.spec.ts`; mutants MU-2637 to MU-2655, MU-2656 to MU-2668
-(revision 8: re-anchored, MU-2666 re-expressed) and MU-2669 to MU-2687. WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
+(revision 8: re-anchored, MU-2666 re-expressed), MU-2669 to MU-2687, MU-2688 to MU-2707 (revision 9) and MU-2708 to MU-2714 (revision 10;
+MU-2713 retired as equivalent after it ran). WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
 **Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the

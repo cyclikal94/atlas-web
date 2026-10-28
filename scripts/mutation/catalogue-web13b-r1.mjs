@@ -39,11 +39,12 @@ export const UNIT_13B_R1 = [
     expect: /R1: choosing another file forgets the previous one at once/,
     // Revision 6 (R7): re-expressed at the corrected text (the dialog now asks its editing session whether the latest file is read).
     // Re-anchored in revision 8 (R7a): the same check, now beside the session's verification; only the read check is removed.
+    // Re-anchored in revision 10 (R7e): the same check, beside the authority asked once at the press.
     patch: (t) =>
       sub(
         t,
-        '    if (editor.state().reading || importStatus(editor) !== "ready") return;\n',
-        '    if (importStatus(editor) !== "ready") return;\n',
+        '    if (editor.state().reading || authority.status !== "ready") return;\n',
+        '    if (authority.status !== "ready") return;\n',
       ),
   },
   {

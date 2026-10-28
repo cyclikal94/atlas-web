@@ -157,10 +157,13 @@ export function importRequest(input: {
   from: string;
   through: string;
   localId?: LocalId;
-  /** The cache's history the kept session was verified against, captured at the press (revision 9, C2): W2 compares it. */
-  continuity?: Continuity;
+  /**
+   * The cache's history the session was verified against, captured at the press (revision 9, C2): W2 compares it. Required (revision 10,
+   * R7e): an import never takes the shared request's path for callers that state none.
+   */
+  continuity: Continuity;
 }): EnqueueRequest {
-  const { sourceId, ics, from, through } = input;
+  const { sourceId, ics, from, through, continuity } = input;
   return {
     endpoint: IMPORT_ENDPOINT,
     targetId: sourceId,
@@ -176,7 +179,7 @@ export function importRequest(input: {
     ],
     build: () => ({ command: { ics, from, through } }),
     ...(input.localId === undefined ? {} : { localId: input.localId }),
-    ...(input.continuity === undefined ? {} : { continuity: input.continuity }),
+    continuity,
   };
 }
 

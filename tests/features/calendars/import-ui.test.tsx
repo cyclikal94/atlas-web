@@ -18,6 +18,7 @@ import * as words from "../../../src/features/calendars/copy-import";
 import { IMPORT_ENDPOINT } from "../../../src/features/calendars/model/commands";
 import { installMatchMedia } from "../../helpers/match-media";
 import { calendarWorld, sourceRow } from "../../support/calendars";
+import { historyOf } from "../../support/data/continuity";
 import { draftRow, headerOf } from "../../support/data/rows";
 
 /**
@@ -784,6 +785,7 @@ describe("E6: no list or status read loads an import's body", () => {
           ics: big,
           from: "2026-01-01",
           through: "2026-12-31",
+          continuity: historyOf(w),
         }),
       );
       expect(out?.kind).toBe("queued");

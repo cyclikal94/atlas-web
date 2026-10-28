@@ -8,6 +8,7 @@ import {
   createSourceRequest,
   importRequest,
 } from "../../src/features/calendars/model/commands";
+import { historyOf } from "../support/data/continuity";
 import { outboxWorld } from "../support/data/outbox-world";
 import { cacheRow } from "../support/data/rows";
 
@@ -44,6 +45,7 @@ async function world() {
       ics: ICS,
       from: "2026-01-01",
       through: "2026-12-31",
+      continuity: historyOf(w),
     }),
   );
   if (
@@ -184,7 +186,7 @@ describe("WEB-13b: the import's answers", () => {
       }),
     ]);
     const out = await w.outbox.enqueue(
-      importRequest({ sourceId: SOURCE, ...BODY }),
+      importRequest({ sourceId: SOURCE, ...BODY, continuity: historyOf(w) }),
     );
     await w.settle();
     return { w, out };
