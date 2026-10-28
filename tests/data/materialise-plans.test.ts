@@ -6,7 +6,9 @@ import type {
   SyncStateRow,
 } from "../../src/data/model/types";
 import {
+  liftMaterialiseStops,
   pruneMaterialiseSequences,
+  readLatestSequences,
   readMaterialiseDiscovery,
   readMaterialiseSequence,
   readMaterialiseSequences,
@@ -17,6 +19,7 @@ import {
 import {
   issueTimerOrder,
   parseTimerCopy,
+  readTimerAuthority,
   readTimerCopy,
   readTimerScope,
   reconcileTimerCopy,
@@ -99,11 +102,12 @@ async function bound() {
 describe("W27: the compare-and-set", () => {
   test("a new key is written only while it is absent; a second create of the same key is stale and returns what is stored", async () => {
     const { write, stored } = await bound();
+    // Revision 4 (review R20): the store stamps the revision (1 for a new row), and returns the row as written.
     expect(await write({ expected: null, next: row() })).toEqual({
       kind: "applied",
-      value: { kind: "written", stored: row() },
+      value: { kind: "written", stored: row({ revision: 1 }) },
     });
-    expect(stored()).toEqual(row());
+    expect(stored()).toEqual(row({ revision: 1 }));
     // MU-10C-11: a CAS that writes when stale overwrites another runner's sequence.
     const second = await write({
       expected: null,
@@ -111,12 +115,12 @@ describe("W27: the compare-and-set", () => {
     });
     expect(second).toEqual({
       kind: "applied",
-      value: { kind: "stale", stored: row() },
+      value: { kind: "stale", stored: row({ revision: 1 }) },
     });
     expect(stored()?.sequence_generation).toBe("g1");
   });
 
-  test("a transition applies only to the row it was decided on: generation, phase, read sequence and attempt key", async () => {
+  test("a transition applies only to the row it was decided on: generation, phase, read sequence, attempt key and revision", async () => {
     const { write, stored } = await bound();
     const submitting = row({
       phase: "submitting",
@@ -128,6 +132,7 @@ describe("W27: the compare-and-set", () => {
       phase: "submitting" as const,
       read_seq: 0,
       attempt_key: "k1",
+      revision: 1,
     };
     for (const wrong of [
       { ...expected, sequence_generation: "g0" },
@@ -135,6 +140,9 @@ describe("W27: the compare-and-set", () => {
       { ...expected, read_seq: 1 },
       { ...expected, attempt_key: "k0" },
       { ...expected, attempt_key: null },
+      // Revision 4 (review R20): the same generation, phase, read and attempt at another revision is another row.
+      { ...expected, revision: 0 },
+      { ...expected, revision: 2 },
     ]) {
       const out = await write({
         expected: wrong,
@@ -142,16 +150,16 @@ describe("W27: the compare-and-set", () => {
       });
       expect(out).toEqual({
         kind: "applied",
-        value: { kind: "stale", stored: submitting },
+        value: { kind: "stale", stored: { ...submitting, revision: 1 } },
       });
     }
-    expect(stored()).toEqual(submitting);
+    expect(stored()).toEqual({ ...submitting, revision: 1 });
     const moved = row({ phase: "awaiting_position_read", read_seq: 1 });
     expect(await write({ expected, next: moved })).toEqual({
       kind: "applied",
-      value: { kind: "written", stored: moved },
+      value: { kind: "written", stored: { ...moved, revision: 2 } },
     });
-    expect(stored()).toEqual(moved);
+    expect(stored()).toEqual({ ...moved, revision: 2 });
   });
 
   test("an expectation of a row that is gone is stale (absent), and a delete removes the row", async () => {
@@ -161,6 +169,7 @@ describe("W27: the compare-and-set", () => {
       phase: "ready" as const,
       read_seq: 0,
       attempt_key: null,
+      revision: 1,
     };
     expect(await write({ expected, next: null })).toEqual({
       kind: "applied",
@@ -183,6 +192,7 @@ describe("W27: the compare-and-set", () => {
         phase: "ready",
         read_seq: 0,
         attempt_key: null,
+        revision: 1,
       },
       next: row({ through_date: "2026-10-26" }),
     });
@@ -228,7 +238,7 @@ describe("W27: the guards of a response-derived write", () => {
     });
     expect(out).toEqual({
       kind: "applied",
-      value: { kind: "written", stored: row() },
+      value: { kind: "written", stored: row({ revision: 1 }) },
     });
     service.dispose("identity");
     const late = await commitMaterialiseSequence(service, service.capture(1), {
@@ -238,11 +248,12 @@ describe("W27: the guards of a response-derived write", () => {
         phase: "ready",
         read_seq: 0,
         attempt_key: null,
+        revision: 1,
       },
       next: null,
     });
     expect(late.kind).not.toBe("applied");
-    expect(stored()).toEqual(row());
+    expect(stored()).toEqual(row({ revision: 1 }));
   });
 });
 
@@ -497,7 +508,7 @@ describe("W28: the running-timer copy", () => {
     expect(out).toMatchObject({ value: { written: true } });
   });
 
-  test("DA-T1: a day's correction removes what it names and fences out every earlier read; an earlier correction changes nothing", async () => {
+  test("DA-T1: a day's correction removes what it names and fences out every earlier read; an earlier correction removes only what its own order entitles it to", async () => {
     const { service } = await bound();
     const issue = async () => {
       const out = await service.store.run(issueTimerOrder, {
@@ -542,11 +553,30 @@ describe("W28: the running-timer copy", () => {
         })
       )?.running,
     ).toEqual([]);
-    // A correction of an earlier order than the fence changes nothing.
+    // A correction of an earlier order than the fence: revision 3 asserted it was not applied at all (`applied: false`). Revision 4 (review
+    // R19): the fence is the latest order of ANY read, so a correction is judged against the copy's own order instead; one no later than
+    // the copy decides nothing by absence (`newer` false), removes nothing here, and never moves the fence back.
+    await service.store.run(writeTimerCopy, {
+      captured: service.capture(1),
+      copy: copy(await issue(), [session(1)]),
+    });
     expect(await correct(first, session(1).id)).toEqual({
       kind: "applied",
-      value: { removed: 0, applied: false, scoped: false },
+      value: { removed: 0, applied: true, scoped: false },
     });
+    expect(
+      (
+        await service.store.run(readTimerCopy, {
+          incarnationId: service.incarnationId,
+        })
+      )?.running,
+    ).toEqual([session(1)]);
+    expect(
+      await service.store.run(writeTimerCopy, {
+        captured: service.capture(1),
+        copy: copy(day, [session(1), session(2)]),
+      }),
+    ).toMatchObject({ value: { written: false } });
     // Control: a read issued after the correction replaces the copy normally.
     expect(
       await service.store.run(writeTimerCopy, {
@@ -764,8 +794,10 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
         running: [],
       },
     });
+    // Revision 4 (review R19): the copy is corrected whatever the fence (`applied`; revision 3 asserted `false` here); its scope is
+    // recorded under the day's own order either way.
     expect(await observe(day, seen([], [id(1)], false))).toMatchObject({
-      value: { applied: false, scoped: true },
+      value: { applied: true, removed: 0, scoped: true },
     });
     expect(await read()).toEqual({
       scope: {
@@ -896,5 +928,294 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
     expect(await read()).toEqual({ scope: null, floor: 2 });
     seed({ timer_scopes: { [DAY]: "damaged" }, timer_order: 7 });
     expect(await read()).toEqual({ scope: null, floor: 7 });
+  });
+});
+
+/**
+ * Revision 4 (review R20): "Try again" over the stops it was pressed on, as ONE compare-and-set; and the row's revision, which every W27
+ * write moves, so a stop that returns to the same generation, phase, read and attempt is still another row.
+ */
+describe("W27: the revision and the lift (revision 4, review R20)", () => {
+  const stoppedRow = (over: Partial<MaterialiseSequenceRow> = {}) =>
+    row({
+      phase: "stopped",
+      attempt: { key: "k1", body: "{}" },
+      read_failures: 3,
+      stop: { reason: "unreachable" },
+      ...over,
+    });
+  const expectOf = (r: MaterialiseSequenceRow) => ({
+    sequence_generation: r.sequence_generation,
+    phase: r.phase,
+    read_seq: r.read_seq,
+    attempt_key: r.attempt?.key ?? null,
+    revision: r.revision ?? 0,
+  });
+  const lifted = (r: MaterialiseSequenceRow) => ({
+    ...r,
+    phase: "submitting" as const,
+    read_failures: 0,
+    successful_calls: 0,
+    stop: null,
+  });
+  const ENTRY = {
+    retry: 2,
+    failures: 3,
+    stop: { reason: "unreachable" as const },
+    attempt: "a1",
+  };
+  const NEXT = { retry: 3, failures: 0, stop: null, attempt: null };
+
+  test("every write moves the revision; a row of an earlier build (none) is matched as 0 and written as 1; one that cannot move is refused", async () => {
+    const { t, write, stored } = await bound();
+    t.world.idb.seed(DB, "materialise_sequences", [stoppedRow()]);
+    const legacy = stored() as MaterialiseSequenceRow;
+    expect(legacy.revision).toBeUndefined();
+    const out = await write({
+      expected: expectOf(legacy),
+      next: lifted(legacy),
+    });
+    expect(out.kind === "applied" && out.value.kind).toBe("written");
+    expect(stored()?.revision).toBe(1);
+    // The same transition decided on the legacy row again (another tab's press of the same stop) is stale.
+    expect(
+      await write({ expected: expectOf(legacy), next: lifted(legacy) }),
+    ).toMatchObject({ value: { kind: "stale" } });
+    const one = stored() as MaterialiseSequenceRow;
+    await write({ expected: expectOf(one), next: stoppedRow() });
+    expect(stored()?.revision).toBe(2);
+    // An unreadable revision reads as 0 on both sides; a revision at the end of its range is never overwritten.
+    t.world.idb.seed(DB, "materialise_sequences", [
+      stoppedRow({ revision: "x" as never }),
+    ]);
+    const odd = stored() as MaterialiseSequenceRow;
+    await write({ expected: expectOf(odd), next: lifted(odd) });
+    expect(stored()?.revision).toBe(1);
+    t.world.idb.seed(DB, "materialise_sequences", [
+      stoppedRow({ revision: Number.MAX_SAFE_INTEGER }),
+    ]);
+    const last = stored() as MaterialiseSequenceRow;
+    expect(
+      await write({ expected: expectOf(last), next: lifted(last) }),
+    ).toMatchObject({ value: { kind: "stale" } });
+    expect(stored()?.phase).toBe("stopped");
+  });
+
+  test("a lift writes both stops or neither: a stale discovery leaves the sequence stopped; a stale sequence leaves the discovery stopped", async () => {
+    const { t, service, seed, stored } = await bound();
+    const sequence = stoppedRow({ revision: 4 });
+    t.world.idb.seed(DB, "materialise_sequences", [sequence]);
+    seed({ materialise_discovery: { [TASK]: ENTRY } });
+    const entry = () =>
+      (t.world.idb.peek(DB, "sync_state", "singleton") as SyncStateRow)
+        .materialise_discovery?.[TASK];
+    const lift = (
+      discovery: typeof ENTRY | null,
+      seq: MaterialiseSequenceRow | null,
+    ) =>
+      service.store.run(liftMaterialiseStops, {
+        captured: service.capture(1),
+        task_id: TASK,
+        discovery:
+          discovery === null ? null : { expected: discovery, next: NEXT },
+        sequence:
+          seq === null
+            ? null
+            : {
+                key: { task_id: TASK, through_date: seq.through_date },
+                expected: expectOf(seq),
+                next: lifted(seq),
+              },
+      });
+    // Stale discovery (another retry generation): nothing written.
+    expect(await lift({ ...ENTRY, retry: 1 }, sequence)).toEqual({
+      kind: "applied",
+      value: { kind: "stale" },
+    });
+    expect(stored()).toEqual(sequence);
+    expect(entry()).toEqual(ENTRY);
+    // Stale sequence (an earlier revision of the same stop): nothing written, the discovery kept.
+    expect(await lift(ENTRY, { ...sequence, revision: 3 })).toEqual({
+      kind: "applied",
+      value: { kind: "stale" },
+    });
+    expect(stored()).toEqual(sequence);
+    expect(entry()).toEqual(ENTRY);
+    // A discovery the map does not hold is never ADDED by a lift.
+    expect(
+      await service.store.run(liftMaterialiseStops, {
+        captured: service.capture(1),
+        task_id: OTHER_TASK,
+        discovery: { expected: ENTRY, next: NEXT },
+        sequence: null,
+      }),
+    ).toEqual({ kind: "applied", value: { kind: "stale" } });
+    // Both as seen: both lifted at once, the revision moved.
+    expect(await lift(ENTRY, sequence)).toEqual({
+      kind: "applied",
+      value: { kind: "written" },
+    });
+    expect(entry()).toEqual(NEXT);
+    expect(stored()).toEqual({ ...lifted(sequence), revision: 5 });
+    // Pressed again on what it saw: stale, nothing more.
+    expect(await lift(ENTRY, sequence)).toMatchObject({
+      value: { kind: "stale" },
+    });
+  });
+});
+
+/** Revision 4 (review R21): the latest day of each NAMED task, whatever other tasks' rows sort before it; bounded per read. */
+describe("W27: the latest sequence by task (revision 4, review R21)", () => {
+  test("found past any number of other tasks' rows and past any number of its own earlier days; absent when none; at most one window of tasks", async () => {
+    const { t, service } = await bound();
+    const others = Array.from({ length: SEQUENCE_WINDOW + 1 }, (_, i) =>
+      row({
+        task_id: `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`,
+        phase: "stopped",
+        stop: { reason: "bound" },
+      }),
+    );
+    const days = Array.from({ length: SEQUENCE_WINDOW + 20 }, (_, i) =>
+      row({
+        through_date: `2026-${String(1 + Math.floor(i / 28)).padStart(2, "0")}-${String(1 + (i % 28)).padStart(2, "0")}`,
+      }),
+    );
+    t.world.idb.seed(DB, "materialise_sequences", [...others, ...days]);
+    const latest = days.reduce((a, b) =>
+      a.through_date > b.through_date ? a : b,
+    );
+    const read = (taskIds: string[]) =>
+      service.store.run(readLatestSequences, {
+        incarnationId: service.incarnationId,
+        taskIds,
+      });
+    expect(await read([TASK, OTHER_TASK])).toEqual({ [TASK]: latest });
+    expect(Object.keys(await read([]))).toEqual([]);
+    expect(
+      Object.keys(
+        await read(others.map((r) => r.task_id).slice(0, SEQUENCE_WINDOW)),
+      ),
+    ).toHaveLength(SEQUENCE_WINDOW);
+    await expect(read(others.map((r) => r.task_id))).rejects.toThrow();
+  });
+});
+
+/** Revision 4 (review R19): the copy, every scope and the floor in one read; corrections of one day are not fenced by another's. */
+describe("W28: one authority (revision 4, review R19)", () => {
+  const A = "aaaaaaaa-0000-4000-8000-0000000000d1";
+  const B = "aaaaaaaa-0000-4000-8000-0000000000d2";
+  const S = "cccccccc-0000-4000-8000-000000000001";
+  const seenOf = (day: string, running: string[] = []) => ({
+    occurrence_id: day,
+    complete: true,
+    running,
+    ended: [],
+  });
+  async function world() {
+    const b = await bound();
+    const issue = async () => {
+      const out = await b.service.store.run(issueTimerOrder, {
+        captured: b.service.capture(1),
+      });
+      if (out.kind !== "applied") throw new Error("not applied");
+      return out.value.order as number;
+    };
+    const correct = (order: number, day: string) =>
+      b.service.store.run(reconcileTimerCopy, {
+        captured: b.service.capture(1),
+        order,
+        drop: (r, newer) => newer && r.occurrence_id === day,
+        scope: seenOf(day),
+      });
+    const authority = () =>
+      b.service.store.run(readTimerAuthority, {
+        incarnationId: b.service.incarnationId,
+      });
+    return { ...b, issue, correct, authority };
+  }
+
+  test.each([
+    ["after another day's later read", true],
+    ["alone (control)", false],
+  ])(
+    "REVIEW4 T5 at the plan: a day's earlier complete read landing %s still corrects the older copy; the fence never moves back",
+    async (_, overtaken) => {
+      const { service, issue, correct, authority } = await world();
+      const copyAt = await issue();
+      await service.store.run(writeTimerCopy, {
+        captured: service.capture(1),
+        copy: {
+          format: 2,
+          order: copyAt,
+          read_at: 1,
+          complete: true,
+          running: [{ id: S, occurrence_id: A }],
+        },
+      });
+      const first = await issue();
+      // An account read issued between the two day reads, its answer still on its way.
+      const account = await issue();
+      const later = await issue();
+      if (overtaken) await correct(later, B);
+      expect(await correct(first, A)).toMatchObject({
+        value: { removed: 1, applied: true, scoped: true },
+      });
+      const now = await authority();
+      expect(now.copy?.running).toEqual([]);
+      expect(now.scopes[A]?.order).toBe(first);
+      // The account read issued before the later read still cannot replace the copy: the fence never moves back.
+      expect(
+        await service.store.run(writeTimerCopy, {
+          captured: service.capture(1),
+          copy: {
+            format: 2,
+            order: overtaken ? account : first,
+            read_at: 1,
+            complete: true,
+            running: [{ id: S, occurrence_id: A }],
+          },
+        }),
+      ).toMatchObject({ value: { written: false } });
+    },
+  );
+
+  test("one snapshot: the copy, every readable scope, and a floor raised by every scope or map that does not read", async () => {
+    const { service, seed, issue, correct, authority } = await world();
+    const a = await issue();
+    await correct(a, A);
+    const b = await issue();
+    await correct(b, B);
+    expect(await authority()).toMatchObject({
+      copy: null,
+      floor: 0,
+      scopes: { [A]: { order: a }, [B]: { order: b } },
+    });
+    // One scope that does not read: its own `seen` is lost.
+    seed({
+      timer_scopes: {
+        [A]: { seen: a, order: a, running: [], ended: [], ended_at: 0 },
+        [B]: { seen: b, order: "x" },
+      },
+    });
+    const one = await authority();
+    expect(Object.keys(one.scopes)).toEqual([A]);
+    expect(one.floor).toBe(b);
+    // A map that is not a map: every order handed out so far.
+    seed({ timer_scopes: "lost" as never, timer_order: 9 });
+    expect(await authority()).toMatchObject({ scopes: {}, floor: 9 });
+    // A correction over it keeps that loss (the floor) while it records the new day.
+    const c = await issue();
+    await correct(c, A);
+    const after = await authority();
+    expect(after.scopes[A]?.order).toBe(c);
+    expect(after.floor).toBeGreaterThanOrEqual(9);
+    expect(
+      (
+        await service.store.run(readTimerScope, {
+          incarnationId: service.incarnationId,
+          occurrenceId: A,
+        })
+      ).floor,
+    ).toBe(after.floor);
   });
 });

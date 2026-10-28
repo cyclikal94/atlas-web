@@ -434,6 +434,8 @@ export async function mountTasks(options: {
   discovery?: Record<string, object>;
   /** WEB-10c revision 1: overlay rows (`pending_effects`) seeded with the drafts, so an acknowledged draft's effect still stands. */
   effects?: object[];
+  /** WEB-10c revision 4: further `sync_state` fields seeded as another page left them (the timer order, fence, scopes and floor). */
+  sync?: Partial<SyncStateRow>;
 }): Promise<Mounted> {
   assertNoOpenActScope("mountTasks");
   // The routes load the screens lazily; loading the module first makes the lazy components resolve at once.
@@ -469,6 +471,13 @@ export async function mountTasks(options: {
       world.idb.seed(NAME, "sync_state", [
         { ...sync, materialise_discovery: options.discovery as never },
       ]);
+    }
+    if (options.sync !== undefined) {
+      const sync = world.idb.peek(NAME, "sync_state", "singleton") as
+        | SyncStateRow
+        | undefined;
+      if (sync === undefined) throw new Error("setup: no sync state");
+      world.idb.seed(NAME, "sync_state", [{ ...sync, ...options.sync }]);
     }
     if (options.cacheStatus !== undefined) {
       const sync = world.idb.peek(NAME, "sync_state", "singleton") as

@@ -6,7 +6,6 @@ import {
   useDataEnv,
   useDraftWithCommand,
   useSharingDefaults,
-  useTimerScope,
 } from "../../../data";
 import type { TaskActions } from "../actions";
 import * as copy from "../copy";
@@ -33,7 +32,7 @@ import {
 import {
   type IssuedRead,
   issueTimerRead,
-  useCopiedTimers,
+  useTimerEvidence,
 } from "../timers/copy";
 import type { PendingMark, RowModel } from "../view";
 import type { DependencyState } from "./Dependencies";
@@ -348,8 +347,9 @@ export function TimerBlock({
   const timerDrafts = row.drafts.filter((d) => timerCommandOf(d) !== null);
   const again = timerDrafts.map((d) => `${d.local_id}:${d.status}`).join(",");
   const day = useDaySessions(row.id, again);
-  const copied = useCopiedTimers();
-  const scoped = useTimerScope(row.id);
+  // The copy, the day's scope and the floor of ONE snapshot (revision 4, review R19); none read yet: no ordered positive is trusted.
+  const evidence = useTimerEvidence();
+  const copied = evidence.copy;
   const running = runningOn(row.id, {
     drafts: timerDrafts,
     read: day.sessions,
@@ -358,8 +358,8 @@ export function TimerBlock({
     readOrder: day.order,
     copyOrder: copied?.order ?? null,
     copyComplete: copied?.complete ?? false,
-    scope: scoped.status === "ready" ? scoped.value.scope : null,
-    floor: scoped.status === "ready" ? scoped.value.floor : 0,
+    scope: evidence.authority?.scopes[row.id] ?? null,
+    floor: evidence.authority?.floor ?? Number.POSITIVE_INFINITY,
   });
   const now = useSecond(running.length > 0);
   const [showSessions, setShowSessions] = useState(false);

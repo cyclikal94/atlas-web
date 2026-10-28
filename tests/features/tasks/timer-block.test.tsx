@@ -947,3 +947,98 @@ describe("R14: absence is evidence only from what was read whole", () => {
     20_000,
   );
 });
+
+/**
+ * Revision 4 (review R19, family `timer-copy-authoritative-absence`): the floor is loss information about EVERY source, the copy included.
+ * REVIEW4 T6 is ported verbatim (a later read of another day lands first, then this day's empty complete read with its scope refused by
+ * the real quota port: the floor rises to that read's order, which is after the copy's). The remount checks that nothing revives it from
+ * the copy afterwards.
+ */
+describe("R19: a refused scope retires the copy's session too", () => {
+  test.each([false, true])(
+    "REVIEW4 T6 (ported): scope reservation refused = %s; and after a remount",
+    async (refused) => {
+      const task = await seconds();
+      const session = copied(task, nowSeconds() - 600);
+      const t = await mountTasks({
+        path: path(task),
+        rows: task.rows,
+        env: { online: false },
+        timerCopy: {
+          format: 2,
+          order: 1,
+          read_at: Date.now(),
+          complete: true,
+          running: [session],
+        },
+      });
+      await t.until(() => block()?.dataset.timerBlock === "running");
+      const service = t.data.service() as AccountService;
+      const captured = service.capture(1);
+      const earlier = await issueTimerOrderNow(service, captured);
+      const later = await issueTimerOrderNow(service, captured);
+      await commitTimerCorrection(t.data, service, captured, {
+        order: later as number,
+        drop: copyCorrection("dddddddd-0000-4000-8000-000000000001", [], true),
+        scope: dayObservation("dddddddd-0000-4000-8000-000000000001", [], true),
+      });
+      const env = refused
+        ? {
+            quota: {
+              reserve: async () => ({
+                verdict: "refuse",
+                settle: () => undefined,
+              }),
+            },
+          }
+        : t.data;
+      await commitTimerCorrection(env as never, service, captured, {
+        order: earlier as number,
+        drop: copyCorrection(task.occurrenceId, [], true),
+        scope: dayObservation(task.occurrenceId, [], true),
+      });
+      await t.settle();
+      const sync = t.world.idb.peek(
+        accountDatabaseName(ME),
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      if (refused) expect(sync.timer_scope_floor).toBe(earlier);
+      else
+        expect(
+          (sync.timer_scopes as Record<string, { order: number }>)[
+            task.occurrenceId
+          ]?.order,
+        ).toBe(earlier);
+      expect(block()?.dataset.timerBlock).toBe("idle");
+      t.remount();
+      await t.until(() => block() !== null);
+      await t.settle();
+      expect(block()?.dataset.timerBlock).toBe("idle");
+    },
+  );
+
+  test.each([
+    ["below the floor: not trusted", 1, "idle"],
+    ["at the floor (control)", 3, "running"],
+  ])("a copy %s, whatever its rows say", async (_, order, expected) => {
+    const task = await seconds();
+    const session = copied(task, nowSeconds() - 600);
+    const t = await mountTasks({
+      path: path(task),
+      rows: task.rows,
+      env: { online: false },
+      timerCopy: {
+        format: 2,
+        order,
+        read_at: Date.now(),
+        complete: true,
+        running: [session],
+      },
+      sync: { timer_order: 3, timer_fence: 3, timer_scope_floor: 3 },
+    });
+    await t.until(() => block() !== null);
+    await t.settle();
+    expect(block()?.dataset.timerBlock).toBe(expected);
+  });
+});

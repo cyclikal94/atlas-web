@@ -126,7 +126,7 @@ export const UNIT_10C = [
         '      if (stored.phase === "stopped") return DONE;\n',
         '      if (stored.phase === "stopped") {\n' +
           "        const again = await commit(service, captured, key, stored, freshBudget(stored));\n" +
-          "        if (again?.stored) await drive(again.stored, today);\n" +
+          "        if (again?.stored) await drive(at, again.stored, today);\n" +
           "        return DONE;\n" +
           "      }\n",
       ),
@@ -1053,8 +1053,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "  const found = discovery[taskId]?.stop;\n  if (found)",
-        "  const found = discovery[taskId]?.stop;\n  if (false as boolean && found)",
+        "  if (entry && found)",
+        "  if (false as boolean && entry && found)",
       ),
   },
   {
@@ -1162,8 +1162,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "    complete: copy.value.complete && !lost,",
-        "    complete: copy.value.complete,",
+        "    complete: copy.complete && !lost,",
+        "    complete: copy.complete,",
       ),
   },
   {
@@ -1298,6 +1298,270 @@ export const UNIT_10C = [
     tests: RUNNER_TESTS,
     expect: /Try again pressed under the ended binding/,
     patch: (t) => sub(t, "      item.retry.service === service &&\n", ""),
+  },
+  // ---- revision 4 (review 4 R19-R22, design assessment of 27 October 2026): one fault per new guard ---------------------------
+  {
+    id: "MU-3102",
+    title:
+      "R19: WEB-10c A15: offline, the account list shows the raw copy, unjudged by the day scopes and the floor",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /REVIEW4 T5 \(ported\)|below the floor a copied row/,
+    patch: (t) =>
+      sub(
+        t,
+        "(copied?.rows ?? []).filter((r) => stands(r, copied?.order ?? null))",
+        "(copied?.rows ?? []).filter((r) => true || stands(r, copied?.order ?? null))",
+      ),
+  },
+  {
+    id: "MU-3103",
+    title:
+      "R19: WEB-10c A15: online, the account list shows its live rows unjudged by a later day read",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /online: a later complete read/,
+    patch: (t) =>
+      sub(
+        t,
+        "running.value.rows.filter((r) =>",
+        "running.value.rows.filter((r) => true ||",
+      ),
+  },
+  {
+    id: "MU-3104",
+    title:
+      "R19: WEB-10c A15: a session the page's own history lists stopped is still shown running",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /history has listed stopped/,
+    patch: (t) => sub(t, "    !stopped.has(row.id) &&\n", ""),
+  },
+  {
+    id: "MU-3105",
+    title:
+      "R19: WEB-10c A12/A15: a Stop queued after its row was retired while the act waited",
+    file: "src/features/tasks/timers/TimersPage.tsx",
+    tests: ["tests/features/tasks/timers-page.test.tsx"],
+    expect: /is retired while the act waits/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (!standing.current.has(row.id)) {",
+        "      if (false as boolean) {",
+      ),
+  },
+  {
+    id: "MU-3106",
+    title:
+      "R19: WEB-10c A15: the floor is not the copy's rule (the detail keeps a copied session below it)",
+    file: "src/features/tasks/model/timers.ts",
+    tests: [
+      "tests/features/tasks/timer-model.test.ts",
+      "tests/features/tasks/timer-block.test.tsx",
+    ],
+    expect: /the floor|REVIEW4 T6 \(ported\)|a copy below the floor/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!copyTrusted || s.stopped_at !== null",
+        "    if (s.stopped_at !== null",
+      ),
+  },
+  {
+    id: "MU-3107",
+    title:
+      "R19: WEB-10c A15: an unread authority is taken as no corrections (every ordered positive stands)",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /authority not read yet/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (authority === null) return order === null;",
+        "  if (authority === null) return true;",
+      ),
+  },
+  {
+    id: "MU-3108",
+    title:
+      "R19: WEB-10c A15: a day read of the SAME order retires a session it does not list",
+    file: "src/features/tasks/model/timers.ts",
+    tests: ["tests/features/tasks/timer-model.test.ts"],
+    expect: /its day's read is not later/,
+    patch: (t) =>
+      sub(t, "    scope.order > order &&", "    scope.order >= order &&"),
+  },
+  {
+    id: "MU-3109",
+    title:
+      "R19: WEB-10c A15: a day's correction is fenced out by a later read of ANOTHER day (the copy keeps the session)",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /REVIEW4 T5 at the plan/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const fence = floorOf(sync);\n    const stored = parseTimerCopy(sync.timer_copy ?? null);",
+        "    const fence = floorOf(sync);\n    if (input.order < fence)\n      return {\n        ...(next === sync ? {} : { sync: next }),\n        result: { removed: 0, applied: false, scoped },\n      };\n    const stored = parseTimerCopy(sync.timer_copy ?? null);",
+      ),
+  },
+  {
+    id: "MU-3110",
+    title:
+      "R19: WEB-10c A15: an earlier day's correction moves the fence back (an older account read replaces the copy)",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /REVIEW4 T5 at the plan/,
+    patch: (t) =>
+      sub(
+        t,
+        "        timer_fence: Math.max(fence, input.order),",
+        "        timer_fence: input.order,",
+      ),
+  },
+  {
+    id: "MU-3111",
+    title:
+      "R19: WEB-10c A15: the authority drops an unreadable scope without raising the floor",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /one snapshot/,
+    patch: (t) =>
+      sub(
+        t,
+        "      else floor = Math.max(floor, lostAt(value, issued));\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3112",
+    title:
+      "R19: WEB-10c A15: a scopes map that is not a map is read as none recorded (no floor)",
+    file: "src/data/plans/timer-copy.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /one snapshot/,
+    patch: (t) =>
+      sub(
+        t,
+        "  raw !== undefined && raw !== null && !isObject(raw) ? issued : 0;",
+        "  0;",
+      ),
+  },
+  {
+    id: "MU-3113",
+    title:
+      "R20: WEB-10c A3/A19: the sequence compare-and-set ignores the revision (a later stop passes as the one pressed on)",
+    file: "src/data/plans/materialise.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect:
+      /REVIEW4 M4 \(ported\)|presses carrying the stop shown|attempt key and revision/,
+    patch: (t) =>
+      sub(
+        t,
+        "    sequenceRevision(stored) === sequenceRevision(expected)",
+        "    true",
+      ),
+  },
+  {
+    id: "MU-3114",
+    title:
+      "R20: WEB-10c A3/A19: a sequence write keeps the caller's revision instead of moving it",
+    file: "src/data/plans/materialise.ts",
+    tests: [
+      "tests/data/materialise-plans.test.ts",
+      "tests/features/tasks/catchup-runner.test.ts",
+    ],
+    expect:
+      /REVIEW4 M4 \(ported\)|every write moves the revision|presses carrying the stop shown/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const row: MaterialiseSequenceRow = { ...next, revision: revision + 1 };",
+        "    const row: MaterialiseSequenceRow = { ...next };",
+      ),
+  },
+  {
+    id: "MU-3115",
+    title:
+      "R20: WEB-10c A19: a lift writes the sequence although the discovery it was pressed on no longer stands",
+    file: "src/data/plans/materialise.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /a lift writes both stops or neither/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !sameDiscovery(discoveryOf(entries, input.task_id), lift.expected)",
+        "        false",
+      ),
+  },
+  {
+    id: "MU-3116",
+    title:
+      "R20: WEB-10c A19: a press naming an earlier stop lifts the later one stored now",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RUNNER_TESTS,
+    expect: /a genuinely later press/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (sequence.revision ?? 0) === seen.revision",
+        "        true",
+      ),
+  },
+  {
+    id: "MU-3117",
+    title:
+      "R20: WEB-10c A1/A19: Today's Try again does not name the stop it was pressed on",
+    file: "src/features/tasks/today/CatchUpBanner.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /names the stop it was pressed on Today's banner/,
+    patch: (t) =>
+      sub(
+        t,
+        "runner.tryAgain(stop.taskId, stop.throughDate, stop.seen)",
+        "runner.tryAgain(stop.taskId, stop.throughDate)",
+      ),
+  },
+  {
+    id: "MU-3118",
+    title:
+      "R20: WEB-10c A19: the detail's Try again does not name the stop it was pressed on",
+    file: "src/features/tasks/catchup/CatchUpNotice.tsx",
+    tests: ["tests/features/tasks/catchup-banner.test.tsx"],
+    expect: /names the stop it was pressed on the task's detail/,
+    patch: (t) =>
+      sub(
+        t,
+        "runner.tryAgain(taskId, stop.throughDate, stop.seen)",
+        "runner.tryAgain(taskId, stop.throughDate)",
+      ),
+  },
+  {
+    id: "MU-3119",
+    title:
+      "R21: WEB-10c A1/A19: a task's FIRST day is read as its latest (a later day's stop or progress hidden)",
+    file: "src/data/plans/materialise.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /found past any number/,
+    patch: (t) => sub(t, "        n - 1,\n", "        0,\n"),
+  },
+  {
+    id: "MU-3120",
+    title:
+      "R22: WEB-10c A6/A18: a held streak read publishes whatever happened since it was asked (only the identity is checked)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /REVIEW4 S1 \(ported\)|a held 409 released once offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!mine.live || owner.current !== mine || identity.current !== asked)",
+        "        if (identity.current !== asked)",
+      ),
   },
 ];
 

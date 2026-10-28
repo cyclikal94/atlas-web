@@ -138,6 +138,13 @@ export function parseTimerScope(value: unknown): TimerScopeRecord | null {
 const lostAt = (raw: unknown, issued: number): number =>
   orderOf(isObject(raw) ? raw.seen : undefined) || issued;
 
+/**
+ * The floor a scopes map that is present but not a map leaves (revision 4): every scope it held is lost, so every order handed out so far
+ * (`issued`). An absent map is "none recorded yet".
+ */
+const mapLost = (raw: unknown, issued: number): number =>
+  raw !== undefined && raw !== null && !isObject(raw) ? issued : 0;
+
 /** What a read of one day observed, for its scope: `running`/`ended` as listed by every page accepted so far. */
 export interface TimerScopeObservation {
   occurrence_id: string;
@@ -272,8 +279,11 @@ export const writeTimerCopy = guardedPlan<
 /**
  * A correction of the copy by a read of ONE occurrence's sessions (`order` from `issueTimerOrder`): the rows `drop` names are removed
  * (`newer`: the read was issued after the copy's own, so what it does not list may be decided by absence; the slice decides), and the
- * fence moves to `order` either way, so an answer issued before this read can no longer replace the copy. A correction older than the
- * fence changes nothing in the copy; one of the fence's own order is a later page of the same read. Removing rows needs no admission.
+ * fence moves up to `order`, so an answer issued before this read can no longer replace the copy. Removing rows needs no admission.
+ *
+ * Revision 4 (review R19): the correction applies to the copy WHATEVER the fence. The fence is the latest order of ANY read applied, so a
+ * later read of ANOTHER day says nothing about this one: an earlier read of this day that lands after it still retires what it did not
+ * list from an older copy (`newer` is decided against the copy's own order, never the fence), and the fence never moves back.
  *
  * The same read's `scope` is recorded in `timer_scopes` under the day's OWN order (revision 3, DA-T3), whatever the copy's fence: that
  * record grows the singleton, so the caller admits it through the quota ledger and passes the reservation's `live()` (`leaseLive`); a
@@ -303,7 +313,10 @@ export const reconcileTimerCopy = guardedPlan<
     let next = sync;
     let scoped = false;
     if (input.scope !== undefined) {
-      const floor = orderOf(sync.timer_scope_floor);
+      const floor = Math.max(
+        orderOf(sync.timer_scope_floor),
+        mapLost(sync.timer_scopes, orderOf(sync.timer_order)),
+      );
       const admitted =
         input.admitted !== false &&
         (input.leaseLive === undefined || input.leaseLive());
@@ -325,12 +338,6 @@ export const reconcileTimerCopy = guardedPlan<
         next = { ...next, timer_scope_floor: Math.max(floor, input.order) };
     }
     const fence = floorOf(sync);
-    // The same order again is the same read's later page (its traversal keeps its first page's place).
-    if (input.order < fence)
-      return {
-        ...(next === sync ? {} : { sync: next }),
-        result: { removed: 0, applied: false, scoped },
-      };
     const stored = parseTimerCopy(sync.timer_copy ?? null);
     const kept =
       stored === null
@@ -348,7 +355,7 @@ export const reconcileTimerCopy = guardedPlan<
         ...(stored !== null && kept !== null && removed > 0
           ? { timer_copy: { ...stored, running: kept } }
           : {}),
-        timer_fence: input.order,
+        timer_fence: Math.max(fence, input.order),
       },
       result: { removed, applied: true, scoped },
     };
@@ -364,6 +371,45 @@ export const readTimerCopy = readPlan<
   scope: [],
   read: async () => null,
   decide: ({ sync }) => parseTimerCopy(sync?.timer_copy ?? null),
+});
+
+/**
+ * Revision 4 (review R19): everything that decides whether a server-derived running session still stands, read in ONE transaction so
+ * every consumer judges against the same moment: the copy, every day's scope and the floor (raised by every scope that does not read, as
+ * `readTimerScope` does; a scopes map that is not a map loses every order handed out so far). The scopes are bounded (`TIMER_SCOPES`).
+ */
+export interface TimerAuthorityRecord {
+  copy: TimerCopyRecord | null;
+  scopes: Record<string, TimerScopeRecord>;
+  floor: number;
+}
+export const readTimerAuthority = readPlan<
+  { incarnationId: string },
+  null,
+  TimerAuthorityRecord
+>({
+  name: "data.readTimerAuthority",
+  scope: [],
+  read: async () => null,
+  decide: ({ sync }) => {
+    const issued = orderOf(sync?.timer_order);
+    const raw: unknown = sync?.timer_scopes;
+    let floor = Math.max(
+      orderOf(sync?.timer_scope_floor),
+      mapLost(raw, issued),
+    );
+    const scopes: Record<string, TimerScopeRecord> = {};
+    for (const [id, value] of Object.entries(isObject(raw) ? raw : {})) {
+      const scope = parseTimerScope(value);
+      if (scope !== null) scopes[id] = scope;
+      else floor = Math.max(floor, lostAt(value, issued));
+    }
+    return {
+      copy: parseTimerCopy(sync?.timer_copy ?? null),
+      scopes,
+      floor,
+    };
+  },
 });
 
 /** One day's scope (DA-T3) and the floor below which a day's read is no longer trusted for what it saw running. */
@@ -383,6 +429,7 @@ export const readTimerScope = readPlan<
       scope,
       floor: Math.max(
         orderOf(sync?.timer_scope_floor),
+        mapLost(sync?.timer_scopes, orderOf(sync?.timer_order)),
         // A scope stored but unreadable: its authority is lost, so nothing it may have retired is trusted.
         raw !== undefined && scope === null
           ? lostAt(raw, orderOf(sync?.timer_order))

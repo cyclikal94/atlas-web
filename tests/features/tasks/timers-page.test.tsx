@@ -1,12 +1,18 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { commitTimerCorrection, issueTimerOrderNow } from "../../../src/data";
+import type { AccountService } from "../../../src/data/engine/account-service";
 import { accountDatabaseName } from "../../../src/data/model/schema";
 import type { SyncStateRow } from "../../../src/data/model/types";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import { TIMER_COPY } from "../../../src/features/tasks/detail/Timer";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import type { AccountTimerPage } from "../../../src/features/tasks/model/contract";
+import {
+  copyCorrection,
+  dayObservation,
+} from "../../../src/features/tasks/model/timers";
 import { TIMERS_COPY } from "../../../src/features/tasks/timers/TimersPage";
 import { installMatchMedia } from "../../helpers/match-media";
 import {
@@ -502,4 +508,249 @@ describe("R10: one read owns each section", () => {
     await t.until(() => reads > queued);
     expect(reads).toBeGreaterThan(queued);
   });
+});
+
+/**
+ * Revision 4 (review R19, family `timer-copy-authoritative-absence`): every running row this list shows stands by the detail's rule against
+ * the same snapshot (the copy, every day's scope, the floor). REVIEW4 T5 is ported verbatim (the reviewer's schedule and assertions); the
+ * live list and the page's own history are the other sources the same rule now covers.
+ */
+describe("R19: one authority for every running row", () => {
+  const OTHER_DAY = "dddddddd-0000-4000-8000-000000000001";
+  test.each([false, true])(
+    "REVIEW4 T5 (ported): newer other-day correction lands first = %s",
+    async (overtaken) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        env: { online: false },
+        timerCopy: {
+          format: 2,
+          order: 1,
+          read_at: Date.now(),
+          complete: true,
+          running: [session],
+        },
+      });
+      await t.until(() => rowOf(session.id) !== null);
+      const service = t.data.service() as AccountService;
+      const captured = service.capture(1);
+      const first = await issueTimerOrderNow(service, captured);
+      const later = await issueTimerOrderNow(service, captured);
+      expect(first).toBeGreaterThan(1);
+      expect(later).toBeGreaterThan(first as number);
+      if (overtaken)
+        await commitTimerCorrection(t.data, service, captured, {
+          order: later as number,
+          drop: copyCorrection(OTHER_DAY, [], true),
+          scope: dayObservation(OTHER_DAY, [], true),
+        });
+      await commitTimerCorrection(t.data, service, captured, {
+        order: first as number,
+        drop: copyCorrection(task.occurrenceId, [], true),
+        scope: dayObservation(task.occurrenceId, [], true),
+      });
+      await t.settle();
+      const sync = t.world.idb.peek(
+        NAME,
+        "sync_state",
+        "singleton",
+      ) as SyncStateRow;
+      expect(
+        (sync.timer_scopes as Record<string, { running: string[] }>)[
+          task.occurrenceId
+        ]?.running,
+      ).toEqual([]);
+      expect(rowOf(session.id)).toBeNull();
+    },
+  );
+
+  test.each([
+    ["its own day", true],
+    ["another day (control)", false],
+  ])(
+    "online: a later complete read of %s published while the list is shown retires the live row (= %s)",
+    async (_, same) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      const api = fakeApi({
+        readAccountTimers: async (q) =>
+          q.state === "running" ? page([session]) : page([]),
+      });
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api,
+      });
+      await t.until(() => rowOf(session.id) !== null);
+      expect(
+        within(rowOf(session.id) as HTMLElement).getByRole("button", {
+          name: TIMER_COPY.stop,
+        }),
+      ).toBeEnabled();
+      // Another tab's (or the detail's) complete read of a day, issued after this list's read.
+      const service = t.data.service() as AccountService;
+      const captured = service.capture(1);
+      const order = await issueTimerOrderNow(service, captured);
+      const day = same ? task.occurrenceId : OTHER_DAY;
+      await commitTimerCorrection(t.data, service, captured, {
+        order: order as number,
+        drop: copyCorrection(day, [], true),
+        scope: dayObservation(day, [], true),
+      });
+      await t.settle();
+      if (same) expect(rowOf(session.id)).toBeNull();
+      else
+        expect(
+          within(rowOf(session.id) as HTMLElement).getByRole("button", {
+            name: TIMER_COPY.stop,
+          }),
+        ).toBeEnabled();
+    },
+  );
+
+  test.each([
+    ["listed stopped", true],
+    ["not listed (control)", false],
+  ])(
+    "online: a running row the page's own history has %s is not shown running (= %s)",
+    async (_, listed) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      const other = available(task, {
+        id: "cccccccc-0000-4000-8000-000000000019",
+        stopped_at: now() - 30,
+        can_modify: false,
+      });
+      const api = fakeApi({
+        readAccountTimers: async (q) =>
+          q.state === "running"
+            ? page([session])
+            : page([listed ? { ...session, stopped_at: now() - 30 } : other]),
+      });
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        api,
+      });
+      await t.until(
+        () =>
+          document
+            .querySelector("[data-timers-history]")
+            ?.getAttribute("data-timers-history") === "ready",
+      );
+      const running = document.querySelector(
+        "[data-timers-running]",
+      ) as HTMLElement;
+      expect(
+        running.querySelector(`[data-account-timer="${session.id}"]`) !== null,
+      ).toBe(!listed);
+      expect(
+        within(running).queryAllByRole("button", { name: TIMER_COPY.stop }),
+      ).toHaveLength(listed ? 0 : 1);
+    },
+  );
+
+  test.each([
+    ["is retired while the act waits: nothing is queued", true],
+    ["still stands (control): the stop is queued", false],
+  ])("a Stop pressed on a row that %s", async (_, retire) => {
+    const task = await seededTask({ title: "Practise piano" });
+    const session = available(task);
+    const api = fakeApi({
+      readAccountTimers: async (q) =>
+        q.state === "running" ? page([session]) : page([]),
+    });
+    const t = await mountTasks({ path: "/tasks/timers", rows: task.rows, api });
+    await t.until(() => rowOf(session.id) !== null);
+    // The act's first wait (its stream id's digest) is held, so a correction can land exactly there.
+    const digest = crypto.subtle.digest.bind(crypto.subtle);
+    let release!: () => void;
+    let holding = true;
+    const spy = vi
+      .spyOn(crypto.subtle, "digest")
+      .mockImplementation(async (algorithm, data) => {
+        if (!holding) return digest(algorithm, data);
+        holding = false;
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return digest(algorithm, data);
+      });
+    try {
+      fireEvent.click(
+        within(rowOf(session.id) as HTMLElement).getByRole("button", {
+          name: TIMER_COPY.stop,
+        }),
+      );
+      await t.until(() => !holding);
+      if (retire) {
+        const service = t.data.service() as AccountService;
+        const captured = service.capture(1);
+        const order = await issueTimerOrderNow(service, captured);
+        await commitTimerCorrection(t.data, service, captured, {
+          order: order as number,
+          drop: copyCorrection(task.occurrenceId, [], true),
+          scope: dayObservation(task.occurrenceId, [], true),
+        });
+        await t.until(() => rowOf(session.id) === null);
+      }
+      release();
+      await t.settle();
+      await t.settle();
+      expect(t.drafts().filter((d) => d.kind === "stop_timer")).toHaveLength(
+        retire ? 0 : 1,
+      );
+    } finally {
+      release?.();
+      spy.mockRestore();
+    }
+  });
+
+  test.each([
+    ["refused (the floor is raised)", true],
+    ["admitted (control)", false],
+  ])(
+    "offline: below the floor a copied row is not offered; its day's scope reservation %s",
+    async (_, refused) => {
+      const task = await seededTask({ title: "Practise piano" });
+      const session = available(task);
+      const t = await mountTasks({
+        path: "/tasks/timers",
+        rows: task.rows,
+        env: { online: false },
+        timerCopy: {
+          format: 2,
+          order: 1,
+          read_at: Date.now(),
+          complete: true,
+          running: [session],
+        },
+      });
+      await t.until(() => rowOf(session.id) !== null);
+      const service = t.data.service() as AccountService;
+      const captured = service.capture(1);
+      const order = await issueTimerOrderNow(service, captured);
+      // A complete read of ANOTHER day: admitted it decides nothing here; refused, its loss raises the floor past the copy.
+      const env = refused
+        ? {
+            quota: {
+              reserve: async () => ({
+                verdict: "refuse",
+                settle: () => undefined,
+              }),
+            },
+          }
+        : t.data;
+      await commitTimerCorrection(env as never, service, captured, {
+        order: order as number,
+        drop: copyCorrection(OTHER_DAY, [], true),
+        scope: dayObservation(OTHER_DAY, [], true),
+      });
+      await t.settle();
+      expect(rowOf(session.id) === null).toBe(refused);
+    },
+  );
 });

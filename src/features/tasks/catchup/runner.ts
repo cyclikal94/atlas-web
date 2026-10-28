@@ -1,6 +1,7 @@
 import {
   type AccountService,
   commitMaterialiseDiscovery,
+  commitMaterialiseLift,
   commitMaterialiseSequence,
   type DataEnv,
   DISCOVERY_REQUEST_ID,
@@ -117,6 +118,16 @@ export interface UnrecordedStop {
   requestId?: string;
 }
 
+/**
+ * The stop a "Try again" was pressed on, as the screen showed it (revision 4, review R20): a day's sequence by its generation and
+ * revision (every write moves the revision, so a later stop is never this one), a discovery by its entry's retry generation, or a stop
+ * held in a page's memory only.
+ */
+export type SeenStop =
+  | { kind: "sequence"; generation: string; revision: number }
+  | { kind: "discovery"; retry: number }
+  | { kind: "memory" };
+
 export interface CatchUpRunner {
   readonly identity: string;
   /** Asks for a task to be brought up to date through its today (or `throughDate`). Idempotent per task and day. */
@@ -127,9 +138,10 @@ export interface CatchUpRunner {
   ): void;
   /**
    * The person's "Try again" for a task's stopped sequence through `throughDate` (the record's own key, whichever page stopped it), or
-   * for its memory-only stop (no day): a fresh budget, then the work resumes.
+   * for its memory-only stop (no day): a fresh budget, then the work resumes. `seen`: the stop the person pressed it on, as shown (review
+   * R20); when it no longer stands as shown, nothing is lifted or asked (the screen shows what stands now).
    */
-  tryAgain(taskId: string, throughDate?: string): void;
+  tryAgain(taskId: string, throughDate?: string, seen?: SeenStop): void;
   /** Connectivity or compatibility changed: waiting work may proceed. */
   kick(): void;
   get(): RunnerState;
@@ -245,6 +257,35 @@ interface Item {
 /** The binding one piece of work began with (review R17): it reads, writes and stamps through this service only. */
 interface Binding {
   service: AccountService;
+}
+
+/**
+ * What a press made on `seen` lifts of what is stored now (review R20), or `null` when the stop the screen showed no longer stands: a
+ * day's stop only while it is that very row (generation and revision), with the discovery stop in front of it (its work cannot go on
+ * without it); a discovery stop only while it is that entry; a memory stop lifts nothing durable.
+ */
+function pressedOn(
+  seen: SeenStop,
+  discovery: MaterialiseDiscovery | null,
+  sequence: Sequence | null,
+): {
+  discovery: MaterialiseDiscovery | null;
+  sequence: Sequence | null;
+} | null {
+  switch (seen.kind) {
+    case "sequence":
+      return sequence !== null &&
+        sequence.sequence_generation === seen.generation &&
+        (sequence.revision ?? 0) === seen.revision
+        ? { discovery: discovery?.stop ? discovery : null, sequence }
+        : null;
+    case "discovery":
+      return discovery?.stop && discovery.retry === seen.retry
+        ? { discovery, sequence: null }
+        : null;
+    case "memory":
+      return { discovery: null, sequence: null };
+  }
 }
 
 const NO_DISCOVERY: MaterialiseDiscovery = {
@@ -499,48 +540,54 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
 
   /**
    * The person's "Try again", under the lock (review R13), through the binding it was pressed under (R17): lifts the discovery stop and
-   * the day's stopped sequence it was pressed on, if they still stand as seen. Only a lift WRITTEN here admits a fresh budget: another
-   * press, here or in another tab, that lifted them first leaves this one with nothing to add. `false`: nothing more is done (the stop
-   * stays shown, or the other press's work carries on).
+   * the day's stopped sequence it was pressed on, if they still stand as seen, in ONE compare-and-set (revision 4, review R20: both or
+   * neither; the sequence compared by its revision, so a stop that came back the same way after another press's budget is not the one
+   * pressed on). Only a lift WRITTEN here admits a fresh budget: another press, here or in another tab, that lifted them first leaves this
+   * one with nothing to add. `false`: nothing more is done (the stop stays shown, or the other press's work carries on).
    */
   const lift = async (
     at: Binding,
     item: Item & { retry: NonNullable<Item["retry"]> },
   ): Promise<boolean> => {
     const seen = item.retry.discovery;
-    if (seen?.stop) {
-      const out = await commitMaterialiseDiscovery(
+    const stopped = item.retry.sequence;
+    if (seen?.stop || stopped !== null) {
+      const out = await commitMaterialiseLift(
         at.service,
         at.service.capture(deps.epoch),
         {
           task_id: item.taskId,
-          expected: seen,
-          next: {
-            retry: seen.retry + 1,
-            failures: 0,
-            stop: null,
-            attempt: null,
-          },
+          discovery: seen?.stop
+            ? {
+                expected: seen,
+                next: {
+                  retry: seen.retry + 1,
+                  failures: 0,
+                  stop: null,
+                  attempt: null,
+                },
+              }
+            : null,
+          // A fresh budget from the position reached, the held attempt (if any) kept: same key, same body (CM-440).
+          sequence:
+            stopped === null
+              ? null
+              : {
+                  key: {
+                    task_id: stopped.task_id,
+                    through_date: stopped.through_date,
+                  },
+                  expected: expectationOf(stopped) as NonNullable<
+                    ReturnType<typeof expectationOf>
+                  >,
+                  next: freshBudget(stopped),
+                },
         },
       );
       if (out.kind !== "applied" || out.value.kind !== "written") return false;
     }
     if (!owns(at)) return false;
     unrecord(item.taskId);
-    const stopped = item.retry.sequence;
-    if (stopped !== null) {
-      // A fresh budget from the position reached, the held attempt (if any) kept.
-      const out = await commitMaterialiseSequence(
-        at.service,
-        at.service.capture(deps.epoch),
-        {
-          key: { task_id: stopped.task_id, through_date: stopped.through_date },
-          expected: expectationOf(stopped),
-          next: freshBudget(stopped),
-        },
-      );
-      if (out.kind !== "applied" || out.value.kind !== "written") return false;
-    }
     return true;
   };
 
@@ -864,10 +911,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       publishQueue();
       pump();
     },
-    tryAgain(taskId, throughDate) {
+    tryAgain(taskId, throughDate, seen) {
       if (disposed) return;
       void (async () => {
-        // What the person pressed it on, as stored now: lifted under the lock only if it still stands so (review R13).
+        // What the person pressed it on, as stored now: lifted under the lock only if it still stands so (review R13), and only if it
+        // is the stop the screen showed (review R20).
         const service = alive();
         rebind(service);
         const day = throughDate ?? settledThrough.get(taskId)?.day;
@@ -884,6 +932,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
             });
             if (stored === undefined) return;
             if (stored?.phase === "stopped") sequence = stored;
+          }
+          if (seen !== undefined) {
+            const shown = pressedOn(seen, discovery, sequence);
+            if (shown === null) return;
+            ({ discovery, sequence } = shown);
           }
         }
         if (disposed) return;

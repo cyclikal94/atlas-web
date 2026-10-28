@@ -131,7 +131,7 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
   // WEB-10c: the catch-up sequences (a compare-and-set of the reserved store) and the running-timer copy (one record, a cache write).
   // Revision 2: the discovery entries (W27, in the singleton) and the timer observation order and its corrections (W28, fixed-size).
   W27: {
-    name: "writeMaterialiseSequence / pruneMaterialiseSequences / writeMaterialiseDiscovery",
+    name: "writeMaterialiseSequence / pruneMaterialiseSequences / writeMaterialiseDiscovery / liftMaterialiseStops",
     guards: ["INC", "CLS", "EPO"],
     durability: "strict",
   },
@@ -318,6 +318,8 @@ describe("F-S7: the writer inventory", () => {
       "data.recordDeviceVerification",
       // WEB-10c: one catch-up row of a few hundred bytes per task and day while it catches up, pruned when a later day begins.
       "data.writeMaterialiseSequence",
+      // WEB-10c revision 4 (review R20): "Try again" replaces that row and an EXISTING discovery entry in one compare-and-set (no growth).
+      "data.liftMaterialiseStops",
     ];
     expect(
       listPlans()

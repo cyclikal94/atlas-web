@@ -8,8 +8,8 @@ import {
   type MaterialiseSequenceRow,
   readResourcesNow,
   useDataEnv,
+  useLatestSequences,
   useMaterialiseDiscovery,
-  useMaterialiseSequences,
 } from "../../../data";
 import type { TasksApi } from "../api";
 import { type TasksEnv, useTasksEnv } from "../env";
@@ -95,8 +95,11 @@ const NONE: Readonly<Record<string, MaterialiseDiscovery>> = {};
 export interface CatchUp {
   runner: CatchUpRunner;
   state: RunnerState;
-  /** The durable sequences of the account (every page's), live. */
-  records: Loadable<MaterialiseSequenceRow[]>;
+  /**
+   * The latest day's durable sequence of each task asked for (every page's), live. Revision 4 (review R21): read by task, so no other
+   * task's rows can hide one of these; `loading` until every read has answered (never read as "no sequence").
+   */
+  records: Loadable<ReadonlyMap<string, MaterialiseSequenceRow>>;
   /** The account's failed discoveries by task (every page's; review R13), live; empty until read (`discoveryRead` false). */
   discovery: Readonly<Record<string, MaterialiseDiscovery>>;
   discoveryRead: boolean;
@@ -123,10 +126,10 @@ export function useCatchUpService(): CatchUpRunner {
   return runner;
 }
 
-export function useCatchUp(): CatchUp {
+export function useCatchUp(taskIds: readonly string[]): CatchUp {
   const runner = useCatchUpService();
   const state = useSyncExternalStore(runner.subscribe, runner.get, runner.get);
-  const records = useMaterialiseSequences(null);
+  const records = useLatestSequences(taskIds);
   const found = useMaterialiseDiscovery();
   const discovery = found.status === "ready" ? found.value : NONE;
   return {

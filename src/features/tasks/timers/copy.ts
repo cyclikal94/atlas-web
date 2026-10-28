@@ -2,9 +2,11 @@ import {
   type AccountService,
   type DataEnv,
   issueTimerOrderNow,
-  useTimerCopy,
+  type TimerCopyRecord,
+  useTimerAuthority,
 } from "../../../data";
 import { type AccountTimerSession, parseAccountTimer } from "../model/contract";
+import type { TimerAuthority } from "../model/timers";
 
 /**
  * The running-timer copy of the displayed account's database (W28, D-10c-4), parsed row by row: a row that does not parse is left out,
@@ -24,21 +26,38 @@ export interface TimerCopy {
   rows: AccountTimerSession[];
 }
 
-export function useCopiedTimers(): TimerCopy | null {
-  const copy = useTimerCopy();
-  if (copy.status !== "ready" || copy.value === null) return null;
+function parsed(copy: TimerCopyRecord | null): TimerCopy | null {
+  if (copy === null) return null;
   const rows: AccountTimerSession[] = [];
   let lost = false;
-  for (const raw of copy.value.running) {
+  for (const raw of copy.running) {
     const row = parseAccountTimer(raw);
     if (row !== null && row.stopped_at === null) rows.push(row);
     else lost = true;
   }
   return {
-    readAt: copy.value.read_at,
-    order: copy.value.order,
-    complete: copy.value.complete && !lost,
+    readAt: copy.read_at,
+    order: copy.order,
+    complete: copy.complete && !lost,
     rows,
+  };
+}
+
+/**
+ * The copy and the authority it, and every other server-derived running session, is judged by (revision 4, review R19), from ONE read of
+ * the displayed account's database: the detail's block and the account's list use the same snapshot and the same rule (`stillRunning`).
+ * `authority` is null while that read is not answered (loading, or the store failed): then no copy is shown and no ordered positive is
+ * trusted.
+ */
+export function useTimerEvidence(): {
+  copy: TimerCopy | null;
+  authority: TimerAuthority | null;
+} {
+  const read = useTimerAuthority();
+  if (read.status !== "ready") return { copy: null, authority: null };
+  return {
+    copy: parsed(read.value.copy),
+    authority: { scopes: read.value.scopes, floor: read.value.floor },
   };
 }
 

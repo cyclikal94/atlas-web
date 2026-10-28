@@ -27,12 +27,13 @@ import {
   elapsed,
   SEVEN_DAYS,
   type StopChoice,
+  stillRunning,
   stopChoice,
   timerCommandOf,
 } from "../model/timers";
 import { taskPath } from "../route";
 import type { PendingMark } from "../view";
-import { type IssuedRead, issueTimerRead, useCopiedTimers } from "./copy";
+import { type IssuedRead, issueTimerRead, useTimerEvidence } from "./copy";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const TIMERS_COPY = {
@@ -65,6 +66,8 @@ type Section =
       rows: AccountTimerSession[];
       next: string | null;
       more: "idle" | "loading" | "error";
+      /** The read's place in the observation order (W28; its first page's, for every page of it), or null (review R19). */
+      order: number | null;
     }
   | { kind: "error"; requestId?: string };
 
@@ -153,18 +156,27 @@ function useSection(state: "running" | "stopped", again: string) {
       return;
     }
     link.next = result.value.next_after;
-    setSection((prev) => ({
-      scope,
-      value: {
-        kind: "ready",
-        rows:
-          after === null || prev.scope !== scope || prev.value.kind !== "ready"
+    setSection((prev) => {
+      const first =
+        after === null || prev.scope !== scope || prev.value.kind !== "ready";
+      return {
+        scope,
+        value: {
+          kind: "ready",
+          rows: first
             ? result.value.items
-            : merge(prev.value.rows, result.value.items),
-        next: result.value.next_after,
-        more: "idle",
-      },
-    }));
+            : merge(
+                (prev.value as Extract<Section, { kind: "ready" }>).rows,
+                result.value.items,
+              ),
+          next: result.value.next_after,
+          more: "idle",
+          order: first
+            ? (issued?.order ?? null)
+            : (prev.value as Extract<Section, { kind: "ready" }>).order,
+        },
+      };
+    });
     // Every accepted FIRST page of the running list is the copy this device keeps (bounded), for a reload offline.
     if (issued !== null && data.service() === issued.service)
       void commitTimerCopy(data, issued.service, issued.captured, {
@@ -381,7 +393,8 @@ export function TimersPage() {
   const again = `${asked}|${drafts.map((d) => `${d.local_id}:${d.status}`).join(",")}`;
   const running = useSection("running", again);
   const history = useSection("stopped", again);
-  const copied = useCopiedTimers();
+  const evidence = useTimerEvidence();
+  const copied = evidence.copy;
   const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -391,12 +404,36 @@ export function TimersPage() {
     return () => clearInterval(timer);
   }, []);
   const offline = running.value.kind === "offline";
-  const copiedRows = offline ? (copied?.rows ?? []) : [];
-  const shownRunning = offline
-    ? copiedRows
-    : running.value.kind === "ready"
-      ? running.value.rows
+  // Every running row, from the copy offline or the live list online, stands only by the detail's rule against the same snapshot
+  // (revision 4, review R19): a later complete read of its day, a finished listing or the floor retires it; so does this page's own
+  // history (a session listed stopped never runs again). What was read is kept as read; only what is shown is resolved.
+  const stopped = new Set(
+    history.value.kind === "ready" ? history.value.rows.map((r) => r.id) : [],
+  );
+  const stands = (row: AccountTimerSession, order: number | null) =>
+    !stopped.has(row.id) &&
+    stillRunning(
+      evidence.authority,
+      row.access === "available" ? row.occurrence_id : null,
+      row.id,
+      order,
+    );
+  const copiedRows = offline
+    ? (copied?.rows ?? []).filter((r) => stands(r, copied?.order ?? null))
+    : [];
+  const runningRows =
+    running.value.kind === "ready"
+      ? running.value.rows.filter((r) =>
+          stands(
+            r,
+            (running.value as Extract<Section, { kind: "ready" }>).order,
+          ),
+        )
       : [];
+  const shownRunning = offline ? copiedRows : runningRows;
+  // What an act may still end once its own reads are answered (review R19: a correction can land while it waits).
+  const standing = useRef(new Set<string>());
+  standing.current = new Set(shownRunning.map((r) => r.id));
   // The days of the running rows this device holds: a copied row's title offline, and every row's window (a closed day's stop).
   const cached = useCachedResources(
     shownRunning.flatMap((r) =>
@@ -433,6 +470,11 @@ export function TimersPage() {
       const held = await readResourcesNow(data, [stream, row.occurrence_id]);
       const day = held?.get(row.occurrence_id)?.merged;
       const parsed = day ? parseOccurrenceData(day.value) : null;
+      // Retired while this waited: nothing is queued (the row has gone from the screen with its actions).
+      if (!standing.current.has(row.id)) {
+        setChoosing(null);
+        return;
+      }
       const input = {
         occurrenceId: row.occurrence_id,
         sessionId: row.id,
@@ -484,7 +526,6 @@ export function TimersPage() {
       closedAt: closed,
     };
   };
-  const runningRows = running.value.kind === "ready" ? running.value.rows : [];
   const historyRows = history.value.kind === "ready" ? history.value.rows : [];
   const nothing =
     running.value.kind === "ready" &&

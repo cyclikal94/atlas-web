@@ -349,6 +349,11 @@ export interface MaterialiseSequenceRow {
   started_at: number;
   /** Consecutive uncertain answers (a send or a read). */
   read_failures: number;
+  /**
+   * Revision 4 (review R20): +1 on EVERY write of the row, stamped by W27 itself, so a row never comes back to an identity a caller saw
+   * before (a "Try again" pressed on one stop cannot lift a later stop that looks the same). Absent on rows of earlier builds: 0.
+   */
+  revision?: number;
   stop: null | {
     reason:
       | "bound"

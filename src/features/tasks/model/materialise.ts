@@ -63,12 +63,14 @@ export function materialiseCommand(taskId: string, throughDate: string) {
   };
 }
 
-/** The stored row's identity: what a compare-and-set of it expects. */
+/** The stored row's identity: what a compare-and-set of it expects (its revision included: review R20). */
 export const expectationOf = (row: Sequence): SequenceExpectation => ({
   sequence_generation: row.sequence_generation,
   phase: row.phase,
   read_seq: row.read_seq,
   attempt_key: row.attempt?.key ?? null,
+  // As stored; W27 reads an absent or unreadable one as 0 on both sides.
+  revision: row.revision ?? 0,
 });
 
 /** The sequence is over: the server's position covers the day (nothing due through it, or generated through it). */

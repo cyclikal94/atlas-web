@@ -134,7 +134,10 @@ describe("sending: the attempt is written before it is sent", () => {
       phase: "awaiting_position_read",
       read_seq: 1,
       attempt_key: null,
+      // Revision 4 (review R20): the row's revision as stored (W27 stamps it; a row not yet written has none: 0).
+      revision: 0,
     });
+    expect(expectationOf({ ...ok, revision: 7 })?.revision).toBe(7);
   });
 
   test("three consecutive uncertain answers stop it as unreachable, KEEPING the attempt for Try again", () => {

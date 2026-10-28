@@ -1191,3 +1191,270 @@ test.describe("E-TM3: a day read in another tab retires what this tab's kept rea
       });
     });
 });
+
+/** The shared store of the account, read or written through `page` (the tab whose session holds the store handle). */
+const syncOf = (page: Page) =>
+  page.evaluate(async (acct) => {
+    const rows = (await window.__atlasData?.rows(acct, "sync_state")) as Array<{
+      timer_fence?: number;
+      timer_scopes?: Record<string, { order?: number }>;
+      timer_copy?: { running?: Array<{ id: string }> };
+    }>;
+    return rows?.[0] ?? {};
+  }, ACCOUNT);
+
+test.describe("E-TM4: another tab's later day read retires the live account row (revision 4: R19)", () => {
+  // The fixture's session protocol takes the account's requests one at a time across windows, so a read issued earlier cannot be held
+  // while a later one is answered here (that inversion, REVIEW4 T5, is the deterministic jsdom case). What a real second tab CAN do is
+  // publish a later complete read of a day while this tab shows its account list online: the same authority rule applies to live rows.
+  for (const which of ["the same day", "another day (control)"] as const)
+    test(`tab B's complete empty read of ${which}; tab A's live list ${which === "the same day" ? "no longer offers" : "still offers"} the session`, async ({
+      context,
+    }, info) => {
+      const goal = {
+        kind: "numeric",
+        minimum: "1800",
+        maximum: null,
+        unit: "seconds",
+      } as const;
+      const here = buildTask({ n: 413, title: "Practise piano", goal });
+      const other = buildTask({ n: 414, title: "Practise scales", goal });
+      const id = "cccccccc-0000-4000-8000-000000000113";
+      const detail = (task: BuiltTask) =>
+        `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+      const { page, r10c } = await setup(
+        context,
+        "/tasks/timers",
+        [here, other],
+        (_reads, r) => {
+          r.accountTimers = (q) => ({
+            status: 200,
+            body: {
+              items:
+                q.state === "running"
+                  ? [
+                      {
+                        access: "available",
+                        id,
+                        occurrence_id: here.occurrenceId,
+                        task_id: here.taskId,
+                        task_title: "Practise piano",
+                        slot_date: TODAY,
+                        started_at: Math.floor(Date.now() / 1000) - 600,
+                        stopped_at: null,
+                        version: 2,
+                        can_modify: true,
+                      },
+                    ]
+                  : [],
+              next_after: null,
+            },
+          });
+          // The session was cancelled elsewhere since: every day read lists nothing.
+          r.timers = () => ({
+            status: 200,
+            body: { items: [], next_after: null },
+          });
+        },
+      );
+      const row = page.locator(`[data-account-timer="${id}"]`);
+      await expect(row.getByRole("button", { name: "Stop" })).toBeVisible();
+      const fence = async () => (await syncOf(page)).timer_fence ?? 0;
+      await expect.poll(fence).toBeGreaterThan(0);
+      const before = await fence();
+      const target = which === "the same day" ? here : other;
+      const second = await bootAt(context, detail(target));
+      await expect(second.locator("[data-timer-block]")).toHaveAttribute(
+        "data-timer-block",
+        "idle",
+      );
+      // Tab B's read has been applied to the shared store (inspected through tab A).
+      await expect.poll(fence).toBeGreaterThan(before);
+      await page.bringToFront();
+      if (which === "the same day") await expect(row).toHaveCount(0);
+      else {
+        await page.waitForTimeout(1_000);
+        await expect(row.getByRole("button", { name: "Stop" })).toBeVisible();
+      }
+      recordEvidence(info, "e-tm4", {
+        which,
+        log: r10c.log.map(({ from, ...e }) => ({
+          ...e,
+          tab: from === page ? 1 : from === second ? 2 : 0,
+        })),
+      });
+    });
+});
+
+test.describe("E-M6: two tabs press Try again on the same stop (revision 4: R20)", () => {
+  test("both presses are made while the account's lock is busy; the stop gets ONE fresh budget: three sends with the stored key, not six", async ({
+    context,
+  }, info) => {
+    const stuck = repeating(415, "Water the plants");
+    const busy = repeating(416, "Feed the cat");
+    const key = "eeeeeeee-0000-4000-8000-000000000415";
+    let freeBusy: () => void = () => undefined;
+    const busyHeld = new Promise<void>((r) => {
+      freeBusy = r;
+    });
+    const { page, r10c } = await setup(
+      context,
+      "/tasks",
+      [stuck, busy],
+      (reads, r) => {
+        reads.respond = (q) =>
+          dailyPage(
+            [view(stuck), view(busy)],
+            q.scope === "joint"
+              ? { pending_tasks: [busy.taskId, stuck.taskId] }
+              : {},
+          );
+        r.position = async ({ taskId }) => {
+          // The other task's catch-up keeps the lock busy until it is freed.
+          if (taskId === busy.taskId) {
+            await busyHeld;
+            return detailOf(busy, { last_date: TODAY, pending: false });
+          }
+          return detailOf(stuck, { last_date: yesterday(10), pending: true });
+        };
+        r.materialise = () => refusal(500, "internal");
+      },
+    );
+    // The stuck task's sequence stopped with an uncertain attempt (another page's, or before a reload).
+    await page.evaluate(
+      async ([acct, row]) => {
+        await window.__atlasData?.put(acct, "materialise_sequences", [row]);
+      },
+      [
+        ACCOUNT,
+        {
+          task_id: stuck.taskId,
+          through_date: TODAY,
+          sequence_generation: "aaaaaaaa-0000-4000-8000-000000000415",
+          phase: "stopped",
+          attempt: {
+            key,
+            body: JSON.stringify({
+              kind: "materialise",
+              limit: 16,
+              task_id: stuck.taskId,
+              through_date: TODAY,
+            }),
+          },
+          read_seq: 0,
+          successful_calls: 0,
+          last_known_position: yesterday(10),
+          started_at: 1,
+          read_failures: 3,
+          stop: { reason: "unreachable" },
+          trigger: "daily",
+        },
+      ] as const,
+    );
+    // Tab 2 shows the stop on the task's own detail before anything is held (a window waits for another's request in flight).
+    const second = await bootAt(
+      context,
+      `/tasks/${stuck.taskId}?occurrence=${stuck.occurrenceId}`,
+    );
+    const tryAgain = (tab: Page) =>
+      tab
+        .locator(`[data-catch-up-task="${stuck.taskId}"]`)
+        .getByRole("button", { name: "Try again" });
+    await expect(tryAgain(second)).toBeVisible({ timeout: 15_000 });
+    // Tab 1 opens Today: it catches the other task up, and that work keeps the account's lock (its position read is held).
+    await page.bringToFront();
+    await page.evaluate((day) => {
+      history.pushState(null, "", `/today?day=${day}&tz=UTC`);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, TODAY);
+    await expect(tryAgain(page)).toBeVisible({ timeout: 15_000 });
+    await expect
+      .poll(() => positionReads(r10c, busy).length, { timeout: 15_000 })
+      .toBeGreaterThan(0);
+    // Both presses are made on the stop as shown, while the lock is busy.
+    for (const tab of [page, second]) {
+      await tab.bringToFront();
+      await tryAgain(tab).click();
+    }
+    expect(posts(r10c)).toHaveLength(0);
+    freeBusy();
+    await expect
+      .poll(() => posts(r10c).length, { timeout: 30_000 })
+      .toBeGreaterThanOrEqual(3);
+    // Both tabs have had the lock since (each finished its queue): no fourth send follows.
+    await second.waitForTimeout(8_000);
+    const sent = posts(r10c);
+    expect(sent.map((e) => e.key)).toEqual([key, key, key]);
+    recordEvidence(info, "e-m6", {
+      log: r10c.log.map(({ from, ...e }) => ({
+        ...e,
+        tab: from === page ? 1 : from === second ? 2 : 0,
+      })),
+    });
+  });
+});
+
+test.describe("E-M7: a stop behind many other tasks' rows (revision 4: R21)", () => {
+  for (const others of [100, 0] as const)
+    test(`${others} other tasks' stops sort first: Today shows this task's stop with its reason and Try again, and sends nothing`, async ({
+      context,
+    }, info) => {
+      const task = repeating(417, "Water the plants");
+      const { page, r10c } = await setup(
+        context,
+        "/tasks",
+        [task],
+        (reads, r) => {
+          reads.respond = (q) =>
+            dailyPage(
+              [view(task)],
+              q.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+            );
+          r.position = () =>
+            detailOf(task, { last_date: yesterday(10), pending: true });
+        },
+      );
+      const stop = {
+        through_date: TODAY,
+        sequence_generation: "g",
+        phase: "stopped",
+        attempt: null,
+        read_seq: 1,
+        successful_calls: 8,
+        last_known_position: yesterday(10),
+        started_at: 1,
+        read_failures: 0,
+        stop: { reason: "bound" },
+        trigger: "daily",
+      };
+      const rows = [
+        ...Array.from({ length: others }, (_, i) => ({
+          ...stop,
+          task_id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+        })),
+        { ...stop, task_id: task.taskId },
+      ];
+      expect(rows.every((r) => r.task_id <= task.taskId)).toBe(true);
+      await page.evaluate(
+        async ([acct, seeded]) => {
+          await window.__atlasData?.put(acct, "materialise_sequences", seeded);
+        },
+        [ACCOUNT, rows] as const,
+      );
+      await page.evaluate((day) => {
+        history.pushState(null, "", `/today?day=${day}&tz=UTC`);
+        dispatchEvent(new PopStateEvent("popstate"));
+      }, TODAY);
+      const notice = page.locator(`[data-catch-up-task="${task.taskId}"]`);
+      await expect(notice).toBeVisible({ timeout: 15_000 });
+      await expect(notice).toHaveAttribute("data-catch-up-stopped", "bound");
+      await expect(
+        notice.getByRole("button", { name: "Try again" }),
+      ).toBeEnabled();
+      expect(posts(r10c)).toHaveLength(0);
+      recordEvidence(info, "e-m7", {
+        others,
+        log: r10c.log.map(({ from: _from, ...e }) => e),
+      });
+    });
+});

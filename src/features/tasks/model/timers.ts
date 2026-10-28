@@ -90,6 +90,42 @@ export interface DayScope {
 }
 
 /**
+ * What decides whether a server-derived running session still stands, as ONE snapshot of this database (W28; revision 4, review R19):
+ * every day's scope and the floor. `null` while it is not read (loading, or the store could not be read): nothing is known to be retired,
+ * so no ordered positive is trusted (`stillRunning`), never "no corrections".
+ */
+export interface TimerAuthority {
+  scopes: Readonly<Record<string, DayScope>>;
+  floor: number;
+}
+
+/**
+ * Whether a session a server read listed RUNNING at `order` still stands against `authority` (revision 4, review R19): the rule every
+ * consumer applies to every source (the copy, the account's live list, a day's read now or kept), so no consumer offers an action another
+ * has retired. Not when its day's reads listed it finished; not when its day's latest complete read is LATER and does not list it (a read
+ * of another day says nothing about it); not when it was seen below the floor (what may have retired it was not kept). A positive whose
+ * order is unknown is retired only by a finished listing. `occurrenceId` null: a restricted row, whose day is not known (the floor alone).
+ */
+export function stillRunning(
+  authority: TimerAuthority | null,
+  occurrenceId: string | null,
+  sessionId: string,
+  order: number | null,
+): boolean {
+  if (authority === null) return order === null;
+  const scope =
+    occurrenceId === null ? undefined : authority.scopes[occurrenceId];
+  if (scope?.ended.includes(sessionId)) return false;
+  if (order === null) return true;
+  if (order < authority.floor) return false;
+  return !(
+    scope !== undefined &&
+    scope.order > order &&
+    !scope.running.includes(sessionId)
+  );
+}
+
+/**
  * The sessions running on `occurrenceId` for me, from every source, a stop or discard on its way taking a session out (the draft's own
  * conflict blocks speak for a failed one).
  *
@@ -102,7 +138,8 @@ export interface DayScope {
  * order below one of them, and not listed by it, was cancelled or stopped since. A session seen where the order is unknown is never
  * retired by absence (nothing says which came first); nor is this device's unsettled start, which stays until its draft settles (its read
  * is asked again when the draft's state changes, and a read issued before the server applied the start cannot know it). A day's read
- * issued before `floor` is not trusted for what it saw running: what may have retired it was not kept.
+ * issued before `floor` is not trusted for what it saw running: what may have retired it was not kept; nor is the copy (revision 4, review
+ * R19: the floor is loss information about every source, not only the day's read).
  */
 export function runningOn(
   occurrenceId: string,
@@ -162,14 +199,14 @@ export function runningOn(
   const retired = (id: string, order: number | null | undefined) =>
     finished.has(id) ||
     (known(order) && complete.some((o) => o.order > order && !o.lists.has(id)));
-  const readTrusted = !(
-    known(input.readOrder) &&
-    input.floor !== undefined &&
-    input.readOrder < input.floor
-  );
+  const trusted = (order: number | null | undefined) =>
+    !(known(order) && input.floor !== undefined && order < input.floor);
+  const readTrusted = trusted(input.readOrder);
+  const copyTrusted = trusted(input.copyOrder);
   for (const s of input.copy ?? []) {
     if (s.access !== "available" || s.occurrence_id !== occurrenceId) continue;
-    if (s.stopped_at !== null || retired(s.id, input.copyOrder)) continue;
+    if (!copyTrusted || s.stopped_at !== null || retired(s.id, input.copyOrder))
+      continue;
     out.set(s.id, {
       id: s.id,
       occurrenceId,

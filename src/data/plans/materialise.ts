@@ -22,12 +22,17 @@ export type SequenceKey = Pick<
   "task_id" | "through_date"
 >;
 
-/** What the caller decided on: the key absent (`null`), or the stored row's identity of the moment. */
+/**
+ * What the caller decided on: the key absent (`null`), or the stored row's identity of the moment. Revision 4 (review R20): with its
+ * `revision`, which every write moves, so a row that returns to the same phase, read and attempt (a fresh budget that stopped again the
+ * same way) is still not the row an earlier decision saw.
+ */
 export type SequenceExpectation = null | {
   sequence_generation: string;
   phase: MaterialiseSequenceRow["phase"];
   read_seq: number;
   attempt_key: string | null;
+  revision: number;
 };
 
 export type SequenceWrite =
@@ -43,6 +48,14 @@ const keyOf = (key: SequenceKey): [string, string] => [
   key.through_date,
 ];
 
+/** A row's revision as stored: absent (a row of an earlier build) or unreadable is 0, so the next write moves it to 1. */
+export const sequenceRevision = (
+  row: Pick<MaterialiseSequenceRow, "revision">,
+) =>
+  Number.isSafeInteger(row.revision) && (row.revision as number) >= 0
+    ? (row.revision as number)
+    : 0;
+
 export function matchesExpectation(
   stored: MaterialiseSequenceRow | undefined,
   expected: SequenceExpectation,
@@ -53,7 +66,8 @@ export function matchesExpectation(
     stored.sequence_generation === expected.sequence_generation &&
     stored.phase === expected.phase &&
     stored.read_seq === expected.read_seq &&
-    (stored.attempt?.key ?? null) === expected.attempt_key
+    (stored.attempt?.key ?? null) === expected.attempt_key &&
+    sequenceRevision(stored) === sequenceRevision(expected)
   );
 }
 
@@ -95,9 +109,15 @@ export const writeMaterialiseSequence = guardedPlan<
       next.through_date !== input.key.through_date
     )
       return { result: { kind: "stale", stored } };
+    // The revision is the store's, never the caller's (review R20): one more than the row replaced, 1 for a new one. A revision that
+    // cannot move any more is not overwritten (nothing is written; the caller adopts what is stored).
+    const revision = reads === undefined ? 0 : sequenceRevision(reads);
+    if (revision >= Number.MAX_SAFE_INTEGER)
+      return { result: { kind: "stale", stored } };
+    const row: MaterialiseSequenceRow = { ...next, revision: revision + 1 };
     return {
-      writes: [w.put("materialise_sequences", next)],
-      result: { kind: "written", stored: next },
+      writes: [w.put("materialise_sequences", row)],
+      result: { kind: "written", stored: row },
     };
   },
 });
@@ -166,6 +186,45 @@ export const readMaterialiseSequences = readPlan<
           range.between([input.taskId, ""], [input.taskId, "￿"]),
           SEQUENCE_WINDOW,
         ),
+  decide: ({ reads }) => reads,
+});
+
+/**
+ * Revision 4 (review R21): the LATEST day's sequence of each named task, whatever else the account holds, so a stop of a task the screen
+ * shows is reachable however many other tasks' rows sort before it. Bounded per read: at most `SEQUENCE_WINDOW` tasks (a caller with more
+ * reads them in several reads), each found with a count of its key range and one row at its end (no bodies but that one are read).
+ */
+export const readLatestSequences = readPlan<
+  { incarnationId: string; taskIds: readonly string[] },
+  Record<string, MaterialiseSequenceRow>,
+  Record<string, MaterialiseSequenceRow>
+>({
+  name: "data.readLatestSequences",
+  scope: ["materialise_sequences"],
+  read: async (reader, input) => {
+    const tasks = [...new Set(input.taskIds)];
+    if (tasks.length > SEQUENCE_WINDOW)
+      throw new Error("readLatestSequences: more tasks than one read admits");
+    const out: Record<string, MaterialiseSequenceRow> = {};
+    for (const taskId of tasks) {
+      const span = range.between([taskId, ""], [taskId, "￿"]);
+      const n = await reader.count(
+        "materialise_sequences",
+        "[task_id+through_date]",
+        span,
+      );
+      if (n === 0) continue;
+      const [last] = await reader.byIndex(
+        "materialise_sequences",
+        "[task_id+through_date]",
+        span,
+        1,
+        n - 1,
+      );
+      if (last !== undefined) out[taskId] = last;
+    }
+    return out;
+  },
   decide: ({ reads }) => reads,
 });
 
@@ -273,6 +332,79 @@ export const writeMaterialiseDiscovery = guardedPlan<
     return {
       sync: { ...sync, materialise_discovery: entries },
       result: { kind: "written", stored: input.next },
+    };
+  },
+});
+
+/**
+ * Revision 4 (review R20): the person's "Try again" as ONE compare-and-set of what it was pressed on: the task's stopped discovery entry
+ * and the day's stopped sequence (either may be absent). Both still stand as seen and both are replaced, or nothing is written (`stale`),
+ * so a lift never clears one stop and loses the other, and a press can never lift a later stop it did not see (the sequence's revision
+ * moves on every write). A discovery lift replaces an existing entry (no growth); a sequence row is the fixed-size W27 row.
+ */
+export interface MaterialiseLift {
+  task_id: string;
+  discovery: {
+    expected: MaterialiseDiscovery;
+    next: MaterialiseDiscovery;
+  } | null;
+  sequence: {
+    key: SequenceKey;
+    expected: Exclude<SequenceExpectation, null>;
+    next: MaterialiseSequenceRow;
+  } | null;
+}
+
+export const liftMaterialiseStops = guardedPlan<
+  MaterialiseLift & { captured: Captured },
+  { row: MaterialiseSequenceRow | undefined },
+  { kind: "written" } | { kind: "stale" }
+>({
+  name: "data.liftMaterialiseStops",
+  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  scope: ["materialise_sequences"],
+  durability: "strict",
+  read: async (reader, input) => ({
+    row:
+      input.sequence === null
+        ? undefined
+        : await reader.get("materialise_sequences", keyOf(input.sequence.key)),
+  }),
+  decide: ({ sync, reads: { row }, input }) => {
+    const stale = { result: { kind: "stale" as const } };
+    const entries = { ...(sync.materialise_discovery ?? {}) };
+    const lift = input.discovery;
+    if (lift !== null) {
+      if (
+        !(input.task_id in entries) ||
+        !sameDiscovery(discoveryOf(entries, input.task_id), lift.expected)
+      )
+        return stale;
+      entries[input.task_id] = lift.next;
+    }
+    const writes = [];
+    const seq = input.sequence;
+    if (seq !== null) {
+      const next = seq.next;
+      const revision = row === undefined ? 0 : sequenceRevision(row);
+      if (
+        seq.key.task_id !== input.task_id ||
+        next.task_id !== seq.key.task_id ||
+        next.through_date !== seq.key.through_date ||
+        !matchesExpectation(row, seq.expected) ||
+        revision >= Number.MAX_SAFE_INTEGER
+      )
+        return stale;
+      writes.push(
+        w.put("materialise_sequences", { ...next, revision: revision + 1 }),
+      );
+    }
+    return {
+      writes,
+      ...(lift === null
+        ? {}
+        : { sync: { ...sync, materialise_discovery: entries } }),
+      result: { kind: "written" as const },
     };
   },
 });

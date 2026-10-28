@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { PageHeading } from "../../../components/ui/page-heading";
 import {
@@ -15,6 +15,7 @@ import {
   useDataEnv,
 } from "../../../data";
 import type { TasksResult } from "../api";
+import type { SeenStop } from "../catchup/runner";
 import { useCatchUp } from "../catchup/useCatchUp";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -213,7 +214,9 @@ const requiresCatchUp = (result: TasksResult<TaskStreak>) =>
  */
 function useStreakFigures(taskId: string, shared: boolean) {
   const env = useTasksEnv();
-  const { runner, state, records, discovery, discoveryRead } = useCatchUp();
+  const { runner, state, records, discovery, discoveryRead } = useCatchUp([
+    taskId,
+  ]);
   const position = useCachePosition();
   // Committed CONTENT asks again (WEB-10a decision 25); the position's first load is not a change.
   const revision =
@@ -227,7 +230,14 @@ function useStreakFigures(taskId: string, shared: boolean) {
     joint: shared ? { kind: "loading" } : null,
   });
   const [ask, setAsk] = useState(0);
-  const generation = useRef(0);
+  // The one read that may still publish (review R22): its reason and whether it still owns the figures.
+  const owner = useRef<{ key: string; live: boolean } | null>(null);
+  // A deliberate refresh retires the read in flight at once, not only when its own effect runs.
+  const refresh = useCallback(() => {
+    if (owner.current) owner.current.live = false;
+    owner.current = null;
+    setAsk((n) => n + 1);
+  }, []);
   const visit = useRef({ caughtUp: false, asked: false, reread: false });
   // A new identity starts the visit's memory afresh.
   const identity = useRef(env.identity);
@@ -237,7 +247,7 @@ function useStreakFigures(taskId: string, shared: boolean) {
   }
   useEffect(() => {
     const again = () => {
-      if (document.visibilityState === "visible") setAsk((n) => n + 1);
+      if (document.visibilityState === "visible") refresh();
     };
     window.addEventListener("focus", again);
     document.addEventListener("visibilitychange", again);
@@ -245,24 +255,37 @@ function useStreakFigures(taskId: string, shared: boolean) {
       window.removeEventListener("focus", again);
       document.removeEventListener("visibilitychange", again);
     };
-  }, []);
-  const ran = useRef<string | null>(null);
+  }, [refresh]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: read again on a visit, a show, committed content or the person's Try again
   useEffect(() => {
-    if (revision === null) return;
-    // One read per reason (a replayed effect asks nothing more).
-    const key = `${taskId}|${shared}|${env.online}|${env.identity}|${revision}|${ask}`;
-    if (ran.current === key) return;
-    ran.current = key;
+    const key =
+      revision === null
+        ? null
+        : `${taskId}|${shared}|${env.online}|${env.identity}|${revision}|${ask}`;
+    const held = owner.current;
+    if (held !== null && held.key === key) {
+      // One read per reason: a replayed effect resumes its own read and asks nothing more.
+      held.live = true;
+      return () => {
+        held.live = false;
+      };
+    }
+    // Any other run ends the earlier read's ownership before it returns: going offline, losing the committed position, another
+    // identity, task or reason (review R22). A held answer then changes nothing it no longer owns.
+    if (held !== null) held.live = false;
+    owner.current = null;
+    if (key === null) return;
+    const mine = { key, live: true };
+    owner.current = mine;
     if (!env.online) {
       setRead({
         personal: { kind: "offline" },
         joint: shared ? { kind: "offline" } : null,
       });
-      return;
+      return () => {
+        mine.live = false;
+      };
     }
-    generation.current += 1;
-    const mine = generation.current;
     const asked = env.identity;
     const one = async (scope: "personal" | "joint"): Promise<Read> => {
       const result = await env.api.readStreak(taskId, scope);
@@ -284,21 +307,23 @@ function useStreakFigures(taskId: string, shared: boolean) {
     };
     void Promise.all([one("personal"), shared ? one("joint") : null]).then(
       ([personal, joint]) => {
-        // Only the latest read of the displayed identity is shown (CM-384).
-        if (generation.current !== mine || identity.current !== asked) return;
+        // Only the read that still owns the figures of the displayed identity is shown (CM-384, review R22).
+        if (!mine.live || owner.current !== mine || identity.current !== asked)
+          return;
         setRead({ personal, joint });
       },
     );
+    return () => {
+      mine.live = false;
+    };
   }, [taskId, shared, env.online, env.identity, revision, ask]);
 
   const waiting =
     read.personal.kind === "catching_up" || read.joint?.kind === "catching_up";
+  // The task's latest day, read by task (review R21).
   const record =
-    records.status === "ready"
-      ? records.value
-          .filter((r) => r.task_id === taskId)
-          .sort((a, b) => b.through_date.localeCompare(a.through_date))[0]
-      : undefined;
+    records.status === "ready" ? records.value.get(taskId) : undefined;
+  const sequencesRead = records.status === "ready";
   // Ask the runner once per visit; read again once when it has finished (no live sequence for the task, none running here).
   useEffect(() => {
     if (!waiting || !env.online) return;
@@ -310,15 +335,17 @@ function useStreakFigures(taskId: string, shared: boolean) {
     const running =
       state.active.includes(taskId) ||
       (record !== undefined && record.phase !== "stopped");
-    // A stopped discovery (review R13) is not a finished catch-up: it is shown, never read past (nor while its record is unread).
+    // A stopped discovery (review R13) is not a finished catch-up: it is shown, never read past (nor while its record, or the task's
+    // sequence, is unread: review R21).
     const stopped =
       record?.phase === "stopped" ||
       !discoveryRead ||
+      !sequencesRead ||
       discovery[taskId]?.stop != null ||
       state.unrecorded.has(taskId);
     if (!running && !stopped && !visit.current.reread) {
       visit.current.reread = true;
-      setAsk((n) => n + 1);
+      refresh();
     }
   }, [
     waiting,
@@ -327,14 +354,26 @@ function useStreakFigures(taskId: string, shared: boolean) {
     record,
     discovery,
     discoveryRead,
+    sequencesRead,
     runner,
     taskId,
+    refresh,
   ]);
   const stoppedRecord =
     waiting && record?.phase === "stopped" && record.stop !== null
       ? record
       : null;
   const discovered = discovery[taskId]?.stop;
+  // What a "Try again" on the stop shown names (review R20).
+  const seen: SeenStop = stoppedRecord
+    ? {
+        kind: "sequence",
+        generation: stoppedRecord.sequence_generation,
+        revision: stoppedRecord.revision ?? 0,
+      }
+    : discovered
+      ? { kind: "discovery", retry: discovery[taskId]?.retry ?? 0 }
+      : { kind: "memory" };
   const memoryStop = !waiting
     ? undefined
     : discovered
@@ -364,10 +403,11 @@ function useStreakFigures(taskId: string, shared: boolean) {
   return {
     personal: stop ?? read.personal,
     joint: read.joint === null ? null : (stop ?? read.joint),
-    retry: () => setAsk((n) => n + 1),
+    retry: refresh,
     tryAgain: (day?: string) => {
       visit.current.reread = false;
-      runner.tryAgain(taskId, day);
+      // A stop of this visit's own reads (a second 409) names no record: the runner asks afresh.
+      runner.tryAgain(taskId, day, stop === null ? undefined : seen);
     },
   };
 }

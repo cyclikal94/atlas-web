@@ -513,3 +513,177 @@ describe("R6: a landed completion is counted once on the strip", () => {
     expect(await numericToday(() => crypto.randomUUID())).toBe("done");
   });
 });
+
+/**
+ * Revision 4 (review R22, family `streak-read-connectivity-ownership`): ONE owner per streak read. Going offline (or any other change of
+ * its reason) ends the read in flight before anything else, so its answer, held past the change, publishes nothing: no figures, no
+ * catch-up. REVIEW4 S1 is ported verbatim (a stable ready screen, exactly one focus refresh held, offline established, then released).
+ */
+describe("R22: a held streak read never replaces what came after it", () => {
+  test.each([false, true])(
+    "REVIEW4 S1 (ported): go offline before a held refresh completes = %s",
+    async (offline) => {
+      const task = await repeating(["complete"]);
+      const held: Array<(v: TasksResult<TaskStreak>) => void> = [];
+      let holding = false;
+      const api = fakeApi({
+        readStreak: async () =>
+          holding
+            ? new Promise<TasksResult<TaskStreak>>((r) => {
+                held.push(r);
+              })
+            : streak(1, 1),
+      });
+      const t = await mountTasks({
+        path: `/tasks/${task.taskId}/streak`,
+        rows: task.rows,
+        api,
+      });
+      await t.until(() => scope("personal")?.dataset.streakState === "ready");
+      expect(scope("personal")?.dataset.streakState).toBe("ready");
+      holding = true;
+      fireEvent(window, new Event("focus"));
+      await t.until(() => held.length > 0);
+      expect(held).toHaveLength(1);
+      if (offline) {
+        t.rerender(tasksEnv(api, { online: false }));
+        await t.until(
+          () => scope("personal")?.dataset.streakState === "offline",
+        );
+        expect(scope("personal")?.dataset.streakState).toBe("offline");
+      }
+      (held[0] as (v: TasksResult<TaskStreak>) => void)(streak(12, 20));
+      await t.settle();
+      expect(scope("personal")?.dataset.streakState).toBe(
+        offline ? "offline" : "ready",
+      );
+    },
+  );
+
+  test.each([
+    ["offline", false],
+    ["still online (control)", true],
+  ])(
+    "a held 409 released once %s: neither the catch-up nor its tile follows",
+    async (_, online) => {
+      const task = await repeating(["complete"]);
+      const held: Array<(v: TasksResult<TaskStreak>) => void> = [];
+      let holding = false;
+      let tasks = 0;
+      const api = fakeApi({
+        readStreak: async () =>
+          holding
+            ? new Promise<TasksResult<TaskStreak>>((r) => {
+                held.push(r);
+              })
+            : streak(1, 1),
+        readTask: () => {
+          tasks += 1;
+          return new Promise(() => undefined);
+        },
+      });
+      const t = await mountTasks({
+        path: `/tasks/${task.taskId}/streak`,
+        rows: task.rows,
+        api,
+      });
+      await t.until(() => scope("personal")?.dataset.streakState === "ready");
+      holding = true;
+      fireEvent(window, new Event("focus"));
+      await t.until(() => held.length > 0);
+      if (!online) {
+        t.rerender(tasksEnv(api, { online: false }));
+        await t.until(
+          () => scope("personal")?.dataset.streakState === "offline",
+        );
+      }
+      (held[0] as (v: TasksResult<TaskStreak>) => void)(MATERIALISE);
+      await t.settle();
+      await t.settle();
+      expect(scope("personal")?.dataset.streakState).toBe(
+        online ? "catching_up" : "offline",
+      );
+      expect(tasks > 0).toBe(online);
+    },
+  );
+
+  test("reconnect: the newer read is shown, and the read held from before going offline changes nothing when it answers last", async () => {
+    const task = await repeating(["complete"]);
+    const held: Array<(v: TasksResult<TaskStreak>) => void> = [];
+    let holding = false;
+    const api = fakeApi({
+      readStreak: async () =>
+        holding
+          ? new Promise<TasksResult<TaskStreak>>((r) => {
+              held.push(r);
+            })
+          : streak(5, 9),
+    });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}/streak`,
+      rows: task.rows,
+      api,
+    });
+    await t.until(() => scope("personal")?.dataset.streakState === "ready");
+    holding = true;
+    fireEvent(window, new Event("focus"));
+    await t.until(() => held.length > 0);
+    t.rerender(tasksEnv(api, { online: false }));
+    await t.until(() => scope("personal")?.dataset.streakState === "offline");
+    holding = false;
+    t.rerender(tasksEnv(api, { online: true }));
+    await t.until(() => scope("personal")?.dataset.streakState === "ready");
+    const shown = scope("personal")?.textContent;
+    (held[0] as (v: TasksResult<TaskStreak>) => void)(streak(12, 20));
+    await t.settle();
+    expect(scope("personal")?.dataset.streakState).toBe("ready");
+    expect(scope("personal")?.textContent).toBe(shown);
+  });
+});
+
+/**
+ * Revision 4 (review R21): the streak reads its OWN task's latest sequence, so other tasks' retained rows cannot hide its recorded stop
+ * (and it does not read past a catch-up whose sequence it has not read).
+ */
+describe("R21: the streak's recorded stop, whatever other tasks hold", () => {
+  test.each([
+    ["100 other tasks' rows sort first", 100],
+    ["none (control)", 0],
+  ])("%s", async (_, n) => {
+    const task = await repeating(["complete"]);
+    const target = {
+      task_id: task.taskId,
+      through_date: TODAY,
+      sequence_generation: "g",
+      phase: "stopped",
+      attempt: null,
+      read_seq: 1,
+      successful_calls: 8,
+      last_known_position: TODAY,
+      started_at: 1,
+      read_failures: 0,
+      stop: { reason: "bound" },
+      trigger: "streak",
+    };
+    const others = Array.from({ length: n }, (_, i) => ({
+      ...target,
+      task_id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+    }));
+    const api = fakeApi({
+      readStreak: async () => MATERIALISE,
+      readTask: () => new Promise(() => undefined),
+    });
+    const t = await mountTasks({
+      path: `/tasks/${task.taskId}/streak`,
+      rows: task.rows,
+      api,
+      sequences: [...others, target],
+    });
+    await t.until(() => scope("personal")?.dataset.streakState === "stopped");
+    expect(
+      scope("personal")
+        ?.querySelector("[data-streak-stopped]")
+        ?.getAttribute("data-streak-stopped"),
+    ).toBe("bound");
+  });
+});

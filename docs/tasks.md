@@ -949,7 +949,13 @@ copy's order and corrections, the opening read and the send's preparation, disco
 native E-M5 and E-TM2. Revision 3 (Review 3 R14–R18, design assessment DA-T3): the reviewer's T4, D3, M2, M3, R4 and R4-P ported with
 their controls into `timer-block`, `dependency-dialog`, `catchup-runner` and `rota`; the observation rule in both directions (`timer-model`),
 the day scopes, bounds, floor and admission (`materialise-plans`), root admission at every entry point, discovery admission and binding
-schedules, rota read ownership; native E-TM3 (another tab's day read reaches this tab's kept read); MU-3085…MU-3101.
+schedules, rota read ownership; native E-TM3 (another tab's day read reaches this tab's kept read); MU-3085…MU-3101. Revision 4 (Review 4
+R19–R22): the reviewer's T5, T6, M4, M5 and S1 ported with their controls into `timers-page`, `timer-block`, `catchup-runner`,
+`catchup-banner` and `streak-page`; the one timer authority (`stillRunning` in `timer-model`; the live list, the page's own history, a
+retirement while an act waits), the sequence revision and the combined lift, the latest row by task and the authority snapshot
+(`materialise-plans`), Try again naming the stop shown, the streak read's ownership across offline and reconnect; native E-TM4 (another
+tab's day read retires the live account row), E-M6 (two real tabs, one real lock: one fresh budget) and E-M7 (a stop behind 100 other
+tasks' rows in real IndexedDB); MU-3102…MU-3120.
 
 ## Limits (WEB-10c)
 
@@ -966,6 +972,11 @@ schedules, rota read ownership; native E-TM3 (another tab's day read reaches thi
   running session as not running offline until it reads again (the conservative side). A task's catch-up record is admitted before its
   first read: on a device the quota ledger refuses, the task shows "This device is short of storage space…" with Try again and nothing is
   sent. Pages without Web Locks each admit the read they send; the later admission wins and the other's answer records nothing.
+- **Revision 4.** Every running timer row, wherever shown, is judged by the day scopes and the floor of one snapshot: while that snapshot
+  is not read (a moment at mount, or a store that fails), no ordered server session is offered, and below the floor the account list and
+  the detail both hide a copied session (the conservative side) until a newer read. A "Try again" lifts only the stop it was pressed on; a
+  stop that came back meanwhile shows again and needs its own press. Today, the detail and the streak read each task's own latest catch-up
+  record, in reads of at most 100 tasks.
 - **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
   compatibility are those last rendered (a pause is taken up again when a task screen renders).
 

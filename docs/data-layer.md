@@ -111,8 +111,8 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W24 | `recordRecoveryOutcome` (WEB-09b: the three recovery-scoped counters, and an abandonment; response-derived, admitted with the request's stamp through `AccountService.commit`) | INC, CLS, OWN, GEN, EPO |
 | W25 | `resetRecoveryBudget` (WEB-09b: the person's "Try again", versioned) | INC |
 | W26 | `reconcileOwedReceipts` (WEB-09b: the receipt bookkeeping of acknowledged drafts that a recovery-mode commit owed, done as an ordinary write once the account is displayed) | INC, CLS, OWN, EPO |
-| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop; revision 3: and its admitted read's `attempt`, a new task's entry admitted as a cache write) | INC, CLS, EPO |
-| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; revision 3: the day's observation in `sync_state.timer_scopes`, admitted as a cache write, or the floor) | INC, CLS, EPO |
+| W27 | `writeMaterialiseSequence`, `pruneMaterialiseSequences` (WEB-10c: the catch-up sequences in the reserved `materialise_sequences` store; a compare-and-set on the stored row's generation, phase, read sequence and attempt key, and since revision 4 its `revision`; through `AccountService.commit`, the person's "Try again" included); `writeMaterialiseDiscovery` (revision 2: a task's failed discovery in `sync_state.materialise_discovery`, a compare-and-set on its retry, count and stop; revision 3: and its admitted read's `attempt`, a new task's entry admitted as a cache write); `liftMaterialiseStops` (revision 4: "Try again" over a stopped discovery entry and the day's stopped sequence as ONE compare-and-set) | INC, CLS, EPO |
+| W28 | `writeTimerCopy` (WEB-10c: the bounded copy of the running timer sessions, one record in `sync_state.timer_copy`; admitted as a cache write); `issueTimerOrder`, `reconcileTimerCopy` (revision 2: the observation order and a day's correction; revision 3: the day's observation in `sync_state.timer_scopes`, admitted as a cache write, or the floor; revision 4: the correction applies whatever the fence) | INC, CLS, EPO |
 
 The Dexie adapter binds every plan operation to the explicit Dexie `Transaction` object (`trans.table`), not to Dexie's implicit "zone". A real engine found why: awaiting a
 native `async` function between two requests loses the zone, the later writes then run as separate transactions, and the first transaction commits before the page is finished
@@ -781,9 +781,24 @@ the current epoch is shown with no request, one persisted for another epoch is n
   growth the quota ledger refused or a hold that lapsed) raises `sync_state.timer_scope_floor` instead: a day's read issued below the
   floor is no longer trusted for a session it saw running. Read by `readTimerScope` (`useTimerScope`). The record's growth is admitted
   as a cache write by `commitTimerCorrection`; a refusal still corrects the copy and raises the floor.
-* **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `useMaterialiseSequences`, `useTimerCopy`,
-  `commitMaterialiseSequence`, `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve); revision
-  3: `useTimerScope`, and quota reserves in `commitTimerCorrection` and `commitMaterialiseDiscovery`.
+* **Revision 4: revisions, lifts and recovery reads (W27; Review 4's R20/R21).** Every write of a sequence row stamps `revision` = the
+  replaced row's + 1 (1 for a new row; a row of an earlier build, or one whose revision does not read, counts as 0; one at the end of the
+  safe-integer range is never overwritten), and the compare-and-set compares it, so a stop that returns to the same generation, phase, read
+  and attempt key after another press's budget is still not the row an earlier decision saw. `liftMaterialiseStops` writes the lift of a
+  stopped discovery entry (an EXISTING entry: never added) and of the day's stopped sequence together, or nothing (`stale`).
+  `readLatestSequences` returns the latest day's row of each NAMED task (at most `SEQUENCE_WINDOW` tasks per read; each found by a count of
+  its key range and one row at its end), replacing the account-prefix read the screens used: no other task's rows can hide a stop.
+* **Revision 4: one authority (W28; Review 4's R19).** `reconcileTimerCopy` corrects the copy whatever the fence (the fence is the latest
+  order of ANY read; whether a row may be decided by absence is judged against the copy's own order) and never moves the fence back. A
+  scopes map that is present but not a map raises the floor to every order handed out so far, on read and on the next correction.
+  `readTimerAuthority` reads the copy, every readable scope and the floor (raised by every scope that does not read) in ONE transaction
+  (`TimerAuthorityRecord`, `useTimerAuthority`): the task slice judges every server-derived running session (the copy, the account's live
+  list, a day's read now or kept) by one rule against it, so the floor is the copy's rule too.
+* **Hooks and imperative calls (`ui/task-records.ts`, kept out of the initial bundle):** `commitMaterialiseSequence`,
+  `pruneOlderSequences`, `readMaterialiseSequenceNow`, `commitTimerCopy` (with its quota reserve); revision 3: quota reserves in
+  `commitTimerCorrection` and `commitMaterialiseDiscovery`; revision 4: `useLatestSequences` (by task, in reads of `SEQUENCE_WINDOW`
+  tasks, ready once every read is), `useTimerAuthority` and `commitMaterialiseLift`, replacing `useMaterialiseSequences`, `useTimerCopy` and
+  `useTimerScope`.
   `DataEnv.quota` is exposed for that reserve (the page's quota guard; the sync-screen doubles, which write no such record, pass none).
 * **Retention.** Nothing new: a discarded or rejected timer draft's `timer_session` version record is removed by the existing recompute
   (no other draft targets it and nothing is cached for it); the wipe removes both records with the account's database.

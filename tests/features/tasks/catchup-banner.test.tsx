@@ -1,12 +1,13 @@
 import { cleanup, fireEvent, screen } from "@testing-library/react";
 import { axe } from "jest-axe";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { MaterialiseSequenceRow } from "../../../src/data/model/types";
 import { createConflictHandlerRegistry } from "../../../src/data/outbox/registries";
 import type { TasksResult } from "../../../src/features/tasks/api";
 import {
   forgetCatchUp,
   registerCatchUpConflicts,
+  runnerForAccount,
 } from "../../../src/features/tasks/catchup/useCatchUp";
 import * as copy from "../../../src/features/tasks/copy";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
@@ -162,6 +163,8 @@ describe("A1: listed tasks are caught up automatically", () => {
     const stop = document.querySelector(
       "[data-catch-up-stopped]",
     ) as HTMLElement;
+    // Revision 4: still shown (an automatic catch-up that lifted it would leave nothing to read, which is this assertion's failure).
+    expect(stop, "the stop is still shown").not.toBeNull();
     expect(stop.dataset.catchUpStopped).toBe("no_progress");
     expect(stop).toHaveTextContent(CATCH_UP_COPY.stopped("Water the plants"));
     expect(stop).toHaveTextContent(CATCH_UP_COPY.reason.no_progress);
@@ -387,6 +390,8 @@ describe("R13: a recorded discovery stop", () => {
     const stop = document.querySelector(
       "[data-catch-up-stopped]",
     ) as HTMLElement;
+    // Revision 4: asserted shown before it is read (a stop not shown is this assertion's failure, not a TypeError).
+    expect(stop, "another page's stop is shown").not.toBeNull();
     expect(stop.dataset.catchUpStopped).toBe("unreachable");
     expect(stop).toHaveTextContent(CATCH_UP_COPY.reason.unreachable);
     expect(calls.readTask).toBe(0);
@@ -430,5 +435,158 @@ describe("R13: a recorded discovery stop", () => {
     );
     await again.settle();
     expect(document.querySelector("[data-catch-up-stopped]")).toBeNull();
+  });
+});
+
+/**
+ * Revision 4 (review R21, family `materialise-sequence-window-recovery`): a stop is read by its own task, never as a prefix of the
+ * account's rows, so any number of other tasks' retained rows cannot hide its reason and Try again. REVIEW4 M5 is ported verbatim (99 and
+ * 100 earlier-sorting stopped tasks; 101 added); the task's own detail is the second public caller.
+ */
+describe("R21: a stop is reachable however many other tasks' rows sort first", () => {
+  const others = (target: MaterialiseSequenceRow, n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      ...target,
+      task_id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+    }));
+
+  test.each([99, 100, 101])(
+    "REVIEW4 M5 (ported): %s other stopped tasks before this task",
+    async (n) => {
+      const task = await seededTask({
+        title: "Needs catch-up",
+        definition: {
+          schedule: {
+            start_date: "2026-01-01",
+            time: null,
+            timezone: "UTC",
+            repeat: { frequency: "daily", interval: 1 },
+          },
+        },
+      });
+      const target = stopped(task, "bound");
+      const { api, calls } = counted({
+        readTask: async () => position(task, "2026-01-01", true),
+      });
+      api.respond = (q) =>
+        q.scope === "joint" ? daily([task.taskId]) : daily([]);
+      const t = await mountTasks({
+        path: PATH,
+        rows: task.rows,
+        api,
+        sequences: [...others(target, n), target],
+      });
+      await t.until(
+        () => calls.readTask > 0 && banner()?.dataset.catchUp === "idle",
+      );
+      expect(calls.materialise).toBe(0);
+      const notice = document.querySelector(
+        `[data-catch-up-task="${task.taskId}"]`,
+      );
+      expect(notice).not.toBeNull();
+      expect(notice).toHaveTextContent(CATCH_UP_COPY.reason.bound);
+      expect(screen.getByRole("button", { name: "Try again" })).toBeEnabled();
+    },
+  );
+
+  test.each([
+    ["100 other tasks' stops sort first", 100],
+    ["none (control)", 0],
+  ])(
+    "the task's own detail shows its stop and Try again lifts it: %s",
+    async (_, n) => {
+      const task = await seededTask({
+        title: "Needs catch-up",
+        definition: {
+          schedule: {
+            start_date: "2026-01-01",
+            time: null,
+            timezone: "UTC",
+            repeat: { frequency: "daily", interval: 1 },
+          },
+        },
+      });
+      const target = stopped(task, "bound");
+      const { api, calls } = counted({
+        readTask: async () => position(task, "2026-01-01", true),
+      });
+      const t = await mountTasks({
+        path: `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+        rows: task.rows,
+        api,
+        sequences: [...others(target, n), target],
+      });
+      await t.until(
+        () =>
+          document.querySelector(`[data-catch-up-task="${task.taskId}"]`) !==
+          null,
+      );
+      expect(
+        document.querySelector(`[data-catch-up-task="${task.taskId}"]`),
+        "the task's stop is shown on its detail",
+      ).not.toBeNull();
+      expect(calls.materialise).toBe(0);
+      const button = screen.queryByRole("button", { name: "Try again" });
+      expect(button, "with Try again").not.toBeNull();
+      fireEvent.click(button as HTMLElement);
+      await t.until(() => calls.materialise > 0);
+      // The press named the stop shown and lifted it: the fresh budget sends.
+      expect(calls.materialise).toBeGreaterThan(0);
+    },
+  );
+});
+
+/** Revision 4 (review R20): the Try again on a stop names THAT stop (its generation and revision) to the runner, from Today and the detail. */
+describe("R20: Try again names the stop it was pressed on", () => {
+  test.each([
+    ["Today's banner", "today"],
+    ["the task's detail", "detail"],
+  ])("%s", async (_, where) => {
+    const task = await seededTask({
+      title: "Needs catch-up",
+      definition: {
+        schedule: {
+          start_date: "2026-01-01",
+          time: null,
+          timezone: "UTC",
+          repeat: { frequency: "daily", interval: 1 },
+        },
+      },
+    });
+    const target = { ...stopped(task, "bound"), revision: 7 };
+    const { api } = counted({
+      readTask: () => new Promise(() => undefined),
+    });
+    api.respond = (q) =>
+      q.scope === "joint" ? daily([task.taskId]) : daily([]);
+    const t = await mountTasks({
+      path:
+        where === "today"
+          ? PATH
+          : `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+      rows: task.rows,
+      api,
+      sequences: [target],
+    });
+    await t.until(
+      () =>
+        document.querySelector(`[data-catch-up-task="${task.taskId}"]`) !==
+        null,
+    );
+    expect(
+      document.querySelector(`[data-catch-up-task="${task.taskId}"]`),
+      "the stop is shown",
+    ).not.toBeNull();
+    const runner = runnerForAccount(ME);
+    expect(runner).not.toBeNull();
+    const spy = vi.spyOn(runner as NonNullable<typeof runner>, "tryAgain");
+    const button = screen.queryByRole("button", { name: "Try again" });
+    expect(button, "with Try again").not.toBeNull();
+    fireEvent.click(button as HTMLElement);
+    expect(spy).toHaveBeenCalledWith(task.taskId, TODAY, {
+      kind: "sequence",
+      generation: "g",
+      revision: 7,
+    });
   });
 });

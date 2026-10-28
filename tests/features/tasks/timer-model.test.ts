@@ -8,6 +8,7 @@ import {
   copyCorrection,
   keptStands,
   runningOn,
+  stillRunning,
 } from "../../../src/features/tasks/model/timers";
 import { draftRow } from "../../support/data/rows";
 
@@ -403,16 +404,17 @@ describe("R14 and DA-T3: later complete observations retire what an earlier read
     expect(ids({ ...base, readOrder: null, floor: 4 })).toEqual([
       [COPIED, "read"],
     ]);
-    // The copy is corrected where it is written: the floor is not its rule.
-    expect(
-      ids({
-        drafts: [],
-        read: null,
-        copy: [copied()],
-        copyOrder: 1,
-        floor: 4,
-      }),
-    ).toEqual([[COPIED, "copy"]]);
+    // Revision 4 (review R19, T6): the floor is loss information about EVERY source. Revision 3 asserted here that it was not the copy's
+    // rule ("the copy is corrected where it is written"), which a refused scope behind another day's fence showed false: below the
+    // floor the copy is not trusted either; at or after it, it is.
+    const copyOnly = { drafts: [], read: null, copy: [copied()] };
+    expect(ids({ ...copyOnly, copyOrder: 1, floor: 4 })).toEqual([]);
+    expect(ids({ ...copyOnly, copyOrder: 4, floor: 4 })).toEqual([
+      [COPIED, "copy"],
+    ]);
+    expect(ids({ ...copyOnly, copyOrder: null, floor: 4 })).toEqual([
+      [COPIED, "copy"],
+    ]);
   });
 });
 
@@ -423,5 +425,90 @@ describe("DA-T3: a kept read belongs to the database it was ordered in", () => {
     expect(keptStands({ incarnation: null }, "b")).toBe(true);
     expect(keptStands({ incarnation: "a" }, null)).toBe(true);
     expect(keptStands(null, "a")).toBe(false);
+  });
+});
+
+/**
+ * Revision 4 (review R19): the rule every consumer applies to a server-derived running session (the copy, the account's live list, a day's
+ * read), against ONE snapshot of every day's scope and the floor.
+ */
+describe("R19: stillRunning, one rule for every source", () => {
+  const A = "dddddddd-0000-4000-8000-0000000000a1";
+  const B = "dddddddd-0000-4000-8000-0000000000b1";
+  const S = "cccccccc-0000-4000-8000-0000000000f1";
+  const of = (
+    scopes: Record<
+      string,
+      { order: number; running: string[]; ended: string[] }
+    >,
+    floor = 0,
+  ) => ({ scopes, floor });
+  test.each([
+    ["no scope, no floor", of({}), A, 3, true],
+    [
+      "its day's later complete read omits it",
+      of({ [A]: { order: 4, running: [], ended: [] } }),
+      A,
+      3,
+      false,
+    ],
+    [
+      "its day's later complete read lists it",
+      of({ [A]: { order: 4, running: [S], ended: [] } }),
+      A,
+      3,
+      true,
+    ],
+    [
+      "its day's read is not later (equal)",
+      of({ [A]: { order: 3, running: [], ended: [] } }),
+      A,
+      3,
+      true,
+    ],
+    [
+      "ANOTHER day's later read (T5)",
+      of({ [B]: { order: 9, running: [], ended: [] } }),
+      A,
+      3,
+      true,
+    ],
+    [
+      "listed finished, whatever the orders",
+      of({ [A]: { order: 0, running: [], ended: [S] } }),
+      A,
+      9,
+      false,
+    ],
+    ["seen below the floor (T6)", of({}, 4), A, 3, false],
+    ["seen at the floor", of({}, 4), A, 4, true],
+    [
+      "order unknown: only a finished listing retires it",
+      of({ [A]: { order: 9, running: [], ended: [] } }, 99),
+      A,
+      null,
+      true,
+    ],
+    [
+      "order unknown, listed finished",
+      of({ [A]: { order: 0, running: [], ended: [S] } }),
+      A,
+      null,
+      false,
+    ],
+    [
+      "restricted (day unknown): the floor alone",
+      of({ [A]: { order: 9, running: [], ended: [S] } }, 2),
+      null,
+      3,
+      true,
+    ],
+    ["restricted below the floor", of({}, 4), null, 3, false],
+  ] as const)("%s", (_, authority, day, order, expected) => {
+    expect(stillRunning(authority, day, S, order)).toBe(expected);
+  });
+  test("authority not read yet (loading, or the store failed): no ordered positive is trusted; an unordered one stands", () => {
+    expect(stillRunning(null, A, S, 3)).toBe(false);
+    expect(stillRunning(null, A, S, null)).toBe(true);
   });
 });

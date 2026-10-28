@@ -9,10 +9,13 @@ import type {
 import {
   DISCOVERY_ENTRY_BYTES,
   type DiscoveryWrite,
+  liftMaterialiseStops,
+  type MaterialiseLift,
   pruneMaterialiseSequences,
+  readLatestSequences,
   readMaterialiseDiscovery,
   readMaterialiseSequence,
-  readMaterialiseSequences,
+  SEQUENCE_WINDOW,
   type SequenceExpectation,
   type SequenceKey,
   type SequenceWrite,
@@ -21,15 +24,14 @@ import {
 } from "../plans/materialise";
 import {
   issueTimerOrder,
-  readTimerCopy,
-  readTimerScope,
+  readTimerAuthority,
   reconcileTimerCopy,
+  type TimerAuthorityRecord,
   type TimerCopyRecord,
   type TimerScopeObservation,
-  type TimerScopeRecord,
   writeTimerCopy,
 } from "../plans/timer-copy";
-import type { Loadable } from "../store/port";
+import type { Loadable, Watchable } from "../store/port";
 import type { DataEnv } from "./env";
 import { useWatch } from "./react";
 
@@ -39,22 +41,70 @@ import { useWatch } from "./react";
  * are read, compared and committed.
  */
 
-/** The sequences of one task (`taskId`) or of the account (`null`), live: re-read when the store changes, in this page or another. */
-export function useMaterialiseSequences(
-  taskId: string | null,
-): Loadable<MaterialiseSequenceRow[]> {
+/**
+ * The latest day's sequence of each of `taskIds`, live: re-read when the store changes, in this page or another (revision 4, review R21:
+ * by task, never a prefix of the account's rows, so another task's rows cannot hide a stop). Read `SEQUENCE_WINDOW` tasks at a time, each
+ * read bounded; the result is ready only once every read is.
+ */
+export function useLatestSequences(
+  taskIds: readonly string[],
+): Loadable<ReadonlyMap<string, MaterialiseSequenceRow>> {
+  const key = [...new Set(taskIds)].sort().join(",");
   return useWatch(
     (env) => {
       const service = env.service();
-      return service
-        ? service.store.watch(readMaterialiseSequences, {
+      if (!service) return null;
+      const tasks = key === "" ? [] : key.split(",");
+      const batches: Watchable<Record<string, MaterialiseSequenceRow>>[] = [];
+      for (let i = 0; i < tasks.length; i += SEQUENCE_WINDOW)
+        batches.push(
+          service.store.watch(readLatestSequences, {
             incarnationId: service.incarnationId,
-            taskId,
-          })
-        : null;
+            taskIds: tasks.slice(i, i + SEQUENCE_WINDOW),
+          }),
+        );
+      return allOf(batches);
     },
-    [taskId],
+    [key],
   );
+}
+
+const NO_SEQUENCES: Loadable<ReadonlyMap<string, MaterialiseSequenceRow>> = {
+  status: "ready",
+  value: new Map(),
+};
+
+/** Several watches as one: ready when all are (their rows merged), else the first that is not; the same object while none changes. */
+function allOf(
+  parts: readonly Watchable<Record<string, MaterialiseSequenceRow>>[],
+): Watchable<ReadonlyMap<string, MaterialiseSequenceRow>> {
+  let seen: readonly Loadable<Record<string, MaterialiseSequenceRow>>[] = [];
+  let out = NO_SEQUENCES;
+  return {
+    get() {
+      const now = parts.map((p) => p.get());
+      if (now.length === seen.length && now.every((v, i) => v === seen[i]))
+        return out;
+      seen = now;
+      const pending = now.find((v) => v.status !== "ready");
+      if (pending !== undefined) out = pending as typeof out;
+      else {
+        const rows = new Map<string, MaterialiseSequenceRow>();
+        for (const v of now)
+          if (v.status === "ready")
+            for (const [taskId, row] of Object.entries(v.value))
+              rows.set(taskId, row);
+        out = { status: "ready", value: rows };
+      }
+      return out;
+    },
+    subscribe(listener) {
+      const stops = parts.map((p) => p.subscribe(listener));
+      return () => {
+        for (const stop of stops) stop();
+      };
+    },
+  };
 }
 
 /** The failed catch-up discoveries of the displayed account's database, by task, live (every page's). */
@@ -71,34 +121,19 @@ export function useMaterialiseDiscovery(): Loadable<
   }, []);
 }
 
-/** The running-timer copy of the displayed account's database, live (`null`: none, or none readable). */
-export function useTimerCopy(): Loadable<TimerCopyRecord | null> {
+/**
+ * The running-timer copy of the displayed account's database with every day's scope and the floor, read together and live (every page's):
+ * ONE snapshot, so a consumer never judges the copy against scopes of another moment (revision 4, review R19).
+ */
+export function useTimerAuthority(): Loadable<TimerAuthorityRecord> {
   return useWatch((env) => {
     const service = env.service();
     return service
-      ? service.store.watch(readTimerCopy, {
+      ? service.store.watch(readTimerAuthority, {
           incarnationId: service.incarnationId,
         })
       : null;
   }, []);
-}
-
-/** One day's timer scope (DA-T3) and the floor of the displayed account's database, live (every page's). */
-export function useTimerScope(
-  occurrenceId: string,
-): Loadable<{ scope: TimerScopeRecord | null; floor: number }> {
-  return useWatch(
-    (env) => {
-      const service = env.service();
-      return service
-        ? service.store.watch(readTimerScope, {
-            incarnationId: service.incarnationId,
-            occurrenceId,
-          })
-        : null;
-    },
-    [occurrenceId],
-  );
 }
 
 export type RecordCommit<O> =
@@ -130,6 +165,24 @@ export async function commitMaterialiseSequence(
   try {
     return settled(
       await service.commit(writeMaterialiseSequence, { captured, ...input }),
+    );
+  } catch {
+    return { kind: "failed" };
+  }
+}
+
+/**
+ * W27: the person's "Try again" over the stops it was pressed on, as one compare-and-set (revision 4, review R20): `written` lifted them
+ * all, `stale` lifted nothing (one no longer stands as seen). Never throws.
+ */
+export async function commitMaterialiseLift(
+  service: AccountService,
+  captured: Captured,
+  input: MaterialiseLift,
+): Promise<RecordCommit<{ kind: "written" } | { kind: "stale" }>> {
+  try {
+    return settled(
+      await service.commit(liftMaterialiseStops, { captured, ...input }),
     );
   } catch {
     return { kind: "failed" };
@@ -334,6 +387,7 @@ export {
 } from "../plans/materialise";
 export {
   TIMER_COPY_ROWS,
+  type TimerAuthorityRecord,
   type TimerCopyRecord,
   type TimerScopeObservation,
   type TimerScopeRecord,

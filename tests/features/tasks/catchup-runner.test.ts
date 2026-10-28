@@ -1199,3 +1199,192 @@ describe("R17: work belongs to the binding it began with", () => {
     runner.dispose();
   });
 });
+
+/**
+ * Revision 4 (review R20, family `materialise-sequence-retry-generation`): a "Try again" names the very stop it was pressed on. Every W27
+ * write moves the row's revision, so a stop that came back the same way (same generation, phase, read and attempt key) after another
+ * press's budget is not the stop a queued press saw. REVIEW4 M4 is ported verbatim: the lock double holds every callback until the
+ * previous one settles and holds the first grant until both presses have queued (no send before it).
+ */
+describe("R20: one stop, one fresh budget", () => {
+  const KEY = "eeeeeeee-0000-4000-8000-000000000001";
+  const heldLocks = () => {
+    let unlock!: () => void;
+    let holder: Promise<unknown> = new Promise<void>((r) => {
+      unlock = r;
+    });
+    let queued = 0;
+    const locks = {
+      request: (_n: string, _o: unknown, run: () => Promise<unknown>) => {
+        queued += 1;
+        const mine = holder.then(run);
+        holder = mine.catch(() => undefined);
+        return mine;
+      },
+    } as unknown as LockManager;
+    return { locks, unlock: () => unlock(), queued: () => queued };
+  };
+
+  test.each([1, 2])(
+    "REVIEW4 M4 (ported): %s pages press the same stop: one new budget",
+    async (pages) => {
+      let unlock!: () => void;
+      let holder: Promise<unknown> = new Promise<void>((r) => {
+        unlock = r;
+      });
+      let queued = 0;
+      const locks = {
+        request: (_n: string, _o: unknown, run: () => Promise<unknown>) => {
+          queued += 1;
+          const mine = holder.then(run);
+          holder = mine.catch(() => undefined);
+          return mine;
+        },
+      } as unknown as LockManager;
+      const attempt = { key: KEY, body: attemptBody(TASK, TODAY) };
+      const initial = row({
+        phase: "stopped",
+        attempt,
+        read_failures: 3,
+        stop: { reason: "unreachable" },
+      });
+      const w = await setup({
+        seed: [initial],
+        script: {
+          positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+          sends: Array.from({ length: 6 }, () => UNCERTAIN),
+        },
+      });
+      const a = w.make({ locks });
+      const b = w.make({ locks });
+      try {
+        a.tryAgain(TASK, TODAY);
+        if (pages === 2) b.tryAgain(TASK, TODAY);
+        for (let i = 0; i < 100 && queued < pages; i++) {
+          await w.t.settle();
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        expect(queued).toBe(pages);
+        expect(w.sent).toHaveLength(0);
+        unlock();
+        await w.idle(a);
+        await w.idle(b);
+        expect(w.sent.map((s) => s.key)).toEqual(Array(3).fill(KEY));
+        expect(w.stored()?.phase).toBe("stopped");
+      } finally {
+        unlock();
+        a.dispose();
+        b.dispose();
+      }
+    },
+  );
+
+  test("a genuinely later press, on the stop shown after the first budget, grants exactly one more; the first stop's press then adds nothing", async () => {
+    const attempt = { key: KEY, body: attemptBody(TASK, TODAY) };
+    const w = await setup({
+      seed: [
+        row({
+          phase: "stopped",
+          attempt,
+          read_failures: 3,
+          stop: { reason: "unreachable" },
+        }),
+      ],
+      script: {
+        positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+        sends: Array.from({ length: 9 }, () => UNCERTAIN),
+      },
+    });
+    const a = w.make();
+    try {
+      const first = w.stored() as MaterialiseSequenceRow;
+      const seenFirst = {
+        kind: "sequence" as const,
+        generation: first.sequence_generation,
+        revision: first.revision ?? 0,
+      };
+      a.tryAgain(TASK, TODAY, seenFirst);
+      await w.idle(a);
+      expect(w.sent).toHaveLength(3);
+      const second = w.stored() as MaterialiseSequenceRow;
+      expect(second.phase).toBe("stopped");
+      // The same generation, phase, read and attempt as the first stop: only its revision tells them apart.
+      expect([
+        second.sequence_generation,
+        second.read_seq,
+        second.attempt?.key,
+      ]).toEqual([first.sequence_generation, first.read_seq, KEY]);
+      expect(second.revision).toBeGreaterThan(first.revision ?? 0);
+      // A press still naming the first stop (a screen not yet refreshed, another tab): nothing is lifted, nothing sent.
+      a.tryAgain(TASK, TODAY, seenFirst);
+      await w.idle(a);
+      expect(w.sent).toHaveLength(3);
+      expect(w.stored()).toEqual(second);
+      // A press on the stop shown now: one more budget, the same key and body.
+      a.tryAgain(TASK, TODAY, {
+        kind: "sequence",
+        generation: second.sequence_generation,
+        revision: second.revision ?? 0,
+      });
+      await w.idle(a);
+      expect(w.sent.map((x) => x.key)).toEqual(Array(6).fill(KEY));
+      expect(new Set(w.sent.map((x) => JSON.stringify(x.command))).size).toBe(
+        1,
+      );
+      expect(w.stored()?.phase).toBe("stopped");
+    } finally {
+      a.dispose();
+    }
+  });
+
+  test.each([
+    ["two pages hold the same displayed stop", 2, 3],
+    ["one page (control)", 1, 3],
+  ])(
+    "presses carrying the stop shown: %s -> %s sends",
+    async (_, pages, sends) => {
+      const attempt = { key: KEY, body: attemptBody(TASK, TODAY) };
+      const w = await setup({
+        seed: [
+          row({
+            phase: "stopped",
+            attempt,
+            read_failures: 3,
+            stop: { reason: "unreachable" },
+            revision: 5,
+          }),
+        ],
+        script: {
+          positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+          sends: Array.from({ length: 6 }, () => UNCERTAIN),
+        },
+      });
+      const held = heldLocks();
+      const a = w.make({ locks: held.locks });
+      const b = w.make({ locks: held.locks });
+      const seen = {
+        kind: "sequence" as const,
+        generation: "g-old",
+        revision: 5,
+      };
+      try {
+        a.tryAgain(TASK, TODAY, seen);
+        if (pages === 2) b.tryAgain(TASK, TODAY, seen);
+        for (let i = 0; i < 100 && held.queued() < pages; i++) {
+          await w.t.settle();
+          await new Promise((r) => setTimeout(r, 0));
+        }
+        expect(held.queued()).toBe(pages);
+        expect(w.sent).toHaveLength(0);
+        held.unlock();
+        await w.idle(a);
+        await w.idle(b);
+        expect(w.sent).toHaveLength(sends);
+      } finally {
+        held.unlock();
+        a.dispose();
+        b.dispose();
+      }
+    },
+  );
+});

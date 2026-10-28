@@ -1,7 +1,7 @@
 import { Button } from "../../../components/ui/button";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { CATCH_UP_COPY, latestByTask, stopFor } from "../today/CatchUpBanner";
+import { CATCH_UP_COPY, stopFor } from "../today/CatchUpBanner";
 import { useCatchUp } from "./useCatchUp";
 
 /**
@@ -18,13 +18,13 @@ export function CatchUpNotice({
   title: string;
 }) {
   const env = useTasksEnv();
-  const { runner, state, records, discovery } = useCatchUp();
-  const latest = latestByTask(
-    records.status === "ready"
-      ? records.value.filter((r) => r.task_id === taskId)
-      : [],
+  const { runner, state, records, discovery } = useCatchUp([taskId]);
+  const stop = stopFor(
+    taskId,
+    records.status === "ready" ? records.value : new Map(),
+    state,
+    discovery,
   );
-  const stop = stopFor(taskId, latest, state, discovery);
   if (stop === null) return null;
   const reachable = env.online && env.writable;
   return (
@@ -46,7 +46,9 @@ export function CatchUpNotice({
       ) : null}
       {reachable && stop.reason !== "horizon" ? (
         <span>
-          <Button onClick={() => runner.tryAgain(taskId, stop.throughDate)}>
+          <Button
+            onClick={() => runner.tryAgain(taskId, stop.throughDate, stop.seen)}
+          >
             {copy.TRY_AGAIN}
           </Button>
         </span>

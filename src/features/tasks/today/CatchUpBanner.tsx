@@ -6,7 +6,7 @@ import {
   type MaterialiseSequenceRow,
   useCachedResources,
 } from "../../../data";
-import type { RunnerState } from "../catchup/runner";
+import type { RunnerState, SeenStop } from "../catchup/runner";
 import { useCatchUp } from "../catchup/useCatchUp";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
@@ -45,19 +45,6 @@ export const CATCH_UP_COPY = {
  */
 export type ShownReason = StopReason | "storage";
 
-/** The latest day's sequence of each task (a task has at most a few: older ones are pruned when a later day begins). */
-export function latestByTask(
-  rows: readonly MaterialiseSequenceRow[],
-): Map<string, MaterialiseSequenceRow> {
-  const out = new Map<string, MaterialiseSequenceRow>();
-  for (const row of rows) {
-    const held = out.get(row.task_id);
-    if (held === undefined || row.through_date > held.through_date)
-      out.set(row.task_id, row);
-  }
-  return out;
-}
-
 /**
  * A task's stopped catch-up, as this page knows it: its latest day's record when stopped, else its stopped discovery (the first read; any
  * page's record, review R13), else a discovery stop held in this page's memory only (its record could not be written).
@@ -67,6 +54,8 @@ export interface ShownStop {
   throughDate: string | undefined;
   reason: ShownReason;
   requestId: string | undefined;
+  /** What a "Try again" pressed on it names (review R20): this very stop, never a later one that looks the same. */
+  seen: SeenStop;
 }
 export function stopFor(
   taskId: string,
@@ -81,14 +70,21 @@ export function stopFor(
       throughDate: row.through_date,
       reason: row.stop.reason,
       requestId: row.stop.request_id,
+      seen: {
+        kind: "sequence",
+        generation: row.sequence_generation,
+        revision: row.revision ?? 0,
+      },
     };
-  const found = discovery[taskId]?.stop;
-  if (found)
+  const entry = discovery[taskId];
+  const found = entry?.stop;
+  if (entry && found)
     return {
       taskId,
       throughDate: undefined,
       reason: found.reason,
       requestId: found.request_id,
+      seen: { kind: "discovery", retry: entry.retry },
     };
   const memory = state.unrecorded.get(taskId);
   return memory === undefined
@@ -98,6 +94,7 @@ export function stopFor(
         throughDate: undefined,
         reason: memory.reason,
         requestId: memory.requestId,
+        seen: { kind: "memory" },
       };
 }
 
@@ -112,7 +109,7 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
   const env = useTasksEnv();
   const announcer = useAnnouncer();
   const heading = useId();
-  const { runner, state, records, discovery } = useCatchUp();
+  const { runner, state, records, discovery } = useCatchUp(pendingTasks);
   const titles = useCachedResources(pendingTasks);
   const key = pendingTasks.join(",");
   const reachable = env.online && env.writable;
@@ -133,7 +130,8 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
     seen.current = { finished: state.finished, stops: state.stops };
   }, [state.finished, state.stops, announcer]);
   if (pendingTasks.length === 0) return null;
-  const latest = latestByTask(records.status === "ready" ? records.value : []);
+  const latest: ReadonlyMap<string, MaterialiseSequenceRow> =
+    records.status === "ready" ? records.value : new Map();
   const titleOf = (taskId: string): string => {
     const row = titles.status === "ready" ? titles.value[taskId] : null;
     return row?.merged.label ?? CATCH_UP_COPY.untitled;
@@ -197,7 +195,9 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
           {reachable && stop.reason !== "horizon" ? (
             <span>
               <Button
-                onClick={() => runner.tryAgain(stop.taskId, stop.throughDate)}
+                onClick={() =>
+                  runner.tryAgain(stop.taskId, stop.throughDate, stop.seen)
+                }
               >
                 {copy.TRY_AGAIN}
               </Button>
