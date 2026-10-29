@@ -63,6 +63,8 @@ import {
  * tablet width, the protected tree after a 403), against the sync control (R19.1, A8, A21).
  * Review 20 (28 October 2026): E-P43 a linkage read asked before an unlink never replaces the one asked after it, and the unlinked person's
  * offline rename stays the ordinary queued edit (R20.1, A9, A10; adapted from the reviewer's two Chromium probes).
+ * Review 21 (29 October 2026): E-P44 New person's shown first note is checked as an encoded text value (8,192 bytes) before anything is
+ * queued, across another page and the page closing (R21.1, A3, A7, A8; adapted from the reviewer's Chromium probe).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -3931,5 +3933,102 @@ test.describe("E-P43: a linkage read asked before an unlink never replaces the o
       ]);
       expect(served.peopleCommands).toHaveLength(3);
       recordEvidence(info, "e-p43", { late, reads, log: served.log });
+    });
+});
+
+test.describe("E-P44: New person's shown first note is checked as an encoded text value before anything is queued (A3, A7, A8; review 21, R21.1)", () => {
+  // Each note is under 4,096 characters; once encoded (`{"kind":"text","text":…}`, UTF-8) the first two are 8,193 bytes, one over the
+  // contract's 8,192, and the control is exactly 8,192 (adapted from Review 21's Chromium probe, which used 3,000 字 and 4,096 ASCII).
+  const notes = {
+    "multibyte, one byte over": `${"字".repeat(2722)}aa`,
+    // Quotation marks are escaped in JSON (2 bytes each). Newlines are the model and component cases' (WebKit's `fill` of 4,083 newlines
+    // did not finish within the test's timeout in the author's first run, revision-21/e-p44-webkit-1).
+    "escaped, one byte over": `aa${'"'.repeat(4083)}`,
+    "control, exactly at the limit": `${"字".repeat(2722)}a`,
+  } as const;
+  for (const [schedule, note] of Object.entries(notes))
+    test(`${schedule}: ${schedule.startsWith("control") ? "one compound draft, readable on another page and after the page closes" : "the dialog keeps the note with its error; no draft, before or after the page closes"}`, async ({
+      context,
+    }, info) => {
+      const over = !schedule.startsWith("control");
+      const bytes = new TextEncoder().encode(
+        JSON.stringify({ kind: "text", text: note }),
+      ).length;
+      expect([[...note].length < 4096, bytes]).toEqual([
+        true,
+        over ? 8193 : 8192,
+      ]);
+      const { page } = await setup(context, "/people", []);
+      await connectivity(context, page, false);
+      await page.locator('[data-people-action="new-person"]').first().click();
+      const dialog = page.getByRole("dialog", { name: "New person" });
+      await dialog.getByRole("textbox", { name: "Name" }).fill("Note limit");
+      await dialog
+        .getByRole("radio", { name: "Only you", exact: true })
+        .click();
+      await dialog.getByRole("button", { name: "Add a first note" }).click();
+      const box = dialog.getByRole("textbox", { name: "First note" });
+      await box.fill(note);
+      await dialog.getByRole("button", { name: "Save" }).click();
+      let id: string | null = null;
+      if (over) {
+        await expect(box).toHaveAttribute("aria-invalid", "true");
+        await expect(box).toHaveAccessibleDescription(
+          "This value is too long to save. Shorten it.",
+        );
+        await expect(dialog).toBeVisible();
+        expect(await box.inputValue()).toBe(note);
+        expect(await draftsOf(page)).toEqual([]);
+      } else {
+        await expect(dialog).toBeHidden();
+        const drafts = await draftsOf(page);
+        expect(drafts.map((d) => d.kind)).toEqual(["create_person"]);
+        const [body] = (await page.evaluate(
+          (a) => window.__atlasData?.rows(a, "draft_commands"),
+          ME,
+        )) as Array<{ command: { commands: Array<Record<string, unknown>> } }>;
+        const commands = body?.command.commands ?? [];
+        expect(commands.map((c) => c.kind)).toEqual([
+          "create_person",
+          "create_field",
+        ]);
+        expect(commands[1]).toMatchObject({
+          person_id: commands[0]?.id,
+          label: "Note",
+          value: note,
+          initial_policy: PRIVATE,
+        });
+        id = commands[0]?.id as string;
+        await expect(
+          page.getByRole("heading", { name: "Note limit" }),
+        ).toBeVisible();
+        await expect(page.locator("[data-field-row]")).toHaveCount(1);
+        await expect(page.locator("[data-unreadable-value]")).toHaveCount(0);
+        // Another page of the same profile reads the queued person and note from real IndexedDB, with its own memory.
+        await connectivity(context, page, true);
+        const other = await bootAt(context, `/people/${id}`);
+        await expect(
+          other.getByRole("heading", { name: "Note limit" }),
+        ).toBeVisible();
+        await expect(other.locator("[data-field-row]")).toHaveCount(1);
+        await expect(other.locator("[data-unreadable-value]")).toHaveCount(0);
+        await other.close();
+      }
+      // The page goes away; a new page of the same profile reads what was stored, and nothing else.
+      await connectivity(context, page, true);
+      await page.close();
+      const reopened = await bootAt(context, "/people");
+      // The new page's harness opens the account to read it (as E-P15's does), with its outbox NOT started: nothing can be sent.
+      await startOutbox(reopened, ME, { start: false });
+      const after = await draftsOf(reopened);
+      expect(after.map((d) => d.kind)).toEqual(over ? [] : ["create_person"]);
+      if (!over) {
+        await navigateInApp(reopened, `/people/${id}`);
+        await expect(reopened.locator("[data-field-row]")).toHaveCount(1);
+        await expect(reopened.locator("[data-unreadable-value]")).toHaveCount(
+          0,
+        );
+      }
+      recordEvidence(info, "e-p44", { schedule, bytes, drafts: after });
     });
 });

@@ -381,6 +381,8 @@ archive is folded over its row. A projected row is never a base for a version-ch
 
 - Hidden form values (PRODUCT-DECISIONS-20261011 item 2): the field type switch keeps each type's value; the new person's hidden note keeps
   its text; a save sends only what applies, with no warning. A refused or uncertain save keeps everything. Inputs are locked while saving.
+- The first note is checked as a text value before the save is admitted, as every other field value is (`valueProblem`, review 21): at
+  most 4,096 characters and 8,192 bytes once encoded. A note over either limit stays as typed, with its error, and nothing is queued.
 - The page memory (linkage answers, policies read, editor drafts) is per identity and dropped for any other identity; the held audience
   changes are not in it (they are durable, D-11a-12). An open, unsaved editor's typed text is page memory: it survives a remount, not an
   account switch or a reload (WEB-14a's Q4 recovery covers the update reload).

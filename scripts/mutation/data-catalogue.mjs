@@ -26456,6 +26456,96 @@ export const UNIT = [
       sub(t, "    if (inflight !== undefined) return inflight;\n", ""),
   },
 
+  // WEB-11a revision 21 (review 21, R21.1): New person's shown first note is checked as an encoded text value
+  // (src/features/people/model/person-form.ts `applicablePerson`, and the shared `valueProblem` byte bound in values.ts).
+  {
+    id: "MU-2884",
+    title:
+      "WEB-11a R21.1: the first note is checked by its characters only (the reviewed defect: a note under 4,096 characters but over 8,192 bytes once encoded is queued)",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect:
+      /R21\.1.*(3,000 字|one byte over|newlines|at 8,193|refused|queue nothing)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const noteProblem = sendNote\n    ? valueProblem({ kind: "text", text: state.note })\n    : null;\n',
+        '  const noteProblem =\n    sendNote && charCount(state.note) > 4096 ? "text_too_long" : null;\n',
+      ),
+  },
+  {
+    id: "MU-2885",
+    title:
+      "WEB-11a R21.1: the first note's bytes are counted raw, not as the encoded value (escaped characters are counted once)",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect: /R21\.1.*(escaped|quotes|backslashes|control characters)/,
+    patch: (t) =>
+      sub(
+        t,
+        '    ? valueProblem({ kind: "text", text: state.note })\n',
+        '    ? charCount(state.note) > 4096\n      ? "text_too_long"\n      : new TextEncoder().encode(state.note).length + 25 > 8192\n        ? "value_too_large"\n        : null\n',
+      ),
+  },
+  {
+    id: "MU-2886",
+    title:
+      "WEB-11a R21.1: a value of exactly 8,192 encoded bytes is refused (the bound is exclusive)",
+    file: "src/features/people/model/values.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect: /R21\.1.*(at 8,192|at the limit)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    new TextEncoder().encode(JSON.stringify(value)).length > LIMITS.valueBytes\n",
+        "    new TextEncoder().encode(JSON.stringify(value)).length >= LIMITS.valueBytes\n",
+      ),
+  },
+  {
+    id: "MU-2887",
+    title:
+      "WEB-11a R21.1 with PRODUCT-DECISIONS item 2: a hidden first note is checked too, so a hidden note over the limit stops the save",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect: /R21\.1.*hidden/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const noteProblem = sendNote\n",
+        '  const noteProblem = state.note.trim() !== ""\n',
+      ),
+  },
+  {
+    id: "MU-2888",
+    title:
+      "WEB-11a R21.1: a note too long once encoded is reported as too many characters (the error names a limit the note is within)",
+    file: "src/features/people/model/person-form.ts",
+    tests: [
+      "tests/features/people/person-form.test.ts",
+      "tests/features/people/duplicates-archive-new.test.tsx",
+    ],
+    expect:
+      /R21\.1.*(3,000 字|one byte over|newlines|at 8,193|refused|queue nothing|reported together)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  else if (noteProblem !== null) problems.note = "value_too_large";\n',
+        '  else if (noteProblem !== null) problems.note = "note_too_long";\n',
+      ),
+  },
+
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];

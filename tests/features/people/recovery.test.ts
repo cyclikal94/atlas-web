@@ -5,6 +5,8 @@ import {
   reduceFieldForm,
 } from "../../../src/features/people/model/field-form";
 import {
+  applicablePerson,
+  type NewPersonState,
   newPersonForm,
   reduceNewPerson,
 } from "../../../src/features/people/model/person-form";
@@ -74,6 +76,26 @@ describe("recovery contexts", () => {
       note: "nuts",
     });
     expect(restoreRename(renameRecoveryFields("Mo"))).toBe("Mo");
+  });
+
+  test("review 21 (R21.1, DA21-16): a note too long to save is restored exactly as typed, shown or hidden; saving it is refused again", () => {
+    // 3,000 characters, 9,025 bytes once encoded: restoring is not admitting, so nothing is cut, and the next deliberate save checks it.
+    const note = "字".repeat(3000);
+    for (const noteOpen of [true, false]) {
+      const state = [
+        { type: "name", value: "Ada" },
+        { type: "note_open", value: true },
+        { type: "note", value: note },
+        { type: "note_open", value: noteOpen },
+      ].reduce((s, a) => reduceNewPerson(s, a as never), newPersonForm());
+      const restored = restorePersonForm(personRecoveryFields(state));
+      expect(restored).toMatchObject({ name: "Ada", noteOpen, note });
+      expect(applicablePerson(restored as NewPersonState)).toEqual(
+        noteOpen
+          ? { ok: false, problems: { note: "value_too_large" } }
+          : { ok: true, name: "Ada", sharing: "defaults", note: null },
+      );
+    }
   });
 });
 

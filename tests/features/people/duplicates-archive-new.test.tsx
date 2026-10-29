@@ -684,6 +684,197 @@ describe("new person", () => {
     });
   });
 
+  describe("a shown note too long to save once encoded (review 21, R21.1)", () => {
+    const TOO_LARGE = "This value is too long to save. Shorten it.";
+    /** 3,000 characters (under 4,096) that encode to 9,025 bytes, and the 8,192-byte value one character shorter than 8,193. */
+    const OVER = "字".repeat(3000);
+    const AT_LIMIT = `${"字".repeat(2722)}a`;
+    const ESCAPED = `a${"\n".repeat(4095)}`;
+    const politeText = () =>
+      [...document.querySelectorAll("[aria-live]")]
+        .map((node) => node.textContent ?? "")
+        .join("|");
+    const counted = (w: ReturnType<typeof peopleWorld>) => {
+      const outbox = w.env.outbox();
+      if (outbox === null) throw new Error("no outbox bound");
+      const enqueue = outbox.enqueue.bind(outbox);
+      const calls = { n: 0 };
+      outbox.enqueue = (request) => {
+        calls.n++;
+        return enqueue(request);
+      };
+      return calls;
+    };
+    const openWith = async (note: string) => {
+      fireEvent.click(
+        (
+          await screen.findAllByRole("button", { name: "New person" })
+        )[0] as HTMLElement,
+      );
+      const d = await screen.findByRole("dialog", { name: "New person" });
+      fireEvent.change(within(d).getByRole("textbox", { name: "Name" }), {
+        target: { value: "Ada" },
+      });
+      fireEvent.click(
+        within(d).getByRole("button", { name: "Add a first note" }),
+      );
+      fireEvent.change(within(d).getByRole("textbox", { name: "First note" }), {
+        target: { value: note },
+      });
+      return d;
+    };
+    /** Asserted (not looked up) first, so a save that went ahead fails here as an assertion, not as a missing element. */
+    const expectRefused = (d: HTMLElement, note: string) => {
+      expect(screen.queryByRole("dialog", { name: "New person" })).toBe(d);
+      const box = within(d).queryByRole("textbox", { name: "First note" });
+      expect(box).not.toBeNull();
+      expect(box).toHaveValue(note);
+      expect(box).toHaveAttribute("aria-invalid", "true");
+      expect(box).toHaveAccessibleDescription(TOO_LARGE);
+      expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue(
+        "Ada",
+      );
+    };
+
+    test("Save and the form's submit queue nothing and keep the input with its error; the corrected note saves one valid batch", async () => {
+      const w = peopleWorld();
+      w.setCache([]);
+      w.env.setDefaults(record());
+      await w.mount("/people");
+      const calls = counted(w);
+      const d = await openWith(OVER);
+      await act(async () => {
+        fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      });
+      expectRefused(d, OVER);
+      await act(async () => {
+        fireEvent.submit(d.querySelector("form") as HTMLFormElement);
+      });
+      expectRefused(d, OVER);
+      expect(calls.n).toBe(0);
+      expect(w.built).toEqual([]);
+      expect(politeText()).not.toContain("Saved");
+      expect((await axe(document.body)).violations).toEqual([]);
+
+      fireEvent.change(within(d).getByRole("textbox", { name: "First note" }), {
+        target: { value: AT_LIMIT },
+      });
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(w.built).toHaveLength(1));
+      expect(calls.n).toBe(1);
+      const body = w.built[0]?.command as {
+        commands: Array<Record<string, unknown>>;
+        defaults_revision: string;
+      };
+      expect(body.commands.map((c) => c.kind)).toEqual([
+        "create_person",
+        "create_field",
+      ]);
+      expect(body.commands[1]).toMatchObject({
+        person_id: body.commands[0]?.id,
+        label: "Note",
+        value: AT_LIMIT,
+      });
+      expect(body.defaults_revision).toBe(REVISION);
+      expect(
+        await screen.findByRole("heading", { name: "Ada" }),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(politeText()).toContain("Saved"));
+      expect(document.querySelector("[data-unreadable-value]")).toBeNull();
+    });
+
+    test("Only you: an escaped note is refused; hidden, the person alone is saved privately", async () => {
+      const w = peopleWorld();
+      w.setCache([]);
+      w.env.setDefaults(record());
+      await w.mount("/people");
+      const calls = counted(w);
+      const d = await openWith(ESCAPED);
+      fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+      await act(async () => {
+        fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      });
+      expectRefused(d, ESCAPED);
+      expect(calls.n).toBe(0);
+      fireEvent.click(
+        within(d).getByRole("button", { name: "Don't add a note" }),
+      );
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(w.built).toHaveLength(1));
+      expect(w.built[0]?.command).toEqual({
+        commands: [
+          {
+            kind: "create_person",
+            id: expect.any(String),
+            name: "Ada",
+            initial_policy: { grants: [], exclude_accounts: [] },
+          },
+        ],
+      });
+    });
+
+    test("defaults never read: the note at the limit is saved for review; one byte over is refused", async () => {
+      const w = peopleWorld();
+      w.setCache([]);
+      w.env.setDefaults(null);
+      await w.mount("/people");
+      const calls = counted(w);
+      const d = await openWith(`${AT_LIMIT}a`);
+      await act(async () => {
+        fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      });
+      expectRefused(d, `${AT_LIMIT}a`);
+      expect(calls.n).toBe(0);
+      fireEvent.change(within(d).getByRole("textbox", { name: "First note" }), {
+        target: { value: AT_LIMIT },
+      });
+      fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(w.built).toHaveLength(1));
+      const body = w.built[0]?.command as {
+        commands: Array<Record<string, unknown>>;
+      };
+      expect(body.commands.map((c) => c.kind)).toEqual([
+        "create_person",
+        "create_field",
+      ]);
+      expect(body.commands[1]).toMatchObject({ value: AT_LIMIT });
+      expect(w.built[0]?.defaultsReview).toEqual(["person", "field"]);
+    });
+
+    test("a refused note survives a remount in the same session, and is refused again", async () => {
+      const w = peopleWorld();
+      w.setCache([]);
+      w.env.setDefaults(record());
+      await w.mount("/people");
+      let d = await openWith(OVER);
+      await act(async () => {
+        fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      });
+      expectRefused(d, OVER);
+      cleanup();
+      await w.mount("/people");
+      const calls = counted(w);
+      fireEvent.click(
+        (
+          await screen.findAllByRole("button", { name: "New person" })
+        )[0] as HTMLElement,
+      );
+      d = await screen.findByRole("dialog", { name: "New person" });
+      expect(within(d).getByRole("textbox", { name: "Name" })).toHaveValue(
+        "Ada",
+      );
+      expect(
+        within(d).getByRole("textbox", { name: "First note" }),
+      ).toHaveValue(OVER);
+      await act(async () => {
+        fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+      });
+      expectRefused(d, OVER);
+      expect(calls.n).toBe(0);
+      expect(w.built).toEqual([]);
+    });
+  });
+
   test("a refused save keeps everything; with no database bound yet it says so and saves nothing", async () => {
     const w = peopleWorld();
     w.setCache([]);
