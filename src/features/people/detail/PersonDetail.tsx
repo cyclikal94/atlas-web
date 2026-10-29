@@ -18,7 +18,12 @@ import { CacheGate } from "../../sync/CacheGate";
 import { useArchiveAction } from "../archive";
 import * as copy from "../copy";
 import { usePeopleEnv } from "../env";
-import { useMemoryRevision } from "../memory";
+import {
+  doubtPolicy,
+  isCurrentMemory,
+  notePolicy,
+  useMemoryRevision,
+} from "../memory";
 import {
   audienceLabel,
   classify,
@@ -724,8 +729,10 @@ function FieldRow({
   const known = env.memory.policies.get(row.id);
   // What this page's policy read said, only while no later policy version of the field is known (review 3, finding 3: never an audience
   // the device already knows is old), and said with the time it was read (C6: never presented as live).
+  // Never one that may be out of date since the sharing editor was open on the field (review 23, R23.1).
   const read =
     known !== undefined &&
+    !env.memory.policyDoubts.has(row.id) &&
     policyShownFor(known, row, env.memory.summaryFloors.get(row.id))
       ? known
       : undefined;
@@ -832,12 +839,19 @@ function FieldRow({
         <ResourcePolicyEditor
           resourceId={row.id}
           open={sharing}
+          onPolicyRead={(policy) => {
+            // What the editor read is what the server holds: this page's read of the field's policy (review 23, R23.1).
+            if (!isCurrentMemory(env.memory)) return;
+            notePolicy(env.memory, row.id, { ...policy, checkedAt: env.now() });
+            env.memory.touch();
+          }}
           onOpenChange={(open) => {
             setSharing(open);
             // What the editor sent (its commands are online, outside the queue) changes the summaries shown, and this page's own read of
-            // the field's policy may be old now (C6): neither is shown again until read again.
-            if (!open) {
-              env.memory.policies.delete(row.id);
+            // the field's policy may be old now (C6): neither is shown again until read again. The read's version stays as the floor
+            // nothing lower replaces (review 23, R23.1).
+            if (!open && isCurrentMemory(env.memory)) {
+              doubtPolicy(env.memory, row.id);
               env.memory.invalidateSummaries();
             }
           }}

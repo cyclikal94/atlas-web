@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   screen,
@@ -13,7 +14,10 @@ import {
   forgetAllPeopleMemory,
   peopleMemory,
 } from "../../../src/features/people/memory";
-import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
+import {
+  forgetRefusedPolicies,
+  type SharingResult,
+} from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { draftRow } from "../../support/data/rows";
 import { HOME, ME, MO, record } from "../../support/people/records";
@@ -789,5 +793,401 @@ describe("R22.1: the subject note describes the policy the save leaves", () => {
     expect(w.sharing.sent.at(-1)?.commands).toEqual([
       { kind: "replace_policy", id: F, expected_version: 6, policy: target },
     ]);
+  });
+});
+
+/**
+ * Review 23, R23.1 (family people-policy-editor-return-coherence): the field editor's audience after the full sharing editor, opened from
+ * it ("Choose people…"), closes. That editor reads and saves the field's policy on its own; what the field editor kept of the policy may be
+ * out of date when it comes back, so it is read again (never answered by a read asked before), and until then nothing of it is said as who
+ * can see the field now. The unfinished input, its session and what the edit is bound to stay as they were: a policy that moved is
+ * reviewed, and the edit is bound to it only once the field has synced to it (never adopted on its own). Through the public field route.
+ */
+describe("R23.1: the field editor's audience after the sharing editor closes", () => {
+  const ORIGINAL: Policy = {
+    grants: [{ kind: "household", id: HOME, edit: false }],
+    exclude_accounts: [MO],
+  };
+  const REMOVED: Policy = { ...ORIGINAL, exclude_accounts: [] };
+  const CHANGED =
+    "Who can see this field changed since you opened it. Check the change above before saving yours.";
+  const RECHECK =
+    "Who can see this field may have changed. It's checked again when you're online.";
+  const MOVED_TITLE = "Who can see this field changed since you opened it";
+  const AHEAD =
+    "Who can see it now is shown here once this field has finished syncing.";
+  const SAVE_MINE = "Save mine on the current version";
+  const field = (policyVersion: number) =>
+    fieldRow({
+      id: F,
+      parent_id: P,
+      label: "Note",
+      version: 4,
+      policy_version: policyVersion,
+    });
+  const noteOf = (d: HTMLElement) =>
+    d.querySelector("[data-subject-note]")?.textContent ?? null;
+  const audienceOf = (d: HTMLElement) =>
+    d.querySelector("[data-audience]")?.getAttribute("data-audience") ?? null;
+  const unknownText = (d: HTMLElement) =>
+    d.querySelector('[data-audience="unknown"]')?.textContent ?? null;
+  const reads = (w: ReturnType<typeof peopleWorld>) =>
+    w.sharing.calls.filter((c) => c.op === "readPolicy").length;
+  const value = () =>
+    within(screen.getByRole("dialog")).getByRole("textbox", { name: "Value" });
+
+  /** The field at policy v6 (Home, excluding Mo, the linked subject in Home), its editor open with unfinished input. */
+  async function begin() {
+    const w = peopleWorld();
+    w.setCache([person({ id: P, label: "Mo" }), field(6)]);
+    w.api.linked.set(P, MO);
+    w.env.setDefaults(record({ members: [ME, MO] }));
+    w.sharing.defaults.households = ok(record().snapshot.households);
+    w.sharing.defaults.policy = ok({ version: 6, policy: ORIGINAL });
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "My unfinished input" },
+    });
+    return w;
+  }
+  /** "Choose people…", then the sharing editor's draft with Mo's exclusion removed. */
+  async function removeExclusion() {
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]'),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: /^Remove exclusion:/,
+      }),
+    );
+  }
+  /** The sharing editor's Save, answered by the server's policy `after` (what it holds once the change committed). */
+  async function save(w: ReturnType<typeof peopleWorld>, after: Policy) {
+    w.sharing.defaults.policy = ok({ version: 7, policy: after });
+    const save = screen.getByRole("dialog").querySelector("[data-save]");
+    fireEvent.click(save as Element);
+    await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+    expect(w.sharing.sent[0]?.commands).toEqual([
+      { kind: "replace_policy", id: F, expected_version: 6, policy: after },
+    ]);
+  }
+  const back = async () => {
+    await waitFor(() =>
+      expect(
+        screen.getByRole("dialog").querySelector("[data-policy-state]"),
+      ).toBeNull(),
+    );
+    return screen.getByRole("dialog");
+  };
+
+  test("R23.1 a saved removal: the old exclusion is not said; the change is reviewed, the input kept, nothing written", async () => {
+    const w = await begin();
+    const asked: Array<{ fresh?: boolean } | undefined> = [];
+    const read = w.sharing.readPolicy;
+    w.sharing.readPolicy = (id, options) => {
+      asked.push(options);
+      return read(id, options);
+    };
+    await removeExclusion();
+    const atSave = reads(w);
+    await save(w, REMOVED);
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(d.textContent).not.toContain(EXCLUDED);
+    expect(value()).toHaveValue("My unfinished input");
+    // The policy was read again, once, after the sharing editor closed, by a read that a read on its way since before cannot answer.
+    expect(reads(w)).toBe(atSave + 1);
+    expect(asked.at(-1)).toEqual({ fresh: true });
+    const panel = d.querySelector("[data-field-conflict]");
+    expect(panel?.querySelector("h3")?.textContent).toBe(MOVED_TITLE);
+    expect(panel?.querySelector("[data-review-audience]")?.textContent).toBe(
+      AHEAD,
+    );
+    // Bound to v7 only once the field has synced to it: until then "Save mine" waits, and nothing of the content is written.
+    expect(d.querySelector('[data-people-action="save-mine"]')).toBeNull();
+    expect(w.built).toEqual([]);
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+
+  test("R23.1 a saved removal, once the field syncs to it: reviewed, bound by the person, and the content saved under v7", async () => {
+    const w = await begin();
+    await removeExclusion();
+    await save(w, REMOVED);
+    let d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    w.setCache([person({ id: P, label: "Mo" }), field(7)]);
+    d = screen.getByRole("dialog");
+    await waitFor(() =>
+      expect(d.querySelector("[data-review-audience]")?.textContent).toBe(
+        "Who can see it now: Home · can view",
+      ),
+    );
+    // Seeing the change binds nothing by itself.
+    expect(w.built).toEqual([]);
+    expect(noteOf(d)).toBeNull();
+    const mine = d.querySelector('[data-people-action="save-mine"]');
+    expect(mine?.textContent).toBe(SAVE_MINE);
+    fireEvent.click(mine as Element);
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_version: 4,
+      expected_policy_version: 7,
+      value: { kind: "text", text: "My unfinished input" },
+    });
+    expect(w.sharing.sent).toHaveLength(1);
+  });
+
+  test("R23.1 control: the removal cancelled: nothing sent, the exclusion said again, and the content saves under v6", async () => {
+    const w = await begin();
+    await removeExclusion();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(audienceOf(d)).toBe("existing");
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.sharing.sent).toEqual([]);
+    expect(d.querySelector("[data-field-conflict]")).toBeNull();
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command,
+    ).toMatchObject({
+      expected_policy_version: 6,
+      value: { kind: "text", text: "My unfinished input" },
+    });
+    expect(w.sharing.calls.map((c) => c.op)).not.toContain("management");
+  });
+
+  test("R23.1 a newer policy read in the sharing editor, then Cancel: the obsolete exclusion is not said and nothing is sent", async () => {
+    const w = await begin();
+    // Someone else removed the exclusion (v7) before the sharing editor opened.
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]')?.textContent,
+      ).toContain("Nobody is excluded."),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.sharing.sent).toEqual([]);
+    expect(w.built).toEqual([]);
+  });
+
+  test("R23.1 an uncertain save that did commit, then Cancel: what the server holds is read, never the old exclusion", async () => {
+    const w = await begin();
+    await removeExclusion();
+    w.sharing.next.management.push({ ok: false, kind: "uncertain" });
+    fireEvent.click(
+      screen.getByRole("dialog").querySelector("[data-save]") as Element,
+    );
+    await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+    // It had committed: the server holds the removal.
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.built).toEqual([]);
+  });
+
+  test("R23.1 control: an uncertain save that did NOT commit, then Cancel: the exclusion, read again, is said again", async () => {
+    const w = await begin();
+    await removeExclusion();
+    w.sharing.next.management.push({ ok: false, kind: "uncertain" });
+    fireEvent.click(
+      screen.getByRole("dialog").querySelector("[data-save]") as Element,
+    );
+    await waitFor(() => expect(w.sharing.sent).toHaveLength(1));
+    const before = reads(w);
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(reads(w)).toBe(before + 1));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(value()).toHaveValue("My unfinished input");
+  });
+
+  test("R23.1 closed while offline: who can see it is not claimed until it is read again online; a chosen audience is not dropped", async () => {
+    const w = await begin();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("radio", {
+        name: "Only you",
+      }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]'),
+      ).not.toBeNull(),
+    );
+    w.setOnline(false);
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    let d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(RECHECK));
+    expect(noteOf(d)).toBeNull();
+    // A content save would drop the chosen "Only you" while the current audience is unknown: refused, the input kept.
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(d.textContent).toContain(
+        "The sharing changed since you opened this. Review who can see it, then save again.",
+      ),
+    );
+    expect(w.built).toEqual([]);
+    expect(value()).toHaveValue("My unfinished input");
+    w.setOnline(true);
+    d = screen.getByRole("dialog");
+    await waitFor(() => expect(audienceOf(d)).toBe("existing"));
+    // The read again shows v6 as it was; the choice made before is still the one shown.
+    expect(within(d).getByRole("radio", { name: "Only you" })).toBeChecked();
+  });
+
+  test("R23.1 closed offline after the sharing editor read a newer policy: that read says the audience moved, never the old one", async () => {
+    const w = await begin();
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]')?.textContent,
+      ).toContain("Nobody is excluded."),
+    );
+    w.setOnline(false);
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    const d = await back();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.sharing.sent).toEqual([]);
+  });
+
+  test("R23.1 a read asked before a later doubt answers late: it ends nothing, and the latest read still decides", async () => {
+    const w = await begin();
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Choose people…",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen
+          .getByRole("dialog")
+          .querySelector('[data-policy-state="editing"]'),
+      ).not.toBeNull(),
+    );
+    // The read after this close (A) is held; the edit then comes back on another mount, whose read (B) is held too.
+    type Answer = SharingResult<{ version: number; policy: Policy }>;
+    let releaseA: (answer: Answer) => void = () => undefined;
+    let releaseB: (answer: Answer) => void = () => undefined;
+    w.sharing.next.policy.push(
+      () =>
+        new Promise<Answer>((resolve) => {
+          releaseA = resolve;
+        }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    await back();
+    const atA = reads(w);
+    w.sharing.next.policy.push(
+      () =>
+        new Promise<Answer>((resolve) => {
+          releaseB = resolve;
+        }),
+    );
+    cleanup();
+    await w.mount(`/people/${P}/fields/${F}`);
+    let d = await dialog();
+    await waitFor(() => expect(reads(w)).toBe(atA + 1));
+    await act(async () => {
+      releaseA(ok({ version: 6, policy: ORIGINAL }));
+    });
+    d = screen.getByRole("dialog");
+    // A answered the doubt before this mount's: B is still the read that decides.
+    expect(unknownText(d)).toBe("Checking who can see this field…");
+    expect(noteOf(d)).toBeNull();
+    await act(async () => {
+      releaseB(ok({ version: 6, policy: ORIGINAL }));
+    });
+    await waitFor(() =>
+      expect(noteOf(screen.getByRole("dialog"))).toBe(EXCLUDED),
+    );
+    expect(value()).toHaveValue("My unfinished input");
+  });
+
+  test("R23.1 an edit kept while the page was elsewhere comes back to a policy changed meanwhile: read again, not said from memory", async () => {
+    const w = await begin();
+    cleanup();
+    // The Sharing screen (or another window) removed the exclusion meanwhile.
+    w.sharing.defaults.policy = ok({ version: 7, policy: REMOVED });
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    await waitFor(() => expect(unknownText(d)).toBe(CHANGED));
+    expect(noteOf(d)).toBeNull();
+    expect(value()).toHaveValue("My unfinished input");
+    expect(w.built).toEqual([]);
   });
 });

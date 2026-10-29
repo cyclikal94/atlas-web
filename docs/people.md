@@ -215,6 +215,16 @@ reopens it with its draft), and `/settings/archived`.
   policy version of the field is known (the cached row's `policy_version` or a version a summary applied), a late older read never
   replaces a later one (`notePolicy`), closing the shared policy editor withdraws it (it may have changed the policy), and it is said with
   the time it was read ("Checked at {time}"), never as live. Otherwise the button reads "Who can see it?".
+- **D-11a-13b** (review 23, R23.1) The shared sharing editor ("Choose people…" in the field editor, the field row's audience button) reads
+  and saves the field's policy on its own. Whatever it read is this page's read too (`onPolicyRead`, monotonic through `notePolicy`); however
+  it closes (saved, cancelled, or a save whose answer was lost), the page's read is DOUBTED (`doubtPolicy`): its version stays as the floor
+  nothing lower replaces, but it is not shown as who can see the field now until a read asked after the doubt answers (a FRESH read, which a
+  read already on its way cannot answer; only the latest read of a field ends or refuses it). An edit restored on a later mount (Sync and
+  back, the Sharing screen) is doubted the same way. While doubted the field editor says "Checking who can see this field…", or offline
+  "Who can see this field may have changed. It's checked again when you're online."; a policy that moved shows "Who can see this field
+  changed since you opened it" with the input kept, and the edit is bound to it only by "Save mine on the current version" once the field
+  has synced to that version ("Who can see it now is shown here once this field has finished syncing." until then). A chosen audience is
+  never dropped by a content-only save while the current audience is unknown. A quick change's confirming read is fresh as well.
 - **D1** (design assessment of 22 October 2026; answered "explicit Send now" in the Running session's question on 22 October 2026) A hold
   runs by itself only in the page that made it, or after the person chose "Send now" or "Try again" there (`memory.heldAuthority`). A
   recovered hold (after a reload, an account switch back, in another page, a legacy v1 copy, one whose discard could not be written) is shown
@@ -441,7 +451,7 @@ the fixture spec named.
 | Owner audiences: "Home · can view" for a person (drawn "Home · 4 people": a household's size is not an audience count, so it is not said as one) | `/people`, `/people/$id` | E-P19, E-P20 |
 | Pending marks "Not sent yet", "Sending…", "Waiting for the server", "Waiting for your review" | `/people/$id` | E-P2, E-P10 |
 | Bounded steps: "Next people", "Previous people", "Keep searching", "Showing {n} so far. There may be more further on.", "No one matches “{q}” so far. There are more people to check.", "Next fields", "Next items"; a step is sorted by name within itself; "More unsent changes are waiting than this page shows. All of them are in Sync."; "This value can't be shown on this device" | `/people`, `/people/$id`, `/settings/archived` | E-P18, component tests |
-| The review of a changed field: "This field changed since you opened it", "Current: …", "Who can see it now: …", "Yours: …", "Check who can see it first: that needs a connection"; the rename's "This person changed since you started. Review the name, then save again." | `/people/$id/fields/$fid`, `/people/$id` | E-P14, E-P5 |
+| The review of a changed field: "This field changed since you opened it", "Current: …", "Who can see it now: …", "Yours: …", "Check who can see it first: that needs a connection"; after the sharing editor (D-11a-13b): "Who can see this field changed since you opened it", "Who can see it now is shown here once this field has finished syncing.", "Who can see this field changed since you opened it. Check the change above before saving yours.", "Who can see this field may have changed. It's checked again when you're online."; the rename's "This person changed since you started. Review the name, then save again." | `/people/$id/fields/$fid`, `/people/$id` | E-P14, E-P5, E-P46 |
 | Field types "Text, Amount, Date, Link, Yes or no, Choices, Checklist" and their inputs | `/people/$id/fields/new` | E-P3 |
 | New field audiences "Use my defaults — {…}", "Only you", "{Home} · can view"; "Save it as Only you first; then choose who can see it…" | `/people/$id/fields/new` | E-P2, E-P3 |
 | PPL-6 notes ("{name} won't see this field unless you share it with them", "{name} is in {Home}, so this sharing includes them. They'll see it if they can also see this profile.", "{name} is excluded from this field's sharing, so they won't see it.", "may be able to see it"; review 22 replaced "{name} is in {Home} and will be able to see it") | `/people/$id/fields/new`, `/people/$id/fields/$fid` | component tests, E-P45 |

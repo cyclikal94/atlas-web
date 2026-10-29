@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import { recordEvidence } from "./data-evidence";
 import {
   deltaPage,
@@ -4143,4 +4143,202 @@ test.describe("E-P45: the subject note describes the policy the save leaves, its
         management: served.management,
       });
     });
+});
+
+test.describe("E-P46: the field editor's audience after the sharing editor closes is read again, never said from before (A5, A15; review 23, R23.1)", () => {
+  // Review 23's native reproductions, maintained (the linked subject Mo owns the parent profile, which grants Home edit access, and is a
+  // Home member; the field grants Home read access at policy v6 and excludes Mo). The editor keeps its unfinished input, its session and
+  // what it is bound to; a policy that moved is reviewed and bound only once the field has synced to it.
+  const P = "55555555-5555-4555-8555-555555555555";
+  const F = "66666666-6666-4666-8666-666666666666";
+  const EXCLUDED =
+    "Mo is excluded from this field's sharing, so they won't see it.";
+  const CHANGED =
+    "Who can see this field changed since you opened it. Check the change above before saving yours.";
+  const original = {
+    grants: [{ kind: "household", id: HOME, edit: false }],
+    exclude_accounts: [MO],
+  };
+  const removed = { ...original, exclude_accounts: [] };
+  const note = (version: number) =>
+    fieldP(
+      F,
+      P,
+      "Note",
+      { kind: "text", text: "Initial note" },
+      { version: 4, policy_version: version },
+    );
+  async function open(context: BrowserContext) {
+    const opened = await setup(
+      context,
+      `/people/${P}/fields/${F}`,
+      [personP(P, "Mo"), note(6)],
+      {
+        linked: { [P]: MO },
+        arrange(s) {
+          s.policies.set(P, {
+            version: 1,
+            policy: {
+              grants: [{ kind: "household", id: HOME, edit: true }],
+              exclude_accounts: [],
+            },
+          });
+          s.summaries.set(P, {
+            owner: {
+              account_id: MO,
+              username: "mo",
+              you: false,
+              person: { id: P, label: "Mo" },
+            },
+            your_access: "edit",
+            added_by_you: "no",
+            field_count: 1,
+            audience: {
+              disclosure: "partial",
+              in_home: true,
+              households: [
+                {
+                  id: HOME,
+                  can_edit: true,
+                  you_are_member: true,
+                  name: "Home",
+                  version: 1,
+                  member_count: 2,
+                },
+              ],
+              your_direct_grant: null,
+              direct_grant_count: null,
+              excluded_count: null,
+            },
+          });
+          s.policies.set(F, { version: 6, policy: original });
+          s.managementScript.push(async () => {
+            s.policies.set(F, { version: 7, policy: removed });
+          });
+        },
+      },
+    );
+    const dialog = opened.page.getByRole("dialog");
+    await expect(dialog.locator("[data-subject-note]")).toHaveText(EXCLUDED);
+    await dialog
+      .getByRole("textbox", { name: "Value", exact: true })
+      .fill("My unfinished input");
+    return { ...opened, dialog };
+  }
+  async function sharingEditor(dialog: ReturnType<Page["getByRole"]>) {
+    await dialog
+      .getByRole("button", { name: "Choose people…", exact: true })
+      .click();
+    await expect(dialog.locator('[data-policy-state="editing"]')).toBeVisible();
+  }
+  const value = (dialog: ReturnType<Page["getByRole"]>) =>
+    dialog.getByRole("textbox", { name: "Value", exact: true });
+
+  test("saved removal: the change is reviewed, not the old exclusion said; bound by the person once the field syncs to v7", async ({
+    context,
+  }, info) => {
+    const { page, net, served, dialog } = await open(context);
+    await sharingEditor(dialog);
+    await dialog.getByRole("button", { name: /^Remove exclusion:/ }).click();
+    await dialog.locator("[data-save]").click();
+    await expect.poll(() => served.management.length).toBe(1);
+    expect(served.management[0]?.body).toMatchObject({
+      commands: [
+        { kind: "replace_policy", id: F, expected_version: 6, policy: removed },
+      ],
+    });
+    await expect(dialog.locator('[data-audience="unknown"]')).toHaveText(
+      CHANGED,
+    );
+    await expect(dialog.locator("[data-subject-note]")).toHaveCount(0);
+    await expect(dialog.getByText(EXCLUDED, { exact: true })).toHaveCount(0);
+    await expect(value(dialog)).toHaveValue("My unfinished input");
+    const review = dialog.locator("[data-field-conflict]");
+    await expect(review.locator("h3")).toHaveText(
+      "Who can see this field changed since you opened it",
+    );
+    await expect(review.locator("[data-review-audience]")).toHaveText(
+      "Who can see it now is shown here once this field has finished syncing.",
+    );
+    await expect(
+      dialog.getByRole("button", {
+        name: "Save mine on the current version",
+        exact: true,
+      }),
+    ).toBeDisabled();
+    expect(await draftsOf(page)).toEqual([]);
+    // The field syncs to the new policy version: who can see it now is shown, and only the person's own act binds the edit to it.
+    await publish(page, net, [note(7)]);
+    await expect(review.locator("[data-review-audience]")).toHaveText(
+      "Who can see it now: Home · can view",
+    );
+    expect(await draftsOf(page)).toEqual([]);
+    await dialog
+      .getByRole("button", {
+        name: "Save mine on the current version",
+        exact: true,
+      })
+      .click();
+    await expect.poll(async () => (await draftsOf(page)).length).toBe(1);
+    // What it sends: the content on the version the person reviewed.
+    await startOutbox(page);
+    await send(page);
+    await expect.poll(() => net.commands.length).toBe(1);
+    expect(JSON.parse(net.commands[0]?.body ?? "{}").command).toMatchObject({
+      kind: "put_field",
+      id: F,
+      expected_version: 4,
+      expected_policy_version: 7,
+      value: { kind: "text", text: "My unfinished input" },
+    });
+    expect(served.management).toHaveLength(1);
+    recordEvidence(info, "e-p46", {
+      schedule: "save",
+      management: served.management,
+      requests: served.log,
+    });
+  });
+
+  test("control, the removal cancelled: nothing sent, the exclusion said again from a new read, the input kept", async ({
+    context,
+  }, info) => {
+    const { served, dialog } = await open(context);
+    const before = served.log.filter((l) => l === `GET /policies/${F}`).length;
+    await sharingEditor(dialog);
+    await dialog.getByRole("button", { name: /^Remove exclusion:/ }).click();
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog.locator('[data-audience="existing"]')).toBeVisible();
+    await expect(dialog.locator("[data-subject-note]")).toHaveText(EXCLUDED);
+    await expect(value(dialog)).toHaveValue("My unfinished input");
+    expect(served.management).toEqual([]);
+    // Read again after the sharing editor closed (its own read, then the field editor's).
+    await expect
+      .poll(() => served.log.filter((l) => l === `GET /policies/${F}`).length)
+      .toBeGreaterThanOrEqual(before + 2);
+    recordEvidence(info, "e-p46", { schedule: "cancel", requests: served.log });
+  });
+
+  test("a newer policy read in the sharing editor, then Cancel: the obsolete exclusion is not said and nothing is sent", async ({
+    context,
+  }, info) => {
+    const { page, served, dialog } = await open(context);
+    // Someone else removed the exclusion (v7) after the field editor read the policy.
+    served.policies.set(F, { version: 7, policy: removed });
+    await sharingEditor(dialog);
+    await expect(
+      dialog.getByRole("region", { name: "Exclusions", exact: true }),
+    ).toContainText("Nobody is excluded.");
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog.locator('[data-audience="unknown"]')).toHaveText(
+      CHANGED,
+    );
+    await expect(dialog.locator("[data-subject-note]")).toHaveCount(0);
+    await expect(value(dialog)).toHaveValue("My unfinished input");
+    expect(served.management).toEqual([]);
+    expect(await draftsOf(page)).toEqual([]);
+    recordEvidence(info, "e-p46", {
+      schedule: "newer read, cancel",
+      requests: served.log,
+    });
+  });
 });

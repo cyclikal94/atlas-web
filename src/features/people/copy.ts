@@ -280,6 +280,10 @@ export const AUDIENCE_OWNER_ONLY =
   "Only the owner can change who can see this field";
 export const AUDIENCE_LOADING = "Checking who can see this field…"; // PROVISIONAL
 export const AUDIENCE_LOAD_FAILED = "Couldn't check who can see this field."; // PROVISIONAL
+export const AUDIENCE_CHANGED =
+  "Who can see this field changed since you opened it. Check the change above before saving yours."; // PROVISIONAL (review 23, R23.1)
+export const AUDIENCE_RECHECK =
+  "Who can see this field may have changed. It's checked again when you're online."; // PROVISIONAL (review 23, R23.1)
 export const SAVED_AFTER_SYNC = "Saved. It'll appear here once it has synced.";
 export const SHARING_CHANGED =
   "The sharing changed since you opened this. Review who can see it, then save again.";
@@ -406,6 +410,10 @@ export const STALE_NOT_SAVED =
 export const CREATE_CHANGED =
   "This field was changed in another window since you opened it. Close it and open it again to see the change; nothing was saved."; // PROVISIONAL (review 2, finding 3)
 export const STALE_TITLE = "This field changed since you opened it"; // PROVISIONAL (finding 1)
+export const POLICY_MOVED_TITLE =
+  "Who can see this field changed since you opened it"; // PROVISIONAL (review 23, R23.1)
+export const POLICY_AHEAD =
+  "Who can see it now is shown here once this field has finished syncing."; // PROVISIONAL (review 23, R23.1)
 export const PUBLISHED_TITLE = "This field has finished syncing"; // PROVISIONAL (review 10, finding 1)
 export const PUBLISHED_NOT_SAVED =
   "Your change isn't saved yet. Check the field as it is now, then save yours on it or discard it."; // PROVISIONAL (review 10, finding 1)

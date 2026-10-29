@@ -112,8 +112,16 @@ export class PeopleMemory {
    * Written through `notePolicy`, so a late answer never replaces a later one.
    */
   readonly policies = new Map<string, PolicyRead>();
-  /** Policy reads on their way, shared by every editor that asks (never made twice). */
-  readonly policyReads = new Set<string>();
+  /**
+   * Field policies whose kept read may be out of date: the shared sharing editor was open on the field (it reads and saves on its own), or
+   * a kept edit came back after the page was elsewhere (review 23, R23.1). By field, the generation of that doubt. While doubted, the kept
+   * read still sets the version nothing lower replaces, but it is not shown as who can see the field NOW; only a read asked after the
+   * doubt (`doubtPolicy`, then `notePolicy` with that generation) ends it.
+   */
+  readonly policyDoubts = new Map<string, number>();
+  policyGeneration = 0;
+  /** Policy reads on their way, by field, each with its owner: only the latest read asked for a field ends or refuses it. */
+  readonly policyReads = new Map<string, object>();
   /** Policy reads that did not answer with a policy (`403`: remembered for the page; others until the next try). */
   readonly policyRefusals = new Map<string, "forbidden" | "failed">();
   /** The count "Possible duplicates" showed from its first page, per person ("2", "2+"; null: none claimed). */
@@ -174,15 +182,32 @@ export class PeopleMemory {
   }
 }
 
-/** Keeps `read` as the field's policy unless a later version of it is already kept (an answer that arrives late never lowers it). */
+/**
+ * Keeps `read` as the field's policy unless a later version of it is already kept (an answer that arrives late never lowers it). `answers`:
+ * the doubt the read was asked after; it ends that doubt only while that is still the field's latest one.
+ */
 export function notePolicy(
   memory: PeopleMemory,
   fieldId: string,
   read: PolicyRead,
+  answers?: number,
 ): void {
   const known = memory.policies.get(fieldId);
   if (known === undefined || read.version >= known.version)
     memory.policies.set(fieldId, read);
+  if (answers !== undefined && memory.policyDoubts.get(fieldId) === answers)
+    memory.policyDoubts.delete(fieldId);
+}
+
+/**
+ * The field's kept policy may have changed (review 23, R23.1): it is not shown as current until a read asked from now on answers, and a
+ * read already on its way answers nothing about it (it no longer owns the field's read). The kept version stays as the floor.
+ */
+export function doubtPolicy(memory: PeopleMemory, fieldId: string): void {
+  memory.policyGeneration += 1;
+  memory.policyDoubts.set(fieldId, memory.policyGeneration);
+  memory.policyReads.delete(fieldId);
+  memory.touch();
 }
 
 let current: PeopleMemory | null = null;

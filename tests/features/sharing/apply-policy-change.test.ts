@@ -57,6 +57,28 @@ describe("applyPolicyChange", () => {
     ]);
   });
 
+  test("WEB-11a R23.1: the confirming read is asked FRESH (never a read on its way since before the receipt); the base read is not", async () => {
+    const api = fakeSharingApi();
+    const asked: Array<{ fresh?: boolean } | undefined> = [];
+    const read = api.readPolicy;
+    api.readPolicy = (id, options) => {
+      asked.push(options);
+      return read(id, options);
+    };
+    api.next.policy.push(
+      ok({ version: 4, policy: HOME_VIEW }),
+      ok({ version: 5, policy: PRIVATE }),
+    );
+    await applyPolicyChange(env(api), {
+      resourceId: FIELD,
+      from: { version: 4, policy: HOME_VIEW },
+      to: PRIVATE,
+      attempt: null,
+      sleep,
+    });
+    expect(asked).toEqual([undefined, { fresh: true }]);
+  });
+
   test("the version guard: a policy that moved since it was shown is 'changed', and nothing is sent", async () => {
     const api = fakeSharingApi();
     api.next.policy.push(ok({ version: 5, policy: HOME_VIEW }));

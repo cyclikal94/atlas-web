@@ -167,9 +167,9 @@ export async function applyPolicyChange(
         return { result: failure(sent), attempt: null };
     }
   }
-  // Receipted. Confirmed only by a read that shows the policy asked for.
+  // Receipted. Confirmed only by a read that shows the policy asked for, asked after the receipt (never one on its way before it).
   const confirm = await untilSent(
-    () => env.api.readPolicy(input.resourceId),
+    () => env.api.readPolicy(input.resourceId, { fresh: true }),
     options,
   );
   if (!current()) return { result: { ok: false, kind: "closed" }, attempt };

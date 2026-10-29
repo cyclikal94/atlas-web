@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, test } from "vitest";
 import {
+  doubtPolicy,
   forgetAllPeopleMemory,
   isCurrentMemory,
   notePolicy,
@@ -71,6 +72,66 @@ describe("review 3, finding 3: a late policy read never lowers the one kept (C6,
     expect(memory.policies.get("f")).toMatchObject({
       version: 7,
       checkedAt: 4,
+    });
+  });
+});
+
+describe("review 23, R23.1: a kept policy the sharing editor may have changed is doubted until a read asked after it answers", () => {
+  const policy = { grants: [], exclude_accounts: [] };
+
+  test("a doubt keeps the read's version as the floor and takes the field's read away from the one on its way", () => {
+    const memory = peopleMemory("acct:1");
+    notePolicy(memory, "f", { version: 6, policy, checkedAt: 1 });
+    const pending = {};
+    memory.policyReads.set("f", pending);
+    let seen = 0;
+    memory.subscribe(() => {
+      seen += 1;
+    });
+    doubtPolicy(memory, "f");
+    expect(memory.policyDoubts.has("f")).toBe(true);
+    expect(memory.policyReads.has("f")).toBe(false);
+    expect(memory.policies.get("f")?.version).toBe(6);
+    expect(seen).toBe(1);
+    // An answer asked before the doubt is still evidence of the version, but it ends nothing.
+    notePolicy(memory, "f", { version: 5, policy, checkedAt: 2 });
+    expect(memory.policies.get("f")?.version).toBe(6);
+    expect(memory.policyDoubts.has("f")).toBe(true);
+    notePolicy(memory, "f", { version: 7, policy, checkedAt: 3 });
+    expect(memory.policies.get("f")?.version).toBe(7);
+    expect(memory.policyDoubts.has("f")).toBe(true);
+  });
+
+  test("only the read asked after the LATEST doubt ends it; another field's doubt is its own", () => {
+    const memory = peopleMemory("acct:1");
+    notePolicy(memory, "f", { version: 6, policy, checkedAt: 1 });
+    doubtPolicy(memory, "f");
+    const first = memory.policyDoubts.get("f");
+    doubtPolicy(memory, "f");
+    const second = memory.policyDoubts.get("f");
+    expect(second).not.toBe(first);
+    doubtPolicy(memory, "g");
+    notePolicy(memory, "f", { version: 7, policy, checkedAt: 2 }, first);
+    expect(memory.policyDoubts.get("f")).toBe(second);
+    notePolicy(memory, "f", { version: 7, policy, checkedAt: 3 }, second);
+    expect(memory.policyDoubts.has("f")).toBe(false);
+    expect(memory.policyDoubts.has("g")).toBe(true);
+  });
+
+  test("a lower version asked after the doubt ends it, but never lowers the kept read", () => {
+    const memory = peopleMemory("acct:1");
+    notePolicy(memory, "f", { version: 7, policy, checkedAt: 1 });
+    doubtPolicy(memory, "f");
+    notePolicy(
+      memory,
+      "f",
+      { version: 6, policy, checkedAt: 2 },
+      memory.policyDoubts.get("f"),
+    );
+    expect(memory.policyDoubts.has("f")).toBe(false);
+    expect(memory.policies.get("f")).toMatchObject({
+      version: 7,
+      checkedAt: 1,
     });
   });
 });

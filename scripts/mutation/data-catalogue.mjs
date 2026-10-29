@@ -22291,7 +22291,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      !stillBound(bound, existing) ||\n      (known !== undefined && known.version !== bound.policyVersion)\n",
+        "      !stillBound(bound, existing) ||\n      (keptPolicy !== undefined && keptPolicy.version !== bound.policyVersion)\n",
         "      false\n",
       ),
   },
@@ -23594,7 +23594,8 @@ export const UNIT = [
     tests: ["tests/features/people/review-findings.test.tsx"],
     expect: /closing the shared policy editor/,
     patch: (t) =>
-      sub(t, "              env.memory.policies.delete(row.id);\n", ""),
+      // Re-expressed in revision 23 (review 23, R23.1): the read is withdrawn by doubting it (its version kept as the floor), not deleted.
+      sub(t, "              doubtPolicy(env.memory, row.id);\n", ""),
   },
   {
     id: "MU-2816",
@@ -26664,6 +26665,244 @@ export const UNIT = [
         "  return quickPolicy(choice, input.current, input.primaryHouseholdId);\n}",
         "  return input.current;\n}",
       ),
+  },
+
+  {
+    id: "MU-2896",
+    title:
+      "WEB-11a R23.1: closing the sharing editor leaves the field editor's kept policy as it was (the reviewed defect: the old exclusion is said after it was removed)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R23\.1 (a saved removal|a newer policy read|an uncertain save that did commit|control: an uncertain save that did NOT commit)/,
+    patch: (t) =>
+      sub(
+        t,
+        "            doubtPolicy(memory, fieldId);\n            memory.invalidateSummaries();\n",
+        "            memory.invalidateSummaries();\n",
+      ),
+  },
+  {
+    id: "MU-2897",
+    title:
+      "WEB-11a R23.1: a doubted kept policy is still shown as who can see the field now",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 (closed while offline|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const known = doubt === undefined ? keptPolicy : undefined;\n",
+        "  const known = keptPolicy;\n",
+      ),
+  },
+  {
+    id: "MU-2898",
+    title:
+      "WEB-11a R23.1: any policy read ends the field's doubt, whenever it was asked",
+    file: "src/features/people/memory.ts",
+    tests: [
+      "tests/features/people/memory.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R23\.1.*(takes the field's read away|LATEST doubt|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (answers !== undefined && memory.policyDoubts.get(fieldId) === answers)\n",
+        "  if (memory.policyDoubts.has(fieldId))\n",
+      ),
+  },
+  {
+    id: "MU-2899",
+    title:
+      "WEB-11a R23.1: a doubt leaves the read already on its way as the field's read (its answer ends what the doubt asked for)",
+    file: "src/features/people/memory.ts",
+    tests: [
+      "tests/features/people/memory.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R23\.1.*(takes the field's read away|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  memory.policyDoubts.set(fieldId, memory.policyGeneration);\n  memory.policyReads.delete(fieldId);\n",
+        "  memory.policyDoubts.set(fieldId, memory.policyGeneration);\n",
+      ),
+  },
+  {
+    id: "MU-2900",
+    title:
+      "WEB-11a R23.1: a fresh policy read joins the read already on its way (asked before the change it is asked after)",
+    file: "src/features/sharing/api.ts",
+    tests: ["tests/features/sharing/api.test.ts"],
+    expect: /R23\.1: a FRESH policy read/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (shared !== undefined && options?.fresh) {\n",
+        "      if (shared !== undefined && options?.fresh && false) {\n",
+      ),
+  },
+  {
+    id: "MU-2901",
+    title:
+      "WEB-11a R23.1: the field editor's read after a doubt is an ordinary one (a read on its way since before may answer it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 a saved removal: the old/,
+    patch: (t) =>
+      sub(
+        t,
+        "        doubted === undefined ? undefined : { fresh: true },\n",
+        "        undefined,\n",
+      ),
+  },
+  {
+    id: "MU-2902",
+    title:
+      "WEB-11a R23.1: a quick change's confirming read is an ordinary one (a read on its way since before the receipt may confirm it)",
+    file: "src/features/sharing/apply-policy-change.ts",
+    tests: ["tests/features/sharing/apply-policy-change.test.ts"],
+    expect: /R23\.1: the confirming read is asked FRESH/,
+    patch: (t) =>
+      sub(
+        t,
+        "    () => env.api.readPolicy(input.resourceId, { fresh: true }),\n",
+        "    () => env.api.readPolicy(input.resourceId),\n",
+      ),
+  },
+  {
+    id: "MU-2903",
+    title:
+      "WEB-11a R23.1: a superseded policy read still ends (or refuses) the field's read, though a later one owns it",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 a read asked before a later doubt/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (memory.policyReads.get(id) === owner) {\n",
+        "      if (owner !== null) {\n",
+      ),
+  },
+  {
+    id: "MU-2904",
+    title:
+      "WEB-11a R23.1: an edit restored on a later mount shows the policy kept from before, without reading it again",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R23\.1 (an edit kept while the page was elsewhere|a read asked before a later doubt)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (\n      initial.restored &&\n      existing !== null &&\n      env.memory.policies.has(existing.id)\n    )\n      doubtPolicy(env.memory, existing.id);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2905",
+    title:
+      "WEB-11a R23.1: the sharing editor never reports what it read (the host learns nothing of a newer policy)",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: [
+      "tests/features/sharing/policy-editor.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /(review 23.*onPolicyRead reports|R23\.1 closed offline after the sharing editor read a newer policy)/,
+    patch: (t) => sub(t, "    onPolicyRead?.(policyLoad.value);\n", ""),
+  },
+  {
+    id: "MU-2906",
+    title:
+      "WEB-11a R23.1: an edit can be bound to a policy that moved ahead of the field as this device has it",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 a saved removal: the old/,
+    patch: (t) =>
+      sub(
+        t,
+        "      : policyMoved && nowAudience === null\n        ? reviewAudienceReason\n        : null;",
+        "      : null;",
+      ),
+  },
+  {
+    id: "MU-2907",
+    title:
+      "WEB-11a R23.1: a content save drops an audience chosen over one that is not known now",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R23\.1 closed while offline/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (touched && currentChoice === null) return fail(copy.SHARING_CHANGED);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2908",
+    title:
+      "WEB-11a R23.1: only an undoubted read says the policy moved (a newer read the sharing editor made is ignored while doubted)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R23\.1 closed offline after the sharing editor read a newer policy/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const policyMoved =\n    keptPolicy !== undefined &&\n    snapshot !== null &&\n    keptPolicy.version !== snapshot.policyVersion;",
+        "  const policyMoved =\n    known !== undefined &&\n    snapshot !== null &&\n    known.version !== snapshot.policyVersion;",
+      ),
+  },
+  {
+    id: "MU-2909",
+    title:
+      "WEB-11a review 23: useSharingLoad's unmount leaves its started mark, so development's replay never reads again (the editor stays Loading)",
+    file: "src/features/sharing/parts.tsx",
+    tests: [
+      "tests/features/sharing/policy-editor.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /(review 23.*under StrictMode|R23\.1 control: the removal cancelled)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      generation.current += 1;\n      started.current = null;\n    },\n    [],",
+        "      generation.current += 1;\n    },\n    [],",
+      ),
+  },
+  {
+    id: "MU-2910",
+    title:
+      "WEB-11a review 23: the policy editor's mounted mark is not set again on development's replay, so a save's answer is dropped",
+    file: "src/features/sharing/ResourcePolicyEditor.tsx",
+    tests: [
+      "tests/features/sharing/policy-editor.test.tsx",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /(review 23.*under StrictMode|R23\.1 a saved removal)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    mounted.current = true;\n    return () => {",
+        "    return () => {",
+      ),
+  },
+  {
+    id: "MU-2911",
+    title:
+      "WEB-11a R23.1: the field row shows its doubted kept read after the sharing editor closed",
+    file: "src/features/people/detail/PersonDetail.tsx",
+    tests: ["tests/features/people/review-findings.test.tsx"],
+    expect:
+      /closing the shared policy editor \(which may have changed it\) withdraws/,
+    patch: (t) => sub(t, "    !env.memory.policyDoubts.has(row.id) &&\n", ""),
   },
 
   ...UNIT_LABELS,

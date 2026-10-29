@@ -39,6 +39,7 @@ import {
   useShown,
 } from "../lifetime";
 import {
+  doubtPolicy,
   isCurrentMemory,
   notePolicy,
   type PeopleMemory,
@@ -640,8 +641,13 @@ function Editor({
   const isNew = existing === null;
   const projected = field?.projected ?? false;
   const canEdit = existing === null ? true : existing.can_edit;
-  const known =
+  const keptPolicy =
     existing === null ? undefined : env.memory.policies.get(existing.id);
+  // A kept read that may be out of date (the sharing editor was open on the field, or this edit came back after the page was elsewhere)
+  // is never who can see the field NOW (review 23, R23.1): until a read asked after that answers, the audience is being checked.
+  const doubt =
+    existing === null ? undefined : env.memory.policyDoubts.get(existing.id);
+  const known = doubt === undefined ? keptPolicy : undefined;
   const livePolicyVersion = existing?.policy_version ?? null;
   const policyLoad: "idle" | "loading" | "forbidden" | "failed" =
     existing === null
@@ -649,46 +655,76 @@ function Editor({
       : env.memory.policyReads.has(existing.id)
         ? "loading"
         : (env.memory.policyRefusals.get(existing.id) ?? "idle");
-  // A policy read OLDER than the field's published policy version is not the audience any more: it is asked again, once per version.
+  // An edit kept while the page was elsewhere comes back to a policy anyone may have changed meanwhile (the Sharing screen, another
+  // window): what this page kept of it is checked again, without touching the edit.
+  // Once per mount (development's replay of every effect is the same mount).
+  const rechecked = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once, when this mount restores a kept edit
+  useEffect(() => {
+    if (rechecked.current) return;
+    rechecked.current = true;
+    if (
+      initial.restored &&
+      existing !== null &&
+      env.memory.policies.has(existing.id)
+    )
+      doubtPolicy(env.memory, existing.id);
+  }, []);
+  // A policy read OLDER than the field's published policy version is not the audience any more: it is asked again, once per version. A
+  // doubted one is asked again once per doubt, by a read that cannot be answered by one asked before the doubt.
   const asked = useRef<number | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new doubt (read from the memory inside) asks again
   useEffect(() => {
     if (existing === null || projected || !canEdit || !env.online) return;
     const memory = env.memory;
-    const read = memory.policies.get(existing.id);
+    const id = existing.id;
+    const read = memory.policies.get(id);
+    const doubted = memory.policyDoubts.get(id);
     const outdated =
       read !== undefined &&
       livePolicyVersion !== null &&
       read.version < livePolicyVersion &&
       asked.current !== livePolicyVersion;
     if (
-      (read !== undefined && !outdated) ||
-      memory.policyReads.has(existing.id) ||
-      memory.policyRefusals.get(existing.id) === "forbidden"
+      (read !== undefined && !outdated && doubted === undefined) ||
+      memory.policyReads.has(id) ||
+      memory.policyRefusals.get(id) === "forbidden"
     )
       return;
     if (outdated) {
       asked.current = livePolicyVersion;
-      memory.policies.delete(existing.id);
+      memory.policies.delete(id);
     }
-    memory.policyReads.add(existing.id);
-    memory.policyRefusals.delete(existing.id);
+    // This read's own: a later read of the field (or a doubt) takes the field's read over, and then this one ends and refuses nothing.
+    const owner = {};
+    memory.policyReads.set(id, owner);
+    memory.policyRefusals.delete(id);
     memory.touch();
-    void untilSent(() => env.sharing.readPolicy(existing.id)).then((result) => {
+    void untilSent(() =>
+      env.sharing.readPolicy(
+        id,
+        doubted === undefined ? undefined : { fresh: true },
+      ),
+    ).then((result) => {
       if (!isCurrentMemory(memory)) return;
-      memory.policyReads.delete(existing.id);
       if (result.ok)
-        notePolicy(memory, existing.id, {
-          ...result.value,
-          checkedAt: env.now(),
-        });
-      else
-        memory.policyRefusals.set(
-          existing.id,
-          result.kind === "forbidden" ? "forbidden" : "failed",
+        notePolicy(
+          memory,
+          id,
+          { ...result.value, checkedAt: env.now() },
+          doubted,
         );
+      if (memory.policyReads.get(id) === owner) {
+        memory.policyReads.delete(id);
+        if (!result.ok)
+          memory.policyRefusals.set(
+            id,
+            result.kind === "forbidden" ? "forbidden" : "failed",
+          );
+      }
       memory.touch();
     });
-  }, [env, existing, projected, canEdit, livePolicyVersion]);
+  }, [env, existing, projected, canEdit, livePolicyVersion, doubt]);
 
   const home = primaryHousehold(defaults.record);
   const homeName = home?.household?.name ?? "Home";
@@ -700,10 +736,16 @@ function Editor({
     known.version === snapshot.policyVersion
       ? known
       : undefined;
+  // Even a doubted read says the policy moved: no version it once had comes back.
   const policyMoved =
-    known !== undefined &&
+    keptPolicy !== undefined &&
     snapshot !== null &&
-    known.version !== snapshot.policyVersion;
+    keptPolicy.version !== snapshot.policyVersion;
+  // ... and one read AHEAD of the field as this device has it waits for the field to sync before the edit can be bound to it.
+  const policyAhead =
+    keptPolicy !== undefined &&
+    livePolicyVersion !== null &&
+    keptPolicy.version > livePolicyVersion;
   const current: AudienceClass | null =
     shownPolicy === undefined
       ? null
@@ -762,8 +804,7 @@ function Editor({
   const reviewAudienceReason =
     nowAudience !== null
       ? null
-      : livePolicyVersion === null ||
-          (known !== undefined && known.version > livePolicyVersion)
+      : livePolicyVersion === null || policyAhead
         ? copy.WAIT_FOR_SYNC_FIELD
         : policyLoad === "forbidden"
           ? copy.PUBLISHED_AUDIENCE_OWNER_ONLY
@@ -1012,7 +1053,7 @@ function Editor({
     if (bound.policyVersion === null) return fail(copy.WAIT_FOR_SYNC_FIELD);
     if (
       !stillBound(bound, existing) ||
-      (known !== undefined && known.version !== bound.policyVersion)
+      (keptPolicy !== undefined && keptPolicy.version !== bound.policyVersion)
     ) {
       tell({ outcome: { kind: "stale" } });
       return;
@@ -1035,6 +1076,9 @@ function Editor({
       if (!outcome.ok) return fail(outcome.message);
       return succeeded(copy.SAVED_NOT_SENT, ticket);
     };
+    // An audience chosen over one that is not known now (checked again after the sharing editor, review 23) is never dropped by a save of
+    // the content alone: the person sees who can see it first.
+    if (touched && currentChoice === null) return fail(copy.SHARING_CHANGED);
     if (!audienceChanged) {
       if (!contentChanged) return close();
       return queued(bound.policyVersion);
@@ -1229,11 +1273,15 @@ function Editor({
     void submit();
   }, [resubmit]);
   /** The current audience must be known before an edit is re-bound to a changed one, or bound to a published one (review 10). */
+  // A policy that moved while the field as this device has it did not (the sharing editor saved it, review 23) is bound to only once the
+  // field has synced to it and its audience is read at that version.
   const rebindReason = needsReview
     ? reviewAudienceReason
     : policyChangedSince && nowAudience === null
       ? copy.CONFLICT_NEEDS_AUDIENCE
-      : null;
+      : policyMoved && nowAudience === null
+        ? reviewAudienceReason
+        : null;
 
   /** "Save mine on the current version" of a CONFLICTED save (finding 3): ITS content, on the version and audience the person sees now. */
   const saveConflicted = async (draft: DraftWithCommand) => {
@@ -1275,19 +1323,33 @@ function Editor({
     else fail(outcome.message);
   };
 
-  if (policyEditor && existing !== null)
+  // The full sharing editor reads and saves the field's policy on its own (review 23, R23.1). Whatever it read is what the server holds,
+  // and is kept as this page's read; however it closes (saved, cancelled, or a save whose answer was lost), what this page kept of the
+  // policy may be out of date, so it is checked again. The edit, its session and what it is bound to stay as they were: a policy that
+  // moved is reviewed (never adopted by the edit on its own).
+  if (policyEditor && existing !== null) {
+    const memory = env.memory;
+    const fieldId = existing.id;
     return (
       <ResourcePolicyEditor
-        resourceId={existing.id}
+        resourceId={fieldId}
         open
+        onPolicyRead={(read) => {
+          if (!isCurrentMemory(memory)) return;
+          notePolicy(memory, fieldId, { ...read, checkedAt: env.now() });
+          memory.touch();
+        }}
         onOpenChange={(open) => {
           if (!open) {
             setPolicyEditor(false);
-            env.memory.invalidateSummaries();
+            if (!isCurrentMemory(memory)) return;
+            doubtPolicy(memory, fieldId);
+            memory.invalidateSummaries();
           }
         }}
       />
     );
+  }
 
   const offline = outcome?.kind === "offline_choice";
   const saveReason = !env.writable
@@ -1446,9 +1508,20 @@ function Editor({
             />
           ) : (unbound || outcome?.kind === "stale") && existing !== null ? (
             <ReviewPanel
-              title={copy.STALE_TITLE}
+              title={
+                policyMoved &&
+                snapshot !== null &&
+                stillBound(snapshot, existing)
+                  ? copy.POLICY_MOVED_TITLE
+                  : copy.STALE_TITLE
+              }
               current={existing}
-              audienceNow={policyChangedSince ? (nowAudience ?? false) : null}
+              audienceNow={
+                policyChangedSince || policyMoved
+                  ? (nowAudience ?? false)
+                  : null
+              }
+              {...(policyAhead ? { audienceUnknown: copy.POLICY_AHEAD } : {})}
               mine={(() => {
                 const ready = applicable(state);
                 return ready.ok
@@ -1535,6 +1608,13 @@ function Editor({
               hasHome={home !== null}
               fieldDefaults={fieldDefaultsLabel(defaults.record)}
               policyLoad={policyLoad}
+              unknownReason={
+                policyMoved
+                  ? copy.AUDIENCE_CHANGED
+                  : doubt !== undefined
+                    ? copy.AUDIENCE_RECHECK
+                    : copy.LINK_UNKNOWN_REASON.offline
+              }
               personName={person.row.label}
               note={subjectNote({
                 linkage,
@@ -1579,6 +1659,7 @@ function AudienceSection({
   hasHome,
   fieldDefaults,
   policyLoad,
+  unknownReason,
   note,
   onChange,
   onChoosePeople,
@@ -1593,6 +1674,8 @@ function AudienceSection({
   hasHome: boolean;
   fieldDefaults: string | null;
   policyLoad: "idle" | "loading" | "forbidden" | "failed";
+  /** What an existing field's audience that is not shown says while it is not being read (it moved, or it is checked when online). */
+  unknownReason: string;
   personName: string;
   note: string | null;
   onChange(value: NewAudience | ExistingAudience): void;
@@ -1641,7 +1724,7 @@ function AudienceSection({
           ? copy.AUDIENCE_LOADING
           : policyLoad === "failed"
             ? copy.AUDIENCE_LOAD_FAILED
-            : copy.LINK_UNKNOWN_REASON.offline}
+            : unknownReason}
       </p>
     );
   return (

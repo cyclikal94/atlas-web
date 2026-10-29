@@ -12,6 +12,7 @@ import { AudienceSummary } from "./AudienceSummary";
 import {
   type DirectoryEntry,
   type ManagementCommand,
+  type PolicyState,
   type SharingFailure,
   type SharingResult,
   untilSent,
@@ -58,6 +59,11 @@ export interface ResourcePolicyEditorProps {
   onOpenChange(open: boolean): void;
   /** After a confirmed save: the receipt's revision. The editor closes itself unless this returns `false`. */
   onSaved?(result: { revision: number }): boolean | undefined;
+  /**
+   * Each read of the policy that answered: the policy and version the server holds (never the draft being edited, never a receipt's
+   * revision). A host that shows the resource's audience itself learns it here (WEB-11a review 23, R23.1).
+   */
+  onPolicyRead?(read: PolicyState): void;
 }
 
 export function ResourcePolicyEditor(props: ResourcePolicyEditorProps) {
@@ -104,6 +110,7 @@ function PolicyEditorDialog({
   resourceId,
   onOpenChange,
   onSaved,
+  onPolicyRead,
 }: ResourcePolicyEditorProps) {
   const env = useSharingEnv();
   const announcer = useAnnouncer();
@@ -160,18 +167,20 @@ function PolicyEditorDialog({
   const sending = useRef(false);
   const uncertain = useRef<Attempt | null>(null);
   const mounted = useRef(true);
-  useEffect(
-    () => () => {
+  // Set on every mount: development's replay of every effect runs this cleanup and then mounts again (WEB-11a review 23).
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
       mounted.current = false;
-    },
-    [],
-  );
+    };
+  }, []);
 
   // A (re)read of the policy is the base of the edit: the draft starts from it, and a Reload discards the local edits. The FIRST read
   // after reopening shows a draft the sync control kept instead, at the version it was composed against (Save stays guarded by it).
   // biome-ignore lint/correctness/useExhaustiveDependencies: the draft is reset only when a new read lands (a new load object)
   useEffect(() => {
     if (policyLoad.status !== "ready") return;
+    onPolicyRead?.(policyLoad.value);
     const kept = restore.current;
     restore.current = undefined;
     if (kept !== undefined) {
