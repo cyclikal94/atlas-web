@@ -13,12 +13,18 @@ import type { RotaConsentCommand, SetRotaCommand, TasksResult } from "../api";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel } from "../format";
-import { completeKept, keptKey, useKeptInput } from "../kept-input";
+import {
+  completeKept,
+  type KeptTicket,
+  keptKey,
+  useKeptInput,
+} from "../kept-input";
 import {
   dismissRota,
   noteIfRefused,
   type RotaAttempt,
   type RotaHold,
+  type RotaOrigin,
   type RotaOutcome,
   rotaHoldOf,
   rotaReadsOf,
@@ -90,6 +96,8 @@ export const ROTA_COPY = {
   conflict: "Someone changed the order while you had it open.",
   reload: "Reload",
   saved: "Turn order saved.",
+  savedEarlier:
+    "Your earlier order was saved. Your newer changes aren't saved yet.",
   nothingChanged: "Nothing has changed",
   you: "You",
 } as const;
@@ -103,6 +111,17 @@ function useRotaHold(identity: string, command: string): RotaHold {
   const hold = () => rotaHoldOf(identity, command);
   return useSyncExternalStore(subscribeRota, hold, hold);
 }
+
+/**
+ * Whether a save's ticket is the input its sent change was made from (review 9, R34): the same editor, session and revision. Save sends
+ * what its ticket holds, so it always is; Try again sends the held attempt's body, which is the input only if nothing was edited since
+ * that change was saved (an edit away and back is still an edit).
+ */
+const represents = (origin: RotaOrigin | null, ticket: KeptTicket): boolean =>
+  origin !== null &&
+  origin.editor === ticket.key &&
+  origin.session === ticket.session &&
+  origin.revision === ticket.revision;
 
 /** The outcome a screen mounted at serial `since` shows: one settled after it mounted (an earlier screen's own note is not carried over). */
 const shownSince = (hold: RotaHold, since: number): RotaOutcome | null =>
@@ -122,7 +141,8 @@ type Send =
  *
  * Review 8, R33: the answer settles only ITS attempt (`settleRota`): a change sent after the person went away and came back, while this one
  * was still on its way, is a new attempt, and this one's late answer, whatever it is, leaves it held with its own body and key. `reread`:
- * the answers after which the rota is read again (by the screen showing it then).
+ * the answers after which the rota is read again (by the screen showing it then). `origin`: the editor input `command` was made from
+ * (review 9, R34), kept with the attempt.
  */
 async function sendAccess(
   env: ReturnType<typeof useTasksEnv>,
@@ -130,6 +150,7 @@ async function sendAccess(
   memoryKey: string,
   command: SetRotaCommand | RotaConsentCommand,
   reread: ReadonlyArray<Send["kind"]>,
+  origin: RotaOrigin | null = null,
 ): Promise<Send> {
   if (!env.online || !env.writable) return { kind: "not_sent" };
   const identity = env.identity;
@@ -138,6 +159,7 @@ async function sendAccess(
     memoryKey,
     command,
     env.newId,
+    origin,
   );
   const flying = joined ? flights.get(attempt) : undefined;
   if (flying !== undefined) return flying;
@@ -499,14 +521,17 @@ function RotaDialog({
   const since = useRef(rotaSerial());
   const said = shownSince(hold, since.current);
   const outcome =
-    said === null || said.kind === "saved"
+    said === null
       ? null
-      : said.kind === "refused"
-        ? {
-            kind: "refused" as const,
-            ...(said.requestId ? { requestId: said.requestId } : {}),
-          }
-        : { kind: said.kind };
+      : said.kind === "saved"
+        ? // Still open after a save it answered: the person had edited past what was saved (the newer order stays, unsaved; R34).
+          { kind: "saved" as const }
+        : said.kind === "refused"
+          ? {
+              kind: "refused" as const,
+              ...(said.requestId ? { requestId: said.requestId } : {}),
+            }
+          : { kind: said.kind };
   const label = (id: string) => labelOf(id, env.accountId, names, anonymous);
   // "Reload" after another editor's change: the order starts again from the latest saved one (the edit is never merged into it).
   const [reloading, setReloading] = useState(false);
@@ -550,15 +575,27 @@ function RotaDialog({
       expected_version: input.value.base,
       participants: order,
     };
-    // A success reads the rota again and is announced by the panel; it consumes the order this save submitted (closing the dialog, above).
+    // The input the change sent represents (review 9, R34), taken with its body before anything is awaited: Save's own ticket; Try
+    // again's, the held attempt's (its body is that earlier save's, whatever the editor holds now).
+    const origin: RotaOrigin | null =
+      resend && held
+        ? held.origin
+        : {
+            editor: ticket.key,
+            session: ticket.session,
+            revision: ticket.revision,
+          };
+    // A success reads the rota again and is announced by the panel; it consumes the order only if this ticket is the input the change was
+    // made from (closing the dialog, above). Otherwise the flight ends and the newer order stays, unsaved.
     const out = await sendAccess(
       env,
       taskId,
       orderKey,
       resend && held ? JSON.parse(held.body) : command,
       ["ok"],
+      origin,
     );
-    completeKept(ticket, out.kind === "ok");
+    completeKept(ticket, out.kind === "ok" && represents(origin, ticket));
   };
   const edit = (next: string[]) => {
     dismissRota(env.identity, orderKey);
@@ -581,7 +618,11 @@ function RotaDialog({
       description={ROTA_COPY.lead}
       footer={
         <div className="flex flex-col gap-2">
-          {outcome?.kind === "conflict" ? (
+          {outcome?.kind === "saved" ? (
+            <p className="text-[12.5px] text-ink-2" data-rota-saved-earlier="">
+              {ROTA_COPY.savedEarlier}
+            </p>
+          ) : outcome?.kind === "conflict" ? (
             <span
               className="flex flex-wrap items-center gap-2"
               data-rota-conflict=""

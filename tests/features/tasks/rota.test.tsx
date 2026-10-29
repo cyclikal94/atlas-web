@@ -831,7 +831,9 @@ describe("R33: a rota answer settles only its own attempt", () => {
   /** The task screen with a rota whose read follows `state`; the first access call is held until `release`, later ones answer `later`. */
   async function world(
     state: { current: Partial<RotaState> },
-    later: () => TasksResult<TaskResult> = () => ({
+    later: () =>
+      | TasksResult<TaskResult>
+      | Promise<TasksResult<TaskResult>> = () => ({
       ok: false,
       kind: "uncertain",
     }),
@@ -1133,6 +1135,230 @@ describe("R33: a rota answer settles only its own attempt", () => {
     expect(w.sent[1]?.key).toBe(w.sent[0]?.key);
   });
 
+  // ---- review 9, R34: Try again consumes only the input its resent change was made from -----------------------------------------------
+  const order = () =>
+    [...document.querySelectorAll("[data-rota-order] [data-rota-person]")].map(
+      (li) => li.getAttribute("data-rota-person"),
+    );
+  const dialogOpen = () =>
+    document.querySelector("[data-rota-dialog]") !== null;
+  const savedEarlier = () =>
+    document.querySelector("[data-rota-saved-earlier]");
+  const saveButton = () =>
+    screen.queryByRole("button", {
+      name: ROTA_COPY.save,
+    }) as HTMLButtonElement | null;
+  const v2 = (): Partial<RotaState> => ({
+    version: 2,
+    participants: [ME, OTHER],
+    eligible_participants: [ME, OTHER, THIRD],
+  });
+  const v3 = (): Partial<RotaState> => ({
+    version: 3,
+    participants: [ME, OTHER, THIRD],
+    eligible_participants: [ME, OTHER, THIRD],
+  });
+  /** A held answer for a later access call: `answer` settles it. */
+  function held() {
+    let answer: (r: TasksResult<TaskResult>) => void = () => undefined;
+    const promise = new Promise<TasksResult<TaskResult>>((resolve) => {
+      answer = resolve;
+    });
+    return { promise, answer: (r: TasksResult<TaskResult>) => answer(r) };
+  }
+  /** Submit A = [ME, OTHER, THIRD] at version 2 (held), then `edit` while it is on its way. */
+  async function submitA(
+    later: () =>
+      | TasksResult<TaskResult>
+      | Promise<TasksResult<TaskResult>> = () => answerOf("success"),
+  ) {
+    const state = { current: v2() };
+    const w = await world(state, later);
+    await openOrder(w.t);
+    press(`${ROTA_COPY.add}: Someone (3333…)`);
+    press(ROTA_COPY.save);
+    await w.t.until(() => w.sent.length === 1);
+    expect(w.sent.length, "A was submitted").toBe(1);
+    expect(w.sent[0]?.command).toEqual({
+      kind: "set_rota",
+      task_id: w.task.taskId,
+      expected_version: 2,
+      participants: [ME, OTHER, THIRD],
+    });
+    return { w, state };
+  }
+  /** A answers uncertain; Try again is offered and pressed, resending A exactly. */
+  async function retryA(w: Awaited<ReturnType<typeof world>>, sends: number) {
+    await w.t.until(() => tryAgain() !== null);
+    expect(tryAgain(), "the uncertain A is offered again").not.toBeNull();
+    press("Try again");
+    await w.t.until(() => w.sent.length === sends);
+    expect(w.sent.length).toBe(sends);
+    expect(
+      w.sent[sends - 1],
+      "Try again resends A's own body and key, never the editor's newer order",
+    ).toEqual(w.sent[0]);
+  }
+  async function reopen(t: Mounted) {
+    press(ROTA_COPY.cancel);
+    await t.settle();
+    expect(dialogOpen(), "closed").toBe(false);
+    await openOrder(t);
+  }
+
+  test.each([
+    {
+      name: "control: A's own success keeps a newer edit",
+      edited: true,
+      retry: false,
+      success: true,
+    },
+    {
+      name: "control: Try again's success closes an unchanged order",
+      edited: false,
+      retry: true,
+      success: true,
+    },
+    {
+      name: "control: Try again's refusal keeps a newer edit",
+      edited: true,
+      retry: true,
+      success: false,
+    },
+    {
+      name: "witness: Try again's success keeps the newer, never-sent edit",
+      edited: true,
+      retry: true,
+      success: true,
+    },
+  ])(
+    "REVIEW9 R34 (ported, with the reopen observation): $name",
+    async ({ edited, retry, success }) => {
+      const { w, state } = await submitA(() =>
+        answerOf(success ? "success" : "refused"),
+      );
+      if (edited) press(`${ROTA_COPY.remove}: Someone (2222…)`);
+      expect(order(), "the editor shows the person's current order").toEqual(
+        edited ? [ME, THIRD] : [ME, OTHER, THIRD],
+      );
+      if (retry) {
+        w.release(answerOf("uncertain"));
+        state.current = v3();
+        await retryA(w, 2);
+      } else {
+        state.current = v3();
+        w.release(answerOf("success"));
+      }
+      await w.t.settle();
+      expect(w.t.drafts(), "online only: nothing queued").toEqual([]);
+      if (!edited) {
+        expect(dialogOpen(), "the saved order is consumed").toBe(false);
+        return;
+      }
+      expect(
+        dialogOpen(),
+        "an answer to A cannot consume the newer order the person has not sent",
+      ).toBe(true);
+      expect(order(), "the newer order stays, editable").toEqual([ME, THIRD]);
+      expect(saveButton()?.disabled, "and can be saved (not busy)").toBe(false);
+      if (success)
+        expect(
+          savedEarlier(),
+          "said: A saved, the newer order not",
+        ).toHaveTextContent(ROTA_COPY.savedEarlier);
+      // The separate observation: closed and opened again on the same visit, the newer order is still the person's.
+      await reopen(w.t);
+      expect(order(), "reopened: still the newer order").toEqual([ME, THIRD]);
+      expect(w.sent.length).toBe(retry ? 2 : 1);
+    },
+  );
+
+  test("R34: repeated uncertainty keeps A's origin: the second Try again's success still leaves the newer order", async () => {
+    let later = 0;
+    const { w, state } = await submitA(() =>
+      answerOf(++later === 1 ? "uncertain" : "success"),
+    );
+    press(`${ROTA_COPY.remove}: Someone (2222…)`);
+    w.release(answerOf("uncertain"));
+    await retryA(w, 2);
+    await w.t.settle();
+    state.current = v3();
+    await retryA(w, 3);
+    await w.t.settle();
+    expect(dialogOpen()).toBe(true);
+    expect(order()).toEqual([ME, THIRD]);
+  });
+
+  test.each(["success", "edited"] as const)(
+    "R34: an edit made while Try again is on its way stays (the retry's ticket is the order before it); control: unedited, the success consumes = %s",
+    async (mode) => {
+      const second = held();
+      const { w, state } = await submitA(() => second.promise);
+      w.release(answerOf("uncertain"));
+      await retryA(w, 2);
+      if (mode === "edited") press(`${ROTA_COPY.remove}: Someone (2222…)`);
+      state.current = v3();
+      second.answer(answerOf("success"));
+      await w.t.settle();
+      if (mode === "edited") {
+        expect(dialogOpen()).toBe(true);
+        expect(order()).toEqual([ME, THIRD]);
+      } else expect(dialogOpen()).toBe(false);
+    },
+  );
+
+  test.each(["retry", "save"] as const)(
+    "R34: edited away and back (the same order again) is still an edit: Try again's success keeps it; an explicit Save of the same order is that input (one key) and consumes = %s",
+    async (how) => {
+      const { w, state } = await submitA();
+      press(`${ROTA_COPY.remove}: Someone (2222…)`);
+      press(`${ROTA_COPY.add}: Someone (2222…)`);
+      press(`${ROTA_COPY.up}: Someone (2222…)`);
+      expect(order(), "the same order as A again").toEqual([ME, OTHER, THIRD]);
+      w.release(answerOf("uncertain"));
+      await w.t.until(() => tryAgain() !== null);
+      state.current = v3();
+      if (how === "retry") {
+        await retryA(w, 2);
+        await w.t.settle();
+        expect(dialogOpen(), "not the input A was saved from").toBe(true);
+        expect(order()).toEqual([ME, OTHER, THIRD]);
+      } else {
+        press(ROTA_COPY.save);
+        await w.t.until(() => w.sent.length === 2);
+        expect(w.sent[1], "the same body is A's attempt: its key").toEqual(
+          w.sent[0],
+        );
+        await w.t.settle();
+        expect(dialogOpen(), "Save submitted what the editor holds").toBe(
+          false,
+        );
+      }
+    },
+  );
+
+  test("R34: a visit to the sync screens keeps the newer order; back, A's uncertain answer and Try again's success leave it there", async () => {
+    const { w, state } = await submitA();
+    press(`${ROTA_COPY.remove}: Someone (2222…)`);
+    await act(async () => {
+      await w.t.router.navigate({ to: "/sync", search: { tab: "queue" } });
+    });
+    await w.t.settle();
+    expect(dialogOpen(), "away at the sync screens").toBe(false);
+    await act(async () => {
+      w.t.router.history.back();
+    });
+    await w.t.until(w.ready);
+    await openOrder(w.t);
+    expect(order(), "the same visit's newer order").toEqual([ME, THIRD]);
+    w.release(answerOf("uncertain"));
+    state.current = v3();
+    await retryA(w, 2);
+    await w.t.settle();
+    expect(dialogOpen()).toBe(true);
+    expect(order()).toEqual([ME, THIRD]);
+  });
+
   describe("the owner (`memory.ts`)", () => {
     const I = `${ME}:1`;
     const J = `${OTHER}:1`;
@@ -1267,6 +1493,36 @@ describe("R33: a rota answer settles only its own attempt", () => {
       expect(other.attempt.key, "another body, another key").not.toBe(
         consent.key,
       );
+    });
+
+    test("R34: an attempt keeps the input it was submitted from: uncertain and resent with its own origin; a join keeps its own", () => {
+      const origin = { editor: "e", session: 4, revision: 7 };
+      const a = startRota(I, "t-1:order", body(true), key, origin).attempt;
+      expect(a.origin).toEqual(origin);
+      expect(Object.isFrozen(a.origin)).toBe(true);
+      const joined = startRota(I, "t-1:order", body(true), key, {
+        ...origin,
+        revision: 8,
+      });
+      expect(joined.joined).toBe(true);
+      expect(joined.attempt.origin, "a join is the pending attempt").toEqual(
+        origin,
+      );
+      settleRota(I, "t-1:order", a, { kind: "uncertain" }, null);
+      const uncertain = rotaHoldOf(I, "t-1:order").attempt;
+      expect(uncertain?.origin, "uncertain keeps its origin").toEqual(origin);
+      const resent = startRota(
+        I,
+        "t-1:order",
+        body(true),
+        key,
+        uncertain?.origin ?? null,
+      ).attempt;
+      expect(resent.key).toBe(a.key);
+      expect(resent.origin).toEqual(origin);
+      expect(
+        startRota(I, "t-1:consent", body(true), key).attempt.origin,
+      ).toBeNull();
     });
   });
 });

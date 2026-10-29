@@ -95,6 +95,19 @@ export interface RotaAttempt {
   readonly key: string;
   readonly body: string;
   readonly phase: "pending" | "uncertain";
+  /** The editor input this change was submitted from (the order's kept session and revision; null for the consent), see `RotaOrigin`. */
+  readonly origin: RotaOrigin | null;
+}
+
+/**
+ * The kept editor input an attempt represents (review 9, R34): the editor (`keptKey`), its session and the revision the person SAVED. It
+ * goes with the attempt, uncertain included, so Try again (which resends the attempt's body) can consume only the input that body was
+ * made from, never newer input typed since. Fixed when the change is submitted by Save; never looked up again after an await.
+ */
+export interface RotaOrigin {
+  readonly editor: string;
+  readonly session: number;
+  readonly revision: number;
 }
 
 /** How the held attempt of a rota command was last answered. `serial` is page-wide and never reused (see `rotaSerial`). */
@@ -525,14 +538,16 @@ export const rotaReadsOf = (identity: string, taskId: string): number =>
 
 /**
  * Takes the attempt for `command` before it is sent. The same body as the attempt PENDING is that attempt, joined (`joined`: nothing is
- * sent again, never a second flight of one key); the same body as an uncertain one keeps its key; any other body is a new attempt with a
- * new key, which replaces the one held (a pending one's answer then settles nothing). The outcome shown is cleared.
+ * sent again, never a second flight of one key; its origin stays its own); the same body as an uncertain one keeps its key; any other body
+ * is a new attempt with a new key, which replaces the one held (a pending one's answer then settles nothing). The outcome shown is cleared.
+ * `origin`: the input the sent body represents, as the caller captured it with the body (Try again passes the held attempt's own).
  */
 export function startRota(
   identity: string,
   command: string,
   body: unknown,
   newKey: () => string,
+  origin: RotaOrigin | null = null,
 ): { attempt: RotaAttempt; joined: boolean } {
   const memory = memoryOf(identity);
   const held = memory.rota.get(command)?.attempt ?? null;
@@ -543,6 +558,7 @@ export function startRota(
     key: next.key,
     body: next.body,
     phase: "pending",
+    origin: origin === null ? null : Object.freeze({ ...origin }),
   });
   bounded(memory.rota, command, Object.freeze({ attempt, outcome: null }));
   rotaChanged();

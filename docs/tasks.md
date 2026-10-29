@@ -807,7 +807,10 @@ are focused evidence, never integration acceptance.*
   settles only the attempt it answers, so an earlier change's late answer never ends a later one sent after the person went away and came
   back. The same change asked again while it is pending joins it (no second request); the screen showing the task when it is answered shows
   it (and reads the rota again after a success, or a consent conflict); a saved order closes the dialog only if it consumed the order the
-  person is at; Try again is disabled with its reason while the page cannot write.
+  person is at; Try again is disabled with its reason while the page cannot write. Revision 9 (review 9 R34): each order attempt carries the
+  input it was saved from (the kept editor's key, session and revision, `RotaOrigin`), kept through an uncertain answer; Try again resends
+  the attempt's body and key and consumes the editor's input only if that is still the input it was saved from, so an order edited since
+  stays open, unsaved, with "Your earlier order was saved. Your newer changes aren't saved yet." (provisional copy).
 - **Streak (WF-TASK-06, CM-368/395, TASK-5).** `/tasks/$taskId/streak` (`streak/StreakPage.tsx`, the detail's "Streak" link): the server's
   current and best runs (both scopes for a shared task: "Shared" and "You"); a joint null is "Withheld — someone keeps their part private",
   a personal null "Unknown", never 0; the last 30 opened periods of MY result from this device, oldest first, five states each with a mark and a
@@ -987,7 +990,14 @@ uncertain controls, the order's conflict, refusal and uncertain answers added; t
 another mount sent (and its success control read again); an answer given before the screen mounted not said again, its uncertain change
 keeping its key; the same change asked again while pending joined; a save edited past while pending (and its unedited control); Try again
 while the page cannot write; the owner's own transitions (an answer settles its attempt, not a body; another identity and a later activation;
-one command beside the other); MU-3183…MU-3193, MU-3026 re-anchored.
+one command beside the other); MU-3183…MU-3193, MU-3026 re-anchored. Revision 9 (Review 9 R34/R35, design assessment of 28 October 2026):
+the reviewer's R34 witness and its three controls ported into `rota.test.tsx` (with the reopen observation), repeated uncertainty, an edit
+while Try again is on its way, an edit away and back (and an explicit Save of the same order, one key), a visit to the sync screens, and the
+owner's origin transitions; native E-R3 (`fixture.tasks-10c.spec.ts`: witness and unchanged control, close/reopen, a full reload sending
+nothing); MU-3194…MU-3199, MU-3188 re-anchored. R35 (harness): `fixture.tasks.spec.ts`'s `commitDelta` publishes its page on the fixture
+server (`tests/e2e/published-delta.ts`: the answer to every poll from a cursor before it, until the writer asks from its own) and waits for
+the writer's commit (its applied revision; for `commitProgress`, the exact progress row), so a page lost to a competing empty answer can
+no longer pass for a commit (E-T15, E-T17, E-T20, E-T21, E-T22, E-T41); self-qualified in `tests/static/published-delta.test.ts`.
 
 ## Limits (WEB-10c)
 
@@ -1033,6 +1043,9 @@ one command beside the other); MU-3183…MU-3193, MU-3026 re-anchored.
   resent automatically; separate tabs hold separate attempts. A change answered before the task screen mounted is not said again there (an
   uncertain one is still sent with its key when the same change is made again). An order saved while the person had edited it further
   leaves the dialog open on the newer edit (it is not merged; Save then meets the saved order's version).
+- **Revision 9.** The same holds after Try again: its success consumes only the order the attempt was saved from (an edit since, an edit
+  away and back included, stays open, unsaved, and says so). The origin is page memory with the attempt: a reload forgets both (no request
+  is resent and the newer order is not recovered).
 - **After an account switch the catch-up service follows the last task screen rendered**: on a non-task screen its connectivity and
   compatibility are those last rendered (a pause is taken up again when a task screen renders).
 

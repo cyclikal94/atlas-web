@@ -2522,11 +2522,12 @@ export const UNIT_10C = [
     file: "src/features/tasks/detail/Rota.tsx",
     tests: ["tests/features/tasks/rota.test.tsx"],
     expect: /edited past while it was pending/,
+    // Re-anchored (revision 9, R34): the completion now also asks whether the ticket is the input the sent change was made from.
     patch: (t) =>
       sub(
         t,
-        '    completeKept(ticket, out.kind === "ok");\n',
-        '    completeKept(ticket, out.kind === "ok");\n    if (out.kind === "ok") onClose();\n',
+        '    completeKept(ticket, out.kind === "ok" && represents(origin, ticket));\n',
+        '    completeKept(ticket, out.kind === "ok" && represents(origin, ticket));\n    if (out.kind === "ok") onClose();\n',
       ),
   },
   {
@@ -2588,6 +2589,93 @@ export const UNIT_10C = [
         t,
         "hold.outcome !== null && hold.outcome.serial > since",
         "hold.outcome !== null && hold.outcome.serial >= 0",
+      ),
+  },
+  {
+    id: "MU-3194",
+    title:
+      "R34: WEB-10c A17 (WEB-10a decision 44): Try again claims the editor's CURRENT input (its ticket), not the input the resent change was made from",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect:
+      /REVIEW9 R34.*witness|repeated uncertainty keeps A's origin|edited away and back.*= retry|sync screens keeps the newer order/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ? held.origin\n",
+        "        ? { editor: ticket.key, session: ticket.session, revision: ticket.revision }\n",
+      ),
+  },
+  {
+    id: "MU-3195",
+    title:
+      "R34: WEB-10c A17: a successful order change consumes the editor's input whatever input it was made from",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect:
+      /REVIEW9 R34.*witness|repeated uncertainty keeps A's origin|edited away and back.*= retry|sync screens keeps the newer order/,
+    patch: (t) =>
+      sub(
+        t,
+        '    completeKept(ticket, out.kind === "ok" && represents(origin, ticket));\n',
+        '    completeKept(ticket, out.kind === "ok");\n',
+      ),
+  },
+  {
+    id: "MU-3196",
+    title:
+      "R34: WEB-10c A17: the input a change represents is matched by editor and session only (a later revision of the same session is consumed)",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect:
+      /REVIEW9 R34.*witness|repeated uncertainty keeps A's origin|edited away and back.*= retry|sync screens keeps the newer order/,
+    patch: (t) =>
+      sub(
+        t,
+        "  origin.session === ticket.session &&\n  origin.revision === ticket.revision;\n",
+        "  origin.session === ticket.session;\n",
+      ),
+  },
+  {
+    id: "MU-3197",
+    title:
+      "R34: WEB-10c A17: an uncertain rota answer forgets the input its attempt was made from (Try again's success then consumes nothing)",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /closes an unchanged order|keeps the input it was submitted from/,
+    patch: (t) =>
+      sub(
+        t,
+        '          ? Object.freeze({ ...attempt, phase: "uncertain" as const })\n',
+        '          ? Object.freeze({ ...attempt, phase: "uncertain" as const, origin: null })\n',
+      ),
+  },
+  {
+    id: "MU-3198",
+    title:
+      "R34: WEB-10c A17: a rota attempt is taken without the input it was submitted from",
+    file: "src/features/tasks/memory.ts",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /closes an unchanged order|keeps the input it was submitted from/,
+    patch: (t) =>
+      sub(
+        t,
+        "    origin: origin === null ? null : Object.freeze({ ...origin }),\n",
+        "    origin: null,\n",
+      ),
+  },
+  {
+    id: "MU-3199",
+    title:
+      "R34: WEB-10c A17: an order dialog left open by a save of an earlier order does not say that order was saved and the newer one was not",
+    file: "src/features/tasks/detail/Rota.tsx",
+    tests: ["tests/features/tasks/rota.test.tsx"],
+    expect: /REVIEW9 R34.*(A's own success keeps a newer edit|witness)/,
+    patch: (t) =>
+      sub(
+        t,
+        '          {outcome?.kind === "saved" ? (\n',
+        "          {false ? (\n",
       ),
   },
 ];

@@ -5,6 +5,7 @@ import {
   fresh,
   type LeaderNet,
   leaderPage,
+  rowsOf,
   settleElsewhere,
   snapshotPage,
   untilSync,
@@ -792,6 +793,143 @@ test.describe("E-R2: a rota change answered after the person went away and came 
         }
         expect(await draftsOf(page)).toEqual([]);
       });
+});
+
+// ---- revision 9 (review 9 R34, A17): Try again consumes only the order it resends --------------------------------------------------
+
+/**
+ * E-R3 (review 9 R34; design assessment Q-R1/Q-R3) in the real engines: order A (a third person added) is saved and held; while it is on
+ * its way the person removes the second person (B, never sent: witness) or leaves the order as it is (control); A is answered uncertain,
+ * and Try again resends A's body under A's key and succeeds. Witness: the dialog stays open on B, says A was saved and B was not, and B is
+ * still there after Cancel and opening the order again (the same visit). Before revision 9 the success consumed B and closed the dialog.
+ * Then a full reload: page memory goes (no automatic request, and B is not recovered: rota changes are never stored), and the order opens
+ * on the server's roster, A. Control: the unchanged order is consumed and the dialog closes. Two tabs hold separate page memories (no
+ * shared attempt or editor); not exercised here: booting a second fixture tab remounts the first's tree. FIXTURE evidence.
+ */
+test.describe("E-R3: Try again's success consumes only the order it resent (A17; review 9 R34)", () => {
+  const OTHER_ID = "22222222-2222-4222-8222-222222222222";
+  const THIRD_ID = "33333333-3333-4333-8333-333333333333";
+  for (const edited of [true, false])
+    test(`${edited ? "witness: an order edited while A was on its way stays, through close/reopen; a reload forgets it and sends nothing" : "control: the order not edited since A is consumed"}`, async ({
+      context,
+    }) => {
+      const task = repeating(edited ? 448 : 449, "Take the bins out");
+      (task.data.definition as { participation: string }).participation =
+        "anyone";
+      for (const u of task.upserts as Array<{
+        resource: { kind: string; value: Record<string, unknown> };
+      }>) {
+        if (u.resource.kind === "execution")
+          u.resource.value.participation = "anyone";
+        if (u.resource.kind === "occurrence")
+          (
+            u.resource.value.definition as { participation: string }
+          ).participation = "anyone";
+      }
+      const path = `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`;
+      const hold = held<void>();
+      let calls = 0;
+      const roster = { version: 1, participants: [ACCOUNT, OTHER_ID] };
+      const { page, r10c } = await setup(context, path, [task], (_reads, r) => {
+        r.enrolment = () => ({
+          status: 200,
+          body: {
+            version: 1,
+            active: true,
+            aggregate_consent: true,
+            policy: { grants: [], exclude_accounts: [] },
+          },
+        });
+        r.rota = () => ({
+          status: 200,
+          body: {
+            version: roster.version,
+            participants: roster.participants,
+            consent_version: 2,
+            accepted: false,
+            eligible_participants: [ACCOUNT, OTHER_ID, THIRD_ID],
+          },
+        });
+        r.access = async ({ command }) => {
+          calls += 1;
+          if (calls === 1) {
+            await hold.promise;
+            return refusal(503, "unavailable");
+          }
+          roster.version += 1;
+          roster.participants = command.participants as string[];
+          return { status: 200, body: { revision: 5 } };
+        };
+      });
+      const sent = () => r10c.log.filter((e) => e.what === "POST set_rota");
+      const dialog = page.locator("[data-rota-dialog]");
+      const people = () =>
+        page
+          .locator("[data-rota-order] [data-rota-person]")
+          .evaluateAll((els) =>
+            els.map((el) => el.getAttribute("data-rota-person")),
+          );
+      const order = page.getByRole("button", { name: "Turn order…" });
+      await expect(order).toBeEnabled();
+      await order.click();
+      await expect(dialog).toBeVisible();
+      await page.getByRole("button", { name: "Add: Someone (3333…)" }).click();
+      await page.getByRole("button", { name: "Save order" }).click();
+      await expect.poll(() => sent().length).toBe(1);
+      expect(sent()[0]?.body).toMatchObject({
+        participants: [ACCOUNT, OTHER_ID, THIRD_ID],
+      });
+      if (edited)
+        await page
+          .getByRole("button", { name: "Remove: Someone (2222…)" })
+          .click();
+      expect(await people()).toEqual(
+        edited ? [ACCOUNT, THIRD_ID] : [ACCOUNT, OTHER_ID, THIRD_ID],
+      );
+      hold.release();
+      const retry = page.getByRole("dialog").getByRole("button", {
+        name: "Try again",
+      });
+      await expect(retry).toBeVisible();
+      await retry.click();
+      await expect.poll(() => sent().length).toBe(2);
+      expect(sent()[1]?.key, "A's own key").toBe(sent()[0]?.key);
+      expect(sent()[1]?.body, "A's own body").toEqual(sent()[0]?.body);
+      expect(await draftsOf(page)).toEqual([]);
+      if (!edited) {
+        await expect(dialog).toHaveCount(0);
+        return;
+      }
+      await expect(page.locator("[data-rota-saved-earlier]")).toBeVisible();
+      await expect(dialog).toBeVisible();
+      expect(await people()).toEqual([ACCOUNT, THIRD_ID]);
+      await expect(
+        page.getByRole("button", { name: "Save order" }),
+      ).toBeEnabled();
+      await page.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).toHaveCount(0);
+      await order.click();
+      await expect(dialog).toBeVisible();
+      expect(await people(), "the same visit: B is still the person's").toEqual(
+        [ACCOUNT, THIRD_ID],
+      );
+      await page.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).toHaveCount(0);
+      await reboot(page);
+      await expect(order).toBeEnabled();
+      await order.click();
+      await expect(dialog).toBeVisible();
+      expect(
+        await people(),
+        "after a reload: the server's roster (A), never B",
+      ).toEqual([ACCOUNT, OTHER_ID, THIRD_ID]);
+      await expect(
+        page.getByRole("dialog").getByRole("button", { name: "Try again" }),
+      ).toHaveCount(0);
+      expect(sent().length, "nothing is sent by a reload").toBe(2);
+      // The reloaded page's account store, opened by the reader if the page has not opened it yet (`draftsOf` assumes it is open).
+      expect(await rowsOf(page, "drafts")).toEqual([]);
+    });
 });
 
 // ---- revision 1 (review R9, A18): identity schedules in the real engines -----------------------------------------------------------
