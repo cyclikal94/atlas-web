@@ -26546,6 +26546,126 @@ export const UNIT = [
       ),
   },
 
+  // WEB-11a revision 22 (review 22, R22.1): the PPL-6 subject note describes the policy a save leaves, from the one derivation the
+  // save sends (src/features/people/model/audience.ts `selectedPolicy`, `subjectNote`; the caller is the field editor).
+  {
+    id: "MU-2889",
+    title:
+      "WEB-11a R22.1: the subject note ignores the policy's exclusion of the subject (the reviewed defect: an excluded subject is told they will see the field)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R22\.1.*(excludes the subject|keep the exclusion|keeps the exclusion|exclusion is still)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (policy?.exclude_accounts.includes(linkage.accountId))\n    return `${personName} is excluded from this field's sharing, so they won't see it.`;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2890",
+    title:
+      "WEB-11a R22.1: any exclusion is taken for the subject's (the count decides, not the identity)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*ANOTHER account/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (policy?.exclude_accounts.includes(linkage.accountId))\n",
+        "  if ((policy?.exclude_accounts.length ?? 0) > 0)\n",
+      ),
+  },
+  {
+    id: "MU-2891",
+    title:
+      "WEB-11a R22.1 with D-11a-7: a change of an existing field's audience starts from an empty policy (its exclusions are dropped from the note and the save)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R22\.1.*(keeps the current exclusions|keep the exclusion|keeps the exclusion)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return quickPolicy(choice, input.current, input.primaryHouseholdId);\n",
+        "  return quickPolicy(choice, null, input.primaryHouseholdId);\n",
+      ),
+  },
+  {
+    id: "MU-2892",
+    title:
+      "WEB-11a R22.1: an unchanged choice is rebuilt from its label instead of keeping the current policy exactly",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*unchanged choice keeps/,
+    patch: (t) => sub(t, "  if (!input.changed) return input.current;\n", ""),
+  },
+  {
+    id: "MU-2893",
+    title:
+      "WEB-11a R22.1: the positive note promises the subject will see the field (a Home grant without the profile they must also see)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*(qualified|still includes|says nothing of the subject)/,
+    patch: (t) =>
+      sub(
+        t,
+        ", so this sharing includes them. They'll see it if they can also see this profile.`",
+        " and will be able to see it.`",
+      ),
+  },
+  {
+    id: "MU-2894",
+    title:
+      "WEB-11a R22.1: Home with its policy not known is described as including the subject (unknown exclusions taken as none)",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect: /R22\.1.*policy not known/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (choice === "custom" || policy === null || input.homeMembers === null)\n',
+        '  if (choice === "custom" || input.homeMembers === null)\n',
+      ),
+  },
+  {
+    id: "MU-2895",
+    title:
+      "WEB-11a R22.1: a changed audience leaves the current policy (the proposed one is never derived), so the note and the save describe the old one",
+    file: "src/features/people/model/audience.ts",
+    tests: [
+      "tests/features/people/audience.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R22\.1.*(change to Home keeps|change to Only you|keep the exclusion|keeps the exclusion)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return quickPolicy(choice, input.current, input.primaryHouseholdId);\n}",
+        "  return input.current;\n}",
+      ),
+  },
+
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];

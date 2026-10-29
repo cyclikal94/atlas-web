@@ -92,7 +92,10 @@ reopens it with its draft), and `/settings/archived`.
   another account's profile; absent for an unlinked person.
 - **D-11a-7** A new field's audience: "Use my defaults — {resolved}" (queued, captures `field`), "Only you" (queued, explicit empty policy),
   "Home · can view" (online, `/task-access-commands`; disabled offline or without a primary household). "Choose people…" is offered after
-  saving. The PPL-6 note appears when the person is known to be linked to another account.
+  saving. The PPL-6 note appears when the person is known to be linked to another account. It describes the policy the save leaves
+  (`selectedPolicy`, the same derivation the save sends; review 22, R22.1): a subject that policy excludes "won't see it" whatever it
+  grants (a change to Home keeps the field's exclusions), and a Home member is "included" only as far as the page can know, since the
+  subject must also be able to see the person the field is on. An unknown policy or membership says "may".
 - **D-11a-8** A quick audience change of an existing field is `applyPolicyChange` from the sharing slice (read, version guard, one
   `replace_policy`, confirming read), never a second editor; the content update that follows carries the confirmed policy version.
 - **D-11a-9** "Not the same" is page memory: nothing is stored or sent.
@@ -441,7 +444,7 @@ the fixture spec named.
 | The review of a changed field: "This field changed since you opened it", "Current: …", "Who can see it now: …", "Yours: …", "Check who can see it first: that needs a connection"; the rename's "This person changed since you started. Review the name, then save again." | `/people/$id/fields/$fid`, `/people/$id` | E-P14, E-P5 |
 | Field types "Text, Amount, Date, Link, Yes or no, Choices, Checklist" and their inputs | `/people/$id/fields/new` | E-P3 |
 | New field audiences "Use my defaults — {…}", "Only you", "{Home} · can view"; "Save it as Only you first; then choose who can see it…" | `/people/$id/fields/new` | E-P2, E-P3 |
-| PPL-6 notes ("{name} won't see this field unless you share it with them", "{name} is in {Home} and will be able to see it", "may be able to see it") | `/people/$id/fields/new` | component tests |
+| PPL-6 notes ("{name} won't see this field unless you share it with them", "{name} is in {Home}, so this sharing includes them. They'll see it if they can also see this profile.", "{name} is excluded from this field's sharing, so they won't see it.", "may be able to see it"; review 22 replaced "{name} is in {Home} and will be able to see it") | `/people/$id/fields/new`, `/people/$id/fields/$fid` | component tests, E-P45 |
 | Held change copy "Kept on this device until then, even if you reload or switch accounts." and §9 row 2's caveat; "Waiting to change who can see {name}"; "Stopping the held change to {name}…"; the discard outcomes ("…was discarded. Nothing was sent.", "…had already changed…", "…may already have been made…"); "Couldn't keep this on the device." | `/people/$id/fields/$fid`, `/people/$id` | E-P6, E-P15, E-P16 |
 | A held change without a recorded predecessor (review 12; v 4): "This held change to {name} was kept before Atlas recorded what it was typed over, so it won't be sent. Edit the field to review it and save it again, or discard it."; "The change to who can see {name} may already have been made."; "Who can see {name} was already changed as asked."; its failure "This change can't be sent as it is. Edit the field to review it and save it again." | `/people/$id` | component tests (`review-findings.test.tsx`, review 12) |
 | Duplicates: "No similar names found so far. There are more people to check." with "Check more"; footer adjusted to page memory | `/people/$id/duplicates` | E-P9 |

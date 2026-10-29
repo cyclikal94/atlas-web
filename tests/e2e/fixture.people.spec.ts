@@ -4032,3 +4032,115 @@ test.describe("E-P44: New person's shown first note is checked as an encoded tex
       recordEvidence(info, "e-p44", { schedule, bytes, drafts: after });
     });
 });
+
+test.describe("E-P45: the subject note describes the policy the save leaves, its exclusions included (A5, A15; review 22, R22.1)", () => {
+  // Review 22's native reproductions (Mo linked to another account and a known Home member), maintained: the editor of an existing
+  // field says what the policy it sends, or keeps, means for the subject, and that policy keeps every exclusion (D-11a-7).
+  const P = "55555555-5555-4555-8555-555555555555";
+  const F = "66666666-6666-4666-8666-666666666666";
+  const OTHER = "77777777-7777-4777-8777-777777777777";
+  const INCLUDED =
+    "Mo is in Home, so this sharing includes them. They'll see it if they can also see this profile.";
+  const EXCLUDED =
+    "Mo is excluded from this field's sharing, so they won't see it.";
+  const homeExcluding = (excluded: string[]) => ({
+    grants: [{ kind: "household", id: HOME, edit: false }],
+    exclude_accounts: excluded,
+  });
+  const schedules = {
+    "control, Home excluding nobody": {
+      policy: homeExcluding([]),
+      note: INCLUDED,
+    },
+    "control, Home excluding another account": {
+      policy: homeExcluding([OTHER]),
+      note: INCLUDED,
+    },
+    "Home excluding the subject": {
+      policy: homeExcluding([MO]),
+      note: EXCLUDED,
+    },
+    "Only you excluding the subject, changed to Home and saved": {
+      policy: { grants: [], exclude_accounts: [MO] },
+      note: EXCLUDED,
+    },
+  } as const;
+  for (const [schedule, { policy, note }] of Object.entries(schedules))
+    test(`${schedule}: ${note === EXCLUDED ? "the note says Mo won't see it" : "the note says Home's sharing includes Mo, qualified"}`, async ({
+      context,
+    }, info) => {
+      const changes = policy.grants.length === 0;
+      const target = homeExcluding([...policy.exclude_accounts]);
+      const { page, served } = await setup(
+        context,
+        `/people/${P}/fields/${F}`,
+        [
+          personP(P, "Mo"),
+          fieldP(
+            F,
+            P,
+            "Note",
+            { kind: "text", text: "Initial note" },
+            { version: 4, policy_version: 6 },
+          ),
+        ],
+        {
+          linked: { [P]: MO },
+          arrange(s) {
+            s.policies.set(F, { version: 6, policy });
+            if (changes)
+              s.policyScript.push(
+                () => ({ status: 200, body: { version: 6, policy } }),
+                () => ({ status: 200, body: { version: 6, policy } }),
+                () => ({ status: 200, body: { version: 7, policy: target } }),
+              );
+          },
+        },
+      );
+      const dialog = page.getByRole("dialog");
+      await expect(
+        dialog.getByRole("radio", {
+          name: changes ? "Only you" : "Home · can view",
+          exact: true,
+        }),
+      ).toBeChecked();
+      const shown = dialog.locator("[data-subject-note]");
+      if (changes) {
+        await expect(shown).toHaveCount(0);
+        await dialog
+          .getByRole("radio", { name: "Home · can view", exact: true })
+          .click();
+      }
+      await expect(shown).toHaveText(note);
+      const observed = await shown.textContent();
+      await expect(
+        dialog.getByText("Mo is in Home and will be able to see it."),
+      ).toHaveCount(0);
+      if (changes) {
+        await dialog
+          .getByRole("textbox", { name: "Value", exact: true })
+          .fill("Updated note");
+        await dialog.getByRole("button", { name: "Save", exact: true }).click();
+        await expect.poll(() => served.management.length).toBe(1);
+        expect(served.management[0]?.body).toMatchObject({
+          commands: [
+            {
+              kind: "replace_policy",
+              id: F,
+              expected_version: 6,
+              policy: target,
+            },
+          ],
+        });
+        await expect(dialog).toHaveCount(0);
+        const drafts = await draftsOf(page);
+        expect(drafts.map((d) => d.kind)).toEqual(["put_field"]);
+      }
+      recordEvidence(info, "e-p45", {
+        schedule,
+        policy,
+        observed,
+        management: served.management,
+      });
+    });
+});

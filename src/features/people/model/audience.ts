@@ -158,34 +158,65 @@ export function personDefaultsLabel(
 }
 
 /**
+ * The policy a save of the field editor leaves the field with, for its audience choice (review 22, R22.1): the ONE derivation behind
+ * both the policy the save sends and the subject note, so the note never describes another policy than the one saved. Null for
+ * "Use my defaults" (the server resolves it) and whenever it is not known: an existing field whose policy at the edit's version was not
+ * read (never an empty policy in its place), a custom policy that is not the current one, or Home with no primary household. An
+ * unchanged choice keeps the current policy exactly; a change to Home keeps its exclusions (D-11a-7), however the choice got there.
+ */
+export function selectedPolicy(input: {
+  choice: "defaults" | "only_you" | "home" | "custom";
+  isNew: boolean;
+  /** The existing field's policy at the version the edit is bound to, or null (a new field, or not read). */
+  current: Policy | null;
+  /** The choice differs from the existing field's current one. */
+  changed: boolean;
+  primaryHouseholdId: string | null;
+}): Policy | null {
+  const { choice } = input;
+  if (choice === "defaults") return null;
+  if (input.isNew)
+    return choice === "custom"
+      ? null
+      : quickPolicy(choice, null, input.primaryHouseholdId);
+  if (input.current === null) return null;
+  if (!input.changed) return input.current;
+  if (choice === "custom") return null;
+  return quickPolicy(choice, input.current, input.primaryHouseholdId);
+}
+
+/**
  * The PPL-6 note under the audience choice, when the person is known to be linked to ANOTHER account (D-11a-7). Without an explicit
- * policy (defaults), the server excludes the subject from a field authored about them; with an explicit one, the policy is used exactly.
- * Null when nothing true can be said (linkage unknown or not another account, or "Only you").
+ * policy (defaults), the server excludes the subject from a field authored about them; with an explicit one, the policy is used exactly,
+ * so it is the policy a save leaves (`selectedPolicy`) that is described (review 22, R22.1): a subject it excludes won't see the field,
+ * whoever it grants. A grant is not a promise either: the subject also has to be able to see the person the field is on (the server
+ * hides a field whose parent its reader cannot see), which this page cannot know, so the positive note says so. Null when nothing true
+ * can be said (linkage unknown or not another account, "Only you", or Home known not to include the subject).
  */
 export function subjectNote(input: {
   linkage: LinkageState;
   choice: "defaults" | "only_you" | "home" | "custom";
+  /** The policy a save leaves (`selectedPolicy`), or null: defaults, or not known. */
+  policy: Policy | null;
   personName: string;
   /** The primary household's member list from the B5 record, or null when it is not known. */
   homeMembers: readonly string[] | null;
   homeName: string | null;
 }): string | null {
-  const { linkage, choice, personName } = input;
+  const { linkage, choice, policy, personName } = input;
   if (!linkage.known || linkage.kind !== "other" || linkage.accountId === null)
     return null;
-  switch (choice) {
-    case "only_you":
-      return null;
-    case "defaults":
-      return `${personName} won't see this field unless you share it with them.`;
-    case "custom":
-      // Who a custom policy reaches is the policy editor's to show: membership of Home says nothing about it.
-      return `${personName} may be able to see it.`;
-    case "home":
-      if (input.homeMembers === null)
-        return `${personName} may be able to see it.`;
-      return input.homeMembers.includes(linkage.accountId)
-        ? `${personName} is in ${input.homeName ?? "Home"} and will be able to see it.`
-        : null;
-  }
+  if (choice === "defaults")
+    return `${personName} won't see this field unless you share it with them.`;
+  if (choice === "only_you") return null;
+  // An exclusion of the subject wins over every grant, Home's included (the server's visibility rule).
+  if (policy?.exclude_accounts.includes(linkage.accountId))
+    return `${personName} is excluded from this field's sharing, so they won't see it.`;
+  // Who a custom policy reaches is the policy editor's to show: membership of Home says nothing about it. Nor can anything be said
+  // of a policy that is not known: its exclusions are not.
+  if (choice === "custom" || policy === null || input.homeMembers === null)
+    return `${personName} may be able to see it.`;
+  return input.homeMembers.includes(linkage.accountId)
+    ? `${personName} is in ${input.homeName ?? "Home"}, so this sharing includes them. They'll see it if they can also see this profile.`
+    : null;
 }

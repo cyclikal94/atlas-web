@@ -50,7 +50,7 @@ import {
   classify,
   fieldDefaultsLabel,
   primaryHousehold,
-  quickPolicy,
+  selectedPolicy,
   subjectNote,
 } from "../model/audience";
 import {
@@ -723,6 +723,14 @@ function Editor({
       : currentChoice;
   const audienceChanged =
     !isNew && touched && currentChoice !== null && audience !== currentChoice;
+  // The policy a save leaves the field with: the one the save sends AND the one the subject note describes (review 22, R22.1).
+  const selected = selectedPolicy({
+    choice: audience ?? "only_you",
+    isNew,
+    current: shownPolicy?.policy ?? null,
+    changed: audienceChanged,
+    primaryHouseholdId: home?.id ?? null,
+  });
   const currentLabel =
     current === null
       ? copy.CURRENT_AUDIENCE_UNKNOWN
@@ -896,7 +904,7 @@ function Editor({
       const fieldId = initial.retained.newFieldId;
       const choiceNew = state.audience as NewAudience;
       if (choiceNew === "home") {
-        const policy = quickPolicy("home", null, home?.id ?? null);
+        const policy = selected;
         if (policy === null) return fail(copy.NO_PRIMARY_HOUSEHOLD);
         const result = await sendOnline(
           env,
@@ -1032,14 +1040,7 @@ function Editor({
       return queued(bound.policyVersion);
     }
     // The audience changes: the policy's own, online-only step, from the audience the edit shows (read at the bound policy version).
-    const target =
-      audience === "custom"
-        ? null
-        : quickPolicy(
-            audience as "only_you" | "home",
-            shownPolicy?.policy ?? null,
-            home?.id ?? null,
-          );
+    const target = selected;
     if (target === null || shownPolicy === undefined)
       return fail(copy.SHARING_CHANGED);
     if (!env.online) {
@@ -1537,11 +1538,8 @@ function Editor({
               personName={person.row.label}
               note={subjectNote({
                 linkage,
-                choice: (audience ?? "only_you") as
-                  | "defaults"
-                  | "only_you"
-                  | "home"
-                  | "custom",
+                choice: audience ?? "only_you",
+                policy: selected,
                 personName: person.row.label,
                 homeMembers:
                   home?.household?.members.map((member) => member.account_id) ??

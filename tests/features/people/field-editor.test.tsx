@@ -7,6 +7,7 @@ import {
 } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import type { Policy } from "../../../src/data";
 import { digestOf } from "../../../src/data/model/canonical";
 import {
   forgetAllPeopleMemory,
@@ -42,6 +43,11 @@ const HOME_VIEW = {
   exclude_accounts: [],
 };
 const dialog = () => screen.findByRole("dialog");
+const INCLUDED =
+  "Mo is in Home, so this sharing includes them. They'll see it if they can also see this profile.";
+const EXCLUDED =
+  "Mo is excluded from this field's sharing, so they won't see it.";
+const PROMISE = "Mo is in Home and will be able to see it.";
 
 async function openNew(w: ReturnType<typeof peopleWorld>) {
   await w.mount(`/people/${P}/fields/new`);
@@ -241,9 +247,13 @@ describe("creating a field", () => {
       ),
     ).toBeInTheDocument();
     fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    // Copy adaptation (review 22, R22.1): this asserted "Mo is in Home and will be able to see it." (D-11a-7's wording). A Home grant
+    // is not known to reach the subject (they must also see the person the field is on), so the same fixture now asserts the qualified
+    // note; the old promise is asserted absent.
+    expect(d.querySelector("[data-subject-note]")?.textContent).toBe(INCLUDED);
     expect(
-      within(d).getByText("Mo is in Home and will be able to see it."),
-    ).toBeInTheDocument();
+      within(d).queryByText("Mo is in Home and will be able to see it."),
+    ).toBeNull();
   });
 });
 
@@ -626,5 +636,158 @@ describe("updating a field", () => {
       expected_policy_version: 3,
       value: { kind: "text", text: "07700 900999" },
     });
+  });
+});
+
+/**
+ * Review 22, R22.1 (family people-subject-audience-exclusion): the PPL-6 note under an EXISTING field's audience describes the policy the
+ * save leaves, the one it sends (`selectedPolicy`): a subject that policy excludes is told apart from one it includes, however the choice
+ * got there, and the exclusion is never dropped to make the note true. The reviewer's reproductions, through the public field route.
+ */
+describe("R22.1: the subject note describes the policy the save leaves", () => {
+  const OTHER = "77777777-7777-4777-8777-777777777777";
+  const homeExcluding = (excluded: string[]) => ({
+    grants: [{ kind: "household" as const, id: HOME, edit: false }],
+    exclude_accounts: excluded,
+  });
+  async function open(
+    policy: Policy,
+    opts: {
+      online?: boolean;
+      more?: { version: number; policy: Policy }[];
+    } = {},
+  ) {
+    const w = peopleWorld(opts.online === false ? { online: false } : {});
+    w.setCache([
+      person({ id: P, label: "Mo" }),
+      fieldRow({
+        id: F,
+        parent_id: P,
+        label: "Note",
+        version: 4,
+        policy_version: 6,
+      }),
+    ]);
+    w.api.linked.set(P, MO);
+    w.env.setDefaults(record({ members: [ME, MO] }));
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy }),
+      ...(opts.more ?? []).map((state) => ok(state)),
+    );
+    await w.mount(`/people/${P}/fields/${F}`);
+    const d = await dialog();
+    return { w, d };
+  }
+  const noteOf = (d: HTMLElement) =>
+    d.querySelector("[data-subject-note]")?.textContent ?? null;
+
+  test("R22.1 a current Home policy that excludes the subject: the note says they won't see it, never that they will", async () => {
+    const { w, d } = await open(homeExcluding([MO]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(within(d).queryByText(PROMISE)).toBeNull();
+    expect(within(d).queryByText(INCLUDED)).toBeNull();
+    // The content edit keeps the policy as it is: no policy step, the content on the bound policy version.
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Updated note" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.calls.map((c) => c.op)).not.toContain("management");
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command.expected_policy_version,
+    ).toBe(6);
+  });
+
+  test("R22.1 a private field that excludes the subject, changed to Home: the note and the sent policy both keep the exclusion", async () => {
+    const privateExcluding: Policy = { grants: [], exclude_accounts: [MO] };
+    const target = homeExcluding([MO]);
+    const { w, d } = await open(privateExcluding, {
+      more: [
+        { version: 6, policy: privateExcluding },
+        { version: 7, policy: target },
+      ],
+    });
+    await within(d).findByRole("radio", { name: "Only you", checked: true });
+    expect(noteOf(d)).toBeNull();
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    expect(within(d).queryByText(PROMISE)).toBeNull();
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Updated note" },
+    });
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.sent[0]?.commands).toEqual([
+      { kind: "replace_policy", id: F, expected_version: 6, policy: target },
+    ]);
+    expect(
+      ((w.built[0]?.command ?? {}) as { command: Record<string, unknown> })
+        .command.expected_policy_version,
+    ).toBe(7);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  test("R22.1 Home to Only you and back, unsaved: the exclusion is still the field's, and the note says so", async () => {
+    const { d } = await open(homeExcluding([MO]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    fireEvent.click(within(d).getByRole("radio", { name: "Only you" }));
+    await waitFor(() => expect(noteOf(d)).toBeNull());
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+  });
+
+  test("R22.1 control: a Home policy excluding nobody includes the subject, qualified by the profile they must also see", async () => {
+    const { d } = await open(homeExcluding([]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(INCLUDED));
+    expect(within(d).queryByText(EXCLUDED)).toBeNull();
+  });
+
+  test("R22.1 control: a Home policy excluding ANOTHER account still includes the subject", async () => {
+    const { d } = await open(homeExcluding([OTHER]));
+    await within(d).findByRole("radio", {
+      name: "Home · can view",
+      checked: true,
+    });
+    await waitFor(() => expect(noteOf(d)).toBe(INCLUDED));
+  });
+
+  test("R22.1 offline, held: a change to Home keeps the exclusion in the note and in the policy sent on reconnect", async () => {
+    const privateExcluding: Policy = { grants: [], exclude_accounts: [MO] };
+    const target = homeExcluding([MO]);
+    const { w, d } = await open(privateExcluding);
+    await within(d).findByRole("radio", { name: "Only you", checked: true });
+    w.setOnline(false);
+    fireEvent.change(within(d).getByRole("textbox", { name: "Value" }), {
+      target: { value: "Inhaler" },
+    });
+    fireEvent.click(within(d).getByRole("radio", { name: "Home · can view" }));
+    await waitFor(() => expect(noteOf(d)).toBe(EXCLUDED));
+    fireEvent.click(within(d).getByRole("button", { name: "Save" }));
+    fireEvent.click(
+      await within(d).findByRole("button", { name: "Hold as draft" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    w.sharing.next.policy.push(
+      ok({ version: 6, policy: privateExcluding }),
+      ok({ version: 7, policy: target }),
+    );
+    w.setOnline(true);
+    await waitFor(() => expect(w.built).toHaveLength(1));
+    expect(w.sharing.sent.at(-1)?.commands).toEqual([
+      { kind: "replace_policy", id: F, expected_version: 6, policy: target },
+    ]);
   });
 });
