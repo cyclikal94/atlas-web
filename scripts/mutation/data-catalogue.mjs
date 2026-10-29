@@ -26331,6 +26331,131 @@ export const UNIT = [
       ),
   },
 
+  // WEB-11a revision 20 (review 20, R20.1): a superseded linkage read changes nothing (src/features/people/reads.tsx `readLinkage`).
+  {
+    id: "MU-2875",
+    title:
+      "WEB-11a R20.1: every linkage read's answer is applied, whichever read is current (the reviewed defect: an answer read before the unlink replaces the one read after it)",
+    file: "src/features/people/reads.tsx",
+    tests: [
+      "tests/features/people/linkage-reads.test.ts",
+      "tests/features/people/linkage-supersession.test.tsx",
+    ],
+    expect:
+      /older answer last: the page knows the unlinked person|superseded, .*nothing changes|the rename's read answers last|the first Reload's read answers last/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (\n        !isCurrentMemory(memory) ||\n        memory.linkageReads.get(personId) !== reading\n      )\n        return;\n",
+        "      if (!isCurrentMemory(memory)) return;\n",
+      ),
+  },
+  {
+    id: "MU-2876",
+    title:
+      "WEB-11a R20.1: only a superseded SUCCESS is ignored (a superseded refusal or failure is still applied, and takes the current read's place)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /superseded, (forbidden|not found|uncertain|not sent|closed)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        memory.linkageReads.get(personId) !== reading\n",
+        "        (result.ok && memory.linkageReads.get(personId) !== reading)\n",
+      ),
+  },
+  {
+    id: "MU-2877",
+    title:
+      "WEB-11a R20.1: a superseded read still removes the read on its way (the current read is no longer joined, and its answer is lost)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /still loading, the current read stays the one joined/,
+    patch: (t) =>
+      sub(
+        t,
+        "      )\n        return;\n      memory.linkageReads.delete(personId);\n",
+        "      ) {\n        memory.linkageReads.delete(personId);\n        return;\n      }\n      memory.linkageReads.delete(personId);\n",
+      ),
+  },
+  {
+    id: "MU-2878",
+    title:
+      "WEB-11a R20.1: a read of another identity's memory is applied to it (only the read slot is compared, not the memory kept)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /a read answering after the account changed changes neither memory/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !isCurrentMemory(memory) ||\n        memory.linkageReads.get(personId) !== reading\n",
+        "        memory.linkageReads.get(personId) !== reading\n",
+      ),
+  },
+  {
+    id: "MU-2879",
+    title:
+      "WEB-11a R20.1: an env of a superseded identity still starts a linkage read",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /an env of a superseded identity asks nothing at all/,
+    patch: (t) => sub(t, "  if (!isCurrentMemory(memory)) return null;\n", ""),
+  },
+  {
+    id: "MU-2880",
+    title:
+      "WEB-11a R20.1: a forced read joins the read on its way (a read asked after a command is answered by one asked before it)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect:
+      /a forced read is a second|older answer last: the page knows the unlinked person/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (options.force) memory.refused.delete(personId);\n",
+        "  if (options.force) memory.refused.delete(personId);\n  const joined = memory.linkageReads.get(personId);\n  if (joined !== undefined) return joined;\n",
+      ),
+  },
+  {
+    id: "MU-2881",
+    title:
+      "WEB-11a R20.1: every failed answer is taken as superseded (the current read's refusal or failure is never applied)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect:
+      /current, (forbidden|not found|uncertain|not sent): applied|a current refusal|a current transient failure/,
+    patch: (t) =>
+      sub(
+        t,
+        "        !isCurrentMemory(memory) ||\n",
+        "        !isCurrentMemory(memory) ||\n        !result.ok ||\n",
+      ),
+  },
+  {
+    id: "MU-2882",
+    title:
+      "WEB-11a R20.1: an offline 'Try again' forgets the refusal though it asks nothing (the edge the design assessment named)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /offline 'Try again' keeps the refusal and asks nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (!env.online) return null;\n  if (options.force) memory.refused.delete(personId);\n",
+        "  if (options.force) memory.refused.delete(personId);\n  if (!env.online) return null;\n",
+      ),
+  },
+  {
+    id: "MU-2883",
+    title:
+      "WEB-11a R20.1 control of the count: an ordinary caller does not join the read on its way (a second request per caller)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-reads.test.ts"],
+    expect: /two ordinary callers make one request/,
+    patch: (t) =>
+      sub(t, "    if (inflight !== undefined) return inflight;\n", ""),
+  },
+
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];

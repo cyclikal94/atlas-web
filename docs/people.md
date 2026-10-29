@@ -72,7 +72,10 @@ reopens it with its draft), and `/settings/archived`.
 - **D-11a-1** Every field write is a typed `put_field`; `create_field` only for the new person's first note (SHARE-10 batch); `edit` only to
   rename a person whose profile is not linked.
 - **D-11a-2** Linkage is read online (`GET /people/{id}`) and kept in the identity's page memory (outlives a remount; a `403`/`404` is remembered
-  until Try again). Unknown linkage is shown as unknown, with the reason; it is never inferred from `can_edit`.
+  until Try again). Unknown linkage is shown as unknown, with the reason; it is never inferred from `can_edit`. An ordinary read joins the
+  one on its way; a read asked after a command, Reload or Try again supersedes it, and only the latest read of a person changes what the
+  page knows (review 20, R20.1): an answer read before an unlink never replaces the one read after it. Offline, Try again asks nothing and
+  forgets nothing.
 - **D-11a-3** (superseded by D-11a-20 for API 0.29) List rows show the name, initials, the cached field count, the pending mark and
   "Archived". The 0.28 prefetch of 25 linkage reads is REMOVED: the account line comes from the summaries for every row, and the list makes
   no `GET /people/{id}` at all.

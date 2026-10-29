@@ -14,12 +14,14 @@ import {
 } from "./data-sync-helpers";
 import { pressTab } from "./helpers";
 import {
+  API,
   atlas,
   bootAt,
   connectivity,
   draftsOf,
   fieldP,
   HOME,
+  json,
   ME,
   MO,
   navigateInApp,
@@ -59,6 +61,8 @@ import {
  * read through real IndexedDB's multi-entry target index (R17.1, A2, A12, A19).
  * Review 19 (28 October 2026): E-P42 New person keeps its latest input and session across the production remounts (the list moving at the
  * tablet width, the protected tree after a 403), against the sync control (R19.1, A8, A21).
+ * Review 20 (28 October 2026): E-P43 a linkage read asked before an unlink never replaces the one asked after it, and the unlinked person's
+ * offline rename stays the ordinary queued edit (R20.1, A9, A10; adapted from the reviewer's two Chromium probes).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -3798,5 +3802,134 @@ test.describe("E-P42: New person keeps what was typed across a remount of the sa
         ["create_field", "Unsent note"],
       ]);
       recordEvidence(info, "e-p42", { boundary, log: served.log });
+    });
+});
+
+test.describe("E-P43: a linkage read asked before an unlink never replaces the one asked after it (A9, A10; review 20, R20.1)", () => {
+  for (const late of [false, true])
+    test(`${late ? "the rename's read answers last" : "control, in order"}: unlinked after rename@1, unlink@1 (conflict), unlink@2; offline Rename queues the content edit`, async ({
+      context,
+    }, info) => {
+      const { page, served, net } = await setup(
+        context,
+        `/people/${P}`,
+        [personP(P, "Kieran")],
+        { linked: { [P]: ME } },
+      );
+      const header = page.locator("[data-identity-header]");
+      const linkage = header.locator("[data-linkage]");
+      await expect(linkage).toHaveAttribute("data-linkage", "self");
+      // The rename's read (the first after it) is held at the stub; the next two answer at once.
+      let release = () => {};
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reads = 0;
+      await context.route(`**${API}/people/${P}`, async (route) => {
+        const n = ++reads;
+        const body = {
+          person: personP(P, "Kieran L.", { version: n < 3 ? 2 : 3 }),
+          linked_account_id: n < 3 ? ME : null,
+        };
+        if (n === 1) await held;
+        await route.fulfill(json(200, body));
+      });
+      served.peopleScript.push(
+        { status: 200, body: { revision: 2, person_id: P } },
+        { status: 409, body: atlas("conflict") },
+        { status: 200, body: { revision: 3, person_id: P } },
+      );
+      await header.getByRole("button", { name: "Rename", exact: true }).click();
+      await header
+        .getByRole("textbox", { name: "Name", exact: true })
+        .fill("Kieran L.");
+      await header.getByRole("button", { name: "Save", exact: true }).click();
+      await expect.poll(() => reads).toBe(1);
+      await expect(header.locator("[data-rename-form]")).toHaveCount(0);
+      await header
+        .getByRole("button", { name: "Unlink account", exact: true })
+        .click();
+      const dialog = page.getByRole("dialog", {
+        name: "Unlink your account from this profile?",
+      });
+      const conflictRead = page.waitForResponse(
+        (r) => r.url().endsWith(`/people/${P}`) && r.status() === 200,
+      );
+      await dialog
+        .getByRole("button", { name: "Unlink account", exact: true })
+        .click();
+      await conflictRead;
+      await expect(dialog).toContainText(
+        "Someone else already changed this — reload and try again.",
+      );
+      await expect.poll(() => reads).toBe(2);
+      if (!late) release();
+      await dialog
+        .getByRole("button", { name: "Unlink account", exact: true })
+        .click();
+      await expect(dialog).toHaveCount(0);
+      await expect(linkage).toHaveAttribute("data-linkage", "unlinked");
+      await publish(page, net, [personP(P, "Kieran L.", { version: 3 })], {
+        start: false,
+      });
+      if (late) {
+        const answered = page.waitForResponse(
+          (r) => r.url().endsWith(`/people/${P}`) && r.status() === 200,
+        );
+        release();
+        await answered;
+        // The held answer has reached the page; two frames let its completion and render run (no production timer is shortened).
+        await page.evaluate(
+          () =>
+            new Promise((resolve) =>
+              requestAnimationFrame(() => requestAnimationFrame(resolve)),
+            ),
+        );
+      }
+      expect(reads).toBe(3);
+      expect(
+        served.peopleCommands.map((c) => {
+          const { command } = c.body as {
+            command: { kind: string; expected_version: number };
+          };
+          return [command.kind, command.expected_version];
+        }),
+      ).toEqual([
+        ["rename_profile", 1],
+        ["unlink", 1],
+        ["unlink", 2],
+      ]);
+      await expect(linkage).toHaveAttribute("data-linkage", "unlinked");
+      await expect(
+        header.getByRole("button", { name: "Unlink account", exact: true }),
+      ).toHaveCount(0);
+      // Offline, the unlinked person's rename is the ordinary content edit, queued over the version the cache holds.
+      await connectivity(context, page, false);
+      await header.getByRole("button", { name: "Rename", exact: true }).click();
+      await header
+        .getByRole("textbox", { name: "Name", exact: true })
+        .fill("Kieran Lane");
+      const save = header.getByRole("button", { name: "Save", exact: true });
+      await expect(save).toBeEnabled();
+      await save.click();
+      await expect(header).toContainText("Not sent yet");
+      const drafts = await draftsOf(page);
+      expect(drafts.map((d) => d.kind)).toEqual(["edit"]);
+      const [body] = (await page.evaluate(
+        (a) => window.__atlasData?.rows(a, "draft_commands"),
+        ME,
+      )) as Array<{ command: { commands: Array<Record<string, unknown>> } }>;
+      expect(body?.command.commands).toEqual([
+        {
+          kind: "edit",
+          id: P,
+          expected_version: 3,
+          expected_policy_version: 1,
+          label: "Kieran Lane",
+          value: "",
+        },
+      ]);
+      expect(served.peopleCommands).toHaveLength(3);
+      recordEvidence(info, "e-p43", { late, reads, log: served.log });
     });
 });

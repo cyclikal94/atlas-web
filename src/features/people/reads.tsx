@@ -654,7 +654,9 @@ export function ConfirmedAbsence({
 // ---- linkage (D-11a-2) --------------------------------------------------------------------------------------------------------------
 /**
  * Reads `GET /people/{id}` for the displayed identity, once per page lifetime unless asked again, and answers what this page knows. The
- * answer lives in the identity's page memory, so a remount of the tree keeps it; a read still on its way is shared, never made twice. A
+ * answer lives in the identity's page memory, so a remount of the tree keeps it; an ordinary read joins one still on its way. A forced
+ * read (after a command, "Reload" or "Try again") is a new read that supersedes the one on its way: only the latest read of a person
+ * changes what the page knows, so an answer read before an unlink can never replace the answer read after it (review 20, R20.1). A
  * `403`/`404` is remembered until an explicit "Try again" (D-12a-13). Nothing is ever inferred from `can_edit`.
  */
 export function readLinkage(
@@ -663,36 +665,44 @@ export function readLinkage(
   options: { force?: boolean } = {},
 ): Promise<unknown> | null {
   const memory = env.memory;
+  if (!isCurrentMemory(memory)) return null;
   if (!options.force) {
     if (memory.linkage.has(personId) || memory.refused.has(personId))
       return null;
     const inflight = memory.linkageReads.get(personId);
     if (inflight !== undefined) return inflight;
-  } else {
-    memory.refused.delete(personId);
   }
+  // A read that cannot start asks nothing again: a refusal stays remembered, and no read on its way is superseded.
   if (!env.online) return null;
-  const reading = env.api.readPerson(personId).then((result) => {
-    if (!isCurrentMemory(memory)) return;
-    memory.linkageReads.delete(personId);
-    if (result.ok) {
-      memory.linkage.set(personId, {
-        state: linkageOf(result.value, env.accountId, env.now()),
-        person: {
-          id: result.value.person.id,
-          label: result.value.person.label,
-          version: result.value.person.version,
-        },
-      });
-      memory.refused.delete(personId);
-    } else if (result.kind === "forbidden" || result.kind === "not_found") {
-      memory.refused.set(personId, result.kind);
-      memory.linkage.delete(personId);
-    } else {
-      memory.failed.add(personId);
-    }
-    memory.touch();
-  });
+  if (options.force) memory.refused.delete(personId);
+  const reading: Promise<unknown> = env.api
+    .readPerson(personId)
+    .then((result) => {
+      // Superseded (a later read of the person was asked) or of another identity: it changes nothing, not even the read on its way.
+      if (
+        !isCurrentMemory(memory) ||
+        memory.linkageReads.get(personId) !== reading
+      )
+        return;
+      memory.linkageReads.delete(personId);
+      if (result.ok) {
+        memory.linkage.set(personId, {
+          state: linkageOf(result.value, env.accountId, env.now()),
+          person: {
+            id: result.value.person.id,
+            label: result.value.person.label,
+            version: result.value.person.version,
+          },
+        });
+        memory.refused.delete(personId);
+      } else if (result.kind === "forbidden" || result.kind === "not_found") {
+        memory.refused.set(personId, result.kind);
+        memory.linkage.delete(personId);
+      } else {
+        memory.failed.add(personId);
+      }
+      memory.touch();
+    });
   memory.failed.delete(personId);
   memory.linkageReads.set(personId, reading);
   memory.touch();

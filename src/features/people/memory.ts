@@ -8,7 +8,8 @@ import type { LinkageState } from "./model/linkage";
  * The people screens' PAGE memory (§3.2 `memory.ts`): what this page learnt or kept for ONE displayed identity (`account:epoch`), outside
  * the components, so that it outlives a remount of the protected tree (a `403` anywhere remounts it, D-12a-13; the WEB-13a lesson):
  *
- *  - `linkage`: the answer of `GET /people/{id}` per person (D-11a-2), and the reads still on their way (shared, never made twice);
+ *  - `linkage`: the answer of `GET /people/{id}` per person (D-11a-2), and the read on its way (an ordinary caller joins it; a forced read
+ *    supersedes it, and only the latest read of the person is applied: review 20, R20.1);
  *  - `refused`: a person read that was refused (`403`/`404`), remembered until an explicit "Try again" (D-12a-13);
  *  - `prefetched`: the people whose linkage the list asked for already (once per identity per page lifetime, D-11a-3);
  *  - `dismissed`: duplicate pairs hidden with "Not the same" (D-11a-9);
