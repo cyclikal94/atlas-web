@@ -213,6 +213,19 @@ explains why it waits, and nothing reaches the enqueue whatever submits the form
 `importRequest` requires it. **Revision 11 (review 11 R7f):** the reading that makes it ready tells the dialog (`subscribeImports`), so
 Import is enabled as soon as the history is known, with no other edit or render needed. A CACHED source's open dialog whose cache
 is only unverified waits the same way; a cache known to be invalid is the E9 close. The source's state is read afresh whenever it is shown.
+**What this protection covers, and what it does not (C4; revision 12, review 13 R10).** Kieran's decision WEB13B-R11-BUDGET-C4-20261028
+(28 October 2026; orchestrator `approval/web13b-r11-budget-c4-20261028.json`, SHA-256
+`3d0a95bb853624bca8a4439a79e8768dae895d08c5986c6bbee16ec979106a88`, and `delivery/handoffs/web13b-r11-budget-c4-approved-20261028.md`, SHA-256
+`f61e6a8feb91b5cf1f03657623ee8fac3a586e5d30d029a85b93e088706c0058`) limits it to COMMITTED invalidations (the witness) and failure evidence
+the page can still observe (the cache's durable invalidation streak, its scoped marker, a stop held in a page's memory). An invalidation
+that was admitted but whose write failed and never committed leaves only that evidence: once every streak, marker and peer-memory record
+of it has gone while the committed history is unchanged, an unfinished import can stay open, or resume, and be saved. That is an ACCEPTED
+RESIDUAL RISK, not a pass of the stronger earlier requirement (any admitted reset ends the session), which no revision or review has
+passed and which stays recorded as history with its failures. Nothing else is relaxed: a committed invalidation still ends the session;
+unknown facts still wait and never save; the press still captures its pair, and W2 still compares it in its own transaction on every
+attempt (fence retries included); another account, incarnation or old writer is still refused; a save already admitted, and a retry of
+it, still stand; Cancel and discard are unchanged. No record is deleted or kept shorter, nothing is submitted automatically, and no failure
+history is persisted for this (a stronger guarantee would need a new, separately approved protocol).
 Sync, reopening and a read completing never store anything; a reload or another tab has no session. `tests/features/calendars/import-retention.test.tsx` (I1-I13
 through the production router; revision 7: L1/L2/L5 through the production `DataProvider` and writers W18/W20/W21/W23; revision 8: the
 waiting session, the pending-source first fill versus invalidation, the marker-only L5 and the unverified cached source; revision 9: R7c, an
@@ -230,17 +243,27 @@ connectivity before EVERY admission, so a read never sent is never sent after th
 **Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the
 binding's author), read strictly (`{reason, resolved, slot}`; a slot only for `moved`, the previous slot, and `work_started`, the proposed
 one). Acknowledge queues `resolve_review` on the review's version with the observation of the card's one read (a review that changed
-between showing and pressing is refused as changed); "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
+between showing and pressing is refused as changed). **Revision 12 (review 13 R8):** the card SHOWS that same read too (its reason, slot,
+privacy, occurrence and links, whether it may be acknowledged, its waiting or conflicted acknowledgement); the list row only names which
+review it is. The list and the card's read are published separately, so a card drawn from the list could show an older review than the
+one Acknowledge resolved. Until its read arrives the card says it is loading and offers nothing; a review the read no longer finds is "no
+longer available", and one it sees resolved goes, before the list says so. `tests/features/calendars/review-panel.test.tsx` (revision 12:
+both publication orders for Acknowledge, Acknowledge (keep current timing) and Acknowledge again, a change inside the replacement's write,
+privacy, navigation, permission, gone, resolved and loading, through the production `DataProvider`), mutants MU-2717 to MU-2722; "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
 which the task screen reads strictly and consumes once to fill a NEW correction session (it never resolves the review); a
 `context_unavailable` review shows no date, title or task; one that leaves the cache while shown is "no longer available". The panel
 reads a page (100) at a time; "Show more reviews" shows 20 more and then the next page, and "Show previous reviews" goes back a page,
 showing it whole (R4); a later page with nothing unresolved still shows the way back. A stored acknowledgement's identity is spent too.
 
-**Known finding (F-13b-1, pre-existing at `b9fd602`, not fixed here):** an ordinary `403` to ANY queued command sent by the production
+**Historical finding (F-13b-1; as recorded on 25 October 2026 at the first Running checkpoint `bfe4118`, pre-existing at `b9fd602`, not
+fixed in that checkpoint; kept as it was written):** an ordinary `403` to ANY queued command sent by the production
 leader makes the session re-check the display; the leader stops and restarts its dispatcher, the answer is dropped and the draft is resent
 at once under the same key, in a loop (31 sends in 0.4 s against a stub, for a settings change as for an import). A `403` to an import is
 therefore classified `rejected` by the dispatcher (unit evidence) but is not recorded through the production composition. See
-`.agtx/execute.md` of the WEB-13b worktree.
+`.agtx/execute.md` of the WEB-13b worktree. **Since corrected in this card's scope:** revision 3 (handover
+`delivery/handoffs/web13b-foundation-403-approved-20261025.md`) records an answer the dispatcher had already issued into its draft while
+its run is stopped that way, and revisions 4 and 5 (F-13b-1a/1b/1c, N1) its failed settlement and the owed-retry and stop authority; see
+`docs/data-layer.md`. The original failure evidence stays in the card's evidence; the final shared regression is still owed.
 
 ## Limits and what is not claimed
 

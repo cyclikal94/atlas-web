@@ -1507,16 +1507,24 @@ test.describe("E-IMP8: the kept import across a protected-tree remount and a cac
       );
       // One answer throughout (a request retried meanwhile gets the same held page): the first snapshot is held until released; once the
       // first fill is seen (`filled`), the invalidation variant answers its next delta `410` and every later snapshot is the held refill.
+      // ADAPTED (WEB-13b revision 12, harness race; same server sequence and assertions): the first delta after the first fill (its
+      // cursor, `delta-0`) is answered `410` once the test has seen the fill (`fillSeen`), whenever it was asked. The leader asks for it
+      // straight after the fill; asked before `filled` was set it used to be answered `200`, and the nudge, met inside that step, was
+      // absorbed, so no `410` came within the poll (one Firefox run, revision 12's driver; trace in its evidence).
       let filled = false;
       let resync = false;
+      let fillSeen!: () => void;
+      const fillWasSeen = new Promise<void>((resolve) => {
+        fillSeen = resolve;
+      });
       net.answer = (call) => {
         if (call.cursor === null) return filled ? heldRefill : firstFill;
-        if (invalidate && filled && !resync) {
+        if (invalidate && call.cursor === "delta-0" && !resync) {
           resync = true;
-          return {
+          return fillWasSeen.then(() => ({
             status: 410,
             body: JSON.stringify(atlasBody("resync_required")),
-          };
+          }));
         }
         return deltaPage([], call.cursor);
       };
@@ -1587,6 +1595,7 @@ test.describe("E-IMP8: the kept import across a protected-tree remount and a cac
         .toBe("valid");
       history.push(await rows(one, "sync_state"));
       filled = true;
+      fillSeen();
       if (invalidate) {
         await one.evaluate(() => window.__atlasFixture?.session?.leaderNudge());
         await expect

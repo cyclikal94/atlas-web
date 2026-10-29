@@ -41,6 +41,7 @@ import {
   proposed,
   REVIEW_CHANGED,
   REVIEW_CONFLICT,
+  REVIEW_LOADING,
   REVIEW_MOVE,
   REVIEWS_HEADING,
   SHOW_MORE_REVIEWS,
@@ -211,18 +212,29 @@ export function ReviewPanel() {
   );
 }
 
+/**
+ * One review's card. The list row only says WHICH review it is; everything the card shows about the review (its reason, slot, privacy,
+ * parent, resolved state and whether it may be acknowledged) and everything Acknowledge saves (base, observation, the conflict it
+ * replaces) come from the card's own ONE read of it (`useResourceView`). The list and that read are published separately, so a card
+ * drawn from the list could show an older review than the one its acknowledgement resolves (WEB-13b review 13, R8).
+ */
 function ReviewCard({ row }: { row: ListedResource }) {
   const env = useOptionalDataEnv();
   const actions = useDataActions();
   const announcer = useAnnouncer();
   const id = row.base.id;
-  // The card's own read of the review: what Acknowledge is built from and checked against (its observation), and its waiting changes.
+  // The card's own read of the review: what it shows, what Acknowledge is built from and checked against (its observation), its waiting
+  // changes.
   const view = useResourceView(id, VIEW_KINDS);
-  const value = parseReview(row.merged.value);
-  const base = parseReview(row.base.value);
+  const shownRow = view.status === "ready" ? view.value.base : null;
+  const value =
+    view.status === "ready" && view.value.merged !== null
+      ? parseReview(view.value.merged.value)
+      : null;
+  const base = shownRow === null ? null : parseReview(shownRow.value);
   const generic = base?.reason === "context_unavailable";
   // The occurrence (the review's parent), then its task and the reference its slot key names; nothing for a generic review.
-  const occurrenceId = row.base.parent_id;
+  const occurrenceId = shownRow?.parent_id ?? null;
   const occurrences = useCachedResources(
     occurrenceId === null || generic ? [] : [occurrenceId],
   );
@@ -317,6 +329,36 @@ function ReviewCard({ row }: { row: ListedResource }) {
     }
   };
 
+  const frame =
+    "list-none rounded-row border border-hairline-strong bg-panel p-3.5";
+  // Not read yet (or no open database): the list's copy of the review is not shown in its place, and nothing can be pressed.
+  if (view.status !== "ready")
+    return (
+      <li
+        data-review={id}
+        data-review-state="loading"
+        aria-busy={view.status === "loading"}
+        className={frame}
+      >
+        <p className="text-[13.5px] text-ink-2">
+          {view.status === "loading" ? REVIEW_LOADING : UNREADABLE}
+        </p>
+      </li>
+    );
+  // The review left the cache (deleted, or access lost) before the list said so: the panel's "gone" treatment, never the older copy.
+  if (shownRow === null || view.value.merged === null)
+    return (
+      <li data-review={id} data-review-state="gone" className={frame}>
+        <p className="text-[13.5px] text-ink-1">{NO_LONGER_AVAILABLE}</p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <Button disabled reason={NO_LONGER_AVAILABLE}>
+            {ACKNOWLEDGE}
+          </Button>
+        </div>
+      </li>
+    );
+  // Published resolved (by this device or another) before the list said so: the card goes, as it does once the list shows it.
+  if (base?.resolved === true) return null;
   const taskName = task?.label ?? A_TASK;
   let title: string;
   let body: string | null = null;
@@ -349,7 +391,7 @@ function ReviewCard({ row }: { row: ListedResource }) {
         body = PRIVATE_GENERIC;
     }
   const move = base === null ? null : proposedMove(base);
-  const canAct = row.merged.can_edit;
+  const canAct = view.value.merged.can_edit;
   const acknowledged = value?.resolved === true;
   const state = acknowledged
     ? "acknowledged"
@@ -365,7 +407,7 @@ function ReviewCard({ row }: { row: ListedResource }) {
       data-review={id}
       data-review-reason={base?.reason ?? "unreadable"}
       data-review-state={state}
-      className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
+      className={frame}
     >
       <div className="flex flex-col gap-0.5">
         <span className="break-words text-[14px] text-ink-1">{title}</span>

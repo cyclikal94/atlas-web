@@ -33,6 +33,7 @@ export const INELIGIBLE_BODY =
   "Its timing is kept as last known — check the anchor's weekdays or title filter";
 export const PRIVATE_TITLE = "A task's schedule may have changed";
 export const UNREADABLE = "This review can't be shown on this device.";
+export const REVIEW_LOADING = "Loading this review…";
 export const A_TASK = "a task";
 export const TASK_NOT_HERE = "This task isn't on this device yet.";
 export const OPEN_TASK = "Open task";

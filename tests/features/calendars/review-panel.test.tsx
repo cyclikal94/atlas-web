@@ -16,7 +16,7 @@ import {
 } from "../../../src/features/calendars/model/review";
 import { installMatchMedia } from "../../helpers/match-media";
 import { calendarWorld, sourceRow } from "../../support/calendars";
-import { cacheRow } from "../../support/data/rows";
+import { cacheRow, draftRow } from "../../support/data/rows";
 
 /**
  * WEB-13b §4.5 (Q22 "resolution of locally available calendar review items"; the wireframe's review panel and its two state cards): the
@@ -547,5 +547,469 @@ describe("revision 1: every unresolved review stays reachable; a stored acknowle
     expect(drafts(w).filter((d) => d.kind === "resolve_review")).toHaveLength(
       1,
     );
+  });
+});
+
+describe("revision 12 (review 13 R8): the card shows and acknowledges ONE reading of its review", () => {
+  type Held = "list" | "view";
+  /**
+   * The review list's watch and the card's resource-view watch, each of which can be HELD: the store commits and the watch reads on, but
+   * its publication to the screen waits (`release` publishes the newest reading). The real watches, plans and outbox underneath; nothing
+   * is fabricated. Mounted again (a new tree over the same page runtime, as production) so that the screen subscribes through them.
+   */
+  const publications = async (w: World, initially: Held[] = []) => {
+    const store = w.env.service()?.store;
+    if (store === undefined) throw new Error("no service");
+    const watch = store.watch.bind(store);
+    const held = new Set<Held>(initially);
+    const waiting = new Map<Held, Set<() => void>>([
+      ["list", new Set()],
+      ["view", new Set()],
+    ]);
+    const count = { list: 0, view: 0 };
+    const subscribed = { list: 0, view: 0 };
+    await w.detach();
+    vi.spyOn(store, "watch").mockImplementation(((
+      plan: { name: string },
+      input: { kind?: string; id?: string },
+    ) => {
+      const source = watch(plan as never, input as never);
+      const which: Held | null =
+        plan.name === "data.readResourceList" && input.kind === "review"
+          ? "list"
+          : plan.name === "data.readResourceView" && input.id === REVIEW
+            ? "view"
+            : null;
+      if (which === null) return source;
+      subscribed[which] += 1;
+      let snapshot = source.get();
+      return {
+        get: () => {
+          if (!held.has(which)) snapshot = source.get();
+          return snapshot;
+        },
+        subscribe: (listener: () => void) => {
+          const publish = () => {
+            snapshot = source.get();
+            listener();
+          };
+          const off = source.subscribe(() => {
+            if (!held.has(which)) return publish();
+            count[which] += 1;
+            waiting.get(which)?.add(publish);
+          });
+          return () => {
+            waiting.get(which)?.delete(publish);
+            off();
+          };
+        },
+      };
+    }) as never);
+    await w.attach();
+    return {
+      hold: (which: Held) => held.add(which),
+      async release(which: Held) {
+        held.delete(which);
+        const queue = [...(waiting.get(which) ?? [])];
+        waiting.get(which)?.clear();
+        await act(async () => {
+          for (const publish of queue) publish();
+        });
+        await w.settle();
+      },
+      /** Publications held back so far: a held order is asserted to have happened, not assumed. */
+      count,
+      subscribed,
+    };
+  };
+  const shown = () =>
+    document.querySelector(`[data-review="${REVIEW}"]`) as HTMLElement | null;
+  const reviewDrafts = (w: World) =>
+    drafts(w).filter((d) => d.kind === "resolve_review");
+  const press = async (w: World, name: string) => {
+    const item = present(shown());
+    await act(async () => {
+      fireEvent.click(within(item).getByRole("button", { name }));
+    });
+    await w.settle();
+  };
+  /** A sync's publication of the review: its row and the version the outbox assumes, in one transaction (W1). */
+  const publish = (w: World, row: CacheRow) =>
+    w.commit({
+      put: { store: "cache", rows: [row] },
+      versions: [
+        {
+          resource_id: REVIEW,
+          locally_assumed_version: row.version,
+          basis: "resource",
+        },
+      ],
+    });
+  const start = async (
+    rows: CacheRow[],
+    initially: Held[] = [],
+    extra = {},
+  ) => {
+    const w = await calendarWorld({
+      production: true,
+      validCache: true,
+      online: false,
+      cache: rows,
+      ...extra,
+    });
+    await screen.findByText(words.REVIEWS_HEADING);
+    await w.settle();
+    const p = await publications(w, initially);
+    await w.settle();
+    return { w, p };
+  };
+  const missing3 = review(
+    { reason: "missing", resolved: false, slot: null },
+    { version: 3 },
+  );
+  const cancelled4 = review(
+    { reason: "cancelled", resolved: false, slot: null },
+    { version: 4 },
+  );
+  /** What a stored acknowledgement resolves: its version and the review value its display patch says. */
+  const resolves = (w: World, d: DraftRow) => ({
+    expected_version: d.expected_version,
+    reason: (
+      d.display_patch?.[REVIEW] as { value?: { reason?: string } } | undefined
+    )?.value?.reason,
+    body: bodyOf(w, d.local_id),
+  });
+
+  test("R8 control: both publications through, the card shows the newer review and Acknowledge resolves that one, once", async () => {
+    const { w, p } = await start([...context, missing3]);
+    expect(p.subscribed.list).toBeGreaterThan(0);
+    expect(p.subscribed.view).toBeGreaterThan(0);
+    await publish(w, cancelled4);
+    expect(present(shown()).getAttribute("data-review-reason")).toBe(
+      "cancelled",
+    );
+    await press(w, words.ACKNOWLEDGE);
+    const stored = reviewDrafts(w);
+    expect(stored).toHaveLength(1);
+    expect(resolves(w, stored[0] as DraftRow)).toEqual({
+      expected_version: 4,
+      reason: "cancelled",
+      body: {
+        command: {
+          kind: "resolve_review",
+          id: REVIEW,
+          expected_version: 4,
+          resolved: true,
+        },
+      },
+    });
+    expect(w.calls.filter((c) => c.method === "POST")).toEqual([]);
+  });
+
+  test("R8 (view first, list held): the card shows the reading Acknowledge is built from, so what it resolves is what it shows", async () => {
+    const { w, p } = await start([...context, missing3]);
+    p.hold("list");
+    await publish(w, cancelled4);
+    expect(p.count.list).toBeGreaterThan(0);
+    const item = present(shown());
+    // The card's own reading reached it: it shows the newer review although the list has not published it.
+    expect(item.getAttribute("data-review-reason")).toBe("cancelled");
+    expect(item).toHaveTextContent(words.cancelledTitle("Put the bins out"));
+    expect(item.textContent).not.toContain(words.MISSING_BODY);
+    await press(w, words.ACKNOWLEDGE);
+    const stored = reviewDrafts(w);
+    expect(stored).toHaveLength(1);
+    expect(resolves(w, stored[0] as DraftRow)).toMatchObject({
+      expected_version: 4,
+      reason: "cancelled",
+    });
+    expect(w.calls.filter((c) => c.method === "POST")).toEqual([]);
+    await p.release("list");
+    expect(reviewDrafts(w)).toHaveLength(1);
+  });
+
+  test("R8 (list first, view held): the card keeps showing what its reading saw; Acknowledge of that older review is refused as changed, nothing stored", async () => {
+    const { w, p } = await start([...context, missing3]);
+    p.hold("view");
+    await publish(w, cancelled4);
+    expect(p.count.view).toBeGreaterThan(0);
+    const item = present(shown());
+    // The list's newer copy is not mixed into the card: it shows the one reading it has.
+    expect(item.getAttribute("data-review-reason")).toBe("missing");
+    expect(item).toHaveTextContent(words.MISSING_BODY);
+    await press(w, words.ACKNOWLEDGE);
+    expect(reviewDrafts(w)).toEqual([]);
+    expect(present(shown())).toHaveTextContent(words.REVIEW_CHANGED);
+    // Its reading published: the newer review shown, and acknowledged as shown.
+    await p.release("view");
+    expect(present(shown()).getAttribute("data-review-reason")).toBe(
+      "cancelled",
+    );
+    await press(w, words.ACKNOWLEDGE);
+    const stored = reviewDrafts(w);
+    expect(stored).toHaveLength(1);
+    expect(resolves(w, stored[0] as DraftRow)).toMatchObject({
+      expected_version: 4,
+      reason: "cancelled",
+    });
+    expect(w.calls.filter((c) => c.method === "POST")).toEqual([]);
+  });
+
+  test.each(["list", "view"] as const)(
+    "R8 Acknowledge (keep current timing), %s held: the proposed slot shown, the link and what is resolved agree",
+    async (which) => {
+      const started = (date: string, time: string, version: number) =>
+        review(
+          { reason: "work_started", resolved: false, slot: slot(date, time) },
+          { version },
+        );
+      const { w, p } = await start([
+        ...context,
+        started("2026-11-03", "18:30:00", 3),
+      ]);
+      p.hold(which);
+      await publish(w, started("2026-11-04", "09:15:00", 4));
+      expect(p.count[which]).toBeGreaterThan(0);
+      const item = present(shown());
+      const link = within(item).getByRole("link", { name: words.REVIEW_MOVE });
+      // The reading the card has: the newer one when the list is held, the older one when the card's own reading is.
+      const [day, move, version] =
+        which === "list"
+          ? [/Wed,? 4 Nov 2026 at 09:15/, "2026-11-04T09%3A15%3A00", 4]
+          : [/Tue,? 3 Nov 2026 at 18:30/, "2026-11-03T18%3A30%3A00", 3];
+      expect(item).toHaveTextContent(day);
+      expect(link.getAttribute("href")).toBe(
+        `/tasks/${TASK}?occurrence=${OCC}&move=${move}`,
+      );
+      await press(w, words.ACKNOWLEDGE_KEEP);
+      const stored = reviewDrafts(w);
+      if (which === "list") {
+        expect(stored).toHaveLength(1);
+        const d = stored[0] as DraftRow;
+        expect(d.expected_version).toBe(version);
+        expect(
+          (
+            d.display_patch?.[REVIEW] as
+              | { value?: { slot?: { date?: string } } }
+              | undefined
+          )?.value?.slot?.date,
+        ).toBe("2026-11-04");
+      } else {
+        expect(stored).toEqual([]);
+        expect(present(shown())).toHaveTextContent(words.REVIEW_CHANGED);
+      }
+      // The current timing is kept: no correction is stored and nothing moves the occurrence.
+      expect(drafts(w).filter((d) => d.kind !== "resolve_review")).toEqual([]);
+      expect(w.calls.filter((c) => c.method === "POST")).toEqual([]);
+    },
+  );
+
+  /** An acknowledgement that the server refused as a version conflict, on the review's version 3. */
+  const conflicted = () =>
+    draftRow({
+      local_id: "00000000-0000-4000-8000-00000000c0f1",
+      created_seq: 1,
+      endpoint: "/calendar-commands",
+      command: {
+        command: {
+          kind: "resolve_review",
+          id: REVIEW,
+          expected_version: 3,
+          resolved: true,
+        },
+      },
+      target_resource_ids: [REVIEW],
+      index_targets: [REVIEW],
+      bases: { [REVIEW]: 3 },
+      bumped: [REVIEW],
+      expected_version: 3,
+      status: "version_conflict",
+    });
+
+  test.each(["list", "view"] as const)(
+    "R8 conflict, Acknowledge again with the %s held: the conflict shown is replaced once by what is shown, or refused with the conflict kept",
+    async (which) => {
+      const { w, p } = await start([...context, missing3], [], {
+        drafts: [conflicted()],
+      });
+      const before = present(shown());
+      expect(before).toHaveTextContent(words.REVIEW_CONFLICT);
+      p.hold(which);
+      await publish(w, cancelled4);
+      expect(p.count[which]).toBeGreaterThan(0);
+      const item = present(shown());
+      expect(item).toHaveTextContent(words.REVIEW_CONFLICT);
+      expect(item.getAttribute("data-review-reason")).toBe(
+        which === "list" ? "cancelled" : "missing",
+      );
+      await press(w, words.ACKNOWLEDGE_AGAIN);
+      const stored = reviewDrafts(w);
+      if (which === "list") {
+        expect(stored).toHaveLength(1);
+        const d = stored[0] as DraftRow;
+        expect(d.local_id).not.toBe(conflicted().local_id);
+        expect(resolves(w, d)).toMatchObject({
+          expected_version: 4,
+          reason: "cancelled",
+        });
+      } else {
+        // Refused: the conflicted acknowledgement stays exactly as it was, and nothing new is stored.
+        expect(stored.map((d) => [d.local_id, d.status])).toEqual([
+          [conflicted().local_id, "version_conflict"],
+        ]);
+        expect(present(shown())).toHaveTextContent(words.REVIEW_CHANGED);
+      }
+      expect(w.calls.filter((c) => c.method === "POST")).toEqual([]);
+    },
+  );
+
+  test("R8 conflict, a change between pressing Acknowledge again and the replacement's write: refused as changed, the conflict kept", async () => {
+    const { w } = await start([...context, missing3], [], {
+      drafts: [conflicted()],
+    });
+    const outbox = w.env.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const original = outbox.supersede.bind(outbox);
+    const supersede = vi
+      .spyOn(outbox, "supersede")
+      .mockImplementation(async (id, request) => {
+        await publish(w, cancelled4);
+        return original(id, request);
+      });
+    await press(w, words.ACKNOWLEDGE_AGAIN);
+    await w.settle();
+    expect(supersede).toHaveBeenCalledTimes(1);
+    expect(await supersede.mock.results[0]?.value).toEqual({
+      kind: "refused",
+      reason: "changed",
+    });
+    expect(reviewDrafts(w).map((d) => [d.local_id, d.status])).toEqual([
+      [conflicted().local_id, "version_conflict"],
+    ]);
+  });
+
+  test("R8 privacy (list held): a review that became private shows the generic card at once: no task, no date, no link", async () => {
+    const { w, p } = await start([...context, missing3]);
+    expect(present(shown())).toHaveTextContent("Put the bins out");
+    p.hold("list");
+    await publish(
+      w,
+      review(
+        { reason: "context_unavailable", resolved: false, slot: null },
+        { version: 4 },
+      ),
+    );
+    expect(p.count.list).toBeGreaterThan(0);
+    const item = present(shown());
+    expect(item).toHaveTextContent(words.PRIVATE_TITLE);
+    expect(item).toHaveTextContent(words.PRIVATE_GENERIC);
+    expect(item.textContent).not.toContain("Put the bins out");
+    expect(item.textContent).not.toMatch(/\d{4}|Nov/);
+    expect(within(item).queryByRole("link")).toBeNull();
+  });
+
+  test("R8 navigation (list held): a review moved to another occurrence links to THAT occurrence's task", async () => {
+    const TASK2 = "00000000-0000-4000-8000-0000000000b3";
+    const OCC2 = "00000000-0000-4000-8000-0000000000c2";
+    const { w, p } = await start([
+      ...context,
+      cacheRow({ id: TASK2, kind: "task", label: "Water the plants" }),
+      cacheRow({
+        id: OCC2,
+        kind: "occurrence",
+        parent_id: "00000000-0000-4000-8000-0000000000b4",
+        label: "Occurrence",
+        value: {
+          task_id: TASK2,
+          slot: slot("2026-11-05", "08:00:00"),
+        } as never,
+      }),
+      missing3,
+    ]);
+    expect(
+      within(present(shown()))
+        .getByRole("link", { name: words.OPEN_TASK })
+        .getAttribute("href"),
+    ).toBe(`/tasks/${TASK}?occurrence=${OCC}`);
+    p.hold("list");
+    await publish(
+      w,
+      review(
+        { reason: "missing", resolved: false, slot: null },
+        { version: 4, parent_id: OCC2 },
+      ),
+    );
+    expect(p.count.list).toBeGreaterThan(0);
+    const item = present(shown());
+    expect(item).toHaveTextContent(words.missingTitle("Water the plants"));
+    expect(
+      within(item)
+        .getByRole("link", { name: words.OPEN_TASK })
+        .getAttribute("href"),
+    ).toBe(`/tasks/${TASK2}?occurrence=${OCC2}`);
+  });
+
+  test("R8 permission (list held): edit access lost at the same version: Acknowledge is unavailable with the reason", async () => {
+    const { w, p } = await start([...context, missing3]);
+    p.hold("list");
+    await publish(
+      w,
+      review(
+        { reason: "missing", resolved: false, slot: null },
+        { version: 3, can_edit: false },
+      ),
+    );
+    expect(p.count.list).toBeGreaterThan(0);
+    const button = within(present(shown())).getByRole("button", {
+      name: words.ACKNOWLEDGE,
+    });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAccessibleDescription(words.CANT_ACKNOWLEDGE);
+  });
+
+  test("R8 gone (list held): a review that left the cache is 'no longer available', with nothing to press or follow", async () => {
+    const { w, p } = await start([...context, missing3]);
+    p.hold("list");
+    await w.commit({ remove: [REVIEW] });
+    expect(p.count.list).toBeGreaterThan(0);
+    const item = present(shown());
+    expect(item.getAttribute("data-review-state")).toBe("gone");
+    expect(item).toHaveTextContent(words.NO_LONGER_AVAILABLE);
+    expect(item.textContent).not.toContain(words.MISSING_BODY);
+    for (const button of within(item).getAllByRole("button"))
+      expect(button).toBeDisabled();
+    expect(within(item).queryByRole("link")).toBeNull();
+  });
+
+  test("R8 resolved (list held): a review published resolved goes from the screen", async () => {
+    const { w, p } = await start([...context, missing3]);
+    p.hold("list");
+    await publish(
+      w,
+      review({ reason: "missing", resolved: true, slot: null }, { version: 4 }),
+    );
+    expect(p.count.list).toBeGreaterThan(0);
+    expect(shown()).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: words.ACKNOWLEDGE }),
+    ).toBeNull();
+  });
+
+  test("R8 loading: until the card's own reading arrives it shows neither the list's copy nor an action", async () => {
+    const { w, p } = await start([...context, missing3], ["view"]);
+    const item = present(shown());
+    expect(item.getAttribute("data-review-state")).toBe("loading");
+    expect(item).toHaveAttribute("aria-busy", "true");
+    expect(item).toHaveTextContent(words.REVIEW_LOADING);
+    expect(item.textContent).not.toContain("Put the bins out");
+    expect(within(item).queryByRole("button")).toBeNull();
+    expect(within(item).queryByRole("link")).toBeNull();
+    await p.release("view");
+    const ready = present(shown());
+    expect(ready.getAttribute("data-review-reason")).toBe("missing");
+    expect(
+      within(ready).getByRole("button", { name: words.ACKNOWLEDGE }),
+    ).toBeEnabled();
+    expect(reviewDrafts(w)).toEqual([]);
   });
 });
