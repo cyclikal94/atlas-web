@@ -25,6 +25,15 @@ export const unknownLinkage = (
   reason: Extract<LinkageState, { known: false }>["reason"],
 ): LinkageState => ({ known: false, reason });
 
+/**
+ * A kept answer as the linkage NOW (review 25, R25.1): only while it is of the latest version of the person known (`floor`). A later
+ * version may have changed who the person is linked to, so an older answer says nothing about now; it is never taken for "unlinked".
+ */
+export const currentLinkage = (
+  kept: LinkageState | undefined,
+  floor: number,
+): LinkageState | null => (kept?.known && kept.version >= floor ? kept : null);
+
 /** The linkage a `PersonDetail` answer says, for the signed-in `accountId`. */
 export function linkageOf(
   answer: { linked_account_id: string | null; person: { version: number } },

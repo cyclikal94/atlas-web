@@ -378,6 +378,12 @@ describe("finding 1: an edit keeps the versions and audience it began on", () =>
     w.putCache(
       person({ id: P, label: "Ada (server)", version: 4, policy_version: 2 }),
     );
+    // Adapted in review 25 (R25.1): who controls the name is checked again at v4 before the form can save (an answer of v3 is not current).
+    await waitFor(() =>
+      expect(
+        document.querySelector("[data-linkage]")?.getAttribute("data-linkage"),
+      ).toBe("unlinked"),
+    );
     const form = document.querySelector("[data-rename-form]") as HTMLElement;
     fireEvent.click(within(form).getByRole("button", { name: "Save" }));
     await within(form).findByText(
@@ -644,6 +650,12 @@ describe("finding 1 (continued): a linked rename and a held continuation", () =>
     });
     w.putCache(
       person({ id: P, label: "Ada (server)", version: 4, policy_version: 2 }),
+    );
+    // Adapted in review 25 (R25.1): who controls the name is checked again at v4 before the form can save (an answer of v3 is not current).
+    await waitFor(() =>
+      expect(
+        document.querySelector("[data-linkage]")?.getAttribute("data-linkage"),
+      ).toBe("self"),
     );
     const form = document.querySelector("[data-rename-form]") as HTMLElement;
     fireEvent.click(within(form).getByRole("button", { name: "Save" }));
@@ -1176,7 +1188,10 @@ describe("finding 4 (continued): a person's field steps", () => {
         params: { personId: Q },
       });
     });
-    await screen.findByText("Bob field 0");
+    // An assertion, not a query that throws (MU-2477; WEB-11a revision 25).
+    await waitFor(() =>
+      expect(screen.queryByText("Bob field 0")).not.toBeNull(),
+    );
     expect(
       screen.queryByRole("button", { name: "Previous fields" }),
     ).toBeNull();

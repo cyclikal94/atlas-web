@@ -10,8 +10,9 @@ import type { LinkageState } from "./model/linkage";
  *
  *  - `linkage`: the answer of `GET /people/{id}` per person (D-11a-2), and the read on its way (an ordinary caller joins it; a forced read
  *    supersedes it, and only the latest read of the person is applied: review 20, R20.1);
+ *  - `personVersions` and `linkageAsked`: the highest version of each person this page saw, and the version a linkage read was last asked
+ *    at; a kept answer older than what is known of the person is not shown as current (review 25, R25.1, `personFloor`);
  *  - `refused`: a person read that was refused (`403`/`404`), remembered until an explicit "Try again" (D-12a-13);
- *  - `prefetched`: the people whose linkage the list asked for already (once per identity per page lifetime, D-11a-3);
  *  - `dismissed`: duplicate pairs hidden with "Not the same" (D-11a-9);
  *  - `heldRuns`: the held audience changes this page is running now, and whether the person discarded one while it ran (the held
  *    changes themselves are DURABLE, in the account's database: `field/held-store.ts`, finding 6 of the review of 13 October);
@@ -70,7 +71,13 @@ export class PeopleMemory {
   readonly refused = new Map<string, "forbidden" | "not_found">();
   /** People whose last linkage read failed for another reason (asked again on reconnect or "Try again"). */
   readonly failed = new Set<string>();
-  readonly prefetched = new Set<string>();
+  /**
+   * The highest server version of each person a linkage answer or the synced row showed (with `summaryFloors`, `personFloor`). Kept when
+   * an answer is withdrawn (a refusal) or a summary read again: what is known of a person never goes back.
+   */
+  readonly personVersions = new Map<string, number>();
+  /** The `personFloor` each person's latest linkage read was asked at: an answer older than it is not asked for again by itself. */
+  readonly linkageAsked = new Map<string, number>();
   readonly dismissed = new Map<string, Set<string>>();
   /** The held changes running on this page, by hold id (at most one at a time). */
   readonly heldRuns = new Map<string, HeldRun>();
@@ -208,6 +215,27 @@ export function doubtPolicy(memory: PeopleMemory, fieldId: string): void {
   memory.policyDoubts.set(fieldId, memory.policyGeneration);
   memory.policyReads.delete(fieldId);
   memory.touch();
+}
+
+/**
+ * The latest version of the person this page knows of (review 25, R25.1): from its linkage answers, the synced row and the summaries
+ * applied. A linkage answer of an earlier version may be out of date (an unlink increments the version), so it is not current.
+ */
+export function personFloor(memory: PeopleMemory, personId: string): number {
+  return Math.max(
+    memory.personVersions.get(personId) ?? 0,
+    memory.summaryFloors.get(personId)?.version ?? 0,
+  );
+}
+
+/** Keeps `version` as the person's latest known one unless a later one is known already. */
+export function notePersonVersion(
+  memory: PeopleMemory,
+  personId: string,
+  version: number,
+): void {
+  if (version > (memory.personVersions.get(personId) ?? 0))
+    memory.personVersions.set(personId, version);
 }
 
 let current: PeopleMemory | null = null;

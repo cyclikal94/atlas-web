@@ -57,6 +57,10 @@ const commands = (w: ReturnType<typeof peopleWorld>) =>
 /**
  * A linked self at version 1 is renamed (its read answers linked v2, held); Unlink at v1 conflicts (its read answers linked v2); Unlink
  * again at v2 succeeds (its read answers unlinked v3). `late` releases the rename's read before the second unlink, or after it.
+ *
+ * Adapted in review 25 (R25.1), assertions unchanged: the rename's v2 is no longer synced before Unlink is pressed. Once the page knows
+ * v2 (the synced row, a summary), a v1 answer is not current, so no Unlink is offered on it at all and unlink@1 cannot be sent (that
+ * schedule is "a synced newer version withdraws the v1 answer" below). Here the sync lags, as the read ordering under test needs.
  */
 async function renamedThenUnlinked(late: boolean) {
   const w = peopleWorld();
@@ -77,10 +81,7 @@ async function renamedThenUnlinked(late: boolean) {
     answer(3, null),
   );
   w.api.next.people.push(
-    async () => {
-      w.setCache([person({ id: P, label: "Kieran L.", version: 2 })]);
-      return { ok: true, value: { revision: 2, person_id: P } };
-    },
+    { ok: true, value: { revision: 2, person_id: P } },
     { ok: false, kind: "conflict" },
     async () => {
       w.setCache([person({ id: P, label: "Kieran L.", version: 3 })]);

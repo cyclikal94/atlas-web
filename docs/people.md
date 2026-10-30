@@ -75,7 +75,13 @@ reopens it with its draft), and `/settings/archived`.
   until Try again). Unknown linkage is shown as unknown, with the reason; it is never inferred from `can_edit`. An ordinary read joins the
   one on its way; a read asked after a command, Reload or Try again supersedes it, and only the latest read of a person changes what the
   page knows (review 20, R20.1): an answer read before an unlink never replaces the one read after it. Offline, Try again asks nothing and
-  forgets nothing.
+  forgets nothing. An answer is CURRENT only at the latest version of the person this page knows (review 25, R25.1: `personFloor`, from
+  the linkage answers, the synced row and the summaries applied; never lowered by a refusal or a summary read again). A later version (an
+  unlink increments it) withdraws the answer at once from the header line, Rename, Unlink and the field editor's subject note (unknown,
+  "Checking…", never "unlinked"), and ONE read is asked for that version, shared by every caller; an answer still older stops there
+  ("couldn't check", Try again) until a later version or a reconnection after a failure. Rename and the open unlink confirmation judge the
+  current linkage at the press; the confirmation stays bound to the version it was opened on, and is bound again only to the signed-in
+  account's own linkage read after its own unlink conflicted. The summary itself is never the linkage (D-11a-3's prefetch is gone).
 - **D-11a-3** (superseded by D-11a-20 for API 0.29) List rows show the name, initials, the cached field count, the pending mark and
   "Archived". The 0.28 prefetch of 25 linkage reads is REMOVED: the account line comes from the summaries for every row, and the list makes
   no `GET /people/{id}` at all.

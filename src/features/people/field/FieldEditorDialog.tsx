@@ -512,7 +512,11 @@ function Editor({
   const defaults = useSharingDefaults();
   const actions = useDataActions();
   const conflicts = useConflictInbox();
-  const { linkage } = usePersonLinkage(person.row.id);
+  // The synced person's version is known too: a linkage answer older than it is not current (review 25, R25.1).
+  const { linkage } = usePersonLinkage(
+    person.row.id,
+    person.projected ? undefined : person.row.version,
+  );
   const draftKey = `field:${person.row.id}:${field?.row.id ?? "new"}`;
   const existing = field?.row ?? null;
   const parsed = existing === null ? null : parseFieldValue(existing.value);

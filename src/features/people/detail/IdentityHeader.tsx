@@ -36,7 +36,12 @@ import {
   unlinkBody,
 } from "../model/commands";
 import { firstPageCount } from "../model/duplicates";
-import { type LinkageState, renameRoute, unlinkOffer } from "../model/linkage";
+import {
+  type LinkageState,
+  type RenameRoute,
+  renameRoute,
+  unlinkOffer,
+} from "../model/linkage";
 import type { ShownRow } from "../model/project";
 import {
   type EditSnapshot,
@@ -49,7 +54,7 @@ import {
 import { charCount } from "../model/values";
 import { sendOnline } from "../online";
 import { Avatar, Banner, PendingBadge, useOutboxSave } from "../parts";
-import { readLinkage, usePersonLinkage } from "../reads";
+import { linkageIn, readLinkage, usePersonLinkage } from "../reads";
 
 /**
  * The identity header of WF-PEOPLE-02 with the Q21 gap-6 additions (`profile-rename-unlink.html`) and the archive entry point
@@ -78,9 +83,12 @@ export function IdentityHeader({
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
   const person = shown.row;
-  const { linkage, retry } = usePersonLinkage(person.id);
+  // The synced row's version is known of the person too (an unsent create's projection has none): an older linkage answer is not current.
+  const synced = shown.projected ? undefined : person.version;
+  const { linkage, retry } = usePersonLinkage(person.id, synced);
   const [renaming, setRenaming] = useState(false);
-  const [unlinking, setUnlinking] = useState(false);
+  // The version the open unlink confirmation was opened on: it confirms that unlink only, never one of a later linkage (review 25).
+  const [unlinking, setUnlinking] = useState<number | null>(null);
   const [sharing, setSharing] = useState(false);
   const Heading = asPage ? PageHeading : SubHeading;
   const renamingFrom = env.memory.drafts.get(`renaming:${person.id}`) as
@@ -146,7 +154,9 @@ export function IdentityHeader({
         <UnlinkEntry
           linkage={linkage}
           name={person.label}
-          onOpen={() => setUnlinking(true)}
+          onOpen={() => {
+            if (linkage.known) setUnlinking(linkage.version);
+          }}
         />
         <ArchiveEntry shown={shown} />
       </div>
@@ -154,15 +164,19 @@ export function IdentityHeader({
         <RenameForm
           shown={shown}
           linkage={linkage}
+          synced={synced}
           drafts={drafts}
           onDone={() => setRenaming(false)}
         />
       ) : null}
-      {unlinking && linkage.known ? (
+      {unlinking !== null ? (
         <UnlinkDialog
           personId={person.id}
-          version={linkage.version}
-          onClose={() => setUnlinking(false)}
+          name={person.label}
+          version={unlinking}
+          linkage={linkage}
+          synced={synced}
+          onClose={() => setUnlinking(null)}
         />
       ) : null}
       <ResourcePolicyEditor
@@ -292,16 +306,7 @@ function RenameEntry({
     );
   if (route.kind === "disabled")
     return (
-      <Button
-        disabled
-        reason={
-          route.reason === "other_owns"
-            ? copy.RENAME_OTHER_OWNS(shown.row.label)
-            : route.reason === "unknown"
-              ? copy.RENAME_UNKNOWN
-              : copy.RENAME_CANNOT_EDIT
-        }
-      >
+      <Button disabled reason={renameDisabled(route.reason, shown.row.label)}>
         {copy.RENAME}
       </Button>
     );
@@ -311,6 +316,16 @@ function RenameEntry({
     </Button>
   );
 }
+
+const renameDisabled = (
+  reason: Extract<RenameRoute, { kind: "disabled" }>["reason"],
+  name: string,
+): string =>
+  reason === "other_owns"
+    ? copy.RENAME_OTHER_OWNS(name)
+    : reason === "unknown"
+      ? copy.RENAME_UNKNOWN
+      : copy.RENAME_CANNOT_EDIT;
 
 function failureMessage(failure: PeopleFailure): string | null {
   switch (failure.kind) {
@@ -361,11 +376,14 @@ interface RetainedRename {
 function RenameForm({
   shown,
   linkage,
+  synced,
   drafts,
   onDone,
 }: {
   shown: ShownRow;
   linkage: LinkageState;
+  /** The synced row's version (`linkageIn`). */
+  synced: number | undefined;
   drafts: readonly DraftWithCommand[];
   onDone(): void;
 }) {
@@ -473,6 +491,13 @@ function RenameForm({
     }
   };
   const run = async () => {
+    // Who controls the name is judged at the press (review 25): a press of a render whose linkage is no longer current sends nothing; the
+    // form, its typed name kept, shows why it cannot save now.
+    if (
+      renameRoute(linkageIn(env, person.id, synced), person.can_edit).kind !==
+      route.kind
+    )
+      return;
     const trimmed = name.trim();
     if (trimmed === "") {
       setMessage({ text: copy.PROBLEM.name_missing as string });
@@ -589,11 +614,13 @@ function RenameForm({
   const offlineBlocked = route.kind === "rename_profile" && !env.online;
   const reason = !env.writable
     ? copy.READ_ONLY_COMPAT
-    : offlineBlocked
-      ? copy.NEEDS_CONNECTION
-      : saving
-        ? copy.SAVING
-        : null;
+    : saving
+      ? copy.SAVING
+      : route.kind === "disabled"
+        ? renameDisabled(route.reason, person.label)
+        : offlineBlocked
+          ? copy.NEEDS_CONNECTION
+          : null;
   return (
     <form
       data-rename-form=""
@@ -687,18 +714,56 @@ function UnlinkEntry({
   );
 }
 
+/**
+ * Whether the confirmation bound to `version` still confirms an unlink the person can make (review 25): the CURRENT linkage is the signed-in
+ * account's, at that version. Otherwise why not. It is bound again only after its own unlink was refused as a conflict ("reload and try
+ * again"), and only to the signed-in account's own linkage read after that; never to another account's or to none.
+ */
+function unlinkBlocked(
+  linkage: LinkageState,
+  version: number,
+  name: string,
+): string | null {
+  if (!linkage.known)
+    return `${copy.LINK_UNKNOWN}. ${copy.LINK_UNKNOWN_REASON[linkage.reason]}`;
+  if (linkage.kind === "other") return copy.UNLINK_OTHER(name);
+  if (linkage.kind === "unlinked") return copy.LINK_NONE;
+  return linkage.version === version ? null : copy.CONFLICT;
+}
+
 function UnlinkDialog({
   personId,
+  name,
   version,
+  linkage,
+  synced,
   onClose,
 }: {
   personId: string;
+  name: string;
+  /** The version the confirmation was opened on (the unlink's guard). */
   version: number;
+  linkage: LinkageState;
+  synced: number | undefined;
   onClose(): void;
 }) {
   const env = usePeopleEnv();
   const announcer = useAnnouncer();
   useMemoryRevision(env.memory);
+  const [bound, setBound] = useState(version);
+  // Its unlink was refused as a conflict: the person was told to try again on the person as read again.
+  const [conflicted, setConflicted] = useState(false);
+  useEffect(() => {
+    if (
+      conflicted &&
+      linkage.known &&
+      linkage.kind === "self" &&
+      linkage.version > bound
+    ) {
+      setBound(linkage.version);
+      setConflicted(false);
+    }
+  }, [conflicted, linkage, bound]);
   // One unlink of the person at a time, whichever confirmation asks (review 7, finding 1): a confirmation opened again while one is
   // sent shows it sending, and sends nothing more.
   const target = `unlink:${personId}`;
@@ -716,6 +781,9 @@ function UnlinkDialog({
     requestId?: string;
   } | null>(null);
   const confirm = async () => {
+    // Judged at the press, on what the page knows NOW (a press of an earlier render never unlinks another linkage or version).
+    if (unlinkBlocked(linkageIn(env, personId, synced), bound, name) !== null)
+      return;
     const admission = admit(env.memory, [target], env.newId);
     if (admission === null) return;
     setMessage(null);
@@ -724,7 +792,7 @@ function UnlinkDialog({
       result = await sendOnline(
         env,
         `unlink:${personId}`,
-        unlinkBody({ personId, version }),
+        unlinkBody({ personId, version: bound }),
         (attempt) => env.api.peopleCommand(attempt),
       );
     } finally {
@@ -737,7 +805,9 @@ function UnlinkDialog({
       return;
     }
     const text = failureMessage(result);
-    if (text !== null && mounted.current)
+    if (!mounted.current) return;
+    if (result.kind === "conflict") setConflicted(true);
+    if (text !== null)
       setMessage({
         text,
         ...("requestId" in result && result.requestId
@@ -751,7 +821,7 @@ function UnlinkDialog({
       ? copy.NEEDS_CONNECTION
       : sending
         ? copy.SAVING
-        : null;
+        : unlinkBlocked(linkage, bound, name);
   return (
     <Dialog
       open

@@ -30,8 +30,10 @@ import {
   personP,
   publish,
   publishChanges,
+  rev,
   servePeople,
   setup,
+  snapshotOf,
 } from "./people-helpers";
 
 /**
@@ -65,6 +67,8 @@ import {
  * offline rename stays the ordinary queued edit (R20.1, A9, A10; adapted from the reviewer's two Chromium probes).
  * Review 21 (29 October 2026): E-P44 New person's shown first note is checked as an encoded text value (8,192 bytes) before anything is
  * queued, across another page and the page closing (R21.1, A3, A7, A8; adapted from the reviewer's Chromium probe).
+ * Review 25 (30 October 2026): E-P48 a person summary's later version withdraws the linkage answer from the header and the open field
+ * editor until that version is read (R25.1, A5, A9, A15; the reviewer's native probe, maintained).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -4504,6 +4508,118 @@ test.describe("E-P47: a field audiences summary's later policy version reaches t
       expect(await draftsOf(page)).toEqual([]);
       recordEvidence(info, "e-p47", {
         version,
+        summary: body,
+        requests: served.log,
+        management: served.management,
+      });
+    });
+});
+
+test.describe("E-P48: a person summary's later version withdraws the linkage answer from the header and the field editor (A5, A9, A15; review 25, R25.1)", () => {
+  // Review 25's native reproduction, maintained: Mo owns the profile and is linked to Mo's own account; Home (the viewer and Mo) may edit
+  // it; the viewer's field default is Home view. The server then unlinks Mo (version 2), ownership, membership and the parent policy
+  // unchanged. The production visible-page refresh reads the summaries again; the list row's applied "Not linked" is the barrier.
+  const NOTE = "Mo won't see this field unless you share it with them.";
+  for (const unlinked of [false, true])
+    test(`${unlinked ? "unlinked at v2: no promise about the former subject, the header reads v2 once, nothing is written" : "control: the unchanged linkage keeps its promise and asks nothing"}`, async ({
+      context,
+    }, info) => {
+      const { page, served } = await setup(
+        context,
+        `/people/${P}/fields/new`,
+        [personP(P, "Mo")],
+        {
+          linked: { [P]: MO },
+          arrange(s) {
+            s.snapshot = snapshotOf(rev(1), {
+              kind: "primary_household",
+              edit: false,
+            });
+            s.policies.set(P, {
+              version: 1,
+              policy: {
+                grants: [{ kind: "household", id: HOME, edit: true }],
+                exclude_accounts: [],
+              },
+            });
+            s.summaries.set(P, {
+              owner: {
+                account_id: MO,
+                username: "mo",
+                you: false,
+                person: { id: P, label: "Mo" },
+              },
+              your_access: "edit",
+              added_by_you: "no",
+              field_count: 0,
+              audience: {
+                disclosure: "partial",
+                in_home: true,
+                households: [
+                  {
+                    id: HOME,
+                    can_edit: true,
+                    you_are_member: true,
+                    name: "Home",
+                    version: 1,
+                    member_count: 2,
+                  },
+                ],
+                your_direct_grant: null,
+                direct_grant_count: null,
+                excluded_count: null,
+              },
+            });
+          },
+        },
+      );
+      const dialog = page.getByRole("dialog");
+      const row = page.locator(`[data-person-row="${P}"]`);
+      const line = page.locator("[data-identity-header] [data-linkage]");
+      const value = dialog.getByRole("textbox", { name: "Value", exact: true });
+      const reads = () => served.log.filter((l) => l === `GET /people/${P}`);
+      await expect(dialog.locator("[data-subject-note]")).toHaveText(NOTE);
+      await expect(line).toHaveAttribute("data-linkage", "other");
+      await expect(row.locator("[data-person-linkage]")).toContainText(
+        "Linked",
+      );
+      await value.fill("Unfinished input");
+      expect(reads()).toHaveLength(1);
+      if (unlinked)
+        served.people.set(P, {
+          person: personP(P, "Mo", { version: 2 }),
+          linked: null,
+        });
+      const response = page.waitForResponse(
+        (r) => r.url().includes("/people/summaries?") && r.status() === 200,
+      );
+      // The production visible-page refresh listener (no bfcache or reload claim; no timer changed).
+      await page.evaluate(() =>
+        document.dispatchEvent(new Event("visibilitychange")),
+      );
+      const body = await (await response).json();
+      expect(body.items[0].version).toBe(unlinked ? 2 : 1);
+      expect(body.items[0].linked_account_id).toBe(unlinked ? null : MO);
+      await expect(row.locator("[data-person-linkage]")).toContainText(
+        unlinked ? "Not linked" : "Linked",
+      );
+      await expect(value).toHaveValue("Unfinished input");
+      if (unlinked) {
+        // The header reads v2 itself (once), and says what it answered.
+        await expect(line).toHaveAttribute("data-linkage", "unlinked");
+        await expect(dialog.locator("[data-subject-note]")).toHaveCount(0);
+        expect(reads()).toHaveLength(2);
+      } else {
+        await expect(dialog.locator("[data-subject-note]")).toHaveText(NOTE);
+        await expect(line).toHaveAttribute("data-linkage", "other");
+        expect(reads()).toHaveLength(1);
+      }
+      expect(served.management).toEqual([]);
+      expect(served.peopleCommands).toEqual([]);
+      expect(served.accessCommands).toEqual([]);
+      expect(await draftsOf(page)).toEqual([]);
+      recordEvidence(info, "e-p48", {
+        unlinked,
         summary: body,
         requests: served.log,
         management: served.management,

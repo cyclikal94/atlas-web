@@ -19,8 +19,19 @@ import {
   useResourceList,
 } from "../../data";
 import { usePeopleEnv } from "./env";
-import { isCurrentMemory, useMemoryRevision } from "./memory";
-import { type LinkageState, linkageOf, unknownLinkage } from "./model/linkage";
+import {
+  isCurrentMemory,
+  notePersonVersion,
+  type PeopleMemory,
+  personFloor,
+  useMemoryRevision,
+} from "./memory";
+import {
+  currentLinkage,
+  type LinkageState,
+  linkageOf,
+  unknownLinkage,
+} from "./model/linkage";
 
 /**
  * The people screens' READS (D-11a-4, D-11a-2). PAGE CHAINS: `useResourceList` gives one live page of at most 100 rows; a chain renders one
@@ -658,6 +669,10 @@ export function ConfirmedAbsence({
  * read (after a command, "Reload" or "Try again") is a new read that supersedes the one on its way: only the latest read of a person
  * changes what the page knows, so an answer read before an unlink can never replace the answer read after it (review 20, R20.1). A
  * `403`/`404` is remembered until an explicit "Try again" (D-12a-13). Nothing is ever inferred from `can_edit`.
+ *
+ * A kept answer older than the latest version of the person known (`personFloor`: a summary, the synced row) is out of date (review 25,
+ * R25.1): an ordinary caller reads again, once for that version. An answer still older than the version it was asked at is not asked
+ * for again by itself (no loop while the server catches up): a later version, a reconnection after a failure or "Try again" asks again.
  */
 export function readLinkage(
   env: ReturnType<typeof usePeopleEnv>,
@@ -666,11 +681,14 @@ export function readLinkage(
 ): Promise<unknown> | null {
   const memory = env.memory;
   if (!isCurrentMemory(memory)) return null;
+  const floor = personFloor(memory, personId);
   if (!options.force) {
-    if (memory.linkage.has(personId) || memory.refused.has(personId))
-      return null;
+    const kept = memory.linkage.get(personId);
+    if (currentLinkage(kept?.state, floor) !== null) return null;
+    if (memory.refused.has(personId)) return null;
     const inflight = memory.linkageReads.get(personId);
     if (inflight !== undefined) return inflight;
+    if (kept !== undefined && !renewalDue(memory, personId, floor)) return null;
   }
   // A read that cannot start asks nothing again: a refusal stays remembered, and no read on its way is superseded.
   if (!env.online) return null;
@@ -686,14 +704,19 @@ export function readLinkage(
         return;
       memory.linkageReads.delete(personId);
       if (result.ok) {
-        memory.linkage.set(personId, {
-          state: linkageOf(result.value, env.accountId, env.now()),
-          person: {
-            id: result.value.person.id,
-            label: result.value.person.label,
-            version: result.value.person.version,
-          },
-        });
+        const version = result.value.person.version;
+        notePersonVersion(memory, personId, version);
+        // Never replaced by an answer of an earlier version (the later one is what is known of the person).
+        const kept = memory.linkage.get(personId);
+        if (kept?.person == null || version >= kept.person.version)
+          memory.linkage.set(personId, {
+            state: linkageOf(result.value, env.accountId, env.now()),
+            person: {
+              id: result.value.person.id,
+              label: result.value.person.label,
+              version,
+            },
+          });
         memory.refused.delete(personId);
       } else if (result.kind === "forbidden" || result.kind === "not_found") {
         memory.refused.set(personId, result.kind);
@@ -704,36 +727,73 @@ export function readLinkage(
       memory.touch();
     });
   memory.failed.delete(personId);
+  memory.linkageAsked.set(personId, floor);
   memory.linkageReads.set(personId, reading);
   memory.touch();
   return reading;
 }
 
+/** A kept but out-of-date answer is read again: for a version not asked at yet, or after its read failed (reconnect, remount). */
+const renewalDue = (memory: PeopleMemory, personId: string, floor: number) =>
+  memory.failed.has(personId) ||
+  (memory.linkageAsked.get(personId) ?? 0) < floor;
+
+/**
+ * What this page knows of the person's linkage NOW. `synced`: the person's version in the synced row (never a projection of an unsent
+ * create, which has no server version), the latest known together with `personFloor`.
+ */
 export function linkageIn(
   env: ReturnType<typeof usePeopleEnv>,
   personId: string,
+  synced?: number,
 ): LinkageState {
   const memory = env.memory;
-  const known = memory.linkage.get(personId);
-  if (known !== undefined) return known.state;
+  const floor = Math.max(personFloor(memory, personId), synced ?? 0);
+  const kept = memory.linkage.get(personId);
+  const current = currentLinkage(kept?.state, floor);
+  if (current !== null) return current;
   if (memory.refused.has(personId)) return unknownLinkage("refused");
   if (memory.linkageReads.has(personId)) return unknownLinkage("loading");
   if (memory.failed.has(personId)) return unknownLinkage("failed");
-  return unknownLinkage(env.online ? "loading" : "offline");
+  if (!env.online) return unknownLinkage("offline");
+  // Out of date, and read again at this version already: what it answered is not current (Try again asks once more).
+  if (kept !== undefined && (memory.linkageAsked.get(personId) ?? 0) >= floor)
+    return unknownLinkage("failed");
+  return unknownLinkage("loading");
 }
 
-/** The linkage of one person: read when online and not yet known; `retry` asks again (after a failure or a refusal). */
-export function usePersonLinkage(personId: string): {
+/**
+ * The linkage of one person: read when online and not yet known, or known only of an earlier version than the latest one known
+ * (`synced`: the synced row's version, see `linkageIn`); `retry` asks again (after a failure or a refusal).
+ */
+export function usePersonLinkage(
+  personId: string,
+  synced?: number,
+): {
   linkage: LinkageState;
   retry(): void;
 } {
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
+  const memory = env.memory;
+  const floor = Math.max(personFloor(memory, personId), synced ?? 0);
+  const kept = memory.linkage.get(personId);
+  // Whether an ordinary read would be asked now: it changes when a later version is known or a read settles before it was met, and only
+  // then (an unchanged answer, another person's summary or any other notification asks nothing).
+  const due =
+    currentLinkage(kept?.state, floor) === null &&
+    !memory.refused.has(personId) &&
+    !memory.linkageReads.has(personId) &&
+    (kept === undefined
+      ? !memory.failed.has(personId)
+      : (memory.linkageAsked.get(personId) ?? 0) < floor);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `due` is the reason to read again; its value is not used
   useEffect(() => {
+    if (synced !== undefined) notePersonVersion(env.memory, personId, synced);
     if (env.online) readLinkage(env, personId);
-  }, [env, personId]);
+  }, [env, personId, synced, due]);
   const retry = useCallback(() => {
     readLinkage(env, personId, { force: true });
   }, [env, personId]);
-  return { linkage: linkageIn(env, personId), retry };
+  return { linkage: linkageIn(env, personId, synced), retry };
 }

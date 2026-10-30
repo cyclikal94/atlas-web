@@ -27040,6 +27040,222 @@ export const UNIT = [
         "      livePolicyVersion === null\n    )\n",
       ),
   },
+  {
+    id: "MU-2923",
+    title:
+      "WEB-11a R25.1: a kept linkage answer is current whatever later version of the person is known (the reviewed defect)",
+    file: "src/features/people/model/linkage.ts",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /currentLinkage: an answer is current only at the latest version known \(DA25-02\) below the floor/,
+    patch: (t) =>
+      sub(
+        t,
+        "): LinkageState | null => (kept?.known && kept.version >= floor ? kept : null);\n",
+        "): LinkageState | null => (kept?.known ? kept : null);\n",
+      ),
+  },
+  {
+    id: "MU-2924",
+    title:
+      "WEB-11a R25.1: a summary's version of the person is not known to the linkage (the header and the note keep claiming the older answer)",
+    file: "src/features/people/memory.ts",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /DA25-01, DA25-03\) unlinked at v2 by a summary: the note and the header stop claiming v1 at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "    memory.summaryFloors.get(personId)?.version ?? 0,\n",
+        "    0,\n",
+      ),
+  },
+  {
+    id: "MU-2925",
+    title:
+      "WEB-11a R25.1: an ordinary caller asks nothing once ANY answer is kept, however out of date",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /withdrawn and read again once \(DA25-04, DA25-05\) withdrawn at once \(never 'unlinked'\), one read shared/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (currentLinkage(kept?.state, floor) !== null) return null;\n",
+        "    if (kept !== undefined) return null;\n",
+      ),
+  },
+  {
+    id: "MU-2926",
+    title:
+      "WEB-11a R25.1: the linkage hook reads only when the person or the env changes, not when a later version is known",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /DA25-01, DA25-03\) unlinked at v2 by a summary: the note and the header stop claiming v1 at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "  }, [env, personId, synced, due]);\n",
+        "  }, [env, personId, synced]);\n",
+      ),
+  },
+  {
+    id: "MU-2927",
+    title:
+      "WEB-11a R25.1: an out-of-date answer is read again on every ordinary call (no bound per version)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /an answer still older than the version it was asked at: not current, and not asked again by itself \(no loop\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "  memory.failed.has(personId) ||\n  (memory.linkageAsked.get(personId) ?? 0) < floor;\n",
+        "  true;\n",
+      ),
+  },
+  {
+    id: "MU-2928",
+    title:
+      "WEB-11a R25.1: a linkage answer does not raise the version known of the person (a refusal then forgets it)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /personFloor never goes back \(DA25-02, I2\) a refusal withdraws the answer, not the version known/,
+    patch: (t) =>
+      sub(t, "        notePersonVersion(memory, personId, version);\n", ""),
+  },
+  {
+    id: "MU-2929",
+    title:
+      "WEB-11a R25.1: an answer of an earlier version replaces the kept later one",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /personFloor never goes back \(DA25-02, I2\) an answer of an earlier version never replaces the kept later one/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (kept?.person == null || version >= kept.person.version)\n",
+        "        if (kept?.person == null || true)\n",
+      ),
+  },
+  {
+    id: "MU-2930",
+    title:
+      "WEB-11a R25.1: the version a linkage read was asked at is not kept (an older answer is asked for again)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /an answer still older than the version it was asked at: not current, and not asked again by itself \(no loop\)/,
+    patch: (t) => sub(t, "  memory.linkageAsked.set(personId, floor);\n", ""),
+  },
+  {
+    id: "MU-2931",
+    title:
+      "WEB-11a R25.1: an answer still older than the version it was asked at is shown as the linkage again",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor-reads.test.ts"],
+    expect:
+      /an answer still older than the version it was asked at: not current, and not asked again by itself \(no loop\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (kept !== undefined && (memory.linkageAsked.get(personId) ?? 0) >= floor)\n    return unknownLinkage("failed");\n',
+        "  if (kept !== undefined && (memory.linkageAsked.get(personId) ?? 0) >= floor)\n    return kept.state;\n",
+      ),
+  },
+  {
+    id: "MU-2932",
+    title:
+      "WEB-11a R25.1: the synced row's version is not kept as known (no read is asked for it)",
+    file: "src/features/people/reads.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /the synced row's later version withdraws it too \(no summary\): one read, then current/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (synced !== undefined) notePersonVersion(env.memory, personId, synced);\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2933",
+    title:
+      "WEB-11a R25.1: the unlink confirmation unlinks on what its render showed, not on the linkage known at the press",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /an open unlink confirmation never unlinks on an answer a later version superseded/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (unlinkBlocked(linkageIn(env, personId, synced), bound, name) !== null)\n      return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2934",
+    title:
+      "WEB-11a R25.1: the open unlink confirmation adopts any later version of the self linkage (not only after its own conflict)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /an open unlink confirmation never unlinks on an answer a later version superseded, nor adopts the later version/,
+    patch: (t) =>
+      sub(
+        t,
+        "      conflicted &&\n      linkage.known &&\n",
+        "      linkage.known &&\n",
+      ),
+  },
+  {
+    id: "MU-2935",
+    title:
+      "WEB-11a R25.1: a rename is saved on the route its render showed, not on the linkage known at the press",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /a rename form open on an unlinked v1: a press of its earlier render sends nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (\n      renameRoute(linkageIn(env, person.id, synced), person.can_edit).kind !==\n      route.kind\n    )\n      return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-2936",
+    title:
+      "WEB-11a R25.1: the open rename form's Save stays enabled when who controls the name is no longer known or is another account",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /self → other while a rename form is open: Save is disabled with the reason/,
+    patch: (t) =>
+      sub(
+        t,
+        '      : route.kind === "disabled"\n        ? renameDisabled(route.reason, person.label)\n        : offlineBlocked\n',
+        "      : offlineBlocked\n",
+      ),
+  },
+  {
+    id: "MU-2937",
+    title:
+      "WEB-11a R25.1: the field editor's subject note is told nothing of the person's synced version",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/linkage-floor.test.tsx"],
+    expect:
+      /the editor's own read of the person is ahead of the header's: the editor withdraws its note/,
+    patch: (t) =>
+      sub(
+        t,
+        "    person.projected ? undefined : person.row.version,\n",
+        "    undefined,\n",
+      ),
+  },
 
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
