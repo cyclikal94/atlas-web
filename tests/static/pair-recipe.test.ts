@@ -40,8 +40,9 @@ describe("the seam is diagnostic only", () => {
       /dataLeader\.start\(session, options\.trace, options\.dataLeaderDiagnostic\)/,
     );
     const shim = code("src/data/leader/start.ts");
-    expect(shim).toMatch(
-      /options\.diagnostic \? \{ diagnostic: options\.diagnostic \} : \{\}/,
+    expect(shim).toMatch(/diagnostic: options\.diagnostic,/);
+    expect(code("src/app/data-leader.ts")).toMatch(
+      /startDataLeader\(session, \{ trace, diagnostic \}\)/,
     );
   });
 

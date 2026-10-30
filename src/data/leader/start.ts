@@ -59,9 +59,11 @@ export function startDataLeader(
     void load().then(
       (module) => {
         if (disposed || started !== null) return;
+        // Both are optional and passed as they are (an absent one is undefined, which the browser composition treats as absent): this
+        // shim is in the initial chunk, so it forwards rather than re-shapes.
         const browser = module.startBrowserLeader(session, {
-          ...(options.trace ? { trace: options.trace } : {}),
-          ...(options.diagnostic ? { diagnostic: options.diagnostic } : {}),
+          trace: options.trace,
+          diagnostic: options.diagnostic,
         });
         started = browser;
         off = browser.leader.role.subscribe(() =>

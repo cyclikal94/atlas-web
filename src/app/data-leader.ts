@@ -17,10 +17,6 @@ export const dataLeader = {
     session: Session,
     trace?: Trace,
     diagnostic?: DiagnosticSegmentation,
-  ): DataLeaderHandle =>
-    startDataLeader(session, {
-      ...(trace ? { trace } : {}),
-      ...(diagnostic ? { diagnostic } : {}),
-    }),
+  ): DataLeaderHandle => startDataLeader(session, { trace, diagnostic }),
 };
 export type { DataLeaderHandle, DiagnosticSegmentation };
