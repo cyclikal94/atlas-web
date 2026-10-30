@@ -133,11 +133,12 @@ export const UNIT_13B_R14 = [
     file: IMPORT_MODEL,
     tests: [T_IMPORT_MODEL],
     expect: /parser corpus (variants-25[67]|variant-11-257)/,
+    // Re-anchored in revision 15 (R13 made the scanner a forward position): the same defect, one leading `:` skipped.
     patch: (t) =>
       sub(
         t,
-        '  rest = trimStartOf(rest, ":");\n',
-        '  if (rest.startsWith(":")) rest = rest.slice(1);\n',
+        "  at = skip(line, at, COLON);\n",
+        "  if (line.charCodeAt(at) === COLON) at += 1;\n",
       ),
   },
   {
@@ -161,11 +162,12 @@ export const UNIT_13B_R14 = [
     file: IMPORT_MODEL,
     tests: [T_IMPORT_MODEL],
     expect: /parser corpus (variants-25[67]|variant-10-257)/,
+    // Re-anchored in revision 15 (R13 made the scanner a forward position): the same defect, a quote read as a raw value.
     patch: (t) =>
       sub(
         t,
-        "        if (rest.startsWith('\"')) {\n",
-        "        if (false) {\n",
+        "      if (line.charCodeAt(at) === QUOTE) {\n",
+        "      if (false) {\n",
       ),
   },
   {

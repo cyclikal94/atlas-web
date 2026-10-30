@@ -153,10 +153,20 @@ the parser stops at a whitespace-only line and ignores the rest, so the count st
 names and values are still compared in upper case, the header is recognised anywhere, and counting continues where the parser would
 refuse the file. So a pre-check can refuse a file early or let the server refuse it, but it never refuses a file the server accepts or
 passes one with more than 256 events. The text is never normalised: what was checked is what is stored and sent. Evidence:
-`tests/fixtures/ics-parser/ical-0.11.0.json`, 49 recipes and the pinned parser's own answer for each, written offline by
+`tests/fixtures/ics-parser/ical-0.11.0.json`, 65 recipes and the pinned parser's own answer for each, written offline by
 `scripts/generate-ics-parser-corpus.mjs` (`--check` rebuilds and compares), asserted case by case in `import-model.test.ts`. The
 rendered paths (the row's chooser, the drop zone's Browse, a page drop, a replaced file still being read) are covered in `import-ui.test.tsx`
 "review 15 R12". This is reference evidence of the parser, not a backend import run.
+
+**How much work the check does** (revision 15, review 16 R13, family `calendar-import-parameter-scan-complexity`). The check runs
+synchronously on the page's main thread after the file is read, so its work must grow with the file. The parser looks for `;`, `:` and
+`,` across the whole rest of a line for every parameter value; copying that made a line of many parameters quadratic (a 256 KB file
+blocked Firefox for 4.6 s). The port keeps the parser's rules (where a name, a key, a raw or quoted value and a list end; the ten-value
+limit of a list; every leading `:` removed) but scans with one position that only moves forward, each search stopping at the parser's
+nearest delimiter. Ordinary properties and `BEGIN`/`END` lines are scanned alike: no parameter is capped and no accepted file is
+refused. `import-model.test.ts` "review 16 R13" counts the code units read and written (`tests/support/work-meter.ts`) and holds them to
+22N + 16P + 16 for a text of N code units in P lines, a bound worked out from the algorithm, with SUMMARY, BEGIN and END parameter
+shapes at n, 2n and 4n and Review 16's 1 MiB files. The corpus adds the parameter rules the scanner keeps, each answered by the parser.
 
 **The import's answers on the current wire** (`answers.ts`, the dispatcher's seam in `src/data/engine/outbox-dispatcher.ts`):
 

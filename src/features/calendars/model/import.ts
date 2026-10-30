@@ -138,15 +138,34 @@ const find = (text: string, char: string): number => {
   return at === -1 ? Number.POSITIVE_INFINITY : at;
 };
 
-function trimStartOf(text: string, char: string): string {
-  let start = 0;
-  while (text[start] === char) start += 1;
-  return text.slice(start);
+const SEMICOLON = 0x3b;
+const COLON = 0x3a;
+const COMMA = 0x2c;
+const QUOTE = 0x22;
+
+/** Where the run of `code` that starts at `at` ends (`trim_start_matches`, as a position). */
+function skip(line: string, at: number, code: number): number {
+  let next = at;
+  while (line.charCodeAt(next) === code) next += 1;
+  return next;
+}
+
+/** The first `;`, `:` or `,` at or after `at`, where a raw parameter value ends; -1 if there is none. */
+function rawValueEnd(line: string, at: number): number {
+  for (let next = at; next < line.length; next += 1) {
+    const code = line.charCodeAt(next);
+    if (code === SEMICOLON || code === COLON || code === COMMA) return next;
+  }
+  return -1;
 }
 
 /**
  * `PropertyParser::parse` of one content line: its name (up to the first `;` or `:`) and its value, after any parameters (a quoted
  * parameter value may hold `:`) with EVERY leading `:` removed. Null where the parser fails; the server then refuses the whole file.
+ *
+ * The parser's rules, but not its searches (review 16 R13): it looks for `;`, `:` and `,` across the whole rest of the line for every
+ * parameter value, which is quadratic in a line of many parameters, and the check runs on the page's main thread. Here one position
+ * only moves forward, and each search stops where the parser's nearest delimiter is, so the line is read a bounded number of times.
  */
 function contentLine(
   line: string,
@@ -158,40 +177,30 @@ function contentLine(
   else if (value !== Number.POSITIVE_INFINITY && value !== 0) end = value;
   else return null;
   const name = line.slice(0, end);
-  let rest = line.slice(end);
-  if (
-    find(rest, ";") !== Number.POSITIVE_INFINITY &&
-    find(rest, ":") > find(rest, ";")
-  )
-    while (rest.startsWith(";")) {
-      rest = trimStartOf(rest, ";");
-      const equals = rest.indexOf("=");
-      if (equals <= 0) return null;
-      rest = rest.slice(equals + 1);
-      for (let values = 10; values > 0; ) {
-        values -= 1;
-        if (rest.startsWith('"')) {
-          const close = rest.indexOf('"', 1);
-          if (close === -1) return null;
-          rest = rest.slice(close + 1);
-        } else {
-          const nextParam = find(rest, ";");
-          const nextValue = find(rest, ":");
-          const nextListed = find(rest, ",");
-          if (nextListed < nextValue && nextListed < nextParam)
-            rest = rest.slice(nextListed);
-          else if (nextParam < nextValue && nextParam < nextListed)
-            rest = rest.slice(nextParam);
-          else if (nextValue !== Number.POSITIVE_INFINITY)
-            rest = rest.slice(nextValue);
-          else return null;
-        }
-        if (!rest.startsWith(",")) break;
-        rest = trimStartOf(rest, ",");
+  // The parser reads parameters when the rest has a `;` before any `:`; the rest starts at the `;` or `:` the name ended at, so that
+  // is exactly when it starts with `;`.
+  let at = end;
+  while (line.charCodeAt(at) === SEMICOLON) {
+    at = skip(line, at, SEMICOLON);
+    const equals = line.indexOf("=", at);
+    if (equals <= at) return null;
+    at = equals + 1;
+    for (let values = 10; values > 0; ) {
+      values -= 1;
+      if (line.charCodeAt(at) === QUOTE) {
+        const close = line.indexOf('"', at + 1);
+        if (close === -1) return null;
+        at = close + 1;
+      } else {
+        at = rawValueEnd(line, at);
+        if (at === -1) return null;
       }
+      if (line.charCodeAt(at) !== COMMA) break;
+      at = skip(line, at, COMMA);
     }
-  rest = trimStartOf(rest, ":");
-  return { name, value: rest === "" ? null : rest };
+  }
+  at = skip(line, at, COLON);
+  return { name, value: at === line.length ? null : line.slice(at) };
 }
 
 /** The checks of a decoded file's text (pure). */

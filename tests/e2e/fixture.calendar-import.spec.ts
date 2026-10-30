@@ -459,6 +459,42 @@ test.describe("E-IMP4: the client bounds (case 4)", () => {
     expect(JSON.parse(posts(cal, IMPORT_PATH)[0]?.body ?? "").ics).toBe(text);
   });
 
+  test("review 16 R13: parameter-heavy files are counted as the parser reads them: 257 parameter variants refused, Review 16's 1 MiB file shown as 1 event and sent byte-identically", async ({
+    context,
+  }) => {
+    test.setTimeout(120_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    await page
+      .getByRole("button", { name: "Import events into Work rota" })
+      .click();
+    expect(parserEvents("parameters-257")).toBe(257);
+    const dialog = await chooseFile(
+      page,
+      corpusText("parameters-257"),
+      "over.ics",
+    );
+    await expect(dialog).toContainText("This file has more than 256 events.");
+    await dialog.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(dialog).toContainText("This file has more than 256 events.");
+    expect(await rows(page, "drafts")).toEqual([]);
+    // Review 16's largest accepted file: one event whose SUMMARY has 262,000 parameters (1,048,123 bytes).
+    const text = `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY${";X=A".repeat(262_000)}:Review\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`;
+    expect(Buffer.byteLength(text, "utf8")).toBe(1_048_123);
+    await chooseFile(page, text, "parameters.ics");
+    await expect(dialog.locator("[data-import-file]")).toContainText("1 event");
+    await dialog.getByLabel("From").fill("2026-01-01");
+    await dialog.getByLabel("Through").fill("2026-12-31");
+    await dialog.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await send(page);
+    await expect
+      .poll(() => posts(cal, IMPORT_PATH).length, { timeout: 60_000 })
+      .toBe(1);
+    expect(JSON.parse(posts(cal, IMPORT_PATH)[0]?.body ?? "").ics).toBe(text);
+  });
+
   test("a valid file of exactly 1 MiB is stored and sent byte-identically (the large-draft path of a real engine)", async ({
     context,
   }) => {

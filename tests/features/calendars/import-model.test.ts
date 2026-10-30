@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
 import {
   checkImportText,
@@ -15,6 +16,7 @@ import {
   corpusSource,
   corpusText,
 } from "../../support/ics-corpus";
+import { metered, WorkExceeded } from "../../support/work-meter";
 
 /**
  * WEB-13b §4.1: the local checks of an `.ics` import mirror the released server's bounds (`v0.29.0-rc.1`, `ics.rs` `parse`): bytes, Rust
@@ -238,6 +240,207 @@ describe("review 15 R12: components on the parser's content lines", () => {
     expect(
       checkImportText(`${head}${" b\r\n".repeat(folds + 1)}${tail}`),
     ).toEqual({ ok: false, reason: "too_many_lines" });
+  });
+});
+
+/**
+ * Review 16 R13: the check runs synchronously on the page, so its work must grow with the file, not with the square of a line's
+ * parameters. The work is counted by `metered` (tests/support/work-meter.ts: code units read or written through the built-in methods)
+ * and held to a bound worked out from the algorithm, not from a measurement. For a text of N code units in P `\n`-separated segments:
+ *
+ *  - encoding N + 1; `lineCount` N + 3 (its searches end where the next begins);
+ *  - `physicalLines` and `contentLines` 7N + 6P + 2: the split; per segment the `\r` test and slice, and `trim`/`trimEnd` reading each
+ *    code unit at most twice and copying it at most twice; the join;
+ *  - per content line of m code units, 13m + 10: the two name searches and the name; the parameters, where each search starts at the
+ *    position and stops at the parser's nearest delimiter, so a code unit is inspected at most five times (by the search that reaches it,
+ *    the checks of the delimiter it is, and the skip of its run); the value; and both upper-casings, which read and write.
+ *
+ * The sum is at most 22N + 16P + 16. The revision-14 scanner, which searched the whole rest of the line for `;`, `:` and `,` at every
+ * parameter value, needs about 64 million at 4,000 parameters (Review 16's work probe), against this bound's few hundred thousand.
+ */
+const workBound = (text: string): number =>
+  22 * text.length + 16 * text.split("\n").length + 16;
+
+/** The calendar of Review 16's probes (`parameter-browser.mjs` `make`), byte for byte. */
+const reviewCalendar = (n: number, kind: "summary" | "begin" | "plain") =>
+  `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN${kind === "begin" ? ";X=A".repeat(n) : ""}:VEVENT\r\nUID:x\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY${kind === "summary" ? ";X=A".repeat(n) : ""}:${kind === "plain" ? "x".repeat(4 * n) : "Review"}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`;
+
+/** One event whose lines are the given ones (each a content line, CRLF ends). */
+const eventWith = ({
+  begin = "BEGIN:VEVENT",
+  summary = "SUMMARY:Review",
+  end = "END:VEVENT",
+}: {
+  begin?: string;
+  summary?: string;
+  end?: string;
+}) =>
+  `BEGIN:VCALENDAR\r\nVERSION:2.0\r\n${begin}\r\nUID:x\r\n${summary}\r\n${end}\r\nEND:VCALENDAR\r\n`;
+
+/** A content line folded as a writer of the format does: a CRLF and a space after every 74 code units. */
+const folded = (line: string): string =>
+  (line.match(/[\s\S]{1,74}/g) ?? []).join("\r\n ");
+
+/** Each shape at n parameters (or n code units of value) and the check's answer for it. */
+const SHAPES: ReadonlyArray<
+  readonly [string, (n: number) => string, { ok: true; events: number }]
+> = [
+  [
+    "an ordinary property's parameters",
+    (n) => reviewCalendar(n, "summary"),
+    { ok: true, events: 1 },
+  ],
+  [
+    "a component line's parameters",
+    (n) => reviewCalendar(n, "begin"),
+    { ok: true, events: 1 },
+  ],
+  [
+    "an END line's parameters",
+    (n) => eventWith({ end: `END${";X=A".repeat(n)}:VEVENT` }),
+    { ok: true, events: 1 },
+  ],
+  [
+    "quoted values holding delimiters",
+    (n) => eventWith({ summary: `SUMMARY${';X="a:b"'.repeat(n)}:Review` }),
+    { ok: true, events: 1 },
+  ],
+  [
+    "listed values",
+    (n) => eventWith({ begin: `BEGIN${";X=a,b,c".repeat(n)}:VEVENT` }),
+    { ok: true, events: 1 },
+  ],
+  [
+    "a list past the ten-value limit",
+    (n) => eventWith({ summary: `SUMMARY;X=${"a,".repeat(n)}:Review` }),
+    { ok: true, events: 1 },
+  ],
+  [
+    "a run of semicolons",
+    (n) => eventWith({ summary: `SUMMARY${";".repeat(n)}X=1:Review` }),
+    { ok: true, events: 1 },
+  ],
+  [
+    "one long parameter value",
+    (n) => eventWith({ summary: `SUMMARY;X=${"a".repeat(4 * n)}:Review` }),
+    { ok: true, events: 1 },
+  ],
+  [
+    "folded component parameters",
+    (n) => eventWith({ begin: folded(`BEGIN${";X=A".repeat(n)}:VEVENT`) }),
+    { ok: true, events: 1 },
+  ],
+  [
+    // The parser fails on the line (no value after the last parameter), so it is not a component; the server refuses the file.
+    "a component line with no value",
+    (n) => eventWith({ begin: `BEGIN${";X=A".repeat(n)}` }),
+    { ok: true, events: 0 },
+  ],
+  [
+    "no parameters (control)",
+    (n) => reviewCalendar(n, "plain"),
+    { ok: true, events: 1 },
+  ],
+];
+
+/** Checks `text` under the meter; past its bound the meter stops it at once and the assertion reports the work it had reached. */
+function measuredCheck(text: string) {
+  const bound = workBound(text);
+  let work: number;
+  let check: ReturnType<typeof checkImportText> | undefined;
+  try {
+    ({ work, result: check } = metered(bound, () => checkImportText(text)));
+  } catch (error) {
+    if (!(error instanceof WorkExceeded)) throw error;
+    work = error.work;
+  }
+  expect(work, `work for ${text.length} code units`).toBeLessThanOrEqual(bound);
+  return { work, check };
+}
+
+describe("review 16 R13: the check's work grows with the file, not with a line's parameters squared", () => {
+  test("the meter counts searches to where they stop, and leaves every answer unchanged", () => {
+    const text = `;X=A${";X=A".repeat(9)}:v`;
+    const { work, result } = metered(1_000, () => [
+      text.indexOf(":"),
+      text.indexOf(","),
+      text.indexOf(";", 4),
+      text.slice(0, 4),
+      text.charCodeAt(0),
+    ]);
+    expect(result).toEqual([40, -1, 4, ";X=A", 0x3b]);
+    // 41 + 42 (to the end: no comma) + 1 + 5 + 1.
+    expect(work).toBe(90);
+    expect(() => metered(10, () => text.indexOf(","))).toThrow(WorkExceeded);
+    // The wrappers are gone afterwards.
+    expect(String.prototype.indexOf.toString()).toContain("[native code]");
+  });
+
+  test.each(SHAPES)(
+    "%s: within the bound at n, 2n and 4n, and growing linearly",
+    (_, shape, answer) => {
+      const runs = [1_000, 2_000, 4_000].map((n) => {
+        const text = shape(n);
+        const { work, check } = measuredCheck(text);
+        expect(check).toMatchObject(answer);
+        // What was checked is what would be stored and sent.
+        expect(check?.ok && check.ics).toBe(text);
+        return work;
+      });
+      const [one, two, four] = runs as [number, number, number];
+      // Linear work with a fixed part grows at most in proportion; the revision-14 scanner grew about fourfold per doubling.
+      expect(two).toBeLessThanOrEqual(2 * one);
+      expect(four).toBeLessThanOrEqual(4 * one);
+    },
+  );
+
+  test.each([
+    [
+      "full",
+      "summary",
+      "10db691359374c914735fc53594cfed98e3cd4b6ad903e4ad96ec63aad6f25ee",
+    ],
+    [
+      "begin-full",
+      "begin",
+      "dddedd5d21f925822d97b74c5a26ef7038fe36256cabd497a58635be2b604b08",
+    ],
+    [
+      "plain-full",
+      "plain",
+      "7db16f593768f4fcd4310bb62c1da6f76c6dbffd15bdf26f828a286091895376",
+    ],
+  ] as const)(
+    "Review 16's %s file (262,000 parameters, just under 1 MiB) is checked within the bound, one event, the text unchanged",
+    (_, kind, sha256) => {
+      const text = reviewCalendar(262_000, kind);
+      expect(createHash("sha256").update(text).digest("hex")).toBe(sha256);
+      expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(
+        IMPORT_LIMITS.bytes,
+      );
+      const { check } = measuredCheck(text);
+      expect(check).toEqual({
+        ok: true,
+        ics: text,
+        bytes: new TextEncoder().encode(text).length,
+        lines: lineCount(text),
+        events: 1,
+      });
+    },
+  );
+
+  test("the corpus holds the parameter rules the scanner keeps, each answered by the parser", () => {
+    const names = corpusCases.map((entry) => entry.name);
+    for (const name of [
+      "parameters-256",
+      "parameters-257",
+      ...Array.from({ length: 10 }, (_, at) => `parameter-${at + 1}-257`),
+      "parameters-summary-many",
+      "parameters-begin-many",
+      "end-eleven-values-then-gap",
+      "end-parameters-then-gap",
+    ])
+      expect(names).toContain(name);
   });
 });
 

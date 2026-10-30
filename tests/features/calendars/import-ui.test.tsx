@@ -948,3 +948,105 @@ describe("review 15 R12: what the parser counts is what is shown, refused and qu
     expect(drafts(w)).toHaveLength(1);
   });
 });
+
+describe("review 16 R13: parameter-heavy files are checked, shown, refused and queued as the parser counts them", () => {
+  const pressIn = (dialog: HTMLElement, name: string) =>
+    fireEvent.click(present(within(dialog).queryByRole("button", { name })));
+  const summaryOf = (dialog: HTMLElement) =>
+    dialog.querySelector("[data-import-file]")?.textContent ?? "";
+  const commands = (w: World) => w.rows("draft_commands");
+  /** Review 16's largest accepted file: one event whose SUMMARY has 262,000 parameters, 1,048,123 bytes. */
+  const reviewFile = `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:x\r\nDTSTART;VALUE=DATE:20261101\r\nSUMMARY${";X=A".repeat(262_000)}:Review\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`;
+
+  test("R13: 256 components written with every parameter rule are shown as 256 events and queued once, the text unchanged", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    const text = corpusText("parameters-256");
+    expect(parserEvents("parameters-256")).toBe(256);
+    await choose(w, dialog, text, "parameters.ics");
+    expect(summaryOf(dialog)).toMatch(/^parameters\.ics · .+ · 256 events$/);
+    pressIn(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    const body = bodyOf(w, drafts(w)[0]?.local_id as string) as {
+      ics: string;
+    };
+    expect(body.ics).toBe(text);
+  });
+
+  test("R13: 257 such components are refused before anything is stored, by the button and by Enter", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    expect(parserEvents("parameters-257")).toBe(257);
+    await choose(w, dialog, corpusText("parameters-257"), "over.ics");
+    expect(dialog).toHaveTextContent(
+      words.FILE_PROBLEMS.too_many_events as string,
+    );
+    pressIn(dialog, words.IMPORT);
+    await w.settle();
+    act(() => {
+      (dialog.querySelector("form") as HTMLFormElement).requestSubmit();
+    });
+    await w.settle();
+    expect(drafts(w)).toEqual([]);
+    expect(commands(w)).toEqual([]);
+    expect(w.calls).toEqual([]);
+  });
+
+  test.each([
+    ["Browse", "parameter-10-257", null],
+    ["a page drop", "end-eleven-values-then-gap", 1],
+  ] as const)(
+    "R13: the drop zone's %s checks %s the same way",
+    async (way, name, events) => {
+      const w = await calendarWorld({ cache: [sourceRow()], online: false });
+      await screen.findByText(words.DROP_PROMPT);
+      const zone = present(document.querySelector("[data-import-drop]"));
+      const text = corpusText(name);
+      const file = new File([text], `${name}.ics`, { type: "text/calendar" });
+      await act(async () => {
+        if (way === "Browse")
+          fireEvent.change(present(zone.querySelector('input[type="file"]')), {
+            target: { files: [file] },
+          });
+        else fireEvent.drop(zone, { dataTransfer: { files: [file] } });
+      });
+      await w.settle();
+      const dialog = present(screen.queryByRole("dialog"));
+      await waitFor(() =>
+        expect(dialog.querySelector("[data-import-file]")).not.toBeNull(),
+      );
+      pressIn(dialog, words.IMPORT);
+      await w.settle();
+      if (events === null) {
+        expect(dialog).toHaveTextContent(
+          words.FILE_PROBLEMS.too_many_events as string,
+        );
+        expect(drafts(w)).toEqual([]);
+        expect(commands(w)).toEqual([]);
+      } else {
+        expect(parserEvents(name)).toBe(events);
+        expect(summaryOf(dialog)).toMatch(/ · 1 event$/);
+        expect(drafts(w)).toHaveLength(1);
+        expect(bodyOf(w, drafts(w)[0]?.local_id as string)).toMatchObject({
+          ics: text,
+        });
+      }
+    },
+  );
+
+  test("R13: Review 16's 1 MiB parameter-heavy file is shown as 1 event and queued once, the text unchanged", async () => {
+    expect(new TextEncoder().encode(reviewFile).length).toBe(1_048_123);
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    await choose(w, dialog, reviewFile, "parameters.ics");
+    expect(summaryOf(dialog)).toMatch(/^parameters\.ics · .+ · 1 event$/);
+    pressIn(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    const body = bodyOf(w, drafts(w)[0]?.local_id as string) as {
+      ics: string;
+    };
+    expect(body.ics).toBe(reviewFile);
+  });
+});

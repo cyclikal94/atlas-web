@@ -71,6 +71,28 @@ const VARIANTS = [
   ev("begin:VEVENT"),
 ];
 
+/**
+ * Revision 15 (review 16 R13): the parameter rules the linear scanner keeps, each a component line the parser still reads as
+ * `BEGIN:VEVENT` — a list then a quoted value, runs of `,` and `;`, empty values, `:` in a key, `=` in a value, delimiters inside quotes,
+ * folded parameters, exactly ten listed values and many parameters.
+ */
+const PARAMETER_VARIANTS = [
+  ev('BEGIN;X-A=a,"b:c":VEVENT'),
+  ev("BEGIN;X-A=a,,,b;X-B=c:VEVENT"),
+  ev("BEGIN;X-A=;X-B=:VEVENT"),
+  ev("BEGIN;;;X-A=1:VEVENT"),
+  ev("BEGIN;X:A=1:VEVENT"),
+  ev("BEGIN;X-A=b=c:VEVENT"),
+  ev('BEGIN;X-A="a,b";X-B="c;d":VEVENT'),
+  ev("BEGIN;X-A=\r\n 1;X-\r\n\tB=2:VEV\r\n ENT"),
+  ev("BEGIN;X-A=1,2,3,4,5,6,7,8,9,10:VEVENT"),
+  ev(`BEGIN${";X=A".repeat(40)}:VEVENT`),
+];
+
+/** The review's shape (`;X=A` repeated), at a size the parser answers quickly; a repeat, so the recipe stays one line. */
+const PARAMETERS = many(";X=A", 4000);
+const EVENT_REST = "UID:p@corpus.example\r\nDTSTART;VALUE=DATE:20261101\r\n";
+
 const OVERRIDES =
   "BEGIN:VEVENT\r\nUID:series@corpus.example\r\nDTSTART:20261101T090000Z\r\nRRULE:FREQ=DAILY;COUNT=5\r\nSUMMARY:Series\r\nEND:VEVENT\r\n" +
   "BEGIN:\r\n VEVENT\r\nUID:series@corpus.example\r\nRECURRENCE-ID:20261102T090000Z\r\nDTSTART:20261102T100000Z\r\nEND:VEVENT\r\n" +
@@ -166,6 +188,67 @@ const CASES = [
     why: `one variant alone, one over: ${JSON.stringify(template.split("\r\nUID")[0])}`,
     parts: [H, many(template, 257), T],
   })),
+  {
+    name: "parameters-256",
+    why: "R13: every parameter variant, exact count",
+    parts: [H, many(PARAMETER_VARIANTS, 256), T],
+  },
+  {
+    name: "parameters-257",
+    why: "R13: every parameter variant, one over",
+    parts: [H, many(PARAMETER_VARIANTS, 257), T],
+  },
+  ...PARAMETER_VARIANTS.map((template, at) => ({
+    name: `parameter-${at + 1}-257`,
+    why: `R13: one parameter variant alone, one over: ${JSON.stringify(template.split("\r\nUID")[0])}`,
+    parts: [H, many(template, 257), T],
+  })),
+  {
+    name: "parameters-summary-many",
+    why: "R13: an ordinary property with 4,000 parameters",
+    parts: [
+      H,
+      `BEGIN:VEVENT\r\n${EVENT_REST}SUMMARY`,
+      PARAMETERS,
+      ":Review\r\nEND:VEVENT\r\n",
+      T,
+    ],
+  },
+  {
+    name: "parameters-begin-many",
+    why: "R13: a component line with 4,000 parameters",
+    parts: [
+      H,
+      "BEGIN",
+      PARAMETERS,
+      `:VEVENT\r\n${EVENT_REST}SUMMARY:Review\r\nEND:VEVENT\r\n`,
+      T,
+    ],
+  },
+  {
+    name: "end-eleven-values-then-gap",
+    why: "R13: the ten-value limit — the calendar's END with eleven listed values still parses and closes it, so the gap ends the reading",
+    parts: [
+      H,
+      many(E, 1),
+      "END;X-A=1,2,3,4,5,6,7,8,9,10,11\r\n",
+      "\u000b\r\n",
+      many(E, 257),
+      T,
+    ],
+  },
+  {
+    name: "end-parameters-then-gap",
+    why: "R13: the calendar's END with quoted and listed parameters closes it",
+    parts: [
+      H,
+      many(E, 1),
+      'END;X-A="a:b";X-B=c,d:VCALENDAR\r\n',
+      "\u000b\r\n",
+      many(E, 257),
+      T,
+    ],
+  },
   {
     name: "overrides-folded",
     why: "overrides are components",
