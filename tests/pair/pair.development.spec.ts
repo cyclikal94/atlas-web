@@ -28,7 +28,9 @@ import {
   headOf,
   type Interval,
   insertSyntheticBatch,
+  type Milestone,
   nudge,
+  observe,
   oracle,
   PAIR_BACKEND,
   pairPage,
@@ -37,6 +39,7 @@ import {
   rawSignInAs,
   rawSyncDirect,
   readerOf,
+  releaseHold,
   SELECTION_SHA256,
   type Seeded,
   type Stored,
@@ -65,6 +68,11 @@ import {
  * Every workload is seeded through PUBLIC routes by another account (W-synthetic's one notice row is the labelled exception), BEFORE the
  * reader signs in: the reader's first snapshot and its durable cursor come from real authentication and synchronisation, and the browser
  * holds the complete old state (with unrelated sentinel rows) at the pre-grant barrier. Only then is the single public grant made.
+ *
+ * Revision 25 (R24-PAIR.c, DA-PAIR-S): the hold is armed by the interval's OPENING and stays in force through any follower's set-up, the
+ * grant and the drive; the workload is the grant's RECEIPT revision; an answer before it (an ordinary poll during the grant) is kept as an
+ * incidental answer and never ends the drive; every hook acts on the server's PIECE (its revision and segment index), never on an attempt's
+ * ordinal; a partly driven case releases the hold at an explicit hand-off.
  *
  * The TAP (scripts/integration/pair-tap.mjs) records the server's exact bodies; a case that alters an answer says so in its title and its
  * interval record keeps the altered answer apart from the server's. The final cache is checked against what the writer wrote (never the
@@ -163,7 +171,6 @@ async function finishAdded(
     terminal: "activated",
     appliedRevision: final.applied_revision,
     oracle: verdict,
-    barriered: true,
     person: o.workload.person,
     extra,
     ...(injected ? { injectedOutsideTap: injected } : {}),
@@ -172,8 +179,9 @@ async function finishAdded(
   return record;
 }
 
-/** After a 410 (real or injected): no holds; the recovery runs by itself to a valid cache holding the workload. */
+/** After a 410 (real or injected): the hold is released at the hand-off; the recovery runs by itself to a valid cache holding the workload. */
 async function untilRecovered(o: Opened, page: Page): Promise<Stored> {
+  await releaseHold(o.iv, "the hand-off: the 410 recovery runs unheld");
   await nudge(page);
   const done = await until(
     () => stored(page, o.reader.account_id, true),
@@ -208,7 +216,6 @@ async function finishRecovered(
     terminal: "recovered",
     appliedRevision: done.applied_revision,
     oracle: verdict,
-    barriered: false,
     person: o.workload.person,
     extra,
   });
@@ -267,10 +274,14 @@ test("PAIR-W1: W-real as ONE whole response (the page is told nothing, as produc
   });
   for (const r of run.steps)
     expect(r.query?.max_changes ?? null, "no request opts in").toBeNull();
-  const answer = run.steps.filter((r) => r.status === 200);
-  expect(answer).toHaveLength(1);
-  expect(answer[0]?.segment ?? null).toBeNull();
-  expect(answer[0]?.changes).toBe(200);
+  // Exactly ONE target response (the receipt's revision, whole); every other answer the client received is kept and is an empty page.
+  expect(run.target, "one target workload response").toHaveLength(1);
+  expect(run.target[0]?.segment ?? null).toBeNull();
+  expect(run.target[0]?.changes).toBe(200);
+  expect(run.target[0]?.last_revision).toBe(run.goal.through);
+  for (const r of run.incidental)
+    expect(r.batches, `incidental answer ${r.seq} is empty`).toBe(0);
+  expect(run.steps).toHaveLength(run.target.length + run.incidental.length);
   await finishAdded(o, run.final as Stored);
 });
 
@@ -291,7 +302,7 @@ for (const [id, m] of [
       model: o.model,
       start: () => access(o.w, "grant", o.workload.person, o.reader.account_id),
     });
-    expectSegmented(run.steps, m, null);
+    expectSegmented(run.steps, m, run.goal.through);
     expect(run.model.restarted).toBe(0);
     // Each piece repeats the person as an ancestor of its fields (contract §3.5), counted against m.
     const record = await finishAdded(o, run.final as Stored);
@@ -335,20 +346,20 @@ for (const [id, m] of [
       model: pre.model,
       start: () => insertSyntheticBatch(reader.account_id, synthetic),
     });
-    if (m !== null) expectSegmented(run.steps, m, null);
-    else
-      expect(
-        run.steps.filter((r) => r.status === 200).map((r) => r.changes),
-      ).toEqual([800]);
+    if (m !== null) expectSegmented(run.steps, m, run.goal.through);
+    else {
+      // ONE whole target response of 800 changes; any other answer the client received is an empty page, kept.
+      expect(run.target.map((r) => r.changes)).toEqual([800]);
+      for (const r of run.incidental) expect(r.batches).toBe(0);
+    }
     const final = run.final as Stored;
-    expect(final.applied_revision).toBeGreaterThan(
-      pre.old.applied_revision as number,
-    );
+    // The revision the synthetic transaction inserted, read inside it.
+    expect(final.applied_revision).toBe(run.goal.through);
     // The batch re-sends what the reader holds: the cache is the old one, row for row.
     const verdict = oracle(pre.oldRows, final.rows ?? [], { sentinel });
     // Every resource of the batch was delivered (each id at least once across the pieces).
     const ids = new Set<string>();
-    for (const r of run.steps.filter((x) => x.status === 200 && x.body_file)) {
+    for (const r of run.target.filter((x) => x.body_file)) {
       const body = JSON.parse(
         bodyOf(r.body_file as string).toString("utf8"),
       ) as {
@@ -370,7 +381,6 @@ for (const [id, m] of [
       terminal: "activated",
       appliedRevision: final.applied_revision,
       oracle: verdict,
-      barriered: true,
       person: synthetic.person,
       injectedOutsideTap:
         "LABELLED SYNTHETIC: one notice row inserted directly into the disposable database",
@@ -392,8 +402,9 @@ test("PAIR-R1: a real reload while piece 3 is held (the answer reaches nobody): 
     old: o.old,
     model: o.model,
     start: () => access(o.w, "grant", o.workload.person, o.reader.account_id),
-    onHeld: async ({ index, before, release }) => {
-      if (index !== 3 || reloaded) return undefined;
+    onHeld: async ({ piece, before, release }) => {
+      // The server's piece 3 of the target, the valid next piece of the chain: never the fourth attempt.
+      if (piece?.index !== 3 || !piece.next || reloaded) return undefined;
       reloaded = true;
       expect(before.delta_stage?.next_index).toBe(3);
       await captureTrace(o.page, o.iv, "before the reload");
@@ -408,7 +419,7 @@ test("PAIR-R1: a real reload while piece 3 is held (the answer reaches nobody): 
   const lost = run.attempts.filter((a) => a.client === "lost");
   expect(lost, "exactly one lost attempt").toHaveLength(1);
   const retry = run.attempts.find(
-    (a) => a.step === (lost[0]?.step as number) + 1,
+    (a) => a.step !== null && a.seq > (lost[0]?.seq as number),
   );
   expect(retry?.client, "the next attempt reached the client").toBe("received");
   expect(retry?.request_cursor, "the retry asks from the same cursor").toBe(
@@ -421,9 +432,9 @@ test("PAIR-R1: a real reload while piece 3 is held (the answer reaches nobody): 
     run.steps.some((r) => r.seq === lost[0]?.seq),
     "the lost attempt is not a received piece",
   ).toBe(false);
-  expectSegmented(run.steps, 4, null);
+  expectSegmented(run.steps, 4, run.goal.through);
   await finishAdded(o, run.final as Stored, {
-    reloaded_at_step: 3,
+    reloaded_at_piece: 3,
     lost_seq: lost[0]?.seq,
     lost_downstream: lost[0]?.downstream,
     retried_seq: retry?.seq,
@@ -445,7 +456,7 @@ test("PAIR-R2: the connection is destroyed AFTER the backend answered piece 2 (T
     model: o.model,
     start: async () => {
       await tap.fault({ kind: "drop_connection", afterIndex: 2 });
-      await access(o.w, "grant", o.workload.person, o.reader.account_id);
+      return access(o.w, "grant", o.workload.person, o.reader.account_id);
     },
   });
   // The tap holds the server's two answers to the SAME cursor: the dropped one (never received) and the one asked again, with the same
@@ -486,12 +497,14 @@ test("PAIR-T1: a second tab of the same browser reads the old complete state thr
 }, info) => {
   caseRow("PAIR-T1");
   const o = await openWReal(context, info, "PAIR-T1", 4);
+  // Opened with the interval's hold in force: an ordinary poll its attachment causes is held and kept (R24-PAIR.c's schedule).
   const follower = await pairPage(context, 4);
   expect(
     (await follower.evaluate(() => window.__atlasFixture?.session?.leader()))
       ?.attachment,
   ).not.toBe("leader");
   let checkedLast = false;
+  let checkedNew = false;
   const run = await drivePieces({
     page: () => o.page,
     account: o.reader.account_id,
@@ -499,18 +512,50 @@ test("PAIR-T1: a second tab of the same browser reads the old complete state thr
     old: o.old,
     model: o.model,
     start: () => access(o.w, "grant", o.workload.person, o.reader.account_id),
-    onHeld: async ({ record }) => {
+    onHeld: async ({ record, piece, phase, before, target }) => {
       const other = (await stored(follower, o.reader.account_id)) as Stored;
-      expect(other.cache_digest, "the follower sees the old live cache").toBe(
-        o.old.cache_digest,
-      );
-      if (seen(record).segment?.last) checkedLast = true;
+      if (phase !== "after_activation") {
+        expect(other.cache_digest, "the follower sees the old live cache").toBe(
+          o.old.cache_digest,
+        );
+        // The target's ACTUAL last piece, held: the old state is still all the follower sees.
+        if (piece?.last && piece.revision === target.through) {
+          observe(
+            o.iv,
+            "follower_old_at_last_piece",
+            record.seq,
+            other.cache_digest,
+          );
+          checkedLast = true;
+        }
+      } else {
+        // A held answer after the activation (the feed's completion page): the follower sees the activated revision.
+        expect(other.applied_revision).toBe(target.through);
+        expect(
+          other.cache_digest,
+          "the follower sees the activated cache",
+        ).toBe(before.cache_digest);
+        observe(
+          o.iv,
+          "follower_new_after_activation",
+          record.seq,
+          other.cache_digest,
+        );
+        checkedNew = true;
+      }
       return undefined;
     },
   });
   expect(checkedLast).toBe(true);
   const fromFollower = (await stored(follower, o.reader.account_id)) as Stored;
   expect(fromFollower.cache_digest).toBe((run.final as Stored).cache_digest);
+  if (!checkedNew)
+    observe(
+      o.iv,
+      "follower_new_after_activation",
+      run.terminal?.final_seq as number,
+      fromFollower.cache_digest,
+    );
   await finishAdded(o, run.final as Stored);
 });
 
@@ -529,8 +574,9 @@ test("PAIR-T2: the leading tab is closed while piece 2 is held; the other tab ta
     old: o.old,
     model: o.model,
     start: () => access(o.w, "grant", o.workload.person, o.reader.account_id),
-    onHeld: async ({ index, release }) => {
-      if (index !== 2 || closed) return undefined;
+    onHeld: async ({ piece, release }) => {
+      // The server's piece 2 of the target, the valid next piece: never the third attempt.
+      if (piece?.index !== 2 || !piece.next || closed) return undefined;
       closed = true;
       await captureTrace(o.page, o.iv, "before the leading tab is closed");
       await o.page.close();
@@ -553,7 +599,7 @@ test("PAIR-T2: the leading tab is closed while piece 2 is held; the other tab ta
   });
   expect(closed).toBe(true);
   o.page = next;
-  await finishAdded(o, run.final as Stored, { leader_closed_at_step: 2 });
+  await finishAdded(o, run.final as Stored, { leader_closed_at_piece: 2 });
 });
 
 // ---- per-response authorisation --------------------------------------------------------------------------------------------------
@@ -564,6 +610,8 @@ test("PAIR-A1: the person is REVOKED while piece 2 is held: no later answer disc
   const o = await openWReal(context, info, "PAIR-A1", 4);
   const delivered = new Set<string>();
   let revokedAt: number | null = null;
+  let grant: Milestone | null = null;
+  let revoke: Milestone | null = null;
   const upserts = (r: TapRecord) =>
     (
       JSON.parse(bodyOf(r.body_file as string).toString("utf8")) as {
@@ -581,18 +629,41 @@ test("PAIR-A1: the person is REVOKED while piece 2 is held: no later answer disc
     iv: o.iv,
     old: o.old,
     model: o.model,
-    start: () => access(o.w, "grant", o.workload.person, o.reader.account_id),
-    onHeld: async ({ index, record }) => {
+    start: async () => {
+      grant = await access(
+        o.w,
+        "grant",
+        o.workload.person,
+        o.reader.account_id,
+      );
+      return grant;
+    },
+    onHeld: async ({ record, piece, addMilestone }) => {
       if (record.status === 200 && record.body_file && revokedAt === null)
         for (const id of upserts(record)) delivered.add(id);
-      if (index === 2 && revokedAt === null) {
-        await access(o.w, "revoke", o.workload.person, o.reader.account_id);
+      // The grant's piece 2, held: the revocation is a LATER milestone the drive must reach (its own receipt revision).
+      if (
+        piece?.index === 2 &&
+        piece.next &&
+        piece.revision === grant?.revision &&
+        revokedAt === null
+      ) {
+        revoke = await access(
+          o.w,
+          "revoke",
+          o.workload.person,
+          o.reader.account_id,
+        );
+        addMilestone(revoke);
         revokedAt = record.seq;
       }
       return undefined;
     },
   });
   expect(revokedAt).not.toBeNull();
+  expect(run.goal.through, "the drive reached the revocation").toBe(
+    (revoke as Milestone | null)?.revision,
+  );
   const workloadIds = new Set([
     o.workload.person,
     ...o.workload.fields.map((f) => f.id),
@@ -617,7 +688,6 @@ test("PAIR-A1: the person is REVOKED while piece 2 is held: no later answer disc
     terminal: "activated",
     appliedRevision: final.applied_revision,
     oracle: verdict,
-    barriered: true,
     person: o.workload.person,
     extra: {
       revoked_after_seq: revokedAt,
@@ -645,14 +715,28 @@ async function bindingCase(
     old: o.old,
     model: o.model,
     start: async () => {
-      await access(o.w, "grant", o.workload.person, o.reader.account_id);
+      // The request-side gate (DA-PAIR-S): no browser /sync reaches the backend until the foreign continuation is prepared and the fault is
+      // armed, so piece 0 cannot be generated first. The foreign reads go directly to the backend, outside the gate.
+      await tap.gate(true);
+      await untilUpstreamSettled(o.iv);
+      const grant = await access(
+        o.w,
+        "grant",
+        o.workload.person,
+        o.reader.account_id,
+      );
       await prepare();
       await arm(o);
+      await tap.gate(false);
+      return grant;
     },
     onHeld: async ({ record }) => {
       if (record.status !== 410) return undefined;
       refused = record;
-      return { stop: true };
+      return {
+        stop: true,
+        reason: "the server's 410: the recovery continues by itself",
+      };
     },
   });
   const answer = refused as TapRecord | null;
@@ -666,6 +750,22 @@ async function bindingCase(
   expect(faults.filter((f) => f.fired !== null)).toHaveLength(1);
   const done = await untilRecovered(o, o.page);
   await finishRecovered(o, done, { refused_seq: answer?.seq });
+}
+/** Every browser /sync the tap already forwarded has its server answer (none is still upstream), so the gate covers all later ones. */
+async function untilUpstreamSettled(iv: Interval) {
+  await expect
+    .poll(
+      async () =>
+        syncRecords(await tap.log(iv.since)).filter(
+          (r) =>
+            r.label === iv.id &&
+            r.status === null &&
+            !r.gated &&
+            !r.upstream_error,
+        ).length,
+      { timeout: 30_000, message: "no /sync is still upstream" },
+    )
+    .toBe(0);
 }
 /** B2/B3: the foreign continuation, read directly from the backend by another device or account after the grant. */
 const foreign: Record<string, string> = {};
@@ -768,16 +868,20 @@ for (const [id, fault, what] of [
       model: o.model,
       start: async () => {
         await tap.fault(fault);
-        await access(o.w, "grant", o.workload.person, o.reader.account_id);
+        return access(o.w, "grant", o.workload.person, o.reader.account_id);
       },
     });
     expect(run.model.restarted, "one restart at the boundary").toBe(1);
     const faulted = run.steps.findIndex((r) => r.delivered);
     expect(faulted).toBeGreaterThanOrEqual(2);
+    // The boundary: the cursor the target's piece 0 was asked from (an incidental page before it may have renewed the pre-grant cursor).
+    const boundary = run.target.find((r) => r.segment?.index === 0)?.query
+      ?.cursor;
+    expect(boundary, "the target's piece 0 was received").toBeDefined();
     expect(
       run.steps[faulted + 1]?.query?.cursor,
       "the request after the broken piece asks from the boundary",
-    ).toBe(o.old.cursor);
+    ).toBe(boundary);
     await finishAdded(o, run.final as Stored, { faulted_step: faulted });
   });
 
@@ -797,12 +901,15 @@ test("PAIR-X1: TAP-INJECTED 410 resync_required in place of piece 2 (client-only
     model: o.model,
     start: async () => {
       await tap.fault({ kind: "answer_410", afterIndex: 2 });
-      await access(o.w, "grant", o.workload.person, o.reader.account_id);
+      return access(o.w, "grant", o.workload.person, o.reader.account_id);
     },
     onHeld: async ({ record }) => {
       if (seen(record).status !== 410) return undefined;
       injected = record;
-      return { stop: true };
+      return {
+        stop: true,
+        reason: "the injected 410: the recovery continues by itself",
+      };
     },
   });
   const answer = injected as TapRecord | null;
@@ -856,10 +963,25 @@ test("PAIR-RC1: the FENCED RECOVERY catch-up (a real revocation, a real 401, a p
   caseRow("PAIR-RC1");
   provokes(401);
   const o = await openWReal(context, info, "PAIR-RC1", 4);
+  // Not driven (the matrix: `none`): the fenced recovery runs by itself; every answer the opening's hold held is released and kept.
+  await releaseHold(o.iv, "not driven: the fenced recovery runs unheld");
   await fence(o.page, o.reader);
   const fencedAt = Date.now();
-  await access(o.w, "grant", o.workload.person, o.reader.account_id);
-  barrier(o.iv, "grant_complete");
+  const grant = await access(
+    o.w,
+    "grant",
+    o.workload.person,
+    o.reader.account_id,
+  );
+  o.iv.target = {
+    revisions: [grant.revision],
+    through: grant.revision,
+    sources: [grant],
+  };
+  barrier(o.iv, "grant_complete", {
+    revision: grant.revision,
+    source: grant.source,
+  });
   await signInAs(o.page, o.reader);
   await untilView(o.page, "displaying", undefined, 120_000);
   const done = await until(
@@ -901,7 +1023,6 @@ test("PAIR-RC1: the FENCED RECOVERY catch-up (a real revocation, a real 401, a p
     terminal: "activated",
     appliedRevision: done.applied_revision,
     oracle: verdict,
-    barriered: false,
     person: o.workload.person,
   });
   // The pieces the client RECEIVED (the proxy's downstream outcome joined to each tap answer).
@@ -921,22 +1042,31 @@ test("PAIR-L1: the same account's session is REPLACED mid-revision (revoked whil
   provokes(401);
   const o = await openWReal(context, info, "PAIR-L1", 4);
   let atRevocation: Stored | null = null;
-  await drivePieces({
+  const run = await drivePieces({
     page: () => o.page,
     account: o.reader.account_id,
     iv: o.iv,
     old: o.old,
     model: o.model,
     start: () => access(o.w, "grant", o.workload.person, o.reader.account_id),
-    onHeld: async ({ index, before }) => {
-      if (index !== 3) return undefined;
+    onHeld: async ({ piece, before }) => {
+      // The server's piece 3 of the target, the valid next piece: never the fourth attempt.
+      if (piece?.index !== 3 || !piece.next) return undefined;
       atRevocation = before;
       // Piece 3 was answered under the old session; the session is revoked before the answer is released, so the NEXT request is a 401.
       await revokeSession(o.page, o.reader);
-      return { stop: true };
+      return {
+        stop: true,
+        reason:
+          "the session was revoked: the recovery catch-up continues under a new epoch",
+      };
     },
   });
   expect((atRevocation as Stored | null)?.delta_stage?.next_index).toBe(3);
+  await releaseHold(
+    o.iv,
+    "the hand-off: the replaced session's recovery runs unheld",
+  );
   await awaitFence(o.page);
   const fenced = (await stored(o.page, o.reader.account_id)) as Stored;
   const refusedSeq = Math.max(
@@ -964,9 +1094,10 @@ test("PAIR-L1: the same account's session is REPLACED mid-revision (revoked whil
   const resumed = syncRecords(await tap.log(refusedSeq)).filter(
     (r) => r.label === o.iv.id && r.status === 200,
   )[0];
-  expect([fenced.cursor, o.old.cursor]).toContain(
-    resumed?.query?.cursor ?? null,
-  );
+  // The boundary: the cursor the target's piece 0 was asked from.
+  const boundary = run.target.find((r) => r.segment?.index === 0)?.query
+    ?.cursor;
+  expect([fenced.cursor, boundary]).toContain(resumed?.query?.cursor ?? null);
   const verdict = oracle(o.oldRows, done.rows ?? [], {
     add: o.workload,
     sentinel: o.sentinel,
@@ -978,7 +1109,6 @@ test("PAIR-L1: the same account's session is REPLACED mid-revision (revoked whil
     terminal: "activated",
     appliedRevision: done.applied_revision,
     oracle: verdict,
-    barriered: false,
     person: o.workload.person,
     extra: {
       staged_at_revocation:

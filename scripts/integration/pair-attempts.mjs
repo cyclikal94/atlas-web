@@ -58,7 +58,10 @@ export function pickHeld(heldIds, records) {
   return { proxyId, record };
 }
 
-/** What a received answer did to the driver's chain model (before → after `advance`). */
+/**
+ * What a received answer did to the driver's chain model (before → after `advance`, pair-driver.mjs). `committed` (revision 25): a page the
+ * client commits (W1) that activates nothing, such as an empty live-edge page, which still advances `page_seq` and may renew the cursor.
+ */
 export function effectOf(before, after) {
   if (after.restarted > before.restarted) return "restarted";
   if (after.activated !== before.activated && after.activated !== null)
@@ -70,6 +73,7 @@ export function effectOf(before, after) {
       after.stage.revision !== before.stage.revision)
   )
     return "staged";
+  if ((after.pages ?? 0) > (before.pages ?? 0)) return "committed";
   return "none";
 }
 
@@ -86,7 +90,7 @@ export function createLedger() {
   return {
     attempts,
     persisted,
-    open({ step, record, proxyId }) {
+    open({ step, record, proxyId, role = null, phase = null }) {
       const attempt = {
         step,
         seq: record.seq,
@@ -95,6 +99,8 @@ export function createLedger() {
         segment: record.segment ?? null,
         revision: record.revision ?? null,
         sha256: record.sha256 ?? null,
+        role,
+        phase,
         client: null,
         downstream: null,
         effect: null,
@@ -130,7 +136,7 @@ export function createLedger() {
       pending = effect === "staged" ? attempt : null;
       return attempt;
     },
-    unheld(record, downstream) {
+    unheld(record, downstream, { role = null, phase = null } = {}) {
       if (!record.dropped)
         throw new Error(
           `seq ${record.seq}: an answer of the interval was neither held nor dropped by the tap`,
@@ -143,6 +149,8 @@ export function createLedger() {
         segment: record.segment ?? null,
         revision: record.revision ?? null,
         sha256: record.sha256 ?? null,
+        role,
+        phase,
         client: "dropped",
         downstream,
         effect: "none",

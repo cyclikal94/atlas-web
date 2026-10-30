@@ -5,15 +5,22 @@ import type { BrowserContext, Page } from "@playwright/test";
 import {
   type Attempt,
   createLedger,
-  effectOf,
   outcomeOf,
   type Persisted,
-  pickHeld,
   seenOf,
-  terminalOf,
 } from "../../scripts/integration/pair-attempts.mjs";
 import {
-  SCHEMA,
+  type ChainModel,
+  type Driven,
+  type HeldStep as DriverStep,
+  drive,
+  type HookAnswer,
+  type Milestone,
+  openHold,
+} from "../../scripts/integration/pair-driver.mjs";
+import {
+  assembleInterval,
+  joinExchanges,
   validateInterval,
 } from "../../scripts/integration/pair-evidence.mjs";
 import {
@@ -39,12 +46,17 @@ import {
  * runner (scripts/integration/run-development-pair.mjs) started, through public routes, except where a name says otherwise:
  *   - `insertSyntheticBatch` writes ONE notice row into the disposable SQLite database (W-synthetic, labelled synthetic, as the backend's
  *     pinned dense fixture does);
- *   - `tap.fault` arms a one-shot, labelled alteration of ONE answer in the tap (scripts/integration/pair-tap.mjs);
+ *   - `tap.fault` arms a one-shot, labelled alteration of ONE answer in the tap (scripts/integration/pair-tap.mjs); `tap.gate` holds the
+ *     browser's /sync requests at the tap, unforwarded, while a case prepares a fault (revision 25: B1-B3);
  *   - the delaying proxy's rules hold, drop or replace answers (tests/integration/helpers.ts `proxy`); the pair runner gives the proxy and
  *     the tap one correlation header, so each tap exchange is joined to the proxy log entry that carried it and its DOWNSTREAM outcome
  *     (scripts/integration/pair-attempts.mjs: the tap sits upstream of the hold and never sees the browser's connection).
  * The browser runs the PRODUCTION composition (the session harness page with `?leader=production`: the election, the engine, the recovery job,
  * production quota, session persistence) and is told only that its server segments (`?segmented=capable`), a DIAGNOSTIC boot option.
+ *
+ * Revision 25 (R24-PAIR.c, DA-PAIR-S/E): the common driver, its opening and the record's assembly live in scripts/integration (pair-driver.mjs,
+ * pair-evidence.mjs), qualified there; this file supplies their browser IO. The hold belongs to the interval from its opening (armed before
+ * the label, every earlier /sync settled) to its end or an explicit hand-off; the workload is the writer's receipt revision.
  */
 
 export const PAIR_BACKEND = process.env.ATLAS_PAIR_BACKEND ?? "";
@@ -134,6 +146,9 @@ export interface TapRecord {
   };
   /** The tap destroyed the connection instead of answering (the server HAS answered): the client received nothing. */
   dropped?: string;
+  /** The request waited at the tap's closed gate (revision 25), forwarded at `t_gate_open`. */
+  gated?: boolean;
+  t_gate_open?: number;
   delivered?: {
     injected: string;
     status: number;
@@ -190,6 +205,11 @@ export const tap = {
   logFull: (since = 0) => tapCall<TapLog>("GET", `/log?since=${since}`),
   fault: (spec: Omit<TapFault, "id" | "fired">) =>
     tapCall<TapFault>("POST", "/fault", spec),
+  /** The request-side gate: closed, every later /sync request waits at the tap, unforwarded; opened, they are forwarded in order. */
+  gate: (closed: boolean) =>
+    tapCall<{ closed: boolean; forwarded: number[] }>("POST", "/gate", {
+      closed,
+    }),
   faults: () => tapCall<TapFault[]>("GET", "/faults"),
   flush: () =>
     tapCall<{
@@ -423,13 +443,16 @@ async function policyVersion(w: Writer, person: string): Promise<number> {
   return (read.json as { person: { policy_version: number } }).person
     .policy_version;
 }
-/** One public access command on `person` for `account` (grant read, or revoke); the answer is asserted. */
+/**
+ * One public access command on `person` for `account` (grant read, or revoke); the answer is asserted. Returns its RECEIPT's revision
+ * (`Receipt {revision}`: the one revision the command published, which the reader's batch carries): the workload's identity (revision 25).
+ */
 export async function access(
   w: Writer,
   kind: "grant" | "revoke",
   person: string,
   account: string,
-) {
+): Promise<Milestone> {
   const version = await policyVersion(w, person);
   const answer = await w.send("/access-commands", {
     commands: [
@@ -443,6 +466,15 @@ export async function access(
     ],
   });
   expect(answer.status, `${kind}: ${JSON.stringify(answer.json)}`).toBe(200);
+  const revision = (answer.json as { revision?: unknown }).revision;
+  expect(
+    Number.isInteger(revision),
+    `${kind}: the receipt names its revision`,
+  ).toBe(true);
+  return {
+    revision: revision as number,
+    source: `the public ${kind} receipt (POST /access-commands)`,
+  };
 }
 /**
  * A person of the writer, granted to each of `readers`, holding `fields` dense checklist fields shared with them at creation (put_field,
@@ -516,7 +548,7 @@ export const seedSentinel = (w: Writer, reader: string) =>
 export async function insertSyntheticBatch(
   reader: string,
   seeded: Seeded,
-): Promise<void> {
+): Promise<Milestone> {
   if (!DATABASE)
     throw new Error("no disposable database (ATLAS_PAIR_DATABASE)");
   const { DatabaseSync } = await import("node:sqlite");
@@ -531,7 +563,16 @@ export async function insertSyntheticBatch(
     db.prepare(
       "INSERT INTO sync_batches(account_id,revision,payload,created_at) SELECT ?,revision,?,? FROM sync_clock WHERE id=1",
     ).run(reader, payload, Math.floor(Date.now() / 1000));
+    // The revision the batch was inserted at, read in the SAME transaction (never inferred later from a maximum or the browser).
+    const { revision } = db
+      .prepare("SELECT revision FROM sync_clock WHERE id=1")
+      .get() as { revision: number };
     db.exec("COMMIT");
+    return {
+      revision,
+      source:
+        "LABELLED SYNTHETIC: the sync_batches row inserted into the disposable database",
+    };
   } finally {
     db.close();
   }
@@ -668,6 +709,21 @@ export async function until(
     await new Promise((r) => setTimeout(r, 25));
   }
 }
+const isComplete = (s: Stored) =>
+  s.phase === "delta" &&
+  s.cache_status === "valid" &&
+  s.cursor !== null &&
+  s.delta_stage === null &&
+  s.staged === 0;
+/** The engine idle (one read), else null. */
+async function idleState(page: Page, account: string) {
+  const s = await stored(page, account);
+  if (!s) return null;
+  const leader = (await leaderOf(page)) as {
+    engine?: { kind?: string };
+  } | null;
+  return leader?.engine?.kind === "idle" ? s : null;
+}
 /** The complete old state: a valid delta cache at the live edge, nothing staged, the engine idle. */
 export async function untilComplete(
   page: Page,
@@ -675,20 +731,8 @@ export async function untilComplete(
   timeoutMs = 120_000,
 ): Promise<Stored> {
   return until(
-    async () => {
-      const s = await stored(page, account);
-      if (!s) return null;
-      const leader = (await leaderOf(page)) as {
-        engine?: { kind?: string };
-      } | null;
-      return leader?.engine?.kind === "idle" ? s : null;
-    },
-    (s) =>
-      s.phase === "delta" &&
-      s.cache_status === "valid" &&
-      s.cursor !== null &&
-      s.delta_stage === null &&
-      s.staged === 0,
+    () => idleState(page, account),
+    isComplete,
     "the complete state at the live edge",
     timeoutMs,
   );
@@ -778,71 +822,8 @@ export function oracle(
   };
 }
 
-// ---- the client's continuity rule, modelled independently of the client ---------------------------------------------------------------
-/**
- * What the client must store after receiving `r` (BE-Q23 contract §4.3; W27/W1): a model kept by the spec from the tap's records, against
- * which the stored state is checked at every barrier. `restarted` counts broken chains (a gap, a repeat, another revision): the stage is
- * discarded and the cursor goes back to the boundary.
- */
-export interface ChainModel {
-  cursor: string;
-  boundary: string | null;
-  stage: { revision: number; next_index: number } | null;
-  activated: number | null;
-  restarted: number;
-}
-export function advance(model: ChainModel, r: TapRecord): ChainModel {
-  const s = seen(r);
-  if (s.status !== 200) return model;
-  const segment = s.segment;
-  if (!segment) {
-    if (model.stage)
-      return {
-        ...model,
-        stage: null,
-        cursor: model.boundary ?? model.cursor,
-        boundary: null,
-        restarted: model.restarted + 1,
-      };
-    // An empty live-edge page confirms the feed's completion; it activates nothing (it names no revision).
-    return {
-      ...model,
-      cursor: s.next_cursor ?? model.cursor,
-      activated: s.last_revision ?? model.activated,
-    };
-  }
-  const broken =
-    model.stage === null
-      ? segment.index !== 0
-      : s.revision !== model.stage.revision ||
-        segment.index !== model.stage.next_index ||
-        (!segment.last && s.has_more !== true);
-  if (broken) {
-    if (model.stage === null)
-      return { ...model, restarted: model.restarted + 1 };
-    return {
-      ...model,
-      stage: null,
-      cursor: model.boundary ?? model.cursor,
-      boundary: null,
-      restarted: model.restarted + 1,
-    };
-  }
-  if (segment.last)
-    return {
-      ...model,
-      stage: null,
-      boundary: null,
-      cursor: s.next_cursor ?? model.cursor,
-      activated: s.revision,
-    };
-  return {
-    ...model,
-    boundary: model.stage === null ? model.cursor : model.boundary,
-    stage: { revision: s.revision as number, next_index: segment.index + 1 },
-    cursor: s.next_cursor ?? model.cursor,
-  };
-}
+// ---- the client's continuity rule, modelled independently of the client: scripts/integration/pair-driver.mjs (`advance`) -----------------
+export type { ChainModel, HookAnswer, Milestone };
 
 // ---- the interval -------------------------------------------------------------------------------------------------------------------
 export interface Barrier {
@@ -854,6 +835,7 @@ export interface Interval {
   id: string;
   caseId: string;
   engine: string;
+  /** The tap's sequence number when the opening labelled it: the window's start (none until the opening is quiet). */
   since: number;
   barriers: Barrier[];
   piecesPersisted: number;
@@ -865,8 +847,33 @@ export interface Interval {
   /** Every driven attempt (received, lost, dropped) and the persistence events they earned (pair-attempts.mjs). */
   attempts: Attempt[];
   persisted: Persisted[];
+  /** The workload: its revisions, each with its source (pair-driver.mjs). */
+  target: Driven<TapRecord, Stored>["goal"] & {
+    sources: Milestone[];
+  };
   /** The driver's terminal references (absent for an interval it did not drive to its end). */
   terminal: { final_seq: number; activated_by_seq: number } | null;
+  /** Where a partly driven case handed over (a 410 recovery, a replaced session). */
+  handOff: { at_seq: number; reason: string } | null;
+  /** The opening (pair-driver.mjs `openHold`): its label, its rounds and what it released before the label. */
+  opening: {
+    label_seq: number;
+    rounds: number;
+    released: Array<{
+      round: number;
+      proxy_id: number;
+      outcome: string | null;
+    }>;
+  } | null;
+  /** The hold the opening armed: owned by the interval until its end or a hand-off; every answer released without the driver is kept. */
+  hold: { ruleId: string; closed: boolean } | null;
+  holdReleases: Array<{
+    proxy_id: number;
+    outcome: string | null;
+    reason: string;
+  }>;
+  /** Named observations a case makes (T1's follower), bound by the record's validator. */
+  observations: Array<{ kind: string; at_seq: number; cache_digest: string }>;
   /** Each page lifetime's trace, taken BEFORE a reload or close and at the end, so no observation depends on the surviving page. */
   traces: Array<{
     lifetime: number;
@@ -917,28 +924,69 @@ async function heapSampler(
     },
   };
 }
-/** Begins the interval: the tap labels every later exchange with it; memory sampling starts (Chromium only). */
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+/**
+ * Begins the interval: memory sampling starts (Chromium only), then the OPENING (pair-driver.mjs `openHold`) arms the hold, settles every
+ * /sync admitted before it, releases what it held before the label, and labels the tap once the page is idle at its complete state.
+ */
 export async function beginInterval(
   page: Page,
+  account: string,
   caseId: string,
   engine: string,
 ): Promise<Interval> {
   const id = `${caseId}:${engine}:${randomUUID()}`;
-  const { seq } = await tap.label(id);
   const iv: Interval = {
     id,
     caseId,
     engine,
-    since: seq,
+    since: Number.NaN,
     barriers: [],
     piecesPersisted: 0,
     heap: await heapSampler(page, engine),
     attempts: [],
     persisted: [],
+    target: { revisions: [], through: null, sources: [] },
     terminal: null,
+    handOff: null,
+    opening: null,
+    hold: null,
+    holdReleases: [],
+    observations: [],
     traces: [],
   };
   open.add(iv);
+  const opening = await openHold(
+    {
+      addRule: async () => {
+        const rule = await proxy.addRule({
+          method: "GET",
+          path: SYNC,
+          action: "hold",
+        });
+        iv.hold = { ruleId: rule.id, closed: false };
+        return rule;
+      },
+      proxyLog: () => proxy.log(),
+      held: async (rule) => (await holds.entries())[rule] ?? [],
+      releaseOne: (rule, entry) => holds.releaseOne(rule, entry),
+      label: async (label) => (await tap.label(label)).seq,
+      tapRecords: () => tap.log(0),
+      quietNow: async () => {
+        const s = await idleState(page, account);
+        return s && isComplete(s) ? s : null;
+      },
+      now: () => Date.now(),
+      sleep,
+    },
+    { label: id },
+  );
+  iv.since = opening.since;
+  iv.opening = {
+    label_seq: opening.since,
+    rounds: opening.rounds,
+    released: opening.released,
+  };
   return iv;
 }
 export const barrier = (iv: Interval, name: string, detail?: unknown) => {
@@ -948,6 +996,33 @@ export const barrier = (iv: Interval, name: string, detail?: unknown) => {
     ...(detail === undefined ? {} : { detail }),
   });
 };
+/** A named observation of the case (T1's follower read through its own connection), at the exchange it was made at. */
+export const observe = (
+  iv: Interval,
+  kind: string,
+  atSeq: number,
+  cacheDigest: string,
+) => {
+  iv.observations.push({ kind, at_seq: atSeq, cache_digest: cacheDigest });
+};
+/**
+ * Ends the interval's hold (an explicit hand-off, or the end of the interval): the rule is removed, so no later answer is held, and every
+ * answer it still held is released, each KEPT with its outcome and the reason (never an attempt the driver made, never silently).
+ */
+export async function releaseHold(iv: Interval, reason: string) {
+  if (!iv.hold || iv.hold.closed) return;
+  const { ruleId } = iv.hold;
+  iv.hold.closed = true;
+  await proxy.removeRule(ruleId);
+  for (const entry of (await holds.entries())[ruleId] ?? []) {
+    const released = await holds.releaseOne(ruleId, entry);
+    iv.holdReleases.push({
+      proxy_id: entry,
+      outcome: released.outcomes[0]?.outcome ?? null,
+      reason,
+    });
+  }
+}
 /** Keeps the page's kernel trace lines of this interval, before the page is reloaded or closed (and at the end). */
 export async function captureTrace(page: Page, iv: Interval, reason: string) {
   const entries = (
@@ -964,55 +1039,23 @@ export async function captureTrace(page: Page, iv: Interval, reason: string) {
   iv.traces.push({ lifetime: iv.traces.length, reason, entries });
 }
 
-/** Counts per response: changes, and how many are the workload person repeated as an ancestor (ancestor overhead). Every attempt counts. */
-export function overheadOf(records: TapRecord[], person: string) {
-  return syncRecords(records)
-    .filter((r) => r.status === 200 && r.body_file)
-    .map((r) => {
-      const page = JSON.parse(
-        bodyOf(r.body_file as string).toString("utf8"),
-      ) as {
-        batches: Array<{
-          changes: Array<{
-            kind: string;
-            id?: string;
-            resource?: { id: string };
-          }>;
-        }>;
-      };
-      const changes = page.batches.flatMap((b) => b.changes);
-      return {
-        seq: r.seq,
-        client: r.attempt?.client ?? null,
-        downstream: r.downstream?.outcome ?? null,
-        bytes: r.bytes,
-        changes: changes.length,
-        person_upserts: changes.filter(
-          (c) => c.kind === "upsert" && c.resource?.id === person,
-        ).length,
-        removals: changes.filter((c) => c.kind === "remove").length,
-        server_ms:
-          r.t_upstream_end === null
-            ? null
-            : Math.round((r.t_upstream_end - r.t_request) * 1000) / 1000,
-      };
-    });
-}
-
 /**
- * The interval's complete collection: labelling ends (the tap's sequence number then is the window's end), every exchange of the window
- * is waited for until the tap and the proxy both settled it (bounded; what is still open is recorded, and refuses the record), the
- * body writes are flushed, and each exchange is joined to its proxy log entry's downstream outcome and the driver's attempt.
+ * The interval's complete collection: labelling ends (the tap's sequence number then is the window's end), the hold is released (every
+ * answer it still held kept as a release), every exchange of the window is waited for until the tap and the proxy both settled it
+ * (bounded; what is still open is recorded, and refuses the record), the body writes are flushed, and each exchange is joined to its proxy
+ * log entry's downstream outcome and the driver's attempt (pair-evidence.mjs `joinExchanges`).
  */
 async function collect(iv: Interval) {
   const { seq: until } = await tap.label(null);
+  await releaseHold(iv, "the end of the interval");
   const deadline = Date.now() + 30_000;
   let log = await tap.logFull(iv.since);
-  let byProxy = new Map<number, ProxyLogEntry>();
+  let entries: ProxyLogEntry[] = [];
   let unsettled: number[] = [];
   for (;;) {
     log = await tap.logFull(iv.since);
-    byProxy = new Map((await proxy.log()).map((e) => [e.id, e]));
+    entries = await proxy.log();
+    const byProxy = new Map(entries.map((e) => [e.id, e]));
     unsettled = log.records
       .filter(
         (r) =>
@@ -1026,29 +1069,11 @@ async function collect(iv: Interval) {
   }
   const flushed = await tap.flush();
   log = await tap.logFull(iv.since);
-  const attemptOf = new Map(iv.attempts.map((a) => [a.seq, a]));
-  const records = log.records
-    .filter((r) => r.seq <= until && r.label === iv.id)
-    .map((r): TapRecord => {
-      const entry = byProxy.get(r.proxy_id as number);
-      const attempt = attemptOf.get(r.seq);
-      return {
-        ...r,
-        downstream: {
-          outcome: outcomeOf(entry),
-          events: entry ? entry.events.map((e) => e.event) : null,
-        },
-        ...(attempt
-          ? {
-              attempt: {
-                step: attempt.step,
-                client: attempt.client,
-                effect: attempt.effect,
-              },
-            }
-          : {}),
-      };
-    });
+  const records = joinExchanges(
+    log.records.filter((r) => r.seq <= until && r.label === iv.id),
+    entries,
+    iv.attempts,
+  ) as TapRecord[];
   return {
     records,
     collection: {
@@ -1064,8 +1089,9 @@ async function collect(iv: Interval) {
 
 /**
  * Ends the interval: its complete collection (above), the page traces, memory, the terminal references (the driver's, or the answers that
- * reached the client: the last activating one and the feed's completion), the oracle; the record is written and VALIDATED
- * (pair-evidence.mjs) before the caller asserts anything else. Returns the record.
+ * reached the client: the last activating one and the feed's completion), the oracle; the record (pair-evidence.mjs `assembleInterval`) is
+ * written and VALIDATED before the caller asserts anything else. How it must have been driven and what it must observe come from the case's
+ * MATRIX row, never from the case. Returns the record.
  */
 export async function endInterval(
   page: Page,
@@ -1077,7 +1103,6 @@ export async function endInterval(
     terminal: "activated" | "recovered";
     appliedRevision: number | null;
     oracle: { verdict: "match" | "mismatch"; problems: string[] };
-    barriered: boolean;
     person: string;
     injectedOutsideTap?: string;
     extra?: Record<string, unknown>;
@@ -1086,70 +1111,19 @@ export async function endInterval(
   const samples = await iv.heap.stop();
   await captureTrace(page, iv, "end of the interval");
   const { records, collection } = await collect(iv);
-  const syncs = syncRecords(records);
-  const terminalRefs =
-    iv.terminal ?? terminalOf(syncs, details.appliedRevision);
-  const record = {
-    schema: SCHEMA,
-    interval: iv.id,
-    case: iv.caseId,
-    engine: iv.engine,
-    backend: details.backend,
-    selection_manifest_sha256: SELECTION_SHA256 || null,
-    api_version: API_VERSION,
-    workload: details.workload,
-    synthetic: details.workload === "W-synthetic",
-    pre_grant_cursor: details.preGrantCursor,
-    correlation:
-      "proxy log entry id (x-atlas-pair-proxy-id), joined to the proxy's downstream outcome",
+  const row = CASES.find((c) => c.id === iv.caseId);
+  if (!row?.driven) throw new Error(`${iv.caseId} has no driven interval`);
+  const record = assembleInterval({
+    iv,
+    records,
     collection,
-    requests: syncs,
-    other_requests: records
-      .filter((r) => !syncs.includes(r))
-      .map((r) => ({
-        seq: r.seq,
-        label: r.label,
-        proxy_id: r.proxy_id ?? null,
-        method: r.method,
-        path: r.path,
-        status: r.status,
-        ...(r.upstream_error ? { upstream_error: r.upstream_error } : {}),
-        downstream: r.downstream,
-      })),
-    attempts: iv.attempts,
-    unaltered:
-      syncs.every((r) => !r.delivered && !r.dropped) &&
-      details.injectedOutsideTap === undefined,
-    ...(details.injectedOutsideTap
-      ? { injected_outside_tap: details.injectedOutsideTap }
-      : {}),
-    barriers: iv.barriers,
-    barriered: details.barriered,
-    pieces_persisted: iv.piecesPersisted,
-    terminal: {
-      kind: details.terminal,
-      applied_revision: details.appliedRevision,
-      final_seq: terminalRefs?.final_seq ?? null,
-      activated_by_seq: terminalRefs?.activated_by_seq ?? null,
-      source: iv.terminal ? "driver" : "answers that reached the client",
+    details: {
+      ...details,
+      selection: SELECTION_SHA256,
+      apiVersion: API_VERSION,
+      driven: row.driven,
+      requiredObservations: [...row.observations],
     },
-    oracle: details.oracle,
-    overhead: overheadOf(records, details.person),
-    totals: {
-      requests: syncs.length,
-      received: syncs.filter((r) => r.downstream?.outcome === "delivered")
-        .length,
-      bytes: syncs.reduce((n, r) => n + (r.bytes ?? 0), 0),
-      max_bytes: Math.max(0, ...syncs.map((r) => r.bytes ?? 0)),
-      wall_ms_grant_to_activation:
-        (iv.barriers.find((b) => b.name === "activation_complete")?.at ??
-          Number.NaN) -
-        (iv.barriers.find((b) => b.name === "grant_complete")?.at ??
-          Number.NaN),
-      wall_resolution:
-        "Node polling of raw IndexedDB every 25 ms (an upper bound on the moment, not the commit's own time)",
-    },
-    browser_traces: iv.traces,
     memory:
       iv.heap.kind === null
         ? { kind: null, reason: iv.heap.reason }
@@ -1167,8 +1141,8 @@ export async function endInterval(
               min: Math.min(...samples),
               max: Math.max(...samples),
             },
-    ...(details.extra ? { extra: details.extra } : {}),
-  };
+    readBody: bodyOf,
+  });
   if (EVIDENCE) {
     mkdirSync(join(EVIDENCE, "intervals"), { recursive: true });
     writeFileSync(
@@ -1186,27 +1160,34 @@ export async function endInterval(
 
 /**
  * A case that failed before ending its interval: the interval is kept as an INCOMPLETE record (never evidence; the runner reports it),
- * with every collected exchange, attempt, barrier and trace, BEFORE the tap and the proxy are reset. Memory sampling is stopped.
+ * with every collected exchange, attempt, barrier, release and trace, BEFORE the tap and the proxy are reset. Memory sampling is stopped.
  */
 export async function abandonOpenIntervals(reason: string) {
   for (const iv of [...open]) {
     open.delete(iv);
     const kept: Record<string, unknown> = {
-      schema: "web09c-pair-interval-incomplete/1",
+      schema: "web09c-pair-interval-incomplete/2",
       interval: iv.id,
       case: iv.caseId,
       engine: iv.engine,
       reason,
+      target: iv.target,
+      opening: iv.opening,
+      hand_off: iv.handOff,
       barriers: iv.barriers,
       attempts: iv.attempts,
       persisted: iv.persisted,
+      observations: iv.observations,
       traces: iv.traces,
     };
     try {
       kept.memory_samples = (await iv.heap.stop()).length;
-      const { records, collection } = await collect(iv);
-      kept.collection = collection;
-      kept.requests = records;
+      if (Number.isInteger(iv.since)) {
+        const { records, collection } = await collect(iv);
+        kept.collection = collection;
+        kept.requests = records;
+      } else await releaseHold(iv, "the case failed during the opening");
+      kept.hold_releases = iv.holdReleases;
     } catch (error) {
       kept.collection_error = String((error as Error)?.message ?? error);
     }
@@ -1226,33 +1207,12 @@ export async function abandonOpenIntervals(reason: string) {
 export const sha256 = (bytes: Buffer | string) =>
   createHash("sha256").update(bytes).digest("hex");
 
-// ---- the per-piece barrier driver ---------------------------------------------------------------------------------------------------
-export interface HeldStep {
-  record: TapRecord;
-  model: ChainModel;
-  before: Stored;
-  index: number;
-  /** Releases the held answer NOW (a hook that navigates the page away first, so the answer reaches nobody). */
-  release(): Promise<void>;
-}
-export interface HookAnswer {
-  /** false: the held answer must not reach the client (the hook reloaded or closed the page); it is released to nobody. */
-  delivered?: boolean;
-  /** Stop driving: the case continues by itself (a 410 recovery, a replaced page). */
-  stop?: boolean;
-}
+// ---- the per-piece barrier driver (scripts/integration/pair-driver.mjs `drive`), with the browser's IO --------------------------------
+export type HeldStep = DriverStep<TapRecord, Stored>;
 /**
- * Holds EVERY `/sync` answer at the delaying proxy (`hold`: the backend has answered; the tap has recorded the exact body) and, at each one
- * (the OLDEST held proxy entry, joined exactly to its tap record by the correlation id; pair-attempts.mjs): reads the stored state in one
- * transaction; checks it against the chain model (the client asks from the cursor it stored; a piece it received is persisted as the stage's
- * next index; a broken chain restarted at the boundary) and against the old live state (nothing of the revision is visible before the final
- * piece is released); counts the persistence of the previously received piece ONCE; then lets the case act (`onHeld`) and releases that one
- * entry, keeping the proxy's outcome. A held answer the hook made unreachable (`delivered: false`) is a LOST attempt: kept in `attempts`, not
- * in `steps`, and the model is not advanced, so the next request must ask from the unchanged stored cursor. An answer the tap dropped never
- * reaches the hold and is kept as a `dropped` attempt. After the feed's completion it waits for the activation (applied revision, no stage,
- * nothing staged) and records the barriers and the terminal references.
- *
- * `steps`: the answers the client RECEIVED, in order. `attempts`: every attempt.
+ * Drives the interval's held answers through the common driver: the hold is the interval's (its opening armed it), the workload is what
+ * `start` returns (the grant's receipt, the synthetic transaction's revision), the stored state is read with raw IndexedDB in one
+ * transaction. The interval keeps the attempts (even when the drive fails), the target, the terminal references and any hand-off.
  */
 export async function drivePieces(options: {
   page: () => Page;
@@ -1260,207 +1220,88 @@ export async function drivePieces(options: {
   iv: Interval;
   old: Stored;
   model: ChainModel;
-  /** Runs once the hold is in force and before the engine is nudged: the grant (or the synthetic batch), and any fault to arm. */
-  start: () => Promise<void>;
+  /** Runs with the hold in force and before the engine is nudged: the grant (or the synthetic batch), and any fault to arm. */
+  start: () => Promise<Milestone>;
   onHeld?: (step: HeldStep) => Promise<HookAnswer | undefined>;
   maxSteps?: number;
-}): Promise<{
-  model: ChainModel;
-  steps: TapRecord[];
-  attempts: Attempt[];
-  final: Stored | null;
-  stoppedAt: TapRecord | null;
-}> {
-  const { account, iv, old } = options;
-  let model = options.model;
-  const rule = await proxy.addRule({
-    method: "GET",
-    path: SYNC,
-    action: "hold",
-  });
-  const ruleId = rule.id;
+}): Promise<Driven<TapRecord, Stored>> {
+  const { account, iv } = options;
+  if (!iv.hold || iv.hold.closed)
+    throw new Error("the interval's hold is not in force");
   const ledger = createLedger();
   iv.attempts = ledger.attempts;
   iv.persisted = ledger.persisted;
-  const steps: TapRecord[] = [];
-  const handled = new Set<number>();
-  let finalSeq: number | null = null;
-  let activatedBy: number | null = null;
-  try {
-    await options.start();
-    barrier(iv, "grant_complete");
-    await nudge(options.page());
-    for (let index = 0; index < (options.maxSteps ?? 600); index += 1) {
-      // The next held answer: the oldest held proxy entry and the one tap record that carries its id.
-      let picked: { proxyId: number; record: TapRecord } | null = null;
-      const deadline = Date.now() + 90_000;
-      for (;;) {
-        const held = (await holds.entries())[ruleId] ?? [];
-        const records = syncRecords(await tap.log(iv.since)).filter(
-          (r) => r.label === iv.id,
-        );
-        // An answer the tap dropped never reaches the hold: it is kept as a dropped attempt.
-        for (const r of records)
-          if (r.dropped && !handled.has(r.seq)) {
-            handled.add(r.seq);
-            ledger.unheld(r, "not held (the tap destroyed the connection)");
-          }
-        picked = pickHeld(held, records);
-        if (picked) break;
-        if (Date.now() > deadline)
-          throw new Error(
-            `no /sync answer was held within 90 s (after step ${index})`,
-          );
-        await new Promise((r) => setTimeout(r, 25));
-      }
-      const { record, proxyId } = picked;
-      handled.add(record.seq);
-      const before = (await stored(options.page(), account)) as Stored;
-      // The client asks from the cursor it stored, and has stored what the model says.
-      expect(
-        record.query?.cursor ?? null,
-        `step ${index}: the request carries the stored cursor`,
-      ).toBe(model.cursor);
-      expect(before.cursor, `step ${index}: stored cursor`).toBe(model.cursor);
-      expect(
-        before.delta_stage?.next_index ?? null,
-        `step ${index}: stored stage`,
-      ).toBe(model.stage?.next_index ?? null);
-      // The previously RECEIVED, staged piece is persisted (witnessed now, at this request): counted once, never per observation.
-      const persisted = ledger.observe({
-        atSeq: record.seq,
-        stage: before.delta_stage,
-      });
-      if (persisted) {
-        iv.piecesPersisted += 1;
-        barrier(iv, "piece_persisted", persisted);
-      }
-      // Nothing of the revision is visible before its final piece is released (I3): the live cache and its bookkeeping are the old ones.
-      if (model.activated === null) {
-        expect(before.cache_digest, `step ${index}: live cache unchanged`).toBe(
-          old.cache_digest,
-        );
-        expect(
-          before.applied_revision,
-          `step ${index}: applied revision unchanged`,
-        ).toBe(old.applied_revision);
-        expect(
-          before.page_seq,
-          `step ${index}: page_seq unchanged (W27 does not advance it)`,
-        ).toBe(old.page_seq);
-        expect(
-          before.composition_seq,
-          `step ${index}: composition unchanged (W27 does not advance it)`,
-        ).toBe(old.composition_seq);
-      }
-      const attempt = ledger.open({ step: index, record, proxyId });
-      // The proxy's outcome of releasing THIS entry (a socket write, or the client already gone).
-      const delivery: { outcome: string | null } = { outcome: null };
-      const release = async () => {
-        if (delivery.outcome !== null) return;
-        const released = await holds.releaseOne(ruleId, proxyId);
-        if (released.released !== 1)
-          throw new Error(
-            `step ${index}: releasing proxy entry ${proxyId} released ${released.released}`,
-          );
-        delivery.outcome = released.outcomes[0]?.outcome ?? "unknown";
-      };
-      const answer =
-        (await options.onHeld?.({ record, model, before, index, release })) ??
-        {};
-      await release();
-      const reached = answer.delivered !== false;
-      const next = reached ? advance(model, record) : model;
-      ledger.settle(attempt, {
-        reached,
-        downstream: delivery.outcome ?? "unknown",
-        effect: effectOf(model, next),
-      });
-      if (
-        reached &&
-        next.activated !== model.activated &&
-        next.activated !== null
-      )
-        activatedBy = record.seq;
-      model = next;
-      if (reached) steps.push(record);
-      const final =
-        seen(record).status === 200 && seen(record).has_more === false;
-      if (final && reached)
-        barrier(iv, "final_released", {
-          seq: record.seq,
-          proxy_id: proxyId,
-          outcome: delivery.outcome,
-        });
-      if (answer.stop)
-        return {
-          model,
-          steps,
-          attempts: ledger.attempts,
-          final: null,
-          stoppedAt: record,
+  const read = async (rows = false) => {
+    const s = await stored(options.page(), account, rows);
+    if (!s) throw new Error("the account database is not there");
+    return s;
+  };
+  const run = await drive<TapRecord, Stored>(
+    {
+      held: async (rule) => (await holds.entries())[rule] ?? [],
+      records: async () =>
+        syncRecords(await tap.log(iv.since)).filter((r) => r.label === iv.id),
+      read: () => read(),
+      release: (rule, entry) => holds.releaseOne(rule, entry),
+      nudge: () => nudge(options.page()),
+      waitFor: (predicate, what, o) =>
+        until(() => read(o?.rows ?? false), predicate, what),
+      barrier: (name, detail) => {
+        if (name === "piece_persisted") iv.piecesPersisted += 1;
+        barrier(iv, name, detail);
+      },
+      now: () => Date.now(),
+      sleep,
+    },
+    {
+      ruleId: iv.hold.ruleId,
+      base: options.old,
+      model: options.model,
+      start: async () => {
+        const first = await options.start();
+        iv.target = {
+          revisions: [first.revision],
+          through: first.revision,
+          sources: [first],
         };
-      if (final && reached) {
-        finalSeq = record.seq;
-        break;
-      }
-    }
-    if (finalSeq === null)
-      throw new Error("the revision did not finish within the step bound");
-    await proxy.removeRule(ruleId);
-    await proxy.release(ruleId);
-    const done = await until(
-      () => stored(options.page(), account, true),
-      (s) =>
-        s.applied_revision === model.activated &&
-        s.delta_stage === null &&
-        s.staged === 0,
-      "the activation",
-    );
-    barrier(iv, "activation_complete", {
-      applied_revision: done.applied_revision,
-      activated_by_seq: activatedBy,
-    });
-    iv.terminal = {
-      final_seq: finalSeq,
-      activated_by_seq: activatedBy as number,
-    };
-    return {
-      model,
-      steps,
-      attempts: ledger.attempts,
-      final: done,
-      stoppedAt: null,
-    };
-  } finally {
-    await proxy.removeRule(ruleId).catch(() => undefined);
-    await proxy.release(ruleId).catch(() => undefined);
-  }
+        return first;
+      },
+      onHeld: options.onHeld,
+      ledger,
+      maxSteps: options.maxSteps,
+    },
+  );
+  iv.target = { ...run.goal, sources: run.sources };
+  iv.terminal = run.terminal;
+  iv.handOff = run.handOff;
+  return run;
 }
 
-/** The common opening: the complete old state, the interval begun, the pre-grant cursor read. */
+/** The common opening: the complete old state, the interval begun and opened (the hold armed), the old state read once, rows included. */
 export async function preGrant(
   page: Page,
   account: string,
   caseId: string,
   engine: string,
 ) {
-  const old = await untilComplete(page, account);
-  const oldRows = (await stored(page, account, true))?.rows ?? [];
-  const iv = await beginInterval(page, caseId, engine);
-  // Read AFTER the label is in force: an empty live-edge poll keeps the cursor (the server reuses it), so this is the interval's start.
-  const at = (await stored(page, account)) as Stored;
+  await untilComplete(page, account);
+  const iv = await beginInterval(page, account, caseId, engine);
+  // Read AFTER the opening: every /sync admitted before the hold settled, the page idle, every later answer held. ONE read, rows included.
+  const at = (await stored(page, account, true)) as Stored;
   expect(
-    at.cursor,
-    "no request moved the cursor while the interval began",
-  ).toBe(old.cursor);
+    isComplete(at),
+    "the old state is complete at the pre-grant barrier",
+  ).toBe(true);
+  const { rows, ...old } = at;
   barrier(iv, "pre_grant_complete", {
     cursor_sha256: sha256(String(at.cursor)),
     cache_count: at.cache_count,
+    cache_digest: at.cache_digest,
+    page_seq: at.page_seq,
   });
   return {
-    old: at,
-    oldRows,
+    old: old as Stored,
+    oldRows: rows ?? [],
     iv,
     model: {
       cursor: at.cursor as string,
@@ -1468,6 +1309,7 @@ export async function preGrant(
       stage: null,
       activated: null,
       restarted: 0,
-    },
+      pages: 0,
+    } satisfies ChainModel,
   };
 }

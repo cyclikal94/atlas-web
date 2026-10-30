@@ -15,6 +15,7 @@ interface ModelLike {
   stage: { revision: number; next_index: number } | null;
   activated: number | null;
   restarted: number;
+  pages?: number;
 }
 export function effectOf(before: ModelLike, after: ModelLike): string;
 export interface Attempt {
@@ -25,6 +26,9 @@ export interface Attempt {
   segment: { index: number; last: boolean } | null;
   revision: number | null;
   sha256: string | null;
+  /** The server's answer to the workload (pair-driver.mjs roleOf) and where the drive was (revision 25). */
+  role: string | null;
+  phase: string | null;
   client: "received" | "lost" | "dropped" | null;
   downstream: string | null;
   effect: string | null;
@@ -47,6 +51,8 @@ export function createLedger(): {
       sha256?: string;
     };
     proxyId: number;
+    role?: string | null;
+    phase?: string | null;
   }): Attempt;
   observe(o: {
     atSeq: number;
@@ -64,6 +70,7 @@ export function createLedger(): {
       query?: { cursor: string | null };
     },
     downstream: string,
+    view?: { role?: string | null; phase?: string | null },
   ): Attempt;
   received(): Attempt[];
 };

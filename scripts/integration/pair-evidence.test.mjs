@@ -1,8 +1,10 @@
-// WEB-09c R23-PAIR (I7), revision 24 (R23-PAIR.b): a paired interval record is evidence only when it binds one interval's complete
-// collection, exchanges, upstream AND altered bodies (re-read and re-parsed), downstream outcomes, barriers, terminal references, oracle and
-// memory. The positive controls are built from GENUINE sync bodies (the shapes the backend answers: whole pages, pieces, a piece that is the
-// revision's last while the feed continues, an empty live-edge page, a snapshot, Atlas error bodies) and must be accepted; each corruption
-// must be refused by its own named check.
+// WEB-09c R23-PAIR (I7), revision 24 (R23-PAIR.b), revision 25 (DA-PAIR-E, schema 3): a paired interval record is evidence only when it
+// binds one interval's complete collection, exchanges, upstream AND altered bodies (re-read and re-parsed), downstream outcomes, barriers,
+// terminal references, oracle and memory, and (schema 3) closes over what it advertises: its target, how it was driven, every attempt and
+// held answer, exactly the persistence and activation witnesses the attempts require, and the case's required observations. The positive
+// controls are built from GENUINE sync bodies (the shapes the backend answers: whole pages, pieces, a piece that is the revision's last
+// while the feed continues, an empty live-edge page, a snapshot, Atlas error bodies) and must be accepted; each corruption must be refused
+// by its own named check. Records the COMMON DRIVER itself produced are validated in pair-driver.test.mjs.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
@@ -70,6 +72,13 @@ const whole = (revisions, hasMore, next, phase = "delta") =>
       has_more: hasMore,
     }),
   );
+const error401 = Buffer.from(
+  JSON.stringify({
+    code: "invalid_session",
+    message: "the session is no longer valid",
+    details: [],
+  }),
+);
 const error410 = Buffer.from(
   JSON.stringify({
     code: "resync_required",
@@ -78,13 +87,27 @@ const error410 = Buffer.from(
   }),
 );
 
-/** A sync exchange as the interval record carries it. */
+/** What receiving `bytes` does to the client's chain (the driver's effect): a final piece or a page with batches activates, a piece stages. */
+function effectOfBytes(bytes, status) {
+  if (status !== 200) return "none";
+  const d = describeSync(bytes);
+  if (d.segment) return d.segment.last ? "activated" : "staged";
+  return d.batches > 0 ? "activated" : "committed";
+}
+/** A sync exchange as the interval record carries it. `held: false`: an answer the hold never held (a recovery after a hand-off). */
 function exchange(
   w,
   seq,
   cursor,
   bytes,
-  { status = 200, client = "received", step = null, outcome } = {},
+  {
+    status = 200,
+    client = "received",
+    step = null,
+    outcome,
+    held = true,
+    effect,
+  } = {},
 ) {
   return {
     seq,
@@ -97,9 +120,21 @@ function exchange(
     ...w.describe(bytes, "upstream"),
     downstream: {
       outcome: outcome ?? (client === "lost" ? "client_gone" : "delivered"),
-      events: ["upstream_response", "held", "delivered"],
+      events: held
+        ? ["upstream_response", "held", "delivered"]
+        : ["upstream_response", "delivered"],
     },
-    ...(step === null ? {} : { attempt: { step, client, effect: "staged" } }),
+    ...(step === null
+      ? {}
+      : {
+          attempt: {
+            step,
+            client,
+            effect:
+              effect ??
+              (client === "lost" ? "none" : effectOfBytes(bytes, status)),
+          },
+        }),
   };
 }
 const other = (seq) => ({
@@ -116,33 +151,117 @@ const memory = {
   scope: "whole page",
   samples: [10, 12],
 };
+/** The server's answer to the workload, as the driver names it (pair-driver.mjs roleOf). */
+const roleOf = (r, revisions) =>
+  r.status !== 200
+    ? "other"
+    : !(r.batches > 0)
+      ? "incidental"
+      : revisions.includes(r.revision) && revisions.includes(r.last_revision)
+        ? "target"
+        : "unrelated";
+/**
+ * Schema 3's closure, as the producer writes it: the target (default: the terminal's revision), the drive mode, the opening, the hold's
+ * releases, the observations, the top-level attempts (the same as each exchange's join, with its role), the bound pre-grant and grant
+ * barriers, and one durable target_activated per activating attempt (placed before final_released). Negatives mutate the result.
+ */
+function finish(record, extra) {
+  const revisions = extra.target ?? [record.terminal.applied_revision];
+  record.target = {
+    revisions,
+    through: revisions.at(-1),
+    sources: revisions.map((revision) => ({
+      revision,
+      source: "the public grant receipt (POST /access-commands)",
+    })),
+  };
+  record.driven = extra.driven ?? "full";
+  record.hand_off = extra.hand_off ?? null;
+  record.opening = {
+    label_seq: record.collection.since,
+    rounds: 1,
+    released: [],
+  };
+  record.hold_releases = extra.hold_releases ?? [];
+  record.required_observations = extra.required_observations ?? [];
+  record.observations = extra.observations ?? [];
+  record.attempts = record.requests
+    .filter((r) => r.attempt)
+    .map((r) => ({
+      step: r.attempt.step,
+      seq: r.seq,
+      proxy_id: r.proxy_id,
+      request_cursor: r.query?.cursor ?? null,
+      segment: r.segment ?? null,
+      revision: r.revision ?? null,
+      sha256: r.sha256,
+      role: roleOf(r, revisions),
+      phase: null,
+      client: r.attempt.client,
+      downstream: r.downstream.outcome,
+      effect: r.attempt.effect,
+    }));
+  const barriers = record.barriers;
+  barriers[0].detail = { cache_digest: "old-cache" };
+  barriers[1].detail = { revision: revisions[0] };
+  if (record.driven !== "none") {
+    const witnesses = record.attempts
+      .filter((a) => a.client === "received" && a.effect === "activated")
+      .map((a) => {
+        const r = record.requests.find((x) => x.seq === a.seq);
+        const s = r.delivered ?? r;
+        return {
+          name: "target_activated",
+          detail: {
+            revision: s.segment ? s.revision : s.last_revision,
+            activated_by_seq: a.seq,
+            page_seq: 1,
+            cache_digest: `cache-${a.seq}`,
+            cache_count: 3,
+          },
+        };
+      });
+    const at = barriers.findIndex(
+      (b) => b.name === "final_released" || b.name === "activation_complete",
+    );
+    barriers.splice(at < 0 ? barriers.length : at, 0, ...witnesses);
+  }
+  barriers.forEach((b, i) => {
+    b.at = 1 + i;
+  });
+  return record;
+}
 function base(_w, requests, others, extra) {
   const seqs = [...requests, ...others].map((r) => r.seq);
-  return {
-    schema: SCHEMA,
-    interval: "PAIR-W2:chromium:iv",
-    case: "PAIR-W2",
-    engine: "chromium",
-    backend: "development",
-    selection_manifest_sha256: "f434df4a",
-    workload: "W-real",
-    synthetic: false,
-    pre_grant_cursor: "c0",
-    collection: {
-      since: Math.min(...seqs) - 1,
-      until: Math.max(...seqs),
-      dropped_through: 0,
-      pending_writes: 0,
-      write_errors: [],
-      unsettled: [],
+  const { target, driven, hand_off, hold_releases, ...rest } = extra;
+  return finish(
+    {
+      schema: SCHEMA,
+      interval: "PAIR-W2:chromium:iv",
+      case: "PAIR-W2",
+      engine: "chromium",
+      backend: "development",
+      selection_manifest_sha256: "f434df4a",
+      workload: "W-real",
+      synthetic: false,
+      pre_grant_cursor: "c0",
+      collection: {
+        since: Math.min(...seqs) - 1,
+        until: Math.max(...seqs),
+        dropped_through: 0,
+        pending_writes: 0,
+        write_errors: [],
+        unsettled: [],
+      },
+      requests,
+      other_requests: others,
+      unaltered: true,
+      oracle: { verdict: "match", problems: [] },
+      memory: structuredClone(memory),
+      ...rest,
     },
-    requests,
-    other_requests: others,
-    unaltered: true,
-    oracle: { verdict: "match", problems: [] },
-    memory: structuredClone(memory),
-    ...extra,
-  };
+    { target, driven, hand_off, hold_releases },
+  );
 }
 const barriers = (...rest) => [
   { name: "pre_grant_complete", at: 1 },
@@ -177,7 +296,6 @@ function segmented() {
       released(14),
       activation(7, 14),
     ),
-    barriered: true,
     pieces_persisted: 2,
     terminal: {
       kind: "activated",
@@ -203,7 +321,7 @@ test("accepted: a driven segmented revision, every body re-read and re-parsed", 
   accept(segmented());
 });
 
-test("accepted: ONE whole response (W1), barriered", () => {
+test("accepted: ONE whole response (W1), fully driven", () => {
   const w = world();
   const record = base(
     w,
@@ -211,7 +329,6 @@ test("accepted: ONE whole response (W1), barriered", () => {
     [other(11)],
     {
       barriers: barriers(released(12), activation(7, 12)),
-      barriered: true,
       pieces_persisted: 0,
       terminal: {
         kind: "activated",
@@ -232,8 +349,8 @@ test("accepted: the revision's last piece while the feed continues (segment.last
     exchange(w, 14, "c2", whole([8], false, "c3"), { step: 2 }),
   ];
   const record = base(w, requests, [other(11)], {
+    target: [7, 8],
     barriers: barriers(persisted(12, 13), released(14), activation(8, 14)),
-    barriered: true,
     pieces_persisted: 1,
     terminal: {
       kind: "activated",
@@ -254,7 +371,6 @@ test("accepted: the revision activated by its last piece, the feed completed by 
   ];
   const record = base(w, requests, [], {
     barriers: barriers(persisted(12, 13), released(14), activation(7, 13)),
-    barriered: true,
     pieces_persisted: 1,
     terminal: {
       kind: "activated",
@@ -288,7 +404,6 @@ function lostAndRetried() {
       released(17),
       activation(7, 17),
     ),
-    barriered: true,
     pieces_persisted: 4,
     terminal: {
       kind: "activated",
@@ -325,7 +440,6 @@ test("accepted: an answer the TAP dropped (the server answered; nothing reached 
       released(16),
       activation(7, 16),
     ),
-    barriered: true,
     pieces_persisted: 3,
     terminal: {
       kind: "activated",
@@ -367,7 +481,6 @@ function injectedPiece() {
       released(16),
       activation(7, 16),
     ),
-    barriered: true,
     pieces_persisted: 3,
     terminal: {
       kind: "activated",
@@ -382,11 +495,11 @@ test("accepted: an altered (TAP-INJECTED) piece delivered, its own bytes retaine
   accept(injectedPiece());
 });
 
-/** X1: piece 2 answered 410 by the tap (client-only), the recovery's cursor-less snapshot, non-barriered. */
+/** X1: piece 1 answered 410 by the tap (client-only): driven up to that hand-off, then the recovery's cursor-less snapshot, unheld. */
 function injected410() {
   const w = world();
   const p1 = piece(7, 1, false, true, "c2");
-  const faulted = exchange(w, 13, "c1", p1);
+  const faulted = exchange(w, 13, "c1", p1, { step: 1, effect: "none" });
   const bytes = Buffer.from(JSON.stringify(INJECTED_410));
   faulted.delivered = {
     injected: "TAP-INJECTED answer_410",
@@ -394,19 +507,24 @@ function injected410() {
     ...w.describe(bytes, "delivered"),
   };
   const requests = [
-    exchange(w, 12, "c0", piece(7, 0, false, true, "c1")),
+    exchange(w, 12, "c0", piece(7, 0, false, true, "c1"), { step: 0 }),
     faulted,
-    exchange(w, 14, null, whole([7], true, "s1", "snapshot")),
-    exchange(w, 15, "s1", whole([7], false, "s2", "snapshot")),
+    exchange(w, 14, null, whole([7], true, "s1", "snapshot"), {
+      held: false,
+    }),
+    exchange(w, 15, "s1", whole([7], false, "s2", "snapshot"), {
+      held: false,
+    }),
   ];
   const record = base(w, requests, [other(11)], {
     unaltered: false,
-    barriers: barriers({
+    driven: "prefix",
+    hand_off: { at_seq: 13, reason: "the injected 410" },
+    barriers: barriers(persisted(12, 13), {
       name: "activation_complete",
       detail: { recovered: true, applied_revision: 7 },
     }),
-    barriered: false,
-    pieces_persisted: 0,
+    pieces_persisted: 1,
     terminal: {
       kind: "recovered",
       applied_revision: 7,
@@ -425,7 +543,7 @@ test("accepted: a REAL 410 for a tampered continuation (the altered piece retain
   const p0 = piece(7, 0, false, true, "c1");
   const tampered = JSON.parse(p0.toString("utf8"));
   tampered.next_cursor = "c1X";
-  const t0 = exchange(w, 12, "c0", p0);
+  const t0 = exchange(w, 12, "c0", p0, { step: 0 });
   t0.delivered = {
     injected: "TAP-INJECTED tamper_next_cursor",
     status: 200,
@@ -433,17 +551,20 @@ test("accepted: a REAL 410 for a tampered continuation (the altered piece retain
   };
   const requests = [
     t0,
-    exchange(w, 13, "c1X", error410, { status: 410 }),
-    exchange(w, 14, null, whole([7], false, "s1", "snapshot")),
+    exchange(w, 13, "c1X", error410, { status: 410, step: 1 }),
+    exchange(w, 14, null, whole([7], false, "s1", "snapshot"), {
+      held: false,
+    }),
   ];
   const record = base(w, requests, [other(11)], {
     unaltered: false,
-    barriers: barriers({
+    driven: "prefix",
+    hand_off: { at_seq: 13, reason: "the server's 410" },
+    barriers: barriers(persisted(12, 13), {
       name: "activation_complete",
       detail: { recovered: true, applied_revision: 7 },
     }),
-    barriered: false,
-    pieces_persisted: 0,
+    pieces_persisted: 1,
     terminal: {
       kind: "recovered",
       applied_revision: 7,
@@ -457,12 +578,12 @@ test("accepted: a REAL 410 for a tampered continuation (the altered piece retain
 test("accepted: a non-barriered catch-up in pieces (RC1: the fenced recovery's reads, not driven)", () => {
   const w = world();
   const requests = [
-    exchange(w, 12, "c0", piece(7, 0, false, true, "c1")),
-    exchange(w, 13, "c1", piece(7, 1, true, false, "c2")),
+    exchange(w, 12, "c0", piece(7, 0, false, true, "c1"), { held: false }),
+    exchange(w, 13, "c1", piece(7, 1, true, false, "c2"), { held: false }),
   ];
   const record = base(w, requests, [other(11)], {
+    driven: "none",
     barriers: barriers(activation(7, 13)),
-    barriered: false,
     pieces_persisted: 0,
     terminal: {
       kind: "activated",
@@ -602,12 +723,12 @@ test("refused: a recovered interval without any 410 before its activation", () =
 test("refused: the activating answer after the feed's completion", () => {
   const w = world();
   const requests = [
-    exchange(w, 12, "c0", whole([], false, "c0")),
-    exchange(w, 13, "c0", whole([7], false, "c1")),
+    exchange(w, 12, "c0", whole([], false, "c0"), { held: false }),
+    exchange(w, 13, "c0", whole([7], false, "c1"), { held: false }),
   ];
   const record = base(w, requests, [], {
+    driven: "none",
     barriers: barriers(activation(7, 13)),
-    barriered: false,
     pieces_persisted: 0,
     terminal: {
       kind: "activated",
@@ -876,8 +997,14 @@ test("refused: the other (non-sync) exchange removed from the record", () => {
 for (const [name, mutate, expected] of [
   [
     "the activation before the final release",
-    (r) => r.barriers.splice(4, 2, r.barriers[5], r.barriers[4]),
-    /final_released after activation_complete/,
+    (r) => {
+      const at = r.barriers.findIndex((b) => b.name === "final_released");
+      r.barriers.splice(at, 2, r.barriers[at + 1], r.barriers[at]);
+      r.barriers.forEach((b, i) => {
+        b.at = 1 + i;
+      });
+    },
+    /final_released out of order/,
   ],
   [
     "time going backwards",
@@ -890,13 +1017,17 @@ for (const [name, mutate, expected] of [
     /missing barrier activation_complete/,
   ],
   [
-    "a piece count that differs from the barriers",
+    "a piece count that differs from the witnesses the attempts require",
     (r) => (r.pieces_persisted = 3),
-    /piece_persisted barriers/,
+    /3 pieces persisted recorded, 2 derived from the attempts/,
   ],
   [
-    "a barriered interval without its final release",
-    (r) => r.barriers.splice(4, 1),
+    "a fully driven interval without its final release",
+    (r) =>
+      r.barriers.splice(
+        r.barriers.findIndex((b) => b.name === "final_released"),
+        1,
+      ),
     /0 final_released barriers/,
   ],
   [
@@ -941,9 +1072,363 @@ for (const [name, mutate, expected] of [
     (r) => (r.schema = "web09c-pair-interval/1"),
     /schema "web09c-pair-interval\/1"/,
   ],
+  [
+    "a schema-2 record (never upgraded or re-annotated)",
+    (r) => (r.schema = "web09c-pair-interval/2"),
+    /schema "web09c-pair-interval\/2"/,
+  ],
 ])
   test(`refused: ${name}`, () => {
     const s = segmented();
+    mutate(s.record);
+    refuse(s, expected, name);
+  });
+
+// ---- schema 3 (revision 25, DA-PAIR-E): the record closes over what it advertises --------------------------------------------------
+/** R24-PAIR.c's schedule, driven correctly: an empty poll answered during the grant (incidental), then the target's pieces, held each. */
+function prefixed() {
+  const w = world();
+  const requests = [
+    exchange(w, 12, "c0", whole([], false, "c0"), { step: 0 }),
+    exchange(w, 13, "c0", piece(7, 0, false, true, "c1"), { step: 1 }),
+    exchange(w, 14, "c1", piece(7, 1, false, true, "c2"), { step: 2 }),
+    exchange(w, 15, "c2", piece(7, 2, true, false, "c3"), { step: 3 }),
+  ];
+  const record = base(w, requests, [other(11)], {
+    barriers: barriers(
+      persisted(13, 14),
+      persisted(14, 15),
+      released(15),
+      activation(7, 15),
+    ),
+    pieces_persisted: 2,
+    terminal: {
+      kind: "activated",
+      applied_revision: 7,
+      final_seq: 15,
+      activated_by_seq: 15,
+    },
+  });
+  return { w, record };
+}
+/** T1: the last piece activates with the feed continuing; an empty page completes it; the follower read at both holds. */
+function follower() {
+  const w = world();
+  const requests = [
+    exchange(w, 12, "c0", piece(7, 0, false, true, "c1"), { step: 0 }),
+    exchange(w, 13, "c1", piece(7, 1, true, true, "c2"), { step: 1 }),
+    exchange(w, 14, "c2", whole([], false, "c2"), { step: 2 }),
+  ];
+  const record = base(w, requests, [], {
+    barriers: barriers(persisted(12, 13), released(14), activation(7, 13)),
+    pieces_persisted: 1,
+    terminal: {
+      kind: "activated",
+      applied_revision: 7,
+      final_seq: 14,
+      activated_by_seq: 13,
+    },
+  });
+  record.case = "PAIR-T1";
+  record.required_observations = [
+    "follower_old_at_last_piece",
+    "follower_new_after_activation",
+  ];
+  record.observations = [
+    {
+      kind: "follower_old_at_last_piece",
+      at_seq: 13,
+      cache_digest: "old-cache",
+    },
+    {
+      kind: "follower_new_after_activation",
+      at_seq: 14,
+      cache_digest: "cache-13",
+    },
+  ];
+  return { w, record };
+}
+test("accepted: an EMPTY poll before the target (R24-PAIR.c's schedule) kept as an incidental attempt, then the target driven to its activation", () => {
+  accept(prefixed());
+});
+test("accepted: T1's follower observations at the held last piece (old cache) and at the completion page after the activation (new cache)", () => {
+  accept(follower());
+});
+test("accepted: an answer held after the feed's completion, released with the hold at the end of the interval (kept as a release)", () => {
+  const s = segmented();
+  const w = s.w;
+  const late = exchange(w, 15, "c3", whole([], false, "c3"));
+  s.record.requests.push(late);
+  s.record.collection.until = 15;
+  s.record.hold_releases = [
+    {
+      proxy_id: late.proxy_id,
+      outcome: "delivered",
+      reason: "the end of the interval",
+    },
+  ];
+  accept(s);
+});
+test("accepted: L1, driven up to an explicit hand-off (piece 1 held, the session replaced), then the recovery's catch-up unheld to the activation", () => {
+  const w = world();
+  const requests = [
+    exchange(w, 12, "c0", piece(7, 0, false, true, "c1"), { step: 0 }),
+    exchange(w, 13, "c1", piece(7, 1, false, true, "c2"), { step: 1 }),
+    exchange(w, 14, "c2", error401, { status: 401, held: false }),
+    exchange(w, 15, "c2", piece(7, 2, true, false, "c3"), { held: false }),
+  ];
+  const record = base(w, requests, [other(11)], {
+    driven: "prefix",
+    hand_off: { at_seq: 13, reason: "the session was replaced" },
+    barriers: barriers(persisted(12, 13), activation(7, 15)),
+    pieces_persisted: 1,
+    terminal: {
+      kind: "activated",
+      applied_revision: 7,
+      final_seq: 15,
+      activated_by_seq: 15,
+    },
+  });
+  accept({ w, record });
+});
+
+for (const [name, build, mutate, expected] of [
+  // DA-PAIR-E's demonstrated omissions: removing every witness or every attempt and held event was accepted by schema 2.
+  [
+    "every persistence witness removed and the count adjusted",
+    prefixed,
+    (r) => {
+      r.barriers = r.barriers.filter((b) => b.name !== "piece_persisted");
+      r.pieces_persisted = 0;
+    },
+    /staged piece 13 has no persistence witness at the next held request 14/,
+  ],
+  [
+    "one persistence witness removed and the count adjusted",
+    prefixed,
+    (r) => {
+      r.barriers.splice(
+        r.barriers.findIndex((b) => b.name === "piece_persisted"),
+        1,
+      );
+      r.pieces_persisted = 1;
+    },
+    /staged piece 13 has no persistence witness/,
+  ],
+  [
+    "every attempt and held event removed",
+    prefixed,
+    (r) => {
+      r.attempts = [];
+      for (const x of r.requests) {
+        delete x.attempt;
+        x.downstream.events = x.downstream.events.filter((e) => e !== "held");
+      }
+    },
+    /exchange 12 precedes the end of the drive but is no attempt/,
+  ],
+  [
+    "one exchange's attempt removed from both lists",
+    prefixed,
+    (r) => {
+      r.attempts = r.attempts.filter((a) => a.seq !== 14);
+      delete r.requests[2].attempt;
+    },
+    /exchange 14 precedes the end of the drive but is no attempt/,
+  ],
+  [
+    "a driven attempt whose answer the proxy never held",
+    prefixed,
+    (r) =>
+      (r.requests[1].downstream.events = ["upstream_response", "delivered"]),
+    /attempt 13 was driven, but the proxy never held its answer/,
+  ],
+  [
+    "the top-level attempts disagreeing with an exchange's join",
+    prefixed,
+    (r) => (r.attempts[1].effect = "none"),
+    /attempt 13: the exchange's join is not the attempt/,
+  ],
+  [
+    "a top-level attempt missing (the exchange still carries it)",
+    prefixed,
+    (r) => (r.attempts = r.attempts.filter((a) => a.seq !== 13)),
+    /exchange 13 carries an attempt the record does not list/,
+  ],
+  [
+    "an attempt's role not the server's answer's",
+    prefixed,
+    (r) => (r.attempts[0].role = "target"),
+    /attempt 12: role target, the server's answer is incidental/,
+  ],
+  [
+    "a held answer neither an attempt nor a recorded release",
+    segmented,
+    (r) => {
+      r.requests.push(exchange(world(), 15, "c3", whole([], false, "c3")));
+      r.collection.until = 15;
+    },
+    /exchange 15 was held, but is neither an attempt nor a recorded release/,
+  ],
+  [
+    "the EMPTY prefix poll named as the feed's completion (R24-PAIR.c's terminal)",
+    prefixed,
+    (r) => {
+      r.terminal.final_seq = 12;
+      r.barriers.find((b) => b.name === "final_released").detail.seq = 12;
+    },
+    /the activating answer comes after the feed's completion/,
+  ],
+  [
+    "the EMPTY prefix poll named as the activating answer",
+    prefixed,
+    (r) => (r.terminal.activated_by_seq = 12),
+    /answer 12 does not activate revision 7/,
+  ],
+  [
+    "a terminal revision that is not the target's",
+    segmented,
+    (r) => {
+      r.target = {
+        revisions: [6],
+        through: 6,
+        sources: [{ revision: 6, source: "receipt" }],
+      };
+      r.barriers[1].detail.revision = 6;
+    },
+    /the terminal revision 7 is not the target's 6/,
+  ],
+  [
+    "a received piece of an UNRELATED revision",
+    segmented,
+    (r) => {
+      r.target = {
+        revisions: [6],
+        through: 6,
+        sources: [{ revision: 6, source: "receipt" }],
+      };
+    },
+    /exchange 12: revision 7..7 is not a target revision/,
+  ],
+  [
+    "no target",
+    segmented,
+    (r) => delete r.target,
+    /the target names no increasing positive revisions/,
+  ],
+  [
+    "a target revision without its source",
+    segmented,
+    (r) => (r.target.sources = []),
+    /a target revision names no source/,
+  ],
+  [
+    "grant_complete not bound to the target",
+    segmented,
+    (r) => (r.barriers[1].detail.revision = 99),
+    /grant_complete does not name the target's first revision/,
+  ],
+  [
+    "the activation's durable witness removed",
+    segmented,
+    (r) =>
+      (r.barriers = r.barriers.filter((b) => b.name !== "target_activated")),
+    /0 target_activated barriers, 1 activating attempts/,
+  ],
+  [
+    "the activation's durable witness naming another answer",
+    segmented,
+    (r) =>
+      (r.barriers.find(
+        (b) => b.name === "target_activated",
+      ).detail.activated_by_seq = 13),
+    /the activation by 14 has no durable witness/,
+  ],
+  [
+    "a partly driven record without its hand-off",
+    injected410,
+    (r) => (r.hand_off = null),
+    /a partly driven record names no hand-off/,
+  ],
+  [
+    "a hand-off at an exchange that was not driven",
+    injected410,
+    (r) => (r.hand_off.at_seq = 14),
+    /the hand-off 14 is not a driven attempt/,
+  ],
+  [
+    "a fully driven record labelled undriven",
+    segmented,
+    (r) => (r.driven = "none"),
+    /an undriven record lists attempts/,
+  ],
+  ["no drive mode", segmented, (r) => delete r.driven, /driven undefined/],
+  [
+    "the window not starting at the opening's label",
+    segmented,
+    (r) => (r.opening.label_seq = 3),
+    /the window does not start at the opening's label/,
+  ],
+  [
+    "no opening",
+    segmented,
+    (r) => delete r.opening,
+    /the opening .* is not recorded/,
+  ],
+  [
+    "no record of the hold's releases",
+    segmented,
+    (r) => delete r.hold_releases,
+    /the hold's releases are not recorded/,
+  ],
+  [
+    "no old cache digest at the pre-grant barrier",
+    segmented,
+    (r) => delete r.barriers[0].detail,
+    /pre_grant_complete names no old cache digest/,
+  ],
+  [
+    "T1's last-piece observation removed",
+    follower,
+    (r) => r.observations.shift(),
+    /the required observation follower_old_at_last_piece is missing/,
+  ],
+  [
+    "T1's last-piece observation made at an earlier piece",
+    follower,
+    (r) => (r.observations[0].at_seq = 12),
+    /follower_old_at_last_piece is not made at the target's held last piece/,
+  ],
+  [
+    "T1's last-piece observation showing the new cache",
+    follower,
+    (r) => (r.observations[0].cache_digest = "cache-13"),
+    /follower_old_at_last_piece does not show the old live cache/,
+  ],
+  [
+    "T1's after-activation observation made before the activation",
+    follower,
+    (r) => (r.observations[1].at_seq = 12),
+    /follower_new_after_activation is not made after the target's activation/,
+  ],
+  [
+    "T1's after-activation observation showing the old cache",
+    follower,
+    (r) => (r.observations[1].cache_digest = "old-cache"),
+    /follower_new_after_activation does not show the activated cache/,
+  ],
+  [
+    "an unknown required observation",
+    follower,
+    (r) => {
+      r.required_observations.push("something");
+      r.observations.push({ kind: "something", at_seq: 14, cache_digest: "x" });
+    },
+    /unknown required observation something/,
+  ],
+])
+  test(`refused (schema 3): ${name}`, () => {
+    const s = build();
     mutate(s.record);
     refuse(s, expected, name);
   });
@@ -955,7 +1440,7 @@ test("the runner's identity check: the record is the case, engine, backend and s
     engine: "chromium",
     backend: "development",
     manifest: "f434df4a",
-    row: { workload: "W-real" },
+    row: { workload: "W-real", driven: "full", observations: [] },
   };
   assert.deepEqual(identityProblems(record, where), []);
   for (const [change, expected] of [
@@ -964,7 +1449,25 @@ test("the runner's identity check: the record is the case, engine, backend and s
     [{ backend: "released" }, /the stack ran released/],
     [{ manifest: null }, /not the approved one/],
     [{ row: undefined }, /not a case of the matrix/],
-    [{ row: { workload: "W-synthetic" } }, /the matrix says W-synthetic/],
+    [
+      { row: { workload: "W-synthetic", driven: "full", observations: [] } },
+      /the matrix says W-synthetic/,
+    ],
+    // Revision 25: the drive mode and the required observations are the matrix's, never the producer's choice.
+    [
+      { row: { workload: "W-real", driven: "none", observations: [] } },
+      /driven full, the matrix says none/,
+    ],
+    [
+      {
+        row: {
+          workload: "W-real",
+          driven: "full",
+          observations: ["follower_old_at_last_piece"],
+        },
+      },
+      /required observations \[\], the matrix says/,
+    ],
   ]) {
     const found = identityProblems(record, { ...where, ...change });
     assert.ok(

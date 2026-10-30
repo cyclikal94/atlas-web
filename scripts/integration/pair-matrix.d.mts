@@ -5,6 +5,8 @@ export interface PairCase {
   workload: "W-real" | "W-synthetic" | null;
   m: number | null;
   caller: "none" | "ordinary" | "recovery";
+  driven: "full" | "prefix" | "none" | null;
+  observations: string[];
   injected: string | null;
 }
 export interface PairUnrun {

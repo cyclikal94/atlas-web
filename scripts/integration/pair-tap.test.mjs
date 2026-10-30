@@ -221,6 +221,75 @@ test("a fault never alters an answer that is not a segment, waits for afterIndex
   assert.equal(reset.unfired.length, 1);
 });
 
+test("the request-side gate (revision 25): a /sync request closed out waits, recorded and unforwarded; opening forwards it in order", async () => {
+  await control("POST", "/reset");
+  await control("POST", "/label", { label: "iv-gate" });
+  assert.deepEqual(await control("POST", "/gate", { closed: true }), {
+    closed: true,
+    forwarded: [],
+  });
+  const body = page(0, false, "c1");
+  answers.push(body);
+  const waiting = sync("?cursor=g0");
+  let log = await control("GET", "/log");
+  for (let i = 0; i < 200 && !log.records.some((r) => r.gated); i += 1) {
+    await new Promise((r) => setTimeout(r, 5));
+    log = await control("GET", "/log");
+  }
+  const [gated] = log.records.filter((r) => r.path.endsWith("/sync"));
+  assert.equal(gated.gated, true);
+  assert.equal(gated.status, null, "nothing reached the upstream");
+  assert.deepEqual(log.gate, { closed: true, waiting: 1 });
+  assert.equal(answers.length, 1, "the upstream has not answered");
+  // A non-sync request is never gated.
+  const other = await fetch(`${urls.tapUrl}/api/experimental/v1/commands`, {
+    method: "POST",
+    body: "x",
+  });
+  assert.equal(other.status, 201);
+  const opened = await control("POST", "/gate", { closed: false });
+  assert.deepEqual(opened.forwarded, [gated.seq]);
+  assert.equal(await (await waiting).text(), body);
+  const after = (await control("GET", "/log")).records.find(
+    (r) => r.seq === gated.seq,
+  );
+  assert.equal(after.status, 200);
+  assert.equal(typeof after.t_gate_open, "number");
+  assert.equal(after.label, "iv-gate");
+});
+
+test("a gated request is DISCARDED at reset (never forwarded into a later case), and the gate is open again", async () => {
+  await control("POST", "/reset");
+  await control("POST", "/gate", { closed: true });
+  const waiting = sync("?cursor=g1").then(
+    (r) => r.status,
+    () => "closed",
+  );
+  let log = await control("GET", "/log");
+  for (let i = 0; i < 200 && log.gate.waiting === 0; i += 1) {
+    await new Promise((r) => setTimeout(r, 5));
+    log = await control("GET", "/log");
+  }
+  answers.push(page(9, true, "never"));
+  await control("POST", "/reset");
+  assert.deepEqual((await control("GET", "/log")).gate, {
+    closed: false,
+    waiting: 0,
+  });
+  // Bounded: a request the reset failed to discard would wait for ever; that is this assertion's failure, not a hang.
+  const settled = await Promise.race([
+    waiting,
+    new Promise((r) => setTimeout(() => r("still waiting"), 2000)),
+  ]);
+  assert.equal(settled, "closed");
+  assert.equal(
+    answers.length,
+    1,
+    "the discarded request never reached the upstream",
+  );
+  answers.length = 0;
+});
+
 test("tamper keeps a hexadecimal MAC hexadecimal and the token's length", () => {
   assert.equal(tamper("d2.aa.ff"), "d2.aa.f0");
   assert.equal(tamper("d2.aa.f9"), "d2.aa.fa");

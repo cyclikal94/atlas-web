@@ -82,6 +82,26 @@ test("the matrix: unique ids, every case on the development backend, the release
   assert.ok(UNSUPPORTED.every((u) => !ids.includes(u.id)));
 });
 
+test("revision 25: every workload case names how its record must be driven, and T1 alone its required observations", () => {
+  const mode = Object.fromEntries(CASES.map((c) => [c.id, c.driven]));
+  assert.equal(mode["PAIR-P0"], null);
+  for (const id of ["PAIR-B1", "PAIR-B2", "PAIR-B3", "PAIR-X1", "PAIR-L1"])
+    assert.equal(mode[id], "prefix", id);
+  assert.equal(mode["PAIR-RC1"], "none");
+  for (const c of CASES.filter(
+    (x) => x.workload !== null && !["prefix", "none"].includes(x.driven),
+  ))
+    assert.equal(c.driven, "full", c.id);
+  for (const c of CASES)
+    assert.deepEqual(
+      c.observations,
+      c.id === "PAIR-T1"
+        ? ["follower_old_at_last_piece", "follower_new_after_activation"]
+        : [],
+      c.id,
+    );
+});
+
 test("discovery: exactly the matrix in every selected engine is accepted", () => {
   assert.deepEqual(
     discoveryProblems(report(every(BROWSERS, listedOnly)), {

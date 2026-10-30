@@ -24,6 +24,9 @@ const DEV = ["development"];
  * W-synthetic (LABELLED SYNTHETIC: 799 fields + their person, one notice batch inserted directly into the disposable database: 800 changes).
  * Neither is the frontend's W1 (800 synthetic checklist changes) or R201 (one person + 200 fields). `m`: the page's starting max_changes
  * (null: the page is told nothing, as production). `injected`: null for unaltered server answers; otherwise who altered what.
+ * `driven` (revision 25): how the interval's record must be driven, checked by the runner against the record (never the producer's claim):
+ * `full` (every answer through the feed's completion held by the common driver), `prefix` (held until an explicit hand-off: a 410 recovery
+ * or a replaced session), `none` (the fenced recovery runs unheld). `observations`: the named observations the record must bind.
  */
 export const CASES = Object.freeze([
   {
@@ -32,6 +35,8 @@ export const CASES = Object.freeze([
     workload: null,
     m: null,
     caller: "none",
+    driven: null,
+    observations: [],
     injected: null,
   },
   {
@@ -40,6 +45,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: null,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: null,
   },
   {
@@ -48,6 +55,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: null,
   },
   {
@@ -56,6 +65,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 100,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: null,
   },
   {
@@ -64,6 +75,8 @@ export const CASES = Object.freeze([
     workload: "W-synthetic",
     m: 100,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: "synthetic notice row inserted into the disposable database",
   },
   {
@@ -72,6 +85,8 @@ export const CASES = Object.freeze([
     workload: "W-synthetic",
     m: null,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: "synthetic notice row inserted into the disposable database",
   },
   {
@@ -80,6 +95,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: null,
   },
   {
@@ -88,6 +105,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: "PROXY: connection dropped after the backend answered",
   },
   {
@@ -96,6 +115,11 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [
+      "follower_old_at_last_piece",
+      "follower_new_after_activation",
+    ],
     injected: null,
   },
   {
@@ -104,6 +128,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: null,
   },
   {
@@ -112,6 +138,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: null,
   },
   {
@@ -120,6 +148,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "prefix",
+    observations: [],
     injected: "TAP: next_cursor tampered (the server's 410 is real)",
   },
   {
@@ -128,6 +158,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "prefix",
+    observations: [],
     injected:
       "TAP: next_cursor replaced by another device's real continuation (the server's 410 is real)",
   },
@@ -137,6 +169,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "prefix",
+    observations: [],
     injected:
       "TAP: next_cursor replaced by another account's real continuation (the server's 410 is real)",
   },
@@ -146,6 +180,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: "TAP: segment index +1 (a gap)",
   },
   {
@@ -154,6 +190,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: "TAP: the previous piece answered again at the current cursor",
   },
   {
@@ -162,6 +200,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "full",
+    observations: [],
     injected: "TAP: batch revision +1",
   },
   {
@@ -170,6 +210,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "ordinary",
+    driven: "prefix",
+    observations: [],
     injected:
       "TAP: 410 resync_required answered in place of a real piece (client-only; NOT server expiry or pruning)",
   },
@@ -179,6 +221,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "recovery",
+    driven: "none",
+    observations: [],
     injected: null,
   },
   {
@@ -187,6 +231,8 @@ export const CASES = Object.freeze([
     workload: "W-real",
     m: 4,
     caller: "recovery",
+    driven: "prefix",
+    observations: [],
     injected: null,
   },
 ]);

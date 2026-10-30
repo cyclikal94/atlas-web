@@ -19,6 +19,11 @@
 //                            delivered-ID ledger), the client receives nothing (the delaying proxy answers it 502)
 // Every injected answer is client-side evidence only; the record says so. Request bodies, headers and cookies are forwarded untouched.
 //
+// The request-side GATE (revision 25, DA-PAIR-S: B1-B3 prepared a foreign continuation and armed a fault only after the grant, so piece 0
+// could already have been generated): `POST /gate {"closed": true}` keeps every later /sync request recorded (`gated`) but unforwarded, so
+// nothing reaches the backend; `{"closed": false}` forwards them in order (`t_gate_open`). A reset or a stop discards gated requests, never
+// forwarding them into a later case. Nothing else in the tap changes, and nothing is gated unless a case closes the gate.
+//
 // Bounded: the in-memory log keeps at most `maxRecords` records (the oldest are dropped and counted, with the highest sequence number
 // dropped, so an interval can prove none of ITS records was lost); bodies live on disk only. A body that cannot be written is recorded as a
 // write error (never swallowed): `/flush` and `/log` answer them, and an interval with one is not evidence.
@@ -159,6 +164,10 @@ export function createTap({
   const upstreams = new Set();
   let previousSegmented = null;
   let stopped = false;
+  const gate = { closed: false, waiting: [] };
+  const discardGated = () => {
+    for (const w of gate.waiting.splice(0)) w.res.destroy();
+  };
   const keep = (record) => {
     records.push(record);
     while (records.length > maxRecords) {
@@ -211,122 +220,131 @@ export function createTap({
       res.destroy();
       return;
     }
-    const upstreamReq = httpRequest(
-      {
-        host: target.hostname,
-        port: target.port,
-        method: req.method,
-        path: req.url,
-        headers: forwarded,
-      },
-      (upstreamRes) => {
-        if (!isSync) {
-          record.status = upstreamRes.statusCode;
-          res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
-          upstreamRes.pipe(res);
+    // The request-side gate (revision 25): a /sync request waits here, recorded, until the gate opens; nothing reaches the backend.
+    const forward = () => {
+      const upstreamReq = httpRequest(
+        {
+          host: target.hostname,
+          port: target.port,
+          method: req.method,
+          path: req.url,
+          headers: forwarded,
+        },
+        (upstreamRes) => {
+          if (!isSync) {
+            record.status = upstreamRes.statusCode;
+            res.writeHead(upstreamRes.statusCode, upstreamRes.headers);
+            upstreamRes.pipe(res);
+            upstreamRes.on("end", () => {
+              record.t_upstream_end = now();
+            });
+            return;
+          }
+          const chunks = [];
+          upstreamRes.on("data", (c) => chunks.push(c));
           upstreamRes.on("end", () => {
             record.t_upstream_end = now();
-          });
-          return;
-        }
-        const chunks = [];
-        upstreamRes.on("data", (c) => chunks.push(c));
-        upstreamRes.on("end", () => {
-          record.t_upstream_end = now();
-          record.status = upstreamRes.statusCode;
-          const body = Buffer.concat(chunks);
-          const file = `${String(id).padStart(6, "0")}.upstream.json`;
-          Object.assign(record, {
-            bytes: body.length,
-            sha256: sha256(body),
-            body_file: file,
-            ...describeSync(body),
-          });
-          let payload = body;
-          let status = upstreamRes.statusCode;
-          const headers = { ...upstreamRes.headers };
-          if (upstreamRes.statusCode === 200 && record.segment) {
-            const at = faults.findIndex(
-              (f) =>
-                f.fired === null &&
-                (f.afterIndex === undefined ||
-                  record.segment.index >= f.afterIndex),
-            );
-            if (at >= 0 && faults[at].kind === "drop_connection") {
-              const fault = faults[at];
-              fault.fired = id;
-              record.dropped =
-                "TAP-INJECTED drop_connection: the server answered; the connection was destroyed before any byte reached the client";
-              persist(file, body);
-              res.destroy();
-              return;
-            }
-            if (at >= 0) {
-              const fault = faults[at];
-              try {
-                const changed = Buffer.from(
-                  JSON.stringify(
-                    applyFault(
-                      fault,
-                      JSON.parse(body.toString("utf8")),
-                      previousSegmented,
-                    ),
-                  ),
-                );
-                payload = changed;
-                if (fault.kind === "answer_410") {
-                  status = 410;
-                  for (const name of Object.keys(headers))
-                    if (name.toLowerCase() === "set-cookie")
-                      delete headers[name];
-                  headers["cache-control"] = "private, no-store";
-                }
-                const deliveredFile = `${String(id).padStart(6, "0")}.delivered.json`;
-                record.delivered = {
-                  injected: `TAP-INJECTED ${fault.kind}`,
-                  status,
-                  bytes: changed.length,
-                  sha256: sha256(changed),
-                  body_file: deliveredFile,
-                  ...describeSync(changed),
-                };
+            record.status = upstreamRes.statusCode;
+            const body = Buffer.concat(chunks);
+            const file = `${String(id).padStart(6, "0")}.upstream.json`;
+            Object.assign(record, {
+              bytes: body.length,
+              sha256: sha256(body),
+              body_file: file,
+              ...describeSync(body),
+            });
+            let payload = body;
+            let status = upstreamRes.statusCode;
+            const headers = { ...upstreamRes.headers };
+            if (upstreamRes.statusCode === 200 && record.segment) {
+              const at = faults.findIndex(
+                (f) =>
+                  f.fired === null &&
+                  (f.afterIndex === undefined ||
+                    record.segment.index >= f.afterIndex),
+              );
+              if (at >= 0 && faults[at].kind === "drop_connection") {
+                const fault = faults[at];
                 fault.fired = id;
-                persist(deliveredFile, changed);
-              } catch (error) {
-                fault.fired = id;
-                fault.error = String(error?.message ?? error);
+                record.dropped =
+                  "TAP-INJECTED drop_connection: the server answered; the connection was destroyed before any byte reached the client";
+                persist(file, body);
+                res.destroy();
+                return;
               }
+              if (at >= 0) {
+                const fault = faults[at];
+                try {
+                  const changed = Buffer.from(
+                    JSON.stringify(
+                      applyFault(
+                        fault,
+                        JSON.parse(body.toString("utf8")),
+                        previousSegmented,
+                      ),
+                    ),
+                  );
+                  payload = changed;
+                  if (fault.kind === "answer_410") {
+                    status = 410;
+                    for (const name of Object.keys(headers))
+                      if (name.toLowerCase() === "set-cookie")
+                        delete headers[name];
+                    headers["cache-control"] = "private, no-store";
+                  }
+                  const deliveredFile = `${String(id).padStart(6, "0")}.delivered.json`;
+                  record.delivered = {
+                    injected: `TAP-INJECTED ${fault.kind}`,
+                    status,
+                    bytes: changed.length,
+                    sha256: sha256(changed),
+                    body_file: deliveredFile,
+                    ...describeSync(changed),
+                  };
+                  fault.fired = id;
+                  persist(deliveredFile, changed);
+                } catch (error) {
+                  fault.fired = id;
+                  fault.error = String(error?.message ?? error);
+                }
+              }
+              if (status === 200) previousSegmented = payload;
             }
-            if (status === 200) previousSegmented = payload;
-          }
-          if (res.destroyed || res.writableEnded) {
-            record.client_gone = true;
-          } else {
-            // The body was buffered whole: it is sent with its exact length (never also chunked).
-            for (const name of Object.keys(headers))
-              if (name.toLowerCase() === "transfer-encoding")
-                delete headers[name];
-            headers["content-length"] = String(payload.length);
-            res.writeHead(status, headers);
-            res.end(payload);
-            record.t_delivered = now();
-          }
-          persist(file, body);
-        });
-      },
-    );
-    upstreams.add(upstreamReq);
-    upstreamReq.once("close", () => upstreams.delete(upstreamReq));
-    upstreamReq.on("error", (error) => {
-      record.upstream_error = String(error?.message ?? error);
-      if (res.destroyed || res.writableEnded) return;
-      if (res.headersSent) res.destroy();
-      else {
-        res.writeHead(502, { "content-type": "application/json" });
-        res.end("{}");
-      }
-    });
-    req.pipe(upstreamReq);
+            if (res.destroyed || res.writableEnded) {
+              record.client_gone = true;
+            } else {
+              // The body was buffered whole: it is sent with its exact length (never also chunked).
+              for (const name of Object.keys(headers))
+                if (name.toLowerCase() === "transfer-encoding")
+                  delete headers[name];
+              headers["content-length"] = String(payload.length);
+              res.writeHead(status, headers);
+              res.end(payload);
+              record.t_delivered = now();
+            }
+            persist(file, body);
+          });
+        },
+      );
+      upstreams.add(upstreamReq);
+      upstreamReq.once("close", () => upstreams.delete(upstreamReq));
+      upstreamReq.on("error", (error) => {
+        record.upstream_error = String(error?.message ?? error);
+        if (res.destroyed || res.writableEnded) return;
+        if (res.headersSent) res.destroy();
+        else {
+          res.writeHead(502, { "content-type": "application/json" });
+          res.end("{}");
+        }
+      });
+      req.pipe(upstreamReq);
+    };
+    if (isSync && gate.closed) {
+      record.gated = true;
+      gate.waiting.push({ record, forward, res });
+      return;
+    }
+    forward();
   });
 
   const control = createServer((req, res) => {
@@ -360,7 +378,21 @@ export function createTap({
           seq,
           pending_writes: writes.size,
           write_errors: writeErrors,
+          gate: { closed: gate.closed, waiting: gate.waiting.length },
           records: records.filter((r) => r.seq > since),
+        });
+      }
+      if (req.method === "POST" && url.pathname === "/gate") {
+        const closed = (await body()).closed === true;
+        gate.closed = closed;
+        const opened = closed ? [] : gate.waiting.splice(0);
+        for (const w of opened) {
+          w.record.t_gate_open = now();
+          w.forward();
+        }
+        return json(200, {
+          closed,
+          forwarded: opened.map((w) => w.record.seq),
         });
       }
       if (req.method === "POST" && url.pathname === "/label") {
@@ -394,6 +426,9 @@ export function createTap({
         records.length = 0;
         label = null;
         previousSegmented = null;
+        // A gated request belongs to the case that closed the gate: it is discarded, never forwarded into the next case.
+        gate.closed = false;
+        discardGated();
         return json(200, { unfired, seq, write_errors: errors });
       }
       return json(404, { error: "unknown control endpoint" });
@@ -425,6 +460,7 @@ export function createTap({
     },
     async stop() {
       stopped = true;
+      discardGated();
       for (const u of upstreams) u.destroy();
       await Promise.all([server, control].map(close));
       await Promise.allSettled([...writes]);

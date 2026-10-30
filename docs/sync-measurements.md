@@ -249,14 +249,25 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   proxy log entry that carried it and its downstream outcome (`delivered` is a socket write towards the preview server's hop, not the page's receipt; a
   held answer whose page departed is normally `client_gone`, and a loss is corroborated by the unchanged stored cursor and stage at the retry). The
   driver keeps every attempt (received, LOST to a departed page, DROPPED by the tap) and judges the bounded sequence over the answers the client received
-  (`scripts/integration/pair-attempts.mjs`, revision 24: R23-PAIR.a). Each case's interval record (`web09c-pair-interval/2`) binds its complete tap window
+  (`scripts/integration/pair-attempts.mjs`, revision 24: R23-PAIR.a). **Revision 25 (R24-PAIR.c):** the common driver and its opening
+  (`scripts/integration/pair-driver.mjs`) name the workload independently of the feed, by the grant's public receipt revision (or the revision the
+  synthetic transaction inserted; A1's revocation is a later milestone): a feed completion before the target (an ordinary poll answered during the grant,
+  as in the reviewed WebKit T1 failure) is an incidental answer and never ends the drive. The hold is armed by the interval's opening, BEFORE the tap's
+  label, after every earlier /sync settled, and stays in force through follower set-up, the grant and the whole drive; hooks act on the server's piece
+  (revision and segment index), never on an attempt's ordinal; an activation is observed durably while every later answer is still held, and the drive
+  ends only at a received completion after the last milestone's activation. B1-B3 close the tap's request-side gate while the foreign continuation and the
+  fault are prepared. Each case's interval record (`web09c-pair-interval/3`; schema 2 refused, never upgraded) binds its complete tap window
   (every exchange listed once, no log truncation, no failed or pending body write), every upstream AND altered body re-read, hash-, length- and
   metadata-checked, the attempts, barriers (pre-grant complete, grant complete, each received piece persisted once, final released, activation complete),
   the terminal references (the answer that activated the applied revision and the feed's completion, both received; a revision's last piece may precede a
   later completion), an independent content oracle (against what the writer wrote, key-order-insensitive) and memory (Chromium: whole-page CDP JS heap
   samples, scoped as such; Firefox/WebKit: null with a reason; native IndexedDB transaction memory unmeasured everywhere). It is validated by
   `scripts/integration/pair-evidence.mjs` before the case asserts anything else, and again by the runner, which also checks it is the record of its case,
-  engine, backend and selection (R23-PAIR.b). A case that fails first leaves an `.incomplete.json` record, never counted.
+  engine, backend and selection (R23-PAIR.b) and that it was driven as the matrix says (`full`, `prefix` to an explicit hand-off, or `none`). Schema 3
+  (DA-PAIR-E) derives and cross-checks what the record advertises: its target bound to the grant, every received batch and the terminal; every exchange up
+  to the drive's end an attempt, joined both ways; every driven answer held, every other held answer a recorded release of the hold; exactly one
+  persistence witness per received staged piece with a later held request; one durable activation witness per activating attempt; and T1's follower
+  observations at the actual last piece and after the activation. A case that fails first leaves an `.incomplete.json` record, never counted.
 * **Matrix (`scripts/integration/pair-matrix.mjs`, 20 cases per engine):** P0 selection witness; W1 whole (both backends); W2/W3 W-real at 4 and 100 with a
   barrier at every piece; S1/S2 W-synthetic at 100 and whole; R1 reload mid-revision; R2 connection dropped after the server answered; T1 second tab across
   the held activation; T2 leader closed mid-revision and real takeover; A1 revocation between pieces (no never-sent identifier disclosed); B1/B2/B3 tampered,
@@ -269,8 +280,13 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   discovery of the matrix; the released-backend control (P0, W1) in Chromium, Firefox and WebKit; targeted mutants of the seam and of the spec's precondition
   and oracle. **Revision 24:** the attempt accounting at the real stand-in backend → tap → holding proxy → departed client boundary, the schema-2 validator's
   positive controls (whole, pieces, last piece before a later completion, empty live-edge completion, lost/retried, dropped, injected 200/410, real 410,
-  non-barriered catch-up) and negatives, and 16 targeted mutants. The 18 development-only cases have NOT been executed (Decision D: independent review of
-  the corrected recipe first).
+  non-barriered catch-up) and negatives, and 16 targeted mutants. **Revision 25:** the maintained driver and opening themselves, with deterministic
+  worlds (empty prefix pages, renewed cursors, a last piece before the feed's completion, an empty final segment, a missing or unrelated target, lost,
+  dropped, restarted, reload/takeover/revocation/hand-off and follower schedules) and at the real hop (an empty answer held through the grant, a /sync
+  admitted before the hold, a request reaching the tap just before the label, the tap's gate before a fault); schema-3 positives and negatives; 34
+  targeted mutants (the 16 of revision 24 carried over). The independent review's partial development run (WebKit T1 failed; the R24-PAIR.c mechanism)
+  stays a failed run; the corrected recipe has NOT been executed against the development backend (Decision D: independent review of the corrected recipe
+  first).
 
 ## Read this first
 
