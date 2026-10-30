@@ -1,4 +1,8 @@
 import type { BrowserContext, Page, TestInfo } from "@playwright/test";
+import {
+  reachedClient,
+  segmentedProblems,
+} from "../../scripts/integration/pair-attempts.mjs";
 import { PAIR_SELECTION } from "../../scripts/integration/pair-selection.mjs";
 import {
   BACKEND,
@@ -11,11 +15,13 @@ import {
 } from "../integration/helpers";
 import {
   API_VERSION,
+  abandonOpenIntervals,
   access,
   accountFor,
   barrier,
   bodyOf,
   type ChainModel,
+  captureTrace,
   caseRow,
   drivePieces,
   endInterval,
@@ -71,12 +77,17 @@ test.describe.configure({ mode: "serial" });
 test.beforeEach(({ browserName: _b }, info) => {
   info.setTimeout(15 * 60_000);
 });
-test.afterEach(async () => {
+test.afterEach(async ({ browserName: _b }, info) => {
   if (!PAIR_BACKEND) return;
-  // Every fault a case armed must have fired; an unfired one is never silently carried into the next case.
+  // A case that failed before ending its interval keeps it as an INCOMPLETE record, before the logs are reset.
+  await abandonOpenIntervals(
+    `the case ended ${info.status} before its interval was complete`,
+  );
+  // Every fault a case armed must have fired; an unfired one is never silently carried into the next case. No body write may have failed.
   const unfired = (await tap.faults()).filter((f) => f.fired === null);
-  await tap.reset();
+  const reset = await tap.reset();
   expect(unfired, "every armed tap fault fired").toEqual([]);
+  expect(reset.write_errors, "every tap body was written").toEqual([]);
 });
 
 const engineOf = (info: TestInfo) => info.project.name.replace(/^pair-/, "");
@@ -119,31 +130,19 @@ async function openWReal(
   return { page, reader, w, sentinel, workload, ...pre };
 }
 
-/** The shape of a bounded delivery: every request asked for m, every answer within m, ONE revision in index order ending once. */
+/**
+ * The shape of a bounded delivery over the answers the client RECEIVED, in order (a lost attempt is not one): every request asked for m,
+ * every answer within m, ONE revision in index order ending once (pair-attempts.mjs `segmentedProblems`, qualified at the real hop boundary).
+ */
 function expectSegmented(
   steps: TapRecord[],
   m: number,
   revision: number | null,
 ) {
-  const answers = steps.filter((r) => r.status === 200);
-  expect(answers.length, "more than one piece").toBeGreaterThan(1);
-  for (const r of answers) {
-    expect(r.query?.max_changes, `seq ${r.seq}: the request's budget`).toBe(
-      String(m),
-    );
-    expect(
-      r.changes ?? 0,
-      `seq ${r.seq}: within the budget`,
-    ).toBeLessThanOrEqual(m);
-  }
-  const pieces = answers.filter(
-    (r) => r.segment && (revision === null || r.revision === revision),
-  );
-  expect(pieces.map((r) => r.segment?.index)).toEqual(pieces.map((_, i) => i));
   expect(
-    pieces.filter((r) => r.segment?.last).length,
-    "exactly one last piece",
-  ).toBe(1);
+    segmentedProblems(steps, m, revision),
+    "the received pieces are one bounded revision in index order",
+  ).toEqual([]);
 }
 
 /** Ends a W-real interval whose terminal state is a whole activation of the workload, with the oracle. */
@@ -162,6 +161,7 @@ async function finishAdded(
     workload: "W-real",
     preGrantCursor: o.old.cursor as string,
     terminal: "activated",
+    appliedRevision: final.applied_revision,
     oracle: verdict,
     barriered: true,
     person: o.workload.person,
@@ -206,6 +206,7 @@ async function finishRecovered(
     workload: "W-real",
     preGrantCursor: o.old.cursor as string,
     terminal: "recovered",
+    appliedRevision: done.applied_revision,
     oracle: verdict,
     barriered: false,
     person: o.workload.person,
@@ -367,6 +368,7 @@ for (const [id, m] of [
       workload: "W-synthetic",
       preGrantCursor: pre.old.cursor as string,
       terminal: "activated",
+      appliedRevision: final.applied_revision,
       oracle: verdict,
       barriered: true,
       person: synthetic.person,
@@ -394,6 +396,7 @@ test("PAIR-R1: a real reload while piece 3 is held (the answer reaches nobody): 
       if (index !== 3 || reloaded) return undefined;
       reloaded = true;
       expect(before.delta_stage?.next_index).toBe(3);
+      await captureTrace(o.page, o.iv, "before the reload");
       await o.page.goto("about:blank");
       await release();
       await pairPage(context, 4, o.page);
@@ -401,12 +404,30 @@ test("PAIR-R1: a real reload while piece 3 is held (the answer reaches nobody): 
     },
   });
   expect(reloaded).toBe(true);
-  expectSegmented(
-    run.steps.filter((r) => !r.client_gone),
-    4,
-    null,
+  // Every attempt is kept: the held piece 3 was LOST (released to the departed page), then asked again from the same stored cursor.
+  const lost = run.attempts.filter((a) => a.client === "lost");
+  expect(lost, "exactly one lost attempt").toHaveLength(1);
+  const retry = run.attempts.find(
+    (a) => a.step === (lost[0]?.step as number) + 1,
   );
-  await finishAdded(o, run.final as Stored, { reloaded_at_step: 3 });
+  expect(retry?.client, "the next attempt reached the client").toBe("received");
+  expect(retry?.request_cursor, "the retry asks from the same cursor").toBe(
+    lost[0]?.request_cursor,
+  );
+  expect(retry?.segment?.index, "the retry is the same piece").toBe(
+    lost[0]?.segment?.index,
+  );
+  expect(
+    run.steps.some((r) => r.seq === lost[0]?.seq),
+    "the lost attempt is not a received piece",
+  ).toBe(false);
+  expectSegmented(run.steps, 4, null);
+  await finishAdded(o, run.final as Stored, {
+    reloaded_at_step: 3,
+    lost_seq: lost[0]?.seq,
+    lost_downstream: lost[0]?.downstream,
+    retried_seq: retry?.seq,
+  });
 });
 
 test("PAIR-R2: the connection is destroyed AFTER the backend answered piece 2 (TAP-INJECTED: the server's delivered-ID ledger is ahead of the client): the same cursor is asked again, the same piece is answered, and the revision activates once", async ({
@@ -449,6 +470,10 @@ test("PAIR-R2: the connection is destroyed AFTER the backend answered piece 2 (T
       ).batches,
     );
   expect(batchesOf(again as TapRecord)).toBe(batchesOf(dropped as TapRecord));
+  expect(
+    run.attempts.filter((a) => a.client === "dropped").map((a) => a.seq),
+    "the dropped answer is kept as a dropped attempt",
+  ).toEqual([dropped?.seq]);
   expect(run.model.restarted).toBe(0);
   await finishAdded(o, run.final as Stored, {
     dropped_seq: dropped?.seq,
@@ -507,6 +532,7 @@ test("PAIR-T2: the leading tab is closed while piece 2 is held; the other tab ta
     onHeld: async ({ index, release }) => {
       if (index !== 2 || closed) return undefined;
       closed = true;
+      await captureTrace(o.page, o.iv, "before the leading tab is closed");
       await o.page.close();
       await release();
       current = next;
@@ -589,6 +615,7 @@ test("PAIR-A1: the person is REVOKED while piece 2 is held: no later answer disc
     workload: "W-real",
     preGrantCursor: o.old.cursor as string,
     terminal: "activated",
+    appliedRevision: final.applied_revision,
     oracle: verdict,
     barriered: true,
     person: o.workload.person,
@@ -847,14 +874,6 @@ test("PAIR-RC1: the FENCED RECOVERY catch-up (a real revocation, a real 401, a p
   barrier(o.iv, "activation_complete", {
     applied_revision: done.applied_revision,
   });
-  const steps = syncRecords(await tap.log(o.iv.since)).filter(
-    (r) => r.label === o.iv.id && r.status === 200,
-  );
-  expectSegmented(
-    steps.filter((r) => r.segment),
-    4,
-    null,
-  );
   const trace = (await traceOf(o.page)).filter((e) => e.at >= fencedAt);
   const cleared = trace.findIndex(
     (e) => e.event === "data.recovery_finish" && e.data?.result === "cleared",
@@ -875,15 +894,22 @@ test("PAIR-RC1: the FENCED RECOVERY catch-up (a real revocation, a real 401, a p
     add: o.workload,
     sentinel: o.sentinel,
   });
-  await endInterval(o.page, o.iv, {
+  const record = await endInterval(o.page, o.iv, {
     backend: PAIR_BACKEND,
     workload: "W-real",
     preGrantCursor: o.old.cursor as string,
     terminal: "activated",
+    appliedRevision: done.applied_revision,
     oracle: verdict,
     barriered: false,
     person: o.workload.person,
   });
+  // The pieces the client RECEIVED (the proxy's downstream outcome joined to each tap answer).
+  expectSegmented(
+    record.requests.filter((r) => reachedClient(r) && r.segment),
+    4,
+    null,
+  );
   expect(verdict.problems).toEqual([]);
 });
 
@@ -950,6 +976,7 @@ test("PAIR-L1: the same account's session is REPLACED mid-revision (revoked whil
     workload: "W-real",
     preGrantCursor: o.old.cursor as string,
     terminal: "activated",
+    appliedRevision: done.applied_revision,
     oracle: verdict,
     barriered: false,
     person: o.workload.person,

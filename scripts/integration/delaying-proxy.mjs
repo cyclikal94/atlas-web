@@ -24,6 +24,13 @@
 //                        revision 2: a gateway that refuses a request before it reaches the backend, so nothing is applied and the
 //                        client keeps its queued work; the log entry records `refused`)
 //
+// WEB-09c revision 24 (R23-PAIR.a), OPT-IN for the development pair only (`correlation`: a header name; absent everywhere else, so nothing
+// below changes for any other caller): every forwarded request carries `<correlation>: <log entry id>` (the pair tap records it as
+// `proxy_id` and strips it before the backend), and a held answer whose downstream client closes before it is released records
+// `client_closed`, so a release to a departed client is observed, not inferred. For every caller, `GET /held?entries=1` names the held log
+// entry ids per rule, `POST /release/<rule>?entry=<id>` releases ONE held entry, and every release answers each released entry's outcome
+// (`delivered` is a socket write, never a client's acknowledgement).
+//
 // WEB-08c revision 14 (family `proxy-injected-answer-cacheable`): an answer the proxy makes itself (`rewrite_status`, `replace_response`,
 // `refuse`) carries none of the backend's headers but ONE: `cache-control: private, no-store`, which the released backend puts on every
 // API answer (`crates/server/src/lib.rs`). Without it an injected 410 is heuristically cacheable, and the browser answered every later
@@ -41,6 +48,7 @@ export function createProxy({
   port = 0,
   controlPort = 0,
   observe = () => undefined,
+  correlation = null,
 }) {
   const target = new URL(upstream);
   const log = [];
@@ -97,7 +105,11 @@ export function createProxy({
           port: target.port,
           method: req.method,
           path: req.url,
-          headers: { ...req.headers, host: target.host },
+          headers: {
+            ...req.headers,
+            host: target.host,
+            ...(correlation ? { [correlation]: String(id) } : {}),
+          },
         },
         (upstreamRes) => {
           const chunks = [];
@@ -165,6 +177,14 @@ export function createProxy({
                 list.push({ deliver: () => deliver(), entry });
                 held.set(rule.id, list);
                 entry.events.push({ t: Date.now() - entry.at, event: "held" });
+                if (correlation)
+                  res.once("close", () => {
+                    if (!res.writableEnded)
+                      entry.events.push({
+                        t: Date.now() - entry.at,
+                        event: "client_closed",
+                      });
+                  });
                 return;
               }
               case "swap": {
@@ -339,8 +359,13 @@ export function createProxy({
       }
       if (req.method === "POST" && url.pathname.startsWith("/release/")) {
         const id = url.pathname.slice("/release/".length);
-        const list = held.get(id) ?? [];
-        held.delete(id);
+        const all = held.get(id) ?? [];
+        const only = url.searchParams.get("entry");
+        const list =
+          only === null ? all : all.filter((i) => String(i.entry.id) === only);
+        const rest = all.filter((i) => !list.includes(i));
+        if (rest.length > 0) held.set(id, rest);
+        else held.delete(id);
         const rule = rules.find((r) => r.id === id);
         if (rule?.action === "swap" && list.length >= 2) {
           // Deliver each response to the OTHER request's client.
@@ -348,12 +373,25 @@ export function createProxy({
           a.deliver({ status: b.status, body: b.body });
           b.deliver({ status: a.status, body: a.body });
         } else for (const item of list) item.deliver();
-        return json(200, { released: list.length });
+        return json(200, {
+          released: list.length,
+          outcomes: list.map((i) => ({
+            id: i.entry.id,
+            outcome: i.entry.events.at(-1)?.event ?? null,
+          })),
+        });
       }
       if (req.method === "GET" && url.pathname === "/held")
         return json(
           200,
-          Object.fromEntries([...held].map(([k, v]) => [k, v.length])),
+          Object.fromEntries(
+            [...held].map(([k, v]) => [
+              k,
+              url.searchParams.get("entries") === "1"
+                ? v.map((i) => i.entry.id)
+                : v.length,
+            ]),
+          ),
         );
       if (req.method === "GET" && url.pathname === "/log")
         return json(200, log);

@@ -81,7 +81,7 @@ describe("the released path is untouched", () => {
       "scripts/integration/schedule.mjs",
     ])
       expect(read(file)).not.toMatch(
-        /pair-(selection|matrix|tap|evidence)|run-development-pair/,
+        /pair-(selection|matrix|tap|evidence|attempts)|run-development-pair/,
       );
   });
 

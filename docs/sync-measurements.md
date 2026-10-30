@@ -244,10 +244,19 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   `sync_dense_fixture.py` is not used as the bootstrap (it drains reader cursors before serving).
 * **Observation:** a passive tap between the delaying proxy and the backend records every `/sync` body's exact bytes, SHA-256, length, request cursor and
   budget, segment and timings, and writes the bodies after delivery. One-shot, labelled tap faults (tamper, substitute, index/revision change, replay, 410,
-  dropped connection) are recorded apart from the server's unaltered body. Each case's interval record binds its exchanges, barriers (pre-grant complete,
-  grant complete, every piece persisted, final released, activation complete), terminal state, an independent content oracle (against what the writer
-  wrote, key-order-insensitive) and memory (Chromium: whole-page CDP JS heap samples, scoped as such; Firefox/WebKit: null with a reason; native IndexedDB
-  transaction memory unmeasured everywhere), and is validated by `scripts/integration/pair-evidence.mjs` before the case asserts anything else.
+  dropped connection) are recorded apart from the server's unaltered body. The tap sits UPSTREAM of the holding proxy, so it never sees the browser's
+  connection: the runner gives both one correlation header (`x-atlas-pair-proxy-id`, stripped before the backend), and each tap exchange is joined to the
+  proxy log entry that carried it and its downstream outcome (`delivered` is a socket write towards the preview server's hop, not the page's receipt; a
+  held answer whose page departed is normally `client_gone`, and a loss is corroborated by the unchanged stored cursor and stage at the retry). The
+  driver keeps every attempt (received, LOST to a departed page, DROPPED by the tap) and judges the bounded sequence over the answers the client received
+  (`scripts/integration/pair-attempts.mjs`, revision 24: R23-PAIR.a). Each case's interval record (`web09c-pair-interval/2`) binds its complete tap window
+  (every exchange listed once, no log truncation, no failed or pending body write), every upstream AND altered body re-read, hash-, length- and
+  metadata-checked, the attempts, barriers (pre-grant complete, grant complete, each received piece persisted once, final released, activation complete),
+  the terminal references (the answer that activated the applied revision and the feed's completion, both received; a revision's last piece may precede a
+  later completion), an independent content oracle (against what the writer wrote, key-order-insensitive) and memory (Chromium: whole-page CDP JS heap
+  samples, scoped as such; Firefox/WebKit: null with a reason; native IndexedDB transaction memory unmeasured everywhere). It is validated by
+  `scripts/integration/pair-evidence.mjs` before the case asserts anything else, and again by the runner, which also checks it is the record of its case,
+  engine, backend and selection (R23-PAIR.b). A case that fails first leaves an `.incomplete.json` record, never counted.
 * **Matrix (`scripts/integration/pair-matrix.mjs`, 20 cases per engine):** P0 selection witness; W1 whole (both backends); W2/W3 W-real at 4 and 100 with a
   barrier at every piece; S1/S2 W-synthetic at 100 and whole; R1 reload mid-revision; R2 connection dropped after the server answered; T1 second tab across
   the held activation; T2 leader closed mid-revision and real takeover; A1 revocation between pieces (no never-sent identifier disclosed); B1/B2/B3 tampered,
@@ -258,7 +267,10 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   mid-revision (L2) — WEB-09d's composed lifecycle.
 * **Qualified so far (revision 23):** the selection, matrix accounting, tap and validator with doubles (`scripts/integration/pair-*.test.mjs`); real
   discovery of the matrix; the released-backend control (P0, W1) in Chromium, Firefox and WebKit; targeted mutants of the seam and of the spec's precondition
-  and oracle. The 18 development-only cases have NOT been executed.
+  and oracle. **Revision 24:** the attempt accounting at the real stand-in backend → tap → holding proxy → departed client boundary, the schema-2 validator's
+  positive controls (whole, pieces, last piece before a later completion, empty live-edge completion, lost/retried, dropped, injected 200/410, real 410,
+  non-barriered catch-up) and negatives, and 16 targeted mutants. The 18 development-only cases have NOT been executed (Decision D: independent review of
+  the corrected recipe first).
 
 ## Read this first
 

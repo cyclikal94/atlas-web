@@ -45,7 +45,8 @@ import { fileURLToPath } from "node:url";
 import { createProxy } from "./delaying-proxy.mjs";
 import { freePort } from "./free-port.mjs";
 import { membersOf, processTable, stopMembers } from "./ownership.mjs";
-import { validateInterval } from "./pair-evidence.mjs";
+import { CORRELATION_HEADER } from "./pair-attempts.mjs";
+import { identityProblems, validateInterval } from "./pair-evidence.mjs";
 import {
   accountNames,
   BROWSERS,
@@ -508,13 +509,17 @@ async function stack(browser) {
       port: tapPort,
       controlPort: tapControlPort,
       bodiesDir: join(out, "bodies"),
+      correlation: CORRELATION_HEADER,
     });
     const tap = await stackState.tap.start();
+    // The proxy names each forwarded request's log entry to the tap (which strips the header before the backend): every tap exchange is
+    // joined to exactly one downstream outcome (R23-PAIR.a).
     stackState.proxy = createProxy({
       upstream: tap.tapUrl,
       port: proxyPort,
       controlPort: proxyControlPort,
       observe: (exchange) => exchanges.push(exchange),
+      correlation: CORRELATION_HEADER,
     });
     const proxied = await stackState.proxy.start();
     groups.spawn(
@@ -599,18 +604,47 @@ async function stack(browser) {
           outcomes: {},
           unsupported: UNSUPPORTED,
         };
-    // Every interval record is validated again, with its bodies re-hashed; a passed workload case needs exactly one valid record.
+    // Every interval record is validated again, with its bodies re-hashed, and checked to be the record of the case, engine, backend and
+    // selection it is filed under; a passed workload case needs exactly one valid record. An INCOMPLETE record (a case that failed before
+    // its interval ended) is kept and reported, never counted.
     record.intervals = {};
-    const files = readdirSync(join(out, "intervals")).filter((f) =>
-      f.endsWith(".json"),
+    const all = readdirSync(join(out, "intervals"));
+    record.incomplete_intervals = all.filter((f) =>
+      f.endsWith(".incomplete.json"),
     );
+    const files = all.filter(
+      (f) => f.endsWith(".json") && !f.endsWith(".incomplete.json"),
+    );
+    const owners = [];
     for (const file of files) {
-      const interval = JSON.parse(
-        readFileSync(join(out, "intervals", file), "utf8"),
-      );
-      record.intervals[file] = validateInterval(interval, {
-        readBody: (f) => readFileSync(join(out, "bodies", f)),
-      });
+      let interval = null;
+      try {
+        interval = JSON.parse(
+          readFileSync(join(out, "intervals", file), "utf8"),
+        );
+      } catch (error) {
+        record.intervals[file] = [
+          `unreadable: ${String(error?.message ?? error).split("\n")[0]}`,
+        ];
+      }
+      if (interval !== null) {
+        record.intervals[file] = [
+          ...validateInterval(interval, {
+            readBody: (f) => readFileSync(join(out, "bodies", f)),
+          }),
+          ...identityProblems(interval, {
+            file,
+            engine: browser,
+            backend: backendKind,
+            manifest:
+              backendKind === "development"
+                ? PAIR_SELECTION.manifest.sha256
+                : null,
+            row: CASES.find((c) => c.id === interval.case),
+          }),
+        ];
+        owners.push(interval.case);
+      }
       if (record.intervals[file].length > 0)
         record.problems.push(
           `interval ${file}: ${record.intervals[file].join("; ")}`,
@@ -621,10 +655,14 @@ async function stack(browser) {
         record.judged.outcomes?.[row.id] === "passed" &&
         row.workload !== null
       ) {
-        const own = files.filter((f) => f.startsWith(`${row.id}.`));
-        if (own.length !== 1)
+        const own = owners.filter((c) => c === row.id).length;
+        if (own !== 1)
           record.problems.push(
-            `${row.id} passed with ${own.length} interval records (one is required)`,
+            `${row.id} passed with ${own} interval records (one is required)`,
+          );
+        if (record.incomplete_intervals.some((f) => f.startsWith(`${row.id}.`)))
+          record.problems.push(
+            `${row.id} passed but left an incomplete interval record`,
           );
       }
     if (exchanges.some((e) => e.status === 429))

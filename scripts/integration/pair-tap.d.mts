@@ -18,6 +18,7 @@ export function createTap(options: {
   bodiesDir: string;
   maxRecords?: number;
   now?: () => number;
+  correlation?: string | null;
 }): {
   start(): Promise<{ tapUrl: string; controlUrl: string }>;
   stop(): Promise<{ ok: boolean }>;

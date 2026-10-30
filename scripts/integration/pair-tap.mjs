@@ -19,7 +19,14 @@
 //                            delivered-ID ledger), the client receives nothing (the delaying proxy answers it 502)
 // Every injected answer is client-side evidence only; the record says so. Request bodies, headers and cookies are forwarded untouched.
 //
-// Bounded: the in-memory log keeps at most `maxRecords` records (the oldest are dropped and counted); bodies live on disk only.
+// Bounded: the in-memory log keeps at most `maxRecords` records (the oldest are dropped and counted, with the highest sequence number
+// dropped, so an interval can prove none of ITS records was lost); bodies live on disk only. A body that cannot be written is recorded as a
+// write error (never swallowed): `/flush` and `/log` answer them, and an interval with one is not evidence.
+//
+// Boundary (revision 24, R23-PAIR.a): the tap sits UPSTREAM of the holding proxy. `t_delivered` and `client_gone` describe the tap's own
+// connection to the proxy, never the browser's: a held answer the proxy later releases to a departed page is the PROXY's observation. With
+// `correlation` (a header name the pair runner gives the proxy as well), each record carries the proxy's log entry id as `proxy_id`, and
+// the header is removed before the request reaches the backend, so each tap exchange is joined to exactly one downstream outcome.
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -135,6 +142,7 @@ export function createTap({
   bodiesDir,
   maxRecords = 4000,
   now = () => performance.now(),
+  correlation = null,
 }) {
   const target = new URL(upstream);
   if (target.hostname !== "127.0.0.1")
@@ -142,6 +150,8 @@ export function createTap({
   mkdirSync(bodiesDir, { recursive: true });
   const records = [];
   let dropped = 0;
+  let droppedThrough = 0;
+  const writeErrors = [];
   let seq = 0;
   let label = null;
   const faults = [];
@@ -152,14 +162,16 @@ export function createTap({
   const keep = (record) => {
     records.push(record);
     while (records.length > maxRecords) {
-      records.shift();
+      droppedThrough = records.shift().seq;
       dropped += 1;
     }
   };
   const persist = (file, bytes) => {
-    const done = writeFile(join(bodiesDir, file), bytes).finally(() =>
-      writes.delete(done),
-    );
+    const done = writeFile(join(bodiesDir, file), bytes)
+      .catch((error) => {
+        writeErrors.push({ file, error: String(error?.message ?? error) });
+      })
+      .finally(() => writes.delete(done));
     writes.add(done);
   };
 
@@ -167,9 +179,17 @@ export function createTap({
     const id = ++seq;
     const url = new URL(req.url, "http://x");
     const isSync = req.method === "GET" && url.pathname.endsWith("/sync");
+    const forwarded = { ...req.headers, host: target.host };
+    let proxyId;
+    if (correlation) {
+      const raw = req.headers[correlation];
+      proxyId = /^[1-9][0-9]*$/.test(raw ?? "") ? Number(raw) : null;
+      delete forwarded[correlation];
+    }
     const record = {
       seq: id,
       label,
+      ...(correlation ? { proxy_id: proxyId } : {}),
       method: req.method,
       path: url.pathname,
       ...(isSync
@@ -197,7 +217,7 @@ export function createTap({
         port: target.port,
         method: req.method,
         path: req.url,
-        headers: { ...req.headers, host: target.host },
+        headers: forwarded,
       },
       (upstreamRes) => {
         if (!isSync) {
@@ -336,6 +356,10 @@ export function createTap({
         const since = Number(url.searchParams.get("since") ?? 0);
         return json(200, {
           dropped,
+          dropped_through: droppedThrough,
+          seq,
+          pending_writes: writes.size,
+          write_errors: writeErrors,
           records: records.filter((r) => r.seq > since),
         });
       }
@@ -355,16 +379,22 @@ export function createTap({
         return json(200, faults);
       if (req.method === "POST" && url.pathname === "/flush") {
         await Promise.allSettled([...writes]);
-        return json(200, { flushed: true });
+        return json(200, {
+          flushed: writes.size === 0,
+          pending_writes: writes.size,
+          write_errors: writeErrors,
+        });
       }
       if (req.method === "POST" && url.pathname === "/reset") {
         // Every armed fault is discarded (and reported, so an unfired fault is never forgotten silently); the log restarts. Bodies stay.
+        // Write errors are reported once more and cleared with it (the spec refuses a case that leaves any behind).
         const unfired = faults.filter((f) => f.fired === null).map((f) => f.id);
+        const errors = writeErrors.splice(0);
         faults.length = 0;
         records.length = 0;
         label = null;
         previousSegmented = null;
-        return json(200, { unfired, seq });
+        return json(200, { unfired, seq, write_errors: errors });
       }
       return json(404, { error: "unknown control endpoint" });
     })().catch((error) => json(500, { error: String(error) }));
