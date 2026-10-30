@@ -226,6 +226,29 @@ export const readMaterialiseSequences = readPlan<
 });
 
 /**
+ * Revision 11 (review R36): one PAGE of the account's rows in key order, after `after` (exclusive; `null`: from the first), at most
+ * `SEQUENCE_WINDOW`. A keyset page: the last row's key read as the next `after` meets every row once, whatever is added or removed
+ * between the pages (nothing shifts), so a caller that must reach EVERY row (a reconnection's lift of its paused rows) walks the account
+ * a page at a time and knows it has seen them all when a page is shorter than the window.
+ */
+export const readMaterialiseSequencePage = readPlan<
+  { incarnationId: string; after: readonly [string, string] | null },
+  MaterialiseSequenceRow[],
+  MaterialiseSequenceRow[]
+>({
+  name: "data.readMaterialiseSequencePage",
+  scope: ["materialise_sequences"],
+  read: (reader, input) =>
+    reader.byIndex(
+      "materialise_sequences",
+      "[task_id+through_date]",
+      input.after === null ? range.all() : range.atLeast(input.after, true),
+      SEQUENCE_WINDOW,
+    ),
+  decide: ({ reads }) => reads,
+});
+
+/**
  * The rows of one task a recovery read returns besides its exact days, unless the caller asks for more (revision 5): its latest days. A
  * screen that shows every retained stop asks for this many more each time the person asks for earlier days (revision 6, R28).
  */

@@ -440,13 +440,13 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "lifecycle-restart": 16,
         sharing: 7,
         snapshot: 6,
-        // WEB-10a's 22 and WEB-10c's 20 task cases; WEB-08d's labels retain their own stack.
-        tasks: 42,
+        // WEB-10a's 22 and WEB-10c's 21 task cases (revision 11 split I-10C-M4 into M4a/M4b); WEB-08d's labels retain their own stack.
+        tasks: 43,
         labels: 15,
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(275);
+      expect(inBrowser(whole, browser)).toHaveLength(276);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -506,8 +506,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       snapshot: 18,
       pages: 54,
       "password-path": 24,
-      // WEB-10a's 22 and WEB-10c's 20 task cases, in three engines.
-      tasks: 126,
+      // WEB-10a's 22 and WEB-10c's 21 task cases, in three engines.
+      tasks: 129,
       labels: 45,
       lists: 24,
     });
@@ -621,8 +621,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 275,
-        passed: 269,
+        planned_cases: 276,
+        passed: 270,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,

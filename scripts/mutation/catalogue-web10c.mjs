@@ -561,9 +561,10 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        // Re-anchored (revision 10): `reconnected` unparks too; the fault is the kick's own.
-        "      rebind(alive());\n      if (unpark()) publishQueue();\n      pump();\n    },\n    reconnected() {",
-        "      rebind(alive());\n      pump();\n    },\n    reconnected() {",
+        // Re-anchored (revision 10): `reconnected` unparks too; the fault is the kick's own. Re-anchored (revision 11): the kick's lines
+        // moved (it carries an unfinished reconnection scan on).
+        "      rebind(service);\n      if (unpark()) publishQueue();\n      // Revision 11 (R36): a reconnection's scan",
+        "      rebind(service);\n      // Revision 11 (R36): a reconnection's scan",
       ),
   },
   {
@@ -2915,8 +2916,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    if (row.phase === "submitting" || row.read_failures > 0)',
-        "    if (false)",
+        // Re-anchored (revision 11): the condition moved (it also names a held attempt in any phase); the same fault.
+        '    (row.phase === "submitting" ||\n      row.attempt !== null ||\n      row.read_failures > 0)',
+        "    false",
       ),
   },
   {
@@ -2925,12 +2927,14 @@ export const UNIT_10C = [
       "R36: WEB-10c A3 (Decision B): a discovery entry of an earlier build with failures is carried on, not stopped for the person",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
-    expect: /Q-M11.*discovery entry with failures/,
+    expect:
+      /Q-M11.*discovery entry with failures|an entry of revision 2 \(failures, no claim field/,
     patch: (t) =>
       sub(
         t,
-        "        ? entry !== null && entry.failures > 0",
-        "        ? false",
+        // Re-anchored (revision 11): the condition moved (it also names an earlier build's claim); the same fault (failures ignored).
+        "          ? entry.failures > 0 || (entry.attempt ?? null) !== null",
+        "          ? (entry.attempt ?? null) !== null",
       ),
   },
   {
@@ -2971,8 +2975,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      if (out === null || !owns(at)) return latch();",
-        "      if (out === null || !owns(at)) return unapplied(at);",
+        // Re-anchored (revision 11): the stop is now `storage()` after the fence; the same fault (a pause, taken up by a kick).
+        "          async () => (await write()) !== null,\n        );\n        return storage();",
+        "          async () => (await write()) !== null,\n        );\n        return unapplied(at);",
       ),
   },
   {
@@ -2981,12 +2986,14 @@ export const UNIT_10C = [
       "R36: WEB-10c A19 (Decision B): a resend the session held back is made after the discovery's window ended",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
-    expect: /session holds back is not made/,
+    expect:
+      /session holds back is not made|discovery: its admission's commit delayed until \+100[01] ms/,
     patch: (t) =>
       sub(
         t,
-        "      () => owns(at) && deps.now() < until,",
-        "      () => owns(at),",
+        // Re-anchored (revision 11): the discovery's permission is `transmits` (asked at the send boundary); the same fault.
+        "    const permit = transmits(at, issued.schedule as Schedule, until, op);",
+        "    const permit = transmits(\n      at,\n      issued.schedule as Schedule,\n      Number.POSITIVE_INFINITY,\n      op,\n    );",
       ),
   },
   {
@@ -2999,8 +3006,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "        back === null ? rest : { ...rest, schedule: back },",
-        "        issued,",
+        // Re-anchored (revision 11): the withdrawal now writes an explicit schedule; the same fault (the admission kept).
+        "      const back = await record(captured, {\n        ...issued,\n        schedule: withdrawn(issued.schedule as Schedule),\n      });",
+        "      const back = await record(captured, issued);",
       ),
   },
   {
@@ -3014,8 +3022,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "            entry?.stop == null ||\n            withDiscovery.has(taskId) ||",
-        "            true ||\n            withDiscovery.has(taskId) ||",
+        // Re-anchored (revision 11): the reconnection's scan pairs entries in `scan`; the same fault.
+        "          entry?.stop == null ||\n          e.paired.has(taskId) ||",
+        "          true ||\n          e.paired.has(taskId) ||",
       ),
   },
   {
@@ -3075,6 +3084,469 @@ export const UNIT_10C = [
         '      if (plan.kind === "write" || row === null) continue;',
       ),
   },
+  // ---- revision 11 (review 12 R36; design assessment C1-C4, Q1-Q11) ----------------------------------------------------------
+  {
+    id: "MU-3227",
+    title:
+      "R36-1: WEB-10c A19 (review 12): an admitted call's permission always holds: it is issued whatever happened while its admission committed",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /admission's commit delayed until \+100[01] ms/,
+    patch: (t) =>
+      sub(
+        t,
+        "        return (\n          owns(at) &&",
+        "        return true || (\n          owns(at) &&",
+      ),
+  },
+  {
+    id: "MU-3228",
+    title:
+      "R36-1: WEB-10c A19 (review 12): the permission at issue does not ask the window's end",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /admission's commit delayed until \+100[01] ms/,
+    patch: (t) =>
+      sub(
+        t,
+        "          now >= s.seen &&\n          now < until &&\n",
+        "          now >= s.seen &&\n",
+      ),
+  },
+  {
+    id: "MU-3229",
+    title:
+      "R36-1: WEB-10c A19: the permission at issue does not ask whether the clock went back before the admission",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a clock that goes back, or stops being a time/,
+    patch: (t) =>
+      sub(
+        t,
+        "          Number.isSafeInteger(now) &&\n          now >= s.seen &&\n",
+        "          Number.isSafeInteger(now) &&\n",
+      ),
+  },
+  {
+    id: "MU-3230",
+    title:
+      "R36-2: WEB-10c A19: the permission at issue does not ask the caller's fence (a fence recorded while the admission commits)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a fence recorded by another page while a call's admission commits/,
+    patch: (t) =>
+      sub(
+        t,
+        "          now >= Math.max(s.next, s.server ?? 0) &&\n          !fenced(at, op)\n",
+        "          now >= Math.max(s.next, s.server ?? 0)\n",
+      ),
+  },
+  {
+    id: "MU-3231",
+    title:
+      "R36-1: WEB-10c A19: the sequence's call is handed on without its permission being asked first",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /admission's commit delayed until \+100[01] ms/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!permit()) answered = UNSENT;\n      else if (plan.kind === "send") {',
+        '      if (plan.kind === "send") {',
+      ),
+  },
+  {
+    id: "MU-3232",
+    title:
+      "R36-1: WEB-10c A19: the discovery read is handed on without its permission being asked first",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /discovery: its admission's commit delayed until \+100[01] ms/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const read: PositionRead = permit()\n      ? await readPosition(item.taskId, permit)\n      : { answer: UNSENT, zone: null };",
+        "    const read: PositionRead = await readPosition(item.taskId, permit);",
+      ),
+  },
+  {
+    id: "MU-3233",
+    title:
+      "R36-1: WEB-10c A19: the command's permission is not carried to the client (the session issues it after the window ended)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /the command \(command\) held in the session until \+1001 ms/,
+    patch: (t) =>
+      sub(
+        t,
+        "            attempt.key,\n            permit,\n          ),",
+        "            attempt.key,\n          ),",
+      ),
+  },
+  {
+    id: "MU-3234",
+    title:
+      "R36-1: WEB-10c A19 (review 12): the task client's first call ignores its permission (only hidden resends ask it)",
+    file: "src/features/tasks/api.ts",
+    tests: ["tests/features/tasks/catchup-retry.test.ts"],
+    expect:
+      /the production readTask asks an initial permission of false|a hidden resend after `not_sent` asks the permission again/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (!isCurrent()) return { ok: false, kind: "not_sent" };\n    const result = await run();',
+        "    const result = await run();\n    if (!isCurrent() && attempt > 0) return result;",
+      ),
+  },
+  {
+    id: "MU-3235",
+    title:
+      "R36-1: WEB-10c A19: the task client's materialise ignores an initial false permission",
+    file: "src/features/tasks/api.ts",
+    tests: ["tests/features/tasks/catchup-retry.test.ts"],
+    expect: /the production materialise asks an initial permission of false/,
+    patch: (t) =>
+      sub(
+        t,
+        '      (admitted?.() === false\n        ? { ok: false, kind: "not_sent" }\n        : call(',
+        '      (false\n        ? { ok: false, kind: "not_sent" }\n        : call(',
+      ),
+  },
+  {
+    id: "MU-3236",
+    title:
+      "R36-1: WEB-10c A19: the task client's reads do not carry their permission to the session",
+    file: "src/features/tasks/api.ts",
+    tests: ["tests/features/tasks/catchup-retry.test.ts"],
+    expect:
+      /the position read \(position\) held in the session until \+1001 ms|the discovery read held past its window's end/,
+    patch: (t) =>
+      sub(
+        t,
+        "                  client(admitted) as unknown as {",
+        "                  client() as unknown as {",
+      ),
+  },
+  {
+    id: "MU-3237",
+    title:
+      "R36-1: WEB-10c A19 (session kernel): `SendOptions.admits` is not asked by the top guard or at the boundary",
+    file: "src/session/kernel/send.ts",
+    tests: ["tests/session/stamped-admits.test.ts"],
+    expect:
+      /false from the start|turned false after every step|asked in the step that issues/,
+    patch: (t) =>
+      sub(
+        t,
+        "    spec.withdraw?.aborted === true ||\n    spec.admits?.() === false;",
+        "    spec.withdraw?.aborted === true;",
+      ),
+  },
+  {
+    id: "MU-3238",
+    title:
+      "R36-1: WEB-10c A19 (session kernel): the stamped fetch drops the caller's permission",
+    file: "src/session/kernel/send.ts",
+    tests: ["tests/session/stamped-admits.test.ts"],
+    expect:
+      /false from the start|turned false after every step|asked in the step that issues/,
+    patch: (t) =>
+      sub(
+        t,
+        "      callerSignal: request.signal,\n      ...permission,\n",
+        "      callerSignal: request.signal,\n",
+      ),
+  },
+  {
+    id: "MU-3239",
+    title:
+      "R36-1: WEB-10c A19 (session): the typed client is built without the caller's send options",
+    file: "src/session/stamped-client.ts",
+    tests: ["tests/session/stamped-admits.test.ts"],
+    expect:
+      /false from the start|turned false after every step|asked in the step that issues/,
+    patch: (t) =>
+      sub(
+        t,
+        'createStampedFetch(k, klass, account, epoch, "library", send),',
+        'createStampedFetch(k, klass, account, epoch, "library"),',
+      ),
+  },
+  {
+    id: "MU-3240",
+    title:
+      "R36-1: WEB-10c A19: a `closed` command answer (possibly after a transmission) is taken as not sent: its admission is withdrawn",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a `closed` answer \(possibly after a transmission\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '    case "closed":\n      return UNSETTLED;',
+        '    case "closed":\n      return UNSENT;',
+      ),
+  },
+  {
+    id: "MU-3241",
+    title:
+      "R36-1: WEB-10c A19: a call its own permission refused is not decided again (no pause written; it waits for a kick)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /admission's commit delayed until \+100[01] ms/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (back === null || !owns(at) || !mayRun() || permit() || refused > 1)\n          return PAUSED;",
+        "        if (back !== undefined) return PAUSED;",
+      ),
+  },
+  {
+    id: "MU-3242",
+    title:
+      "R36-2: WEB-10c A19 (review 12): an answer whose record failed once is never written again (no repair)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /ONE failed record of a 429|a discovery answer recorded at its repair/,
+    patch: (t) =>
+      sub(
+        t,
+        "export const REPAIR_MS: readonly number[] = [250, 1_000];",
+        "export const REPAIR_MS: readonly number[] = [];",
+      ),
+  },
+  {
+    id: "MU-3243",
+    title:
+      "R36-2: WEB-10c A19: an answer never written fences nothing (no marker, no page hold)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /never written: a marker fences the day|a discovery answer whose record never lands|after a reload only the marker survives/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (m.set(scope, op, () => owns(at)).state === "unavailable")\n      m.stops.hold(scope, op);',
+        "    void m.stops.instance(scope, op);",
+      ),
+  },
+  {
+    id: "MU-3244",
+    title: "R36-2: WEB-10c A19: a standing fence is never consulted",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /never written: a marker fences the day|a marker of the task's discovery in the page host \(true\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";',
+        "    return m.stops.has(scope, op) && false;",
+      ),
+  },
+  {
+    id: "MU-3245",
+    title:
+      "R36-2: WEB-10c A19: a marker that cannot be read is taken as absent",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a marker that cannot be read stands/,
+    patch: (t) =>
+      sub(
+        t,
+        'm.probe(scope, op) !== "unmarked";',
+        'm.probe(scope, op) === "marked";',
+      ),
+  },
+  {
+    id: "MU-3246",
+    title:
+      "R36-2: WEB-10c A19: the page's own hold of a fence (no marker could be written) is not consulted",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a marker that cannot be read stands/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return m.stops.has(scope, op) || m.probe(scope, op)",
+        "    return m.probe(scope, op)",
+      ),
+  },
+  {
+    id: "MU-3247",
+    title:
+      "R36-2: WEB-10c A19: the person's press does not write the outcome this page kept (its 429 deadline, its success) before going on",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /writes the kept 429 first|a successful command whose record never lands/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!(await repair())) {",
+        "        if (repair === null) {",
+      ),
+  },
+  {
+    id: "MU-3248",
+    title:
+      "R36-2: WEB-10c A19: the person's press ends every fence of the operation, not only the instances it saw",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a press ends only the fence instances it saw/,
+    patch: (t) =>
+      sub(
+        t,
+        "          m.retire(fences.scope, f.op, f.marker, { explicit: true });",
+        "          m.clear(fences.scope, f.op);",
+      ),
+  },
+  {
+    id: "MU-3249",
+    title:
+      "R36-3: WEB-10c A19 (review 12): a legacy discovery claim with zero failures is taken as fresh",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a legacy claim with zero failures stops for the person/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ? entry.failures > 0 || (entry.attempt ?? null) !== null",
+        "          ? entry.failures > 0",
+      ),
+  },
+  {
+    id: "MU-3250",
+    title:
+      "R36-3: WEB-10c A19: a withdrawn discovery admission drops its schedule key (and is then read as an earlier build's claim)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a current withdrawn admission/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const back = await record(captured, {\n        ...issued,\n        schedule: withdrawn(issued.schedule as Schedule),\n      });",
+        "      const { schedule: _, ...rest } = issued;\n      const kept = withdrawn(issued.schedule as Schedule);\n      const back = await record(\n        captured,\n        kept === null ? rest : { ...rest, schedule: kept },\n      );",
+      ),
+  },
+  {
+    id: "MU-3251",
+    title:
+      "R36-3: WEB-10c A19: an earlier build's row holding an attempt in `ready` carries on (its uncertainty resent with no schedule)",
+    file: "src/features/tasks/model/materialise.ts",
+    tests: RETRY_TESTS,
+    expect: /a legacy row in `ready` holding an attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        '    (row.phase === "submitting" ||\n      row.attempt !== null ||\n      row.read_failures > 0)',
+        '    (row.phase === "submitting" || row.read_failures > 0)',
+      ),
+  },
+  {
+    id: "MU-3252",
+    title:
+      "R36-4: WEB-10c A19 (review 12): a reconnection reads only the first page of the account's rows",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /earlier unrelated retained rows|several paused tasks and days beyond the first page/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (page.complete || last === undefined) break;",
+        "        if (page.complete || last !== null) break;",
+      ),
+  },
+  {
+    id: "MU-3253",
+    title:
+      "R36-4: WEB-10c A19: a reconnection also lifts pauses recorded after it",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a pause recorded after the reconnection/,
+    patch: (t) =>
+      sub(
+        t,
+        "  ): boolean => resumable(s) && (s as Schedule).seen <= edge;",
+        "  ): boolean => resumable(s) && edge === edge;",
+      ),
+  },
+  {
+    id: "MU-3254",
+    title:
+      "R36-4: WEB-10c A19: a page that cannot be read ends the reconnection's scan (the rest is never reached)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a page that cannot be read leaves the scan where it was/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!current() || page === undefined) return;",
+        "        if (!current() || page === undefined) {\n          edgeScan = null;\n          return;\n        }",
+      ),
+  },
+  {
+    id: "MU-3255",
+    title:
+      "R36-4: WEB-10c A19: a kick does not carry an unfinished reconnection scan on",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a page that cannot be read leaves the scan where it was/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (edgeScan !== null && edgeScan.service === service)\n        void scan(edgeScan);\n",
+        "      void service;\n",
+      ),
+  },
+  {
+    id: "MU-3256",
+    title:
+      "R36-2: WEB-10c A19 (production composition): the page's markers are not given to its runner",
+    file: "src/features/tasks/catchup/useCatchUp.ts",
+    tests: RETRY_TESTS,
+    expect: /a marker of the task's discovery in the page host \(true\)/,
+    patch: (t) => sub(t, "    markers: () => getPageDataHost().markers,\n", ""),
+  },
+  {
+    id: "MU-3257",
+    title: "R36-2: WEB-10c A19: a discovery answer's record is not repaired",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a discovery answer recorded at its repair/,
+    patch: (t) =>
+      sub(
+        t,
+        '      const written = await settle(\n        at,\n        () => record(captured, next),\n        (w) => w !== "failed",\n      );',
+        "      const written = await record(captured, next);",
+      ),
+  },
+  {
+    id: "MU-3258",
+    title:
+      "R36-2: WEB-10c A19: the discovery does not consult its fence before it reads (only the permission refuses, and no stop is shown)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /a discovery answer whose record never lands fences the discovery|a marker of the task's discovery in the page host \(true\)|a marker that cannot be read stands/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (fenced(at, op))\n      return end(stopInMemory(item.taskId, { reason: "storage" }));\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3259",
+    title:
+      "R36-2: WEB-10c A19: a sequence does not consult its day's fence before it is admitted (only the permission refuses, and no stop is shown)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /never written: a marker fences the day|after a reload only the marker survives/,
+    patch: (t) => sub(t, "      if (fenced(at, op)) return storage();\n", ""),
+  },
 ];
 
 /** Real-engine mutants (all three engines on macOS, one job with its control; `grep` names the native case written for each). */
@@ -3105,8 +3577,9 @@ export const ENGINE_10C = [
     patch: (t) =>
       sub(
         t,
-        "          JSON.parse(attempt.body) as MaterialiseCommand,\n          attempt.key,",
-        "          JSON.parse(attempt.body) as MaterialiseCommand,\n          deps.newId(),",
+        // Re-anchored (revision 11): the call is indented one level deeper (its permission is asked first); the same fault.
+        "            JSON.parse(attempt.body) as MaterialiseCommand,\n            attempt.key,",
+        "            JSON.parse(attempt.body) as MaterialiseCommand,\n            deps.newId(),",
       ),
   },
   {
@@ -3122,6 +3595,36 @@ export const ENGINE_10C = [
         t,
         "            <Button onClick={onSee}>{DEPENDENCY_COPY.see}</Button>",
         "            <Button key={String(Math.random())} onClick={onSee}>{DEPENDENCY_COPY.see}</Button>",
+      ),
+  },
+  {
+    id: "MU-3260",
+    title:
+      "N-10C-R36a: WEB-10c A19 (review 12): (REAL ENGINE) a reconnection reads only the first page of the account's rows",
+    file: "src/features/tasks/catchup/runner.ts",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-M11:",
+    expect: /150 other tasks' rows sort first/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (page.complete || last === undefined) break;",
+        "        if (page.complete || last !== null) break;",
+      ),
+  },
+  {
+    id: "MU-3261",
+    title:
+      "N-10C-R36b: WEB-10c A19 (review 12): (REAL ENGINE) a standing fence (a marker in localStorage) is never consulted after a reload",
+    file: "src/features/tasks/catchup/runner.ts",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-M11:",
+    expect: /fences it across a full reload/,
+    patch: (t) =>
+      sub(
+        t,
+        '    return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";',
+        "    return m.stops.has(scope, op) && false;",
       ),
   },
 ];

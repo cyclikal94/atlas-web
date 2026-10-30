@@ -49,6 +49,8 @@ export interface SendSpec<R> {
    * keeps its answer and is handled exactly as before.
    */
   withdraw?: AbortSignal;
+  /** WEB-10c (review R36): asked wherever `withdraw` is read; false is a withdrawn permission (see `SendOptions.admits`). */
+  admits?: () => boolean;
   /** An operation cover requires the operation fence of THIS envelope. */
   operationId?: OperationId;
   /**
@@ -95,7 +97,9 @@ export async function send<R>(
   );
   const queued = spec.klass === "ordinary" || spec.klass === "recovery";
   const callerAborted = () =>
-    spec.callerSignal?.aborted === true || spec.withdraw?.aborted === true;
+    spec.callerSignal?.aborted === true ||
+    spec.withdraw?.aborted === true ||
+    spec.admits?.() === false;
   const onCallerAbort = () => activity.cancel("caller_abort");
   spec.callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
   spec.withdraw?.addEventListener("abort", onCallerAbort, { once: true });
@@ -572,6 +576,7 @@ export function createStampedFetch(
   account: AccountId,
   epoch: Epoch,
   to: "caller" | "library" = "caller",
+  permission: Pick<SendSpec<unknown>, "withdraw" | "admits"> = {},
 ): (request: Request) => Promise<Response> {
   return async (request) => {
     const outcome = await send<OrdinaryAnswer>(k, {
@@ -580,6 +585,7 @@ export function createStampedFetch(
       epoch,
       request,
       callerSignal: request.signal,
+      ...permission,
       onAnswer: handleOrdinaryAnswer,
     });
     switch (outcome.kind) {

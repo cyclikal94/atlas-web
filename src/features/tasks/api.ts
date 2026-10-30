@@ -122,8 +122,10 @@ export interface TasksApi {
     zone: string;
   }): Promise<TasksResult<TaskPreset[]>>;
   /**
-   * `admitted` (revision 10, Decision B): asked before each resend of a request the session held back (`not_sent`); once false, the
-   * request is not made again and `not_sent` is the answer (the catch-up's position read: its retry window may have ended meanwhile).
+   * `admitted` (revision 10, Decision B; revision 11, review R36): the catch-up's permission to transmit, asked before the first call and
+   * each resend of a request the session held back (`not_sent`), and carried to the session's send boundary, where it is asked again in
+   * the step that issues (after every wait for the token, the cover and the locks). Once false, nothing more is issued and `not_sent` is
+   * the answer; a request already issued is never aborted. It must not throw.
    */
   readTask(
     id: string,
@@ -158,10 +160,11 @@ export interface TasksApi {
     taskId: string,
     scope: "personal" | "joint",
   ): Promise<TasksResult<TaskStreak>>;
-  /** `POST /task-commands` with the attempt's key: the catch-up runner only. */
+  /** `POST /task-commands` with the attempt's key: the catch-up runner only. `admitted`: as `readTask`'s (revision 11, review R36). */
   materialise(
     command: MaterialiseCommand,
     key: string,
+    admitted?: () => boolean,
   ): Promise<TasksResult<TaskResult>>;
   /** `POST /task-access-commands` (enrolment, rota consent, turn order), one attempt per body. `enrol` is a call of it. */
   access(command: AccessCommand, key: string): Promise<TasksResult<TaskResult>>;
@@ -299,18 +302,21 @@ export async function call<T>(
 
 const NOT_SENT_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800, 1_000];
 
-/** `not_sent`: the session held the request for a moment; the same call is made again, a bounded number of times (stamped-call contract). */
+/**
+ * `not_sent`: the session held the request for a moment; the same call is made again, a bounded number of times (stamped-call contract).
+ * `isCurrent` is asked before every call, the first included (revision 11, review R36): false, and nothing is made.
+ */
 export async function untilSent<T>(
   run: () => Promise<TasksResult<T>>,
   isCurrent: () => boolean = () => true,
 ): Promise<TasksResult<T>> {
   for (let attempt = 0; ; attempt += 1) {
+    if (!isCurrent()) return { ok: false, kind: "not_sent" };
     const result = await run();
     if (result.ok || result.kind !== "not_sent") return result;
     const delay = NOT_SENT_DELAYS_MS[attempt];
     if (delay === undefined || !isCurrent()) return result;
     await new Promise<void>((resolve) => setTimeout(resolve, delay));
-    if (!isCurrent()) return result;
   }
 }
 
@@ -320,7 +326,14 @@ export function createTasksApi(
   account: string,
   epoch: number,
 ): TasksApi {
-  const client = () => session.api.client("ordinary", account, epoch);
+  // A caller's permission (the catch-up's) travels to the send boundary; every other call is made as before.
+  const client = (admits?: () => boolean) =>
+    session.api.client(
+      "ordinary",
+      account,
+      epoch,
+      admits === undefined ? undefined : { admits },
+    );
   const offline = (): TasksResult<never> | null =>
     typeof navigator !== "undefined" && navigator.onLine === false
       ? { ok: false, kind: "offline" }
@@ -338,7 +351,7 @@ export function createTasksApi(
             call(
               () =>
                 (
-                  client() as unknown as {
+                  client(admitted) as unknown as {
                     GET(p: string, o: unknown): Promise<Answered>;
                   }
                 ).GET(path, { params }),
@@ -395,16 +408,18 @@ export function createTasksApi(
       ),
     enrol: (command, key) => access(command, key),
     access: (command, key) => access(command, key),
-    materialise: async (command, key) =>
+    materialise: async (command, key, admitted) =>
       offline() ??
-      call(
-        () =>
-          client().POST("/task-commands", {
-            params: { header: { "Idempotency-Key": key } },
-            body: { command } as never,
-          }),
-        parseTaskResult,
-      ),
+      (admitted?.() === false
+        ? { ok: false, kind: "not_sent" }
+        : call(
+            () =>
+              client(admitted).POST("/task-commands", {
+                params: { header: { "Idempotency-Key": key } },
+                body: { command } as never,
+              }),
+            parseTaskResult,
+          )),
     readDependencies: (occurrenceId) =>
       get(
         "/occurrences/{id}/dependencies",

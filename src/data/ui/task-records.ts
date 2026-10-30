@@ -14,9 +14,11 @@ import {
   type MaterialiseLift,
   readMaterialiseDiscovery,
   readMaterialiseSequence,
+  readMaterialiseSequencePage,
   readMaterialiseSequences,
   readTaskSequences,
   SEQUENCE_ROW_BYTES,
+  SEQUENCE_WINDOW,
   type SequenceExpectation,
   type SequenceKey,
   type SequenceWrite,
@@ -276,6 +278,25 @@ export async function readTaskSequencesNow(
       incarnationId: service.incarnationId,
       taskId,
     });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Revision 11 (review R36): one keyset page of the account's sequences after `after` (exclusive; `null`: the first), and whether it is the
+ * LAST (`complete`: shorter than the window); `undefined`: the store could not be read (never an empty account).
+ */
+export async function readSequencePageNow(
+  service: AccountService,
+  after: readonly [string, string] | null,
+): Promise<{ rows: MaterialiseSequenceRow[]; complete: boolean } | undefined> {
+  try {
+    const rows = await service.store.run(readMaterialiseSequencePage, {
+      incarnationId: service.incarnationId,
+      after,
+    });
+    return { rows, complete: rows.length < SEQUENCE_WINDOW };
   } catch {
     return undefined;
   }

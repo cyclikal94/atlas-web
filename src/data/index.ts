@@ -223,6 +223,7 @@ export {
   type RecordCommit,
   readMaterialiseDiscoveryNow,
   readMaterialiseSequenceNow,
+  readSequencePageNow,
   readTaskSequencesNow,
   readTimerAuthorityNow,
   type SequenceExpectation,

@@ -342,10 +342,15 @@ export function step(row: Sequence, now: number, newKey: () => string): Step {
       "unreachable",
     ),
   });
-  if (row.schedule === undefined && row.phase !== "ready")
-    if (row.phase === "submitting" || row.read_failures > 0)
-      // An earlier build's row: a held attempt, or a read that had failed, has no schedule to carry on from.
-      return stop(null, "legacy");
+  if (
+    row.schedule === undefined &&
+    (row.phase === "submitting" ||
+      row.attempt !== null ||
+      row.read_failures > 0)
+  )
+    // An earlier build's row: a held attempt (whatever its phase; revision 11, review R36), or a read that had failed, has no schedule
+    // to carry on from. A row with neither (a `ready` row, an awaiting read never answered wrongly) carries on.
+    return stop(null, "legacy");
   const s = readSchedule(row.schedule, caller);
   if (s === "invalid") return stop(null, "clock");
   if (s?.issued != null)

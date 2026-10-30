@@ -420,8 +420,11 @@ export interface MaterialiseDiscovery {
    * (none since the entry was made or lifted; an entry of revision 2 has none). An answer is recorded only over its own attempt.
    */
   attempt?: string | null;
-  /** Revision 10 (Decision B): the discovery read's retry schedule. Absent on an entry of an earlier build. */
-  schedule?: MaterialiseRetry;
+  /**
+   * Revision 10 (Decision B): the discovery read's retry schedule. Absent on an entry of an earlier build; revision 11 (review R36): `null`
+   * when nothing is outstanding (written explicitly, so an absent one is never this build's).
+   */
+  schedule?: MaterialiseRetry | null;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

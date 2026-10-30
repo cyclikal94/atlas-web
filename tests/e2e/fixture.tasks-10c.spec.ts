@@ -10,7 +10,7 @@ import {
   snapshotPage,
   untilSync,
 } from "./data-leader-helpers";
-import { serveIdentityReads } from "./data-local-faults";
+import { operationKeyOf, serveIdentityReads } from "./data-local-faults";
 import {
   ACCOUNT,
   type SyncStub,
@@ -34,6 +34,7 @@ import {
   dailyPage,
   draftsOf,
   goOfflineAtBoundary,
+  goOnlineAtBoundary,
   serveTaskReads,
   type TaskReads,
   todayUtc,
@@ -2222,4 +2223,183 @@ test.describe("E-TM6: Stop is admitted by the writing transaction against what i
         drafts: await draftsOf(page),
       });
     });
+});
+
+test.describe("E-M11: a reconnection past the first page, and a fence across a reload (revision 11: R36)", () => {
+  const body = (taskId: string) =>
+    JSON.stringify({
+      kind: "materialise",
+      limit: 16,
+      task_id: taskId,
+      through_date: TODAY,
+    });
+  const schedule = (over: Record<string, unknown>) => ({
+    v: 1,
+    caller: "command",
+    issued: null,
+    since: null,
+    failures: 0,
+    next: 0,
+    server: null,
+    cause: null,
+    unknown: 0,
+    seen: Date.now() - 5_000,
+    pause: null,
+    ...over,
+  });
+
+  test("150 other tasks' rows sort first: an observed offline-then-online change resumes this task's window pause once, with its stored key", async ({
+    context,
+  }, info) => {
+    const task = repeating(419, "Water the plants");
+    const key = "eeeeeeee-0000-4000-8000-000000000419";
+    const { page, r10c } = await setup(context, "/tasks", [task], (_, r) => {
+      r.position = () => detailOf(task, { last_date: TODAY, pending: false });
+    });
+    const stop = {
+      through_date: TODAY,
+      sequence_generation: "g",
+      phase: "stopped",
+      attempt: null,
+      read_seq: 1,
+      successful_calls: 8,
+      last_known_position: yesterday(10),
+      started_at: 1,
+      read_failures: 0,
+      stop: { reason: "bound" },
+      trigger: "daily",
+      schedule: null,
+    };
+    const rows = [
+      ...Array.from({ length: 150 }, (_, i) => ({
+        ...stop,
+        task_id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`,
+      })),
+      {
+        ...stop,
+        task_id: task.taskId,
+        read_seq: 0,
+        successful_calls: 0,
+        attempt: { key, body: body(task.taskId) },
+        stop: { reason: "unreachable" },
+        read_failures: 10,
+        schedule: schedule({
+          since: Date.now() - 181_000,
+          failures: 10,
+          next: Date.now() - 5_000,
+          cause: "transport",
+          pause: "window",
+        }),
+      },
+    ];
+    expect(rows.every((r) => r.task_id <= task.taskId)).toBe(true);
+    await page.evaluate(
+      async ([acct, seeded]) => {
+        await window.__atlasData?.put(acct, "materialise_sequences", seeded);
+      },
+      [ACCOUNT, rows] as const,
+    );
+    // Not a reconnection: nothing is sent while the page only stays online.
+    await page.waitForTimeout(1_500);
+    expect(posts(r10c)).toHaveLength(0);
+    await goOfflineAtBoundary(page);
+    await page.waitForTimeout(300);
+    await goOnlineAtBoundary(page);
+    await expect.poll(() => posts(r10c).length, { timeout: 15_000 }).toBe(1);
+    expect(posts(r10c)[0]?.key).toBe(key);
+    await expect
+      .poll(
+        () =>
+          page.evaluate(
+            async ([acct, id]) =>
+              (
+                ((await window.__atlasData?.rows(
+                  acct,
+                  "materialise_sequences",
+                )) ?? []) as Array<{ task_id: string }>
+              ).filter((r) => r.task_id === id).length,
+            [ACCOUNT, task.taskId] as const,
+          ),
+        { timeout: 15_000 },
+      )
+      .toBe(0);
+    await page.waitForTimeout(1_500);
+    expect(posts(r10c)).toHaveLength(1);
+    recordEvidence(info, "e-m11-scan", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+
+  test("a marker of the day's unrecorded outcome (real localStorage) fences it across a full reload; Try again ends that marker and resends the stored key", async ({
+    context,
+  }, info) => {
+    const task = repeating(420, "Water the plants");
+    const key = "eeeeeeee-0000-4000-8000-000000000420";
+    const { page, r10c } = await setup(
+      context,
+      "/tasks",
+      [task],
+      (reads, r) => {
+        reads.respond = (q) =>
+          dailyPage(
+            [view(task)],
+            q.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+          );
+        r.position = () =>
+          posts(r).length > 0
+            ? detailOf(task, { last_date: TODAY, pending: false })
+            : detailOf(task, { last_date: yesterday(10), pending: true });
+      },
+    );
+    // An admitted command whose answer was never recorded, and the marker of that day's failed record (another page's, before a reload).
+    await page.evaluate(
+      async ([acct, row]) => {
+        await window.__atlasData?.put(acct, "materialise_sequences", [row]);
+      },
+      [
+        ACCOUNT,
+        {
+          task_id: task.taskId,
+          through_date: TODAY,
+          sequence_generation: "aaaaaaaa-0000-4000-8000-000000000420",
+          phase: "submitting",
+          attempt: { key, body: body(task.taskId) },
+          read_seq: 0,
+          successful_calls: 0,
+          last_known_position: yesterday(10),
+          started_at: 1,
+          read_failures: 0,
+          stop: null,
+          trigger: "daily",
+          revision: 3,
+          schedule: schedule({ issued: Date.now() - 5_000 }),
+        },
+      ] as const,
+    );
+    const marker = `${await operationKeyOf(page, `materialise:${task.taskId}:${TODAY}`)}#native-page.1`;
+    await page.evaluate((k) => localStorage.setItem(k, "1"), marker);
+    await page.evaluate((day) => {
+      history.pushState(null, "", `/today?day=${day}&tz=UTC`);
+      dispatchEvent(new PopStateEvent("popstate"));
+    }, TODAY);
+    await reboot(page);
+    const notice = page.locator(`[data-catch-up-task="${task.taskId}"]`);
+    await expect(notice).toHaveAttribute("data-catch-up-stopped", "storage", {
+      timeout: 15_000,
+    });
+    await page.waitForTimeout(2_000);
+    expect(posts(r10c)).toHaveLength(0);
+    expect(await page.evaluate((k) => localStorage.getItem(k), marker)).toBe(
+      "1",
+    );
+    await notice.getByRole("button", { name: "Try again" }).click();
+    await expect.poll(() => posts(r10c).length, { timeout: 15_000 }).toBe(1);
+    expect(posts(r10c)[0]?.key).toBe(key);
+    expect(
+      await page.evaluate((k) => localStorage.getItem(k), marker),
+    ).toBeNull();
+    recordEvidence(info, "e-m11-fence", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
 });

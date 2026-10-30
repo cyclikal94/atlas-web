@@ -124,6 +124,11 @@ interface Raw {
   status: number;
   body: unknown;
 }
+/**
+ * Revision 11 (review R37): every request a test helper makes carries this header, so a log of the PAGE's own traffic (`requestLog`,
+ * I-10C-M4's barriers) never counts a helper's request as the product's. The backend ignores it.
+ */
+const HELPER = "x-atlas-test-helper";
 /** One stamped request made in the page (the session's own client), asked again while the session answers `not_sent`. */
 const call = (
   page: Page,
@@ -146,6 +151,7 @@ const call = (
             new Request(`${location.origin}/api/experimental/v1${path}`, {
               method,
               headers: {
+                "x-atlas-test-helper": "1",
                 ...(body === undefined
                   ? {}
                   : { "content-type": "application/json" }),
@@ -388,7 +394,7 @@ const materialise = (page: Page, id: Id, taskId: string, through: string) =>
     },
     crypto.randomUUID(),
   );
-/** The `materialise` posts and position reads the PAGE made, from the browser's own request log. */
+/** The `materialise` posts and position reads the PAGE made, from the browser's own request log (a helper's are not the page's). */
 function requestLog(page: Page, taskId: string) {
   const out: Array<{
     kind: "materialise" | "position";
@@ -398,6 +404,7 @@ function requestLog(page: Page, taskId: string) {
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (!url.pathname.startsWith(API)) return;
+    if (request.headers()[HELPER] !== undefined) return;
     const path = url.pathname.slice(API.length);
     if (request.method() === "POST" && path === "/task-commands") {
       const body = request.postDataJSON() as {
@@ -573,46 +580,299 @@ test.describe("I-10C-M2/M3: the bound, Try again and the horizon (A2; TASK-13; C
 });
 
 test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)", () => {
-  test("after the reload exactly one more position read and no new materialise", async ({
-    context,
-  }) => {
+  /**
+   * Revision 11 (review R37; design assessment C5): a CAUSAL witness of the recovery. The old page's position read (after its successful
+   * `materialise`) is held until the page is CLOSED, and the retained row is proven before it closes (one success, awaiting ITS OWN read,
+   * admitted and unanswered, stable). A new page of the same browser (the same database) is the recovering runner, triggered by the real
+   * daily endpoint; its own traffic only is counted (every helper request carries `HELPER`; the arranger is another signed-in client in
+   * another browser context), and each of its reads is held at a barrier where the durable records name the caller that is asking. The
+   * revision-10 version passed without the new page doing anything (Review 12, R37); it is kept in the evidence history, not here.
+   *
+   * `ATLAS_I10C_M4_QUALIFY` (qualification runs only, execute.md; never set in a validation plan): `old-page-settles` lets the old page's
+   * read through (the retained-row precondition must then fail); `helper-get` adds an untagged GET of the task from the new page after
+   * its discovery (under a mutant that disables the recovery, the oracle must still fail).
+   */
+  const QUALIFY = process.env.ATLAS_I10C_M4_QUALIFY ?? "";
+  type Retained = {
+    rows: Array<{
+      task_id: string;
+      through_date: string;
+      sequence_generation: string;
+      phase: string;
+      read_seq: number;
+      attempt: { key: string } | null;
+      successful_calls: number;
+      schedule?: {
+        caller: string;
+        issued: number | null;
+        failures: number;
+      } | null;
+    }>;
+    discovery: {
+      attempt?: string | null;
+      schedule?: { issued: number | null } | null;
+    } | null;
+  };
+  /** The task's durable catch-up records as the page's database holds them (IndexedDB: no request). */
+  const retained = (page: Page, account: string, taskId: string) =>
+    page.evaluate(
+      async ({ a, t }) => {
+        const data = window.__atlasData;
+        if (!data) throw new Error("no data harness");
+        const rows = (
+          (await data.rows(a, "materialise_sequences")) as Array<{
+            task_id: string;
+          }>
+        ).filter((r) => r.task_id === t);
+        const sync = await data.syncState(a);
+        const all = sync?.materialise_discovery as
+          | Record<string, unknown>
+          | undefined;
+        return { rows, discovery: all?.[t] ?? null };
+      },
+      { a: account, t: taskId },
+    ) as Promise<Retained>;
+
+  /** The old page: its first `materialise` succeeds and its position read is held until the page is closed. */
+  async function closedWhileHeld(context: BrowserContext, backlog: number) {
     const { page, id } = await bootAs(context, main);
-    const made = await makeTask(page, id, backdated(10), { title: "I-10C-M4" });
-    const posted: string[] = [];
+    const made = await makeTask(page, id, backdated(backlog), {
+      title: "I-10C-M4",
+    });
+    const keys: string[] = [];
     let held = false;
     await page.route(`**${API}/tasks/${made.taskId}`, async (route) => {
-      if (posted.length > 0 && !held) {
+      if (route.request().headers()[HELPER] !== undefined)
+        return route.fallback();
+      if (keys.length > 0 && !held) {
         held = true;
-        // Held until the page goes: the read is never answered for that page.
+        if (QUALIFY === "old-page-settles") return route.fallback();
+        // Never answered: the page is closed with it outstanding.
         return;
       }
       return route.fallback();
     });
     page.on("request", (request) => {
+      if (request.headers()[HELPER] !== undefined) return;
       const body =
         request.method() === "POST"
           ? (request.postDataJSON() as { command?: { kind?: string } } | null)
           : null;
-      if (body?.command?.kind === "materialise") posted.push(request.url());
+      if (body?.command?.kind === "materialise")
+        keys.push(request.headers()["idempotency-key"] ?? "");
     });
     await go(page, `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`);
     await expect.poll(() => held, { timeout: 60_000 }).toBe(true);
-    await page.unroute(`**${API}/tasks/${made.taskId}`);
-    const log = requestLog(page, made.taskId);
-    await reopenBound(
-      page,
-      id.account_id,
-      `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`,
-    );
+    // PRECONDITION: the retained continuation, before the page closes, and still so a moment later (an answered read would move it).
+    const awaiting = async () => {
+      const { rows } = await retained(page, id.account_id, made.taskId);
+      const row = rows[0];
+      return rows.length === 1 &&
+        row?.phase === "awaiting_position_read" &&
+        row.attempt === null &&
+        row.read_seq === 1 &&
+        row.schedule?.caller === "position" &&
+        row.schedule.issued != null
+        ? row
+        : null;
+    };
     await expect
-      .poll(async () => (await position(page, id, made.taskId))?.pending, {
-        timeout: 60_000,
+      .poll(async () => (await awaiting()) !== null, {
+        timeout: 30_000,
       })
-      .toBe(false);
-    await page.waitForTimeout(3_000);
-    expect(log.filter((e) => e.kind === "position")).toHaveLength(1);
-    expect(log.filter((e) => e.kind === "materialise")).toHaveLength(0);
-    expect(posted).toHaveLength(1);
+      .toBe(true);
+    const before = (await awaiting()) as Retained["rows"][number];
+    await page.waitForTimeout(2_000);
+    expect(await awaiting(), "the old page's read is still unanswered").toEqual(
+      before,
+    );
+    expect(keys).toHaveLength(1);
+    await page.close();
+    return { id, made, before, oldKey: keys[0] as string };
+  }
+
+  /**
+   * The new page of the same browser: its product traffic logged from creation (helpers excluded), and its first `hold` reads of the
+   * task held at barriers the test releases (`release`).
+   */
+  async function recovering(
+    context: BrowserContext,
+    account: string,
+    taskId: string,
+    hold: number,
+  ) {
+    const page = await context.newPage();
+    const product: Array<{ kind: "materialise" | "position"; key?: string }> =
+      [];
+    page.on("request", (request) => {
+      const url = new URL(request.url());
+      if (!url.pathname.startsWith(API)) return;
+      if (request.headers()[HELPER] !== undefined) return;
+      const path = url.pathname.slice(API.length);
+      if (request.method() === "GET" && path === `/tasks/${taskId}`)
+        product.push({ kind: "position" });
+      if (request.method() === "POST" && path === "/task-commands") {
+        const body = request.postDataJSON() as {
+          command?: { kind?: string; task_id?: string };
+        } | null;
+        if (
+          body?.command?.kind === "materialise" &&
+          body.command.task_id === taskId
+        )
+          product.push({
+            kind: "materialise",
+            key: request.headers()["idempotency-key"],
+          });
+      }
+    });
+    const held: Array<{ release(): Promise<void> }> = [];
+    let seen = 0;
+    await page.route(`**${API}/tasks/${taskId}`, async (route) => {
+      if (
+        route.request().headers()[HELPER] !== undefined ||
+        route.request().method() !== "GET"
+      )
+        return route.fallback();
+      seen += 1;
+      if (seen > hold) return route.fallback();
+      held.push({ release: () => route.fallback() });
+    });
+    await reopenBound(page, account, "/tasks");
+    return { page, product, held };
+  }
+
+  test("I-10C-M4a: the new page recovers the retained row with its OWN position read; another client finished the backlog, so no new materialise at all", async ({
+    context,
+    browser,
+  }) => {
+    const { id, made, before } = await closedWhileHeld(context, 30);
+    const r = await recovering(context, id.account_id, made.taskId, 2);
+    // Before any trigger: the retained row is there, as the old page left it, and the new page has asked nothing.
+    expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
+      before,
+    ]);
+    expect(r.product).toEqual([]);
+    await go(r.page, `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`);
+    // BARRIER 1 = the discovery read: its claim is durable, and the row is untouched.
+    await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(1);
+    const atDiscovery = await retained(r.page, id.account_id, made.taskId);
+    expect(atDiscovery.discovery?.attempt ?? null).not.toBeNull();
+    expect(atDiscovery.discovery?.schedule?.issued ?? null).not.toBeNull();
+    expect(atDiscovery.rows).toEqual([before]);
+    // Another client (its own browser context and session) finishes the backlog meanwhile: its traffic is never the page's.
+    const other = await browser.newContext({
+      baseURL: test.info().project.use.baseURL,
+    });
+    try {
+      const arranger = await apiAs(other, main);
+      expect(
+        (await materialise(arranger.page, arranger.id, made.taskId, today()))
+          .status,
+      ).toBe(200);
+      expect(
+        (await position(arranger.page, arranger.id, made.taskId))?.pending,
+      ).toBe(false);
+      await r.held[0]?.release();
+      if (QUALIFY === "helper-get")
+        // An untagged GET of the task from the page (it looks like the page's own): the oracle below must not take it for recovery.
+        void r.page.evaluate(
+          async ({ a, e, t }) => {
+            await window.__s.api
+              .fetchFor(
+                "ordinary",
+                a,
+                e,
+              )(
+                new Request(
+                  `${location.origin}/api/experimental/v1/tasks/${t}`,
+                ),
+              )
+              .catch(() => undefined);
+          },
+          { a: id.account_id, e: id.epoch, t: made.taskId },
+        );
+      // BARRIER 2 = the row's own position read: the discovery is over (its entry gone) and the row's read is admitted anew, its old
+      // unanswered read counted as lost; still the same generation and read, and no command.
+      await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(2);
+      const atRecovery = await retained(r.page, id.account_id, made.taskId);
+      expect(atRecovery.discovery).toBeNull();
+      expect(atRecovery.rows).toHaveLength(1);
+      const row = atRecovery.rows[0];
+      expect(row).toMatchObject({
+        sequence_generation: before.sequence_generation,
+        phase: "awaiting_position_read",
+        read_seq: 1,
+        attempt: null,
+        schedule: { caller: "position", failures: 1 },
+      });
+      expect(row?.schedule?.issued ?? 0).toBeGreaterThan(
+        before.schedule?.issued ?? Number.POSITIVE_INFINITY,
+      );
+      expect(r.product.filter((e) => e.kind === "materialise")).toEqual([]);
+      await r.held[1]?.release();
+      // Its continuation settles the row (the position covers the day) and nothing else is sent.
+      await expect
+        .poll(
+          async () =>
+            (await retained(r.page, id.account_id, made.taskId)).rows.length,
+          { timeout: 60_000 },
+        )
+        .toBe(0);
+      await r.page.waitForTimeout(3_000);
+      expect(r.product).toEqual([{ kind: "position" }, { kind: "position" }]);
+      expect(
+        (await retained(r.page, id.account_id, made.taskId)).discovery,
+      ).toBeNull();
+    } finally {
+      await other.close();
+    }
+  });
+
+  test("I-10C-M4b: with backlog left, the recovered first action is the row's own read; only then a materialise with a NEW key, until the day is covered", async ({
+    context,
+  }) => {
+    const { id, made, before, oldKey } = await closedWhileHeld(context, 40);
+    const r = await recovering(context, id.account_id, made.taskId, 2);
+    expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
+      before,
+    ]);
+    await go(r.page, `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`);
+    await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(1);
+    expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
+      before,
+    ]);
+    await r.held[0]?.release();
+    await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(2);
+    const atRecovery = (await retained(r.page, id.account_id, made.taskId))
+      .rows[0];
+    expect(atRecovery).toMatchObject({
+      sequence_generation: before.sequence_generation,
+      phase: "awaiting_position_read",
+      read_seq: 1,
+      schedule: { caller: "position", failures: 1 },
+    });
+    expect(r.product.filter((e) => e.kind === "materialise")).toEqual([]);
+    await r.held[1]?.release();
+    await expect
+      .poll(
+        async () =>
+          (await retained(r.page, id.account_id, made.taskId)).rows.length,
+        { timeout: 120_000 },
+      )
+      .toBe(0);
+    await r.page.waitForTimeout(3_000);
+    expect(r.product.slice(0, 3).map((e) => e.kind)).toEqual([
+      "position",
+      "position",
+      "materialise",
+    ]);
+    const keys = r.product
+      .filter((e) => e.kind === "materialise")
+      .map((e) => e.key);
+    expect(keys.length).toBeGreaterThan(0);
+    expect(keys).not.toContain(oldKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect((await position(r.page, id, made.taskId))?.pending).toBe(false);
   });
 });
 

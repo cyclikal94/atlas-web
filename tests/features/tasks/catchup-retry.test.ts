@@ -2,6 +2,12 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { DataEnv } from "../../../src/data";
 import type { AccountService } from "../../../src/data/engine/account-service";
+import type { WriteFailureMarkers } from "../../../src/data/engine/write-failure-marker";
+import { createWriteFailureMarkers } from "../../../src/data/engine/write-failure-marker";
+import {
+  createPageDataHost,
+  resetPageDataHost,
+} from "../../../src/data/leader/page-host";
 import type {
   MaterialiseDiscovery,
   MaterialiseRetry,
@@ -10,6 +16,7 @@ import type {
 } from "../../../src/data/model/types";
 import {
   call,
+  createTasksApi,
   type MaterialiseCommand,
   type TasksApi,
   type TasksResult,
@@ -17,6 +24,8 @@ import {
 import {
   type CatchUpRunner,
   createCatchUpRunner,
+  fenceOf,
+  REPAIR_MS,
   seenDiscovery,
   seenSequence,
 } from "../../../src/features/tasks/catchup/runner";
@@ -25,11 +34,16 @@ import {
   runnerOf,
 } from "../../../src/features/tasks/catchup/useCatchUp";
 import type { TasksEnv } from "../../../src/features/tasks/env";
-import type { TaskDetail } from "../../../src/features/tasks/model/contract";
+import {
+  parseTaskDetail,
+  type TaskDetail,
+} from "../../../src/features/tasks/model/contract";
 import { attemptBody } from "../../../src/features/tasks/model/materialise";
 import { WINDOW_MS } from "../../../src/features/tasks/model/retry";
 import { todayIn } from "../../../src/features/tasks/model/time";
+import { type Session, StampedRequestError } from "../../../src/session";
 import { ACCOUNT, DB, defaultsWorld } from "../../support/data/defaults-world";
+import { FakeMarkerStorage } from "../../support/data/marker-storage";
 import { cacheRow } from "../../support/data/rows";
 
 /**
@@ -170,10 +184,17 @@ async function setup(
       service?: () => AccountService | null;
       /** Replaces moving the clock by each wait (a held wait: never resolves; a jump: moves it by something else). */
       sleep?: (ms: number) => Promise<void>;
+      /** Revision 11: the page's write-failure markers (none when omitted). */
+      markers?: WriteFailureMarkers;
+      /** Revision 11: the API this runner uses instead of the scripted one (the production client over a session double). */
+      api?: TasksApi;
     } = {},
   ) =>
     createCatchUpRunner({
-      api,
+      ...(over.markers === undefined
+        ? {}
+        : { markers: () => over.markers as WriteFailureMarkers }),
+      api: over.api ?? api,
       identity: `${ACCOUNT}:1`,
       accountId: ACCOUNT,
       epoch: 1,
@@ -1423,4 +1444,1267 @@ describe("Q-M6 (production hook): only an observed offline-to-online change is a
     await flush();
     expect(second).not.toHaveBeenCalled();
   });
+});
+
+// ---- Revision 11 (review R36; design assessment C1–C4, Q1–Q11) ----------------------------------------------------------------------
+/**
+ * Review 12's four R36 witnesses with their positive controls, maintained (`REVIEW12`), and the schedules the design assessment adds
+ * around each boundary. The production runner, W27 plans and account service throughout; only the commit boundary, the API's answers
+ * (or, for the transport cases, the session under the production task client) and the clock are scripted. FIXTURE evidence.
+ */
+type Commit = { next?: unknown; expected?: unknown };
+/** The production service with its `commit` intercepted: `onCommit` decides when (and whether) the real commit runs. */
+function intercepted(
+  w: Awaited<ReturnType<typeof setup>>,
+  onCommit: (
+    plan: string,
+    input: Commit,
+    run: () => Promise<unknown>,
+  ) => Promise<unknown>,
+): AccountService {
+  const real = w.t.env.service() as AccountService;
+  return new Proxy(real, {
+    get(target, key, receiver) {
+      if (key !== "commit") return Reflect.get(target, key, receiver);
+      return (plan: { name: string }, input: Commit) =>
+        onCommit(plan.name, input, () =>
+          target.commit(plan as never, input as never),
+        );
+    },
+  }) as AccountService;
+}
+/** The write admits a transmission (its schedule's `issued` is set). */
+const admitting = (input: Commit) =>
+  (input.next as { schedule?: { issued?: number | null } } | null)?.schedule
+    ?.issued != null;
+const PLAN_OF = {
+  discovery: "data.writeMaterialiseDiscovery",
+  command: "data.writeMaterialiseSequence",
+  position: "data.writeMaterialiseSequence",
+} as const;
+const CALLERS = ["discovery", "command", "position"] as const;
+type CallerName = (typeof CALLERS)[number];
+/** The caller's state one second before its window ends (`since` = NOW − WINDOW + 1 s), as seeded. */
+function oneSecondLeft(caller: CallerName) {
+  const s = schedule({
+    caller,
+    since: NOW - WINDOW_MS + 1_000,
+    failures: 1,
+    // Its time came 10 s ago and it was last written now: a clock moved back between them is told apart from one before `next`.
+    next: NOW - 10_000,
+    seen: NOW,
+  });
+  return caller === "discovery"
+    ? {
+        discovery: {
+          [TASK]: {
+            retry: 0,
+            failures: 1,
+            stop: null,
+            attempt: "old",
+            schedule: s,
+          },
+        },
+        positions: [detail(TODAY, false)],
+      }
+    : {
+        seed: [
+          row({
+            phase:
+              caller === "command" ? "submitting" : "awaiting_position_read",
+            attempt:
+              caller === "command"
+                ? { key: "frozen-key", body: attemptBody(TASK, TODAY) }
+                : null,
+            read_seq: caller === "position" ? 1 : 0,
+            schedule: s,
+          }),
+        ],
+        positions: [detail("2026-10-01", true), detail(TODAY, false)],
+      };
+}
+const transmissionsOf = (
+  w: Awaited<ReturnType<typeof setup>>,
+  caller: CallerName,
+) =>
+  caller === "command"
+    ? w.sent()
+    : caller === "position"
+      ? w.reads().slice(1)
+      : w.reads();
+const markerWorld = () => {
+  const storage = new FakeMarkerStorage();
+  return {
+    storage,
+    page: (id: string) =>
+      createWriteFailureMarkers(storage, undefined, {
+        locks: null,
+        id: () => id,
+      }),
+  };
+};
+
+describe("REVIEW12 R36-1: a call is permitted when it is issued, not only when it was planned", () => {
+  test.each(
+    CALLERS.flatMap((caller) => [
+      [caller, 500, 1],
+      [caller, 1_000, 0],
+      [caller, 1_001, 0],
+    ]) as Array<[CallerName, number, number]>,
+  )(
+    "%s: its admission's commit delayed until +%i ms (the window ends at +1,000): %i transmissions; a refused one is paused, its identity kept",
+    async (caller, delay, expected) => {
+      const w = await setup(oneSecondLeft(caller));
+      let crossed = false;
+      const service = intercepted(w, async (plan, input, run) => {
+        const next = input.next as { schedule?: { caller?: string } } | null;
+        if (
+          !crossed &&
+          plan === PLAN_OF[caller] &&
+          admitting(input) &&
+          next?.schedule?.caller === caller
+        ) {
+          crossed = true;
+          // The real commit, delayed before it starts (its stamp and compare-and-set still pass): nothing has been sent yet.
+          await Promise.resolve();
+          w.setNow(NOW + delay);
+        }
+        return run();
+      });
+      const r = w.make({ service: () => service });
+      try {
+        r.ensure(TASK, "daily");
+        await w.idle(r);
+        expect(crossed, "the admission boundary was exercised").toBe(true);
+        expect(transmissionsOf(w, caller)).toHaveLength(expected);
+        if (expected === 1) return;
+        // Refused: withdrawn, then decided again at once: a window pause written, nothing counted for the refusal.
+        if (caller === "discovery") {
+          expect(w.discovery()?.stop).toEqual({ reason: "unreachable" });
+          expect(w.discovery()?.schedule).toMatchObject({
+            pause: "window",
+            failures: 1,
+            issued: null,
+          });
+        } else {
+          expect(w.stored()).toMatchObject({
+            phase: "stopped",
+            stop: { reason: "unreachable" },
+            schedule: { caller, pause: "window", failures: 1, issued: null },
+            attempt: caller === "command" ? { key: "frozen-key" } : null,
+          });
+        }
+      } finally {
+        r.dispose();
+      }
+    },
+  );
+
+  test.each(CALLERS)(
+    "%s: a clock that goes back, or stops being a time, while its admission commits: nothing is transmitted; it pauses (clock)",
+    async (caller) => {
+      for (const moved of [NOW - 5_000, Number.NaN]) {
+        const w = await setup(oneSecondLeft(caller));
+        let crossed = false;
+        const service = intercepted(w, async (plan, input, run) => {
+          const next = input.next as { schedule?: { caller?: string } } | null;
+          if (
+            !crossed &&
+            plan === PLAN_OF[caller] &&
+            admitting(input) &&
+            next?.schedule?.caller === caller
+          ) {
+            crossed = true;
+            await Promise.resolve();
+            w.setNow(moved);
+          }
+          return run();
+        });
+        const r = w.make({ service: () => service });
+        try {
+          r.ensure(TASK, "daily");
+          await w.idle(r);
+          expect(crossed).toBe(true);
+          expect(transmissionsOf(w, caller), String(moved)).toHaveLength(0);
+          const s =
+            caller === "discovery"
+              ? w.discovery()?.schedule
+              : w.stored()?.schedule;
+          expect(s?.pause, String(moved)).toBe("clock");
+        } finally {
+          r.dispose();
+        }
+      }
+    },
+  );
+
+  test("a binding that ends while the admission commits, or the device going offline: nothing is transmitted", async () => {
+    for (const change of ["offline", "binding"] as const) {
+      const w = await setup(oneSecondLeft("command"));
+      let live = true;
+      const real = w.t.env.service() as AccountService;
+      const service = intercepted(w, async (plan, input, run) => {
+        if (plan === PLAN_OF.command && admitting(input)) {
+          const out = await run();
+          if (change === "offline") w.setOnline(false);
+          else live = false;
+          return out;
+        }
+        return run();
+      });
+      const r = w.make({ service: () => (live ? service : real) });
+      try {
+        r.ensure(TASK, "daily");
+        await w.settle();
+        await w.settle();
+        expect(w.sent(), change).toHaveLength(0);
+      } finally {
+        r.dispose();
+      }
+    }
+  });
+});
+
+describe("REVIEW12 R36-1 through the production client: the permission reaches the session's issue", () => {
+  /**
+   * A session double under the PRODUCTION task client (`createTasksApi`): every request waits at a gate (the session's token, cover and
+   * locks) and is issued only if its `admits` still holds then, as the kernel's boundary does (`tests/session/stamped-admits.test.ts`
+   * proves the kernel's own). `transmitted`: what crossed the "boundary".
+   */
+  function heldSession(answer: (method: string, path: string) => Response) {
+    const gates: Array<() => void> = [];
+    const transmitted: Array<{ method: string; path: string }> = [];
+    const asked: Array<{ method: string; path: string }> = [];
+    const notSent = { count: 0 };
+    const session = {
+      api: {
+        client: (
+          _klass: string,
+          _account: string,
+          _epoch: number,
+          send?: { admits?: () => boolean },
+        ) => {
+          const issue = async (method: string, path: string) => {
+            asked.push({ method, path });
+            await new Promise<void>((resolve) => gates.push(resolve));
+            if (notSent.count > 0) {
+              notSent.count -= 1;
+              throw new StampedRequestError("not_sent");
+            }
+            if (send?.admits?.() === false)
+              throw new StampedRequestError("not_sent");
+            transmitted.push({ method, path });
+            const response = answer(method, path);
+            const body = await response
+              .clone()
+              .json()
+              .catch(() => null);
+            return response.ok
+              ? { data: body, response }
+              : { error: body, response };
+          };
+          return {
+            GET: (path: string) => issue("GET", path),
+            POST: (path: string) => issue("POST", path),
+          };
+        },
+      },
+    } as unknown as Session;
+    const open = async (n = 1) => {
+      for (let i = 0; i < n; i += 1) {
+        for (let k = 0; k < 50 && gates.length === 0; k += 1)
+          await new Promise((r) => setTimeout(r, 0));
+        gates.shift()?.();
+      }
+    };
+    return { session, transmitted, asked, open, gates, notSent };
+  }
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  /** The wire body of `GET /tasks/{id}` (the projections without the cache's own `kind_date`). */
+  const DETAIL_BODY = (last: string, pending: boolean) => {
+    const { task, execution, materialisation } = (
+      detail(last, pending) as { value: TaskDetail }
+    ).value;
+    const wire = (row: TaskDetail["task"] | null) => {
+      if (row === null) return null;
+      const { kind_date: _, ...rest } = row as typeof row & {
+        kind_date?: unknown;
+      };
+      return rest;
+    };
+    return { task: wire(task), execution: wire(execution), materialisation };
+  };
+  const UNAVAILABLE = {
+    code: "temporarily_unavailable",
+    message: "m",
+    request_id: "req-q2",
+    details: [],
+  };
+
+  test("precondition: the raw detail body parses as the client's answer", () => {
+    expect(parseTaskDetail(DETAIL_BODY(TODAY, false))).not.toBeNull();
+  });
+
+  test.each([
+    ["the command", "command", 1_001, 0],
+    ["the command", "command", 500, 1],
+    ["the position read", "position", 1_001, 0],
+    ["the position read", "position", 500, 1],
+  ] as const)(
+    "%s (%s) held in the session until +%i ms (its window ends at +1,000): %i issued",
+    async (_, caller, delay, expected) => {
+      const w = await setup(oneSecondLeft(caller));
+      const s = heldSession((method) =>
+        method === "POST"
+          ? json(503, UNAVAILABLE)
+          : json(200, DETAIL_BODY("2026-10-01", true)),
+      );
+      const r = w.make({ api: createTasksApi(s.session, ACCOUNT, 1) });
+      try {
+        r.ensure(TASK, "daily");
+        // The discovery read goes through; the caller's own request then waits in the session while the clock moves on.
+        await s.open(1);
+        for (let k = 0; k < 400 && s.asked.length < 2; k += 1) await w.settle();
+        expect(s.asked).toHaveLength(2);
+        w.setNow(NOW + delay);
+        await s.open(1);
+        await w.settle();
+        await w.settle();
+        const own = s.transmitted.slice(1);
+        expect(own).toHaveLength(expected);
+        if (expected === 0)
+          expect(w.stored()?.schedule).toMatchObject({ pause: "window" });
+      } finally {
+        r.dispose();
+        while (s.gates.length > 0) s.gates.shift()?.();
+      }
+    },
+  );
+
+  test("the discovery read held past its window's end issues nothing; held 500 ms, it is issued", async () => {
+    for (const [delay, expected] of [
+      [1_001, 0],
+      [500, 1],
+    ] as const) {
+      const w = await setup(oneSecondLeft("discovery"));
+      const s = heldSession(() => json(200, DETAIL_BODY(TODAY, false)));
+      const r = w.make({ api: createTasksApi(s.session, ACCOUNT, 1) });
+      try {
+        r.ensure(TASK, "daily");
+        for (let k = 0; k < 400 && s.asked.length < 1; k += 1) await w.settle();
+        w.setNow(NOW + delay);
+        await s.open(1);
+        await w.idle(r);
+        expect(s.transmitted, String(delay)).toHaveLength(expected);
+      } finally {
+        r.dispose();
+        while (s.gates.length > 0) s.gates.shift()?.();
+      }
+    }
+  });
+
+  test("a hidden resend after `not_sent` asks the permission again: none once the window has ended", async () => {
+    const w = await setup(oneSecondLeft("position"));
+    const s = heldSession(() => json(200, DETAIL_BODY("2026-10-01", true)));
+    const r = w.make({ api: createTasksApi(s.session, ACCOUNT, 1) });
+    try {
+      r.ensure(TASK, "daily");
+      await s.open(1);
+      for (let k = 0; k < 400 && s.asked.length < 2; k += 1) await w.settle();
+      // The session holds the position read back once (`not_sent`); before its resend the window ends.
+      s.notSent.count = 1;
+      await s.open(1);
+      w.setNow(NOW + 1_000);
+      for (let k = 0; k < 40; k += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        if (s.gates.length > 0) await s.open(1);
+      }
+      expect(s.asked).toHaveLength(2);
+      expect(s.transmitted).toHaveLength(1);
+    } finally {
+      r.dispose();
+      while (s.gates.length > 0) s.gates.shift()?.();
+    }
+  });
+
+  test.each([true, false])(
+    "the production readTask asks an initial permission of %s before its first call",
+    async (admitted) => {
+      const get = vi.fn(async () => ({
+        data: {},
+        response: new Response("", { status: 200 }),
+      }));
+      const api = createTasksApi(
+        { api: { client: () => ({ GET: get }) } } as never,
+        ACCOUNT,
+        1,
+      );
+      await api.readTask(TASK, () => admitted);
+      expect(get).toHaveBeenCalledTimes(admitted ? 1 : 0);
+    },
+  );
+
+  test.each([true, false])(
+    "the production materialise asks an initial permission of %s and carries it to the client",
+    async (admitted) => {
+      const seen: Array<{ admits?: () => boolean } | undefined> = [];
+      const post = vi.fn(async () => ({
+        data: {},
+        response: new Response("", { status: 200 }),
+      }));
+      const api = createTasksApi(
+        {
+          api: {
+            client: (
+              _k: string,
+              _a: string,
+              _e: number,
+              send?: { admits?: () => boolean },
+            ) => {
+              seen.push(send);
+              return { POST: post };
+            },
+          },
+        } as never,
+        ACCOUNT,
+        1,
+      );
+      await api.materialise(
+        { kind: "materialise", task_id: TASK, through_date: TODAY, limit: 16 },
+        "k",
+        () => admitted,
+      );
+      expect(post).toHaveBeenCalledTimes(admitted ? 1 : 0);
+      if (admitted) expect(seen[0]?.admits?.()).toBe(true);
+    },
+  );
+
+  test("control: a read with no permission is made as before, and its client carries none", async () => {
+    const seen: unknown[] = [];
+    const get = vi.fn(async () => ({
+      data: {},
+      response: new Response("", { status: 200 }),
+    }));
+    const api = createTasksApi(
+      {
+        api: {
+          client: (...args: unknown[]) => {
+            seen.push(args[3]);
+            return { GET: get };
+          },
+        },
+      } as never,
+      ACCOUNT,
+      1,
+    );
+    await api.readTask(TASK);
+    await api.readRota(TASK);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(seen).toEqual([undefined, undefined]);
+  });
+});
+
+describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences its caller across pages and reloads", () => {
+  /** The outcome commit of the caller's issued transmission (not an admission), the first `n` times it is made. */
+  const failOutcome = (
+    w: Awaited<ReturnType<typeof setup>>,
+    plan: string,
+    expectedPhase: string | null,
+    n: number,
+  ) => {
+    let failed = 0;
+    const service = intercepted(w, async (name, input, run) => {
+      const expected = input.expected as { phase?: string } | null;
+      if (
+        failed < n &&
+        name === plan &&
+        !admitting(input) &&
+        (expectedPhase === null
+          ? (input.expected as { attempt?: string | null } | null)?.attempt !=
+            null
+          : expected?.phase === expectedPhase)
+      ) {
+        failed += 1;
+        return { kind: "failed" };
+      }
+      return run();
+    });
+    return { service, failed: () => failed };
+  };
+
+  test("CONTROL: a healthy catch-up with markers writes no marker", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+    });
+    const r = w.make({ markers: m.page("p1") });
+    r.ensure(TASK, "daily");
+    await w.idle(r);
+    expect(w.sent()).toHaveLength(1);
+    expect(
+      [...m.storage.items.keys()].filter((k) => k.includes("materialise")),
+    ).toEqual([]);
+    r.dispose();
+  });
+
+  test("WITNESS (review 12): ONE failed record of a 429 (Retry-After 60) is repaired: a new runner on the same database sends nothing before its deadline", async () => {
+    const w = await setup({
+      positions: [
+        detail("2026-10-01", true),
+        detail("2026-10-01", true),
+        detail(TODAY, false),
+      ],
+      sends: [await http(429, "rate_limited", "60")],
+    });
+    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 1);
+    // The repair's own short wait moves the clock; the wait for the deadline is held (this runner then "goes away").
+    const r = w.make({
+      service: () => f.service,
+      sleep: (ms) =>
+        ms <= Math.max(...REPAIR_MS)
+          ? Promise.resolve(w.setNow(w.now() + ms))
+          : new Promise<void>(() => undefined),
+    });
+    r.ensure(TASK, "daily");
+    for (let i = 0; i < 40 && w.stored()?.schedule?.server == null; i += 1)
+      await w.settle();
+    expect(f.failed()).toBe(1);
+    // Repaired: the deadline is durable, and nothing is held in memory.
+    expect(w.stored()?.schedule).toMatchObject({
+      server: NOW + 60_000,
+      issued: null,
+    });
+    expect(r.get().unrecorded.has(TASK)).toBe(false);
+    expect(w.sent()).toHaveLength(1);
+    r.dispose();
+    const second = w.make();
+    try {
+      second.ensure(TASK, "daily");
+      await w.idle(second);
+      expect(w.sent().filter((x) => x.at < NOW + 60_000)).toHaveLength(1);
+      expect(new Set(w.sent().map((x) => x.key)).size).toBe(1);
+    } finally {
+      second.dispose();
+    }
+  });
+
+  test.each([
+    ["a 429's record (Retry-After 60)", "429"],
+    ["a successful command's record", "ok"],
+  ] as const)(
+    "%s never written: a marker fences the day; a new runner, and another page, send nothing automatically",
+    async (_, what) => {
+      const m = markerWorld();
+      const w = await setup({
+        positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+        sends: [what === "429" ? await http(429, "rate_limited", "60") : OK],
+      });
+      const f = failOutcome(
+        w,
+        "data.writeMaterialiseSequence",
+        "submitting",
+        99,
+      );
+      const r = w.make({ service: () => f.service, markers: m.page("p1") });
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(f.failed()).toBe(1 + REPAIR_MS.length);
+      expect(r.get().unrecorded.get(TASK)).toMatchObject({
+        reason: "storage",
+        throughDate: TODAY,
+      });
+      const scope = {
+        account: ACCOUNT,
+        incarnationId: (w.t.env.service() as AccountService).incarnationId,
+      };
+      expect(m.page("p9").probe(scope, fenceOf(TASK, TODAY))).toBe("marked");
+      r.dispose();
+      // A reload (a new runner, a new markers object over the same storage) and another page: nothing transmitted, the stop shown.
+      for (const page of ["p2", "p3"]) {
+        const next = w.make({ markers: m.page(page) });
+        try {
+          next.ensure(TASK, "daily");
+          next.kick();
+          next.reconnected();
+          await w.idle(next);
+          expect(w.sent(), page).toHaveLength(1);
+          expect(next.get().unrecorded.get(TASK)?.reason).toBe("storage");
+        } finally {
+          next.dispose();
+        }
+      }
+    },
+  );
+
+  test("the person's press on the same page writes the kept 429 first: its deadline holds, then the SAME key once; the marker it saw ends", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+      sends: [await http(429, "rate_limited", "60")],
+    });
+    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 3);
+    const markers = m.page("p1");
+    const r = w.make({ service: () => f.service, markers });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      const stop = r.get().unrecorded.get(TASK);
+      expect(stop?.reason).toBe("storage");
+      r.tryAgain(TASK, TODAY, { kind: "memory", id: stop?.id as string });
+      await w.idle(r);
+      const sends = w.sent();
+      expect(sends.filter((x) => x.at < NOW + 60_000)).toHaveLength(1);
+      expect(sends.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(sends.map((x) => x.key)).size).toBe(1);
+      const scope = {
+        account: ACCOUNT,
+        incarnationId: (w.t.env.service() as AccountService).incarnationId,
+      };
+      expect(markers.probe(scope, fenceOf(TASK, TODAY))).toBe("unmarked");
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("a successful command whose record never lands: the press writes its continuation, so only its position is read (no second command)", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+      sends: [OK],
+    });
+    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 3);
+    const r = w.make({ service: () => f.service, markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      const stop = r.get().unrecorded.get(TASK);
+      expect(stop?.reason).toBe("storage");
+      r.tryAgain(TASK, TODAY, { kind: "memory", id: stop?.id as string });
+      await w.idle(r);
+      // One command in all; after the press a discovery read and then the row's OWN position read (a discovery read is never it).
+      expect(w.sent()).toHaveLength(1);
+      expect(w.reads()).toHaveLength(3);
+      expect(w.stored()).toBeUndefined();
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("after a reload only the marker survives: the press ends it and carries on from the durable record (its issue counted as lost, the same key)", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+      sends: [await http(429, "rate_limited", "60")],
+    });
+    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 99);
+    const first = w.make({ service: () => f.service, markers: m.page("p1") });
+    first.ensure(TASK, "daily");
+    await w.idle(first);
+    first.dispose();
+    const second = w.make({ markers: m.page("p2") });
+    try {
+      second.ensure(TASK, "daily");
+      await w.idle(second);
+      const stop = second.get().unrecorded.get(TASK);
+      expect(stop?.reason).toBe("storage");
+      expect(w.sent()).toHaveLength(1);
+      second.tryAgain(TASK, TODAY, { kind: "memory", id: stop?.id as string });
+      await w.idle(second);
+      const sends = w.sent();
+      expect(sends.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(sends.map((x) => x.key))).toEqual(
+        new Set([sends[0]?.key]),
+      );
+      // The lost issue's pace (not the unknowable deadline): the disclosed limit of a record never written anywhere.
+      expect((sends[1]?.at ?? 0) - NOW).toBeGreaterThanOrEqual(1_000);
+    } finally {
+      second.dispose();
+    }
+  });
+
+  test("a press ends only the fence instances it saw: one recorded by another page while the press works stays, and still fences the day", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+      sends: [await http(429, "rate_limited", "60")],
+    });
+    let outcomes = 0;
+    let newer = false;
+    const scope = () => ({
+      account: ACCOUNT,
+      incarnationId: (w.t.env.service() as AccountService).incarnationId,
+    });
+    // The 429's record fails three times (the answer, its two repairs); the press's repair is the fourth, and while it commits
+    // another page records a newer failure of the same day.
+    const service = intercepted(w, async (plan, input, run) => {
+      const expected = input.expected as { phase?: string } | null;
+      if (
+        plan === "data.writeMaterialiseSequence" &&
+        !admitting(input) &&
+        expected?.phase === "submitting"
+      ) {
+        outcomes += 1;
+        if (outcomes <= 3) return { kind: "failed" };
+        if (outcomes === 4) {
+          m.page("p2").set(scope(), fenceOf(TASK, TODAY));
+          newer = true;
+        }
+      }
+      return run();
+    });
+    const r = w.make({ service: () => service, markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      const stop = r.get().unrecorded.get(TASK);
+      expect(stop?.reason).toBe("storage");
+      r.tryAgain(TASK, TODAY, { kind: "memory", id: stop?.id as string });
+      await w.idle(r);
+      expect(newer).toBe(true);
+      expect(m.page("p3").probe(scope(), fenceOf(TASK, TODAY))).toBe("marked");
+      // The newer fence stands: nothing more is sent, and its stop is shown.
+      expect(w.sent()).toHaveLength(1);
+      expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("a fence recorded by another page while a call's admission commits: the call is not issued", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+    });
+    let crossed = false;
+    const service = intercepted(w, async (plan, input, run) => {
+      const out = await run();
+      if (
+        !crossed &&
+        plan === "data.writeMaterialiseSequence" &&
+        admitting(input)
+      ) {
+        crossed = true;
+        m.page("p2").set(
+          {
+            account: ACCOUNT,
+            incarnationId: (w.t.env.service() as AccountService).incarnationId,
+          },
+          fenceOf(TASK, TODAY),
+        );
+      }
+      return out;
+    });
+    const r = w.make({ service: () => service, markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(crossed).toBe(true);
+      expect(w.sent()).toHaveLength(0);
+      expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("a discovery answer whose record never lands fences the discovery: a new runner reads nothing", async () => {
+    const m = markerWorld();
+    const w = await setup({ positions: [await TRANSIENT_503()] });
+    const f = failOutcome(w, "data.writeMaterialiseDiscovery", null, 99);
+    const r = w.make({ service: () => f.service, markers: m.page("p1") });
+    r.ensure(TASK, "daily");
+    await w.idle(r);
+    expect(w.reads()).toHaveLength(1);
+    expect(f.failed()).toBe(1 + REPAIR_MS.length);
+    r.dispose();
+    const next = w.make({ markers: m.page("p2") });
+    try {
+      next.ensure(TASK, "daily");
+      await w.idle(next);
+      expect(w.reads()).toHaveLength(1);
+      expect(next.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      next.dispose();
+    }
+  });
+
+  test("a discovery answer recorded at its repair (one failure): nothing fenced, the work goes on", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [await TRANSIENT_503(), detail(TODAY, false)],
+    });
+    const f = failOutcome(w, "data.writeMaterialiseDiscovery", null, 1);
+    const r = w.make({ service: () => f.service, markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(f.failed()).toBe(1);
+      expect(w.reads()).toHaveLength(2);
+      expect(r.get().unrecorded.has(TASK)).toBe(false);
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("a marker that cannot be read stands: nothing is transmitted automatically; a marker that cannot be written is held for the page", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+    });
+    m.storage.failEnumeration = true;
+    m.storage.failGets = true;
+    const r = w.make({ markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.reads()).toHaveLength(0);
+      expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      r.dispose();
+    }
+    const m2 = markerWorld();
+    const w2 = await setup({
+      positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+      sends: [await http(429, "rate_limited", "60")],
+    });
+    const f = failOutcome(
+      w2,
+      "data.writeMaterialiseSequence",
+      "submitting",
+      99,
+    );
+    m2.storage.failWrites = true;
+    const markers = m2.page("p1");
+    const first = w2.make({ service: () => f.service, markers });
+    first.ensure(TASK, "daily");
+    await w2.idle(first);
+    first.dispose();
+    // The same page's next runner (the same markers object: its memory of stops) is fenced too.
+    const again = w2.make({ markers });
+    try {
+      again.ensure(TASK, "daily");
+      await w2.idle(again);
+      expect(w2.sent()).toHaveLength(1);
+      expect(again.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      again.dispose();
+    }
+  });
+
+  test("a fence of another database lifetime (incarnation) fences nothing here", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+    });
+    m.page("p0").set(
+      { account: ACCOUNT, incarnationId: "another-lifetime" },
+      fenceOf(TASK),
+    );
+    const r = w.make({ markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(1);
+    } finally {
+      r.dispose();
+    }
+  });
+});
+
+describe("REVIEW12 R36-3: records of earlier builds with an outstanding claim", () => {
+  test("CONTROL (review 12): a legacy entry with no claim and no failures makes its first read", async () => {
+    const w = await setup({
+      discovery: {
+        [TASK]: { retry: 0, failures: 0, stop: null, attempt: null },
+      },
+    });
+    const r = w.make();
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.reads()).toHaveLength(1);
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("WITNESS (review 12): a legacy claim with zero failures stops for the person, its claim and counts kept; nothing read; Try again reads", async () => {
+    const w = await setup({
+      discovery: {
+        [TASK]: {
+          retry: 0,
+          failures: 0,
+          stop: null,
+          attempt: "legacy-in-flight",
+        },
+      },
+    });
+    const r = w.make();
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.reads()).toHaveLength(0);
+      const entry = w.discovery() as MaterialiseDiscovery;
+      expect(entry).toMatchObject({
+        retry: 0,
+        failures: 0,
+        attempt: "legacy-in-flight",
+        stop: { reason: "unreachable" },
+        schedule: { pause: "legacy" },
+      });
+      r.tryAgain(TASK, undefined, seenDiscovery(entry));
+      await w.idle(r);
+      expect(w.reads()).toHaveLength(1);
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("an entry of revision 2 (failures, no claim field, no schedule) is still a legacy stop: nothing read, its count kept", async () => {
+    const w = await setup({
+      discovery: { [TASK]: { retry: 1, failures: 2, stop: null } },
+    });
+    const r = w.make();
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.reads()).toHaveLength(0);
+      expect(w.discovery()).toMatchObject({
+        retry: 1,
+        failures: 2,
+        stop: { reason: "unreachable" },
+        schedule: { pause: "legacy" },
+      });
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("a current withdrawn admission (the session held the read) keeps `schedule: null` and is read normally next time, never a legacy stop", async () => {
+    const w = await setup({
+      positions: [
+        { ok: false, kind: "not_sent" },
+        detail("2026-10-01", true),
+        detail(TODAY, false),
+      ],
+    });
+    const r = w.make();
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.discovery()).toMatchObject({ stop: null, schedule: null });
+      expect(w.discovery()?.attempt).not.toBeNull();
+      r.kick();
+      await w.idle(r);
+      expect(w.reads().length).toBeGreaterThanOrEqual(2);
+      expect(w.discovery()).toBeUndefined();
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("a legacy row in `ready` holding an attempt is a manual stop keeping that attempt; a legacy `ready` row without one carries on", async () => {
+    for (const held of [true, false]) {
+      const legacy = row({
+        attempt: held
+          ? { key: "legacy-key", body: attemptBody(TASK, TODAY) }
+          : null,
+      });
+      delete (legacy as { schedule?: unknown }).schedule;
+      const w = await setup({
+        seed: [legacy],
+        positions: [detail("2026-10-01", true), detail(TODAY, false)],
+      });
+      const r = w.make();
+      try {
+        r.ensure(TASK, "daily");
+        await w.idle(r);
+        if (held) {
+          expect(w.sent()).toHaveLength(0);
+          expect(w.stored()).toMatchObject({
+            phase: "stopped",
+            attempt: { key: "legacy-key" },
+            schedule: { pause: "legacy" },
+          });
+        } else expect(w.sent()).toHaveLength(1);
+      } finally {
+        r.dispose();
+      }
+    }
+  });
+
+  test("a `closed` answer (possibly after a transmission) keeps the admission: the next turn counts it as lost, the same key", async () => {
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+      sends: [{ ok: false, kind: "closed" }, OK],
+    });
+    const r = w.make();
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.stored()?.schedule?.issued).toBe(NOW);
+      r.kick();
+      await w.idle(r);
+      const sends = w.sent();
+      expect(sends).toHaveLength(2);
+      expect(sends[0]?.key).toBe(sends[1]?.key);
+      expect((sends[1]?.at ?? 0) - NOW).toBeGreaterThanOrEqual(1_000);
+    } finally {
+      r.dispose();
+    }
+  });
+});
+
+describe("REVIEW12 R36-4: a reconnection reaches every paused row of the account", () => {
+  const unrelated = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      row({
+        task_id: `00000000-0000-4000-8000-${String(i + 100).padStart(12, "0")}`,
+        phase: "stopped",
+        stop: { reason: "rejected" },
+      }),
+    );
+  const pausedRow = (task = TASK, over: Partial<MaterialiseRetry> = {}) =>
+    row({
+      task_id: task,
+      phase: "stopped",
+      stop: { reason: "unreachable" },
+      attempt: {
+        key: `frozen-${task.slice(-2)}`,
+        body: attemptBody(task, TODAY),
+      },
+      schedule: schedule({
+        caller: "command",
+        pause: "window",
+        since: NOW - WINDOW_MS,
+        failures: 10,
+        next: NOW,
+        seen: NOW,
+        ...over,
+      }),
+    });
+
+  test.each([0, 99, 100, 101, 199, 201])(
+    "%i earlier unrelated retained rows: the paused row after them is resumed once, with its key",
+    async (n) => {
+      const w = await setup({ seed: [...unrelated(n), pausedRow()] });
+      const r = w.make();
+      try {
+        r.reconnected();
+        await w.settle();
+        await w.idle(r);
+        expect(w.sent()).toHaveLength(1);
+        expect(w.sent()[0]?.key).toBe("frozen-b1");
+        expect(w.stored()).toBeUndefined();
+      } finally {
+        r.dispose();
+      }
+    },
+  );
+
+  test("several paused tasks and days beyond the first page: each resumed once; a page exactly full is followed to its end", async () => {
+    const tail = [
+      "ffffffff-0000-4000-8000-0000000000c1",
+      "ffffffff-0000-4000-8000-0000000000c2",
+      "ffffffff-0000-4000-8000-0000000000c3",
+    ];
+    // 197 unrelated + 3 paused = 200 rows: two exactly full pages, then an empty one.
+    const w = await setup({
+      seed: [...unrelated(197), ...tail.map((t) => pausedRow(t))],
+      positions: tail.map((t) => detail(TODAY, false, t)),
+    });
+    const r = w.make();
+    try {
+      r.reconnected();
+      await w.settle();
+      await w.idle(r);
+      expect(
+        w.log
+          .filter((e) => e.what === "send")
+          .map((e) => e.task)
+          .sort(),
+      ).toEqual([...tail].sort());
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("a pause recorded after the reconnection (`seen` later than it) is not lifted by it; one at it is", async () => {
+    for (const [seen, expected] of [
+      [NOW + 5, 0],
+      [NOW, 1],
+    ] as const) {
+      const w = await setup({
+        seed: [...unrelated(120), pausedRow(TASK, { seen })],
+      });
+      const r = w.make();
+      try {
+        r.reconnected();
+        await w.settle();
+        await w.idle(r);
+        expect(w.sent(), String(seen)).toHaveLength(expected);
+      } finally {
+        r.dispose();
+      }
+    }
+  });
+
+  test("a page that cannot be read leaves the scan where it was: the next kick under the same binding carries it on; another binding does not", async () => {
+    const w = await setup({ seed: [...unrelated(150), pausedRow()] });
+    const real = w.t.env.service() as AccountService;
+    let fail = 1;
+    const store = new Proxy(real.store, {
+      get(target, key, receiver) {
+        if (key !== "run") return Reflect.get(target, key, receiver);
+        return (plan: { name: string }, input: unknown) => {
+          if (
+            plan.name === "data.readMaterialiseSequencePage" &&
+            (input as { after: unknown }).after !== null &&
+            fail > 0
+          ) {
+            fail -= 1;
+            return Promise.reject(new Error("read failed"));
+          }
+          return target.run(plan as never, input as never);
+        };
+      },
+    });
+    const service = new Proxy(real, {
+      get(target, key, receiver) {
+        return key === "store" ? store : Reflect.get(target, key, receiver);
+      },
+    }) as AccountService;
+    const r = w.make({ service: () => service });
+    try {
+      r.reconnected();
+      await w.settle();
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(0);
+      r.kick();
+      await w.settle();
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(1);
+    } finally {
+      r.dispose();
+    }
+    // The same failure, then another binding (the database reopened): the old reconnection's scan is never carried on under it.
+    const w2 = await setup({ seed: [...unrelated(150), pausedRow()] });
+    const real2 = w2.t.env.service() as AccountService;
+    let fail2 = 1;
+    const store2 = new Proxy(real2.store, {
+      get(target, key, receiver) {
+        if (key !== "run") return Reflect.get(target, key, receiver);
+        return (plan: { name: string }, input: unknown) => {
+          if (
+            plan.name === "data.readMaterialiseSequencePage" &&
+            (input as { after: unknown }).after !== null &&
+            fail2 > 0
+          ) {
+            fail2 -= 1;
+            return Promise.reject(new Error("read failed"));
+          }
+          return target.run(plan as never, input as never);
+        };
+      },
+    });
+    const first = new Proxy(real2, {
+      get(target, key, receiver) {
+        return key === "store" ? store2 : Reflect.get(target, key, receiver);
+      },
+    }) as AccountService;
+    const second = new Proxy(real2, {}) as AccountService;
+    let current = first;
+    const r2 = w2.make({ service: () => current });
+    try {
+      r2.reconnected();
+      await w2.settle();
+      await w2.idle(r2);
+      current = second;
+      r2.kick();
+      await w2.settle();
+      await w2.idle(r2);
+      expect(w2.sent()).toHaveLength(0);
+    } finally {
+      r2.dispose();
+    }
+  });
+
+  test("an unrecognised pause, a manual stop and a stop of no schedule past the first page are not resumed", async () => {
+    const others = [
+      pausedRow("eeeeeeee-0000-4000-8000-0000000000d1", {
+        pause: "unrecognised",
+      }),
+      row({
+        task_id: "eeeeeeee-0000-4000-8000-0000000000d2",
+        phase: "stopped",
+        stop: { reason: "bound" },
+      }),
+    ];
+    const w = await setup({ seed: [...unrelated(130), ...others] });
+    const r = w.make();
+    try {
+      r.reconnected();
+      await w.settle();
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(0);
+    } finally {
+      r.dispose();
+    }
+  });
+});
+
+describe("REVIEW12 R36-2 (production composition): the page's own markers fence the page's runner", () => {
+  afterEach(() => {
+    forgetCatchUp();
+    resetPageDataHost();
+  });
+
+  test.each([true, false])(
+    "a marker of the task's discovery in the page host (%s): the runner `runnerOf` builds reads nothing; none: it reads",
+    async (marked) => {
+      const storage = new FakeMarkerStorage();
+      resetPageDataHost(
+        createPageDataHost(
+          createWriteFailureMarkers(storage, undefined, { locks: null }),
+        ),
+      );
+      const w = await setup({ positions: [detail(TODAY, false)] });
+      const service = w.t.env.service() as AccountService;
+      if (marked)
+        createWriteFailureMarkers(storage, undefined, { locks: null }).set(
+          { account: ACCOUNT, incarnationId: service.incarnationId },
+          fenceOf(TASK),
+        );
+      const reads: string[] = [];
+      const env: TasksEnv = {
+        api: {
+          readTask: async (id: string) => {
+            reads.push(id);
+            return detail(TODAY, false, id);
+          },
+        } as unknown as TasksApi,
+        accountId: ACCOUNT,
+        identity: `${ACCOUNT}:1`,
+        online: true,
+        writable: true,
+        now: () => NOW,
+        newId: () => crypto.randomUUID(),
+        dailyPageSize: 200,
+      };
+      const data = {
+        service: () => service,
+        serviceStore: { get: () => service, subscribe: () => () => undefined },
+        quota: null,
+      } as unknown as DataEnv;
+      const runner = runnerOf(env, data);
+      runner.ensure(TASK, "daily");
+      await w.idle(runner);
+      expect(reads).toHaveLength(marked ? 0 : 1);
+      if (marked)
+        expect(runner.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    },
+  );
 });

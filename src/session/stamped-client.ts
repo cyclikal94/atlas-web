@@ -1,5 +1,6 @@
 import { createApiClient } from "../lib/api-client";
 import { apiUrl } from "../lib/api-client/wire";
+import type { SendOptions } from "./api";
 import { createStampedFetch, sealResult } from "./kernel/send";
 import type { Kernel } from "./kernel/state";
 import type { AccountId, Epoch } from "./model/types";
@@ -33,9 +34,10 @@ export function createStampedClient(
   klass: "ordinary" | "recovery",
   account: AccountId,
   epoch: Epoch,
+  send?: SendOptions,
 ): ReturnType<typeof createApiClient> {
   const client = createApiClient(
-    createStampedFetch(k, klass, account, epoch, "library"),
+    createStampedFetch(k, klass, account, epoch, "library", send),
     apiUrl("").href,
   );
   const sealed: Record<string, unknown> = { ...client };

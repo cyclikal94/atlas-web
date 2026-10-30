@@ -8,8 +8,10 @@ import {
   DISCOVERY_REQUEST_ID,
   type MaterialiseDiscovery,
   type MaterialiseSequenceRow,
+  type PageDataHost,
   readMaterialiseDiscoveryNow,
   readMaterialiseSequenceNow,
+  readSequencePageNow,
   readTaskSequencesNow,
   type SequenceKey,
 } from "../../../data";
@@ -18,6 +20,7 @@ import { noteIfRefused } from "../memory";
 import { parseDefinition } from "../model/contract";
 import {
   begin,
+  callerOf,
   expectationOf,
   tryAgain as freshBudget,
   onRead,
@@ -103,6 +106,26 @@ import { todayIn } from "../model/time";
  * schedule. An answer whose record cannot be written stops automatic work for the task on this page (a `storage` stop in memory): the
  * call it answered is never made again automatically. A discovery read is never taken as the position read of a sequence: each caller
  * reads under its own admission. `reconnected` (an observed offline-to-online change, never a generic kick) resumes `window` pauses only.
+ *
+ * REVISION 11 (review R36; design assessment C1–C4):
+ * - PERMISSION AT ISSUE: an admitted call carries its permission to the session's send boundary (`transmits`), asked in the synchronous
+ *   step that issues it, after every wait (the admission's commit, the token, the cover, the locks): its binding still displayed, the page
+ *   able to run, no unrecorded outcome of its caller standing, and the clock a valid time no earlier than the admission, before the
+ *   window's end and not before its schedule's time. A call it refuses is not sent, its admission is withdrawn (nothing counted) and the
+ *   schedule decides again (a pause written, or a wait). An issued call is never aborted: a slow one that answers after the window's end
+ *   is recorded once. Only `not_sent` and `offline` are known not to have been sent; a `closed` answer may follow a transmission, so its
+ *   admission stays and counts as lost when the work is next taken up.
+ * - OUTCOMES THAT CANNOT BE RECORDED: an answer's record is written again a bounded number of times (`REPAIR_MS`: persistence only, nothing
+ *   is transmitted). One still not written FENCES its caller (a write-failure marker of the account's database lifetime, `fenceOf`; this
+ *   page's memory of it when no marker can be written): no page transmits for that caller automatically while it stands, a reload and
+ *   another tab included, and a marker that cannot be read counts as standing. The outcome is kept in this page's memory, and the
+ *   person's "Try again" writes it first, then ends exactly the marker instances its press saw. After a reload only the marker survives
+ *   (no deadline or success it recorded can be known), so the press carries on from the durable record: its issue counts as lost.
+ * - MIGRATION: a discovery entry of an earlier build with a claim (`attempt`) or failures and no schedule is a visible manual stop, its
+ *   claim and counts kept; a withdrawn admission keeps an explicit `schedule: null`, so it is never mistaken for one.
+ * - RECONNECTION reaches every row: the account is read a keyset page at a time (`readSequencePageNow`) until a short page, and only
+ *   pauses that stood at the reconnection (`seen` no later than it) are lifted. A page that cannot be read leaves the scan where it was,
+ *   for the next kick under the same binding (never another binding's).
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -127,6 +150,11 @@ export interface CatchUpDeps {
   locks?: LockManager | null;
   /** The origin's quota ledger (a new task's discovery entry is admitted through it); absent: not admitted (a test of the runner alone). */
   quota?(): DataEnv["quota"] | null;
+  /**
+   * Revision 11 (review R36): the page's write-failure markers, which fence a caller whose answer could not be recorded (header);
+   * absent: none (the fence is this runner's memory only).
+   */
+  markers?(): PageDataHost["markers"] | null;
 }
 
 /** What this page knows that the durable records do not show: what it is working on, and a stop it could not record. */
@@ -246,14 +274,26 @@ export interface CatchUpRunner {
 const sleepFor = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Revision 11 (review R36): the waits before an answer's record is written again (persistence only: nothing is transmitted). */
+export const REPAIR_MS: readonly number[] = [250, 1_000];
+
+/** Revision 11 (review R36): the marker operation that fences a task's discovery, or one day's sequence of it. */
+export const fenceOf = (taskId: string, day?: string) =>
+  day === undefined ? `materialise:${taskId}` : `materialise:${taskId}:${day}`;
+
 /** The task's zone from its details, as `GET /tasks/{id}` returned them. */
 function zoneOf(execution: { value: unknown } | null): string | null {
   const definition = execution ? parseDefinition(execution.value) : null;
   return definition?.schedule.timezone ?? null;
 }
 
-type Pause = { kind: "pause" };
-const PAUSE: Pause = { kind: "pause" };
+/**
+ * Nothing to record of a transmission. `unsent` (revision 11, review R36): it is known not to have been made (`not_sent`, `offline`), so
+ * its admission is withdrawn; otherwise (`closed`: the identity moved, possibly after an answer) it may have been, so its admission stays.
+ */
+type Pause = { kind: "pause"; unsent: boolean };
+const UNSENT: Pause = { kind: "pause", unsent: true };
+const UNSETTLED: Pause = { kind: "pause", unsent: false };
 
 function classifySend(result: TasksResult<unknown>): SendAnswer | Pause {
   if (result.ok) return { kind: "ok" };
@@ -271,8 +311,9 @@ function classifySend(result: TasksResult<unknown>): SendAnswer | Pause {
           };
     case "not_sent":
     case "offline":
+      return UNSENT;
     case "closed":
-      return PAUSE;
+      return UNSETTLED;
     default:
       // 409 (an unmet precondition), 422 (an archived task, a day beyond the horizon), 403, 404: definite and terminal.
       return {
@@ -319,8 +360,9 @@ function classifyRead(
       };
     case "not_sent":
     case "offline":
+      return { answer: UNSENT, zone: null };
     case "closed":
-      return { answer: PAUSE, zone: null };
+      return { answer: UNSETTLED, zone: null };
     default:
       return {
         answer: {
@@ -357,7 +399,19 @@ interface Item {
     sequence: Sequence | null;
     /** The service it was pressed under: a press of an ended binding lifts nothing in another (review R17). */
     service: AccountService | null;
+    /** Revision 11 (review R36): the fences of the task that stood when it was pressed (the only ones its lift may end). */
+    fences?: Fences;
   };
+}
+
+/** Revision 11 (review R36): the fences of some operations as they stood when a press was made: this page's hold and the marker's instances. */
+interface Fences {
+  scope: { account: string; incarnationId: string };
+  stood: Array<{
+    op: string;
+    memory: string | null;
+    marker: ReturnType<PageDataHost["markers"]["witness"]>;
+  }>;
 }
 
 /** The binding one piece of work began with (review R17): it reads, writes and stamps through this service only. */
@@ -429,12 +483,13 @@ const liftedDiscovery = (
 ): MaterialiseDiscovery => {
   const stored = readSchedule(seen.schedule, "discovery");
   const s = reset(stored === "invalid" ? null : stored, now, manual);
+  // Revision 11 (R36): `schedule` always written (`null`: nothing outstanding), so a lifted entry is never one of an earlier build.
   return {
     retry: seen.retry + 1,
     failures: 0,
     stop: null,
     attempt: null,
-    ...(s === null ? {} : { schedule: s }),
+    schedule: s,
   };
 };
 
@@ -601,6 +656,68 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   };
   const mayRun = () => alive() !== null && deps.online() && deps.writable();
 
+  // ---- Revision 11 (review R36): fences of outcomes that could not be recorded ---------------------------------------------------
+  const markers = () => deps.markers?.() ?? null;
+  const scopeOf = (service: AccountService) => ({
+    account: deps.accountId,
+    incarnationId: service.incarnationId,
+  });
+  /** An outcome of `op` that could not be recorded stands (a marker, or this page's hold of one); a marker that cannot be read stands. */
+  const fenced = (at: Binding, op: string) => {
+    const m = markers();
+    if (m === null) return false;
+    const scope = scopeOf(at.service);
+    return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";
+  };
+  /** Fences `op`: a marker written now, in this binding's lifetime only; held in this page's memory when none can be written. */
+  const fence = (at: Binding, op: string) => {
+    const m = markers();
+    if (m === null) return;
+    const scope = scopeOf(at.service);
+    if (m.set(scope, op, () => owns(at)).state === "unavailable")
+      m.stops.hold(scope, op);
+  };
+  /** The outcomes this page could not record, by binding and operation: written first by the person's press (`lift`). */
+  const repairs = new Map<string, () => Promise<boolean>>();
+  const repairKey = (service: AccountService, op: string) =>
+    `${service.incarnationId}|${op}`;
+  /** Writes `write`'s record again after each of `REPAIR_MS` while it is not written and the binding stands (persistence only). */
+  const settle = async <T>(
+    at: Binding,
+    write: () => Promise<T>,
+    written: (out: T) => boolean,
+  ): Promise<T> => {
+    let out = await write();
+    for (const ms of REPAIR_MS) {
+      if (written(out) || !owns(at)) break;
+      await sleep(ms);
+      if (!owns(at)) break;
+      out = await write();
+    }
+    return out;
+  };
+  /**
+   * The permission of one admitted transmission (header: PERMISSION AT ISSUE), asked at the send boundary and before each hidden
+   * resend: `s` is the schedule written with its admission, `until` its window's end (exclusive). Never throws.
+   */
+  const transmits =
+    (at: Binding, s: Schedule, until: number, op: string) => () => {
+      try {
+        const now = deps.now();
+        return (
+          owns(at) &&
+          mayRun() &&
+          Number.isSafeInteger(now) &&
+          now >= s.seen &&
+          now < until &&
+          now >= Math.max(s.next, s.server ?? 0) &&
+          !fenced(at, op)
+        );
+      } catch {
+        return false;
+      }
+    };
+
   /** This work's binding is still the displayed one (review R17). */
   const owns = (at: Binding) =>
     !disposed && at.service.live && deps.service() === at.service;
@@ -632,6 +749,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
             ? {}
             : { throughDate: item.throughDate }),
         });
+      repairs.clear();
+      edgeScan = null;
       if (
         state.unrecorded.size > 0 ||
         state.zones.size > 0 ||
@@ -728,8 +847,9 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
    * transition is committed over it through the binding's service, and a lost compare-and-set adopts what is stored instead.
    *
    * Revision 10 (Decision B): each transmission is admitted first (`step`: written before it is made), and a wait parks the work until its
-   * schedule's time (`at`). An answer whose record is not applied while the binding still stands stops automatic work for the task on this
-   * page (`storage`, in memory): what it answered is never transmitted again automatically.
+   * schedule's time (`at`). Revision 11 (R36): the call is issued only while its permission holds (`transmits`), and an answer whose
+   * record is not applied after its repairs while the binding still stands fences the day (`storage`, in memory and by its marker): what
+   * it answered is never transmitted again automatically, on this page or another, before or after a reload.
    */
   const drive = async (
     at: Binding,
@@ -742,16 +862,19 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       through_date: start.through_date,
     };
     const service = at.service;
-    const latch = (): Outcome =>
-      owns(at)
-        ? stopInMemory(key.task_id, {
-            reason: "storage",
-            throughDate: key.through_date,
-          })
-        : lost(at);
+    const op = fenceOf(key.task_id, key.through_date);
+    const storage = () =>
+      stopInMemory(key.task_id, {
+        reason: "storage",
+        throughDate: key.through_date,
+      });
+    // Revision 11: how many calls this drive's own permission refused (each is withdrawn and decided again; never a loop).
+    let refused = 0;
     while (row !== null && row.phase !== "stopped") {
       if (!owns(at)) return lost(at);
       if (!mayRun()) return PAUSED;
+      // Revision 11 (R36): an outcome of this day that could not be recorded stands: nothing is transmitted for it automatically.
+      if (fenced(at, op)) return storage();
       const plan = step(row, deps.now(), deps.newId);
       if (plan.kind === "wait") return { kind: "paused", at: plan.at };
       const admitted = await commit(
@@ -766,37 +889,60 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (!admitted.written || plan.kind === "write" || row === null) continue;
       const issued = row;
       const captured = service.capture(deps.epoch);
-      /** Not transmitted after all (the session held it, offline, closed): its admission is withdrawn, nothing counted. */
-      const withdraw = async () => {
-        await commit(service, captured, key, issued, {
+      const permit = transmits(at, issued.schedule as Schedule, plan.until, op);
+      let next: Sequence | null;
+      let read: PositionRead | null = null;
+      let answered: SendAnswer | ReadAnswer | Pause;
+      // The permission is asked here too, before the call is handed on (then by the client and at the boundary).
+      if (!permit()) answered = UNSENT;
+      else if (plan.kind === "send") {
+        const attempt = issued.attempt as { key: string; body: string };
+        answered = classifySend(
+          await deps.api.materialise(
+            JSON.parse(attempt.body) as MaterialiseCommand,
+            attempt.key,
+            permit,
+          ),
+        );
+      } else {
+        read = await readPosition(issued.task_id, permit);
+        answered = read.answer;
+      }
+      if (!owns(at)) return lost(at);
+      if (answered.kind === "pause") {
+        // `closed` may follow a transmission: its admission stays (counted as lost when the work is taken up again).
+        if (!answered.unsent) return PAUSED;
+        // Not transmitted: the admission is withdrawn, nothing counted.
+        const back = await commit(service, captured, key, issued, {
           ...issued,
           schedule: withdrawn(issued.schedule as Schedule),
         });
-        return PAUSED;
-      };
-      let next: Sequence | null;
-      let read: PositionRead | null = null;
-      if (plan.kind === "send") {
-        const attempt = issued.attempt as { key: string; body: string };
-        const result = await deps.api.materialise(
-          JSON.parse(attempt.body) as MaterialiseCommand,
-          attempt.key,
-        );
-        const answer = classifySend(result);
-        if (!owns(at)) return lost(at);
-        if (answer.kind === "pause") return withdraw();
-        next = onSent(issued, answer, deps.now());
-      } else {
-        read = await readPosition(
-          issued.task_id,
-          () => owns(at) && deps.now() < plan.until,
-        );
-        if (!owns(at)) return lost(at);
-        if (read.answer.kind === "pause") return withdraw();
-        next = onRead(issued, read.answer, todayOf(), deps.now());
+        // Refused by its own permission (the window ended, the clock moved, a fence): the schedule decides again, sending nothing
+        // until it admits. Any other refusal (the session held it) waits for a kick, as before.
+        if (back === null || !owns(at) || !mayRun() || permit() || refused > 1)
+          return PAUSED;
+        refused += 1;
+        row = back.stored;
+        continue;
       }
-      const out = await commit(service, captured, key, issued, next);
-      if (out === null || !owns(at)) return latch();
+      next =
+        plan.kind === "send"
+          ? onSent(issued, answered as SendAnswer, deps.now())
+          : onRead(issued, answered as ReadAnswer, todayOf(), deps.now());
+      const outcome = next;
+      const write = () => commit(service, captured, key, issued, outcome);
+      const out = await settle(at, write, (o) => o !== null);
+      if (out === null) {
+        if (!owns(at)) return lost(at);
+        // Revision 11 (R36): never written: fenced across pages and reloads; the outcome is kept for the person's press.
+        fence(at, op);
+        repairs.set(
+          repairKey(service, op),
+          async () => (await write()) !== null,
+        );
+        return storage();
+      }
+      if (!owns(at)) return lost(at);
       row = out.stored;
       if (row === null) {
         // The position covers this day; the task's other days it covers are satisfied too (revision 5).
@@ -876,6 +1022,28 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (out.kind !== "applied" || out.value.kind !== "written") return false;
     }
     if (!owns(at)) return false;
+    // Revision 11 (R36): an outcome this page could not record is written first (its repair, persistence only); then the fences the
+    // press saw end, exactly those instances (a fence recorded since is a newer failure and stays). A repair still not written keeps the
+    // fence and shows the stop again.
+    const fences = item.retry.fences;
+    if (fences !== undefined) {
+      for (const { op } of fences.stood) {
+        const key = repairKey(at.service, op);
+        const repair = repairs.get(key);
+        if (repair === undefined) continue;
+        if (!(await repair())) {
+          if (owns(at)) stopInMemory(item.taskId, { reason: "storage" });
+          return false;
+        }
+        repairs.delete(key);
+      }
+      const m = markers();
+      if (m !== null)
+        for (const f of fences.stood) {
+          if (f.memory !== null) m.stops.release(fences.scope, f.op, f.memory);
+          m.retire(fences.scope, f.op, f.marker, { explicit: true });
+        }
+    }
     unrecord(item.taskId);
     return true;
   };
@@ -892,6 +1060,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const discover = async (
     at: Binding,
     item: Item,
+    again = false,
   ): Promise<
     | {
         kind: "ok";
@@ -902,6 +1071,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   > => {
     const end = (outcome: Outcome) => ({ kind: "end" as const, outcome });
     if (state.unrecorded.has(item.taskId)) return end(DONE);
+    const op = fenceOf(item.taskId);
+    // Revision 11 (R36): an answer of this discovery that could not be recorded stands (any page's, a reload's): nothing is read.
+    if (fenced(at, op))
+      return end(stopInMemory(item.taskId, { reason: "storage" }));
     const entries = await readMaterialiseDiscoveryNow(at.service);
     if (!owns(at)) return end(lost(at));
     if (entries === undefined) return end(PAUSED);
@@ -933,11 +1106,34 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         { task_id: item.taskId, expected: entry, next },
         quota === null ? null : { quota },
       );
-      if (!owns(at) || out.kind === "dropped") return "lost" as const;
-      if (out.kind === "failed") return "failed" as const;
+      if (!owns(at)) return "lost" as const;
+      // Revision 11 (R36): dropped while the binding stands (the persistence hold could not vouch for it) is not written either.
+      if (out.kind !== "applied") return "failed" as const;
       if (out.value.kind !== "written") return out.value.kind;
       entry = out.value.stored;
       return "written" as const;
+    };
+    /**
+     * Revision 11 (R36): an ANSWER's record, written again after each of `REPAIR_MS` while it fails; one never written fences the
+     * discovery (header) and is kept for the person's press, which writes it first.
+     */
+    const answered = async (
+      captured: ReturnType<AccountService["capture"]>,
+      next: MaterialiseDiscovery | null,
+    ) => {
+      const written = await settle(
+        at,
+        () => record(captured, next),
+        (w) => w !== "failed",
+      );
+      if (written === "failed" && owns(at)) {
+        fence(at, op);
+        repairs.set(repairKey(at.service, op), async () => {
+          const w = await record(captured, next);
+          return w === "written" || w === "stale";
+        });
+      }
+      return written;
     };
     /** The entry with `s` as its schedule (a pause is its stop, kept with the claim it stopped on). */
     const scheduled = (
@@ -953,12 +1149,15 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       attempt: base.attempt ?? null,
       schedule: s,
     });
-    /** A stop of the task's entry, recorded (or held in memory when it cannot be). */
+    /** A stop of the task's entry, recorded (or held in memory when it cannot be). `answer`: it records an answer (revision 11). */
     const stopWith = async (
       captured: ReturnType<AccountService["capture"]>,
       next: MaterialiseDiscovery,
+      answer = false,
     ) => {
-      const written = await record(captured, next);
+      const written = answer
+        ? await answered(captured, next)
+        : await record(captured, next);
       if (written === "lost") return end(lost(at));
       if (written === "stale") return end(DONE);
       if (written !== "written")
@@ -975,13 +1174,17 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     };
     const now = deps.now();
     const base = entry ?? NO_DISCOVERY;
-    // Revision 10: failures of an earlier build have no schedule to carry on from; an untrusted schedule grants nothing.
+    // Revision 10: failures of an earlier build have no schedule to carry on from; an untrusted schedule grants nothing. Revision 11
+    // (R36): nor has a claim of an earlier build, which may be a read admitted and never answered (failures 0); a current entry always
+    // has its `schedule` key, `null` when nothing is outstanding.
     const stored =
-      entry === null || entry.schedule === undefined
-        ? entry !== null && entry.failures > 0
-          ? ("legacy" as const)
-          : null
-        : readSchedule(entry.schedule, "discovery");
+      entry === null
+        ? null
+        : entry.schedule === undefined
+          ? entry.failures > 0 || (entry.attempt ?? null) !== null
+            ? ("legacy" as const)
+            : null
+          : readSchedule(entry.schedule, "discovery");
     if (stored === "legacy" || stored === "invalid")
       // Its count of failures is kept as it was; no time is invented for it.
       return stopWith(at.service.capture(deps.epoch), {
@@ -1039,25 +1242,29 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     const until =
       s?.since == null ? Number.POSITIVE_INFINITY : s.since + WINDOW_MS;
     const captured = at.service.capture(deps.epoch);
-    const read = await readPosition(
-      item.taskId,
-      () => owns(at) && deps.now() < until,
-    );
+    const permit = transmits(at, issued.schedule as Schedule, until, op);
+    const read: PositionRead = permit()
+      ? await readPosition(item.taskId, permit)
+      : { answer: UNSENT, zone: null };
     // An answer for an ended binding is dropped: it is never recorded in another database (R17).
     if (!owns(at)) return end(lost(at));
     if (read.answer.kind === "pause") {
-      // Not sent after all: the admission is withdrawn, nothing counted.
-      const back = withdrawn(issued.schedule as Schedule);
-      const { schedule: _, ...rest } = issued;
-      await record(
-        captured,
-        back === null ? rest : { ...rest, schedule: back },
-      );
+      // `closed` may follow a transmission (revision 11): its claim stays, counted as lost when the task is taken up again.
+      if (!read.answer.unsent) return end(PAUSED);
+      // Not sent after all: the admission is withdrawn, nothing counted. Revision 11 (R36): with an explicit `schedule: null` when
+      // nothing is outstanding, so it is never read as an earlier build's unanswered claim.
+      const back = await record(captured, {
+        ...issued,
+        schedule: withdrawn(issued.schedule as Schedule),
+      });
+      // Refused by its own permission: the schedule decides again at once (a pause written, or a wait), sending nothing.
+      if (back === "written" && !again && owns(at) && mayRun() && !permit())
+        return discover(at, item, true);
       return end(PAUSED);
     }
     if (read.answer.kind === "ok" && read.zone !== null) {
       // Found: the discovery's failures are over (its entry goes, only its own); a page's memory stop of it is lifted by its success.
-      const done = await record(captured, null);
+      const done = await answered(captured, null);
       if (done === "lost") return end(lost(at));
       if (done === "stale") return end(DONE);
       // Revision 10: its record could not be written: nothing more is sent automatically for the task here.
@@ -1067,23 +1274,27 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       return { kind: "ok", read, captured };
     }
     if (read.answer.kind !== "uncertain")
-      return stopWith(captured, {
-        ...scheduled(issued, {
-          ...(issued.schedule as Schedule),
-          issued: null,
-        }),
-        stop: {
-          reason: "rejected",
-          ...(read.answer.kind === "rejected" && read.answer.requestId
-            ? {
-                request_id: read.answer.requestId.slice(
-                  0,
-                  DISCOVERY_REQUEST_ID,
-                ),
-              }
-            : {}),
+      return stopWith(
+        captured,
+        {
+          ...scheduled(issued, {
+            ...(issued.schedule as Schedule),
+            issued: null,
+          }),
+          stop: {
+            reason: "rejected",
+            ...(read.answer.kind === "rejected" && read.answer.requestId
+              ? {
+                  request_id: read.answer.requestId.slice(
+                    0,
+                    DISCOVERY_REQUEST_ID,
+                  ),
+                }
+              : {}),
+          },
         },
-      });
+        true,
+      );
     const after = failed(
       issued.schedule as Schedule,
       "discovery",
@@ -1092,8 +1303,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       true,
     );
     if (after.pause !== null)
-      return stopWith(captured, scheduled(issued, after));
-    const written = await record(captured, scheduled(issued, after));
+      return stopWith(captured, scheduled(issued, after), true);
+    const written = await answered(captured, scheduled(issued, after));
     if (written === "lost") return end(lost(at));
     if (written === "stale") return end(DONE);
     if (written !== "written")
@@ -1332,6 +1543,114 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     return true;
   };
 
+  /**
+   * Revision 11 (review R36): the lift of one observed reconnection, over EVERY row of the account (keyset pages until a short one) and
+   * every discovery entry: each pause by its retry window that stood at the reconnection (`seen` no later than `edge`; a pause recorded
+   * since is another one) is queued once, its lift compared as read. A page that cannot be read leaves the scan where it is (`after`), for
+   * the next kick under the same binding; another binding ends it.
+   */
+  interface EdgeScan {
+    service: AccountService;
+    edge: number;
+    after: readonly [string, string] | null;
+    entries: Record<string, MaterialiseDiscovery> | null;
+    /** The tasks whose discovery pause is lifted with one of their rows (both or neither, as before). */
+    paired: Set<string>;
+    busy: boolean;
+  }
+  let edgeScan: EdgeScan | null = null;
+  const pausedAt = (
+    s: ReturnType<typeof readSchedule>,
+    edge: number,
+  ): boolean => resumable(s) && (s as Schedule).seen <= edge;
+  const scan = async (e: EdgeScan): Promise<void> => {
+    if (e.busy) return;
+    e.busy = true;
+    const current = () =>
+      edgeScan === e &&
+      !disposed &&
+      e.service.live &&
+      deps.service() === e.service;
+    const lifts = (item: Item) => {
+      const key = workKey(item);
+      parked.delete(key);
+      const queued = queue.find((q) => workKey(q) === key);
+      if (queued !== undefined) {
+        queued.manual = true;
+        queued.retry = item.retry as NonNullable<Item["retry"]>;
+      } else queue.push(item);
+    };
+    try {
+      if (e.entries === null) {
+        const entries = await readMaterialiseDiscoveryNow(e.service);
+        if (!current() || entries === undefined) return;
+        e.entries = entries;
+      }
+      const entries = e.entries;
+      const discoveryOf = (taskId: string) => {
+        const entry = entries[taskId];
+        if (
+          entry?.stop == null ||
+          e.paired.has(taskId) ||
+          !pausedAt(readSchedule(entry.schedule, "discovery"), e.edge)
+        )
+          return null;
+        e.paired.add(taskId);
+        return entry;
+      };
+      for (;;) {
+        const page = await readSequencePageNow(e.service, e.after);
+        if (!current() || page === undefined) return;
+        for (const row of page.rows) {
+          if (
+            !pausedAt(readSchedule(row.schedule, callerOf(row)), e.edge) ||
+            resumeOnline(row, deps.now()) === row
+          )
+            continue;
+          lifts({
+            taskId: row.task_id,
+            trigger: row.trigger,
+            throughDate: row.through_date,
+            manual: true,
+            retry: {
+              online: true,
+              discovery: discoveryOf(row.task_id),
+              sequence: row,
+              service: e.service,
+            },
+          });
+        }
+        const last = page.rows.at(-1);
+        if (page.complete || last === undefined) break;
+        e.after = [last.task_id, last.through_date];
+        publishQueue();
+        pump();
+      }
+      for (const taskId of Object.keys(entries)) {
+        const discovery = discoveryOf(taskId);
+        if (discovery !== null)
+          lifts({
+            taskId,
+            trigger: "daily",
+            manual: true,
+            retry: {
+              online: true,
+              discovery,
+              sequence: null,
+              service: e.service,
+            },
+          });
+      }
+      if (edgeScan === e) edgeScan = null;
+    } finally {
+      e.busy = false;
+      if (!disposed) {
+        publishQueue();
+        pump();
+      }
+    }
+  };
+
   return {
     identity: deps.identity,
     ensure(taskId, trigger, options = {}) {
@@ -1396,7 +1715,28 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         const pressed = workKey({ taskId, throughDate: day });
         for (const [key, p] of parked)
           if (workKey(p) === pressed) parked.delete(key);
-        const retry = { discovery, sequence, service };
+        // Revision 11 (R36): the task's fences as they stand at the press (the discovery's and the day's): only these may end.
+        const m = markers();
+        const fences: Fences | undefined =
+          m === null || service === null
+            ? undefined
+            : {
+                scope: scopeOf(service),
+                stood: [
+                  fenceOf(taskId),
+                  ...(day === undefined ? [] : [fenceOf(taskId, day)]),
+                ].map((op) => ({
+                  op,
+                  memory: m.stops.instance(scopeOf(service), op),
+                  marker: m.witness(scopeOf(service), op),
+                })),
+              };
+        const retry = {
+          discovery,
+          sequence,
+          service,
+          ...(fences === undefined ? {} : { fences }),
+        };
         const queued = queue.find((q) => workKey(q) === pressed);
         if (queued !== undefined) {
           queued.manual = true;
@@ -1415,8 +1755,12 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     },
     kick() {
       if (disposed) return;
-      rebind(alive());
+      const service = alive();
+      rebind(service);
       if (unpark()) publishQueue();
+      // Revision 11 (R36): a reconnection's scan that could not finish carries on, under the binding it was observed with only.
+      if (edgeScan !== null && edgeScan.service === service)
+        void scan(edgeScan);
       pump();
     },
     reconnected() {
@@ -1428,65 +1772,17 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         pump();
         return;
       }
-      void (async () => {
-        // The stops as stored at the reconnection: each is lifted only while it still stands so (a later stop is another one).
-        const entries = await readMaterialiseDiscoveryNow(service);
-        const rows = await readTaskSequencesNow(service, null);
-        if (disposed || entries === undefined || rows === undefined) {
-          pump();
-          return;
-        }
-        const items: Item[] = [];
-        const withDiscovery = new Set<string>();
-        const discoveryOf = (taskId: string) => {
-          const entry = entries[taskId];
-          if (
-            entry?.stop == null ||
-            withDiscovery.has(taskId) ||
-            !resumable(readSchedule(entry.schedule, "discovery"))
-          )
-            return null;
-          withDiscovery.add(taskId);
-          return entry;
-        };
-        for (const row of rows) {
-          const lifted = resumeOnline(row, deps.now());
-          if (lifted === row) continue;
-          items.push({
-            taskId: row.task_id,
-            trigger: row.trigger,
-            throughDate: row.through_date,
-            manual: true,
-            retry: {
-              online: true,
-              discovery: discoveryOf(row.task_id),
-              sequence: row,
-              service,
-            },
-          });
-        }
-        for (const taskId of Object.keys(entries)) {
-          const discovery = discoveryOf(taskId);
-          if (discovery !== null)
-            items.push({
-              taskId,
-              trigger: "daily",
-              manual: true,
-              retry: { online: true, discovery, sequence: null, service },
-            });
-        }
-        for (const item of items) {
-          const key = workKey(item);
-          parked.delete(key);
-          const queued = queue.find((q) => workKey(q) === key);
-          if (queued !== undefined) {
-            queued.manual = true;
-            queued.retry = item.retry as NonNullable<Item["retry"]>;
-          } else queue.push(item);
-        }
-        publishQueue();
-        pump();
-      })();
+      // The stops as stored at the reconnection: each is lifted only while it still stands so (a later stop is another one). A newer
+      // reconnection replaces a scan still going (its stops are a superset); revision 11: every page of the account is read.
+      edgeScan = {
+        service,
+        edge: deps.now(),
+        after: null,
+        entries: null,
+        paired: new Set(),
+        busy: false,
+      };
+      void scan(edgeScan);
     },
     get: () => state,
     subscribe(listener) {

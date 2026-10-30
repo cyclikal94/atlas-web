@@ -68,7 +68,8 @@ export function runnerOf(env: TasksEnv, data: DataEnv): CatchUpRunner {
   const runner: CatchUpRunner = createCatchUpRunner({
     api: {
       readTask: (id, admitted) => api().readTask(id, admitted),
-      materialise: (command, key) => api().materialise(command, key),
+      materialise: (command, key, admitted) =>
+        api().materialise(command, key, admitted),
     } as Pick<TasksApi, "readTask" | "materialise"> as TasksApi,
     identity: env.identity,
     accountId: env.accountId,
@@ -76,6 +77,8 @@ export function runnerOf(env: TasksEnv, data: DataEnv): CatchUpRunner {
     service: () => mine()?.data.service() ?? null,
     // A new task's discovery record is admitted through the origin's quota ledger before its first read (revision 3, R16).
     quota: () => mine()?.data.quota ?? null,
+    // Revision 11 (review R36): the page's ONE write-failure markers fence a caller whose answer could not be recorded.
+    markers: () => getPageDataHost().markers,
     online: () => mine()?.online ?? false,
     writable: () => mine()?.writable ?? false,
     now: () => mine()?.env.now() ?? Date.now(),
