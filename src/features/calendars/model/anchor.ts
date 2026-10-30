@@ -250,14 +250,15 @@ export function describeAnchor(
 /**
  * The queued `set_anchor` (§4.3; R13): its version check is on the TASK root resource (`expected_version`, `409 conflict` on a mismatch),
  * it needs edit access to the task, and `anchor: null` removes the anchor (automation stops, occurrences stay). Nothing is shown
- * optimistically (the binding is not in the cache). `observed`: the read the panel was opened from, checked again in the writing
- * transaction.
+ * optimistically (the binding is not in the cache). `observed`: the read of the task the change is made from, checked again in the
+ * writing transaction. Required (revision 13, review 14 R11): a change of an existing task's anchor is never written without one, so the
+ * version it is checked against is never one nobody saw.
  */
 export function setAnchorRequest(
   task: Pick<CacheRow, "id">,
   anchor: CalendarAnchor | null,
+  observed: Observation,
   localId?: LocalId,
-  observed?: Observation,
 ): EnqueueRequest {
   const { id } = task;
   return {
@@ -282,7 +283,7 @@ export function setAnchorRequest(
       },
     }),
     ...(localId === undefined ? {} : { localId }),
-    ...(observed === undefined ? {} : { observed }),
+    observed,
   };
 }
 

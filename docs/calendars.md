@@ -172,7 +172,14 @@ again after a refusal (or a failure that may have stored it) keeps its identity;
 again is three changes (R2). The panel PRESENTS one editing session (`anchor-editor.ts`, revision 2, R3a/R3b): the session, not the panel's mount,
 owns the input, the save being made (one at a time) and what it said; a save settles on its own session (never numbers re-used, so a
 cancelled panel's late save changes nothing) whichever panel shows it then. Told that the task changed, the person's next press saves the
-task as it is then (still checked when written). The in-dialog sync control keeps the session for the next panel opened while the task's
+task as it is then (still checked when written). Every change is checked against a read of the task (revision 13, review 14 R11:
+`setAnchorRequest` requires the observation): the read the session was opened on or, once renewed, the task as the section shows it at
+the press. A panel opened before the section's read of the task arrived has none, and a renewed session has none while the task is not
+readable: that press writes nothing ("This task's details are still loading — check the anchor and save again."), keeps the input and any
+conflict being replaced, and makes the next press a deliberate save of the task as it is then. A read arriving never saves by itself.
+Evidence: `anchor-section.test.tsx` "revision 13" (the subscribed read held and released, another device's change before the write, Save,
+Remove, Review's replacement, renewal after a done save and after a changed refusal, a kept session shown by a new mount, Enter), the
+pending create's detail in `task-form-anchor.test.tsx`, and mutants MU-2723 to MU-2732. The in-dialog sync control keeps the session for the next panel opened while the task's
 visit goes on (ia.md §1.3.3, I1; `tasks/detail/anchor-kept.ts`, owned by the visit, for the task detail; a panel that left without Cancel
 leaves its input there too; the panel belongs to the visit going on when it opens, even in a section React kept mounted through a departure
 and return, revision 3 R3c; the form's own session for the new-task form).

@@ -29,6 +29,7 @@ import {
   ANCHOR_CONFLICT,
   ANCHOR_NOT_SAVED_CHANGED,
   ANCHOR_NOT_SAVED_DENIED,
+  ANCHOR_NOT_SAVED_UNCHECKED,
   ANCHOR_QUEUED,
   ANCHOR_REASONS,
   ANCHOR_REMOVED,
@@ -239,6 +240,7 @@ export function AnchorSection({
   type PanelFor = {
     anchor: CalendarAnchor | null;
     supersede: string | null;
+    /** The task as read when the session was opened; null when its read had not arrived (never filled in later: R11, see `save`). */
     observed: Observation | null;
     /** A save of the session was done while newer input stayed in it: the next save is checked against the task as it is NOW. */
     renewed: boolean;
@@ -303,6 +305,16 @@ export function AnchorSection({
     if (!env.writable) return copy.NOT_WRITABLE;
     const outbox = data.outbox();
     if (outbox === null) return copy.NO_DATABASE;
+    // What the change is checked against when it is written: the task as the session was opened on it or, once renewed, as it is NOW.
+    // A session opened before the task's read arrived has no such read, and a renewed one has none while the task is not readable now
+    // (revision 13, review 14 R11): nothing is written (never a change on a version nobody saw), the input and any change being superseded
+    // stay, and the next press is a deliberate save of the task as it is then. A read arriving never saves by itself.
+    const observed = context.renewed ? observedNow : context.observed;
+    if (observed === null || observed.resourceId !== task.id)
+      return {
+        refused: ANCHOR_NOT_SAVED_UNCHECKED,
+        context: { ...context, renewed: true },
+      };
     // The identity of each change pressed and not yet stored, so the same change pressed again after a refusal (or a failure that may
     // have stored it) is recognised; a STORED change's identity is retired (R2): pressing a change again later, even one equal to an earlier
     // one (A, B, then A), is a new operation. The session's visit's, taken when it was opened (R3c).
@@ -313,8 +325,7 @@ export function AnchorSection({
       key = env.newId();
       keys.set(what, key);
     }
-    const observed = context.renewed ? observedNow : context.observed;
-    const request = setAnchorRequest(task, next, key, observed ?? undefined);
+    const request = setAnchorRequest(task, next, observed, key);
     try {
       const outcome =
         context.supersede === null

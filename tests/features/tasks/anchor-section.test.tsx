@@ -6,7 +6,12 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { CacheRow } from "../../../src/data";
+import {
+  type CacheRow,
+  type EnqueueRequest,
+  readResourceViewNow,
+} from "../../../src/data";
+import type { Loadable } from "../../../src/data/store/port";
 import { setAnchorRequest } from "../../../src/features/calendars/anchors";
 import * as words from "../../../src/features/calendars/copy-anchor";
 import type { CalendarAnchor } from "../../../src/features/calendars/model/anchor";
@@ -22,6 +27,7 @@ import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import { StampedRequestError } from "../../../src/session";
 import { installMatchMedia } from "../../helpers/match-media";
 import { cacheRow, draftRow } from "../../support/data/rows";
+import { sectionTaskRead } from "../../support/tasks/task-read";
 import {
   fakeApi,
   mountTasks,
@@ -94,6 +100,24 @@ const anchorDrafts = (t: Mounted) =>
   t.drafts().filter((d) => d.kind === "set_anchor");
 const bodyOf = (t: Mounted, id: string) =>
   t.bodies().find((b) => b.local_id === id)?.command.command;
+/** The panel the press opened, asserted (revision 13: a panel that never opens fails as an assertion, not a query's timeout). */
+async function dialogOpened(t: Mounted): Promise<HTMLElement> {
+  await t.until(() => screen.queryByRole("dialog") !== null);
+  return present(screen.queryByRole("dialog"));
+}
+/**
+ * Waits until the section's own read of the task (installed before the section mounted again) is ready and shown: a panel opened before
+ * it has no read to save on (R11, revision 13), so a test about something else opens its panel after it.
+ */
+async function taskReadShown(
+  t: Mounted,
+  taskRead: ReturnType<typeof sectionTaskRead>,
+) {
+  expect(taskRead.subscriptions()).toBeGreaterThan(0);
+  await t.until(() => taskRead.real()?.status === "ready");
+  expect(taskRead.real()?.status).toBe("ready");
+  await t.settle();
+}
 
 async function mounted(
   task: SeededTask,
@@ -205,9 +229,11 @@ describe("the binding read (case 3, D-13b-9)", () => {
     await t.settle();
     expect(t.api.calls.readAnchor).toBe(1);
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.TRY_AGAIN,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.TRY_AGAIN,
+        }),
+      ),
     );
     await t.settle();
     expect(t.api.calls.readAnchor).toBe(2);
@@ -258,7 +284,9 @@ describe("the binding read (case 3, D-13b-9)", () => {
 describe("set_anchor (queued, offline included)", () => {
   async function chooseEvent(t: Mounted, dialog: HTMLElement) {
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.CHANGE_EVENT }),
+      present(
+        within(dialog).queryByRole("button", { name: words.CHANGE_EVENT }),
+      ),
     );
     await t.settle();
     const pick = await within(dialog).findByText("Bin day");
@@ -273,21 +301,33 @@ describe("set_anchor (queued, offline included)", () => {
       rows: [sourceRow, eventRow()],
     });
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.ANCHOR_ACTION,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.ANCHOR_ACTION,
+        }),
+      ),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     await chooseEvent(t, dialog);
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: "-1" },
-    });
-    fireEvent.change(within(dialog).getByLabelText(words.TIME_LABEL), {
-      target: { value: "18:00" },
-    });
-    fireEvent.click(within(dialog).getByRole("button", { name: "Monday" }));
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: "-1" },
+      },
+    );
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.TIME_LABEL)),
+      {
+        target: { value: "18:00" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(within(dialog).queryByRole("button", { name: "Monday" })),
+    );
+    fireEvent.click(
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -327,40 +367,56 @@ describe("set_anchor (queued, offline included)", () => {
       ],
     });
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.ANCHOR_ACTION,
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.ANCHOR_ACTION,
+        }),
+      ),
+    );
+    const dialog = await dialogOpened(t);
+    await chooseEvent(t, dialog);
+    const seconds = present(
+      within(dialog).queryByRole("radio", {
+        name: words.OR_SECONDS,
       }),
     );
-    const dialog = await screen.findByRole("dialog");
-    await chooseEvent(t, dialog);
-    const seconds = within(dialog).getByRole("radio", {
-      name: words.OR_SECONDS,
-    });
     expect(seconds).toBeDisabled();
     expect(seconds).toHaveAccessibleDescription(words.NEEDS_TIMED_EVENT);
-    const days = within(dialog).getByLabelText(
-      words.DAYS_LABEL,
+    const days = present(
+      within(dialog).queryByLabelText(words.DAYS_LABEL),
     ) as HTMLInputElement;
     fireEvent.change(days, { target: { value: "one" } });
-    fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
-      target: { value: "Bin" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+      {
+        target: { value: "Bin" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
-    expect(within(dialog).getByText(words.WHOLE_NUMBER)).toBeInTheDocument();
+    expect(
+      present(within(dialog).queryByText(words.WHOLE_NUMBER)),
+    ).toBeInTheDocument();
     expect(days.value).toBe("one");
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+      present(within(dialog).queryByRole("radio", { name: words.PERSON_DATE })),
     );
     expect(within(dialog).queryByLabelText(words.TITLE_CONTAINS)).toBeNull();
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+      present(
+        within(dialog).queryByRole("radio", { name: words.EVENT_SERIES }),
+      ),
     );
     expect(
-      (within(dialog).getByLabelText(words.TITLE_CONTAINS) as HTMLInputElement)
-        .value,
+      (
+        present(
+          within(dialog).queryByLabelText(words.TITLE_CONTAINS),
+        ) as HTMLInputElement
+      ).value,
     ).toBe("Bin");
     expect(anchorDrafts(t)).toEqual([]);
   });
@@ -375,13 +431,17 @@ describe("set_anchor (queued, offline included)", () => {
       rows: [sourceRow],
     });
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.CHANGE_ANCHOR,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.CHANGE_ANCHOR,
+        }),
+      ),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.REMOVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.REMOVE_ANCHOR }),
+      ),
     );
     await t.settle();
     const [draft] = anchorDrafts(t);
@@ -417,17 +477,24 @@ describe("set_anchor (queued, offline included)", () => {
     });
     expect(section()).toHaveTextContent(words.ANCHOR_CONFLICT);
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.REVIEW_ANCHOR,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.REVIEW_ANCHOR,
+        }),
+      ),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     expect(
-      (within(dialog).getByLabelText(words.TIME_LABEL) as HTMLInputElement)
-        .value,
+      (
+        present(
+          within(dialog).queryByLabelText(words.TIME_LABEL),
+        ) as HTMLInputElement
+      ).value,
     ).toBe("18:00");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     const all = anchorDrafts(t);
@@ -463,9 +530,11 @@ describe("set_anchor (queued, offline included)", () => {
       words.anchorRejected(words.ANCHOR_REASONS.unavailable as string),
     );
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.DISMISS_ANCHOR,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.DISMISS_ANCHOR,
+        }),
+      ),
     );
     await t.settle();
     expect(anchorDrafts(t)).toEqual([]);
@@ -522,9 +591,11 @@ describe("set_anchor (queued, offline included)", () => {
       row.kind === "task" ? { ...row, can_edit: false } : row,
     );
     await mounted({ ...task, rows }, { online: false });
-    const action = within(section() as HTMLElement).getByRole("button", {
-      name: words.ANCHOR_ACTION,
-    });
+    const action = present(
+      within(section() as HTMLElement).queryByRole("button", {
+        name: words.ANCHOR_ACTION,
+      }),
+    );
     expect(action).toBeDisabled();
     expect(action).toHaveAccessibleDescription(words.ANCHOR_NOT_SAVED_DENIED);
   });
@@ -539,22 +610,30 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
     }),
   });
   async function openChange(t: Mounted) {
+    // Asserted present (revision 13): a panel left open hides the section, which must fail as an assertion, not a query error (MU-2500).
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.CHANGE_ANCHOR,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.CHANGE_ANCHOR,
+        }),
+      ),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     await t.settle();
     return dialog;
   }
   async function saveDays(t: Mounted, days: string) {
     const dialog = await openChange(t);
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: days },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: days },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -616,7 +695,9 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
     const remove = async () => {
       const dialog = await openChange(t);
       fireEvent.click(
-        within(dialog).getByRole("button", { name: words.REMOVE_ANCHOR }),
+        present(
+          within(dialog).queryByRole("button", { name: words.REMOVE_ANCHOR }),
+        ),
       );
       await t.settle();
       expect(screen.queryByRole("dialog")).toBeNull();
@@ -642,16 +723,23 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
         throw new Error("the completion was lost");
       });
     const dialog = await openChange(t);
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: "-2" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: "-2" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).not.toBeNull();
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -667,29 +755,40 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
     const dialog = await openChange(t);
     const release = holdEnqueue(t, "enqueue");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(anchorDrafts(t)).toHaveLength(1);
-    fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
-      target: { value: "newer filter" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+      {
+        target: { value: "newer filter" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+      present(within(dialog).queryByRole("radio", { name: words.PERSON_DATE })),
     );
     expect(within(dialog).queryByLabelText(words.TITLE_CONTAINS)).toBeNull();
     await act(async () => release());
     await t.settle();
     expect(screen.queryByRole("dialog")).not.toBeNull();
-    expect(within(dialog).getByText(words.ANCHOR_SAVED_NEWER)).toBeVisible();
+    expect(
+      present(within(dialog).queryByText(words.ANCHOR_SAVED_NEWER)),
+    ).toBeVisible();
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+      present(
+        within(dialog).queryByRole("radio", { name: words.EVENT_SERIES }),
+      ),
     );
-    expect(within(dialog).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
-      "newer filter",
-    );
+    expect(
+      present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+    ).toHaveValue("newer filter");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -727,20 +826,27 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
       drafts: [conflicted],
     });
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.REVIEW_ANCHOR,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.REVIEW_ANCHOR,
+        }),
+      ),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     await t.settle();
     const release = holdEnqueue(t, "supersede");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: "-4" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: "-4" },
+      },
+    );
     await act(async () => release());
     await t.settle();
     expect(screen.queryByRole("dialog")).not.toBeNull();
@@ -750,7 +856,9 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
     const supersede = vi.spyOn(outbox, "supersede");
     supersede.mockClear();
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(supersede).not.toHaveBeenCalled();
@@ -779,7 +887,9 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
     const dialog = await openChange(t);
     const release = holdEnqueue(t, "enqueue");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).not.toBeNull();
@@ -811,48 +921,64 @@ describe("revision 1: each change is its own operation, settled as submitted (R2
       }),
     );
     let dialog = await openChange(t);
-    fireEvent.change(within(dialog).getByLabelText(words.TIME_LABEL), {
-      target: { value: "19:15" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.TIME_LABEL)),
+      {
+        target: { value: "19:15" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     dialog = await openChange(t);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.CLEAR_TIME }),
+      present(within(dialog).queryByRole("button", { name: words.CLEAR_TIME })),
     );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     dialog = await openChange(t);
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+      present(within(dialog).queryByRole("radio", { name: words.PERSON_DATE })),
     );
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+      present(
+        within(dialog).queryByRole("radio", { name: words.EVENT_SERIES }),
+      ),
     );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     // Edited away and back to the same minute, and cleared then typed again: what was typed (the kept time ended with the edit).
     dialog = await openChange(t);
-    const time = () => within(dialog).getByLabelText(words.TIME_LABEL);
+    const time = () =>
+      present(within(dialog).queryByLabelText(words.TIME_LABEL));
     fireEvent.change(time(), { target: { value: "19:15" } });
     fireEvent.change(time(), { target: { value: "18:00" } });
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     dialog = await openChange(t);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.CLEAR_TIME }),
+      present(within(dialog).queryByRole("button", { name: words.CLEAR_TIME })),
     );
     fireEvent.change(time(), { target: { value: "18:00" } });
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(offsets(t)).toEqual([
@@ -874,20 +1000,25 @@ describe("revision 1: every cached calendar can be chosen in the event picker (R
     }));
   async function picker(t: Mounted) {
     fireEvent.click(
-      within(section() as HTMLElement).getByRole("button", {
-        name: words.ANCHOR_ACTION,
-      }),
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.ANCHOR_ACTION,
+        }),
+      ),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.CHANGE_EVENT }),
+      present(
+        within(dialog).queryByRole("button", { name: words.CHANGE_EVENT }),
+      ),
     );
     await t.settle();
     return dialog;
   }
   const labels = (dialog: HTMLElement) =>
     [
-      ...(within(dialog).getByRole("combobox") as HTMLSelectElement).options,
+      ...(present(within(dialog).queryByRole("combobox")) as HTMLSelectElement)
+        .options,
     ].map((o) => o.textContent);
 
   test("101 sources: Show next calendars reaches the 101st, its events are listed and one is anchored to; the choice stays while paging back", async () => {
@@ -911,7 +1042,9 @@ describe("revision 1: every cached calendar can be chosen in the event picker (R
     await t.settle();
     // Paging alone changes nothing: the first source stays chosen (and an option) until another is picked.
     expect(labels(dialog)).toEqual(["Calendar 000", "Calendar 100"]);
-    const select = within(dialog).getByRole("combobox") as HTMLSelectElement;
+    const select = present(
+      within(dialog).queryByRole("combobox"),
+    ) as HTMLSelectElement;
     expect(select.value).toBe(rows[0]?.id);
     fireEvent.change(select, { target: { value: last.id } });
     await t.settle();
@@ -928,7 +1061,9 @@ describe("revision 1: every cached calendar can be chosen in the event picker (R
     fireEvent.click(await within(dialog).findByText("Bin day"));
     await t.settle();
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(
@@ -1172,7 +1307,7 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
         }),
       ),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     await t.settle();
     return dialog;
   }
@@ -1197,17 +1332,27 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
     await t.settle();
   }
   const days = (dialog: HTMLElement) =>
-    (within(dialog).getByLabelText(words.DAYS_LABEL) as HTMLInputElement).value;
+    (
+      present(
+        within(dialog).queryByLabelText(words.DAYS_LABEL),
+      ) as HTMLInputElement
+    ).value;
   function edit(dialog: HTMLElement) {
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: "-5" },
-    });
-    fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
-      target: { value: "kept filter" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: "-5" },
+      },
+    );
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+      {
+        target: { value: "kept filter" },
+      },
+    );
     // Hidden while the person-date reference is chosen: its value is kept too.
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+      present(within(dialog).queryByRole("radio", { name: words.PERSON_DATE })),
     );
   }
 
@@ -1222,16 +1367,16 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
     const again = await openChange(t);
     expect(days(again)).toBe("-5");
     expect(
-      within(again).getByRole("radio", { name: words.PERSON_DATE }),
+      present(within(again).queryByRole("radio", { name: words.PERSON_DATE })),
     ).toBeChecked();
     fireEvent.click(
-      within(again).getByRole("radio", { name: words.EVENT_SERIES }),
+      present(within(again).queryByRole("radio", { name: words.EVENT_SERIES })),
     );
-    expect(within(again).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
-      "kept filter",
-    );
+    expect(
+      present(within(again).queryByLabelText(words.TITLE_CONTAINS)),
+    ).toHaveValue("kept filter");
     fireEvent.click(
-      within(again).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(within(again).queryByRole("button", { name: words.SAVE_ANCHOR })),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -1268,7 +1413,9 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
     await t.until(() => section() !== null);
     const resumed = await openChange(t);
     expect(days(resumed)).toBe("-5");
-    fireEvent.click(within(resumed).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(
+      present(within(resumed).queryByRole("button", { name: "Cancel" })),
+    );
     await t.settle();
     const fresh = await openChange(t);
     expect(days(fresh)).toBe("-1");
@@ -1295,11 +1442,16 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
     // Nothing edited after Save: the kept state is what was saved, so it is dropped.
     let release = hold();
     let dialog = await openChange(t);
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: "-2" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: "-2" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     await viaSyncControl(t, dialog);
@@ -1309,21 +1461,31 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
     await t.until(() => section() !== null);
     dialog = await openChange(t);
     expect(days(dialog)).toBe("-1");
-    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(
+      present(within(dialog).queryByRole("button", { name: "Cancel" })),
+    );
     await t.settle();
     // Edited after Save: the newer input is resumed, and its save is an ordinary new change (not refused as changed by its own).
     release = hold();
     dialog = await openChange(t);
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: "-3" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: "-3" },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value: "-4" },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value: "-4" },
+      },
+    );
     await viaSyncControl(t, dialog);
     await act(async () => release());
     await t.settle();
@@ -1332,7 +1494,9 @@ describe("revision 1: the in-dialog sync control keeps the panel for the task's 
     dialog = await openChange(t);
     expect(days(dialog)).toBe("-4");
     fireEvent.click(
-      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+      present(
+        within(dialog).queryByRole("button", { name: words.SAVE_ANCHOR }),
+      ),
     );
     await t.settle();
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -1368,7 +1532,7 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
     fireEvent.click(
       present(within(section() as HTMLElement).queryByRole("button", { name })),
     );
-    const dialog = await screen.findByRole("dialog");
+    const dialog = await dialogOpened(t);
     await t.settle();
     return dialog;
   }
@@ -1397,11 +1561,18 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
     await t.until(() => section() !== null);
   }
   const days = (dialog: HTMLElement) =>
-    (within(dialog).getByLabelText(words.DAYS_LABEL) as HTMLInputElement).value;
+    (
+      present(
+        within(dialog).queryByLabelText(words.DAYS_LABEL),
+      ) as HTMLInputElement
+    ).value;
   const setDays = (dialog: HTMLElement, value: string) =>
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value },
+      },
+    );
   const press = (dialog: HTMLElement, name: string) =>
     fireEvent.click(present(within(dialog).queryByRole("button", { name })));
   const saveButton = (dialog: HTMLElement) =>
@@ -1484,12 +1655,17 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
       await t.settle();
       expect(anchorDrafts(t)).toHaveLength(1);
       setDays(dialog, "-3");
-      fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
-        target: { value: "newer filter" },
-      });
+      fireEvent.change(
+        present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+        {
+          target: { value: "newer filter" },
+        },
+      );
       // Hidden while the person-date reference is chosen: kept too.
       fireEvent.click(
-        within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+        present(
+          within(dialog).queryByRole("radio", { name: words.PERSON_DATE }),
+        ),
       );
       await viaSyncControl(t, dialog);
       if (!early) await release();
@@ -1507,11 +1683,13 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
       ).not.toBeNull();
       expect(saveButton(dialog)).not.toBeDisabled();
       fireEvent.click(
-        within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+        present(
+          within(dialog).queryByRole("radio", { name: words.EVENT_SERIES }),
+        ),
       );
-      expect(within(dialog).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
-        "newer filter",
-      );
+      expect(
+        present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+      ).toHaveValue("newer filter");
       press(dialog, words.SAVE_ANCHOR);
       await t.settle();
       expect(dialogNow()).toBeNull();
@@ -1815,6 +1993,7 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
   test("an ordinary departure while a save is being made: the next visit's panel starts from the binding, and the late save neither changes nor closes it", async () => {
     const task = await seededTask();
     const t = await mounted(task, read);
+    const taskRead = sectionTaskRead(t.data, task.taskId);
     const release = holdStored(t);
     let dialog = await openChange(t);
     setDays(dialog, "-2");
@@ -1827,6 +2006,9 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
     await t.until(
       () => section()?.getAttribute("data-anchor-section") === "anchored",
     );
+    // ADAPTED (revision 13, R11): the next visit's panel is opened once the new section's read of the task is shown; opened before it, its
+    // first press is refused (the R11 tests), which is not what this test is about.
+    await taskReadShown(t, taskRead);
     dialog = await openChange(t);
     expect(days(dialog)).toBe("-1");
     setDays(dialog, "-7");
@@ -1845,6 +2027,9 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
     const outbox = t.data.outbox();
     const row = task.rows.find((r) => r.id === task.taskId);
     if (outbox === null || row === undefined) throw new Error("setup");
+    // The other tab saves from its own read of the task (R11: a change of an anchor is never written without one).
+    const read = await readResourceViewNow(t.data, task.taskId);
+    if (!read.ok) throw new Error("setup: the other tab's read");
     const outcome = await outbox.enqueue(
       setAnchorRequest(
         row,
@@ -1852,6 +2037,7 @@ describe("revision 2: the panel's editing session owns its save, whichever panel
           ...ANCHOR,
           offset: { kind: "calendar_days", days, time: "18:00:00" },
         },
+        read.value.view.observation,
         `00000000-0000-4000-8000-0000000007a${String(Math.abs(days))}`,
       ),
     );
@@ -2004,11 +2190,18 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
     expect(section(), "React kept the section mounted").toBe(before);
   }
   const days = (dialog: HTMLElement) =>
-    (within(dialog).getByLabelText(words.DAYS_LABEL) as HTMLInputElement).value;
+    (
+      present(
+        within(dialog).queryByLabelText(words.DAYS_LABEL),
+      ) as HTMLInputElement
+    ).value;
   const setDays = (dialog: HTMLElement, value: string) =>
-    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
-      target: { value },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value },
+      },
+    );
   const press = (dialog: HTMLElement, name: string) =>
     fireEvent.click(present(within(dialog).queryByRole("button", { name })));
   const saveButton = (dialog: HTMLElement) =>
@@ -2048,11 +2241,14 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
   /** Types newer input with a hidden value: −`n` days, a title filter, then the person-date reference (which hides that filter). */
   function editWithHidden(dialog: HTMLElement, n: number, filter: string) {
     setDays(dialog, `-${n}`);
-    fireEvent.change(within(dialog).getByLabelText(words.TITLE_CONTAINS), {
-      target: { value: filter },
-    });
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+      {
+        target: { value: filter },
+      },
+    );
     fireEvent.click(
-      within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+      present(within(dialog).queryByRole("radio", { name: words.PERSON_DATE })),
     );
   }
 
@@ -2068,6 +2264,7 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
     async (_, before) => {
       const task = await seededTask();
       const t = await mounted(task, reads(-1));
+      const taskRead = sectionTaskRead(t.data, task.taskId);
       const first = section();
       if (before === "bounce") await bounce(t, task);
       if (before === "remount") {
@@ -2078,6 +2275,8 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
         expect(section()).toBeNull();
         await backToTask(t, task);
         expect(section()).not.toBe(first);
+        // ADAPTED (revision 13, R11): the panel is opened once the new section's read of the task is shown (see `taskReadShown`).
+        await taskReadShown(t, taskRead);
       }
       // The input is typed only now, after any departure: nothing earlier is asked to survive it.
       let dialog = await openChange(t);
@@ -2088,14 +2287,18 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
       dialog = await openChange(t);
       expect(days(dialog), "the input typed after the return").toBe("-7");
       expect(
-        within(dialog).getByRole("radio", { name: words.PERSON_DATE }),
+        present(
+          within(dialog).queryByRole("radio", { name: words.PERSON_DATE }),
+        ),
       ).toBeChecked();
       fireEvent.click(
-        within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+        present(
+          within(dialog).queryByRole("radio", { name: words.EVENT_SERIES }),
+        ),
       );
-      expect(within(dialog).getByLabelText(words.TITLE_CONTAINS)).toHaveValue(
-        "kept filter",
-      );
+      expect(
+        present(within(dialog).queryByLabelText(words.TITLE_CONTAINS)),
+      ).toHaveValue("kept filter");
       press(dialog, words.SAVE_ANCHOR);
       await t.settle();
       expect(dialogNow()).toBeNull();
@@ -2303,7 +2506,9 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
         within(dialog).queryByText(words.ANCHOR_SAVED_NEWER),
       ).not.toBeNull();
       fireEvent.click(
-        within(dialog).getByRole("radio", { name: words.EVENT_SERIES }),
+        present(
+          within(dialog).queryByRole("radio", { name: words.EVENT_SERIES }),
+        ),
       );
       press(dialog, words.SAVE_ANCHOR);
       await t.settle();
@@ -2402,6 +2607,7 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
   test("a save that may have been stored, then Cancel: the same change pressed in a NEW panel of a NEW section mount of the visit is the same operation (stored once)", async () => {
     const task = await seededTask();
     const t = await mounted(task, reads(-1));
+    const taskRead = sectionTaskRead(t.data, task.taskId);
     await bounce(t, task);
     const outbox = t.data.outbox();
     if (outbox === null) throw new Error("no outbox");
@@ -2428,6 +2634,8 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
       () => section()?.getAttribute("data-anchor-section") === "anchored",
     );
     expect(section()).not.toBe(first);
+    // ADAPTED (revision 13, R11): the new panel is opened once the new section's read of the task is shown (see `taskReadShown`).
+    await taskReadShown(t, taskRead);
     dialog = await openChange(t);
     expect(days(dialog), "a new panel starts from the binding").toBe("-1");
     setDays(dialog, "-2");
@@ -2454,5 +2662,527 @@ describe("revision 3: a panel opened from a section React kept mounted belongs t
     const all = anchorDrafts(t);
     expect(new Set(all.map((d) => d.local_id)).size).toBe(3);
     expect(offsets(t)).toEqual(dayOffsets(-2, -3, -2));
+  });
+});
+
+describe("revision 13: an anchor change is written only against a read of the task (review 14 R11)", () => {
+  /**
+   * R11 (family calendar-anchor-observation-admission; design assessment M26–M32, M35): a panel opened before the section's read of the
+   * task arrived captured no read, and its Save/Remove was written against whatever version the writing transaction found (one nobody
+   * saw). Now nothing is written without a read: that press is refused with its reason, the input (and any conflict being replaced)
+   * stays, and the next press is a deliberate save of the task as the section shows it then, checked again when it is written. The
+   * section's read is held on the ACTUAL subscribed watch (`sectionTaskRead`), never invented; another device's change is a real
+   * sync page (`commitNow`, the cache writer), committed between the press and the writing transaction.
+   */
+  const read = {
+    rows: [sourceRow],
+    binding: async () => ({
+      ok: true as const,
+      value: { binding: { anchor: ANCHOR, version: 1, active: true } },
+    }),
+  };
+  const dialogNow = () => screen.queryByRole("dialog");
+  const days = (dialog: HTMLElement) =>
+    (
+      present(
+        within(dialog).queryByLabelText(words.DAYS_LABEL),
+      ) as HTMLInputElement
+    ).value;
+  const setDays = (dialog: HTMLElement, value: string) =>
+    fireEvent.change(
+      present(within(dialog).queryByLabelText(words.DAYS_LABEL)),
+      {
+        target: { value },
+      },
+    );
+  const press = (dialog: HTMLElement, name: string) =>
+    fireEvent.click(present(within(dialog).queryByRole("button", { name })));
+  const note = (dialog: HTMLElement, text: string) =>
+    within(dialog).queryByText(text);
+  async function open(t: Mounted, name: string = words.CHANGE_ANCHOR) {
+    const button = () =>
+      within(section() as HTMLElement).queryByRole("button", { name });
+    await t.until(() => button() !== null);
+    fireEvent.click(present(button()));
+    await t.settle();
+    return present(dialogNow());
+  }
+  /** The section mounted again over the same visit, its task read seen through `sectionTaskRead` (held as `held`, if given). */
+  async function sectionWithRead(
+    t: Mounted,
+    task: SeededTask,
+    held?: Loadable<never>,
+    shownAs = "anchored",
+  ) {
+    const taskRead = sectionTaskRead(
+      t.data,
+      task.taskId,
+      held === undefined ? {} : { held },
+    );
+    await act(async () => t.remount());
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === shownAs,
+    );
+    expect(section()?.getAttribute("data-anchor-section")).toBe(shownAs);
+    expect(taskRead.subscriptions()).toBeGreaterThan(0);
+    return taskRead;
+  }
+  /** The real read is ready, of `version` (the hold hides it; it never makes one up). */
+  async function realReady(
+    t: Mounted,
+    taskRead: ReturnType<typeof sectionTaskRead>,
+    version: number,
+  ) {
+    await t.until(() => taskRead.real()?.status === "ready");
+    const real = taskRead.real();
+    expect(real?.status).toBe("ready");
+    if (real?.status !== "ready") throw new Error("unreachable");
+    expect(real.value.base?.version).toBe(version);
+    return real.value.observation;
+  }
+  /** Another device's change of the task (version 2), published by a real sync page. */
+  async function changedElsewhere(t: Mounted, task: SeededTask, version = 2) {
+    const row = task.rows.find((r) => r.id === task.taskId);
+    if (row === undefined) throw new Error("setup");
+    expect(
+      await t.commitNow([
+        { ...row, version, label: `Changed on another device (${version})` },
+      ]),
+    ).toBe(true);
+  }
+  /**
+   * Every enqueue/supersede asked of the page's outbox, passed through (installed once per test); `next` runs inside the NEXT one before
+   * it is written, `holdAnswer` holds the delivery of the NEXT one's answer after it is written (until the returned release).
+   */
+  function outboxCalls(t: Mounted) {
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const enqueue = outbox.enqueue.bind(outbox);
+    const supersede = outbox.supersede.bind(outbox);
+    const asked: { method: string; request: EnqueueRequest }[] = [];
+    let between: (() => Promise<void>) | null = null;
+    let answer: Promise<void> | null = null;
+    const around = async <T,>(write: () => Promise<T>): Promise<T> => {
+      const step = between;
+      between = null;
+      if (step !== null) await step();
+      const held = answer;
+      answer = null;
+      const outcome = await write();
+      if (held !== null) await held;
+      return outcome;
+    };
+    vi.spyOn(outbox, "enqueue").mockImplementation(async (request) => {
+      asked.push({ method: "enqueue", request });
+      return around(() => enqueue(request));
+    });
+    vi.spyOn(outbox, "supersede").mockImplementation(async (id, request) => {
+      asked.push({ method: "supersede", request });
+      return around(() => supersede(id, request));
+    });
+    return {
+      asked,
+      next: (step: () => Promise<void>) => {
+        between = step;
+      },
+      holdAnswer: () => {
+        let release!: () => void;
+        answer = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return async () => {
+          await act(async () => release());
+          await t.settle();
+        };
+      },
+    };
+  }
+  const queuedAnchors = (t: Mounted) =>
+    anchorDrafts(t).map((d) => ({
+      status: d.status,
+      expected: d.expected_version,
+      body: bodyOf(t, d.local_id),
+    }));
+
+  for (const action of ["save", "remove"] as const) {
+    test(`R11 ${action} (ADAPTED from Review 14's probe): opened before the task's read arrived, released before the press, changed elsewhere before the write: nothing is written on a version nobody saw`, async () => {
+      const task = await seededTask();
+      const t = await mounted(task, read);
+      const taskRead = await sectionWithRead(t, task, { status: "loading" });
+      const dialog = await open(t);
+      expect(
+        taskRead.hidden(),
+        "the hold hid the section's read",
+      ).toBeGreaterThan(0);
+      const seen = await realReady(t, taskRead, 1);
+      // Delivered before the press (the strengthened probe's schedule).
+      await taskRead.release();
+      await t.settle();
+      expect(await realReady(t, taskRead, 1)).toEqual(seen);
+      if (action === "save") setDays(dialog, "-5");
+      const button =
+        action === "save" ? words.SAVE_ANCHOR : words.REMOVE_ANCHOR;
+      const calls = outboxCalls(t);
+      calls.next(() => changedElsewhere(t, task));
+      press(dialog, button);
+      await t.settle();
+      // The adaptation: Review 14's probe interposed the other device's change INSIDE this press's enqueue; the press is now refused
+      // before any enqueue, so nothing is written at all. The probe's oracle (no change on version 2 that nobody saw) is asserted here and
+      // at the next deliberate press, which reaches the interposition.
+      expect(calls.asked, "no request without a read of the task").toEqual([]);
+      expect(queuedAnchors(t)).toEqual([]);
+      expect(dialogNow()).not.toBeNull();
+      expect(note(dialog, words.ANCHOR_NOT_SAVED_UNCHECKED)).not.toBeNull();
+      if (action === "save") expect(days(dialog)).toBe("-5");
+      // The next press is a deliberate save of the task as the section shows it now (version 1): the change elsewhere, committed between
+      // that press and its write, is caught and refused as changed.
+      press(dialog, button);
+      await t.settle();
+      expect(calls.asked).toHaveLength(1);
+      expect(calls.asked[0]?.request.observed).toEqual(seen);
+      expect(queuedAnchors(t)).toEqual([]);
+      expect(note(dialog, words.ANCHOR_NOT_SAVED_CHANGED)).not.toBeNull();
+      if (action === "save") expect(days(dialog)).toBe("-5");
+      // Pressed again once the change is shown: written once, on version 2.
+      const now = await realReady(t, taskRead, 2);
+      press(dialog, button);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+      expect(calls.asked).toHaveLength(2);
+      expect(calls.asked[1]?.request.observed).toEqual(now);
+      expect(queuedAnchors(t)).toEqual([
+        {
+          status: "queued",
+          expected: 2,
+          body: {
+            kind: "set_anchor",
+            id: task.taskId,
+            expected_version: 2,
+            anchor:
+              action === "save"
+                ? {
+                    ...ANCHOR,
+                    offset: {
+                      kind: "calendar_days",
+                      days: -5,
+                      time: "18:00:00",
+                    },
+                  }
+                : null,
+          },
+        },
+      ]);
+    });
+  }
+
+  test.each([
+    ["loading", { status: "loading" } as const],
+    ["unavailable", { status: "unavailable", reason: "error" } as const],
+  ])(
+    "R11: the task's read still %s at the press: refused (again on a second press), the input kept; once shown, saved once on what was shown",
+    async (_, held) => {
+      const task = await seededTask();
+      const t = await mounted(task, read);
+      const taskRead = await sectionWithRead(t, task, held);
+      const dialog = await open(t);
+      setDays(dialog, "-4");
+      const calls = outboxCalls(t);
+      for (const _press of [1, 2]) {
+        press(dialog, words.SAVE_ANCHOR);
+        await t.settle();
+        expect(calls.asked).toEqual([]);
+        expect(note(dialog, words.ANCHOR_NOT_SAVED_UNCHECKED)).not.toBeNull();
+        expect(days(dialog)).toBe("-4");
+      }
+      expect(taskRead.hidden()).toBeGreaterThan(0);
+      const seen = await realReady(t, taskRead, 1);
+      // The read arriving saves nothing by itself.
+      await taskRead.release();
+      await t.settle();
+      expect(calls.asked).toEqual([]);
+      expect(queuedAnchors(t)).toEqual([]);
+      press(dialog, words.SAVE_ANCHOR);
+      await t.settle();
+      expect(dialogNow()).toBeNull();
+      expect(calls.asked.map((c) => c.request.observed)).toEqual([seen]);
+      expect(queuedAnchors(t)).toMatchObject([
+        { status: "queued", expected: 1 },
+      ]);
+    },
+  );
+
+  test("R11 controls: opened on a ready read, the first press is written on it; changed elsewhere before the write, it is refused as changed", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const taskRead = await sectionWithRead(t, task);
+    const seen = await realReady(t, taskRead, 1);
+    let dialog = await open(t);
+    setDays(dialog, "-5");
+    const calls = outboxCalls(t);
+    calls.next(() => changedElsewhere(t, task));
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([seen]);
+    expect(queuedAnchors(t)).toEqual([]);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_CHANGED)).not.toBeNull();
+    press(dialog, "Cancel");
+    await t.settle();
+    // Unchanged since the panel opened: one press, written.
+    const now = await realReady(t, taskRead, 2);
+    dialog = await open(t);
+    setDays(dialog, "-6");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([seen, now]);
+    expect(queuedAnchors(t)).toMatchObject([{ status: "queued", expected: 2 }]);
+    expect(taskRead.hidden()).toBe(0);
+  });
+
+  test("R11 control: a change of the task shown after the panel opened, before its press, is refused as changed (the session's own read, never the latest)", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const taskRead = await sectionWithRead(t, task);
+    const seen = await realReady(t, taskRead, 1);
+    const dialog = await open(t);
+    setDays(dialog, "-5");
+    await act(async () => {
+      await changedElsewhere(t, task);
+    });
+    await t.settle();
+    const now = await realReady(t, taskRead, 2);
+    const calls = outboxCalls(t);
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([seen]);
+    expect(queuedAnchors(t)).toEqual([]);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_CHANGED)).not.toBeNull();
+    expect(days(dialog)).toBe("-5");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([seen, now]);
+    expect(queuedAnchors(t)).toMatchObject([{ status: "queued", expected: 2 }]);
+  });
+
+  test("R11 Review of a conflicted change, opened before the task's read: no blind replacement (the conflict and its body stay); then one deliberate replacement, checked when written", async () => {
+    const task = await seededTask();
+    const conflicted = draftRow({
+      local_id: "00000000-0000-4000-8000-00000000c0f2",
+      endpoint: "/calendar-commands",
+      status: "version_conflict",
+      command: {
+        command: {
+          kind: "set_anchor",
+          id: task.taskId,
+          expected_version: 0,
+          anchor: ANCHOR,
+        },
+      } as never,
+      target_resource_ids: [task.taskId],
+      index_targets: [task.taskId],
+      bases: { [task.taskId]: 0 },
+      last_error: { status: 409, code: "conflict", stage: "conflict" },
+    });
+    const t = await mounted(task, {
+      online: false,
+      rows: [sourceRow, eventRow()],
+      drafts: [conflicted],
+    });
+    const taskRead = await sectionWithRead(
+      t,
+      task,
+      { status: "loading" },
+      "offline",
+    );
+    const dialog = await open(t, words.REVIEW_ANCHOR);
+    const calls = outboxCalls(t);
+    const before = {
+      draft: anchorDrafts(t),
+      body: bodyOf(t, conflicted.local_id),
+    };
+    expect(before.draft.map((d) => d.status)).toEqual(["version_conflict"]);
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(calls.asked).toEqual([]);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_UNCHECKED)).not.toBeNull();
+    expect(anchorDrafts(t)).toEqual(before.draft);
+    expect(bodyOf(t, conflicted.local_id)).toEqual(before.body);
+    const seen = await realReady(t, taskRead, 1);
+    await taskRead.release();
+    await t.settle();
+    // Changed elsewhere between the deliberate press and its write: refused; the conflict still stands.
+    calls.next(() => changedElsewhere(t, task));
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(calls.asked.map((c) => [c.method, c.request.observed])).toEqual([
+      ["supersede", seen],
+    ]);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_CHANGED)).not.toBeNull();
+    expect(anchorDrafts(t)).toEqual(before.draft);
+    expect(bodyOf(t, conflicted.local_id)).toEqual(before.body);
+    const now = await realReady(t, taskRead, 2);
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(calls.asked.map((c) => [c.method, c.request.observed])).toEqual([
+      ["supersede", seen],
+      ["supersede", now],
+    ]);
+    expect(
+      anchorDrafts(t).find((d) => d.local_id === conflicted.local_id),
+    ).toBeUndefined();
+    expect(queuedAnchors(t)).toEqual([
+      {
+        status: "queued",
+        expected: 2,
+        body: {
+          kind: "set_anchor",
+          id: task.taskId,
+          expected_version: 2,
+          anchor: ANCHOR,
+        },
+      },
+    ]);
+  });
+
+  test("R11 after a done save that kept newer input: the next save waits for the task's read (refused while it is not shown), then is written once on it", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const taskRead = await sectionWithRead(t, task);
+    const first = await realReady(t, taskRead, 1);
+    const calls = outboxCalls(t);
+    const release = calls.holdAnswer();
+    const dialog = await open(t);
+    setDays(dialog, "-2");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    setDays(dialog, "-3");
+    // The task's read is not available when the done save renews the session.
+    await taskRead.hold({ status: "unavailable", reason: "error" });
+    await release();
+    expect(note(dialog, words.ANCHOR_SAVED_NEWER)).not.toBeNull();
+    expect(anchorDrafts(t)).toHaveLength(1);
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([first]);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_UNCHECKED)).not.toBeNull();
+    expect(days(dialog)).toBe("-3");
+    expect(anchorDrafts(t)).toHaveLength(1);
+    await taskRead.release();
+    await t.settle();
+    const now = taskRead.real();
+    expect(now?.status).toBe("ready");
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([
+      first,
+      now?.status === "ready" ? now.value.observation : "unreachable",
+    ]);
+    expect(
+      queuedAnchors(t).map(
+        (q) => (q.body?.anchor as CalendarAnchor | undefined)?.offset,
+      ),
+    ).toEqual([
+      { kind: "calendar_days", days: -2, time: "18:00:00" },
+      { kind: "calendar_days", days: -3, time: "18:00:00" },
+    ]);
+  });
+
+  test("R11 after a changed refusal: while the task's read is not shown nothing is written and the change keeps its identity; each deliberate press is checked when written", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const taskRead = await sectionWithRead(t, task);
+    const seen = await realReady(t, taskRead, 1);
+    const dialog = await open(t);
+    setDays(dialog, "-5");
+    const calls = outboxCalls(t);
+    calls.next(() => changedElsewhere(t, task, 2));
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_CHANGED)).not.toBeNull();
+    const key = calls.asked[0]?.request.localId;
+    expect(key).toBeDefined();
+    await realReady(t, taskRead, 2);
+    await taskRead.hold();
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(calls.asked).toHaveLength(1);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_UNCHECKED)).not.toBeNull();
+    expect(taskRead.hidden()).toBeGreaterThan(0);
+    await taskRead.release();
+    await t.settle();
+    const second = await realReady(t, taskRead, 2);
+    // Changed elsewhere AGAIN between this press and its write.
+    calls.next(() => changedElsewhere(t, task, 3));
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_CHANGED)).not.toBeNull();
+    expect(queuedAnchors(t)).toEqual([]);
+    const third = await realReady(t, taskRead, 3);
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([
+      seen,
+      second,
+      third,
+    ]);
+    // One change, one identity throughout: waiting for the read neither retired nor replaced it.
+    expect(new Set(calls.asked.map((c) => c.request.localId))).toEqual(
+      new Set([key]),
+    );
+    expect(anchorDrafts(t).map((d) => d.local_id)).toEqual([key]);
+    expect(queuedAnchors(t)).toMatchObject([{ status: "queued", expected: 3 }]);
+  });
+
+  test("R11 retained: a session opened before the task's read and left holding input is shown again by a NEW section mount with the read ready; it is not silently given that read (the press is refused once), then saved", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const taskRead = await sectionWithRead(t, task, { status: "loading" });
+    let dialog = await open(t);
+    setDays(dialog, "-8");
+    // The protected tree mounts again (the same visit): the panel leaves without Cancel, holding its input.
+    await taskRead.release();
+    await act(async () => t.remount());
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    const seen = await realReady(t, taskRead, 1);
+    dialog = await open(t);
+    expect(days(dialog), "the session shown again").toBe("-8");
+    const calls = outboxCalls(t);
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(calls.asked).toEqual([]);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_UNCHECKED)).not.toBeNull();
+    press(dialog, words.SAVE_ANCHOR);
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([seen]);
+    expect(queuedAnchors(t)).toMatchObject([{ status: "queued", expected: 1 }]);
+  });
+
+  test("R11 Enter in the panel (the form's own submission) takes the same check: refused before the read, written after", async () => {
+    const task = await seededTask();
+    const t = await mounted(task, read);
+    const taskRead = await sectionWithRead(t, task, { status: "loading" });
+    const dialog = await open(t);
+    setDays(dialog, "-9");
+    const calls = outboxCalls(t);
+    const field = present(within(dialog).queryByLabelText(words.DAYS_LABEL));
+    fireEvent.submit(present(field.closest("form")));
+    await t.settle();
+    expect(calls.asked).toEqual([]);
+    expect(note(dialog, words.ANCHOR_NOT_SAVED_UNCHECKED)).not.toBeNull();
+    const seen = await realReady(t, taskRead, 1);
+    await taskRead.release();
+    await t.settle();
+    fireEvent.submit(present(field.closest("form")));
+    await t.settle();
+    expect(dialogNow()).toBeNull();
+    expect(calls.asked.map((c) => c.request.observed)).toEqual([seen]);
+    expect(queuedAnchors(t)).toMatchObject([{ status: "queued", expected: 1 }]);
   });
 });

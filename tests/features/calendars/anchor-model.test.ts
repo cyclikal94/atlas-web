@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { describe, expect, test } from "vitest";
+import { ObservationFold } from "../../../src/data/model/observation";
 import {
   type AnchorDraft,
   anchorDraftOf,
@@ -263,10 +264,21 @@ describe("round trip, summary and the request", () => {
 
   test("set_anchor is version-checked on the TASK, needs edit access, and `null` removes", () => {
     const anchor = anchorOf(event(false));
-    const request = setAnchorRequest({ id: TASK }, anchor, "k1");
+    // What a read of the task saw (here: an incarnation holding no copy of it and no drafts), carried to the writing transaction (R11).
+    const observed = {
+      resourceId: TASK,
+      token: new ObservationFold(
+        "incarnation-1",
+        TASK,
+        undefined,
+        undefined,
+      ).token(),
+    };
+    const request = setAnchorRequest({ id: TASK }, anchor, observed, "k1");
     expect(request).toMatchObject({
       endpoint: "/calendar-commands",
       localId: "k1",
+      observed,
       targets: [
         {
           resourceId: TASK,
@@ -282,7 +294,10 @@ describe("round trip, summary and the request", () => {
         command: { kind: "set_anchor", id: TASK, expected_version: 4, anchor },
       },
     });
-    const removal = setAnchorRequest({ id: TASK }, null).build({ [TASK]: 5 });
+    const removing = setAnchorRequest({ id: TASK }, null, observed);
+    expect(removing.observed).toEqual(observed);
+    expect(removing.localId).toBeUndefined();
+    const removal = removing.build({ [TASK]: 5 });
     expect(removal.command).toEqual({
       command: {
         kind: "set_anchor",

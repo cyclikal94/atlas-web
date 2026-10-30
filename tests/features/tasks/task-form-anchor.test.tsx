@@ -5,7 +5,8 @@ import {
   screen,
   within,
 } from "@testing-library/react";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { EnqueueRequest } from "../../../src/data";
 import * as words from "../../../src/features/calendars/copy-anchor";
 import { FROM_REVIEW } from "../../../src/features/calendars/copy-review";
 import { forgetBindings } from "../../../src/features/tasks/detail/anchor-binding";
@@ -18,6 +19,7 @@ import { FORM_COPY } from "../../../src/features/tasks/form/TaskFormPage";
 import { forgetTaskMemory } from "../../../src/features/tasks/memory";
 import { installMatchMedia } from "../../helpers/match-media";
 import { cacheRow } from "../../support/data/rows";
+import { sectionTaskRead } from "../../support/tasks/task-read";
 import { mountTasks, seededTask } from "../../support/tasks/world";
 
 /**
@@ -28,6 +30,7 @@ import { mountTasks, seededTask } from "../../support/tasks/world";
 installMatchMedia({ width: 1440 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   forgetTaskMemory();
   forgetAllCorrections();
   forgetBindings();
@@ -264,6 +267,72 @@ describe("the new task's detail before it has synced", () => {
     expect(section.getAttribute("data-anchor-section")).toBe("unsynced");
     expect(section).toHaveTextContent(words.BINDING_UNSYNCED);
     expect(t.api.calls.readAnchor ?? 0).toBe(0);
+  });
+});
+
+describe("the new task's detail before it has synced: an anchor change from the detail (revision 13, R11 / design assessment M34)", () => {
+  test("the pending create's own read of the task (no cached copy yet) is what the change is checked against: not refused as unread, the create's anchor unchanged", async () => {
+    const t = await newForm();
+    repeats("none");
+    await anchorIt(t);
+    fireEvent.click(screen.getByRole("button", { name: FORM_COPY.save }));
+    await t.until(
+      () => document.querySelector("[data-anchor-section]") !== null,
+    );
+    await t.settle();
+    const created = command(t);
+    expect(created?.anchor).toBeDefined();
+    const taskId = String(created?.id);
+    const taskRead = sectionTaskRead(t.data, taskId);
+    await act(async () => t.remount());
+    await t.until(() => taskRead.real()?.status === "ready");
+    const real = taskRead.real();
+    expect(real?.status).toBe("ready");
+    if (real?.status !== "ready") throw new Error("unreachable");
+    expect(real.value.base, "no cached copy of a pending create").toBeNull();
+    await t.settle();
+    const section = document.querySelector(
+      "[data-anchor-section]",
+    ) as HTMLElement;
+    expect(section.getAttribute("data-anchor-section")).toBe("unsynced");
+    const outbox = t.data.outbox();
+    if (outbox === null) throw new Error("no outbox");
+    const asked: EnqueueRequest[] = [];
+    const enqueue = outbox.enqueue.bind(outbox);
+    let outcome: unknown;
+    vi.spyOn(outbox, "enqueue").mockImplementation(async (request) => {
+      asked.push(request);
+      outcome = await enqueue(request);
+      return outcome as never;
+    });
+    fireEvent.click(
+      within(section).getByRole("button", { name: words.ANCHOR_ACTION }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.CHANGE_EVENT }),
+    );
+    await t.settle();
+    fireEvent.click(
+      (await within(dialog).findByText("Bin day")).closest(
+        "button",
+      ) as HTMLElement,
+    );
+    await t.settle();
+    fireEvent.change(within(dialog).getByLabelText(words.DAYS_LABEL), {
+      target: { value: "-2" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: words.SAVE_ANCHOR }),
+    );
+    await t.settle();
+    expect(
+      within(document.body).queryByText(words.ANCHOR_NOT_SAVED_UNCHECKED),
+    ).toBeNull();
+    expect(asked.map((r) => r.observed)).toEqual([real.value.observation]);
+    expect(outcome).toMatchObject({ kind: "queued" });
+    // The create keeps its own anchor (the change is a separate command after it).
+    expect(command(t)?.anchor).toEqual(created?.anchor);
   });
 });
 

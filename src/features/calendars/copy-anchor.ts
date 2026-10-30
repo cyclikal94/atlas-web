@@ -133,6 +133,9 @@ export const ANCHOR_SAVED_NEWER =
 export const ANCHOR_NOT_SAVED_CHANGED =
   "This task changed while you were editing — check the anchor and save again.";
 export const ANCHOR_NOT_SAVED_DENIED = "You can't change this task.";
+/** Provisional: the task's details had not been read when the panel was opened (or are not readable now), so nothing was saved. */
+export const ANCHOR_NOT_SAVED_UNCHECKED =
+  "This task's details are still loading — check the anchor and save again.";
 
 // ---- the new-task form ----------------------------------------------------------------------------------------------------------------
 /** Verbatim ("Anchor to a calendar event"). */
