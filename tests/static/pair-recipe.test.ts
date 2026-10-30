@@ -1,9 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
-  CASES,
-  UNSUPPORTED,
-} from "../../scripts/integration/pair-matrix.mjs";
+import { CASES, UNSUPPORTED } from "../../scripts/integration/pair-matrix.mjs";
 import { DATA_CONFIG } from "../../src/data/model/config";
 
 /**
@@ -66,7 +63,9 @@ describe("the seam is diagnostic only", () => {
 
   it("only the fixture session harness passes it, only when the page asks, and only with the production leader", () => {
     const harness = code("src/fixture/session-harness/main.tsx");
-    expect(harness).toMatch(/segmentedParam !== "capable" \|\| !productionLeader/);
+    expect(harness).toMatch(
+      /segmentedParam !== "capable" \|\| !productionLeader/,
+    );
     expect(harness).toMatch(/harness\.pairing === null\s*\?\s*\{\}/);
     expect(harness).toMatch(/pairMaxChanges >= 4\s*&&\s*pairMaxChanges <= 800/);
   });
@@ -80,7 +79,9 @@ describe("the released path is untouched", () => {
       "scripts/integration/stacks.mjs",
       "scripts/integration/schedule.mjs",
     ])
-      expect(read(file)).not.toMatch(/pair-(selection|matrix|tap|evidence)|run-development-pair/);
+      expect(read(file)).not.toMatch(
+        /pair-(selection|matrix|tap|evidence)|run-development-pair/,
+      );
   });
 
   it("the pair projects exist only when the pair runner asks (ATLAS_PAIR=1), with their own test directory", () => {
