@@ -45,6 +45,10 @@ if (probes && probes !== "held-operation")
 if (![1, 2, 3, 4].includes(requestedWorkers))
   throw new Error("ATLAS_E2E_WORKERS must be 1..4");
 
+// WEB-09c (R23-PAIR): the development-pair journey (tests/pair) is a project of its own, and EXISTS only when its runner
+// (scripts/integration/run-development-pair.mjs) asks for it with ATLAS_PAIR=1, so every other run keeps exactly its project set. Its
+// runner starts the backend, the tap, the proxy and its own fixture preview, and passes the URL in.
+const pair = process.env.ATLAS_PAIR === "1";
 const projects = browsers.flatMap(({ name, device }) => [
   {
     name: `production-${name}`,
@@ -67,6 +71,16 @@ const projects = browsers.flatMap(({ name, device }) => [
     testMatch: lane === "parallel-ui" ? /$a/ : /integration\..*\.spec\.ts/,
     use: { ...device, baseURL: INTEGRATION },
   },
+  ...(pair
+    ? [
+        {
+          name: `pair-${name}`,
+          testDir: "./tests/pair",
+          testMatch: /pair\.development\.spec\.ts/,
+          use: { ...device, baseURL: INTEGRATION },
+        },
+      ]
+    : []),
 ]);
 const needed = neededTargets(
   process.argv,

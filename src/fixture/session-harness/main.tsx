@@ -83,6 +83,15 @@ export interface SessionHarness {
    * 5 s for the displayed account's facade; `no_outbox` otherwise. The result is the facade's, flattened as the data harness reports it.
    */
   enqueue(spec: unknown): Promise<unknown>;
+  /**
+   * FIXTURE / DIAGNOSTIC ONLY (WEB-09c, R23-PAIR): what this page told its PRODUCTION leader about segmented delivery (`?segmented=capable`,
+   * optionally `&maxChanges=<4..800>`), or null when it told it nothing (as production). The development-pair spec reads it to prove which
+   * composition ran; it changes nothing.
+   */
+  pairing: {
+    segmentedCapable: true;
+    segmentedMaxChanges: number | null;
+  } | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -110,6 +119,7 @@ const harness: SessionHarness = {
   hints: () => createBroadcastHints(),
   canary: (store) => runAuthCanary(store),
   trace: [],
+  pairing: null,
   async seedAuthState(state) {
     const store: OpenedAuthStore =
       harness.booted?.store ?? (await openAuthStore());
@@ -291,6 +301,36 @@ const scaledLockWait = Number(params.get("lockWaitMs"));
 // FIXTURE ONLY (WEB-09b, P-13): the PRODUCTION sync leader runs only when the page asks (`?leader=production`), so the specs that drive
 // the data harness's own test leader keep their meaning and two engines never issue `/sync` on one page.
 const productionLeader = params.get("leader") === "production";
+// FIXTURE / DIAGNOSTIC ONLY (WEB-09c, R23-PAIR): the development-pair adapter (scripts/integration/run-development-pair.mjs) asks the
+// PRODUCTION leader to treat its server as segmenting, through the boot option `dataLeaderDiagnostic`. It is refused unless the page also runs
+// the production leader, and a starting `max_changes` outside BE-Q23's structural range is refused, so a malformed page never boots quietly
+// with another composition than the one it names.
+const segmentedParam = params.get("segmented");
+const maxChangesParam = params.get("maxChanges");
+if (
+  segmentedParam !== null &&
+  (segmentedParam !== "capable" || !productionLeader)
+)
+  throw new Error(
+    "?segmented= takes only `capable`, and only with ?leader=production",
+  );
+if (maxChangesParam !== null && segmentedParam === null)
+  throw new Error("?maxChanges= needs ?segmented=capable");
+const pairMaxChanges =
+  maxChangesParam === null ? null : Number(maxChangesParam);
+if (
+  pairMaxChanges !== null &&
+  !(
+    Number.isInteger(pairMaxChanges) &&
+    pairMaxChanges >= 4 &&
+    pairMaxChanges <= 800
+  )
+)
+  throw new Error("?maxChanges= must be an integer from 4 to 800");
+harness.pairing =
+  segmentedParam === "capable"
+    ? { segmentedCapable: true, segmentedMaxChanges: pairMaxChanges }
+    : null;
 let startedByTest: Promise<Booted | null> | null = null;
 const startBoot = (): Promise<Booted | null> => {
   harness.ready = boot({
@@ -299,6 +339,16 @@ const startBoot = (): Promise<Booted | null> => {
       : {}),
     neutralRoot,
     dataLeader: productionLeader,
+    ...(harness.pairing === null
+      ? {}
+      : {
+          dataLeaderDiagnostic: {
+            segmentedCapable: () => true,
+            ...(pairMaxChanges === null
+              ? {}
+              : { segmentedMaxChanges: pairMaxChanges }),
+          },
+        }),
     trace: {
       emit(event, data) {
         harness.trace.push({ at: Date.now(), event, data });

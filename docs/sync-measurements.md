@@ -207,13 +207,58 @@ fixture-firefox --project fixture-webkit --workers 1 --retries 0 --output <dir>/
    design keeps, alongside BE-Q23's single-resource minimum (one change and at most three ancestors).
 3. *Request count and overhead against whole-batch delivery:* `ceil(changes / (m - ancestors))` requests per oversized revision; each is a lease and a round trip
    (BE-Q23 records the server's per-request cost). Indicative desktop spans above.
-4. *Completion of the real server-generated dense update:* **not run.** It needs BE-Q23's implemented backend and an agreed candidate/backend pair. The synthetic
-   W1 control and R201 complete in every engine at every budget tried (rows checked).
+4. *Completion of the real server-generated dense update:* **not run.** Decision D of 29 October 2026 approved the exact development pair (the unreleased
+   BE-Q23 backend at `633edd4f…`, executable `a6a73bbf…`); the maintained recipe that runs it is below ("The development pairing"), and its paired execution
+   waits for the independent review of that recipe, as Decision D requires. The synthetic W1 control and R201 complete in every engine at every budget tried
+   (rows checked; FIXTURE evidence).
 5. *Interrupted and resumed behaviour:* N1-N4 of `tests/e2e/fixture.data-segmented.spec.ts` (a real reload between segments, an IndexedDB fault during the
    activation, a second page adopting the staged revision, no partial view), passing in all three engines (FIXTURE, stubbed `/sync`).
 6. *Known unmeasured bounds:* any device (WEB-09d); the real backend's segment sizes and timing (BE-Q23); memory per segment beyond the sampled Chromium heap;
    multi-tab contention during a long staged revision; the exclusive-host sweep itself.
 
+
+### The development pairing (R23-PAIR; Decision D, 29 October 2026)
+
+**Status: recipe authored and qualified; paired execution NOT run.** Decision D permits isolated qualification of this frontend against the independently
+reviewed, UNRELEASED BE-Q23 backend, and requires the exact recipe, source applicability, fixture ownership and client evidence matrix to be independently
+reviewed **before** paired execution. Nothing below is integration, activation or acceptance evidence; the production pin (`0.29.0-rc.1`), API types and
+opt-in (`segmentedMinApiVersion: null`) are unchanged.
+
+* **Runner:** `node scripts/integration/run-development-pair.mjs --backend development|released [--browsers …] [--evidence <fresh dir>] [--grep …] [--check]`.
+  `development` selects the approved artefacts through `scripts/integration/pair-selection.mjs` (the orchestrator's `backend-pairing/manifest.json`,
+  SHA-256 `f434df4a…`, and every file it names: executable, OpenAPI, bounded contract, backend review, dense fixture, generator lock, types tarball
+  `0.0.0-pairing.20261029`; backend HEAD and tree; tracked-clean checkout; darwin/arm64). Any difference refuses the run. The executable is copied into the
+  run's own directory, the copy re-hashed and launched, and the kernel's view of the launched process checked. `released` is the released-backend CONTROL
+  (the unchanged `fetch-backend.mjs`, verified against SHA256SUMS, into the pair runner's own cache), which runs only the whole-revision cases.
+  `--check` verifies selection, source and discovery and starts nothing. The frontend source must be committed (`--diagnostic-dirty` labels a run NOT
+  evidence); the fixture build is made by the invocation from that source.
+* **Composition:** the session harness page with `?leader=production` (the production election, sync engine, recovery job, production quota, session
+  persistence, W27/W1) plus the DIAGNOSTIC boot option `?segmented=capable&maxChanges=m` (`DiagnosticSegmentation`, `src/data/leader/start.ts`), which hands
+  `segmentedCapable` to both request callers. `main.tsx` never passes it (`tests/static/pair-recipe.test.ts`); the leader-world test SEG-1 to SEG-3 shows
+  both callers opt in only when given it.
+* **Fixture ownership:** one fresh disposable SQLite stack per engine; accounts made by the backend's own `account` command (a writer, one reader per case,
+  one foreign account); every workload seeded through PUBLIC routes BEFORE the reader signs in, so the reader's snapshot, device and durable pre-grant cursor
+  come from real authentication and synchronisation, with unrelated sentinel rows in the old state. W-real = one person + 199 dense checklist fields revealed
+  by ONE public grant (200 changes); W-synthetic (LABELLED SYNTHETIC) = 799 fields + their person re-sent by ONE notice row inserted directly into the
+  disposable database (800 changes). Neither is W1 (800 synthetic checklist changes) or R201 (one person + 200 fields). The backend's own
+  `sync_dense_fixture.py` is not used as the bootstrap (it drains reader cursors before serving).
+* **Observation:** a passive tap between the delaying proxy and the backend records every `/sync` body's exact bytes, SHA-256, length, request cursor and
+  budget, segment and timings, and writes the bodies after delivery. One-shot, labelled tap faults (tamper, substitute, index/revision change, replay, 410,
+  dropped connection) are recorded apart from the server's unaltered body. Each case's interval record binds its exchanges, barriers (pre-grant complete,
+  grant complete, every piece persisted, final released, activation complete), terminal state, an independent content oracle (against what the writer
+  wrote, key-order-insensitive) and memory (Chromium: whole-page CDP JS heap samples, scoped as such; Firefox/WebKit: null with a reason; native IndexedDB
+  transaction memory unmeasured everywhere), and is validated by `scripts/integration/pair-evidence.mjs` before the case asserts anything else.
+* **Matrix (`scripts/integration/pair-matrix.mjs`, 20 cases per engine):** P0 selection witness; W1 whole (both backends); W2/W3 W-real at 4 and 100 with a
+  barrier at every piece; S1/S2 W-synthetic at 100 and whole; R1 reload mid-revision; R2 connection dropped after the server answered; T1 second tab across
+  the held activation; T2 leader closed mid-revision and real takeover; A1 revocation between pieces (no never-sent identifier disclosed); B1/B2/B3 tampered,
+  foreign-device and foreign-account continuations refused by the SERVER (410); G1/G2/G3 gap, repeat and revision change (tap-injected, restart at the
+  boundary); X1 tap-injected 410 (client-only, NOT server expiry/pruning); RC1 the fenced recovery catch-up in pieces; L1 the same account's session
+  replaced mid-revision. **Unrun, with owners:** real expiry (X0) and pruning (X2) — the executable offers no bounded control (retention is at least one day,
+  no frozen clock), reported to the BE-Q23 fixture owner and coordinator; a retired own device (B4) and an account switch or confirmed Keep/Delete logout
+  mid-revision (L2) — WEB-09d's composed lifecycle.
+* **Qualified so far (revision 23):** the selection, matrix accounting, tap and validator with doubles (`scripts/integration/pair-*.test.mjs`); real
+  discovery of the matrix; the released-backend control (P0, W1) in Chromium, Firefox and WebKit; targeted mutants of the seam and of the spec's precondition
+  and oracle. The 18 development-only cases have NOT been executed.
 
 ## Read this first
 

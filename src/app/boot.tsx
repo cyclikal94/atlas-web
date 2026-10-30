@@ -35,7 +35,11 @@ import {
   checkCapabilities,
   probeCapabilities,
 } from "./capabilities";
-import { type DataLeaderHandle, dataLeader } from "./data-leader";
+import {
+  type DataLeaderHandle,
+  type DiagnosticSegmentation,
+  dataLeader,
+} from "./data-leader";
 
 /**
  * The boot sequence (plan 5.4), shared by the production entry (`main.tsx`) and the fixture-only session harness
@@ -71,6 +75,11 @@ export interface BootOptions {
    * own test leader and the evidence recorded with it keep their meaning (two engines must never issue `/sync` on one page).
    */
   dataLeader?: boolean;
+  /**
+   * WEB-09c (R23-PAIR): DIAGNOSTIC ONLY. The development-pair page tells the production leader its server segments. `main.tsx` never passes
+   * it (a static test asserts it); only the fixture session harness does, and only when the page asks (`?segmented=`).
+   */
+  dataLeaderDiagnostic?: DiagnosticSegmentation;
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
@@ -186,7 +195,9 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
     </SessionProvider>,
   );
   await session.start({ beforeStart: options.beforeStart });
-  const leader = leads ? dataLeader.start(session, options.trace) : null;
+  const leader = leads
+    ? dataLeader.start(session, options.trace, options.dataLeaderDiagnostic)
+    : null;
   // The OIDC landing continues only now: the durable record decides (epoch and phase), never the order things happened in.
   if (handoff.oidc) void completeLanding(session, handoff.oidc);
   return { session, store: opened, leader };

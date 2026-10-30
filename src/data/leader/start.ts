@@ -8,6 +8,18 @@ import { markLeaderStarted } from "./presence";
  * (offline before it was cached) is asked for again, paced, and on the browser's `online` event; until it loads the page leads nothing,
  * which is what the chip says ("Updates stopped").
  */
+/**
+ * WEB-09c (R23-PAIR): DIAGNOSTIC ONLY. The development-pair adapter's page (the fixture session harness, `?segmented=`) tells the PRODUCTION
+ * leader that its server segments and which starting `max_changes` to use, so the paired journey runs the production election, engine,
+ * recovery job, quota and persistence paths. Production never supplies it (`main.tsx` passes no boot option; a static test asserts it), so
+ * `DATA_CONFIG.segmentedMinApiVersion` (null) keeps every production request unsegmented.
+ */
+export interface DiagnosticSegmentation {
+  segmentedCapable(): boolean;
+  /** The starting `max_changes` in place of `DATA_CONFIG.segmentedMaxChanges` (absent: the configured one). */
+  segmentedMaxChanges?: number;
+}
+
 export interface DataLeaderHandle {
   readonly role: Store<LeaderRole>;
   /** Tests and HMR only. */
@@ -17,13 +29,17 @@ export interface DataLeaderHandle {
 type Loader = () => Promise<{
   startBrowserLeader(
     session: Session,
-    options?: { trace?: Trace },
+    options?: { trace?: Trace; diagnostic?: DiagnosticSegmentation },
   ): { leader: { role: Store<LeaderRole> }; dispose(): void };
 }>;
 
 export function startDataLeader(
   session: Session,
-  options: { trace?: Trace; load?: Loader } = {},
+  options: {
+    trace?: Trace;
+    load?: Loader;
+    diagnostic?: DiagnosticSegmentation;
+  } = {},
 ): DataLeaderHandle {
   const load: Loader = options.load ?? (() => import("../ui/browser-leader"));
   markLeaderStarted();
@@ -43,10 +59,10 @@ export function startDataLeader(
     void load().then(
       (module) => {
         if (disposed || started !== null) return;
-        const browser = module.startBrowserLeader(
-          session,
-          options.trace ? { trace: options.trace } : {},
-        );
+        const browser = module.startBrowserLeader(session, {
+          ...(options.trace ? { trace: options.trace } : {}),
+          ...(options.diagnostic ? { diagnostic: options.diagnostic } : {}),
+        });
         started = browser;
         off = browser.leader.role.subscribe(() =>
           publish(browser.leader.role.get()),
