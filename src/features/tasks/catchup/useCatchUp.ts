@@ -44,13 +44,18 @@ export function runnerOf(env: TasksEnv, data: DataEnv): CatchUpRunner {
       held.online !== env.online ||
       held.writable !== env.writable ||
       held.data !== data;
+    // Revision 10 (Decision B): offline then online, as this page observed it, is a reconnection (it may resume a stop paused by its
+    // retry window); the first render, a repeated "online" and any other change are only a kick.
+    const reconnected = !held.online && env.online;
     held.data = data;
     held.online = env.online;
     held.writable = env.writable;
     held.env = env;
     if (changed) {
       const runner = held.runner;
-      queueMicrotask(() => runner.kick());
+      queueMicrotask(() =>
+        reconnected ? runner.reconnected() : runner.kick(),
+      );
     }
     return held.runner;
   }
@@ -62,7 +67,7 @@ export function runnerOf(env: TasksEnv, data: DataEnv): CatchUpRunner {
   const api = () => mine()?.env.api ?? env.api;
   const runner: CatchUpRunner = createCatchUpRunner({
     api: {
-      readTask: (id) => api().readTask(id),
+      readTask: (id, admitted) => api().readTask(id, admitted),
       materialise: (command, key) => api().materialise(command, key),
     } as Pick<TasksApi, "readTask" | "materialise"> as TasksApi,
     identity: env.identity,

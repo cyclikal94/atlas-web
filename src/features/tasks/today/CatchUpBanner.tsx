@@ -17,7 +17,8 @@ import {
 import { useCatchUp } from "../catchup/useCatchUp";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import type { StopReason } from "../model/materialise";
+import { callerOf, type StopReason } from "../model/materialise";
+import { type Pause, readSchedule } from "../model/retry";
 
 /** Provisional copy (STAGED-ACCEPTANCE-20261011; docs/tasks.md WEB-10c checkpoint list). */
 export const CATCH_UP_COPY = {
@@ -49,7 +50,35 @@ export const CATCH_UP_COPY = {
     storage:
       "This device is short of storage space, so Atlas couldn't keep track of catching up. Free some space, then try again.",
   } satisfies Record<ShownReason, string>,
+  /** Revision 10 (Decision B): why trying again automatically stopped, in place of the reason. */
+  pause: {
+    window:
+      "Atlas kept trying for a few minutes without success. It will try again when this device reconnects.",
+    unrecognised:
+      "The server gave an answer Atlas didn't recognise, several times.",
+    clock:
+      "This device's clock changed while Atlas was trying. Check its date and time, then try again.",
+    legacy:
+      "Atlas was updated while it was catching up. Try again to carry on.",
+  } satisfies Record<Pause, string>,
 } as const;
+
+/** The sentence that says why a stop stands (revision 10: a retry pause says why trying again stopped). */
+export const reasonText = (stop: { reason: ShownReason; pause?: Pause }) =>
+  stop.pause === undefined
+    ? CATCH_UP_COPY.reason[stop.reason]
+    : CATCH_UP_COPY.pause[stop.pause];
+
+/** A record's retry pause, when its stop is one (revision 10). */
+const pauseOf = (
+  value: unknown,
+  caller: Parameters<typeof readSchedule>[1],
+) => {
+  const s = readSchedule(value, caller);
+  return s === null || s === "invalid" || s.pause === null
+    ? {}
+    : { pause: s.pause };
+};
 
 /**
  * Why a task's catch-up stopped, as shown: a sequence's or a discovery's reason, or `storage` (revision 3, review R16: this page could not
@@ -66,6 +95,8 @@ export interface ShownStop {
   throughDate: string | undefined;
   reason: ShownReason;
   requestId: string | undefined;
+  /** Revision 10: the retry pause it is, if any. */
+  pause?: Pause;
   /** What a "Try again" pressed on it names (review R20): this very stop, never a later one that looks the same. */
   seen: SeenStop;
 }
@@ -114,6 +145,7 @@ export function stopsFor(
             throughDate: row.through_date,
             reason: row.stop.reason,
             requestId: row.stop.request_id,
+            ...pauseOf(row.schedule, callerOf(row)),
             seen: seenSequence(row, found),
           },
         ]
@@ -127,6 +159,7 @@ export function stopsFor(
         throughDate: undefined,
         reason: found.stop.reason,
         requestId: found.stop.request_id,
+        ...pauseOf(found.schedule, "discovery"),
         seen: seenDiscovery(found),
       },
     ];
@@ -234,9 +267,7 @@ export function CatchUpBanner({ pendingTasks }: { pendingTasks: string[] }) {
           <p className="text-[13px] font-medium text-ink-1">
             {CATCH_UP_COPY.stopped(titleOf(stop.taskId))}
           </p>
-          <p className="text-[12.5px] text-ink-2">
-            {CATCH_UP_COPY.reason[stop.reason]}
-          </p>
+          <p className="text-[12.5px] text-ink-2">{reasonText(stop)}</p>
           {stop.requestId ? (
             <p className="select-all font-num text-[12px] text-ink-2">
               {copy.REQUEST_ID(stop.requestId)}

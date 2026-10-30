@@ -233,7 +233,13 @@ test.describe("E-M2: a reload in each phase (A3; CM-440)", () => {
     });
   });
 
-  test("held awaiting the position: after the reload exactly one more position read and no new materialise", async ({
+  /**
+   * ADAPTATION (revision 10, Decision B and the design assessment's step 5): this case expected exactly ONE more read after the reload, the
+   * discovery read taken as the position read. Each caller now reads under its own admission, and the held read, issued and never answered,
+   * is counted as lost when it was issued: the discovery read, then the position read after its 1 s pace. The intent kept: only reads,
+   * never another `materialise` (CM-440), and nothing more once the position is read.
+   */
+  test("held awaiting the position: after the reload the discovery read and its own position read, and no new materialise", async ({
     context,
   }, info) => {
     const task = repeating(403, "Feed the cat");
@@ -271,9 +277,9 @@ test.describe("E-M2: a reload in each phase (A3; CM-440)", () => {
     await reboot(page);
     await expect
       .poll(() => positionReads(r10c, task).length, { timeout: 20_000 })
-      .toBe(readsBefore + 1);
+      .toBe(readsBefore + 2);
     await page.waitForTimeout(1_500);
-    expect(positionReads(r10c, task).length).toBe(readsBefore + 1);
+    expect(positionReads(r10c, task).length).toBe(readsBefore + 2);
     expect(posts(r10c).length).toBe(postsBefore);
     hold.release(detailOf(task, { last_date: TODAY, pending: false }));
     recordEvidence(info, "e-m2-awaiting", {
@@ -1565,7 +1571,13 @@ test.describe("E-TM4: another tab's later day read retires the live account row 
 });
 
 test.describe("E-M6: two tabs press Try again on the same stop (revision 4: R20)", () => {
-  test("both presses are made while the account's lock is busy; the stop gets ONE fresh budget: three sends with the stored key, not six", async ({
+  /**
+   * ADAPTATION (revision 10, Decision B supersedes the three-uncertain stop for commands): this case counted ONE fresh budget as three
+   * sends (two budgets: six). An unrecognised command answer is now retried through its 180-second window, so one budget is one paced
+   * episode: resends at 1, 2, 4, 8 … s after the one before, every one with the stored key. Two budgets would be two interleaved episodes,
+   * resending sooner than the pace. The intent kept: both presses on one stop admit ONE fresh budget, with the stored key.
+   */
+  test("both presses are made while the account's lock is busy; the stop gets ONE fresh budget: one paced episode with the stored key, not two", async ({
     context,
   }, info) => {
     const stuck = repeating(415, "Water the plants");
@@ -1659,10 +1671,20 @@ test.describe("E-M6: two tabs press Try again on the same stop (revision 4: R20)
     await expect
       .poll(() => posts(r10c).length, { timeout: 30_000 })
       .toBeGreaterThanOrEqual(3);
-    // Both tabs have had the lock since (each finished its queue): no fourth send follows.
+    // Both tabs have had the lock since (each finished its queue); the episode goes on at its own pace.
     await second.waitForTimeout(8_000);
     const sent = posts(r10c);
-    expect(sent.map((e) => e.key)).toEqual([key, key, key]);
+    expect(new Set(sent.map((e) => e.key))).toEqual(new Set([key]));
+    // About 11 s from the first send: sends at 0, 1, 3, 7 s (the fifth is due at 15 s). Each no sooner than its pace after the one
+    // before (a second budget would resend in between).
+    expect(sent.length).toBeGreaterThanOrEqual(4);
+    expect(sent.length).toBeLessThanOrEqual(5);
+    const paces = [1_000, 2_000, 4_000, 8_000];
+    sent.slice(1).forEach((e, i) => {
+      expect(e.at - (sent[i]?.at as number)).toBeGreaterThanOrEqual(
+        (paces[i] as number) - 25,
+      );
+    });
     recordEvidence(info, "e-m6", {
       log: r10c.log.map(({ from, ...e }) => ({
         ...e,

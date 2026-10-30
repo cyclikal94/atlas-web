@@ -22,6 +22,12 @@ const RUNNER_TESTS = [
   "tests/features/tasks/materialise-model.test.ts",
   "tests/features/tasks/catchup-runner.test.ts",
 ];
+/** Revision 10 (Decision B): the retry protocol's own tests, with the runner's. */
+const RETRY_TESTS = [
+  ...RUNNER_TESTS,
+  "tests/features/tasks/retry-policy.test.ts",
+  "tests/features/tasks/catchup-retry.test.ts",
+];
 
 export const UNIT_10C = [
   // ---- catch-up --------------------------------------------------------------------------------------------------------------------
@@ -54,8 +60,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    phase: row.attempt === null ? "ready" : "submitting",\n    successful_calls: 0,',
-        '    phase: row.attempt === null ? "ready" : "submitting",\n    last_known_position: null,\n    successful_calls: 0,',
+        // Re-anchored (revision 10): Try again's phase is the stop's continuation.
+        "    phase: continuation(row),\n    successful_calls: 0,",
+        "    phase: continuation(row),\n    last_known_position: null,\n    successful_calls: 0,",
       ),
   },
   {
@@ -67,8 +74,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    phase: row.attempt === null ? "ready" : "submitting",\n    successful_calls: 0,',
-        '    phase: row.attempt === null ? "ready" : "submitting",\n    successful_calls: row.successful_calls,',
+        // Re-anchored (revision 10): Try again's phase is the stop's continuation.
+        "    phase: continuation(row),\n    successful_calls: 0,",
+        "    phase: continuation(row),\n    successful_calls: row.successful_calls,",
       ),
   },
   {
@@ -95,8 +103,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '      const failures = row.read_failures + 1;\n      const next = { ...row, read_failures: failures };\n      return failures >= MAX_READ_FAILURES\n        ? stopped(next, "unreachable", answer.requestId)',
-        '      const failures = row.read_failures + 1;\n      const next = { ...row, attempt: null, read_failures: failures };\n      return failures >= MAX_READ_FAILURES\n        ? stopped(next, "unreachable", answer.requestId)',
+        // Re-anchored (revision 10, Decision B): a failure of the row's caller is recorded by `failure`; the fault drops its attempt.
+        "  const next = { ...row, read_failures: s.failures, schedule: s };",
+        "  const next = { ...row, attempt: null, read_failures: s.failures, schedule: s };",
       ),
   },
   {
@@ -159,8 +168,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    case "rejected":\n      return stopped({ ...row, attempt: null }, "rejected", answer.requestId);\n    case "capacity":',
-        '    case "rejected":\n      return stopped({ ...row, attempt: null }, "no_progress", answer.requestId);\n    case "capacity":',
+        // Re-anchored (revision 10): the refusal also clears the schedule.
+        '    case "rejected":\n      return stopped(\n        { ...row, attempt: null, schedule: null },\n        "rejected",',
+        '    case "rejected":\n      return stopped(\n        { ...row, attempt: null, schedule: null },\n        "no_progress",',
       ),
   },
   {
@@ -507,8 +517,9 @@ export const UNIT_10C = [
       sub(
         t,
         // Re-anchored (revision 3): an ended binding's branch follows this one, so the fault keeps the statement and parks nothing.
-        '      if (outcome.kind === "paused") park(item, outcome.throughDate);\n',
-        '      if (outcome.kind === "paused") void item;\n',
+        // Re-anchored (revision 10): parking carries the time its schedule admits; the fault still arms the wake and parks nothing.
+        "        park(item, outcome.throughDate, outcome.at);\n",
+        "        void item;\n",
       ),
   },
   {
@@ -547,7 +558,13 @@ export const UNIT_10C = [
     file: "src/features/tasks/catchup/runner.ts",
     tests: RUNNER_TESTS,
     expect: /online again \(kick\)|not_sent|compatibility lost|throws part-way/,
-    patch: (t) => sub(t, "      if (unpark()) publishQueue();\n", ""),
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored (revision 10): `reconnected` unparks too; the fault is the kick's own.
+        "      rebind(alive());\n      if (unpark()) publishQueue();\n      pump();\n    },\n    reconnected() {",
+        "      rebind(alive());\n      pump();\n    },\n    reconnected() {",
+      ),
   },
   {
     id: "MU-3038",
@@ -1004,8 +1021,9 @@ export const UNIT_10C = [
       sub(
         t,
         // Re-anchored (revision 3, R16): the read is admitted over the entry; the fault admits it from a zero count.
-        "      ...(entry ?? NO_DISCOVERY),\n      attempt: deps.newId(),",
-        "      ...NO_DISCOVERY,\n      retry: entry?.retry ?? 0,\n      attempt: deps.newId(),",
+        // Re-anchored (revision 10, Decision B): the count is the entry's schedule; the fault admits the read from none.
+        '      failures: s?.failures ?? base.failures,\n      attempt: deps.newId(),\n      schedule: issue(s, "discovery", now),',
+        '      failures: 0,\n      attempt: deps.newId(),\n      schedule: issue(null, "discovery", now),',
       ),
   },
   {
@@ -1019,8 +1037,9 @@ export const UNIT_10C = [
       sub(
         t,
         // Re-anchored (revision 3).
-        "            retry: seen.retry + 1,\n",
-        "            retry: seen.retry,\n",
+        // Re-anchored (revision 10): the lifted entry is `liftedDiscovery`'s.
+        "    retry: seen.retry + 1,\n",
+        "    retry: seen.retry,\n",
       ),
   },
   {
@@ -1280,8 +1299,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      (a.stop === null) === (b.stop === null) &&\n      (a.attempt ?? null) === (b.attempt ?? null);",
-        "      (a.stop === null) === (b.stop === null);",
+        // Re-anchored (revision 10): the schedule is compared after it.
+        "      (a.stop === null) === (b.stop === null) &&\n      (a.attempt ?? null) === (b.attempt ?? null) &&\n",
+        "      (a.stop === null) === (b.stop === null) &&\n",
       ),
   },
   {
@@ -1309,7 +1329,8 @@ export const UNIT_10C = [
     file: "src/features/tasks/catchup/runner.ts",
     tests: RUNNER_TESTS,
     expect: /Try again pressed under the ended binding/,
-    patch: (t) => sub(t, "      item.retry.service === service &&\n", ""),
+    // Re-anchored (revision 10): the press is taken off the item before its lift is tried.
+    patch: (t) => sub(t, "      pressed.service === service &&\n", ""),
   },
   // ---- revision 4 (review 4 R19-R22, design assessment of 27 October 2026): one fault per new guard ---------------------------
   {
@@ -2219,7 +2240,13 @@ export const UNIT_10C = [
     file: "src/features/tasks/catchup/runner.ts",
     tests: RUNNER_TESTS,
     expect: /names its day/,
-    patch: (t) => sub(t, "            throughDate: key.through_date,\n", ""),
+    patch: (t) =>
+      sub(
+        t,
+        // Re-anchored (revision 10): a storage stop of an answer whose record failed names its day too.
+        '        ? stopInMemory(item.taskId, {\n            reason: "storage",\n            throughDate: key.through_date,\n',
+        '        ? stopInMemory(item.taskId, {\n            reason: "storage",\n',
+      ),
   },
   {
     id: "MU-3166",
@@ -2676,6 +2703,376 @@ export const UNIT_10C = [
         t,
         '          {outcome?.kind === "saved" ? (\n',
         "          {false ? (\n",
+      ),
+  },
+  // ---- revision 10 (review 11 R36, Decision B; design assessment of 29 October 2026): one fault per protection of the retry protocol ----
+  {
+    id: "MU-3200",
+    title:
+      "R36: WEB-10c A19 (Decision B): a 500 internal_error is not a recognised transient answer",
+    file: "src/features/tasks/api.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /recognised transient answers|WITNESS: discovery 500|Q-M1.*transient 500/,
+    patch: (t) => sub(t, '  500: "internal_error",\n', ""),
+  },
+  {
+    id: "MU-3201",
+    title:
+      "R36: WEB-10c A19 (Decision B): a 503 temporarily_unavailable is not a recognised transient answer",
+    file: "src/features/tasks/api.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /recognised transient answers|WITNESS: discovery 503|Q-M1.*transient 503/,
+    patch: (t) => sub(t, '  503: "temporarily_unavailable",\n', ""),
+  },
+  {
+    id: "MU-3202",
+    title:
+      "R36: WEB-10c A19 (Decision B): a recognised transient read answer counts in the unrecognised streak (the causes collapsed)",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /WITNESS: discovery|Q-M2: the unrecognised read streak|recognised transient answers between them/,
+    patch: (t) =>
+      sub(
+        t,
+        '    read && cause === "unrecognised" ? base.unknown + 1 : base.unknown;',
+        '    read && (cause === "unrecognised" || cause === "transient")\n      ? base.unknown + 1\n      : base.unknown;',
+      ),
+  },
+  {
+    id: "MU-3203",
+    title:
+      "R36: WEB-10c A19 (Decision B): an unrecognised COMMAND answer counts in a read's streak (three stop it)",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /unrecognised COMMAND answer is duration-governed|MU-10C-06/,
+    patch: (t) =>
+      sub(
+        t,
+        '    read && cause === "unrecognised" ? base.unknown + 1 : base.unknown;',
+        '    cause === "unrecognised" ? base.unknown + 1 : base.unknown;',
+      ),
+  },
+  {
+    id: "MU-3204",
+    title:
+      "R36: WEB-10c A19 (Decision B): a 429's server deadline is not a minimum (the back-off alone paces)",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /429|Retry-After|server deadline/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const next = Math.max(\n    now + (DELAYS_MS[Math.min(failures, DELAYS_MS.length) - 1] as number),\n    server ?? 0,\n  );",
+        "  const next = now + (DELAYS_MS[Math.min(failures, DELAYS_MS.length) - 1] as number);",
+      ),
+  },
+  {
+    id: "MU-3205",
+    title:
+      "R36: WEB-10c A19 (Decision B): the window's end itself still admits a transmission (>= became >)",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /the window's end admits nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (s.since !== null && now >= s.since + WINDOW_MS)",
+        "  if (s.since !== null && now > s.since + WINDOW_MS)",
+      ),
+  },
+  {
+    id: "MU-3206",
+    title:
+      "R36: WEB-10c A19 (Decision B): a failure whose pace ends exactly at the window's end waits for it instead of pausing",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /pace falls at or after the window/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : next >= since + WINDOW_MS || !Number.isSafeInteger(next)",
+        "        : next > since + WINDOW_MS || !Number.isSafeInteger(next)",
+      ),
+  },
+  {
+    id: "MU-3207",
+    title: "R36: WEB-10c A19 (Decision B): the pacing caps at 60 s, not 30 s",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /delays 1, 2, 4, 8, 16, then 30 s|Q-M1|WITNESS: an uncertain command|MU-10C-06/,
+    patch: (t) =>
+      sub(
+        t,
+        "  1_000, 2_000, 4_000, 8_000, 16_000, 30_000,",
+        "  1_000, 2_000, 4_000, 8_000, 16_000, 60_000,",
+      ),
+  },
+  {
+    id: "MU-3208",
+    title:
+      "R36: WEB-10c A19 (Decision B): the sustained-failure window is 240 s, not 180 s",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /delays 1, 2, 4, 8, 16, then 30 s|Q-M1|window's end|WITNESS/,
+    patch: (t) =>
+      sub(
+        t,
+        "export const WINDOW_MS = 180_000;",
+        "export const WINDOW_MS = 240_000;",
+      ),
+  },
+  {
+    id: "MU-3209",
+    title:
+      "R36: WEB-10c A19 (Decision B): a reconnection ends the unrecognised streak too",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /only the person's reset ends the streak/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const unknown = manual ? 0 : s.unknown;",
+        "  const unknown = 0;",
+      ),
+  },
+  {
+    id: "MU-3210",
+    title:
+      "R36: WEB-10c A19 (Decision B): a reconnection lifts any retry pause, not only a window's",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /pause, and stops that are not retry pauses|three unrecognised first reads stop it; a reconnection|only the person's reset ends the streak/,
+    patch: (t) =>
+      sub(
+        t,
+        '  s !== null && s !== "invalid" && s.pause === "window";',
+        '  s !== null && s !== "invalid" && s.pause !== null;',
+      ),
+  },
+  {
+    id: "MU-3211",
+    title:
+      "R36: WEB-10c A19 (Decision B): a clock behind the last time written is trusted (no clock pause)",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /clock behind|backwards clock/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (now < s.seen) return { kind: "pause", pause: "clock" };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3212",
+    title: "R36: WEB-10c A19 (Decision B): a 429's Retry-After is not read",
+    file: "src/features/tasks/api.ts",
+    tests: RETRY_TESTS,
+    expect: /429|Retry-After/,
+    patch: (t) =>
+      sub(
+        t,
+        "    status === 429 ? retryAfterMs(retryAfter, Date.now()) : undefined;",
+        "    undefined;",
+      ),
+  },
+  {
+    id: "MU-3213",
+    title:
+      "R36: WEB-10c A3 (Decision B): a command issued and never answered (a reload) is resent at once, not counted as lost when issued",
+    file: MODEL,
+    tests: RETRY_TESTS,
+    expect: /issued and never answered|Q-M4|takeover/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (s?.issued != null)\n    return { kind: "write", next: failure(row, undefined, now, undefined, s) };\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3214",
+    title:
+      "R36: WEB-10c A3 (Decision B): a discovery read issued and never answered (a reload) is not counted",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /a reload \(another runner on the same database\) adopts|two pages without Web Locks/,
+    patch: (t) => sub(t, "    if (s?.issued != null) {", "    if (false) {"),
+  },
+  {
+    id: "MU-3215",
+    title:
+      "R36: WEB-10c A3 (Decision B): a row of an earlier build holding an attempt or a failed read is carried on, not stopped for the person",
+    file: MODEL,
+    tests: RETRY_TESTS,
+    expect: /earlier build|Q-M11/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (row.phase === "submitting" || row.read_failures > 0)',
+        "    if (false)",
+      ),
+  },
+  {
+    id: "MU-3216",
+    title:
+      "R36: WEB-10c A3 (Decision B): a discovery entry of an earlier build with failures is carried on, not stopped for the person",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /Q-M11.*discovery entry with failures/,
+    patch: (t) =>
+      sub(
+        t,
+        "        ? entry !== null && entry.failures > 0",
+        "        ? false",
+      ),
+  },
+  {
+    id: "MU-3217",
+    title:
+      "R36: WEB-10c A3 (Decision B): a paused position read's Try again begins the next command (the read's continuation lost)",
+    file: MODEL,
+    tests: RETRY_TESTS,
+    expect: /uncertain reads keep the phase|Q-M11|Q-M12/,
+    patch: (t) =>
+      sub(
+        t,
+        '      ? "awaiting_position_read"\n      : "ready";',
+        '      ? "ready"\n      : "ready";',
+      ),
+  },
+  {
+    id: "MU-3218",
+    title:
+      "R36: WEB-10c A2 (Decision B): a reconnection resets the counted calls (an unattended budget past eight)",
+    file: MODEL,
+    tests: RETRY_TESTS,
+    expect: /resumes on a reconnection WHERE it stopped/,
+    patch: (t) =>
+      sub(
+        t,
+        "    phase: continuation(row),\n    read_failures: 0,",
+        "    phase: continuation(row),\n    successful_calls: 0,\n    read_failures: 0,",
+      ),
+  },
+  {
+    id: "MU-3219",
+    title:
+      "R36: WEB-10c A19 (Decision B): an answer whose record failed pauses the work (a kick transmits again) instead of stopping it",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /cannot be written: a storage stop/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (out === null || !owns(at)) return latch();",
+        "      if (out === null || !owns(at)) return unapplied(at);",
+      ),
+  },
+  {
+    id: "MU-3220",
+    title:
+      "R36: WEB-10c A19 (Decision B): a resend the session held back is made after the discovery's window ended",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /session holds back is not made/,
+    patch: (t) =>
+      sub(
+        t,
+        "      () => owns(at) && deps.now() < until,",
+        "      () => owns(at),",
+      ),
+  },
+  {
+    id: "MU-3221",
+    title:
+      "R36: WEB-10c A19 (Decision B): a discovery read not sent after all keeps its admission (counted as lost later)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /session holds back is not made/,
+    patch: (t) =>
+      sub(
+        t,
+        "        back === null ? rest : { ...rest, schedule: back },",
+        "        issued,",
+      ),
+  },
+  {
+    id: "MU-3222",
+    title:
+      "R36: WEB-10c A19 (Decision B): a reconnection does not resume a discovery paused by its window",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /a reconnection does, once|two pages consume the same reconnection|deadline beyond the window pauses at once/,
+    patch: (t) =>
+      sub(
+        t,
+        "            entry?.stop == null ||\n            withDiscovery.has(taskId) ||",
+        "            true ||\n            withDiscovery.has(taskId) ||",
+      ),
+  },
+  {
+    id: "MU-3223",
+    title:
+      "R36: WEB-10c A19 (Decision B): the discovery's compare-and-set ignores its schedule (an issue, a deadline, a pause)",
+    file: "src/data/plans/materialise.ts",
+    tests: ["tests/data/materialise-plans.test.ts"],
+    expect: /differ only in their schedule/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (a.attempt ?? null) === (b.attempt ?? null) &&\n      scheduleOf(a) === scheduleOf(b);",
+        "      (a.attempt ?? null) === (b.attempt ?? null);",
+      ),
+  },
+  {
+    id: "MU-3224",
+    title:
+      "R36: WEB-10c A19 (Decision B): the page's first online render, or any online render, is taken for a reconnection",
+    file: "src/features/tasks/catchup/useCatchUp.ts",
+    tests: RETRY_TESTS,
+    expect: /only an observed offline-to-online change/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const reconnected = !held.online && env.online;",
+        "    const reconnected = env.online;",
+      ),
+  },
+  {
+    id: "MU-3225",
+    title:
+      "R36: WEB-10c A3 (Decision B): a discovery read is taken as the position read of a sequence awaiting it (the discovery-as-position bypass)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /awaiting its position with a future schedule|held in awaiting_position_read: its own position read/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (stored.phase === "stopped") return DONE;\n      return keyed(await drive(at, stored, today), throughDate);',
+        '      if (stored.phase === "stopped") return DONE;\n      if (answer !== null && stored.phase === "awaiting_position_read") {\n        const next = onRead(stored, answer, today(), deps.now());\n        const out = await commit(service, captured, key, stored, next);\n        if (out === null) return paused;\n        if (out.stored === null) return DONE;\n        return keyed(await drive(at, out.stored, today), throughDate);\n      }\n      return keyed(await drive(at, stored, today), throughDate);',
+      ),
+  },
+  {
+    id: "MU-3226",
+    title:
+      "R36: WEB-10c A19 (Decision B): a schedule's admission is not required: a stale admission is transmitted",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /lost admission/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!admitted.written || plan.kind === "write" || row === null) continue;',
+        '      if (plan.kind === "write" || row === null) continue;',
       ),
   },
 ];

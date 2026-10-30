@@ -346,8 +346,11 @@ export type DiscoveryWrite =
   /** A new task's entry whose growth the quota ledger did not admit: nothing was written. */
   | { kind: "refused"; stored: null };
 
-/** What one task's entry is admitted at: its fields, a stop's reason and a request id of at most `DISCOVERY_REQUEST_ID` characters. */
-export const DISCOVERY_ENTRY_BYTES = 512;
+/**
+ * What one task's entry is admitted at: its fields, a stop's reason, a request id of at most `DISCOVERY_REQUEST_ID` characters and,
+ * since revision 10 (Decision B), its retry schedule (512 before it; the largest entry with a schedule is under 600 bytes).
+ */
+export const DISCOVERY_ENTRY_BYTES = 768;
 export const DISCOVERY_REQUEST_ID = 128;
 
 const isDiscovery = (value: unknown): value is MaterialiseDiscovery => {
@@ -377,6 +380,24 @@ export const discoveryOf = (
   return isDiscovery(value) ? value : null;
 };
 
+/**
+ * Revision 10 (Decision B): a discovery's retry schedule as compared (stored as given; the task slice validates it): two entries that
+ * differ only in a deadline or an issue are not the same entry.
+ */
+const scheduleOf = ({ schedule: s }: MaterialiseDiscovery) =>
+  typeof s === "object" && s !== null
+    ? [
+        s.issued,
+        s.since,
+        s.failures,
+        s.next,
+        s.server,
+        s.unknown,
+        s.seen,
+        s.pause,
+      ].join()
+    : String(s);
+
 const sameDiscovery = (
   a: MaterialiseDiscovery | null,
   b: MaterialiseDiscovery | null,
@@ -386,7 +407,8 @@ const sameDiscovery = (
     : a.retry === b.retry &&
       a.failures === b.failures &&
       (a.stop === null) === (b.stop === null) &&
-      (a.attempt ?? null) === (b.attempt ?? null);
+      (a.attempt ?? null) === (b.attempt ?? null) &&
+      scheduleOf(a) === scheduleOf(b);
 
 export const writeMaterialiseDiscovery = guardedPlan<
   {

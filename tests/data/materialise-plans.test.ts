@@ -6,12 +6,15 @@ import type {
   SyncStateRow,
 } from "../../src/data/model/types";
 import {
+  DISCOVERY_ENTRY_BYTES,
+  DISCOVERY_REQUEST_ID,
   deleteSatisfiedSequences,
   liftMaterialiseStops,
   readMaterialiseDiscovery,
   readMaterialiseSequence,
   readMaterialiseSequences,
   readTaskSequences,
+  SEQUENCE_ROW_BYTES,
   SEQUENCE_WINDOW,
   TASK_SEQUENCE_DAYS,
   TASK_SEQUENCE_ROWS,
@@ -788,6 +791,91 @@ describe("W27: a task's discovery entry (revision 2, review R13 and DA-M1)", () 
         next: entry(1),
       }),
     ).toEqual({ kind: "dropped", reason: "incarnation" });
+  });
+
+  test("revision 10 (Decision B): two entries that differ only in their schedule (an issue, a deadline, a pause) are not the same entry", async () => {
+    const { service, seed } = await bound();
+    const schedule = {
+      v: 1 as const,
+      caller: "discovery" as const,
+      issued: null,
+      since: 1_000,
+      failures: 1,
+      next: 2_000,
+      server: null,
+      cause: "transient" as const,
+      unknown: 0,
+      seen: 1_000,
+      pause: null,
+    };
+    const stored = { ...entry(1), attempt: "a-1", schedule };
+    seed({ materialise_discovery: { [TASK]: stored } });
+    const write = (expected: object) =>
+      service.store.run(writeMaterialiseDiscovery, {
+        captured: service.capture(1),
+        task_id: TASK,
+        expected: expected as never,
+        next: { ...entry(2), attempt: "a-1" },
+      });
+    for (const other of [
+      { ...schedule, issued: 1_500 },
+      { ...schedule, next: 9_000 },
+      { ...schedule, server: 9_000 },
+      { ...schedule, pause: "window" },
+      { ...schedule, unknown: 1 },
+    ])
+      expect(
+        await write({ ...stored, schedule: other }),
+        JSON.stringify(other),
+      ).toMatchObject({
+        value: { kind: "stale" },
+      });
+    // An entry of an earlier build (no schedule) is not one with a schedule either.
+    expect(await write({ ...entry(1), attempt: "a-1" })).toMatchObject({
+      value: { kind: "stale" },
+    });
+    expect(await write(stored)).toMatchObject({ value: { kind: "written" } });
+  });
+
+  test("revision 10: a discovery entry and a sequence row at their largest still fit the sizes their growth is admitted at", () => {
+    const schedule = {
+      v: 1,
+      caller: "discovery",
+      issued: Number.MAX_SAFE_INTEGER,
+      since: Number.MAX_SAFE_INTEGER,
+      failures: Number.MAX_SAFE_INTEGER,
+      next: Number.MAX_SAFE_INTEGER,
+      server: Number.MAX_SAFE_INTEGER,
+      cause: "rate_limited",
+      unknown: Number.MAX_SAFE_INTEGER,
+      seen: Number.MAX_SAFE_INTEGER,
+      pause: "unrecognised",
+    };
+    const bytes = (value: unknown) =>
+      new TextEncoder().encode(JSON.stringify(value)).length;
+    expect(
+      bytes({
+        retry: Number.MAX_SAFE_INTEGER,
+        failures: Number.MAX_SAFE_INTEGER,
+        stop: {
+          reason: "unreachable",
+          request_id: "r".repeat(DISCOVERY_REQUEST_ID),
+        },
+        attempt: "a".repeat(64),
+        schedule,
+      }),
+    ).toBeLessThanOrEqual(DISCOVERY_ENTRY_BYTES);
+    expect(
+      bytes({
+        ...row({
+          phase: "stopped",
+          attempt: { key: "k".repeat(36), body: "b".repeat(110) },
+          stop: { reason: "unreachable", request_id: "r".repeat(128) },
+          revision: Number.MAX_SAFE_INTEGER,
+        }),
+        schedule: { ...schedule, caller: "position" },
+      }),
+    ).toBeLessThanOrEqual(SEQUENCE_ROW_BYTES);
   });
 
   test("an answer is recorded only over its own admitted attempt: another attempt, or an entry deleted and made again, is stale", async () => {

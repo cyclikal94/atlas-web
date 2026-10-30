@@ -373,6 +373,39 @@ export interface MaterialiseSequenceRow {
     request_id?: string;
   };
   trigger: "daily" | "streak" | "draft";
+  /**
+   * Revision 10 (Decision B): the retry schedule of the caller the phase names (`submitting`: the `materialise` command; awaiting its
+   * position: the position read), or `null` (no failure or issue outstanding). ABSENT on a row of an earlier build: its uncertainty has no
+   * trustworthy schedule (the task slice migrates it).
+   */
+  schedule?: MaterialiseRetry | null;
+}
+
+/**
+ * Revision 10 (Decision B, WEB-04 §5.11): one catch-up caller's durable retry schedule, written BEFORE each transmission (`issued`) and
+ * with each answer, so a reload or another tab's turn carries on from it. Times are ms of the device clock. The data layer stores and
+ * compares it; the task slice's pure reducer (`model/retry.ts`) decides every value.
+ */
+export interface MaterialiseRetry {
+  v: 1;
+  caller: "discovery" | "command" | "position";
+  /** The admitted transmission whose answer is not recorded yet, or null. */
+  issued: number | null;
+  /** The first failure of the episode (its window's start), or null: none since the caller's own success or a reset. */
+  since: number | null;
+  /** Consecutive failures in the episode (the pacing). */
+  failures: number;
+  /** The earliest next transmission (0: any time). */
+  next: number;
+  /** A server deadline (`Retry-After`) still to respect, or null. */
+  server: number | null;
+  cause: "transient" | "transport" | "rate_limited" | "unrecognised" | null;
+  /** Consecutive unrecognised answers of a read (never reset by a recognised transient one). */
+  unknown: number;
+  /** The latest time written (a clock that goes back before it pauses). */
+  seen: number;
+  /** Why automatic transmission stopped (the record's stop shows it), or null. */
+  pause: null | "window" | "unrecognised" | "clock" | "legacy";
 }
 
 /** WEB-10c revision 2 (W27): one task's failed catch-up discovery (`sync_state.materialise_discovery`). */
@@ -387,6 +420,8 @@ export interface MaterialiseDiscovery {
    * (none since the entry was made or lifted; an entry of revision 2 has none). An answer is recorded only over its own attempt.
    */
   attempt?: string | null;
+  /** Revision 10 (Decision B): the discovery read's retry schedule. Absent on an entry of an earlier build. */
+  schedule?: MaterialiseRetry;
 }
 
 /** The value a request carries from the moment it is captured for issue to the moment its answer is committed. */

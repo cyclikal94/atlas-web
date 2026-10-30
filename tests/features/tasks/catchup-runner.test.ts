@@ -83,6 +83,14 @@ const OK: TasksResult<{ revision: number }> = {
   value: { revision: 7 },
 };
 const UNCERTAIN = { ok: false, kind: "uncertain" } as const;
+/**
+ * Revision 10 (Decision B): one 180-second window of failed command answers (an unrecognised one included) is ten sends, at 0, 1, 3, 7,
+ * 15, 31, 61, 91, 121 and 151 s; the next would be at 181 s, past the window, so the command pauses instead. These are its waits.
+ */
+const WINDOW_SENDS = 10;
+const WINDOW_WAITS = [
+  1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000,
+];
 
 async function setup(
   options: { script?: Partial<Script>; seed?: MaterialiseSequenceRow[] } = {},
@@ -111,6 +119,9 @@ async function setup(
     },
   } as unknown as TasksApi;
   const waits: number[] = [];
+  // Revision 10 (Decision B): the device clock moves by each wait recorded (a wait that resolves while the clock stands still would let a
+  // duration policy loop), and a test can move it itself.
+  let clock = NOW;
   let online = true;
   let writable = true;
   let ids = 0;
@@ -130,13 +141,14 @@ async function setup(
       service: over.service ?? (() => t.env.service()),
       online: () => online,
       writable: () => writable,
-      now: () => NOW,
+      now: () => clock,
       newId: () => {
         ids += 1;
         return `00000000-0000-4000-8000-${String(ids).padStart(12, "0")}`;
       },
       sleep: async (ms) => {
         waits.push(ms);
+        clock += ms;
         await over.sleep?.();
       },
       locks: over.locks === undefined ? null : over.locks,
@@ -170,6 +182,10 @@ async function setup(
     discovery,
     reads: () => reads,
     waits,
+    now: () => clock,
+    setNow: (value: number) => {
+      clock = value;
+    },
     make,
     idle,
     stored,
@@ -197,6 +213,8 @@ const row = (
   read_failures: 0,
   stop: null,
   trigger: "daily",
+  // A row of this build (revision 10): its schedule is present. A row of an earlier build omits it (`legacy`).
+  schedule: null,
   ...over,
 });
 
@@ -330,29 +348,36 @@ describe("A2: the horizon, and A4: a terminal refusal", () => {
 });
 
 describe("A19: uncertain answers resend the SAME key, paced and bounded", () => {
-  test("MU-10C-06 (runner): two uncertain sends are resent with their key after 1 s and 2 s; the third stops (unreachable) keeping it; Try again resends it", async () => {
+  /**
+   * ADAPTATION (revision 10, Decision B supersedes the three-uncertain stop for commands; the original "three sends after 1 s and 2 s"
+   * assertions are preserved in revision 9's history): uncertain sends are resent with their key, paced 1, 2, 4, 8, 16, then 30 s, for
+   * the 180-second window from the first failure; then the command stops (unreachable, a `window` pause) keeping its attempt; Try again
+   * resends it. The intent kept: the same key and body, paced, bounded, kept for the person.
+   */
+  test("MU-10C-06 (runner): uncertain sends are resent with their key, paced for the 180 s window; then it stops (unreachable) keeping it; Try again resends it", async () => {
     const w = await setup({
       script: {
         positions: [detail("2026-09-01", true), detail(TODAY, false)],
-        sends: [UNCERTAIN, UNCERTAIN, UNCERTAIN, OK],
+        sends: [...Array.from({ length: WINDOW_SENDS }, () => UNCERTAIN), OK],
       },
     });
     const runner = w.make();
     runner.ensure(TASK, "daily");
     await w.idle(runner);
-    expect(w.sent).toHaveLength(3);
+    expect(w.sent).toHaveLength(WINDOW_SENDS);
     expect(new Set(w.sent.map((s) => s.key)).size).toBe(1);
-    expect(w.waits).toEqual([1_000, 2_000]);
+    expect(w.waits).toEqual(WINDOW_WAITS);
     const held = w.stored();
     expect(held).toMatchObject({
       phase: "stopped",
       stop: { reason: "unreachable" },
+      schedule: { caller: "command", pause: "window", failures: WINDOW_SENDS },
     });
     expect(held?.attempt?.key).toBe(w.sent[0]?.key);
     runner.tryAgain(TASK, TODAY);
     await w.idle(runner);
-    expect(w.sent).toHaveLength(4);
-    expect(w.sent[3]?.key).toBe(w.sent[0]?.key);
+    expect(w.sent).toHaveLength(WINDOW_SENDS + 1);
+    expect(w.sent[WINDOW_SENDS]?.key).toBe(w.sent[0]?.key);
     expect(w.stored()).toBeUndefined();
   });
 
@@ -367,12 +392,14 @@ describe("A19: uncertain answers resend the SAME key, paced and bounded", () => 
     const runner = w.make();
     runner.ensure(TASK, "daily");
     await w.idle(runner);
-    // Revision 3 (R16): the stop also names the admitted read that met it (its attempt); every other field as before.
+    // Revision 3 (R16): the stop also names the admitted read that met it (its attempt); revision 10: and its schedule (the third
+    // unrecognised read pauses it); every other field as before.
     expect(w.discovery()).toEqual({
       attempt: expect.any(String),
       retry: 0,
       failures: 3,
       stop: { reason: "unreachable" },
+      schedule: expect.objectContaining({ pause: "unrecognised", unknown: 3 }),
     });
     expect(runner.get().unrecorded.size).toBe(0);
     expect(w.sent).toEqual([]);
@@ -402,15 +429,92 @@ describe("A3: a reload, a takeover or a crash in each phase", () => {
     expect(w.stored()).toBeUndefined();
   });
 
-  test("held in awaiting_position_read: exactly ONE position read and no materialise", async () => {
+  test("revision 10: held in submitting with its send issued and never answered (a crash, a reload): counted as lost WHEN it was issued, then resent with ITS key at its paced time", async () => {
+    const issuedAt = NOW - 500;
     const w = await setup({
-      seed: [row({ phase: "awaiting_position_read", read_seq: 3 })],
-      script: { positions: [detail(TODAY, false)] },
+      seed: [
+        row({
+          phase: "submitting",
+          attempt: { key: "kept-key", body: attemptBody(TASK, TODAY) },
+          schedule: {
+            v: 1,
+            caller: "command",
+            issued: issuedAt,
+            since: null,
+            failures: 0,
+            next: 0,
+            server: null,
+            cause: null,
+            unknown: 0,
+            seen: issuedAt,
+            pause: null,
+          },
+        }),
+      ],
+      script: {
+        positions: [detail("2026-10-01", true), detail(TODAY, false)],
+        sends: [UNCERTAIN],
+      },
     });
     const runner = w.make();
     runner.ensure(TASK, "daily");
     await w.idle(runner);
-    expect(w.reads()).toBe(1);
+    // Lost at `issuedAt` (the window begins there, never at the reload); 1 s from it is 500 ms from now. Then the resend's own failure,
+    // 2 s later, and its success.
+    expect(w.waits).toEqual([500, 2_000]);
+    expect(w.sent.map((s) => s.key)).toEqual(["kept-key", "kept-key"]);
+    expect(w.stored()).toBeUndefined();
+  });
+
+  test("revision 10: a row of an earlier build holding an attempt (no schedule to carry on from) is stopped for the person, sending nothing; Try again resends ITS key", async () => {
+    const legacy = row({
+      phase: "submitting",
+      attempt: { key: "kept-key", body: attemptBody(TASK, TODAY) },
+      read_failures: 2,
+    });
+    delete (legacy as Partial<MaterialiseSequenceRow>).schedule;
+    const w = await setup({
+      seed: [legacy],
+      script: {
+        positions: [
+          detail("2026-10-01", true),
+          detail("2026-10-01", true),
+          detail(TODAY, false),
+        ],
+      },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.sent).toEqual([]);
+    expect(w.stored()).toMatchObject({
+      phase: "stopped",
+      stop: { reason: "unreachable" },
+      attempt: { key: "kept-key" },
+      // Its counters are kept, no time invented.
+      read_failures: 2,
+      schedule: { pause: "legacy", since: null, failures: 0 },
+    });
+    runner.tryAgain(TASK, TODAY);
+    await w.idle(runner);
+    expect(w.sent.map((s) => s.key)).toEqual(["kept-key"]);
+    expect(w.stored()).toBeUndefined();
+  });
+
+  /**
+   * ADAPTATION (revision 10, Decision B and the design assessment's step 5): this case expected ONE read in all, the discovery read taken
+   * as the sequence's position read. Each caller now reads under its own admission, so the discovery read is followed by the position read:
+   * two reads. The intent kept: only reads, never another `materialise` (CM-440), and the sequence completes.
+   */
+  test("held in awaiting_position_read: its own position read (after the discovery read) and no materialise", async () => {
+    const w = await setup({
+      seed: [row({ phase: "awaiting_position_read", read_seq: 3 })],
+      script: { positions: [detail("2026-10-01", true), detail(TODAY, false)] },
+    });
+    const runner = w.make();
+    runner.ensure(TASK, "daily");
+    await w.idle(runner);
+    expect(w.reads()).toBe(2);
     expect(w.sent).toEqual([]);
     expect(w.stored()).toBeUndefined();
   });
@@ -780,14 +884,16 @@ describe("R13: a stopped discovery stays stopped until Try again", () => {
     const second = w.make();
     second.ensure(TASK, "daily");
     await w.idle(second);
-    // One more read reached the bound (2 + 1); the held answer of the ended page wrote nothing.
+    // One more read reached the bound (2 + 1 unrecognised); the held answer of the ended page wrote nothing. Revision 10: its read, issued
+    // and never recorded, is counted as lost (a failure, not an unrecognised answer), so the count of failures is 4.
     expect(w.reads()).toBe(4);
     // Revision 3 (R16): the stop also names the admitted read that met it (its attempt); every other field as before.
     expect(w.discovery()).toEqual({
       attempt: expect.any(String),
       retry: 0,
-      failures: 3,
+      failures: 4,
       stop: { reason: "unreachable" },
+      schedule: expect.objectContaining({ pause: "unrecognised", unknown: 3 }),
     });
     const third = w.make();
     third.ensure(TASK, "daily");
@@ -832,6 +938,7 @@ describe("R13: a stopped discovery stays stopped until Try again", () => {
       retry: 1,
       failures: 3,
       stop: { reason: "unreachable" },
+      schedule: expect.objectContaining({ pause: "unrecognised", unknown: 3 }),
     });
   });
 
@@ -1079,16 +1186,22 @@ describe("R16: a first read is admitted before it is sent", () => {
     for (let i = 0; i < 100 && w.reads() === 0; i += 1) await w.t.settle();
     const claimed = w.discovery()?.attempt;
     expect(claimed).toEqual(expect.any(String));
-    const b = w.make({ sleep: () => new Promise(() => undefined) });
+    // ADAPTATION (revision 10, Decision B): b finds a's read issued and not answered, which it cannot tell from a lost one without Web
+    // Locks: it is counted as lost and b reads after its 1 s pace (its first wait), never at once; its later waits never end here.
+    let waited = 0;
+    const b = w.make({
+      sleep: () =>
+        waited++ === 0 ? Promise.resolve() : new Promise(() => undefined),
+    });
     b.ensure(TASK, "daily");
     for (let i = 0; i < 100 && w.reads() < 2; i += 1) await w.t.settle();
     expect(w.reads()).toBe(2);
     await w.t.settle();
-    // b's uncertain answer is recorded over b's claim.
-    expect(w.discovery()).toMatchObject({ failures: 1, stop: null });
+    // b's uncertain answer is recorded over b's claim (the lost one and its own: two failures).
+    expect(w.discovery()).toMatchObject({ failures: 2, stop: null });
     release({ ok: false, kind: "forbidden", requestId: "late-a" } as never);
     await w.idle(a);
-    expect(w.discovery()).toMatchObject({ failures: 1, stop: null });
+    expect(w.discovery()).toMatchObject({ failures: 2, stop: null });
     expect(w.discovery()?.attempt).not.toBe(claimed);
     expect(a.get().unrecorded.size).toBe(0);
     a.dispose();
@@ -1261,7 +1374,7 @@ describe("R20: one stop, one fresh budget", () => {
         seed: [initial],
         script: {
           positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
-          sends: Array.from({ length: 6 }, () => UNCERTAIN),
+          sends: Array.from({ length: 2 * WINDOW_SENDS }, () => UNCERTAIN),
         },
       });
       const a = w.make({ locks });
@@ -1278,7 +1391,8 @@ describe("R20: one stop, one fresh budget", () => {
         unlock();
         await w.idle(a);
         await w.idle(b);
-        expect(w.sent.map((s) => s.key)).toEqual(Array(3).fill(KEY));
+        // ADAPTATION (revision 10): one new budget is one window of sends (was three).
+        expect(w.sent.map((s) => s.key)).toEqual(Array(WINDOW_SENDS).fill(KEY));
         expect(w.stored()?.phase).toBe("stopped");
       } finally {
         unlock();
@@ -1301,7 +1415,7 @@ describe("R20: one stop, one fresh budget", () => {
       ],
       script: {
         positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
-        sends: Array.from({ length: 9 }, () => UNCERTAIN),
+        sends: Array.from({ length: 3 * WINDOW_SENDS }, () => UNCERTAIN),
       },
     });
     const a = w.make();
@@ -1315,7 +1429,8 @@ describe("R20: one stop, one fresh budget", () => {
       };
       a.tryAgain(TASK, TODAY, seenFirst);
       await w.idle(a);
-      expect(w.sent).toHaveLength(3);
+      // ADAPTATION (revision 10): one budget is one window of sends (was three); likewise below.
+      expect(w.sent).toHaveLength(WINDOW_SENDS);
       const second = w.stored() as MaterialiseSequenceRow;
       expect(second.phase).toBe("stopped");
       // The same generation, phase, read and attempt as the first stop: only its revision tells them apart.
@@ -1328,7 +1443,7 @@ describe("R20: one stop, one fresh budget", () => {
       // A press still naming the first stop (a screen not yet refreshed, another tab): nothing is lifted, nothing sent.
       a.tryAgain(TASK, TODAY, seenFirst);
       await w.idle(a);
-      expect(w.sent).toHaveLength(3);
+      expect(w.sent).toHaveLength(WINDOW_SENDS);
       expect(w.stored()).toEqual(second);
       // A press on the stop shown now: one more budget, the same key and body.
       a.tryAgain(TASK, TODAY, {
@@ -1338,7 +1453,9 @@ describe("R20: one stop, one fresh budget", () => {
         discovery: null,
       });
       await w.idle(a);
-      expect(w.sent.map((x) => x.key)).toEqual(Array(6).fill(KEY));
+      expect(w.sent.map((x) => x.key)).toEqual(
+        Array(2 * WINDOW_SENDS).fill(KEY),
+      );
       expect(new Set(w.sent.map((x) => JSON.stringify(x.command))).size).toBe(
         1,
       );
@@ -1349,8 +1466,9 @@ describe("R20: one stop, one fresh budget", () => {
   });
 
   test.each([
-    ["two pages hold the same displayed stop", 2, 3],
-    ["one page (control)", 1, 3],
+    // ADAPTATION (revision 10): one budget is one window of sends (was three).
+    ["two pages hold the same displayed stop", 2, WINDOW_SENDS],
+    ["one page (control)", 1, WINDOW_SENDS],
   ])(
     "presses carrying the stop shown: %s -> %s sends",
     async (_, pages, sends) => {
@@ -1367,7 +1485,7 @@ describe("R20: one stop, one fresh budget", () => {
         ],
         script: {
           positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
-          sends: Array.from({ length: 6 }, () => UNCERTAIN),
+          sends: Array.from({ length: 2 * WINDOW_SENDS }, () => UNCERTAIN),
         },
       });
       const held = heldLocks();
@@ -1979,8 +2097,8 @@ describe("R29: a different day asked while other work is paused or active", () =
         await w.idle(runner);
         expect(w.sent).toHaveLength(1);
         expect(w.stored()?.phase).toBe(parked ? "submitting" : undefined);
-        if (parked)
-          w.script.positions.push(detail(TODAY, false), detail(TODAY, false));
+        // Revision 10: D, taken up where it stood (its zone read on this page), reads only its position: no discovery read of D.
+        if (parked) w.script.positions.push(detail(TODAY, false));
         w.script.positions.push(detail(TODAY, false), detail(later, false));
         const before = w.sent.length;
         runner.ensure(TASK, "draft", { throughDate: later });
@@ -2098,11 +2216,13 @@ describe("R29: a different day asked while other work is paused or active", () =
   });
 
   test("a press on one day leaves work paused before its day was known (another need of the task): it resumes on the next kick", async () => {
+    // Revision 10: the later day's stop holds its uncertain command (a stop with no attempt is a paused position read: its press reads).
     const stoppedLater = row({
       through_date: addDays(TODAY, 3),
       sequence_generation: "later",
       phase: "stopped",
       revision: 1,
+      attempt: { key: "later-key", body: attemptBody(TASK, addDays(TODAY, 3)) },
       read_failures: 3,
       stop: { reason: "unreachable" },
     });

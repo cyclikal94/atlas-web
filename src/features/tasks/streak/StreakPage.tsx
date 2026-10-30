@@ -33,6 +33,7 @@ import {
 } from "../model/contract";
 import { personalResult } from "../model/evaluate";
 import { progressId } from "../model/ids";
+import type { Pause } from "../model/retry";
 import {
   type Figure,
   figureOf,
@@ -46,7 +47,7 @@ import {
   unitOf,
 } from "../model/streak";
 import {
-  CATCH_UP_COPY,
+  reasonText,
   recoveryRows,
   type ShownReason,
   stopsFor,
@@ -203,7 +204,13 @@ type Read =
   | { kind: "ready"; streak: TaskStreak }
   | { kind: "error"; requestId?: string }
   | { kind: "catching_up" }
-  | { kind: "stopped"; reason: ShownReason; requestId?: string; day?: string }
+  | {
+      kind: "stopped";
+      reason: ShownReason;
+      requestId?: string;
+      day?: string;
+      pause?: Pause;
+    }
   | { kind: "offline" };
 
 const STREAK_READ = (taskId: string) => `streak:${taskId}`;
@@ -376,6 +383,7 @@ function useStreakFigures(taskId: string, shared: boolean) {
     ? {
         kind: "stopped",
         reason: shown.reason,
+        ...(shown.pause === undefined ? {} : { pause: shown.pause }),
         ...(shown.requestId ? { requestId: shown.requestId } : {}),
         ...(shown.throughDate === undefined ? {} : { day: shown.throughDate }),
       }
@@ -460,9 +468,7 @@ function Tiles({
           <p className="text-[13px] font-medium text-ink-1">
             {STREAK_COPY.stopped}
           </p>
-          <p className="text-[12.5px] text-ink-2">
-            {CATCH_UP_COPY.reason[read.reason]}
-          </p>
+          <p className="text-[12.5px] text-ink-2">{reasonText(read)}</p>
           {read.requestId ? (
             <p className="select-all font-num text-[12px] text-ink-2">
               {copy.REQUEST_ID(read.requestId)}

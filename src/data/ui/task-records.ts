@@ -263,10 +263,13 @@ export async function clearSatisfiedSequences(
   }
 }
 
-/** One task's rows as stored now, in key order (its earliest `SEQUENCE_WINDOW`); `undefined`: the store could not be read. */
+/**
+ * One task's rows as stored now, in key order (its earliest `SEQUENCE_WINDOW`), or the account's (`null`; revision 10: the stops an
+ * observed reconnection may resume); `undefined`: the store could not be read.
+ */
 export async function readTaskSequencesNow(
   service: AccountService,
-  taskId: string,
+  taskId: string | null,
 ): Promise<MaterialiseSequenceRow[] | undefined> {
   try {
     return await service.store.run(readMaterialiseSequences, {

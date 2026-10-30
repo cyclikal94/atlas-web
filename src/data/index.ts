@@ -95,6 +95,7 @@ export type {
   JsonObject,
   LocalId,
   MaterialiseDiscovery,
+  MaterialiseRetry,
   MaterialiseSequenceRow,
   ProjectionPatch,
   ResourceId,

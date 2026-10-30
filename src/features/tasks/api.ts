@@ -43,9 +43,30 @@ export type RefusalKind =
 export type TasksResult<T> =
   | { ok: true; value: T; requestId?: string }
   | { ok: false; kind: RefusalKind; requestId?: string; code?: string }
-  /** `code`: an Atlas body's code when the answer had one (a `503 slice_capacity`), for a caller that stops on it (WEB-10c's catch-up). */
-  | { ok: false; kind: "uncertain"; requestId?: string; code?: string }
+  /**
+   * `code`: an Atlas body's code when the answer had one (a `503 slice_capacity`), for a caller that stops on it (WEB-10c's catch-up).
+   * `retry`: what the answer says about trying again (revision 10, Decision B), read only by the catch-up's callers; every other caller
+   * treats every uncertain answer alike, as before.
+   */
+  | {
+      ok: false;
+      kind: "uncertain";
+      requestId?: string;
+      code?: string;
+      retry?: RetryFacts;
+    }
   | { ok: false; kind: "not_sent" | "offline" | "closed" };
+
+/**
+ * Revision 10 (Decision B, WEB-04 §5.11): the cause of an uncertain answer. `transient`: a recognised `500 internal_error` or
+ * `503 temporarily_unavailable`; `transport`: no answer (a network error, a lost response); `rate_limited`: a `429`, with its valid
+ * `Retry-After` as `afterMs` (from the answer); `unrecognised`: any other answer (an unexpected status or code, a `4xx` without an Atlas
+ * body, a `200` that is not the contract's answer).
+ */
+export interface RetryFacts {
+  cause: "transient" | "transport" | "rate_limited" | "unrecognised";
+  afterMs?: number;
+}
 
 export type TasksFailure = Extract<TasksResult<never>, { ok: false }>;
 
@@ -100,7 +121,14 @@ export interface TasksApi {
     startDate: string;
     zone: string;
   }): Promise<TasksResult<TaskPreset[]>>;
-  readTask(id: string): Promise<TasksResult<TaskDetail>>;
+  /**
+   * `admitted` (revision 10, Decision B): asked before each resend of a request the session held back (`not_sent`); once false, the
+   * request is not made again and `not_sent` is the answer (the catch-up's position read: its retry window may have ended meanwhile).
+   */
+  readTask(
+    id: string,
+    admitted?: () => boolean,
+  ): Promise<TasksResult<TaskDetail>>;
   readEnrolment(taskId: string): Promise<TasksResult<Enrolment>>;
   readJournal(
     progressId: string,
@@ -155,15 +183,43 @@ const BY_STATUS: Readonly<Record<number, RefusalKind>> = {
   422: "invalid",
 };
 
+const UNRECOGNISED: RetryFacts = { cause: "unrecognised" };
+/** The recognised transient answers (WEB-04 §5.11): their status with their code. */
+const TRANSIENT: Readonly<Record<number, string>> = {
+  500: "internal_error",
+  503: "temporarily_unavailable",
+};
+
+/**
+ * A `Retry-After` (RFC 9110: delay-seconds or an IMF-fixdate HTTP-date; the obsolete date forms are not read) as a delay in ms from now,
+ * or `undefined` when absent or not valid. A date in the past is no delay.
+ */
+export function retryAfterMs(
+  raw: string | null | undefined,
+  now: number,
+): number | undefined {
+  const value = raw?.trim() ?? "";
+  // A very large one is still valid: held at about 31 years, so the deadline it makes stays an exact time.
+  if (/^\d+$/.test(value)) return Math.min(Number(value), 1e9) * 1_000;
+  const at = /^[A-Za-z]{3}, \d\d [A-Za-z]{3} \d{4} \d\d:\d\d:\d\d GMT$/.test(
+    value,
+  )
+    ? Date.parse(value)
+    : Number.NaN;
+  return Number.isFinite(at) ? Math.max(0, at - now) : undefined;
+}
+
 export function classifyAnswer(
   status: number,
   contentType: string | null,
   body: unknown,
+  retryAfter: string | null = null,
 ): TasksFailure {
   if (status === 401) return { ok: false, kind: "closed" };
   const atlas = recogniseAtlasError(contentType, body);
   if (status >= 400 && status < 500 && status !== 408 && status !== 429) {
-    if (atlas === null) return { ok: false, kind: "uncertain" };
+    if (atlas === null)
+      return { ok: false, kind: "uncertain", retry: UNRECOGNISED };
     return {
       ok: false,
       kind: REFUSAL_CODES[atlas.code] ?? BY_STATUS[status] ?? "invalid",
@@ -171,13 +227,25 @@ export function classifyAnswer(
       code: atlas.code,
     };
   }
+  const after =
+    status === 429 ? retryAfterMs(retryAfter, Date.now()) : undefined;
+  const retry: RetryFacts =
+    status === 429
+      ? {
+          cause: "rate_limited",
+          ...(after === undefined ? {} : { afterMs: after }),
+        }
+      : atlas !== null && TRANSIENT[status] === atlas.code
+        ? { cause: "transient" }
+        : UNRECOGNISED;
   return atlas === null
-    ? { ok: false, kind: "uncertain" }
+    ? { ok: false, kind: "uncertain", retry }
     : {
         ok: false,
         kind: "uncertain",
         requestId: atlas.request_id,
         code: atlas.code,
+        retry,
       };
 }
 
@@ -191,7 +259,7 @@ export function classifyThrown(error: unknown): TasksFailure {
         return { ok: false, kind: "closed" };
     }
   }
-  return { ok: false, kind: "uncertain" };
+  return { ok: false, kind: "uncertain", retry: { cause: "transport" } };
 }
 
 interface Answered {
@@ -210,13 +278,19 @@ export async function call<T>(
     if (response.ok) {
       const value = parse(data);
       return value === null
-        ? { ok: false, kind: "uncertain", ...(requestId ? { requestId } : {}) }
+        ? {
+            ok: false,
+            kind: "uncertain",
+            ...(requestId ? { requestId } : {}),
+            retry: UNRECOGNISED,
+          }
         : { ok: true, value, ...(requestId ? { requestId } : {}) };
     }
     return classifyAnswer(
       response.status,
       response.headers.get("content-type"),
       error,
+      response.headers.get("retry-after"),
     );
   } catch (error) {
     return classifyThrown(error);
@@ -255,19 +329,22 @@ export function createTasksApi(
     path: string,
     params: Record<string, unknown>,
     parse: (body: unknown) => T | null,
+    admitted?: () => boolean,
   ): Promise<TasksResult<T>> =>
     Promise.resolve(
       offline() ??
-        untilSent(() =>
-          call(
-            () =>
-              (
-                client() as unknown as {
-                  GET(p: string, o: unknown): Promise<Answered>;
-                }
-              ).GET(path, { params }),
-            parse,
-          ),
+        untilSent(
+          () =>
+            call(
+              () =>
+                (
+                  client() as unknown as {
+                    GET(p: string, o: unknown): Promise<Answered>;
+                  }
+                ).GET(path, { params }),
+              parse,
+            ),
+          admitted,
         ),
     );
   const access = async (
@@ -306,7 +383,8 @@ export function createTasksApi(
         { query: { start_date: q.startDate, timezone: q.zone } },
         parsePresets,
       ),
-    readTask: (id) => get("/tasks/{id}", { path: { id } }, parseTaskDetail),
+    readTask: (id, admitted) =>
+      get("/tasks/{id}", { path: { id } }, parseTaskDetail, admitted),
     readEnrolment: (taskId) =>
       get("/tasks/{id}/enrolment", { path: { id: taskId } }, parseEnrolment),
     readJournal: (progressId, after) =>

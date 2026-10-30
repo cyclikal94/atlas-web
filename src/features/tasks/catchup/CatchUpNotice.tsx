@@ -4,7 +4,12 @@ import { TASK_SEQUENCE_ROWS, type TaskSequences } from "../../../data";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { dayLabel } from "../format";
-import { CATCH_UP_COPY, recoveryRows, stopsFor } from "../today/CatchUpBanner";
+import {
+  CATCH_UP_COPY,
+  reasonText,
+  recoveryRows,
+  stopsFor,
+} from "../today/CatchUpBanner";
 import { useCatchUp } from "./useCatchUp";
 
 /**
@@ -84,9 +89,7 @@ export function CatchUpNotice({
               {CATCH_UP_COPY.forDay(dayLabel(stop.throughDate))}
             </p>
           ) : null}
-          <p className="text-[12.5px] text-ink-2">
-            {CATCH_UP_COPY.reason[stop.reason]}
-          </p>
+          <p className="text-[12.5px] text-ink-2">{reasonText(stop)}</p>
           {stop.requestId ? (
             <p className="select-all font-num text-[12px] text-ink-2">
               {copy.REQUEST_ID(stop.requestId)}
