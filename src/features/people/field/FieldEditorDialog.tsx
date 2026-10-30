@@ -89,6 +89,7 @@ import {
   stillBound,
   successorFollows,
 } from "../model/snapshot";
+import { policyMovedFrom, policyShownFor } from "../model/summary";
 import {
   FIELD_KINDS,
   type FieldKind,
@@ -647,8 +648,22 @@ function Editor({
   // is never who can see the field NOW (review 23, R23.1): until a read asked after that answers, the audience is being checked.
   const doubt =
     existing === null ? undefined : env.memory.policyDoubts.get(existing.id);
-  const known = doubt === undefined ? keptPolicy : undefined;
+  // A later policy version a summary applied (review 24, R24.1): the kept read is not the field's audience now either, until one at it is.
+  const floor =
+    existing === null ? undefined : env.memory.summaryFloors.get(existing.id);
+  const known =
+    doubt === undefined &&
+    keptPolicy !== undefined &&
+    existing !== null &&
+    policyShownFor(keptPolicy, existing, floor)
+      ? keptPolicy
+      : undefined;
   const livePolicyVersion = existing?.policy_version ?? null;
+  // The version a read must reach to be the audience now: only a summary AHEAD of the synced field asks a read again (R24.1).
+  const requiredPolicy = Math.max(
+    livePolicyVersion ?? 0,
+    floor?.policyVersion ?? 0,
+  );
   const policyLoad: "idle" | "loading" | "forbidden" | "failed" =
     existing === null
       ? "idle"
@@ -670,31 +685,35 @@ function Editor({
     )
       doubtPolicy(env.memory, existing.id);
   }, []);
-  // A policy read OLDER than the field's published policy version is not the audience any more: it is asked again, once per version. A
-  // doubted one is asked again once per doubt, by a read that cannot be answered by one asked before the doubt.
+  // A policy read OLDER than the field's published policy version, or than one a summary applied (review 24, R24.1), is not the audience
+  // any more: it is asked again, once per version, by a read asked since. A doubted one is asked again once per doubt, by a read that
+  // cannot be answered by one asked before the doubt. A read that answers below a version known meanwhile asks again (`keptPolicy`).
   const asked = useRef<number | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: a new doubt (read from the memory inside) asks again
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new doubt, floor or kept read (read from the memory inside) asks again
   useEffect(() => {
     if (existing === null || projected || !canEdit || !env.online) return;
     const memory = env.memory;
     const id = existing.id;
     const read = memory.policies.get(id);
     const doubted = memory.policyDoubts.get(id);
+    const required = Math.max(
+      livePolicyVersion ?? 0,
+      memory.summaryFloors.get(id)?.policyVersion ?? 0,
+    );
     const outdated =
       read !== undefined &&
-      livePolicyVersion !== null &&
-      read.version < livePolicyVersion &&
-      asked.current !== livePolicyVersion;
+      read.version < required &&
+      asked.current !== required;
     if (
       (read !== undefined && !outdated && doubted === undefined) ||
       memory.policyReads.has(id) ||
       memory.policyRefusals.get(id) === "forbidden"
     )
       return;
-    if (outdated) {
-      asked.current = livePolicyVersion;
+    asked.current = required;
+    // Below the synced version it is gone; below a summary's only, it stays as the version nothing lower replaces (never shown).
+    if (outdated && read.version < (livePolicyVersion ?? 0))
       memory.policies.delete(id);
-    }
     // This read's own: a later read of the field (or a doubt) takes the field's read over, and then this one ends and refuses nothing.
     const owner = {};
     memory.policyReads.set(id, owner);
@@ -703,7 +722,7 @@ function Editor({
     void untilSent(() =>
       env.sharing.readPolicy(
         id,
-        doubted === undefined ? undefined : { fresh: true },
+        doubted === undefined && !outdated ? undefined : { fresh: true },
       ),
     ).then((result) => {
       if (!isCurrentMemory(memory)) return;
@@ -724,7 +743,16 @@ function Editor({
       }
       memory.touch();
     });
-  }, [env, existing, projected, canEdit, livePolicyVersion, doubt]);
+  }, [
+    env,
+    existing,
+    projected,
+    canEdit,
+    livePolicyVersion,
+    doubt,
+    requiredPolicy,
+    keptPolicy,
+  ]);
 
   const home = primaryHousehold(defaults.record);
   const homeName = home?.household?.name ?? "Home";
@@ -736,16 +764,15 @@ function Editor({
     known.version === snapshot.policyVersion
       ? known
       : undefined;
-  // Even a doubted read says the policy moved: no version it once had comes back.
+  // Even a doubted read says the policy moved: no version it once had comes back. So does a later version a summary applied (R24.1).
   const policyMoved =
-    keptPolicy !== undefined &&
     snapshot !== null &&
-    keptPolicy.version !== snapshot.policyVersion;
-  // ... and one read AHEAD of the field as this device has it waits for the field to sync before the edit can be bound to it.
+    policyMovedFrom(snapshot.policyVersion, keptPolicy, floor);
+  // ... and one read or summarised AHEAD of the field as this device has it waits for the field to sync before the edit can be bound to it.
   const policyAhead =
-    keptPolicy !== undefined &&
     livePolicyVersion !== null &&
-    keptPolicy.version > livePolicyVersion;
+    Math.max(keptPolicy?.version ?? 0, floor?.policyVersion ?? 0) >
+      livePolicyVersion;
   const current: AudienceClass | null =
     shownPolicy === undefined
       ? null
@@ -1051,9 +1078,14 @@ function Editor({
     const bound = snapshot;
     if (bound === null) return fail(copy.PUBLISHED_REVIEW_FIRST);
     if (bound.policyVersion === null) return fail(copy.WAIT_FOR_SYNC_FIELD);
+    // What this page knows of the field's policy NOW, not as last rendered (review 24, R24.1: a summary may have applied a later one).
     if (
       !stillBound(bound, existing) ||
-      (keptPolicy !== undefined && keptPolicy.version !== bound.policyVersion)
+      policyMovedFrom(
+        bound.policyVersion,
+        env.memory.policies.get(existing.id),
+        env.memory.summaryFloors.get(existing.id),
+      )
     ) {
       tell({ outcome: { kind: "stale" } });
       return;
@@ -1272,6 +1304,13 @@ function Editor({
       return;
     void submit();
   }, [resubmit]);
+  /** Whether a later policy version than the field's as this device has it is known NOW: read, or applied by a summary (review 24). */
+  const observedAhead = () =>
+    existing !== null &&
+    Math.max(
+      env.memory.policies.get(existing.id)?.version ?? 0,
+      env.memory.summaryFloors.get(existing.id)?.policyVersion ?? 0,
+    ) > (existing.policy_version ?? 0);
   /** The current audience must be known before an edit is re-bound to a changed one, or bound to a published one (review 10). */
   // A policy that moved while the field as this device has it did not (the sharing editor saved it, review 23) is bound to only once the
   // field has synced to it and its audience is read at that version.
@@ -1296,7 +1335,12 @@ function Editor({
   };
   const saveConflictedAdmitted = async (draft: DraftWithCommand) => {
     const content = draftFieldContent(draft);
-    if (existing === null || content === null || livePolicyVersion === null)
+    if (
+      existing === null ||
+      content === null ||
+      livePolicyVersion === null ||
+      observedAhead()
+    )
       return fail(copy.WAIT_FOR_SYNC_FIELD);
     if (content.policyVersion !== livePolicyVersion && nowAudience === null)
       return fail(copy.CONFLICT_NEEDS_AUDIENCE);
@@ -1477,10 +1521,12 @@ function Editor({
               saveReason={
                 conflicted === null || conflictContent === null
                   ? copy.LOADING_MINE
-                  : conflictContent.policyVersion !== livePolicyVersion &&
-                      nowAudience === null
-                    ? copy.CONFLICT_NEEDS_AUDIENCE
-                    : null
+                  : policyAhead
+                    ? copy.WAIT_FOR_SYNC_FIELD
+                    : conflictContent.policyVersion !== livePolicyVersion &&
+                        nowAudience === null
+                      ? copy.CONFLICT_NEEDS_AUDIENCE
+                      : null
               }
               onDiscard={async () => {
                 await actions.discard(conflict.draft.local_id);

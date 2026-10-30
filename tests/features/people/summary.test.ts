@@ -11,6 +11,8 @@ import {
   parsePersonSummaryDetail,
   parseSharedWith,
   parseSummaryPage,
+  policyMovedFrom,
+  policyShownFor,
   summaryCurrentFor,
 } from "../../../src/features/people/model/summary";
 
@@ -389,5 +391,44 @@ describe("what the screens say", () => {
     expect(summaryCurrentFor({ version: 1, policy_version: 1 }, null)).toBe(
       true,
     );
+  });
+});
+
+/**
+ * Review 24, R24.1: what a field policy read (`read`), the synced field (`cached`) and a summary's applied versions (`floor`) say about the
+ * audience an edit bound to one version may show. A read below any later known version is never current; any later version says the
+ * policy moved, the summary's alone included; a same-version summary or another field's says nothing.
+ */
+describe("R24.1: a field's policy evidence against its version floor", () => {
+  const at = (version: number) => ({ version });
+  const floor = (policyVersion: number) => ({ policyVersion });
+  test("a read is current only at or above every version known: the synced field's and the summary's", () => {
+    expect(policyShownFor(at(6), { policy_version: 6 }, floor(6))).toBe(true);
+    expect(policyShownFor(at(6), { policy_version: 6 }, undefined)).toBe(true);
+    expect(policyShownFor(at(6), { policy_version: 6 }, floor(7))).toBe(false);
+    expect(policyShownFor(at(6), { policy_version: 7 }, floor(6))).toBe(false);
+    expect(policyShownFor(at(7), { policy_version: 6 }, floor(7))).toBe(true);
+    expect(policyShownFor(at(7), { policy_version: 6 }, floor(8))).toBe(false);
+    expect(policyShownFor(at(8), { policy_version: 7 }, floor(7))).toBe(true);
+  });
+  test("the policy moved from the bound version on any other read, or on a LATER summarised version alone", () => {
+    // Nothing read, nothing later summarised: not moved.
+    expect(policyMovedFrom(6, undefined, undefined)).toBe(false);
+    expect(policyMovedFrom(6, undefined, floor(6))).toBe(false);
+    // A summary behind the bound version (it lags) proves nothing.
+    expect(policyMovedFrom(6, undefined, floor(5))).toBe(false);
+    expect(policyMovedFrom(6, at(6), floor(5))).toBe(false);
+    expect(policyMovedFrom(6, at(6), floor(6))).toBe(false);
+    // Any later version is a move, before a read or sync of it.
+    expect(policyMovedFrom(6, undefined, floor(7))).toBe(true);
+    expect(policyMovedFrom(6, at(6), floor(7))).toBe(true);
+    expect(policyMovedFrom(6, at(7), floor(6))).toBe(true);
+    expect(policyMovedFrom(6, at(8), floor(7))).toBe(true);
+    // A read of another version than the bound one, even an older one, is not the edit's audience.
+    expect(policyMovedFrom(6, at(5), undefined)).toBe(true);
+    // An edit not bound to a synced version yet: a read or a summarised version says it moved.
+    expect(policyMovedFrom(null, undefined, undefined)).toBe(false);
+    expect(policyMovedFrom(null, undefined, floor(1))).toBe(true);
+    expect(policyMovedFrom(null, at(1), undefined)).toBe(true);
   });
 });

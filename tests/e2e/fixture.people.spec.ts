@@ -4342,3 +4342,171 @@ test.describe("E-P46: the field editor's audience after the sharing editor close
     });
   });
 });
+
+test.describe("E-P47: a field audiences summary's later policy version reaches the open field editor (A5, A15; review 24, R24.1)", () => {
+  // Review 24's coherent native reproduction, maintained: the signed-in account owns the field, whose policy v6 grants Home read access and
+  // excludes Mo; Mo owns the parent profile (Home may edit it), so the field's own audience is complete and its effective access partial.
+  // The production visible-page refresh reads the summaries again; the application's own applied row label is the barrier.
+  const P = "55555555-5555-4555-8555-555555555555";
+  const F = "66666666-6666-4666-8666-666666666666";
+  const EXCLUDED =
+    "Mo is excluded from this field's sharing, so they won't see it.";
+  const CHANGED =
+    "Who can see this field changed since you opened it. Check the change above before saving yours.";
+  const original = {
+    grants: [{ kind: "household", id: HOME, edit: false }],
+    exclude_accounts: [MO],
+  };
+  const audience = (version: number) => ({
+    id: F,
+    version: 4,
+    policy_version: version,
+    archived: false,
+    owner_is_you: true,
+    your_access: "owner",
+    audience: {
+      disclosure: "complete",
+      in_home: true,
+      households: [
+        {
+          id: HOME,
+          can_edit: false,
+          you_are_member: true,
+          name: "Home",
+          version: 1,
+          member_count: 2,
+        },
+      ],
+      your_direct_grant: null,
+      direct_grant_count: 0,
+      excluded_count: version === 6 ? 1 : 0,
+    },
+    effective: {
+      disclosure: "partial",
+      account_count: null,
+      limited_count: null,
+    },
+  });
+  for (const version of [6, 7])
+    test(`${version === 6 ? "control: the same version summarised again keeps the exclusion" : "summary v7 before the policy read and the sync: the exclusion is not said, nothing is written"}`, async ({
+      context,
+    }, info) => {
+      const { page, served } = await setup(
+        context,
+        `/people/${P}/fields/${F}`,
+        [
+          personP(P, "Mo"),
+          fieldP(
+            F,
+            P,
+            "Note",
+            { kind: "text", text: "Initial note" },
+            { version: 4, policy_version: 6 },
+          ),
+        ],
+        {
+          linked: { [P]: MO },
+          arrange(s) {
+            s.policies.set(P, {
+              version: 1,
+              policy: {
+                grants: [{ kind: "household", id: HOME, edit: true }],
+                exclude_accounts: [],
+              },
+            });
+            s.summaries.set(P, {
+              owner: {
+                account_id: MO,
+                username: "mo",
+                you: false,
+                person: { id: P, label: "Mo" },
+              },
+              your_access: "edit",
+              added_by_you: "no",
+              field_count: 1,
+              audience: {
+                disclosure: "partial",
+                in_home: true,
+                households: [
+                  {
+                    id: HOME,
+                    can_edit: true,
+                    you_are_member: true,
+                    name: "Home",
+                    version: 1,
+                    member_count: 2,
+                  },
+                ],
+                your_direct_grant: null,
+                direct_grant_count: null,
+                excluded_count: null,
+              },
+            });
+            s.policies.set(F, { version: 6, policy: original });
+            s.fieldAudiences.set(P, [audience(6)]);
+          },
+        },
+      );
+      const dialog = page.getByRole("dialog");
+      const row = page.locator(`[data-field-row="${F}"]`);
+      const value = dialog.getByRole("textbox", { name: "Value", exact: true });
+      await expect(dialog.locator("[data-subject-note]")).toHaveText(EXCLUDED);
+      await expect(row.locator("[data-field-audience]")).toHaveText(
+        "Home · can view · 1 excluded",
+      );
+      await value.fill("Unfinished input");
+      served.policies.set(F, {
+        version,
+        policy:
+          version === 6 ? original : { ...original, exclude_accounts: [] },
+      });
+      served.fieldAudiences.set(P, [audience(version)]);
+      const reads = () =>
+        served.log.filter((l) => l === `GET /policies/${F}`).length;
+      const before = reads();
+      const response = page.waitForResponse(
+        (r) =>
+          r.url().includes(`/people/${P}/field-audiences`) &&
+          r.status() === 200,
+      );
+      // The production visible-page refresh listener (no bfcache or reload claim; no timer changed).
+      await page.evaluate(() =>
+        document.dispatchEvent(new Event("visibilitychange")),
+      );
+      const body = await (await response).json();
+      expect(body.items[0].policy_version).toBe(version);
+      await expect(row.locator("[data-field-audience]")).toHaveText(
+        version === 6 ? "Home · can view · 1 excluded" : "Home · can view",
+      );
+      await expect(value).toHaveValue("Unfinished input");
+      if (version === 6) {
+        await expect(dialog.locator("[data-subject-note]")).toHaveText(
+          EXCLUDED,
+        );
+        expect(reads()).toBe(before);
+      } else {
+        // The move is reviewed: the policy is read again (once), and the edit waits for the field to sync before it can be bound.
+        await expect(dialog.locator('[data-audience="unknown"]')).toHaveText(
+          CHANGED,
+        );
+        await expect(dialog.locator("[data-subject-note]")).toHaveCount(0);
+        await expect(
+          dialog.locator("[data-field-conflict] [data-review-audience]"),
+        ).toHaveText(
+          "Who can see it now is shown here once this field has finished syncing.",
+        );
+        await expect(
+          dialog.locator('[data-people-action="save-mine"]'),
+        ).toHaveCount(0);
+        expect(reads()).toBe(before + 1);
+      }
+      expect(served.management).toEqual([]);
+      expect(await draftsOf(page)).toEqual([]);
+      recordEvidence(info, "e-p47", {
+        version,
+        summary: body,
+        requests: served.log,
+        management: served.management,
+      });
+    });
+});

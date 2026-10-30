@@ -576,6 +576,22 @@ export function policyShownFor(
 }
 
 /**
+ * Whether the field's policy has moved from `bound` (the version an edit is bound to, review 24, R24.1): a kept read of another version
+ * says so, and so does a LATER version a summary applied (`floor`), before any read or sync of it. A summary proves the move only: it is
+ * never the policy, nor who can see the field now. PURE.
+ */
+export function policyMovedFrom(
+  bound: number | null,
+  read: { version: number } | undefined,
+  floor: { policyVersion: number } | undefined,
+): boolean {
+  return (
+    (read !== undefined && read.version !== bound) ||
+    (floor?.policyVersion ?? 0) > (bound ?? 0)
+  );
+}
+
+/**
  * Whether a summary row may be shown beside a cached projection: it is not OLDER than what this device shows. A newer one is the
  * server's later state (the cache catches up); an older one waits for the re-read the projection change has already asked for.
  */

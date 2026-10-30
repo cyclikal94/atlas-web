@@ -22291,7 +22291,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "      !stillBound(bound, existing) ||\n      (keptPolicy !== undefined && keptPolicy.version !== bound.policyVersion)\n",
+        "      !stillBound(bound, existing) ||\n      policyMovedFrom(\n        bound.policyVersion,\n        env.memory.policies.get(existing.id),\n        env.memory.summaryFloors.get(existing.id),\n      )\n",
         "      false\n",
       ),
   },
@@ -26692,8 +26692,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "  const known = doubt === undefined ? keptPolicy : undefined;\n",
-        "  const known = keptPolicy;\n",
+        "  const known =\n    doubt === undefined &&\n    keptPolicy !== undefined &&\n",
+        "  const known =\n    keptPolicy !== undefined &&\n",
       ),
   },
   {
@@ -26756,7 +26756,7 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "        doubted === undefined ? undefined : { fresh: true },\n",
+        "        doubted === undefined && !outdated ? undefined : { fresh: true },\n",
         "        undefined,\n",
       ),
   },
@@ -26855,8 +26855,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "  const policyMoved =\n    keptPolicy !== undefined &&\n    snapshot !== null &&\n    keptPolicy.version !== snapshot.policyVersion;",
-        "  const policyMoved =\n    known !== undefined &&\n    snapshot !== null &&\n    known.version !== snapshot.policyVersion;",
+        "    policyMovedFrom(snapshot.policyVersion, keptPolicy, floor);",
+        "    policyMovedFrom(snapshot.policyVersion, known, floor);",
       ),
   },
   {
@@ -26903,6 +26903,142 @@ export const UNIT = [
     expect:
       /closing the shared policy editor \(which may have changed it\) withdraws/,
     patch: (t) => sub(t, "    !env.memory.policyDoubts.has(row.id) &&\n", ""),
+  },
+  {
+    id: "MU-2912",
+    title:
+      "WEB-11a R24.1 (the reviewed defect): the field editor's kept policy is who can see the field now whatever later version a summary applied",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 summary v7 before the policy read and the sync/,
+    patch: (t) =>
+      sub(
+        t,
+        "    policyShownFor(keptPolicy, existing, floor)\n",
+        "    policyShownFor(keptPolicy, existing, undefined)\n",
+      ),
+  },
+  {
+    id: "MU-2913",
+    title:
+      "WEB-11a R24.1: a later version a summary applied does not say the policy moved (only a read of another version does)",
+    file: "src/features/people/model/summary.ts",
+    tests: [
+      "tests/features/people/summary.test.ts",
+      "tests/features/people/field-editor.test.tsx",
+    ],
+    expect:
+      /R24\.1.*(LATER summarised version alone|summary v7 before the policy read)/,
+    patch: (t) =>
+      sub(t, "    (floor?.policyVersion ?? 0) > (bound ?? 0)\n", "    false\n"),
+  },
+  {
+    id: "MU-2914",
+    title:
+      "WEB-11a R24.1: the field editor's read asks only for the synced version, never a later one a summary applied",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R24\.1 (summary v7 before the policy read|summary, then policy read)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      memory.summaryFloors.get(id)?.policyVersion ?? 0,\n",
+        "      0,\n",
+      ),
+  },
+  {
+    id: "MU-2915",
+    title:
+      "WEB-11a R24.1: a summary's later version does not run the field editor's read again (it waits for another render cause)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R24\.1 (summary v7 before the policy read|summary, then policy read)/,
+    patch: (t) =>
+      sub(t, "    requiredPolicy,\n    keptPolicy,\n", "    keptPolicy,\n"),
+  },
+  {
+    id: "MU-2916",
+    title:
+      "WEB-11a R24.1: a read answering below a version applied meanwhile leaves that version unasked",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 a later version applied while the read is on its way/,
+    patch: (t) =>
+      sub(t, "    requiredPolicy,\n    keptPolicy,\n", "    requiredPolicy,\n"),
+  },
+  {
+    id: "MU-2917",
+    title:
+      "WEB-11a R24.1: a read below the required version is asked again on every answer (not once per version)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/policy-read-bound.test.tsx"],
+    expect:
+      /R24\.1 a read answering below the summary's version revives nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "      read.version < required &&\n      asked.current !== required;\n",
+        "      read.version < required;\n",
+      ),
+  },
+  {
+    id: "MU-2918",
+    title:
+      "WEB-11a R24.1: the read a summary's later version asks is an ordinary one (a read on its way since before may answer it)",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 summary v7 before the policy read and the sync/,
+    patch: (t) =>
+      sub(
+        t,
+        "        doubted === undefined && !outdated ? undefined : { fresh: true },\n",
+        "        doubted === undefined ? undefined : { fresh: true },\n",
+      ),
+  },
+  {
+    id: "MU-2919",
+    title:
+      "WEB-11a R24.1: a summarised version ahead of the synced field does not make the edit wait for the sync",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect:
+      /R24\.1 (summary v7 before the policy read|a conflicted save is not saved)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    Math.max(keptPolicy?.version ?? 0, floor?.policyVersion ?? 0) >\n",
+        "    (keptPolicy?.version ?? 0) >\n",
+      ),
+  },
+  {
+    id: "MU-2920",
+    title:
+      "WEB-11a R24.1: the save checks the summarised version as last rendered, not as known at the press",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 a later version stored before the editor renders again/,
+    patch: (t) =>
+      sub(
+        t,
+        "        env.memory.policies.get(existing.id),\n        env.memory.summaryFloors.get(existing.id),\n      )\n",
+        "        env.memory.policies.get(existing.id),\n        floor,\n      )\n",
+      ),
+  },
+  {
+    id: "MU-2922",
+    title:
+      "WEB-11a R24.1: a conflicted save is saved on the synced version whatever later version is known at the press",
+    file: "src/features/people/field/FieldEditorDialog.tsx",
+    tests: ["tests/features/people/field-editor.test.tsx"],
+    expect: /R24\.1 a conflicted save is not saved/,
+    patch: (t) =>
+      sub(
+        t,
+        "      livePolicyVersion === null ||\n      observedAhead()\n    )\n",
+        "      livePolicyVersion === null\n    )\n",
+      ),
   },
 
   ...UNIT_LABELS,
