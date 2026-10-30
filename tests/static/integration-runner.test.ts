@@ -430,8 +430,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         i14e: 4,
         i14d: 4,
         data: 32,
-        // WEB-13b: I-CAL-IMP1-4, I-CAL-ANC1 and I-CAL-REV1 join the calendar stack (13 + 6).
-        calendar: 19,
+        // WEB-13b: I-CAL-IMP1-4, I-CAL-ANC1 and I-CAL-REV1 join the calendar stack (13 + 6); revision 14 (R12) adds I-CAL-IMP5.
+        calendar: 20,
         traces: 16,
         registration: 20,
         oidc: 10,
@@ -446,7 +446,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(261);
+      expect(inBrowser(whole, browser)).toHaveLength(262);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -620,9 +620,9 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        // WEB-13b adds six calendar cases to accepted main's 255-case inventory.
-        planned_cases: 261,
-        passed: 255,
+        // WEB-13b adds six calendar cases to accepted main's 255-case inventory, and revision 14 (R12) I-CAL-IMP5.
+        planned_cases: 262,
+        passed: 256,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,

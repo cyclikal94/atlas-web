@@ -1269,6 +1269,85 @@ test.describe("I-CAL-IMP4: the calendar permits are busy (CH3, 7(f))", () => {
   });
 });
 
+test.describe("I-CAL-IMP5: folded and rewritten component lines (review 15 R12)", () => {
+  test("a file the server's parser reads as six events is shown with six, sent byte-identically and its six events arrive; 257 folded events are refused on this device and nothing is sent", async ({
+    context,
+  }) => {
+    const { page, wire } = await ready(context);
+    const id = await addSource(page, "I-IMP5 Folded");
+    await wakeLeader(page);
+    await expect(row(page, id)).toBeVisible({ timeout: 30_000 });
+    // Each component line written another way the pinned parser (ical 0.11.0) reads as BEGIN:VEVENT; the header folded too.
+    const variants = [
+      "BEGIN:\r\n VEVENT",
+      "BEGIN:VE\r\n\tVENT",
+      "BEGIN;X-A=1:VEVENT",
+      "BEGIN::VEVENT",
+      "BEGIN:VEVENT \t",
+      "begin:VEVENT",
+    ];
+    let at = 0;
+    const text = calendar(
+      variants.map((_, n) => [
+        `imp5-${n}-${crypto.randomUUID()}`,
+        day(3 + n),
+        `Folded ${n}`,
+      ]),
+    )
+      .replace("BEGIN:VCALENDAR", "BEGIN:\r\n VCALENDAR")
+      .replace(/BEGIN:VEVENT/g, () => variants[at++] as string);
+    expect(at).toBe(6);
+    await page
+      .getByRole("button", { name: "Import events into I-IMP5 Folded" })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Import events" });
+    await dialog.locator('input[type="file"]').setInputFiles({
+      name: "folded.ics",
+      mimeType: "text/calendar",
+      buffer: Buffer.from(text, "utf8"),
+    });
+    await expect(dialog.locator("[data-import-file]")).toContainText(
+      "6 events",
+    );
+    await dialog.getByLabel("From").fill(day(0));
+    await dialog.getByLabel("Through").fill(day(60));
+    await dialog.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await wakeLeader(page);
+    await expect
+      .poll(() => importStatuses(id), { timeout: 60_000 })
+      .toEqual([200]);
+    expect(JSON.parse(imports(wire, id)[0]?.body ?? "").ics).toBe(text);
+    await expect
+      .poll(async () => (await events(page, id)).length, { timeout: 30_000 })
+      .toBe(6);
+
+    const over = calendar(
+      Array.from({ length: 257 }, (_, n) => [
+        `imp5-over-${n}-${crypto.randomUUID()}`,
+        day(3),
+        `Over ${n}`,
+      ]) as Array<[string, string, string]>,
+    ).replaceAll("BEGIN:VEVENT", "BEGIN:\r\n VEVENT");
+    await page
+      .getByRole("button", { name: "Import events into I-IMP5 Folded" })
+      .click();
+    await dialog.locator('input[type="file"]').setInputFiles({
+      name: "over.ics",
+      mimeType: "text/calendar",
+      buffer: Buffer.from(over, "utf8"),
+    });
+    await expect(dialog).toContainText("This file has more than 256 events.");
+    await dialog.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(dialog).toContainText("This file has more than 256 events.");
+    await wakeLeader(page);
+    await page.waitForTimeout(5_000);
+    expect(imports(wire, id)).toHaveLength(1);
+    expect(await importStatuses(id)).toEqual([200]);
+    expect(await events(page, id)).toHaveLength(6);
+  });
+});
+
 /** The new-task form with an anchor to the cached event `title`, saved "Only me"; returns the create's task id. */
 async function anchoredTask(
   page: Page,

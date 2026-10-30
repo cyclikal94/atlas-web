@@ -9,6 +9,12 @@ import {
   lineCount,
   readImportFile,
 } from "../../../src/features/calendars/model/import";
+import {
+  type CorpusCase,
+  corpusCases,
+  corpusSource,
+  corpusText,
+} from "../../support/ics-corpus";
 
 /**
  * WEB-13b §4.1: the local checks of an `.ics` import mirror the released server's bounds (`v0.29.0-rc.1`, `ics.rs` `parse`): bytes, Rust
@@ -98,6 +104,140 @@ describe("events: VEVENT components, overrides included", () => {
       ok: false,
       reason: "not_calendar",
     });
+  });
+});
+
+/*
+ * Review 15 R12 (revision 14): components are recognised on the content lines the server's parser reads, not on physical lines. The
+ * oracle is the pinned parser itself: `tests/fixtures/ics-parser/ical-0.11.0.json`, written by `scripts/generate-ics-parser-corpus.mjs`
+ * from `ical` 0.11.0 (the released backend's dependency) over each recipe. A text whose hash differs from the one the parser read fails
+ * here, so the recipe and the parser's answer cannot drift apart.
+ */
+const accepted = corpusCases.filter((entry) => entry.parser.status === "ok");
+const refused = corpusCases.filter((entry) => entry.parser.status !== "ok");
+
+/**
+ * What this device answers for a file the SERVER refuses (`invalid_ics`): a pre-check, not the parser. The header is recognised wherever
+ * it is and in any case, as before; counting goes on where the parser would stop with an error (the cautious answer).
+ */
+const REFUSED_BY_SERVER: Record<string, ReturnType<typeof checkImportText>> = {
+  "gap-inside-calendar": { ok: false, reason: "too_many_events" },
+  "gap-after-event": { ok: false, reason: "too_many_events" },
+  "header-continued": { ok: false, reason: "not_calendar" },
+  "header-leading-space": { ok: false, reason: "not_calendar" },
+  "value-lower-case-257": { ok: false, reason: "too_many_events" },
+  "not-calendar": { ok: false, reason: "not_calendar" },
+  empty: { ok: false, reason: "not_calendar" },
+};
+const COUNTED_THOUGH_REFUSED: Record<string, number> = {
+  "gap-before-header": 1,
+  "header-lower-case": 1,
+  "second-calendar": 2,
+  "event-continued": 0,
+  "fold-two-spaces": 0,
+  "trailing-feff": 0,
+  "unclosed-quote": 0,
+};
+
+describe("review 15 R12: components on the parser's content lines", () => {
+  test("the corpus is the pinned parser's, and holds the cases the correction needs", () => {
+    expect(corpusSource).toMatchObject({
+      commit: "4396c99300d00798fc10e61d459f4d9fce699ee8",
+      parser_files_sha256: {
+        "src/line.rs":
+          "8fa08985500b4e478a58d78063ac2e0f2a6472ebf84aa3fb7bd085d411e9dede",
+      },
+    });
+    const names = corpusCases.map((entry) => entry.name);
+    for (const name of [
+      "header-folded-space",
+      "header-folded-tab",
+      "events-folded-256",
+      "events-folded-257",
+      "variants-256",
+      "variants-257",
+      "markers-in-text",
+      "gap-after-end",
+    ])
+      expect(names).toContain(name);
+    // Every case the server refuses has a stated local answer: none is left unchecked.
+    expect(refused.map((entry) => entry.name).sort()).toEqual(
+      [
+        ...Object.keys(REFUSED_BY_SERVER),
+        ...Object.keys(COUNTED_THOUGH_REFUSED),
+      ].sort(),
+    );
+  });
+
+  test.each(accepted.map((entry) => [entry.name, entry] as const))(
+    "parser corpus %s: the parser's own count, the text unchanged",
+    (_, entry: CorpusCase) => {
+      const text = corpusText(entry);
+      const events = (entry.parser as { events: number }).events;
+      const check = checkImportText(text);
+      if (events > IMPORT_LIMITS.events)
+        expect(check).toEqual({ ok: false, reason: "too_many_events" });
+      else {
+        expect(check).toEqual({
+          ok: true,
+          ics: text,
+          bytes: new TextEncoder().encode(text).length,
+          lines: lineCount(text),
+          events,
+        });
+        // The same string, not a normalised copy: what was checked is what is stored and sent.
+        expect(check.ok && check.ics).toBe(text);
+      }
+    },
+  );
+
+  test.each(refused.map((entry) => [entry.name, entry] as const))(
+    "refused by the server %s: this device's pre-check",
+    (name, entry) => {
+      const check = checkImportText(corpusText(entry));
+      const counted = COUNTED_THOUGH_REFUSED[name];
+      if (counted === undefined) expect(check).toEqual(REFUSED_BY_SERVER[name]);
+      else expect(check).toMatchObject({ ok: true, events: counted });
+    },
+  );
+
+  test("a folded file read from a Blob (with a byte-order mark) is checked and kept exactly as decoded", async () => {
+    const text = corpusText("variants-256");
+    const out = await readImportFile(
+      new Blob([
+        new Uint8Array([0xef, 0xbb, 0xbf]),
+        new TextEncoder().encode(text),
+      ]),
+    );
+    expect(out).toEqual({
+      ok: true,
+      ics: text,
+      bytes: new TextEncoder().encode(text).length,
+      lines: lineCount(text),
+      events: 256,
+    });
+    expect(
+      await readImportFile(
+        new Blob([new TextEncoder().encode(corpusText("events-folded-257"))]),
+      ),
+    ).toEqual({ ok: false, reason: "too_many_events" });
+  });
+
+  test("the line bound still counts PHYSICAL lines: folding does not lower it", () => {
+    // 20,001 physical lines that unfold into a few content lines are still over the bound.
+    const head = "BEGIN:VCALENDAR\r\nX-LONG:a\r\n";
+    const tail = "BEGIN:VEVENT\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    const folds = IMPORT_LIMITS.lines - lineCount(head + tail);
+    const at = `${head}${" b\r\n".repeat(folds)}${tail}`;
+    expect(lineCount(at)).toBe(IMPORT_LIMITS.lines);
+    expect(checkImportText(at)).toMatchObject({
+      ok: true,
+      lines: IMPORT_LIMITS.lines,
+      events: 1,
+    });
+    expect(
+      checkImportText(`${head}${" b\r\n".repeat(folds + 1)}${tail}`),
+    ).toEqual({ ok: false, reason: "too_many_lines" });
   });
 });
 

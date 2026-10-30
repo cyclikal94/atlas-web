@@ -6,7 +6,7 @@
  *
  *  - Size: UTF-8 BYTES of the decoded text (`input.len()`), at most 1 MiB. A byte-order mark is removed by the decoder and never sent.
  *  - Lines: Rust `str::lines` of the text BEFORE unfolding: split on `\n`, a final empty segment not counted. At most 20,000.
- *  - Events: `VEVENT` components, overrides included. At most 256.
+ *  - Events: `VEVENT` components, overrides included, recognised on the parser's UNFOLDED content lines (below). At most 256.
  *  - Window: two `YYYY-MM-DD` dates that round-trip, years 1900–9999, `0 ≤ through − from ≤ 730` days (inclusive coverage). A reversed
  *    window is the server's `calendar_limit`; here it is a `span` error.
  *  - Envelope: the JSON body `{ics, from, through}` at most 2 MiB (the route's limit): escaping can take a 1 MiB file over it.
@@ -45,11 +45,154 @@ export function lineCount(text: string): number {
   return text.endsWith("\n") ? newlines : newlines + 1;
 }
 
-/** The text's lines as the parser sees their content: a trailing `\r` removed. */
-const lines = (text: string): string[] =>
-  text
-    .split("\n")
-    .map((line) => (line.endsWith("\r") ? line.slice(0, -1) : line));
+/*
+ * Components are recognised as the server's parser reads them (review 15 R12): `ical` 0.11.0's `LineReader` and `PropertyParser`, which
+ * `ics.rs` runs AFTER its byte and line bounds. A component begins on a logical content line, not a physical one: `BEGIN:` folded onto
+ * the next line, `BEGIN:VEVENT ` with trailing white space, `BEGIN::VEVENT` and `BEGIN;X-A=1:VEVENT` are all one more event to the
+ * server. The text itself is never changed: what was checked is what is stored and sent.
+ */
+
+/** Rust `char::is_whitespace` (Unicode White_Space), which the parser trims with. Not JavaScript's `trim`: it also removes U+FEFF and keeps U+0085. */
+const isSpace = (code: number): boolean =>
+  code === 0x20 ||
+  (code >= 0x09 && code <= 0x0d) ||
+  code === 0x85 ||
+  code === 0xa0 ||
+  code === 0x1680 ||
+  (code >= 0x2000 && code <= 0x200a) ||
+  code === 0x2028 ||
+  code === 0x2029 ||
+  code === 0x202f ||
+  code === 0x205f ||
+  code === 0x3000;
+
+function trimEnd(text: string): string {
+  let end = text.length;
+  while (end > 0 && isSpace(text.charCodeAt(end - 1))) end -= 1;
+  return text.slice(0, end);
+}
+
+function trim(text: string): string {
+  let start = 0;
+  while (start < text.length && isSpace(text.charCodeAt(start))) start += 1;
+  return trimEnd(text.slice(start));
+}
+
+/** Rust `BufRead::lines`: split on `\n`, one `\r` before it removed; a final empty segment is not a line. */
+function physicalLines(text: string): string[] {
+  const out = text.split("\n");
+  const last = out.pop() as string;
+  for (let n = 0; n < out.length; n += 1) {
+    const line = out[n] as string;
+    if (line.endsWith("\r")) out[n] = line.slice(0, -1);
+  }
+  if (last !== "") out.push(last);
+  return out;
+}
+
+/** Where the parser's line reader yields nothing but carries on reading after it (see `contentLines`). */
+const GAP = null;
+
+/**
+ * `LineReader::next_line`, line by line. A line starting with a space or tab continues the one before it, that one character removed;
+ * empty lines are skipped, even between a line and its continuation; each part loses its trailing white space, and a new line (not the
+ * first) its leading white space too. A new line that is only white space, with no continuation, reads as nothing: a GAP.
+ */
+function contentLines(text: string): Array<string | typeof GAP> {
+  const physical = physicalLines(text);
+  const out: Array<string | typeof GAP> = [];
+  let at = 0;
+  let saved: string | undefined;
+  for (;;) {
+    const parts: string[] = [];
+    if (saved !== undefined) {
+      parts.push(saved);
+      saved = undefined;
+    } else
+      while (at < physical.length) {
+        const line = physical[at++] as string;
+        if (line !== "") {
+          parts.push(trimEnd(line));
+          break;
+        }
+      }
+    while (at < physical.length) {
+      const line = physical[at++] as string;
+      if (line === "") continue;
+      const first = line.charCodeAt(0);
+      if (first === 0x20 || first === 0x09) parts.push(trimEnd(line.slice(1)));
+      else {
+        saved = trim(line);
+        break;
+      }
+    }
+    const content = parts.join("");
+    if (content !== "") out.push(content);
+    else if (saved === undefined) return out;
+    else out.push(GAP);
+  }
+}
+
+const find = (text: string, char: string): number => {
+  const at = text.indexOf(char);
+  return at === -1 ? Number.POSITIVE_INFINITY : at;
+};
+
+function trimStartOf(text: string, char: string): string {
+  let start = 0;
+  while (text[start] === char) start += 1;
+  return text.slice(start);
+}
+
+/**
+ * `PropertyParser::parse` of one content line: its name (up to the first `;` or `:`) and its value, after any parameters (a quoted
+ * parameter value may hold `:`) with EVERY leading `:` removed. Null where the parser fails; the server then refuses the whole file.
+ */
+function contentLine(
+  line: string,
+): { name: string; value: string | null } | null {
+  const param = find(line, ";");
+  const value = find(line, ":");
+  let end: number;
+  if (param < value && param !== 0) end = param;
+  else if (value !== Number.POSITIVE_INFINITY && value !== 0) end = value;
+  else return null;
+  const name = line.slice(0, end);
+  let rest = line.slice(end);
+  if (
+    find(rest, ";") !== Number.POSITIVE_INFINITY &&
+    find(rest, ":") > find(rest, ";")
+  )
+    while (rest.startsWith(";")) {
+      rest = trimStartOf(rest, ";");
+      const equals = rest.indexOf("=");
+      if (equals <= 0) return null;
+      rest = rest.slice(equals + 1);
+      for (let values = 10; values > 0; ) {
+        values -= 1;
+        if (rest.startsWith('"')) {
+          const close = rest.indexOf('"', 1);
+          if (close === -1) return null;
+          rest = rest.slice(close + 1);
+        } else {
+          const nextParam = find(rest, ";");
+          const nextValue = find(rest, ":");
+          const nextListed = find(rest, ",");
+          if (nextListed < nextValue && nextListed < nextParam)
+            rest = rest.slice(nextListed);
+          else if (nextParam < nextValue && nextParam < nextListed)
+            rest = rest.slice(nextParam);
+          else if (nextValue !== Number.POSITIVE_INFINITY)
+            rest = rest.slice(nextValue);
+          else return null;
+        }
+        if (!rest.startsWith(",")) break;
+        rest = trimStartOf(rest, ",");
+      }
+    }
+  rest = trimStartOf(rest, ":");
+  return { name, value: rest === "" ? null : rest };
+}
 
 /** The checks of a decoded file's text (pure). */
 export function checkImportText(ics: string): ImportFileCheck {
@@ -58,12 +201,35 @@ export function checkImportText(ics: string): ImportFileCheck {
   const count = lineCount(ics);
   if (count > IMPORT_LIMITS.lines)
     return { ok: false, reason: "too_many_lines" };
+  // Names and values are compared in upper case, as before: the parser matches `vevent` (or a lower-case header) only as a refusal of
+  // the whole file, so counting it can refuse nothing the server accepts. Every `BEGIN:VEVENT` counts wherever it is: the parser allows
+  // one only directly in the calendar and refuses the file otherwise. The one place it stops reading early is a GAP straight after the
+  // calendar's END (it then takes nothing after it); anywhere else the file is refused, and counting on is the cautious answer.
   let calendar = false;
   let events = 0;
-  for (const line of lines(ics)) {
-    const upper = line.toUpperCase();
-    if (upper === "BEGIN:VCALENDAR") calendar = true;
-    else if (upper === "BEGIN:VEVENT") events += 1;
+  let depth = 0;
+  let closed = false;
+  for (const line of contentLines(ics)) {
+    if (line === GAP) {
+      if (closed) break;
+      continue;
+    }
+    closed = false;
+    const property = contentLine(line);
+    if (property === null) continue;
+    const name = property.name.toUpperCase();
+    if (name === "END") {
+      // The parser ends the open component at any END, whatever it names.
+      if (depth > 0) {
+        depth -= 1;
+        closed = depth === 0;
+      }
+    } else if (name === "BEGIN" && property.value !== null) {
+      const component = property.value.toUpperCase();
+      if (component === "VCALENDAR") calendar = true;
+      else if (component === "VEVENT") events += 1;
+      depth += 1;
+    }
   }
   if (!calendar) return { ok: false, reason: "not_calendar" };
   if (events > IMPORT_LIMITS.events)

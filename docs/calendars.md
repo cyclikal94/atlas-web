@@ -127,7 +127,8 @@ marked "provisional" in `copy-import.ts`, `copy-anchor.ts` and `copy-review.ts` 
 **Import** (`model/import.ts`, `ImportDialog.tsx`, `ImportDropZone.tsx`, `ImportsPanel.tsx`, `import-action.tsx`, the one row-action entry).
 "Import events" on a source row (cached or pending; unavailable on a view-only or turned-off source, with the reason) or the page's drop
 zone ("browse" is a real file control; dropping is an enhancement) opens the dialog: the file is read and checked **on this device**
-(UTF-8 bytes ≤ 1 MiB, Rust `str::lines` before unfolding ≤ 20,000, `VEVENT`s with overrides ≤ 256, a fatal UTF-8 decode, a
+(UTF-8 bytes ≤ 1 MiB, Rust `str::lines` before unfolding ≤ 20,000, `VEVENT`s with overrides ≤ 256 on the parser's content lines
+(below), a fatal UTF-8 decode, a
 `YYYY-MM-DD` window with years 1900–9999 and `0 ≤ through − from ≤ 730` days inclusive, the JSON body ≤ 2 MiB), and Import stores ONE
 draft (`importRequest`; offline included; a synchronous latch; the same press after a local refusal reuses its identity; a QUEUED
 import's identity is spent, so a later Import is a new operation). Only the latest file chosen can be imported: choosing another forgets
@@ -140,6 +141,22 @@ address or another tab. The **Imports** panel lists this device's outstanding im
 (`useDraftHeaders` / `readDraftHeaders`; an import's body is never read for a list, and `readOutstanding` asked for a kind no longer
 loads a newer draft of another kind: E6): Queued, Sent (trying again), Sent — couldn't confirm yet (link to the queue), Import accepted,
 refused with its reason (Dismiss), or the capacity words (link to the queue). No count of imported events is ever claimed.
+
+**Which lines are components** (revision 14, review 15 R12, family `calendar-import-logical-line-validation`). The byte and line
+bounds measure the decoded text exactly as stored, before unfolding. Components are then recognised as the server's parser reads them:
+`ical` 0.11.0's `LineReader` and `PropertyParser`, ported in `model/import.ts`. A line starting with a space or tab continues the one
+before it, with that character removed. Empty lines are skipped, even inside a fold, and trailing white space (Rust's `White_Space`, not
+JavaScript's) is trimmed. A value loses every leading `:`, and parameters (quoted ones too) come before it. `BEGIN:` folded onto the
+next line, `BEGIN:VEVENT ` with trailing white space, `BEGIN::VEVENT` and `BEGIN;X-A=1:VEVENT` therefore each count as one event, as
+they do on the server. Text inside a property (`DESCRIPTION:… BEGIN:VEVENT`, folded or not) does not count. After the calendar's END,
+the parser stops at a whitespace-only line and ignores the rest, so the count stops there too. This remains a pre-check, not a parser:
+names and values are still compared in upper case, the header is recognised anywhere, and counting continues where the parser would
+refuse the file. So a pre-check can refuse a file early or let the server refuse it, but it never refuses a file the server accepts or
+passes one with more than 256 events. The text is never normalised: what was checked is what is stored and sent. Evidence:
+`tests/fixtures/ics-parser/ical-0.11.0.json`, 49 recipes and the pinned parser's own answer for each, written offline by
+`scripts/generate-ics-parser-corpus.mjs` (`--check` rebuilds and compares), asserted case by case in `import-model.test.ts`. The
+rendered paths (the row's chooser, the drop zone's Browse, a page drop, a replaced file still being read) are covered in `import-ui.test.tsx`
+"review 15 R12". This is reference evidence of the parser, not a backend import run.
 
 **The import's answers on the current wire** (`answers.ts`, the dispatcher's seam in `src/data/engine/outbox-dispatcher.ts`):
 

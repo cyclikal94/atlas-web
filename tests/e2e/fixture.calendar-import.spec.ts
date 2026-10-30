@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { corpusText, parserEvents } from "../support/ics-corpus";
 import {
   ACCOUNT,
   atlasBody,
@@ -417,6 +418,45 @@ test.describe("E-IMP4: the client bounds (case 4)", () => {
     await expect(dialog).toContainText("Enter a date between 1900 and 9999");
     expect(await rows(page, "drafts")).toEqual([]);
     expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
+  });
+
+  test("review 15 R12: components are counted as the server's parser reads them: 257 folded refused, a folded header a calendar, 256 rewritten shown and sent byte-identically", async ({
+    context,
+  }) => {
+    test.setTimeout(90_000);
+    const { page, cal } = await calendarsPage(context, {
+      cache: [sourceProjection(SOURCE)],
+    });
+    await page
+      .getByRole("button", { name: "Import events into Work rota" })
+      .click();
+    const dialog = await chooseFile(
+      page,
+      corpusText("events-folded-257"),
+      "over.ics",
+    );
+    await expect(dialog).toContainText("This file has more than 256 events.");
+    await dialog.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(dialog).toContainText("This file has more than 256 events.");
+    expect(await rows(page, "drafts")).toEqual([]);
+    await chooseFile(page, corpusText("header-folded-many"), "header.ics");
+    await expect(dialog.locator("[data-import-file]")).toContainText("1 event");
+    await expect(dialog).not.toContainText("isn't a calendar");
+    const text = corpusText("variants-256");
+    expect(parserEvents("variants-256")).toBe(256);
+    await chooseFile(page, text, "mixed.ics");
+    await expect(dialog.locator("[data-import-file]")).toContainText(
+      "256 events",
+    );
+    await dialog.getByLabel("From").fill("2026-01-01");
+    await dialog.getByLabel("Through").fill("2026-12-31");
+    await dialog.getByRole("button", { name: "Import", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await send(page);
+    await expect
+      .poll(() => posts(cal, IMPORT_PATH).length, { timeout: 60_000 })
+      .toBe(1);
+    expect(JSON.parse(posts(cal, IMPORT_PATH)[0]?.body ?? "").ics).toBe(text);
   });
 
   test("a valid file of exactly 1 MiB is stored and sent byte-identically (the large-draft path of a real engine)", async ({

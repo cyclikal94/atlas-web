@@ -20,6 +20,7 @@ import { installMatchMedia } from "../../helpers/match-media";
 import { calendarWorld, sourceRow } from "../../support/calendars";
 import { historyOf } from "../../support/data/continuity";
 import { draftRow, headerOf } from "../../support/data/rows";
+import { corpusText, parserEvents } from "../../support/ics-corpus";
 
 /**
  * WEB-13b §4.2 (Q22 "file imports"; the wireframe's import panels): the row's "Import events", the page's drop zone, the import dialog
@@ -798,5 +799,152 @@ describe("E6: no list or status read loads an import's body", () => {
     expect(w.world.idb.reads.rows.get("draft_commands") ?? 0).toBe(0);
     // Control: the panel and the row did read the drafts' headers.
     expect(w.world.idb.reads.rows.get("drafts") ?? 0).toBeGreaterThan(0);
+  });
+});
+
+/*
+ * Review 15 R12 (revision 14): a component is counted on the content lines the server's parser reads, through EVERY way a file reaches
+ * the dialog (the row's chooser, the drop zone's Browse, a page drop), with the count shown and the text queued exactly as chosen. The
+ * texts and their counts are the pinned parser's corpus (`tests/support/ics-corpus.ts`).
+ */
+describe("review 15 R12: what the parser counts is what is shown, refused and queued", () => {
+  const pressIn = (dialog: HTMLElement, name: string) =>
+    fireEvent.click(present(within(dialog).queryByRole("button", { name })));
+  const summaryOf = (dialog: HTMLElement) =>
+    dialog.querySelector("[data-import-file]")?.textContent ?? "";
+  const commands = (w: World) => w.rows("draft_commands");
+
+  test("R12: a folded calendar header is a calendar: the row's Import queues it, the text unchanged", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    const text = corpusText("header-folded-many");
+    await choose(w, dialog, text, "folded.ics");
+    expect(dialog).not.toHaveTextContent(
+      words.FILE_PROBLEMS.not_calendar as string,
+    );
+    expect(summaryOf(dialog)).toMatch(/^folded\.ics · .+ · 1 event$/);
+    pressIn(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    const body = bodyOf(w, drafts(w)[0]?.local_id as string) as {
+      ics: string;
+    };
+    expect(body.ics).toBe(text);
+  });
+
+  test("R12: 256 components however written are shown as 256 events and queued once by Enter, the text unchanged", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    const text = corpusText("variants-256");
+    expect(parserEvents("variants-256")).toBe(256);
+    await choose(w, dialog, text, "mixed.ics");
+    expect(summaryOf(dialog)).toMatch(/ · 256 events$/);
+    act(() => {
+      (dialog.querySelector("form") as HTMLFormElement).requestSubmit();
+    });
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    expect(bodyOf(w, drafts(w)[0]?.local_id as string)).toMatchObject({
+      ics: text,
+    });
+  });
+
+  test("R12: 257 folded components are refused before anything is stored, by the button and by Enter; an earlier import is untouched", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const first = await openFromRow(w);
+    await choose(w, first, ICS);
+    pressIn(first, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
+    const before = { drafts: drafts(w), commands: commands(w) };
+
+    const dialog = await openFromRow(w);
+    expect(parserEvents("events-folded-257")).toBe(257);
+    await choose(w, dialog, corpusText("events-folded-257"), "over.ics");
+    expect(dialog).toHaveTextContent(
+      words.FILE_PROBLEMS.too_many_events as string,
+    );
+    expect(summaryOf(dialog)).toBe("over.ics");
+    pressIn(dialog, words.IMPORT);
+    await w.settle();
+    act(() => {
+      (dialog.querySelector("form") as HTMLFormElement).requestSubmit();
+    });
+    await w.settle();
+    expect(drafts(w)).toEqual(before.drafts);
+    expect(commands(w)).toEqual(before.commands);
+    expect(w.calls).toEqual([]);
+    expect(screen.queryByRole("dialog")).not.toBeNull();
+  });
+
+  test.each([
+    ["Browse", "events-folded-257", null],
+    ["Browse", "header-folded-tab", 1],
+    ["a page drop", "variants-257", null],
+    ["a page drop", "overrides-folded", 3],
+  ] as const)(
+    "R12: the drop zone's %s checks %s the same way",
+    async (way, name, events) => {
+      const w = await calendarWorld({ cache: [sourceRow()], online: false });
+      await screen.findByText(words.DROP_PROMPT);
+      const zone = present(document.querySelector("[data-import-drop]"));
+      const text = corpusText(name);
+      const file = new File([text], `${name}.ics`, { type: "text/calendar" });
+      await act(async () => {
+        if (way === "Browse")
+          fireEvent.change(present(zone.querySelector('input[type="file"]')), {
+            target: { files: [file] },
+          });
+        else fireEvent.drop(zone, { dataTransfer: { files: [file] } });
+      });
+      await w.settle();
+      const dialog = present(screen.queryByRole("dialog"));
+      await waitFor(() =>
+        expect(dialog.querySelector("[data-import-file]")).not.toBeNull(),
+      );
+      pressIn(dialog, words.IMPORT);
+      await w.settle();
+      if (events === null) {
+        expect(dialog).toHaveTextContent(
+          words.FILE_PROBLEMS.too_many_events as string,
+        );
+        expect(drafts(w)).toEqual([]);
+        expect(commands(w)).toEqual([]);
+      } else {
+        expect(parserEvents(name)).toBe(events);
+        expect(drafts(w)).toHaveLength(1);
+        expect(bodyOf(w, drafts(w)[0]?.local_id as string)).toMatchObject({
+          ics: text,
+        });
+      }
+    },
+  );
+
+  test("R12: a 256-event file still being read when a 257-event folded one replaces it: only the newer is shown, and nothing is stored", async () => {
+    const w = await calendarWorld({ cache: [sourceRow()], online: false });
+    const dialog = await openFromRow(w);
+    const input = present(dialog.querySelector('input[type="file"]'));
+    const held = heldFile(corpusText("events-folded-256"), "held.ics");
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [held.file] } });
+    });
+    await choose(w, dialog, corpusText("variants-257"), "newer.ics");
+    await act(async () => {
+      held.release();
+    });
+    await w.settle();
+    expect(summaryOf(dialog)).toBe("newer.ics");
+    expect(dialog).toHaveTextContent(
+      words.FILE_PROBLEMS.too_many_events as string,
+    );
+    pressIn(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toEqual([]);
+    // Control: the 256-event file chosen again is shown with its count and imported.
+    await choose(w, dialog, corpusText("events-folded-256"), "again.ics");
+    expect(summaryOf(dialog)).toMatch(/^again\.ics · .+ · 256 events$/);
+    pressIn(dialog, words.IMPORT);
+    await w.settle();
+    expect(drafts(w)).toHaveLength(1);
   });
 });

@@ -74,11 +74,13 @@ export const UNIT_13B = [
     file: IMPORT_MODEL,
     tests: [T_IMPORT_MODEL],
     expect: /lower-case component lines are counted/,
+    // Re-anchored in revision 14 (R12 moved recognition onto the parser's content lines): the same defect, a lower-case component
+    // value no longer counted.
     patch: (t) =>
       sub(
         t,
-        '    else if (upper === "BEGIN:VEVENT") events += 1;\n',
-        '    else if (line === "BEGIN:VEVENT") events += 1;\n',
+        "      const component = property.value.toUpperCase();\n",
+        "      const component = property.value;\n",
       ),
   },
   {
