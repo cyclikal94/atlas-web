@@ -28,7 +28,12 @@ import {
   settle,
   useEditingSession,
 } from "../lifetime";
-import { isCurrentMemory, useMemoryRevision } from "../memory";
+import {
+  isCurrentMemory,
+  type PeopleMemory,
+  useMemoryRevision,
+} from "../memory";
+import { attemptVersion, replayFor } from "../model/attempt";
 import {
   baseGuard,
   renameEditRequest,
@@ -52,7 +57,7 @@ import {
   successorFollows,
 } from "../model/snapshot";
 import { charCount } from "../model/values";
-import { sendOnline } from "../online";
+import { replayOnline, sendOnline } from "../online";
 import { Avatar, Banner, PendingBadge, useOutboxSave } from "../parts";
 import { linkageIn, readLinkage, usePersonLinkage } from "../reads";
 
@@ -149,13 +154,23 @@ export function IdentityHeader({
           shown={shown}
           linkage={linkage}
           open={renaming}
+          retained={env.memory.attempts.has(`rename:${person.id}`)}
           onOpen={() => setRenaming(true)}
         />
         <UnlinkEntry
           linkage={linkage}
           name={person.label}
+          retained={unlinkReplay(env.memory, person.id) !== null}
           onOpen={() => {
-            if (linkage.known) setUnlinking(linkage.version);
+            // An uncertain unlink is confirmed again as it was made: on its own version, whatever is read now (review 26, R26.1).
+            const replay = unlinkReplay(env.memory, person.id);
+            const version =
+              replay !== null
+                ? attemptVersion(replay)
+                : linkage.known
+                  ? linkage.version
+                  : null;
+            if (version !== null) setUnlinking(version);
           }}
         />
         <ArchiveEntry shown={shown} />
@@ -289,11 +304,14 @@ function RenameEntry({
   shown,
   linkage,
   open,
+  retained,
   onOpen,
 }: {
   shown: ShownRow;
   linkage: LinkageState;
   open: boolean;
+  /** A rename whose outcome is uncertain is kept: the form stays reachable to try it again, whoever the person is linked to now. */
+  retained: boolean;
   onOpen(): void;
 }) {
   if (open) return null;
@@ -304,7 +322,7 @@ function RenameEntry({
         {copy.RENAME}
       </Button>
     );
-  if (route.kind === "disabled")
+  if (route.kind === "disabled" && !retained)
     return (
       <Button disabled reason={renameDisabled(route.reason, shown.row.label)}>
         {copy.RENAME}
@@ -326,6 +344,22 @@ const renameDisabled = (
     : reason === "unknown"
       ? copy.RENAME_UNKNOWN
       : copy.RENAME_CANNOT_EDIT;
+
+/**
+ * The uncertain rename a Save of `name` resolves (review 26, R26.2): the kept attempt, when `name` is what it sent. It is sent again as it
+ * was (its key, its body, its version and endpoint) before anything about the person as read now is asked; only a changed name is a new
+ * rename, judged on the person and linkage read now.
+ */
+const renameReplay = (memory: PeopleMemory, personId: string, name: string) =>
+  replayFor(memory.attempts.get(`rename:${personId}`) ?? null, (version) =>
+    renameProfileBody({ personId, version, name: name.trim() }),
+  );
+
+/** The uncertain unlink of the person (review 26, R26.1): resolved with its own request, never judged as a new unlink. */
+const unlinkReplay = (memory: PeopleMemory, personId: string) =>
+  replayFor(memory.attempts.get(`unlink:${personId}`) ?? null, (version) =>
+    unlinkBody({ personId, version }),
+  );
 
 function failureMessage(failure: PeopleFailure): string | null {
   switch (failure.kind) {
@@ -490,7 +524,49 @@ function RenameForm({
       settle(admission);
     }
   };
+  /** What an online rename's answer does to the form: success ends the session at `ticket`; anything else is shown. */
+  const answered = (
+    result: Awaited<ReturnType<typeof env.api.peopleCommand>>,
+    version: number,
+    ticket: number,
+  ) => {
+    if (result.ok) {
+      env.memory.drafts.set(`renaming:${person.id}`, version);
+      readLinkage(env, person.id, { force: true });
+      announcer.announce(copy.RENAMED, "polite");
+      ended(ticket);
+      return;
+    }
+    if (result.kind === "forbidden")
+      readLinkage(env, person.id, { force: true });
+    const text = failureMessage(result);
+    if (text !== null)
+      tell({
+        message: {
+          text,
+          ...("requestId" in result && result.requestId
+            ? { requestId: result.requestId }
+            : {}),
+          reload: result.kind === "conflict",
+        },
+      });
+  };
   const run = async () => {
+    // The uncertain rename of this name is resolved first, exactly as it was sent (review 26, R26.2): not judged on the linkage, the
+    // person's version or the form's binding as read now, and never re-bound (a sync of its own commit would otherwise make it "stale").
+    const replay = renameReplay(env.memory, person.id, name);
+    if (replay !== null) {
+      setMessage(null);
+      const ticket = revision;
+      const result = await replayOnline(
+        env,
+        `rename:${person.id}`,
+        replay,
+        (attempt) => env.api.peopleCommand(attempt),
+      );
+      answered(result, attemptVersion(replay) as number, ticket);
+      return;
+    }
     // Who controls the name is judged at the press (review 25): a press of a render whose linkage is no longer current sends nothing; the
     // form, its typed name kept, shows why it cannot save now.
     if (
@@ -527,26 +603,7 @@ function RenameForm({
         body,
         (attempt) => env.api.peopleCommand(attempt),
       );
-      if (result.ok) {
-        env.memory.drafts.set(`renaming:${person.id}`, version);
-        readLinkage(env, person.id, { force: true });
-        announcer.announce(copy.RENAMED, "polite");
-        ended(ticket);
-        return;
-      }
-      if (result.kind === "forbidden")
-        readLinkage(env, person.id, { force: true });
-      const text = failureMessage(result);
-      if (text !== null)
-        tell({
-          message: {
-            text,
-            ...("requestId" in result && result.requestId
-              ? { requestId: result.requestId }
-              : {}),
-            reload: result.kind === "conflict",
-          },
-        });
+      answered(result, version, ticket);
       return;
     }
     if (route.kind !== "edit" || snapshot.policyVersion === null) {
@@ -612,15 +669,21 @@ function RenameForm({
   };
 
   const offlineBlocked = route.kind === "rename_profile" && !env.online;
+  // A Save that tries the uncertain rename again needs only the connection: not the linkage or version read now (review 26).
+  const replaying = renameReplay(env.memory, person.id, name) !== null;
   const reason = !env.writable
     ? copy.READ_ONLY_COMPAT
     : saving
       ? copy.SAVING
-      : route.kind === "disabled"
-        ? renameDisabled(route.reason, person.label)
-        : offlineBlocked
-          ? copy.NEEDS_CONNECTION
-          : null;
+      : replaying
+        ? env.online
+          ? null
+          : copy.NEEDS_CONNECTION
+        : route.kind === "disabled"
+          ? renameDisabled(route.reason, person.label)
+          : offlineBlocked
+            ? copy.NEEDS_CONNECTION
+            : null;
   return (
     <form
       data-rename-form=""
@@ -686,14 +749,20 @@ function RenameForm({
 function UnlinkEntry({
   linkage,
   name,
+  retained,
   onOpen,
 }: {
   linkage: LinkageState;
   name: string;
+  /**
+   * An unlink whose outcome is uncertain is kept (review 26, R26.1): it stays reachable, to be tried again as it was, even when the linkage
+   * read now offers no new unlink (its own commit, read back, says "not linked"; a remount closed its confirmation).
+   */
+  retained: boolean;
   onOpen(): void;
 }) {
   const env = usePeopleEnv();
-  const offer = unlinkOffer(linkage);
+  const offer = retained ? { kind: "enabled" as const } : unlinkOffer(linkage);
   if (offer.kind === "absent") return null;
   if (offer.kind === "disabled")
     return (
@@ -776,25 +845,39 @@ function UnlinkDialog({
       mounted.current = false;
     };
   }, []);
+  // The uncertain unlink of the person, kept: this confirmation tries IT again (review 26, R26.1), and says so when opened on it.
+  const replaying = unlinkReplay(env.memory, personId) !== null;
   const [message, setMessage] = useState<{
     text: string;
     requestId?: string;
-  } | null>(null);
+  } | null>(() => (replaying ? { text: copy.UNCERTAIN } : null));
   const confirm = async () => {
-    // Judged at the press, on what the page knows NOW (a press of an earlier render never unlinks another linkage or version).
-    if (unlinkBlocked(linkageIn(env, personId, synced), bound, name) !== null)
+    // An uncertain unlink is resolved first, with its own key and body: what is read since (its own commit read back as "not linked", a
+    // later version) is no reason to refuse it, and is never adopted into it (review 26, R26.1).
+    const replay = unlinkReplay(env.memory, personId);
+    // A NEW unlink is judged at the press, on what the page knows NOW (a press of an earlier render never unlinks another linkage or
+    // version).
+    if (
+      replay === null &&
+      unlinkBlocked(linkageIn(env, personId, synced), bound, name) !== null
+    )
       return;
     const admission = admit(env.memory, [target], env.newId);
     if (admission === null) return;
     setMessage(null);
     let result: Awaited<ReturnType<typeof env.api.peopleCommand>>;
     try {
-      result = await sendOnline(
-        env,
-        `unlink:${personId}`,
-        unlinkBody({ personId, version: bound }),
-        (attempt) => env.api.peopleCommand(attempt),
-      );
+      const send = (attempt: Parameters<typeof env.api.peopleCommand>[0]) =>
+        env.api.peopleCommand(attempt);
+      result =
+        replay !== null
+          ? await replayOnline(env, target, replay, send)
+          : await sendOnline(
+              env,
+              target,
+              unlinkBody({ personId, version: bound }),
+              send,
+            );
     } finally {
       settle(admission);
     }
@@ -821,7 +904,9 @@ function UnlinkDialog({
       ? copy.NEEDS_CONNECTION
       : sending
         ? copy.SAVING
-        : unlinkBlocked(linkage, bound, name);
+        : replaying
+          ? null
+          : unlinkBlocked(linkage, bound, name);
   return (
     <Dialog
       open

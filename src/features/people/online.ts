@@ -21,17 +21,46 @@ export const sentSomething = (result: {
  */
 const NOT_SENT_DELAYS_MS: readonly number[] = [50, 100, 200, 400, 800, 1_000];
 
-export async function sendOnline<T>(
+type Send<T> = (attempt: Attempt) => Promise<PeopleResult<T>>;
+type Sleep = (ms: number) => Promise<void>;
+const wait: Sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const sendOnline = <T>(
   env: PeopleEnv,
   key: string,
   body: unknown,
-  send: (attempt: Attempt) => Promise<PeopleResult<T>>,
-  sleep: (ms: number) => Promise<void> = (ms) =>
-    new Promise((resolve) => setTimeout(resolve, ms)),
+  send: Send<T>,
+  sleep: Sleep = wait,
+): Promise<PeopleResult<T>> =>
+  sendAttempt(
+    env,
+    key,
+    attemptFor(env.memory.attempts.get(key) ?? null, body, env.newId),
+    send,
+    sleep,
+  );
+
+/**
+ * Sends the retained uncertain attempt again EXACTLY (review 26): its key and its body, never a new key or a body built from what is read
+ * now (`replayFor` chose it). Its outcome settles it like any other: a receipt or a refusal ends it, uncertainty keeps it.
+ */
+export const replayOnline = <T>(
+  env: PeopleEnv,
+  key: string,
+  attempt: Attempt,
+  send: Send<T>,
+  sleep: Sleep = wait,
+): Promise<PeopleResult<T>> => sendAttempt(env, key, attempt, send, sleep);
+
+async function sendAttempt<T>(
+  env: PeopleEnv,
+  key: string,
+  attempt: Attempt,
+  send: Send<T>,
+  sleep: Sleep,
 ): Promise<PeopleResult<T>> {
   const memory = env.memory;
   const previous = memory.attempts.get(key) ?? null;
-  const attempt = attemptFor(previous, body, env.newId);
   let result: PeopleResult<T>;
   for (let tries = 0; ; tries += 1) {
     result = await send(attempt);
@@ -39,25 +68,30 @@ export async function sendOnline<T>(
     const delay = NOT_SENT_DELAYS_MS[tries];
     if (delay === undefined || !isCurrentMemory(memory)) break;
     await sleep(delay);
+    // Nothing more is sent for an identity that ended during the wait (review 26, DA26-08).
+    if (!isCurrentMemory(memory)) break;
   }
   if (!isCurrentMemory(memory)) return result;
   // A command was sent (whatever its answer said): the summaries shown are read again (finding 8: a receipt invalidates them).
   if (sentSomething(result)) memory.invalidateSummaries();
-  const kept = afterOutcome(
-    attempt,
-    previous,
-    result.ok
-      ? "ok"
-      : result.kind === "uncertain"
-        ? "uncertain"
-        : result.kind === "not_sent" ||
-            result.kind === "offline" ||
-            result.kind === "closed"
-          ? "not_sent"
-          : "refused",
-  );
-  if (kept === null) memory.attempts.delete(key);
-  else memory.attempts.set(key, kept);
+  // Only while the target's attempt is still the one this send began on: a later send's outcome is never overwritten by this one's.
+  if ((memory.attempts.get(key) ?? null) === previous) {
+    const kept = afterOutcome(
+      attempt,
+      previous,
+      result.ok
+        ? "ok"
+        : result.kind === "uncertain"
+          ? "uncertain"
+          : result.kind === "not_sent" ||
+              result.kind === "offline" ||
+              result.kind === "closed"
+            ? "not_sent"
+            : "refused",
+    );
+    if (kept === null) memory.attempts.delete(key);
+    else memory.attempts.set(key, kept);
+  }
   memory.touch();
   return result;
 }

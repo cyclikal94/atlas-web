@@ -21,6 +21,35 @@ export const attemptFor = (
   newKey: () => string,
 ): Attempt => nextAttempt(uncertain, body, newKey);
 
+/** The `expected_version` the retained attempt's command was made against (null when its body has none). */
+export function attemptVersion(attempt: Attempt): number | null {
+  try {
+    const version = (
+      JSON.parse(attempt.body) as { command?: { expected_version?: unknown } }
+    ).command?.expected_version;
+    return typeof version === "number" ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The retained uncertain attempt a press resolves (review 26, R26.1/R26.2), or null: it is resolved FIRST, before anything about the person
+ * as read now is asked of a new command. It is the attempt when what was submitted is unchanged: `intent` made at the attempt's OWN
+ * version is byte-identical to its body. Then it is sent again exactly (its key and body; a committed one answers with its receipt).
+ * Nothing read since (a newer version, another linkage, a synced name) changes what it was, and nothing is rebuilt from it.
+ */
+export function replayFor(
+  retained: Attempt | null,
+  intent: (version: number) => unknown,
+): Attempt | null {
+  if (retained === null) return null;
+  const version = attemptVersion(retained);
+  return version !== null && canonicalBody(intent(version)) === retained.body
+    ? retained
+    : null;
+}
+
 /** What remains uncertain after an outcome: kept after `uncertain` or a send that never happened, cleared by a definite answer. */
 export function afterOutcome(
   sent: Attempt,

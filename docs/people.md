@@ -95,7 +95,7 @@ reopens it with its draft), and `/settings/archived`.
 - **D-11a-5** Rename: known self → `rename_profile` (online, 1–200); known unlinked → the content `edit` (queueable, 1–300); known other →
   disabled ("{name} owns this name"); unknown → disabled ("Needs a connection to check who controls this name").
 - **D-11a-6** Unlink: enabled for the linked self only (online, one attempt per body, a confirmation); disabled with the drawn reason for
-  another account's profile; absent for an unlinked person.
+  another account's profile; absent for an unlinked person. An unlink whose outcome is uncertain is the exception (D-11a-32).
 - **D-11a-7** A new field's audience: "Use my defaults — {resolved}" (queued, captures `field`), "Only you" (queued, explicit empty policy),
   "Home · can view" (online, `/task-access-commands`; disabled offline or without a primary household). "Choose people…" is offered after
   saving. The PPL-6 note appears when the person is known to be linked to another account. It describes the policy the save leaves
@@ -394,6 +394,29 @@ reopens it with its draft), and `/settings/archived`.
   Visibility is not write authority: every write keeps its own guards. Tests: `parent-read-coherence.test.tsx` (every surface, both orders,
   every rendered state recorded), `tests/data/child-reads.test.ts` (the production plans and page commit), `world-child-reads.test.tsx` (the
   double against the plans), `tests/data/hooks.test.tsx`, E-P40 (two real pages).
+- **D-11a-32** (review 26 of 1 November 2026, R26.1/R26.2, and its design assessment; §4.7, A10/A17) An online Rename or Unlink whose
+  outcome is UNCERTAIN is resolved with its own request before anything about the person as read now is asked of a new command. What the
+  page learns afterwards (its own commit read back as "Not linked to an account", a later version, another linkage, the synced new name)
+  is not evidence of its outcome, and is never adopted into it:
+  - the kept attempt (`memory.attempts`, `rename:<id>` / `unlink:<id>`) is chosen by what was SUBMITTED, made at the attempt's OWN version
+    (`replayFor`): any unlink of the person, or a rename of exactly the same name (surrounding spaces ignored, as when it was sent). It is
+    sent again EXACTLY (`replayOnline`: its key and byte-identical body, the online endpoint), never with a new key, never rebuilt from the
+    person as read now, never through the queued content edit of an unlinked person;
+  - the confirmation's Unlink and the form's Save need only the connection, compatibility and single admission for it; the linkage, the
+    version and the form's binding read now are not asked (`unlinkBlocked`, the rename route and `stillBound` judge NEW commands only);
+  - it stays reachable after its dialog or form closed (as after a remount): the header still offers Unlink and Rename while it is kept,
+    whatever the linkage read now offers; a confirmation opened on it is bound to its version and says it is uncertain;
+  - its answer settles it as any other: a receipt ends it (success); a refusal ends it (shown, the typed name kept), and what follows is a
+    NEW command judged on the person read now (the existing conflict re-binding and stale-rename rules); uncertainty, offline, closed and
+    a not_sent kept it unchanged;
+  - a changed name is a new rename (bound again, then a new key); a later send's attempt is never overwritten by an earlier one's late
+    outcome, and a quiet not_sent resend stops when the identity ended during the wait.
+  The attempt lives in the page's memory only: a reload, a crash or another account forgets it (nothing is replayed or guessed; the
+  person is read again), and another tab has its own. The backend answers a matching key and body with the original receipt before any
+  new-command check. A shared field create keeps the existing one-attempt-per-body rule: its Home policy is the one the editor shows, so a
+  changed primary household is a new body (a second create of the same id is refused by the server, never made twice). Tests:
+  `uncertain-replay.test.tsx` (every arrival order of detail, summary and sync before the retry; later states; every answer; edits;
+  offline; reopening), `replay.test.ts`.
 
 What is shown of unsent changes: a queued draft has no overlay until it is claimed, so the screens fold the bodies of the outstanding drafts
 (`useOutstandingCreates`) over the cache (`model/project.ts`): a create is projected and marked "Not sent yet"; a later rename, field update or

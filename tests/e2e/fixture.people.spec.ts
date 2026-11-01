@@ -69,6 +69,8 @@ import {
  * queued, across another page and the page closing (R21.1, A3, A7, A8; adapted from the reviewer's Chromium probe).
  * Review 25 (30 October 2026): E-P48 a person summary's later version withdraws the linkage answer from the header and the open field
  * editor until that version is read (R25.1, A5, A9, A15; the reviewer's native probe, maintained).
+ * Review 26 (1 November 2026): E-P49 an uncertain Unlink or Rename is tried again with its original key and body after its own commit is
+ * read back or synced, and stays reachable after its confirmation closed (R26.1/R26.2, A10, A17; the reviewer's native probes, maintained).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -4624,5 +4626,187 @@ test.describe("E-P48: a person summary's later version withdraws the linkage ans
         requests: served.log,
         management: served.management,
       });
+    });
+});
+
+test.describe("E-P49: an uncertain Unlink or Rename is tried again as it was sent, whatever is read since (A10, A17; review 26, R26.1/R26.2)", () => {
+  // Review 26's native reproductions, maintained. The first command's connection is reset; with `committed`, the fake server applied it
+  // first. Each retry must send the byte-identical body under the same Idempotency-Key, whatever the page has learnt in between.
+  const UNCERTAIN =
+    "We couldn't confirm this was saved. Try again — it won't be applied twice.";
+  type Sent = { key: string | null; body: string | null };
+  async function lossyCommands(
+    context: BrowserContext,
+    sent: Sent[],
+    onFirst: () => void,
+    onLater: () => void,
+  ) {
+    await context.route(`**${API}/people-commands`, async (route) => {
+      sent.push({
+        key: route.request().headers()["idempotency-key"] ?? null,
+        body: route.request().postData(),
+      });
+      if (sent.length === 1) {
+        onFirst();
+        await route.abort("connectionreset");
+      } else {
+        onLater();
+        await route.fulfill(json(200, { revision: 2, person_id: P }));
+      }
+    });
+  }
+
+  for (const committed of [true, false])
+    test(`unlink: ${committed ? "its commit read back as not linked — Try again sends the original" : "control: the link unchanged — Try again sends the original"}`, async ({
+      context,
+    }, info) => {
+      const { page, served } = await setup(
+        context,
+        `/people/${P}`,
+        [personP(P, "Kieran")],
+        { linked: { [P]: ME } },
+      );
+      const unlinked = () =>
+        served.people.set(P, {
+          person: personP(P, "Kieran", { version: 2 }),
+          linked: null,
+        });
+      const sent: Sent[] = [];
+      await lossyCommands(
+        context,
+        sent,
+        () => {
+          if (committed) unlinked();
+        },
+        unlinked,
+      );
+      const header = page.locator("[data-identity-header]");
+      await expect(header.locator("[data-linkage]")).toHaveAttribute(
+        "data-linkage",
+        "self",
+      );
+      await header
+        .getByRole("button", { name: "Unlink account", exact: true })
+        .click();
+      const dialog = page.getByRole("dialog", {
+        name: "Unlink your account from this profile?",
+      });
+      await dialog
+        .getByRole("button", { name: "Unlink account", exact: true })
+        .click();
+      await expect(dialog).toContainText(UNCERTAIN);
+      await expect(header.locator("[data-linkage]")).toHaveAttribute(
+        "data-linkage",
+        committed ? "unlinked" : "self",
+      );
+      expect(sent).toHaveLength(1);
+      expect(sent[0]?.key).toBeTruthy();
+      expect(JSON.parse(sent[0]?.body ?? "{}").command).toEqual({
+        kind: "unlink",
+        person_id: P,
+        expected_version: 1,
+      });
+      if (committed) {
+        // Closed (as a remount would close it): the header still offers it, and the confirmation says it is uncertain.
+        await dialog
+          .getByRole("button", { name: "Cancel", exact: true })
+          .click();
+        await expect(dialog).toHaveCount(0);
+        const entry = header.getByRole("button", {
+          name: "Unlink account",
+          exact: true,
+        });
+        await expect(entry).toBeEnabled();
+        await entry.click();
+        await expect(dialog).toContainText(UNCERTAIN);
+      }
+      const retry = dialog.getByRole("button", {
+        name: "Unlink account",
+        exact: true,
+      });
+      await expect(retry).toBeEnabled();
+      await retry.click();
+      await expect.poll(() => sent.length).toBe(2);
+      expect(sent[1]).toEqual(sent[0]);
+      await expect(dialog).toHaveCount(0);
+      expect(served.management).toHaveLength(0);
+      expect(served.accessCommands).toHaveLength(0);
+      recordEvidence(info, "e-p49-unlink", { committed, sent });
+    });
+
+  for (const synced of [true, false])
+    test(`rename: ${synced ? "its commit synced — the unchanged Save sends the original" : "control: the sync lags — the unchanged Save sends the original"}`, async ({
+      context,
+    }, info) => {
+      const { page, served, net } = await setup(
+        context,
+        `/people/${P}`,
+        [personP(P, "Kieran")],
+        { linked: { [P]: ME } },
+      );
+      const sent: Sent[] = [];
+      await lossyCommands(
+        context,
+        sent,
+        () => {},
+        () => {},
+      );
+      const header = page.locator("[data-identity-header]");
+      await expect(header.locator("[data-linkage]")).toHaveAttribute(
+        "data-linkage",
+        "self",
+      );
+      await header.getByRole("button", { name: "Rename", exact: true }).click();
+      await header
+        .getByRole("textbox", { name: "Name", exact: true })
+        .fill("Kieran L.");
+      await header.getByRole("button", { name: "Save", exact: true }).click();
+      await expect(header).toContainText(UNCERTAIN);
+      if (synced) {
+        const renamed = personP(P, "Kieran L.", { version: 2 });
+        served.people.set(P, { person: renamed, linked: ME });
+        await publishChanges(
+          page,
+          net,
+          [{ kind: "upsert", resource: renamed }],
+          {
+            start: false,
+            retake: true,
+          },
+        );
+        await expect
+          .poll(
+            async () =>
+              (
+                (await page.evaluate(
+                  (account) => window.__atlasData?.rows(account, "cache"),
+                  ME,
+                )) as Array<{ id: string; version: number }>
+              ).find((row) => row.id === P)?.version,
+          )
+          .toBe(2);
+        await expect(
+          header.getByRole("heading", { name: "Kieran L.", exact: true }),
+        ).toBeVisible();
+      }
+      expect(sent).toHaveLength(1);
+      expect(JSON.parse(sent[0]?.body ?? "{}").command).toEqual({
+        kind: "rename_profile",
+        person_id: P,
+        expected_version: 1,
+        name: "Kieran L.",
+      });
+      await expect(
+        header.getByRole("textbox", { name: "Name", exact: true }),
+      ).toHaveValue("Kieran L.");
+      await header.getByRole("button", { name: "Save", exact: true }).click();
+      await expect.poll(() => sent.length).toBe(2);
+      expect(sent[1]).toEqual(sent[0]);
+      await expect(header.locator("[data-rename-form]")).toHaveCount(0);
+      await expect(header).not.toContainText(
+        "This person changed since you started",
+      );
+      expect(await draftsOf(page)).toEqual([]);
+      recordEvidence(info, "e-p49-rename", { synced, sent });
     });
 });

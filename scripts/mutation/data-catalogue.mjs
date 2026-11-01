@@ -27192,7 +27192,8 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    if (unlinkBlocked(linkageIn(env, personId, synced), bound, name) !== null)\n      return;\n",
+        // Re-anchored in revision 26 (a NEW unlink is judged at the press; a kept uncertain one is not); same mutation: no judging at the press.
+        "    if (\n      replay === null &&\n      unlinkBlocked(linkageIn(env, personId, synced), bound, name) !== null\n    )\n      return;\n",
         "",
       ),
   },
@@ -27237,8 +27238,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        '      : route.kind === "disabled"\n        ? renameDisabled(route.reason, person.label)\n        : offlineBlocked\n',
-        "      : offlineBlocked\n",
+        // Re-anchored in revision 26 (a kept uncertain rename's Save comes first); same mutation: the disabled route's reason is dropped.
+        '        : route.kind === "disabled"\n          ? renameDisabled(route.reason, person.label)\n          : offlineBlocked\n',
+        "        : offlineBlocked\n",
       ),
   },
   {
@@ -27257,6 +27259,248 @@ export const UNIT = [
       ),
   },
 
+  {
+    id: "MU-2938",
+    title:
+      "WEB-11a R26: the unlink confirmation's press never chooses the kept uncertain attempt: it is judged as a new unlink and refused",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since committed, then detail before Try again/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const replay = unlinkReplay(env.memory, personId);\n",
+        "    const replay = null;\n",
+      ),
+  },
+  {
+    id: "MU-2939",
+    title:
+      "WEB-11a R26: the unlink confirmation's button ignores the kept uncertain attempt: disabled once its commit is read back",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since committed, then detail before Try again/,
+    patch: (t) =>
+      sub(
+        t,
+        "        : replaying\n          ? null\n          : unlinkBlocked(linkage, bound, name);\n",
+        "        : unlinkBlocked(linkage, bound, name);\n",
+      ),
+  },
+  {
+    id: "MU-2940",
+    title: "WEB-11a R26: the exact replay is sent under a new key",
+    file: "src/features/people/online.ts",
+    tests: [
+      "tests/features/people/replay.test.ts",
+      "tests/features/people/uncertain-replay.test.tsx",
+    ],
+    expect: /replayOnline sends the kept attempt exactly/,
+    patch: (t) =>
+      sub(
+        t,
+        "): Promise<PeopleResult<T>> => sendAttempt(env, key, attempt, send, sleep);\n",
+        "): Promise<PeopleResult<T>> =>\n  sendAttempt(env, key, { ...attempt, key: env.newId() }, send, sleep);\n",
+      ),
+  },
+  {
+    id: "MU-2941",
+    title:
+      "WEB-11a R26: the header is told nothing of the kept uncertain unlink: it is unreachable once the confirmation is closed",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty and the commit read back/,
+    patch: (t) =>
+      sub(
+        t,
+        "          retained={unlinkReplay(env.memory, person.id) !== null}\n",
+        "          retained={false}\n",
+      ),
+  },
+  {
+    id: "MU-2942",
+    title:
+      "WEB-11a R26: the reopened confirmation binds to the linkage read now, not to the kept attempt's own version",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty, then the linkage cannot be read/,
+    patch: (t) =>
+      sub(
+        t,
+        "              replay !== null\n                ? attemptVersion(replay)\n                : linkage.known\n                  ? linkage.version\n                  : null;\n",
+        "              linkage.known\n                  ? linkage.version\n                  : null;\n",
+      ),
+  },
+  {
+    id: "MU-2943",
+    title:
+      "WEB-11a R26: a confirmation opened on the kept uncertain unlink does not say it is uncertain",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty and the commit read back/,
+    patch: (t) =>
+      sub(
+        t,
+        "  } | null>(() => (replaying ? { text: copy.UNCERTAIN } : null));\n",
+        "  } | null>(null);\n",
+      ),
+  },
+  {
+    id: "MU-2944",
+    title:
+      "WEB-11a R26: the Unlink entry ignores the kept uncertain unlink (offered only as the linkage read now allows)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since closed after the uncertainty and the commit read back/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const offer = retained ? { kind: "enabled" as const } : unlinkOffer(linkage);\n',
+        "  const offer = unlinkOffer(linkage);\n",
+      ),
+  },
+  {
+    id: "MU-2945",
+    title:
+      "WEB-11a R26: the rename form's Save never chooses the kept uncertain rename: it is judged and re-bound as a new rename",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again committed, then sync before Save/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const replay = renameReplay(env.memory, person.id, name);\n    if (replay !== null) {\n",
+        "    const replay = null;\n    if (replay !== null) {\n",
+      ),
+  },
+  {
+    id: "MU-2946",
+    title:
+      "WEB-11a R26: the rename form's Save ignores the kept uncertain rename: disabled by the linkage read now",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again committed, then linked to another account: the unchanged Save sends the original online rename only/,
+    patch: (t) =>
+      sub(
+        t,
+        '      : replaying\n        ? env.online\n          ? null\n          : copy.NEEDS_CONNECTION\n        : route.kind === "disabled"\n',
+        '      : route.kind === "disabled"\n',
+      ),
+  },
+  {
+    id: "MU-2947",
+    title:
+      "WEB-11a R26: the kept rename is matched on the untrimmed name (what was sent was trimmed)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again the same name typed again \(changed and back, with spaces around it\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    renameProfileBody({ personId, version, name: name.trim() }),\n",
+        "    renameProfileBody({ personId, version, name }),\n",
+      ),
+  },
+  {
+    id: "MU-2948",
+    title: "WEB-11a R26: any kept attempt is replayed, whatever was submitted",
+    file: "src/features/people/model/attempt.ts",
+    tests: [
+      "tests/features/people/replay.test.ts",
+      "tests/features/people/uncertain-replay.test.tsx",
+    ],
+    expect:
+      /replayFor a changed name, another person or another command is not the kept attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return version !== null && canonicalBody(intent(version)) === retained.body\n    ? retained\n    : null;\n",
+        "  return version !== null ? retained : null;\n",
+      ),
+  },
+  {
+    id: "MU-2949",
+    title:
+      "WEB-11a R26: the Rename entry ignores the kept uncertain rename (disabled as the linkage read now says)",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again cancelled after the uncertainty, then linked to another account/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (route.kind === "disabled" && !retained)\n',
+        '  if (route.kind === "disabled")\n',
+      ),
+  },
+  {
+    id: "MU-2950",
+    title:
+      "WEB-11a R26: an earlier send's late outcome overwrites the attempt a later send made",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/replay.test.ts"],
+    expect:
+      /a send never overwrites a later attempt of its target an earlier send's late outcome leaves the attempt a later send made/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if ((memory.attempts.get(key) ?? null) === previous) {\n",
+        "  if (true) {\n",
+      ),
+  },
+  {
+    id: "MU-2951",
+    title:
+      "WEB-11a R26: a not_sent is asked again after the identity ended during the wait",
+    file: "src/features/people/online.ts",
+    tests: ["tests/features/people/replay.test.ts"],
+    expect: /replayOnline the identity changes during a not_sent wait/,
+    patch: (t) =>
+      sub(
+        t,
+        "    await sleep(delay);\n    // Nothing more is sent for an identity that ended during the wait (review 26, DA26-08).\n    if (!isCurrentMemory(memory)) break;\n",
+        "    await sleep(delay);\n",
+      ),
+  },
+  {
+    id: "MU-2952",
+    title:
+      "WEB-11a R26: the unlink retry adopts the linkage version read now instead of sending the kept attempt",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.1: an uncertain unlink is tried again as it was sent, whatever is read since not committed, then relinked to the viewer at a later version/,
+    patch: (t) =>
+      sub(
+        t,
+        "          ? await replayOnline(env, target, replay, send)\n",
+        "          ? await sendOnline(\n              env,\n              target,\n              unlinkBody({\n                personId,\n                version: linkage.known ? linkage.version : bound,\n              }),\n              send,\n            )\n",
+      ),
+  },
+  {
+    id: "MU-2953",
+    title:
+      "WEB-11a R26: the rename retry is rebuilt from the person as read now instead of sending the kept attempt",
+    file: "src/features/people/detail/IdentityHeader.tsx",
+    tests: ["tests/features/people/uncertain-replay.test.tsx"],
+    expect:
+      /R26\.2: an unchanged uncertain rename is tried again as it was sent, before the form is judged or bound again committed, then sync before Save/,
+    patch: (t) =>
+      sub(
+        t,
+        "      const result = await replayOnline(\n        env,\n        `rename:${person.id}`,\n        replay,\n        (attempt) => env.api.peopleCommand(attempt),\n      );\n",
+        "      const result = await sendOnline(\n        env,\n        `rename:${person.id}`,\n        renameProfileBody({\n          personId: person.id,\n          version: person.version,\n          name: name.trim(),\n        }),\n        (attempt) => env.api.peopleCommand(attempt),\n      );\n",
+      ),
+  },
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
 ];
