@@ -1,9 +1,14 @@
 import type { BrowserContext, Page, TestInfo } from "@playwright/test";
+import { PROOF_SCHEMA } from "../../scripts/integration/diagnostic-evidence.mjs";
 import {
   reachedClient,
   segmentedProblems,
 } from "../../scripts/integration/pair-attempts.mjs";
-import { PAIR_SELECTION } from "../../scripts/integration/pair-selection.mjs";
+import {
+  DIAGNOSTIC_SELECTION,
+  PAIR_SELECTION,
+  selectionIdentity,
+} from "../../scripts/integration/pair-selection.mjs";
 import {
   BACKEND,
   expect,
@@ -23,6 +28,8 @@ import {
   type ChainModel,
   captureTrace,
   caseRow,
+  DIAGNOSTIC_RECEIPT,
+  diagnostic,
   drivePieces,
   endInterval,
   headOf,
@@ -33,8 +40,10 @@ import {
   observe,
   oracle,
   PAIR_BACKEND,
+  type Probe,
   pairPage,
   preGrant,
+  probeSync,
   RELEASED_VERSION,
   rawSignInAs,
   rawSyncDirect,
@@ -47,13 +56,18 @@ import {
   seedSentinel,
   seedWReal,
   seen,
+  sessionProbe,
+  sha256,
   signInAs,
   stored,
   syncRecords,
   type TapRecord,
   tap,
+  tokenHeader,
   until,
+  untilGated,
   type Writer,
+  writeProof,
   writerAccount,
   writerFor,
 } from "./support";
@@ -78,8 +92,13 @@ import {
  * interval record keeps the altered answer apart from the server's. The final cache is checked against what the writer wrote (never the
  * trace), and every interval record is validated (scripts/integration/pair-evidence.mjs) before the case asserts anything else.
  *
- * Not here: real expiry and pruning (no bounded control on the approved executable: pair-matrix.mjs UNSUPPORTED, owner named), a retired own
- * device and the composed Keep/Delete lifecycle (WEB-09d), device memory, tuning (the 150-sample sweep is a separate obligation).
+ * Revision 26 (R26-DIAG): REAL expiry (PAIR-X0) and REAL pruning (PAIR-X2) run only against the approved DIAGNOSTIC executable
+ * (`--backend diagnostic`; pair-selection.mjs DIAGNOSTIC_SELECTION), each in its own fresh fixture attempt, through its private stdin
+ * controls (the runner's bridge: support.ts `diagnostic`). Nothing is injected: the 410 is the server's, caused by the sync clock (X0) or
+ * the real collector (X2), and each case writes a causal proof the runner checks against the attempt's transcript.
+ *
+ * Not here: a retired own device and the composed Keep/Delete lifecycle (WEB-09d), device memory, tuning (the 150-sample sweep is a
+ * separate obligation).
  */
 test.describe.configure({ mode: "serial" });
 test.beforeEach(({ browserName: _b }, info) => {
@@ -241,6 +260,20 @@ test("PAIR-P0: the backend is the one selected (its /health version; whether it 
     expect(SELECTION_SHA256).toBe(PAIR_SELECTION.manifest.sha256);
     expect(bounded.status, "the development backend accepts max_changes").toBe(
       200,
+    );
+  } else if (PAIR_BACKEND === "diagnostic") {
+    // Revision 26: the approved diagnostic executable, its own receipt, and its private controls answering for THIS attempt.
+    expect(health.api_version).toBe(DIAGNOSTIC_SELECTION.backend.apiVersion);
+    expect(API_VERSION).toBe(DIAGNOSTIC_SELECTION.backend.apiVersion);
+    expect(SELECTION_SHA256).toBe(selectionIdentity());
+    expect(DIAGNOSTIC_RECEIPT?.features).toEqual(DIAGNOSTIC_SELECTION.features);
+    expect(bounded.status, "the diagnostic backend accepts max_changes").toBe(
+      200,
+    );
+    const state = await diagnostic("inspect");
+    expect(state.attempt).toBe(DIAGNOSTIC_RECEIPT?.attempt);
+    expect(state.result.sync_now, "the sync clock is at its start").toBe(
+      DIAGNOSTIC_RECEIPT?.sync_start,
     );
   } else {
     expect(
@@ -917,6 +950,374 @@ test("PAIR-X1: TAP-INJECTED 410 resync_required in place of piece 2 (client-only
   expect(answer?.delivered?.status, "the client was answered 410").toBe(410);
   const done = await untilRecovered(o, o.page);
   await finishRecovered(o, done, { injected_seq: answer?.seq });
+});
+
+// ---- REAL expiry and REAL pruning (revision 26, R26-DIAG: the diagnostic executable only) ---------------------------------------------
+const receiptOf = () => {
+  if (!DIAGNOSTIC_RECEIPT) throw new Error("no diagnostic receipt");
+  return DIAGNOSTIC_RECEIPT;
+};
+/** The held piece the X0/X2 schedule acts on: the target's piece 2, the valid next piece and not the last (a continuation follows it). */
+const isScheduledPiece = (
+  piece: { index: number; next: boolean; last: boolean } | null,
+) => piece?.index === 2 && piece.next && !piece.last;
+const floorIn = (
+  state: { accounts: Array<{ id: string; sync_floor: number }> },
+  account: string,
+): number | undefined =>
+  state.accounts.find((a) => a.id === account)?.sync_floor;
+const stageOf = (s: Stored) =>
+  s.delta_stage
+    ? { revision: s.delta_stage.revision, next_index: s.delta_stage.next_index }
+    : null;
+/**
+ * The schedule both causal cases share at their chosen piece: the request gate closes BEFORE the piece is released, so the continuation
+ * request the client then makes waits at the tap, unforwarded; the piece is observed persisted as the stage (the continuation stored);
+ * the request is observed queued at the gate. `control` then runs the diagnostic command(s); the gate opens only after its answers.
+ */
+async function queueContinuation(
+  o: Opened,
+  record: TapRecord,
+  release: () => Promise<void>,
+  control: (token: string) => Promise<void>,
+) {
+  const token = record.next_cursor as string;
+  const header = tokenHeader(token);
+  await tap.gate(true);
+  await release();
+  await until(
+    () => stored(o.page, o.reader.account_id),
+    (s) => s.cursor === token && s.delta_stage?.next_index === header.index,
+    "the staged piece persisted, its continuation stored",
+  );
+  await untilGated(o.iv, token);
+  await control(token);
+  await tap.gate(false);
+  return token;
+}
+
+test("PAIR-X0: REAL continuation EXPIRY (the diagnostic sync clock; no collection): with the browser's next continuation QUEUED at the request gate, the clock moves from start to E−1 (the same token on the same session is still answered) and to E, the token's own expiry; the SERVER answers 410 resync_required; while it is held the old cache and the stage remain; the recovery builds the whole revision", async ({
+  context,
+  provokes,
+}, info) => {
+  caseRow("PAIR-X0");
+  provokes(410);
+  const receipt = receiptOf();
+  const o = await openWReal(context, info, "PAIR-X0", 4);
+  const controls: Record<string, number> = {};
+  const probes: Record<string, unknown> = {};
+  let staged: TapRecord | null = null;
+  let refused: TapRecord | null = null;
+  let token = "";
+  await drivePieces({
+    page: () => o.page,
+    account: o.reader.account_id,
+    iv: o.iv,
+    old: o.old,
+    model: o.model,
+    start: () => access(o.w, "grant", o.workload.person, o.reader.account_id),
+    onHeld: async ({ record, piece, before, release }) => {
+      if (staged === null && isScheduledPiece(piece)) {
+        staged = record;
+        expect(before.delta_stage?.next_index).toBe(2);
+        token = await queueContinuation(o, record, release, async (t) => {
+          // The token was ISSUED at the frozen sync start: it expires at start + retention (read from the token, never altered).
+          const E = tokenHeader(t).expiry;
+          expect(E).toBe(receipt.sync_start + receipt.retention_seconds);
+          const before0 = await diagnostic("inspect");
+          controls.inspect_before = before0.seq;
+          const minus = await diagnostic("advance_clock", { time: E - 1 });
+          controls.advance_e_minus_1 = minus.seq;
+          expect(minus.result).toEqual({ from: receipt.sync_start, to: E - 1 });
+          // The SAME continuation on the SAME session one second before its expiry: still answered with its piece (a labelled probe).
+          const atMinus = await probeSync("x0-e-minus-1", { context }, t);
+          expect(atMinus.status, "the token is valid at E−1").toBe(200);
+          probes.e_minus_1 = atMinus;
+          const atE = await diagnostic("advance_clock", { time: E });
+          controls.advance_e = atE.seq;
+          expect(atE.result).toEqual({ from: E - 1, to: E });
+          const live = await sessionProbe(context);
+          expect(live.status, "the session is live (wall time)").toBe(200);
+          probes.session_after_e = live;
+          const after = await diagnostic("inspect");
+          controls.inspect_after_e = after.seq;
+          for (const k of [
+            "revision_clock",
+            "accounts",
+            "batches",
+            "receipts_sha256",
+            "resources_sha256",
+            "sessions",
+          ])
+            expect(
+              after.result[k],
+              `${k} unchanged by the clock steps`,
+            ).toEqual(before0.result[k]);
+        });
+        return undefined;
+      }
+      if (staged !== null && refused === null && record.status === 410) {
+        refused = record;
+        // Held: the server's 410 has not reached the client; the reader still shows the old cache and keeps its stage.
+        expect(before.cache_digest).toBe(o.old.cache_digest);
+        observe(
+          o.iv,
+          "reader_old_at_refusal",
+          record.seq,
+          before.cache_digest,
+          stageOf(before),
+        );
+        controls.inspect_at_refusal = (await diagnostic("inspect")).seq;
+        return {
+          stop: true,
+          reason:
+            "the server's real 410 (expiry): the recovery continues by itself",
+        };
+      }
+      return undefined;
+    },
+  });
+  const answer = refused as TapRecord | null;
+  expect(answer, "the server refused the expired continuation").not.toBeNull();
+  expect(answer?.code).toBe("resync_required");
+  expect(
+    answer?.delivered,
+    "the 410 is the server's, unaltered",
+  ).toBeUndefined();
+  expect(answer?.query?.cursor).toBe(token);
+  const E = tokenHeader(token).expiry;
+  controls.advance_e_plus_1 = (
+    await diagnostic("advance_clock", { time: E + 1 })
+  ).seq;
+  const atPlus = await probeSync("x0-e-plus-1", { context }, token);
+  expect(atPlus.status, "the token is refused at E+1").toBe(410);
+  probes.e_plus_1 = atPlus;
+  const done = await untilRecovered(o, o.page);
+  const proof = writeProof("PAIR-X0", o.iv.engine, {
+    schema: PROOF_SCHEMA,
+    case: "PAIR-X0",
+    interval: o.iv.id,
+    attempt: receipt.attempt,
+    engine: o.iv.engine,
+    reader_account: o.reader.account_id,
+    continuation: { token_sha256: sha256(token), header: tokenHeader(token) },
+    staged: { tap_seq: (staged as TapRecord | null)?.seq ?? null },
+    refused: { tap_seq: answer?.seq ?? null },
+    hand_off_seq: o.iv.handOff?.at_seq ?? null,
+    controls,
+    probes,
+  });
+  await finishRecovered(o, done, {
+    refused_seq: answer?.seq,
+    diagnostic_proof: proof,
+  });
+});
+
+test("PAIR-X2: REAL PRUNING (the real collector; no clock step): with the request gate closed and drained BEFORE the grant, the target batch is aged in setup before any of it is requested; with the browser's next continuation QUEUED at the gate, the collector runs at the sync start, removes exactly that batch and raises the floor past the continuation's boundary while the token is unexpired and an untouched account keeps its history and continuation; the SERVER answers 410; the recovery builds the whole revision", async ({
+  context,
+  provokes,
+}, info) => {
+  caseRow("PAIR-X2");
+  provokes(410);
+  const receipt = receiptOf();
+  // The untouched CONTROL account, prepared before the reader signs in: its own fresh revision and a live continuation of it.
+  const controlAccount = accountFor("pair-x2-control");
+  const w0 = await writerFor(writerAccount());
+  const controlPerson = await seedPerson(
+    w0,
+    [controlAccount.account_id],
+    10,
+    "X2 control",
+  );
+  await access(w0, "revoke", controlPerson.person, controlAccount.account_id);
+  const controlSession = await rawSignInAs(
+    controlAccount,
+    "pair-x2-control-device",
+  );
+  const controlHead = await headOf(controlSession);
+  const controlGrant = await access(
+    w0,
+    "grant",
+    controlPerson.person,
+    controlAccount.account_id,
+  );
+  const controlPiece = await rawSyncDirect(
+    controlSession,
+    `?cursor=${encodeURIComponent(controlHead)}&max_changes=4`,
+  );
+  expect(controlPiece.status).toBe(200);
+  expect(
+    controlPiece.json?.batches?.[0]?.segment?.index,
+    "the control's piece 0",
+  ).toBe(0);
+  const controlToken = controlPiece.json?.next_cursor as string;
+  expect(tokenHeader(controlToken).revision).toBe(controlGrant.revision);
+  const o = await openWReal(context, info, "PAIR-X2", 4);
+  const reader = o.reader.account_id;
+  const controls: Record<string, number> = {};
+  let drainedAt = 0;
+  let grantAt = 0;
+  let staged: TapRecord | null = null;
+  let refused: TapRecord | null = null;
+  let token = "";
+  let controlProbe: Probe | null = null;
+  let target: {
+    account: string;
+    revision: number;
+    payload_sha256: string;
+  } | null = null;
+  await drivePieces({
+    page: () => o.page,
+    account: reader,
+    iv: o.iv,
+    old: o.old,
+    model: o.model,
+    start: async () => {
+      // Gate and drain BEFORE the grant: no request can carry the target until its batch has been aged.
+      await tap.gate(true);
+      await untilUpstreamSettled(o.iv);
+      drainedAt = Date.now();
+      const grant = await access(o.w, "grant", o.workload.person, reader);
+      grantAt = Date.now();
+      const state = await diagnostic("inspect");
+      controls.inspect_before_ageing = state.seq;
+      const batch = (
+        state.result.batches as Array<{
+          account: string;
+          revision: number;
+          payload_sha256: string;
+        }>
+      ).find((b) => b.account === reader && b.revision === grant.revision);
+      expect(batch, "the reader's target batch is stored").toBeDefined();
+      target = {
+        account: reader,
+        revision: grant.revision,
+        payload_sha256: batch?.payload_sha256 as string,
+      };
+      const aged = await diagnostic("age_history", {
+        batches: [
+          {
+            ...target,
+            created_at: receipt.sync_start - receipt.retention_seconds,
+          },
+        ],
+      });
+      controls.age_history = aged.seq;
+      // Nothing reached the backend between the drain and the ageing (the gate held every /sync), so nothing of the target was requested.
+      expect(
+        syncRecords(await tap.log(o.iv.since))
+          .filter(
+            (r) =>
+              r.label === o.iv.id &&
+              !r.gated &&
+              (r.t_request > drainedAt ||
+                r.revision === grant.revision ||
+                r.last_revision === grant.revision),
+          )
+          .map((r) => r.seq),
+        "no /sync reached the backend between the drain and the ageing",
+      ).toEqual([]);
+      await tap.gate(false);
+      return grant;
+    },
+    onHeld: async ({ record, piece, before, release }) => {
+      if (staged === null && isScheduledPiece(piece)) {
+        staged = record;
+        expect(before.delta_stage?.next_index).toBe(2);
+        const t = target as { account: string; revision: number };
+        token = await queueContinuation(o, record, release, async (tok) => {
+          const header = tokenHeader(tok);
+          const collected = await diagnostic("collect", {
+            time: receipt.sync_start,
+          });
+          controls.collect = collected.seq;
+          const c = collected.result;
+          expect(
+            (
+              c.removed_batches as Array<{ account: string; revision: number }>
+            ).map((b) => `${b.account}@${b.revision}`),
+            "the collector removed exactly the aged target batch",
+          ).toEqual([`${reader}@${t.revision}`]);
+          expect(
+            floorIn(c.after, reader),
+            "the reader's floor is the pruned revision",
+          ).toBe(t.revision);
+          expect(header.boundary).toBeLessThan(t.revision);
+          expect(header.expiry, "the token is unexpired").toBeGreaterThan(
+            collected.sync_now,
+          );
+          expect(floorIn(c.after, controlAccount.account_id)).toBe(
+            floorIn(c.before, controlAccount.account_id),
+          );
+          // The untouched account's live continuation is still answered after the collection (a labelled probe).
+          controlProbe = await probeSync(
+            "x2-control",
+            { session: controlSession },
+            controlToken,
+          );
+          expect(
+            controlProbe.status,
+            "the control account's continuation still works",
+          ).toBe(200);
+        });
+        return undefined;
+      }
+      if (staged !== null && refused === null && record.status === 410) {
+        refused = record;
+        expect(before.cache_digest).toBe(o.old.cache_digest);
+        observe(
+          o.iv,
+          "reader_old_at_refusal",
+          record.seq,
+          before.cache_digest,
+          stageOf(before),
+        );
+        controls.inspect_at_refusal = (await diagnostic("inspect")).seq;
+        return {
+          stop: true,
+          reason:
+            "the server's real 410 (pruning): the recovery continues by itself",
+        };
+      }
+      return undefined;
+    },
+  });
+  const answer = refused as TapRecord | null;
+  expect(answer, "the server refused the pruned continuation").not.toBeNull();
+  expect(answer?.code).toBe("resync_required");
+  expect(
+    answer?.delivered,
+    "the 410 is the server's, unaltered",
+  ).toBeUndefined();
+  expect(answer?.query?.cursor).toBe(token);
+  const done = await untilRecovered(o, o.page);
+  const proof = writeProof("PAIR-X2", o.iv.engine, {
+    schema: PROOF_SCHEMA,
+    case: "PAIR-X2",
+    interval: o.iv.id,
+    attempt: receipt.attempt,
+    engine: o.iv.engine,
+    reader_account: reader,
+    target,
+    drained_before_grant_at: drainedAt,
+    grant_at: grantAt,
+    continuation: { token_sha256: sha256(token), header: tokenHeader(token) },
+    staged: { tap_seq: (staged as TapRecord | null)?.seq ?? null },
+    refused: { tap_seq: answer?.seq ?? null },
+    hand_off_seq: o.iv.handOff?.at_seq ?? null,
+    controls,
+    control_account: {
+      account: controlAccount.account_id,
+      revision: controlGrant.revision,
+      continuation_sha256: sha256(controlToken),
+      continuation_header: tokenHeader(controlToken),
+      probe_after: controlProbe,
+    },
+  });
+  await finishRecovered(o, done, {
+    refused_seq: answer?.seq,
+    diagnostic_proof: proof,
+  });
 });
 
 // ---- the recovery caller ----------------------------------------------------------------------------------------------------------

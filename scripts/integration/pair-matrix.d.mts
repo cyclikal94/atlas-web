@@ -1,4 +1,4 @@
-export type PairBackend = "development" | "released";
+export type PairBackend = "development" | "released" | "diagnostic";
 export interface PairCase {
   id: string;
   backends: PairBackend[];
@@ -8,6 +8,8 @@ export interface PairCase {
   driven: "full" | "prefix" | "none" | null;
   observations: string[];
   injected: string | null;
+  /** Revision 26: the diagnostic controls a diagnostic-only case uses. */
+  diagnostic?: string;
 }
 export interface PairUnrun {
   id: string;
@@ -22,6 +24,8 @@ export const BROWSERS: string[];
 export const CASES: readonly PairCase[];
 export const UNSUPPORTED: readonly PairUnrun[];
 export function accountNames(): string[];
+export function diagnosticAccounts(caseId: string): string[];
+export function diagnosticCases(cases?: readonly PairCase[]): string[];
 export function titleId(title: string): string | null;
 export function applicable(row: PairCase, backend: string): boolean;
 export function designedSkipReason(backend: string): string;
@@ -36,6 +40,7 @@ export function judgeResults(
     backend: string;
     cases?: readonly PairCase[];
     unsupported?: readonly PairUnrun[];
+    narrowed?: boolean;
   },
 ): {
   complete: boolean;

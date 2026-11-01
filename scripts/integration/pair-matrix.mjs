@@ -14,10 +14,12 @@
 import { reportCases, reportShapeProblems } from "./stacks.mjs";
 
 export const SPEC = "pair.development.spec.ts";
-export const BACKENDS = ["development", "released"];
+export const BACKENDS = ["development", "released", "diagnostic"];
 export const BROWSERS = ["chromium", "firefox", "webkit"];
 const BOTH = ["development", "released"];
 const DEV = ["development"];
+/** Revision 26 (R26-DIAG): the approved diagnostic executable (pair-selection.mjs DIAGNOSTIC_SELECTION), one fresh attempt per case. */
+const DIAG = ["diagnostic"];
 
 /**
  * Every executable case. `workload`: W-real (one person + 199 dense checklist fields, revealed by ONE public grant: 200 changes) or
@@ -31,7 +33,7 @@ const DEV = ["development"];
 export const CASES = Object.freeze([
   {
     id: "PAIR-P0",
-    backends: BOTH,
+    backends: [...BOTH, ...DIAG],
     workload: null,
     m: null,
     caller: "none",
@@ -215,6 +217,34 @@ export const CASES = Object.freeze([
     injected:
       "TAP: 410 resync_required answered in place of a real piece (client-only; NOT server expiry or pruning)",
   },
+  // Revision 26 (R26-DIAG): REAL expiry and REAL pruning, executable only on the diagnostic selection (its private stdin controls; no
+  // synthetic SQL writer, no tap-injected answer, no host-clock change). Each runs in its own fresh fixture attempt (the clock is
+  // irreversible and the first clock step or collection ends setup). On the development and released backends they are designed skips:
+  // neither executable has a supported control that reaches expiry or pruning (the capability limit recorded before revision 26).
+  {
+    id: "PAIR-X0",
+    backends: DIAG,
+    workload: "W-real",
+    m: 4,
+    caller: "ordinary",
+    driven: "prefix",
+    observations: ["reader_old_at_refusal"],
+    injected: null,
+    diagnostic:
+      "advance_clock (E−1, E, E+1) with the continuation queued at the request gate; no collection, no ageing",
+  },
+  {
+    id: "PAIR-X2",
+    backends: DIAG,
+    workload: "W-real",
+    m: 4,
+    caller: "ordinary",
+    driven: "prefix",
+    observations: ["reader_old_at_refusal"],
+    injected: null,
+    diagnostic:
+      "age_history of the target batch before any of it is requested, then collect at the sync start with the continuation queued; no clock step",
+  },
   {
     id: "PAIR-RC1",
     backends: DEV,
@@ -238,26 +268,11 @@ export const CASES = Object.freeze([
 ]);
 
 /**
- * What this recipe does not execute, UNRUN with its owner, never a pass: `capability`, what the bounded recipe cannot produce against the exact
- * approved binary (reported to its owner); `transferred`, a schedule outside this recipe, named with where it belongs.
+ * What this recipe does not execute, UNRUN with its owner, never a pass: `transferred`, a schedule outside this recipe, named with where it
+ * belongs. (Before revision 26 PAIR-X0 and PAIR-X2 were listed here as `capability` limits of the normal executables; they are now cases of
+ * the diagnostic selection, and remain designed skips, never passes, on the development and released backends.)
  */
 export const UNSUPPORTED = Object.freeze([
-  {
-    id: "PAIR-X0",
-    kind: "capability",
-    what: "real continuation EXPIRY answered by the server",
-    reason:
-      "a continuation expires after ATLAS_SYNC_RETENTION_DAYS (validated 1..3650 days, crates/core/src/storage/mod.rs with_retention_days); the executable has no frozen-clock interface, and changing host time, patching the pinned binary or forging a token is excluded",
-    owner: "BE-Q23 backend fixture owner / delivery coordinator",
-  },
-  {
-    id: "PAIR-X2",
-    kind: "capability",
-    what: "real PRUNING (recovery floor advanced past a staged revision)",
-    reason:
-      "pruning follows retention (at least one day) through the server's maintenance (collect_expired); no bounded, supported control reaches it on the approved executable",
-    owner: "BE-Q23 backend fixture owner / delivery coordinator",
-  },
   {
     id: "PAIR-B4",
     kind: "transferred",
@@ -285,6 +300,15 @@ export const accountNames = () => [
   ...CASES.map((c) => `pair-${c.id.toLowerCase()}`),
   "pair-b3-foreign",
 ];
+/** The accounts ONE diagnostic attempt creates (its `add_account` setup commands): the writer, the case's reader, X2's untouched control. */
+export const diagnosticAccounts = (caseId) => [
+  "pair-writer",
+  `pair-${caseId.toLowerCase()}`,
+  ...(caseId === "PAIR-X2" ? ["pair-x2-control"] : []),
+];
+/** The diagnostic cases, in the order the runner gives each its own attempt. */
+export const diagnosticCases = (cases = CASES) =>
+  cases.filter((c) => c.backends.includes("diagnostic")).map((c) => c.id);
 
 export const titleId = (title) =>
   /^(PAIR-[A-Z]+[0-9]+):/.exec(title)?.[1] ?? null;

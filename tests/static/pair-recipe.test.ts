@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { CASES, UNSUPPORTED } from "../../scripts/integration/pair-matrix.mjs";
 import { DATA_CONFIG } from "../../src/data/model/config";
@@ -81,7 +82,32 @@ describe("the released path is untouched", () => {
       "scripts/integration/schedule.mjs",
     ])
       expect(read(file)).not.toMatch(
-        /pair-(selection|matrix|tap|evidence|attempts|driver)|run-development-pair/,
+        /pair-(selection|matrix|tap|evidence|attempts|driver)|run-development-pair|diagnostic-(fixture|evidence|fake)/,
+      );
+  });
+
+  it("revision 26: no product, fixture or service-worker source reaches the diagnostic adapter, its bridge or its stand-in", () => {
+    const sources = execFileSync(
+      "git",
+      [
+        "ls-files",
+        "-co",
+        "--exclude-standard",
+        "src",
+        "public",
+        "index.html",
+        "vite.config.ts",
+      ],
+      {
+        encoding: "utf8",
+      },
+    )
+      .split("\n")
+      .filter((f) => f && existsSync(f) && !statSync(f).isDirectory());
+    expect(sources.length).toBeGreaterThan(100);
+    for (const file of sources)
+      expect(read(file), file).not.toMatch(
+        /diagnostic-(fixture|evidence|fake)|ATLAS_PAIR_DIAGNOSTIC|atlas-sync-diagnostic/,
       );
   });
 

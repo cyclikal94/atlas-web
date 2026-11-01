@@ -3,6 +3,11 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BrowserContext, Page } from "@playwright/test";
 import {
+  controlCall as bridgeCall,
+  type ContinuationHeader,
+  continuationOf,
+} from "../../scripts/integration/diagnostic-fixture.mjs";
+import {
   type Attempt,
   createLedger,
   outcomeOf,
@@ -872,8 +877,13 @@ export interface Interval {
     outcome: string | null;
     reason: string;
   }>;
-  /** Named observations a case makes (T1's follower), bound by the record's validator. */
-  observations: Array<{ kind: string; at_seq: number; cache_digest: string }>;
+  /** Named observations a case makes (T1's follower; X0/X2's reader at the held 410, with its stage), bound by the record's validator. */
+  observations: Array<{
+    kind: string;
+    at_seq: number;
+    cache_digest: string;
+    stage?: { revision: number; next_index: number } | null;
+  }>;
   /** Each page lifetime's trace, taken BEFORE a reload or close and at the end, so no observation depends on the surviving page. */
   traces: Array<{
     lifetime: number;
@@ -1002,8 +1012,14 @@ export const observe = (
   kind: string,
   atSeq: number,
   cacheDigest: string,
+  stage?: { revision: number; next_index: number } | null,
 ) => {
-  iv.observations.push({ kind, at_seq: atSeq, cache_digest: cacheDigest });
+  iv.observations.push({
+    kind,
+    at_seq: atSeq,
+    cache_digest: cacheDigest,
+    ...(stage === undefined ? {} : { stage }),
+  });
 };
 /**
  * Ends the interval's hold (an explicit hand-off, or the end of the interval): the rule is removed, so no later answer is held, and every
@@ -1312,4 +1328,195 @@ export async function preGrant(
       pages: 0,
     } satisfies ChainModel,
   };
+}
+
+// ---- revision 26 (R26-DIAG): the diagnostic fixture's private controls and labelled probes ---------------------------------------------
+/**
+ * The diagnostic attempt (scripts/integration/run-development-pair.mjs `--backend diagnostic`): its ready receipt, and the runner's private
+ * bridge (an owned Unix socket and this attempt's secret) to the executable's stdin controls. Only `inspect`, `age_history`,
+ * `advance_clock` and `collect` pass; account creation and shutdown are the runner's. Nothing here reaches the browser, the preview or
+ * the product, and no call is ever retried.
+ */
+export interface DiagnosticReceipt {
+  attempt: string;
+  sync_start: number;
+  retention_seconds: number;
+  api_version: string;
+  public_origin: string;
+  features: Record<string, boolean>;
+}
+export const DIAGNOSTIC_RECEIPT: DiagnosticReceipt | null = JSON.parse(
+  process.env.ATLAS_PAIR_DIAGNOSTIC_RECEIPT || "null",
+);
+const BRIDGE = {
+  socketPath: process.env.ATLAS_PAIR_DIAGNOSTIC_SOCKET ?? "",
+  token: process.env.ATLAS_PAIR_DIAGNOSTIC_TOKEN ?? "",
+};
+export interface DiagnosticAnswer {
+  attempt: string;
+  seq: number;
+  op: string;
+  ok: true;
+  effect: string;
+  sync_now: number;
+  // biome-ignore lint/suspicious/noExplicitAny: the executable's own result shapes, checked where they are used
+  result: any;
+}
+/** One diagnostic command; resolves with its successful answer, throws (with the executable's answer) otherwise. */
+export async function diagnostic(
+  op: "inspect" | "age_history" | "advance_clock" | "collect",
+  args: Record<string, unknown> = {},
+): Promise<DiagnosticAnswer> {
+  if (!BRIDGE.socketPath || !DIAGNOSTIC_RECEIPT)
+    throw new Error("no diagnostic attempt: run with --backend diagnostic");
+  const r = await bridgeCall(BRIDGE, "POST", "/command", { op, args });
+  if (r.status !== 200)
+    throw new Error(
+      `diagnostic ${op}: ${r.status} ${JSON.stringify(r.body).slice(0, 600)}`,
+    );
+  return r.body.answer as DiagnosticAnswer;
+}
+
+/** The browser's own session as headers (its cookies for the preview origin and the CSRF token its session derives). */
+async function browserSessionHeaders(context: BrowserContext) {
+  const cookie = (await context.cookies(ORIGIN))
+    .map((c) => `${c.name}=${c.value}`)
+    .join("; ");
+  const current = await fetch(
+    `${BACKEND}/api/experimental/v1/browser-sessions/current`,
+    {
+      headers: { origin: ORIGIN, cookie, "x-atlas-session": "1" },
+    },
+  );
+  const body = (await current.json().catch(() => null)) as {
+    csrf_token?: string;
+    session_id?: string;
+  } | null;
+  return {
+    cookie,
+    current: current.status,
+    csrf: body?.csrf_token ?? "",
+    session_id: body?.session_id ?? null,
+  };
+}
+export interface Probe {
+  label: string;
+  session: "browser" | "control";
+  token_sha256: string | null;
+  status: number;
+  code: string | null;
+  body_file: string | null;
+  body_sha256: string | null;
+  at_sent: number;
+  at_answered: number;
+}
+/** Keeps a probe's exact answer bytes beside the tap's bodies (named, hashed), so the reader re-hashes them. */
+function keepProbeBody(label: string, bytes: Buffer) {
+  const digest = sha256(bytes);
+  const file = `probe-${label}-${digest.slice(0, 16)}.json`;
+  mkdirSync(BODIES, { recursive: true });
+  writeFileSync(join(BODIES, file), bytes);
+  return { file, digest };
+}
+/**
+ * A LABELLED CONTROL PROBE (not the engine's traffic, never through the tap or the proxy, so never held, gated or labelled with the
+ * interval): one `/sync` read with `token`, sent DIRECTLY to the backend under the BROWSER's own session (same account, device and session),
+ * or under a raw `RawPairSession`. Its answer's bytes are kept.
+ */
+export async function probeSync(
+  label: string,
+  who: { context: BrowserContext } | { session: RawPairSession },
+  token: string,
+  maxChanges = 4,
+): Promise<Probe> {
+  const headers =
+    "context" in who
+      ? await browserSessionHeaders(who.context)
+      : { cookie: who.session.cookie, csrf: who.session.csrf };
+  const at_sent = Date.now();
+  const response = await fetch(
+    `${BACKEND}/api/experimental/v1/sync?cursor=${encodeURIComponent(token)}&max_changes=${maxChanges}`,
+    {
+      headers: {
+        origin: ORIGIN,
+        cookie: headers.cookie,
+        "x-csrf-token": headers.csrf,
+        "x-atlas-session": "1",
+      },
+    },
+  );
+  const bytes = Buffer.from(await response.arrayBuffer());
+  const at_answered = Date.now();
+  let code: string | null = null;
+  try {
+    code =
+      (JSON.parse(bytes.toString("utf8")) as { code?: string }).code ?? null;
+  } catch {
+    code = null;
+  }
+  const kept = keepProbeBody(label, bytes);
+  return {
+    label,
+    session: "context" in who ? "browser" : "control",
+    token_sha256: sha256(token),
+    status: response.status,
+    code,
+    body_file: kept.file,
+    body_sha256: kept.digest,
+    at_sent,
+    at_answered,
+  };
+}
+/** The browser's session is live (wall-time authentication): `/browser-sessions/current` answered directly, labelled. */
+export async function sessionProbe(context: BrowserContext) {
+  const at_sent = Date.now();
+  const h = await browserSessionHeaders(context);
+  return {
+    label: "session-live",
+    status: h.current,
+    session_id: h.session_id,
+    at_sent,
+    at_answered: Date.now(),
+  };
+}
+/** The browser's next /sync with `token`, recorded at the closed request gate and NOT forwarded (no answer yet). */
+export async function untilGated(
+  iv: Interval,
+  token: string,
+): Promise<TapRecord> {
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    const found = syncRecords(await tap.log(iv.since)).find(
+      (r) => r.label === iv.id && r.gated === true && r.query?.cursor === token,
+    );
+    if (found) {
+      if (found.t_gate_open !== undefined || found.status !== null)
+        throw new Error(`the gated request ${found.seq} was already forwarded`);
+      return found;
+    }
+    if (Date.now() > deadline)
+      throw new Error(
+        "the browser's continuation request did not reach the closed gate in 60 s",
+      );
+    await sleep(25);
+  }
+}
+export const tokenHeader = (token: string): ContinuationHeader => {
+  const header = continuationOf(token);
+  if (!header) throw new Error("not an issued continuation");
+  return header;
+};
+/** Writes the case's causal proof (the runner validates it against the attempt's transcript and the interval); returns its reference. */
+export function writeProof(
+  caseId: string,
+  engine: string,
+  proof: Record<string, unknown>,
+) {
+  const bytes = Buffer.from(`${JSON.stringify(proof, null, 2)}\n`);
+  const file = `${caseId}.${engine}.proof.json`;
+  if (EVIDENCE) {
+    mkdirSync(join(EVIDENCE, "diagnostic"), { recursive: true });
+    writeFileSync(join(EVIDENCE, "diagnostic", file), bytes);
+  }
+  return { file, sha256: sha256(bytes) };
 }

@@ -85,10 +85,10 @@ export function validateInterval(record, { readBody } = {}) {
   for (const key of ["interval", "case", "engine", "backend"])
     if (!isText(record[key])) bad(`${key} is missing`);
   if (
-    record.backend === "development" &&
+    (record.backend === "development" || record.backend === "diagnostic") &&
     !isText(record.selection_manifest_sha256)
   )
-    bad("a development interval names no selection manifest hash");
+    bad(`a ${record.backend} interval names no selection manifest hash`);
   if (!["W-real", "W-synthetic", null].includes(record.workload ?? null))
     bad(`unknown workload ${record.workload}`);
   if (record.workload === "W-synthetic" && record.synthetic !== true)
@@ -597,6 +597,19 @@ export function validateInterval(record, { readBody } = {}) {
         bad(`${kind} is not made after the target's activation`);
       if (o.cache_digest !== throughWitness?.detail?.cache_digest)
         bad(`${kind} does not show the activated cache`);
+    } else if (kind === "reader_old_at_refusal") {
+      // Revision 26 (R26-DIAG): while the server's real 410 is HELD, the reader still shows the old live cache and keeps its persisted stage.
+      const at = (record.requests ?? []).find((r) => r?.seq === o.at_seq);
+      if (
+        o.at_seq !== record.hand_off?.at_seq ||
+        attemptOf.get(o.at_seq)?.step == null ||
+        at?.status !== 410
+      )
+        bad(`${kind} is not made at the held 410 the interval handed off at`);
+      if (o.cache_digest !== pre?.detail?.cache_digest)
+        bad(`${kind} does not show the old live cache`);
+      if (!(Number.isInteger(o.stage?.next_index) && o.stage.next_index >= 1))
+        bad(`${kind} does not show a persisted stage`);
     } else bad(`unknown required observation ${kind}`);
   }
 

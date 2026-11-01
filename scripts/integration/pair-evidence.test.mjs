@@ -1481,3 +1481,90 @@ test("the runner's identity check: the record is the case, engine, backend and s
     ),
   );
 });
+
+// ---- revision 26 (R26-DIAG): X0/X2's observation at the held REAL 410 ---------------------------------------------------------------
+/** X0/X2 shape: piece 0 staged, the continuation answered by the server's own 410 (held, the hand-off), then the recovery's snapshot. */
+function realRefusal(change = {}) {
+  const w = world();
+  const requests = [
+    exchange(w, 12, "c0", piece(7, 0, false, true, "c1"), { step: 0 }),
+    exchange(w, 13, "c1", error410, { status: 410, step: 1 }),
+    exchange(w, 14, null, whole([7], false, "s1", "snapshot"), { held: false }),
+  ];
+  const record = base(w, requests, [other(11)], {
+    driven: "prefix",
+    hand_off: { at_seq: 13, reason: "the server's real 410" },
+    barriers: barriers(persisted(12, 13), {
+      name: "activation_complete",
+      detail: { recovered: true, applied_revision: 7 },
+    }),
+    pieces_persisted: 1,
+    terminal: {
+      kind: "recovered",
+      applied_revision: 7,
+      final_seq: 14,
+      activated_by_seq: 14,
+    },
+  });
+  record.case = "PAIR-X0";
+  record.required_observations = ["reader_old_at_refusal"];
+  record.observations = [
+    {
+      kind: "reader_old_at_refusal",
+      at_seq: 13,
+      cache_digest: "old-cache",
+      stage: { revision: 7, next_index: 1 },
+      ...change,
+    },
+  ];
+  return { w, record };
+}
+test("accepted (revision 26): the reader's old cache and persisted stage observed at the held real 410 it handed off at", () => {
+  accept(realRefusal());
+});
+for (const [name, change, expected] of [
+  [
+    "observed at the staged piece, not the 410",
+    { at_seq: 12 },
+    /reader_old_at_refusal is not made at the held 410/,
+  ],
+  [
+    "the activated or another cache",
+    { cache_digest: "cache-12" },
+    /does not show the old live cache/,
+  ],
+  ["no persisted stage", { stage: null }, /does not show a persisted stage/],
+  [
+    "a stage with nothing staged",
+    { stage: { revision: 7, next_index: 0 } },
+    /does not show a persisted stage/,
+  ],
+]) {
+  test(`refused (revision 26): reader_old_at_refusal ${name}`, () => {
+    refuse(realRefusal(change), expected, name);
+  });
+}
+test("refused (revision 26): reader_old_at_refusal at a held 410 the interval did NOT hand off at", () => {
+  const r = realRefusal();
+  r.record.hand_off = { at_seq: 12, reason: "elsewhere" };
+  refuse(
+    r,
+    /reader_old_at_refusal is not made at the held 410 the interval handed off at/,
+    "not the hand-off",
+  );
+});
+test("refused (revision 26): a required reader_old_at_refusal that was never made", () => {
+  const r = realRefusal();
+  r.record.observations = [];
+  refuse(r, /required observation reader_old_at_refusal is missing/, "missing");
+});
+test("refused (revision 26): a diagnostic interval naming no selection", () => {
+  const r = realRefusal();
+  r.record.backend = "diagnostic";
+  delete r.record.selection_manifest_sha256;
+  refuse(
+    r,
+    /a diagnostic interval names no selection manifest hash/,
+    "no selection",
+  );
+});

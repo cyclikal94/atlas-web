@@ -7,6 +7,8 @@ import {
   BROWSERS,
   CASES,
   designedSkipReason,
+  diagnosticAccounts,
+  diagnosticCases,
   discoveryProblems,
   judgeResults,
   SPEC,
@@ -66,10 +68,27 @@ const every = (browsers, shape, cases = CASES) =>
     })),
   );
 
-test("the matrix: unique ids, every case on the development backend, the released control whole-revision only, accounts per case", () => {
+test("the matrix: unique ids, every case on the development backend except the diagnostic-only X0/X2, the released control whole-revision only, accounts per case", () => {
   const ids = CASES.map((c) => c.id);
   assert.equal(new Set(ids).size, ids.length);
-  assert.ok(CASES.every((c) => c.backends.includes("development")));
+  // Revision 26 (R26-DIAG): PAIR-X0/X2 run ONLY on the diagnostic selection (real expiry/pruning controls); every other case keeps the
+  // development backend exactly as before, and the diagnostic selection runs P0 and X0/X2 alone (no synthetic SQL writer: S1/S2 stay off).
+  const diagnosticOnly = ["PAIR-X0", "PAIR-X2"];
+  for (const c of CASES)
+    if (diagnosticOnly.includes(c.id))
+      assert.deepEqual(c.backends, ["diagnostic"], c.id);
+    else assert.ok(c.backends.includes("development"), c.id);
+  assert.deepEqual(diagnosticCases(), ["PAIR-P0", "PAIR-X0", "PAIR-X2"]);
+  assert.deepEqual(diagnosticAccounts("PAIR-X2"), [
+    "pair-writer",
+    "pair-pair-x2",
+    "pair-x2-control",
+  ]);
+  assert.deepEqual(diagnosticAccounts("PAIR-X0"), [
+    "pair-writer",
+    "pair-pair-x0",
+  ]);
+  assert.equal(ids.length, 22, "20 cases before revision 26, plus X0 and X2");
   for (const c of CASES.filter((x) => x.backends.includes("released")))
     assert.equal(c.m, null, `${c.id} needs max_changes`);
   assert.equal(new Set(accountNames()).size, accountNames().length);
@@ -97,7 +116,9 @@ test("revision 25: every workload case names how its record must be driven, and 
       c.observations,
       c.id === "PAIR-T1"
         ? ["follower_old_at_last_piece", "follower_new_after_activation"]
-        : [],
+        : ["PAIR-X0", "PAIR-X2"].includes(c.id)
+          ? ["reader_old_at_refusal"]
+          : [],
       c.id,
     );
 });
@@ -195,10 +216,47 @@ test("judge: development, every case passed: complete; the unsupported rows are 
   const out = judged("development", (c) => designed(c, "development"));
   assert.deepEqual(out.problems, []);
   assert.equal(out.complete, true);
-  assert.equal(out.counts.passed, CASES.length);
+  // Revision 26: every case except the diagnostic-only X0/X2, which are designed skips on the development backend.
+  assert.equal(out.counts.passed, CASES.length - 2);
+  assert.equal(out.counts.designed_skip, 2);
+  assert.equal(out.outcomes["PAIR-X0"], "designed_skip");
+  assert.equal(out.outcomes["PAIR-X2"], "designed_skip");
   assert.ok(
     out.unsupported.length > 0 &&
       out.unsupported.every((u) => u.outcome === "unrun"),
+  );
+});
+
+test("judge: diagnostic, a narrowed run of ONE case (its own attempt) is selected_ok and never complete", () => {
+  const one = report(
+    every(["chromium"], (c) => designed(c, "diagnostic")).filter((e) =>
+      e.title.startsWith("PAIR-X0:"),
+    ),
+  );
+  const out = judgeResults(one, {
+    browser: "chromium",
+    backend: "diagnostic",
+    narrowed: true,
+  });
+  assert.deepEqual(out.problems, []);
+  assert.equal(out.outcomes["PAIR-X0"], "passed");
+  assert.equal(out.outcomes["PAIR-X1"], "not_selected");
+  assert.equal(out.selected_ok, true);
+  assert.equal(out.complete, false);
+  const passedX1 = report(
+    every(["chromium"], () => passed()).filter((e) =>
+      e.title.startsWith("PAIR-X1:"),
+    ),
+  );
+  const wrong = judgeResults(passedX1, {
+    browser: "chromium",
+    backend: "diagnostic",
+    narrowed: true,
+  });
+  assert.equal(
+    wrong.outcomes["PAIR-X1"],
+    "failed",
+    "X1 is never a diagnostic pass",
   );
 });
 
