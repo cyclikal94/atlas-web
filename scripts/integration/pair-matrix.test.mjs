@@ -158,7 +158,8 @@ test("revision 25: every workload case names how its record must be driven, and 
               "recovery_invalidated",
               "recovery_staged_hidden",
               "recovery_final_held",
-              "recovery_exposed",
+              "recovery_activated",
+              "recovery_rendered",
             ]
           : [],
       c.id,

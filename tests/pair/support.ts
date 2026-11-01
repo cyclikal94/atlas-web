@@ -47,9 +47,9 @@ import {
   paceSignIn,
   proxy,
   raw,
-  records,
   test,
 } from "../integration/helpers";
+import { renderingOf } from "./rendering";
 
 /**
  * WEB-09c (R23-PAIR): the support of the development-pair journey (pair.development.spec.ts). Everything here talks to the REAL backend the
@@ -985,6 +985,8 @@ export interface Interval {
   }>;
   /** Revision 27: the recovery caller's hold, armed again before the grant (`rearmed_prefix`): the tap's last sequence number then. */
   rearm?: { at_seq: number; reason: string; released_rule: string };
+  /** Revision 28: the account the recovery observer observes (the interval record's `reader_account`). */
+  readerAccount?: string;
   /** Each page lifetime's trace, taken BEFORE a reload or close and at the end, so no observation depends on the surviving page. */
   traces: Array<{
     lifetime: number;
@@ -1672,7 +1674,8 @@ export function markers(caseId: string) {
 export type Markers = ReturnType<typeof markers>;
 
 // ---- revision 27 (R27-DIAG.b, C2): the recovery observed at held snapshot pages, by the leader and an independent follower ------------
-/** One reader's view for the recovery observer: its own raw IndexedDB read, its rendered cache gate, its view and the leader's job. */
+export { renderingOf };
+/** One reader's sample for the recovery observer: its own raw IndexedDB read and its rendering (rendering.ts `renderingOf`), kept as separate fields. */
 export async function recoveryReader(
   page: Page,
   account: string,
@@ -1682,26 +1685,13 @@ export async function recoveryReader(
 ): Promise<RecoveryReader & { local?: LocalWork }> {
   const s = await stored(page, account, o.rows ?? false, o.local ?? null);
   if (!s) throw new Error(`the ${reader} has no account database`);
-  const gate =
-    (await page.locator('[data-cache-gate="refreshing"]').count()) > 0
-      ? "refreshing"
-      : null;
-  const v = (await page
-    .evaluate(() => window.__s?.view?.get?.() ?? null)
-    .catch(() => null)) as { kind?: string } | null;
-  const host = (await leaderOf(page).catch(() => null)) as {
-    notice?: { reason?: string } | null;
-  } | null;
-  const fences = (await records(page).catch(() => null))?.auth_state?.fences;
+  const seen = await renderingOf(page, account);
   return {
     ...s,
     reader,
     page: pageId,
-    gate,
-    view: v?.kind ?? null,
-    notice: host?.notice ?? null,
-    // The account's own auth fences (an invalid_session fence stands until the recovery finishes and clears it).
-    fenced: (fences?.[account] ?? []).length > 0,
+    account,
+    ...seen,
   } as RecoveryReader & { local?: LocalWork };
 }
 
@@ -1729,6 +1719,8 @@ export async function observeRecoveryOf(options: {
   if (!iv.hold || iv.hold.closed)
     throw new Error("the interval's hold is not in force at the hand-off");
   const ruleId = iv.hold.ruleId;
+  // Revision 28: the interval names the account its recovery observations are of (pair-evidence.mjs binds every sample to it).
+  iv.readerAccount = options.account;
   const done = await observeRecovery(
     {
       held: async (rule) => (await holds.entries())[rule] ?? [],
@@ -1755,12 +1747,13 @@ export async function observeRecoveryOf(options: {
     {
       ruleId,
       caller: options.caller,
+      account: options.account,
       refusal: options.refusal,
       oldDigest: options.oldDigest,
       expectFinal: (rows) => options.expectFinal(rows as CacheLike[]),
     },
   );
-  await releaseHold(iv, "after the recovery's observed exposure");
+  await releaseHold(iv, "after the recovery's observed rendered exposure");
   return done.final as unknown as Stored;
 }
 

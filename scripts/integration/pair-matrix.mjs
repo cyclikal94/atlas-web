@@ -34,13 +34,18 @@ const DIAG = ["diagnostic"];
  * (`ordinary`: the sync engine; `recovery`: the fenced recovery job), checked against the record. `local_work` (revision 27): the case
  * admits named local work and declares it; every other case keeps the zero-draft premise.
  */
-/** Revision 27 (R27-DIAG.b, design assessment C2): what every real-410 case must observe of its recovery, at held snapshot pages. */
+/**
+ * Revision 27 (R27-DIAG.b, design assessment C2): what every real-410 case must observe of its recovery, at held snapshot pages. Revision 28
+ * (R28-DIAG.b, C5): `recovery_activated` (revision 27's `recovery_exposed`, renamed: the atomic DATA activation) and `recovery_rendered`
+ * (both pages then SHOW the recovered cache) are separate observations.
+ */
 export const RECOVERY_OBSERVATIONS = Object.freeze([
   "reader_old_at_refusal",
   "recovery_invalidated",
   "recovery_staged_hidden",
   "recovery_final_held",
-  "recovery_exposed",
+  "recovery_activated",
+  "recovery_rendered",
 ]);
 export const CASES = Object.freeze([
   {

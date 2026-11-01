@@ -1735,7 +1735,13 @@ function xl0World() {
         recovery_invalidated: standing,
         recovery_staged_hidden: standing,
         recovery_final_held: standing,
-        recovery_exposed: {
+        // Revision 28: the data activation (revision 27's recovery_exposed) and the rendered settlement are separate barriers.
+        recovery_activated: {
+          ...standing,
+          resource_in_cache: 1,
+          applied_revision: 13,
+        },
+        recovery_rendered: {
           ...standing,
           resource_in_cache: 1,
           applied_revision: 13,
@@ -1755,7 +1761,7 @@ const xl0 = (w) => x0Problems(w.proof, ctxOf(ready(w)));
 test("XL0: expiry with admitted local work and a reload is accepted (settled by the activation, or after display)", () => {
   assert.deepEqual(xl0(xl0World()), []);
   const owed = xl0World();
-  owed.proof.local_work.barriers.recovery_exposed = {
+  owed.proof.local_work.barriers.recovery_activated = {
     draft: null,
     effects: [],
     resource_in_cache: 1,
@@ -1846,7 +1852,7 @@ for (const [name, edit, expected] of [
   [
     "a partial reconciliation at the exposure",
     (w) => {
-      w.proof.local_work.barriers.recovery_exposed = {
+      w.proof.local_work.barriers.recovery_activated = {
         draft: null,
         effects: [{ local_id: "L1", resource_id: "P1", receipt_revision: 12 }],
         resource_in_cache: 1,
@@ -1887,6 +1893,29 @@ for (const [name, edit, expected] of [
     "no local work at all",
     (w) => (w.proof.local_work = null),
     /records no local work/,
+  ],
+  [
+    "(revision 28) a partial reconciliation at the rendered settlement",
+    (w) => {
+      w.proof.local_work.barriers.recovery_rendered = {
+        draft: null,
+        effects: [{ local_id: "L1", resource_id: "P1", receipt_revision: 12 }],
+        resource_in_cache: 1,
+        applied_revision: 13,
+      };
+    },
+    /local work at recovery_rendered is neither standing nor settled/,
+  ],
+  [
+    "(revision 28) no rendered-settlement barrier",
+    (w) => delete w.proof.local_work.barriers.recovery_rendered,
+    /local work is not observed at recovery_rendered/,
+  ],
+  [
+    "(revision 28) the resource absent from the cache at the rendered settlement",
+    (w) =>
+      (w.proof.local_work.barriers.recovery_rendered.resource_in_cache = 0),
+    /holds the local resource 0 times at recovery_rendered/,
   ],
 ])
   test(`XL0 refused: ${name}`, () => {
@@ -1963,4 +1992,24 @@ test("X2 refused: a /sync (not of the target) reached the backend between the dr
     ),
     JSON.stringify(x2(w)),
   );
+});
+
+// Revision 28 (R28-DIAG.b, DA28-OBS): the runner gives the proof's reader the interval; the proof's reader account must be the account the
+// interval's recovery observed.
+test("R28-DIAG.b: the proof's reader account is the interval's observed reader account", () => {
+  const w = ready(x0World());
+  const ctx = ctxOf(w);
+  assert.deepEqual(
+    x0Problems(w.proof, { ...ctx, interval: { reader_account: "reader" } }),
+    [],
+  );
+  for (const interval of [{ reader_account: "someone-else" }, {}, null])
+    assert.ok(
+      x0Problems(w.proof, { ...ctx, interval }).some((p) =>
+        /the proof's reader is not the account the interval's recovery observed/.test(
+          p,
+        ),
+      ),
+      JSON.stringify(interval),
+    );
 });

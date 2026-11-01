@@ -82,11 +82,11 @@ describe("the released path is untouched", () => {
       "scripts/integration/schedule.mjs",
     ])
       expect(read(file)).not.toMatch(
-        /pair-(selection|matrix|tap|evidence|attempts|driver|recovery)|run-development-pair|diagnostic-(fixture|evidence|fake)|causal-journal/,
+        /pair-(selection|matrix|tap|evidence|attempts|driver|recovery|schedule)|run-development-pair|diagnostic-(fixture|evidence|fake)|causal-journal/,
       );
   });
 
-  it("revision 26/27: no product, fixture or service-worker source reaches the diagnostic adapter, its bridge, its stand-in, the causal journal or the recovery observer", () => {
+  it("revision 26/27/28: no product, fixture or service-worker source reaches the diagnostic adapter, its bridge, its stand-in, the causal journal, the recovery observer or the schedule", () => {
     const sources = execFileSync(
       "git",
       [
@@ -107,7 +107,7 @@ describe("the released path is untouched", () => {
     expect(sources.length).toBeGreaterThan(100);
     for (const file of sources)
       expect(read(file), file).not.toMatch(
-        /diagnostic-(fixture|evidence|fake)|ATLAS_PAIR_DIAGNOSTIC|atlas-sync-diagnostic|causal-journal|pair-recovery/,
+        /diagnostic-(fixture|evidence|fake)|ATLAS_PAIR_DIAGNOSTIC|atlas-sync-diagnostic|causal-journal|pair-recovery|pair-schedule|__pairDocument/,
       );
   });
 
@@ -136,6 +136,21 @@ describe("the spec is exactly the explicit matrix", () => {
     const named = new Set(spec.match(/PAIR-[A-Z]+[0-9]+/g) ?? []);
     for (const id of named) expect(ids, id).toContain(id);
     for (const unrun of UNSUPPORTED) expect(spec).not.toContain(`"${unrun.id}`);
+  });
+
+  it("revision 28 (R28-DIAG.a): the real-410 schedule is the maintained pair-schedule.mjs composition; no hook reads the outer token", () => {
+    const src = code("tests/pair/pair.development.spec.ts");
+    expect(src).toMatch(
+      /from "\.\.\/\.\.\/scripts\/integration\/pair-schedule\.mjs"/,
+    );
+    // Exactly the five real-410 callers use the shared helper, and the one afterE hook is the maintained reload hook.
+    expect(src.match(/token = \(await queueContinuation\(/g)?.length).toBe(5);
+    expect(src.match(/afterE:/g)?.length).toBe(1);
+    expect(src).toMatch(/afterE: reloadHook\(\{/);
+    // The spec's own wrapper delegates; it neither awaits the control nor re-implements the reload poll.
+    expect(src).not.toMatch(/await control\(token\)/);
+    expect(src).not.toMatch(/r\.query\?\.cursor === token/);
+    expect(src).not.toMatch(/\(tok: string\)/);
   });
 
   it("every case asks for its own matrix row (the designed skip on a backend it is not executable on)", () => {

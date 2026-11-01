@@ -287,9 +287,14 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   named create_person of the reader admitted through the production outbox and receipted before the clock steps, and a reload after E). Every order a case
   claims is between positions of the attempt's causal journal (the runner's tap, control and bridge events and the spec's acknowledged markers), never
   between clocks (revision 27, R27-DIAG.a). After the server's real 410 the hold stays armed and the recovery is observed at held snapshot pages by the leader
-  and an independent follower page: invalidated, staged hidden, the last page held, and one atomic exposure (R27-DIAG.b). The fixture is removed only after
-  the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases are qualified with stand-ins only; the approved executable has
-  NOT been launched and no diagnostic case has run in a browser.** The approval requires an independent review of the exact client source, selection and
+  and an independent follower page: invalidated, staged hidden, the last page held, and one atomic exposure (R27-DIAG.b). Since revision 28 (R28-DIAG.a/b)
+  the shared schedule is one maintained module (`pair-schedule.mjs`: the continuation is handed to the expiry control and to XL0's reload hook before they
+  run), and what each page SHOWS is observed separately from its stored cache status (session view, protected root, visible cache-gate placeholder,
+  attachment and document identity; an unavailable observation is incomplete, never hidden), at every held page by both pages; the atomic data activation
+  (`recovery_activated`) and the later moment both pages show the recovered cache (`recovery_rendered`; for the fenced caller only once its fence is cleared)
+  are separate observations. The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
+  are qualified with stand-ins, and the rendering adapter against the fixture DOM, only; the approved executable has NOT been launched and no diagnostic case
+  has run in a browser.** The approval requires an independent review of the exact client source, selection and
   recipe BEFORE any execution (design assessment Q6), then the three-engine qualification (Q7). Nothing here is expiry/pruning evidence yet.
 * **Qualified so far (revision 23):** the selection, matrix accounting, tap and validator with doubles (`scripts/integration/pair-*.test.mjs`); real
   discovery of the matrix; the released-backend control (P0, W1) in Chromium, Firefox and WebKit; targeted mutants of the seam and of the spec's precondition

@@ -6,6 +6,12 @@ import {
   segmentedProblems,
 } from "../../scripts/integration/pair-attempts.mjs";
 import {
+  type ContinuationContext,
+  expiryControl as expirySchedule,
+  queueContinuation as queueSchedule,
+  reloadHook,
+} from "../../scripts/integration/pair-schedule.mjs";
+import {
   DIAGNOSTIC_SELECTION,
   PAIR_SELECTION,
   selectionIdentity,
@@ -988,37 +994,52 @@ const stageOf = (s: Stored) =>
     ? { revision: s.delta_stage.revision, next_index: s.delta_stage.next_index }
     : null;
 /**
- * The schedule every causal case shares at its chosen piece: the request gate closes BEFORE the piece is released, so the continuation
- * request the client then makes waits at the tap, unforwarded; the piece is observed persisted as the stage (the continuation stored);
- * the request is observed queued at the gate. `control` then runs the diagnostic command(s); the gate opens only after its answers.
+ * The schedule every causal case shares at its chosen piece (pair-schedule.mjs `queueContinuation`, revision 28): the request gate closes
+ * BEFORE the piece is released, so the continuation request the client then makes waits at the tap, unforwarded; the piece is observed
+ * persisted as the stage (the continuation stored); the request is observed queued at the gate. `control(ctx)` then runs the diagnostic
+ * command(s) with the continuation CONTEXT made from the held record before anything ran (R28-DIAG.a: never a value the caller assigns from
+ * this helper's return); the gate opens only after its answers. Resolves with the context.
  */
-async function queueContinuation(
+type Continuation = ContinuationContext<ReturnType<typeof tokenHeader>>;
+function queueContinuation(
   o: Opened,
   record: TapRecord,
   release: () => Promise<void>,
-  control: (token: string) => Promise<void>,
-) {
-  const token = record.next_cursor as string;
-  const header = tokenHeader(token);
-  await tap.gate(true);
-  await release();
-  await until(
-    () => stored(o.page, o.reader.account_id),
-    (s) => s.cursor === token && s.delta_stage?.next_index === header.index,
-    "the staged piece persisted, its continuation stored",
+  control: (ctx: Continuation) => Promise<void>,
+): Promise<Continuation> {
+  return queueSchedule(
+    {
+      headerOf: tokenHeader,
+      gate: (open) => tap.gate(open),
+      release,
+      untilStored: (ctx) =>
+        until(
+          () => stored(o.page, o.reader.account_id),
+          (s) =>
+            s.cursor === ctx.token &&
+            s.delta_stage?.next_index === ctx.header.index,
+          "the staged piece persisted, its continuation stored",
+        ),
+      untilGated: (ctx) => untilGated(o.iv, ctx.token),
+    },
+    record,
+    control,
   );
-  await untilGated(o.iv, token);
-  await control(token);
-  await tap.gate(false);
-  return token;
 }
-/** The follower page, opened while the refusal is HELD (the leader's engine waits on it): it attaches as a follower, never the leader. */
+/**
+ * The follower page, opened while the refusal is HELD (the leader's engine waits on it). Revision 28 (design assessment DA28-OBS): it must
+ * POSITIVELY attach as a follower (an unavailable or "none" attachment is not a follower), within a bounded wait.
+ */
 async function openFollower(context: BrowserContext) {
   const follower = await pairPage(context, 4);
-  expect(
-    ((await leaderOf(follower)) as { attachment?: string } | null)?.attachment,
-    "the second page is a follower",
-  ).not.toBe("leader");
+  await expect
+    .poll(
+      async () =>
+        ((await leaderOf(follower)) as { attachment?: string } | null)
+          ?.attachment ?? null,
+      { message: "the second page attaches as a follower", timeout: 30_000 },
+    )
+    .toBe("follower");
   return follower;
 }
 /**
@@ -1077,55 +1098,37 @@ async function recoverObserved(
   });
   return done;
 }
-/** The expiry schedule X0, XR0 and XL0 share: inspect, E−1 (the same token answered), E, the session live, inspect again; `afterE`. */
+/**
+ * The expiry schedule X0, XR0 and XL0 share (pair-schedule.mjs `expiryControl`, revision 28): inspect, E−1 (the same token answered), E, the
+ * session live, inspect again; then `afterE(ctx)`. Every hook receives the continuation context before it runs.
+ */
 function expiryControl(
   context: BrowserContext,
   m: Markers,
   controls: Record<string, number>,
   probes: Record<string, unknown>,
   hooks: {
-    beforeInspect?: () => Promise<void>;
-    afterE?: () => Promise<void>;
+    beforeInspect?: (ctx: Continuation) => Promise<void>;
+    afterE?: (ctx: Continuation) => Promise<void>;
   } = {},
 ) {
-  const receipt = receiptOf();
-  return async (t: string) => {
-    // The token was ISSUED at the frozen sync start: it expires at start + retention (read from the token, never altered).
-    const E = tokenHeader(t).expiry;
-    expect(E).toBe(receipt.sync_start + receipt.retention_seconds);
-    await hooks.beforeInspect?.();
-    const before0 = await diagnostic("inspect");
-    controls.inspect_before = before0.seq;
-    const minus = await diagnostic("advance_clock", { time: E - 1 });
-    controls.advance_e_minus_1 = minus.seq;
-    expect(minus.result).toEqual({ from: receipt.sync_start, to: E - 1 });
-    // The SAME continuation on the SAME session one second before its expiry: still answered with its piece (a labelled, bracketed probe).
-    const atMinus = await m.bracket("x0-e-minus-1", () =>
-      probeSync("x0-e-minus-1", { context }, t),
-    );
-    expect(atMinus.status, "the token is valid at E−1").toBe(200);
-    probes.e_minus_1 = atMinus;
-    const atE = await diagnostic("advance_clock", { time: E });
-    controls.advance_e = atE.seq;
-    expect(atE.result).toEqual({ from: E - 1, to: E });
-    const live = await m.bracket("session-live", () => sessionProbe(context));
-    expect(live.status, "the session is live (wall time)").toBe(200);
-    probes.session_after_e = live;
-    const after = await diagnostic("inspect");
-    controls.inspect_after_e = after.seq;
-    for (const k of [
-      "revision_clock",
-      "accounts",
-      "batches",
-      "receipts_sha256",
-      "resources_sha256",
-      "sessions",
-    ])
-      expect(after.result[k], `${k} unchanged by the clock steps`).toEqual(
-        before0.result[k],
-      );
-    await hooks.afterE?.();
-  };
+  return expirySchedule<ReturnType<typeof tokenHeader>>(
+    {
+      receipt: receiptOf(),
+      diagnostic: (op, args) =>
+        diagnostic(op as Parameters<typeof diagnostic>[0], args) as Promise<{
+          seq: number;
+          result: Record<string, unknown>;
+        }>,
+      // A labelled, bracketed probe of the SAME continuation on the SAME session.
+      probeAt: (label, token) =>
+        m.bracket(label, () => probeSync(label, { context }, token)),
+      sessionLive: () => m.bracket("session-live", () => sessionProbe(context)),
+      controls,
+      probes,
+    },
+    hooks,
+  );
 }
 /** E+1: the same token refused (a labelled, bracketed probe after the clock step). */
 async function expiryAfter(
@@ -1188,12 +1191,14 @@ test("PAIR-X0: REAL continuation EXPIRY (the diagnostic sync clock; no collectio
       if (staged === null && isScheduledPiece(piece)) {
         staged = record;
         expect(before.delta_stage?.next_index).toBe(2);
-        token = await queueContinuation(
-          o,
-          record,
-          release,
-          expiryControl(context, m, controls, probes),
-        );
+        token = (
+          await queueContinuation(
+            o,
+            record,
+            release,
+            expiryControl(context, m, controls, probes),
+          )
+        ).token;
         return undefined;
       }
       if (staged !== null && refused === null && record.status === 410) {
@@ -1333,8 +1338,8 @@ function pruneControl(
   out: { probe: Probe | null },
 ) {
   const receipt = receiptOf();
-  return async (tok: string) => {
-    const header = tokenHeader(tok);
+  return async (ctx: Continuation) => {
+    const header = ctx.header;
     const t = target();
     const collected = await diagnostic("collect", { time: receipt.sync_start });
     controls.collect = collected.seq;
@@ -1419,19 +1424,21 @@ test("PAIR-X2: REAL PRUNING (the real collector; no clock step): with the reques
       if (staged === null && isScheduledPiece(piece)) {
         staged = record;
         expect(before.delta_stage?.next_index).toBe(2);
-        token = await queueContinuation(
-          o,
-          record,
-          release,
-          pruneControl(
-            m,
-            controls,
-            reader,
-            () => target as { revision: number },
-            ctl,
-            out,
-          ),
-        );
+        token = (
+          await queueContinuation(
+            o,
+            record,
+            release,
+            pruneControl(
+              m,
+              controls,
+              reader,
+              () => target as { revision: number },
+              ctl,
+              out,
+            ),
+          )
+        ).token;
         return undefined;
       }
       if (staged !== null && refused === null && record.status === 410) {
@@ -1532,112 +1539,108 @@ test("PAIR-XL0: REAL EXPIRY with named admitted LOCAL WORK and a RELOAD: one cre
       if (staged === null && isScheduledPiece(piece)) {
         staged = record;
         expect(before.delta_stage?.next_index).toBe(2);
-        token = await queueContinuation(
-          o,
-          record,
-          release,
-          expiryControl(context, m, controls, probes, {
-            // The local work, admitted while the continuation waits at the gate and BEFORE the durable baseline of the clock steps.
-            beforeInspect: async () => {
-              const saved = await enqueueThroughProduction(o.page, {
-                endpoint: "/commands",
-                targets: [
-                  {
-                    resourceId: P,
-                    role: "primary",
-                    basis: "resource",
-                    versionChecked: false,
-                    seedIfUntracked: 1,
-                  },
-                ],
-                command: {
-                  commands: [
+        token = (
+          await queueContinuation(
+            o,
+            record,
+            release,
+            expiryControl(context, m, controls, probes, {
+              // The local work, admitted while the continuation waits at the gate and BEFORE the durable baseline of the clock steps.
+              beforeInspect: async () => {
+                const saved = await enqueueThroughProduction(o.page, {
+                  endpoint: "/commands",
+                  targets: [
                     {
-                      kind: "create_person",
-                      id: P,
-                      name,
-                      initial_policy: { grants: [], exclude_accounts: [] },
+                      resourceId: P,
+                      role: "primary",
+                      basis: "resource",
+                      versionChecked: false,
+                      seedIfUntracked: 1,
                     },
                   ],
+                  command: {
+                    commands: [
+                      {
+                        kind: "create_person",
+                        id: P,
+                        name,
+                        initial_policy: { grants: [], exclude_accounts: [] },
+                      },
+                    ],
+                  },
+                  displayPatch: { [P]: { label: name } },
+                });
+                expect(
+                  saved.kind,
+                  "the production outbox admits the draft",
+                ).toBe("queued");
+                localId = saved.localId as string;
+                const admitted = await until(
+                  () => stored(o.page, account, false, [P]),
+                  (s) =>
+                    (s.local?.drafts ?? []).some(
+                      (d) =>
+                        d.local_id === localId &&
+                        Number.isInteger(d.receipt_revision),
+                    ) &&
+                    (s.local?.effects ?? []).some(
+                      (e) =>
+                        e.local_id === localId &&
+                        Number.isInteger(e.receipt_revision),
+                    ),
+                  "the local command's receipt is admitted",
+                  60_000,
+                );
+                receiptRevision =
+                  admitted.local?.drafts.find((d) => d.local_id === localId)
+                    ?.receipt_revision ?? null;
+                expect(receiptRevision).toBeGreaterThan(
+                  record.revision as number,
+                );
+                expect(
+                  sent.filter((x) => x.idempotency_key === localId),
+                  "sent once, with its local id as the key",
+                ).toHaveLength(1);
+                await m.mark("receipt_admitted");
+                barriers.receipt_admitted = await localAt(
+                  o.page,
+                  account,
+                  localId,
+                  P,
+                );
+                declareLocalWork({
+                  drafts: admitted.drafts,
+                  composition_seq: admitted.composition_seq,
+                  reason: `the admitted create_person ${localId}`,
+                });
+              },
+              // The reload: after E is acknowledged, before the gate opens (pair-schedule.mjs `reloadHook`, revision 28 R28-DIAG.a). Every
+              // comparison inside it is with the continuation CONTEXT the control hands it, never the outer `token` assigned only once
+              // `queueContinuation` returns (after this very hook).
+              afterE: reloadHook({
+                mark: (name) => m.mark(name),
+                beforeReload: () =>
+                  captureTrace(o.page, o.iv, "before the reload"),
+                reload: async () => {
+                  await o.page.goto("about:blank");
+                  await pairPage(context, 4, o.page);
                 },
-                displayPatch: { [P]: { label: name } },
-              });
-              expect(saved.kind, "the production outbox admits the draft").toBe(
-                "queued",
-              );
-              localId = saved.localId as string;
-              const admitted = await until(
-                () => stored(o.page, account, false, [P]),
-                (s) =>
-                  (s.local?.drafts ?? []).some(
-                    (d) =>
-                      d.local_id === localId &&
-                      Number.isInteger(d.receipt_revision),
-                  ) &&
-                  (s.local?.effects ?? []).some(
-                    (e) =>
-                      e.local_id === localId &&
-                      Number.isInteger(e.receipt_revision),
-                  ),
-                "the local command's receipt is admitted",
-                60_000,
-              );
-              receiptRevision =
-                admitted.local?.drafts.find((d) => d.local_id === localId)
-                  ?.receipt_revision ?? null;
-              expect(receiptRevision).toBeGreaterThan(
-                record.revision as number,
-              );
-              expect(
-                sent.filter((x) => x.idempotency_key === localId),
-                "sent once, with its local id as the key",
-              ).toHaveLength(1);
-              await m.mark("receipt_admitted");
-              barriers.receipt_admitted = await localAt(
-                o.page,
-                account,
-                localId,
-                P,
-              );
-              declareLocalWork({
-                drafts: admitted.drafts,
-                composition_seq: admitted.composition_seq,
-                reason: `the admitted create_person ${localId}`,
-              });
-            },
-            // The reload: after E is acknowledged, before the gate opens.
-            afterE: async () => {
-              const begin = await m.mark("reload_begin");
-              await captureTrace(o.page, o.iv, "before the reload");
-              await o.page.goto("about:blank");
-              await pairPage(context, 4, o.page);
-              await m.mark("reload_end");
-              // The reloaded page's own request, with the SAME stored continuation, queued at the gate after the reload began.
-              await until(
-                async () => {
-                  const again = syncRecords(await tap.log(o.iv.since)).find(
-                    (r) =>
-                      r.label === o.iv.id &&
-                      r.gated === true &&
-                      r.query?.cursor === token &&
-                      (r.j_request ?? 0) > begin,
+                records: async () => syncRecords(await tap.log(o.iv.since)),
+                stored: async () => (await stored(o.page, account)) as Stored,
+                until: (read, accept, what) => until(read, accept, what),
+                label: o.iv.id,
+                after: async () => {
+                  barriers.after_reload = await localAt(
+                    o.page,
+                    account,
+                    localId,
+                    P,
                   );
-                  return again
-                    ? ((await stored(o.page, account)) as Stored)
-                    : null;
                 },
-                (s) => s.cursor === token,
-                "the reloaded page asks again from the stored continuation",
-              );
-              barriers.after_reload = await localAt(
-                o.page,
-                account,
-                localId,
-                P,
-              );
-            },
-          }),
-        );
+              }),
+            }),
+          )
+        ).token;
         return undefined;
       }
       if (
@@ -2040,12 +2043,14 @@ test("PAIR-XR0: REAL EXPIRY of the FENCED RECOVERY caller's catch-up (a real rev
       if (staged === null && isScheduledPiece(piece)) {
         staged = record;
         expect(before.delta_stage?.next_index).toBe(2);
-        token = await queueContinuation(
-          o,
-          record,
-          release,
-          expiryControl(context, m, controls, probes),
-        );
+        token = (
+          await queueContinuation(
+            o,
+            record,
+            release,
+            expiryControl(context, m, controls, probes),
+          )
+        ).token;
         return undefined;
       }
       if (staged !== null && refused === null && record.status === 410) {
@@ -2137,19 +2142,21 @@ test("PAIR-XR2: REAL PRUNING of the FENCED RECOVERY caller's catch-up: the fence
       if (staged === null && isScheduledPiece(piece)) {
         staged = record;
         expect(before.delta_stage?.next_index).toBe(2);
-        token = await queueContinuation(
-          o,
-          record,
-          release,
-          pruneControl(
-            m,
-            controls,
-            reader,
-            () => target as { revision: number },
-            ctl,
-            out,
-          ),
-        );
+        token = (
+          await queueContinuation(
+            o,
+            record,
+            release,
+            pruneControl(
+              m,
+              controls,
+              reader,
+              () => target as { revision: number },
+              ctl,
+              out,
+            ),
+          )
+        ).token;
         return undefined;
       }
       if (staged !== null && refused === null && record.status === 410) {

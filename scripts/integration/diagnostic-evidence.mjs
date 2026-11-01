@@ -430,8 +430,17 @@ const durable = (state) => ({
  * The proof's context: the journal (re-read by the caller and passed as `journal`, or empty), each tap exchange's journal positions bound to
  * the events they claim, and the named markers (`proof.marks[name]`, each a bridge.mark of `<case-prefix>:<name>`).
  */
-function contextOf(proof, { journal, requests }, bad) {
+function contextOf(proof, { journal, requests, interval }, bad) {
   const events = journal ?? new Map();
+  // Revision 28 (R28-DIAG.b, DA28-OBS): the runner gives the interval; its observed reader account is the proof's reader.
+  if (
+    interval !== undefined &&
+    (typeof proof.reader_account !== "string" ||
+      proof.reader_account !== interval?.reader_account)
+  )
+    bad(
+      "the proof's reader is not the account the interval's recovery observed",
+    );
   if (events.size === 0)
     bad("no causal journal was given to the proof's reader");
   for (const r of requests ?? []) {
@@ -1100,14 +1109,16 @@ function localWorkProblems(proof, ctx, j) {
     bad(
       "the refusal is not the reloaded page's own request, forwarded after the reload",
     );
-  // The barrier table: the same identities until the exposure, settled after it.
+  // The barrier table: the same identities until the activation, settled after it. Revision 28: `recovery_activated` is revision 27's
+  // `recovery_exposed` (the data activation); `recovery_rendered` is the moment both pages show the recovered cache.
   const order = [
     "receipt_admitted",
     "after_reload",
     "recovery_invalidated",
     "recovery_staged_hidden",
     "recovery_final_held",
-    "recovery_exposed",
+    "recovery_activated",
+    "recovery_rendered",
     "settled",
   ];
   const table = w.barriers ?? {};
@@ -1129,15 +1140,15 @@ function localWorkProblems(proof, ctx, j) {
       bad(
         `local work at ${name} is not the same admitted draft and pending effect`,
       );
-  const exposed = table.recovery_exposed;
-  if (exposed && !standing(exposed) && !settledAt(exposed))
-    bad(
-      "local work at the exposure is neither standing nor settled (a partial reconciliation)",
-    );
-  for (const [name, b] of [
-    ["recovery_exposed", exposed],
-    ["settled", table.settled],
-  ]) {
+  for (const name of ["recovery_activated", "recovery_rendered"]) {
+    const b = table[name];
+    if (b && !standing(b) && !settledAt(b))
+      bad(
+        `local work at ${name} is neither standing nor settled (a partial reconciliation)`,
+      );
+  }
+  for (const name of ["recovery_activated", "recovery_rendered", "settled"]) {
+    const b = table[name];
     if (!b) continue;
     if (b.resource_in_cache !== 1)
       bad(

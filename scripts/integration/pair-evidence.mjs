@@ -39,6 +39,13 @@
 // staged while the live cache is untouched and hidden), `recovery_final_held` (the last snapshot page held, still hidden), and
 // `recovery_exposed` (one atomic exposure of the complete cache, nothing staged), each made by the LEADER and an independent FOLLOWER page
 // reading its own connection. The caller and the local-work declaration are the matrix row's (`identityProblems`).
+// Revision 28 (R28-DIAG.b; design assessment C2-C5): the stored cache status is never evidence of what a page shows. Every recovery
+// observation must carry the observation contract `web09c-recovery-observation/2` (an earlier one, such as revision 27's, is INCOMPLETE and
+// refused, never upgraded): each reader's separate RENDERING (session view, protected root, visible refreshing placeholders, attachment, a
+// per-document identity) and its fences, complete, for the same account and documents throughout. Hidden and shown are judged here from
+// the rendering alone, written independently of the live observer (pair-recovery.mjs). `recovery_exposed` is renamed `recovery_activated`
+// (the DATA activation), `recovery_final_held` carries BOTH readers at every held snapshot page, and `recovery_rendered` binds the moment
+// both pages show the recovered cache (for the recovery caller, with the fence cleared).
 import { createHash } from "node:crypto";
 import {
   activates,
@@ -831,6 +838,8 @@ export function assembleInterval({
       : {}),
     hand_off: iv.handOff ?? null,
     ...(iv.rearm ? { rearm: iv.rearm } : {}),
+    // Revision 28: the account the recovery observer was asked to observe (every recovery sample must be of it).
+    ...(iv.readerAccount ? { reader_account: iv.readerAccount } : {}),
     opening: iv.opening,
     hold_releases: iv.holdReleases,
     collection,
@@ -887,19 +896,64 @@ export function assembleInterval({
   };
 }
 
-// ---- revision 27 (R27-DIAG.b): the recovery observations ---------------------------------------------------------------------------
+// ---- revision 27 (R27-DIAG.b): the recovery observations; revision 28 (R28-DIAG.b): their renderings --------------------------------
 export const RECOVERY_KINDS = Object.freeze([
   "recovery_invalidated",
   "recovery_staged_hidden",
   "recovery_final_held",
-  "recovery_exposed",
+  "recovery_activated",
+  "recovery_rendered",
 ]);
-/** A reader's state is hidden: the live cache is not shown (not valid, or the rendered cache gate says refreshing, or the view is not
- *  displaying the account). */
-const hidden = (r) =>
-  r?.cache_status !== "valid" ||
-  r?.gate === "refreshing" ||
-  r?.view !== "displaying";
+export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/2";
+/** Why a reader's sample is not a complete observation of its page (the same account `account`); none: it is one. */
+function sampleProblems(r, account) {
+  const g = r?.rendering;
+  const who = r?.reader ?? "a reader";
+  if (g?.status !== "observed")
+    return [`${who}'s rendering is not observed (${g?.status ?? "missing"})`];
+  const p = [];
+  if (!isText(g.document)) p.push(`${who} names no document`);
+  if (!isText(r.account) || r.account !== account)
+    p.push(`${who} is not a sample of the account ${account}`);
+  if (g.attachment !== (r.reader === "leader" ? "leader" : "follower"))
+    p.push(`${who}'s page is attached as ${g.attachment ?? "nothing"}`);
+  if (!isText(g.view?.kind)) p.push(`${who}'s session view is not observed`);
+  else if (g.view.kind === "displaying" && g.view.account_id !== account)
+    p.push(`${who} displays another account`);
+  if (
+    g.root?.present !== true ||
+    typeof g.root.gated !== "boolean" ||
+    typeof g.root.mounted !== "boolean"
+  )
+    p.push(`${who}'s protected root is not observed`);
+  if (
+    !Number.isInteger(g.placeholders?.present) ||
+    !Number.isInteger(g.placeholders?.refreshing_visible)
+  )
+    p.push(`${who}'s cache-gate placeholders are not observed`);
+  if (typeof r.fenced !== "boolean")
+    p.push(`${who}'s auth fences are not observed`);
+  return p;
+}
+/**
+ * A complete sample shows NO account content: the protected tree gated or unmounted under the neutral state (the only shape for the fenced
+ * recovery caller), or — for the ordinary caller — the displaying account behind at least one VISIBLE refreshing placeholder in the lifted
+ * tree, or a gated/unmounted tree. Any other session kind (signed_out, booting, incompatible, an unknown one), the floor, or an invisible
+ * placeholder is not hidden.
+ */
+function renderedHidden(r, caller) {
+  const g = r.rendering;
+  const covered = g.root.gated === true || g.root.mounted === false;
+  if (g.view.kind === "neutral") return covered;
+  if (g.view.kind !== "displaying" || caller === "recovery") return false;
+  return covered || g.placeholders.refreshing_visible > 0;
+}
+/** A complete sample SHOWS the recovered account: displaying it, the tree lifted and mounted, no cache-gate placeholder at all. */
+const renderedShown = (r) =>
+  r.rendering.view.kind === "displaying" &&
+  r.rendering.root.gated === false &&
+  r.rendering.root.mounted === true &&
+  r.rendering.placeholders.present === 0;
 /**
  * One recovery observation's problems. Each is made at a HELD snapshot answer after the hand-off (so the client has committed everything
  * before that request and nothing after it), released by a recorded release of the hold, by two readers: `leader` (the leading page) and
@@ -931,12 +985,40 @@ function recoveryObservationProblems(kind, o, ctx) {
     bad("not made by the leader AND a follower");
   else if (leader.page === follower.page)
     bad("the follower is the leading page itself");
-  const readers = [leader, follower].filter(Boolean);
   const refusalGen = o.detail?.generation_at_refusal;
   const invalidated = ctx.observations.find(
     (x) => x?.kind === "recovery_invalidated",
   );
   const gen = invalidated?.detail?.leader?.recovery_generation;
+  // Revision 28: the observation contract, and complete samples of the same account and the same two documents throughout.
+  if (o.detail?.schema !== RECOVERY_OBSERVATION_SCHEMA)
+    bad(
+      `made under the observation contract ${JSON.stringify(o.detail?.schema ?? null)}, not ${RECOVERY_OBSERVATION_SCHEMA} (incomplete)`,
+    );
+  const account = record.reader_account;
+  if (!isText(account)) bad("the interval names no observed reader account");
+  const documentOf = (who) =>
+    invalidated?.detail?.[who]?.rendering?.document ?? null;
+  const sampled = (r) => {
+    const p = sampleProblems(r, account);
+    for (const x of p) bad(`an incomplete sample: ${x}`);
+    if (p.length > 0) return false;
+    if (r.rendering.document !== documentOf(r.reader))
+      bad(`${r.reader}'s document is not the one observed at the invalidation`);
+    return true;
+  };
+  const complete = [leader, follower].filter(Boolean).filter(sampled);
+  if (
+    complete.length === 2 &&
+    leader.rendering.document === follower.rendering.document
+  )
+    bad("the follower is the leading page's own document");
+  const readers = [leader, follower].filter(Boolean);
+  const hiddenOf = (r, what) => {
+    if (complete.includes(r) && !renderedHidden(r, record.caller))
+      bad(`${r.reader}'s page shows account content ${what}`);
+  };
+
   if (kind === "recovery_invalidated") {
     for (const r of readers) {
       if (r.cache_status === "valid")
@@ -950,7 +1032,7 @@ function recoveryObservationProblems(kind, o, ctx) {
         bad(`${r.reader} has no new recovery generation`);
       if (r.cache_digest !== old)
         bad(`${r.reader}'s live cache changed before the snapshot`);
-      if (!hidden(r)) bad(`${r.reader} shows the cache while it is invalid`);
+      hiddenOf(r, "while the cache is invalid");
     }
     if (
       leader &&
@@ -993,8 +1075,7 @@ function recoveryObservationProblems(kind, o, ctx) {
         bad(`${r.reader}'s live cache changed before the activation`);
       if (r.cache_status === "valid")
         bad(`${r.reader} shows a valid cache before the last page`);
-      if (!hidden(r))
-        bad(`${r.reader} shows the cache while the snapshot is staged`);
+      hiddenOf(r, "while the snapshot is staged");
       if (
         record.caller === "recovery" &&
         r.reader === "leader" &&
@@ -1005,6 +1086,59 @@ function recoveryObservationProblems(kind, o, ctx) {
     if (kind === "recovery_final_held") {
       if (at.has_more !== false)
         bad(`exchange ${at.seq} is not the last snapshot page`);
+      // Revision 28 (C4): both readers at EVERY held snapshot page after the first, each complete, hidden, of the recovery's generation and
+      // the old live cache — exactly the interval's snapshot exchanges between the invalidation and this one.
+      const held = Array.isArray(o.detail?.pages) ? o.detail.pages : null;
+      const expected = [...bySeq.values()]
+        .filter(
+          (x) =>
+            x.status === 200 &&
+            x.phase === "snapshot" &&
+            x.seq > (invalidated?.at_seq ?? Number.POSITIVE_INFINITY) &&
+            x.seq <= at.seq,
+        )
+        .map((x) => x.seq)
+        .sort((x, y) => x - y);
+      if (!held) bad("the held snapshot pages are not recorded");
+      else {
+        const seqs = JSON.stringify(held.map((x) => x?.seq));
+        if (seqs !== JSON.stringify(expected))
+          bad(
+            `the held pages recorded ${seqs} are not the snapshot pages ${JSON.stringify(expected)}`,
+          );
+        for (const page of held) {
+          if (
+            page?.leader?.reader !== "leader" ||
+            page?.follower?.reader !== "follower"
+          ) {
+            bad(`page ${page?.seq} is not read by the leader AND a follower`);
+            continue;
+          }
+          for (const r of [page.leader, page.follower]) {
+            if (!sampled(r)) continue;
+            if (!renderedHidden(r, record.caller))
+              bad(
+                `${r.reader}'s page shows account content at page ${page.seq}`,
+              );
+            if (r.cache_digest !== old || r.cache_status === "valid")
+              bad(
+                `${r.reader}'s live cache is not the old hidden one at page ${page.seq}`,
+              );
+            if (
+              !(r.staging_rows > 0) ||
+              r.recovery_generation !== gen ||
+              !(
+                r.staging_generations?.length === 1 &&
+                r.staging_generations[0] === gen
+              )
+            )
+              bad(
+                `${r.reader} does not hold the recovery's staged rows at page ${page.seq}`,
+              );
+          }
+        }
+      }
+
       if (terminal?.activated_by_seq !== at.seq)
         bad(
           "the last snapshot page held is not the terminal's activating answer",
@@ -1019,7 +1153,7 @@ function recoveryObservationProblems(kind, o, ctx) {
       else if (!(leader?.staging_rows >= staged.detail?.leader?.staging_rows))
         bad("the staged rows went backwards");
     }
-  } else if (kind === "recovery_exposed") {
+  } else if (kind === "recovery_activated") {
     if (terminal?.activated_by_seq !== at.seq)
       bad("not made at the terminal's activating snapshot page");
     for (const r of readers) {
@@ -1038,7 +1172,34 @@ function recoveryObservationProblems(kind, o, ctx) {
       bad("the follower does not read the activated cache");
     if (leader?.cache_digest !== o.cache_digest)
       bad("the observation's digest is not the leader's");
-    if (!isText(o.detail?.rows_sha256)) bad("the exposed rows are not hashed");
+    if (!isText(o.detail?.rows_sha256))
+      bad("the activated rows are not hashed");
+  } else if (kind === "recovery_rendered") {
+    // Revision 28 (C5): after the data activation, both pages SHOW the recovered cache (the recovery caller's with its fence cleared).
+    const activated = ctx.observations.find(
+      (x) => x?.kind === "recovery_activated",
+    );
+    if (!activated) bad("no data activation was observed before it");
+    if (terminal?.activated_by_seq !== at.seq)
+      bad("not made at the terminal's activating snapshot page");
+    for (const r of readers) {
+      if (!complete.includes(r)) continue;
+      if (!renderedShown(r))
+        bad(`${r.reader}'s page does not show the recovered cache`);
+      if (
+        r.cache_status !== "valid" ||
+        r.staging_rows !== 0 ||
+        r.delta_stage !== null ||
+        r.staged !== 0
+      )
+        bad(`${r.reader} does not hold the complete activated cache`);
+      if (r.cache_digest !== activated?.cache_digest)
+        bad(`${r.reader} shows another cache than the activated one`);
+      if (record.caller === "recovery" && r.fenced !== false)
+        bad(`${r.reader} shows the recovered cache while fenced`);
+    }
+    if (o.cache_digest !== activated?.cache_digest)
+      bad("the observation's digest is not the activated cache");
   }
   return problems;
 }

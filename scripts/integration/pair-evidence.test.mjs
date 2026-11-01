@@ -13,6 +13,7 @@ import {
   SCHEMA,
   validateInterval,
 } from "./pair-evidence.mjs";
+import { hiddenProblems, shownProblems } from "./pair-recovery.mjs";
 import { describeSync, INJECTED_410 } from "./pair-tap.mjs";
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
@@ -1570,9 +1571,42 @@ test("refused (revision 26): a diagnostic interval naming no selection", () => {
 });
 
 // ---- revision 27 (R27-DIAG.b): the recovery observed at held snapshot pages; the recovery caller's re-armed hold --------------------
+/** Revision 28: the renderings `renderingOf` reports (the real view kinds; no `fenced` view exists). */
+const ACCOUNT = "reader-acct";
+const RENDER = {
+  // The ordinary recovery: the displaying account behind the cache gate's visible refreshing placeholder.
+  refreshing: (reader) => ({
+    status: "observed",
+    document: `${reader}-document`,
+    attachment: reader,
+    view: { kind: "displaying", account_id: ACCOUNT, state: null },
+    root: { present: true, gated: false, mounted: true },
+    placeholders: { present: 1, refreshing_visible: 1 },
+  }),
+  // The fenced recovery: the neutral state over the gated protected tree.
+  neutral: (reader) => ({
+    status: "observed",
+    document: `${reader}-document`,
+    attachment: reader,
+    view: { kind: "neutral", account_id: null, state: "1e.checking" },
+    root: { present: true, gated: true, mounted: true },
+    placeholders: { present: 1, refreshing_visible: 1 },
+  }),
+  // The recovered account shown.
+  shown: (reader) => ({
+    status: "observed",
+    document: `${reader}-document`,
+    attachment: reader,
+    view: { kind: "displaying", account_id: ACCOUNT, state: null },
+    root: { present: true, gated: false, mounted: true },
+    placeholders: { present: 0, refreshing_visible: 0 },
+  }),
+};
+const withoutRender = ({ render: _render, ...rest }) => rest;
 const readerState = (reader, extra = {}) => ({
   reader,
   page: `${reader}-page`,
+  account: ACCOUNT,
   cache_status: "invalid",
   cursor: null,
   phase: "snapshot",
@@ -1583,16 +1617,16 @@ const readerState = (reader, extra = {}) => ({
   recovery_generation: 6,
   cache_digest: "old-cache",
   applied_revision: 6,
-  gate: "refreshing",
-  view: "displaying",
   notice: null,
   fenced: false,
-  ...extra,
+  ...withoutRender(extra),
+  rendering: RENDER[extra.render ?? "refreshing"](reader),
 });
 const pair = (extra = {}, follower = {}) => ({
   leader: readerState("leader", extra),
   follower: readerState("follower", { ...extra, ...follower }),
 });
+const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/2" };
 /** X0's real 410 at 13 (the hand-off), then three snapshot pages 14, 15, 16, each held and released by a recorded release. */
 function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
   const w = world();
@@ -1640,14 +1674,16 @@ function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
   record.local_work = false;
   const recovery = caller === "recovery";
   const fence = recovery
-    ? { fenced: true, notice: { reason: "resync_required" }, view: "fenced" }
+    ? { fenced: true, notice: { reason: "resync_required" }, render: "neutral" }
     : {};
+  record.reader_account = ACCOUNT;
   record.required_observations = [
     "reader_old_at_refusal",
     "recovery_invalidated",
     "recovery_staged_hidden",
     "recovery_final_held",
-    "recovery_exposed",
+    "recovery_activated",
+    "recovery_rendered",
   ];
   const staged = { staging_rows: 4, staging_generations: [6], ...fence };
   record.observations = [
@@ -1661,33 +1697,59 @@ function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
       kind: "recovery_invalidated",
       at_seq: p1,
       cache_digest: "old-cache",
-      detail: { ...pair(fence), generation_at_refusal: 5 },
+      detail: { ...SCHEMA_DETAIL, ...pair(fence), generation_at_refusal: 5 },
     },
     {
       kind: "recovery_staged_hidden",
       at_seq: p2,
       cache_digest: "old-cache",
-      detail: pair(staged),
+      detail: { ...SCHEMA_DETAIL, ...pair(staged) },
     },
     {
       kind: "recovery_final_held",
       at_seq: p3,
       cache_digest: "old-cache",
-      detail: pair({ ...staged, staging_rows: 8 }),
+      detail: {
+        ...SCHEMA_DETAIL,
+        ...pair({ ...staged, staging_rows: 8 }),
+        // Revision 28 (C4): both readers at every held page after the first.
+        pages: [
+          { seq: p2, ...pair(staged) },
+          { seq: p3, ...pair({ ...staged, staging_rows: 8 }) },
+        ],
+      },
     },
     {
-      kind: "recovery_exposed",
+      kind: "recovery_activated",
       at_seq: p3,
       cache_digest: "new-cache",
       detail: {
+        ...SCHEMA_DETAIL,
+        // The data activation is legal while the recovery caller's fence still stands (its pages still hidden).
         ...pair({
           cache_status: "valid",
           cache_digest: "new-cache",
           applied_revision: 7,
-          gate: null,
-          ...(recovery ? { fenced: true, view: "fenced" } : {}),
+          ...(recovery
+            ? { fenced: true, render: "neutral" }
+            : { render: "shown" }),
         }),
         rows_sha256: "a".repeat(64),
+      },
+    },
+    {
+      kind: "recovery_rendered",
+      at_seq: p3,
+      cache_digest: "new-cache",
+      detail: {
+        ...SCHEMA_DETAIL,
+        ...pair({
+          cache_status: "valid",
+          cache_digest: "new-cache",
+          applied_revision: 7,
+          fenced: false,
+          render: "shown",
+        }),
       },
     },
   ];
@@ -1767,29 +1829,30 @@ for (const [name, edit, expected] of [
   ],
   [
     "the exposure not at the activating page",
-    (r) => (obs(r, "recovery_exposed").at_seq = r.p2),
+    (r) => (obs(r, "recovery_activated").at_seq = r.p2),
     /not made at the terminal's activating snapshot page/,
   ],
   [
     "the follower reads another cache after the exposure",
-    (r) => (obs(r, "recovery_exposed").detail.follower.cache_digest = "other"),
+    (r) =>
+      (obs(r, "recovery_activated").detail.follower.cache_digest = "other"),
     /follower does not read the activated cache/,
   ],
   [
     "rows still staged after the exposure",
-    (r) => (obs(r, "recovery_exposed").detail.leader.staging_rows = 1),
+    (r) => (obs(r, "recovery_activated").detail.leader.staging_rows = 1),
     /still holds staged rows after the activation/,
   ],
   [
     "the old cache shown after the exposure",
     (r) =>
-      (obs(r, "recovery_exposed").detail.follower.cache_digest = "old-cache"),
-    /still shows the old cache/,
+      (obs(r, "recovery_activated").detail.follower.cache_digest = "old-cache"),
+    /still shows the old cache|still holds the old cache/,
   ],
   [
     "no row hash",
-    (r) => delete obs(r, "recovery_exposed").detail.rows_sha256,
-    /exposed rows are not hashed/,
+    (r) => delete obs(r, "recovery_activated").detail.rows_sha256,
+    /activated rows are not hashed/,
   ],
   [
     "a page that was not released by a recorded release",
@@ -1901,4 +1964,206 @@ test("refused (revision 27): the last page held with no staged page observed by 
     /recovery_final_held: no staged page was observed by the last one \(fewer than two snapshot pages\)/,
     "single",
   );
+});
+
+// ---- revision 28 (R28-DIAG.b; design assessment Q2/Q4): the interval reader judges what each page SHOWS, never the stored status ------
+// Every case keeps the stored state correct (invalid cache, the recovery's generation, the old digest, staging) and changes only ONE
+// reader's rendering at one barrier. Before revision 28 the reader's `hidden` accepted every such case because the cache was invalid.
+// Parity: the live observer's own rules (pair-recovery.mjs) must reject the same sample — the two are written independently.
+const SHAPES = {
+  open: (g) => ({
+    ...g,
+    view: { kind: "displaying", account_id: ACCOUNT, state: null },
+    root: { present: true, gated: false, mounted: true },
+    placeholders: { present: 0, refreshing_visible: 0 },
+  }),
+  unavailable: () => ({ status: "unavailable", error: "evaluate failed" }),
+  "unknown-kind": (g) => ({ ...g, view: { kind: "fenced" } }),
+  "signed-out": (g) => ({
+    ...g,
+    view: { kind: "signed_out", account_id: null, state: null },
+  }),
+  "no-root": (g) => ({ ...g, root: { present: false } }),
+  "placeholder-not-visible": (g) => ({
+    ...g,
+    view: { kind: "displaying", account_id: ACCOUNT, state: null },
+    root: { present: true, gated: false, mounted: true },
+    placeholders: { present: 1, refreshing_visible: 0 },
+  }),
+  "wrong-account": (g) => ({
+    ...g,
+    view: { kind: "displaying", account_id: "other-acct", state: null },
+  }),
+  "wrong-attachment": (g) => ({ ...g, attachment: "none" }),
+  "no-document": (g) => ({ ...g, document: null }),
+  "other-document": (g) => ({ ...g, document: `${g.document}-reloaded` }),
+};
+const SHAPE_EXPECTED = {
+  open: /page shows account content/,
+  unavailable: /incomplete sample: .*rendering is not observed \(unavailable\)/,
+  "unknown-kind": /page shows account content/,
+  "signed-out": /page shows account content/,
+  "no-root": /incomplete sample: .*protected root is not observed/,
+  "placeholder-not-visible": /page shows account content/,
+  "wrong-account": /incomplete sample: .*displays another account/,
+  "wrong-attachment": /incomplete sample: .*attached as none/,
+  "no-document": /incomplete sample: .*names no document/,
+  "other-document": /document is not the one observed at the invalidation/,
+};
+/** Where a barrier's sample sits in the record. */
+const SAMPLES = {
+  invalidated: (r, who) => obs(r, "recovery_invalidated").detail[who],
+  staged: (r, who) => obs(r, "recovery_staged_hidden").detail[who],
+  "held page": (r, who) => obs(r, "recovery_final_held").detail.pages[0][who],
+  final: (r, who) => obs(r, "recovery_final_held").detail[who],
+};
+for (const caller of ["ordinary", "recovery"])
+  for (const who of ["leader", "follower"])
+    for (const [at, sampleOf] of Object.entries(SAMPLES))
+      for (const [shape, change] of Object.entries(SHAPES)) {
+        if (shape === "other-document" && at === "invalidated") continue;
+        test(`refused (revision 28, ${caller}): the ${who} ${shape} at the ${at}, every stored field correct`, () => {
+          const r = observedRecovery({
+            caller,
+            rearmed: caller === "recovery",
+          });
+          const sample = sampleOf(r, who);
+          // Parity: the live observer's rules accept the healthy sample and reject the changed one.
+          assert.deepEqual(
+            hiddenProblems(sample, { caller, what: "x" }),
+            [],
+            "healthy before the change",
+          );
+          sample.rendering = change(sample.rendering);
+          if (shape !== "other-document")
+            assert.ok(
+              hiddenProblems(sample, { caller, what: "x" }).length > 0 ||
+                ["wrong-account", "wrong-attachment", "no-document"].includes(
+                  shape,
+                ),
+              "the live observer also rejects it",
+            );
+          refuse(r, SHAPE_EXPECTED[shape], `${caller} ${who} ${shape} ${at}`);
+        });
+      }
+test("refused (revision 28, recovery caller): a displaying page behind the refreshing placeholder is not the fenced recovery's hidden state", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  obs(r, "recovery_staged_hidden").detail.follower.rendering =
+    RENDER.refreshing("follower");
+  refuse(
+    r,
+    /follower's page shows account content while the snapshot is staged/,
+    "displaying fenced",
+  );
+});
+test("accepted (revision 28, ordinary caller): the neutral state over a gated tree is also hidden", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_staged_hidden").detail.follower.rendering =
+    RENDER.neutral("follower");
+  accept(r);
+});
+test("refused (revision 28): a recovery observation of the earlier contract (revision 27's gate/view fields, no rendering) is incomplete, never upgraded", () => {
+  const r = observedRecovery();
+  const o = obs(r, "recovery_staged_hidden");
+  delete o.detail.schema;
+  for (const who of ["leader", "follower"]) {
+    delete o.detail[who].rendering;
+    Object.assign(o.detail[who], { gate: "refreshing", view: "displaying" });
+  }
+  refuse(
+    r,
+    /recovery_staged_hidden: made under the observation contract null/,
+    "old contract",
+  );
+  refuse(
+    r,
+    /recovery_staged_hidden: an incomplete sample: leader's rendering is not observed \(missing\)/,
+    "old samples",
+  );
+});
+test("refused (revision 28): the interval names no observed reader account", () => {
+  const r = observedRecovery();
+  delete r.record.reader_account;
+  refuse(r, /names no observed reader account/, "no account");
+});
+test("refused (revision 28): both readers consistently of ANOTHER account than the interval's", () => {
+  const r = observedRecovery();
+  r.record.reader_account = "someone-else";
+  refuse(r, /is not a sample of the account someone-else/, "wrong account");
+});
+test("refused (revision 28): the follower reports the leader's own document", () => {
+  const r = observedRecovery();
+  for (const o of r.record.observations.filter((x) => x.detail?.follower))
+    o.detail.follower.rendering.document = "leader-document";
+  for (const p of obs(r, "recovery_final_held").detail.pages)
+    p.follower.rendering.document = "leader-document";
+  refuse(r, /follower is the leading page's own document/, "same document");
+});
+test("refused (revision 28): auth fences that were not read", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_invalidated").detail.follower.fenced = null;
+  refuse(r, /follower's auth fences are not observed/, "fences");
+});
+test("refused (revision 28, C4): an intermediate held page missing from the record", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_final_held").detail.pages.shift();
+  refuse(r, /are not the snapshot pages/, "missing page");
+});
+test("refused (revision 28, C4): no held pages recorded", () => {
+  const r = observedRecovery();
+  delete obs(r, "recovery_final_held").detail.pages;
+  refuse(r, /held snapshot pages are not recorded/, "no pages");
+});
+test("refused (revision 28, C4): an intermediate page's follower with the old cache valid", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_final_held").detail.pages[0].follower.cache_status = "valid";
+  refuse(r, /live cache is not the old hidden one at page/, "page cache");
+});
+// The rendered settlement (C5).
+test("refused (revision 28, C5): the rendered settlement missing (data activation alone)", () => {
+  const r = observedRecovery();
+  r.record.observations = r.record.observations.filter(
+    (o) => o.kind !== "recovery_rendered",
+  );
+  refuse(r, /required observation recovery_rendered is missing/, "no rendered");
+});
+for (const caller of ["ordinary", "recovery"])
+  for (const who of ["leader", "follower"]) {
+    test(`refused (revision 28, C5, ${caller}): the ${who} never shown (still behind the gate) at the rendered settlement`, () => {
+      const r = observedRecovery({ caller, rearmed: caller === "recovery" });
+      const sample = obs(r, "recovery_rendered").detail[who];
+      assert.deepEqual(shownProblems(sample), [], "healthy before the change");
+      sample.rendering = RENDER.refreshing(who);
+      assert.ok(shownProblems(sample).length > 0, "parity");
+      refuse(
+        r,
+        new RegExp(`${who}'s page does not show the recovered cache`),
+        "not shown",
+      );
+    });
+    test(`refused (revision 28, C5, ${caller}): the ${who}'s rendering unavailable at the rendered settlement`, () => {
+      const r = observedRecovery({ caller, rearmed: caller === "recovery" });
+      obs(r, "recovery_rendered").detail[who].rendering = {
+        status: "unavailable",
+        error: "x",
+      };
+      refuse(r, /recovery_rendered: an incomplete sample/, "unavailable");
+    });
+  }
+test("refused (revision 28, C5, recovery caller): shown while the fence stands", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  obs(r, "recovery_rendered").detail.follower.fenced = true;
+  refuse(r, /follower shows the recovered cache while fenced/, "fenced shown");
+});
+test("refused (revision 28, C5): shown with another cache than the activated one", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_rendered").detail.leader.cache_digest = "later";
+  refuse(r, /shows another cache than the activated one/, "other cache");
+});
+test("refused (revision 28, C5): the rendered settlement before any data activation", () => {
+  const r = observedRecovery();
+  r.record.observations = r.record.observations.filter(
+    (o) => o.kind !== "recovery_activated",
+  );
+  refuse(r, /no data activation was observed before it/, "no activation");
 });

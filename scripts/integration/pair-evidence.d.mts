@@ -63,6 +63,8 @@ export interface IntervalParts {
   handOff: { at_seq: number; reason: string } | null;
   /** Revision 27: the recovery caller's re-armed hold. */
   rearm?: { at_seq: number; reason: string; released_rule: string };
+  /** Revision 28: the account the recovery observations are of. */
+  readerAccount?: string;
   opening: unknown;
   holdReleases: unknown[];
   observations: unknown[];
@@ -70,6 +72,7 @@ export interface IntervalParts {
   traces: unknown[];
 }
 export const RECOVERY_KINDS: readonly string[];
+export const RECOVERY_OBSERVATION_SCHEMA: string;
 export function assembleInterval<
   R extends { seq: number; method: string; path: string },
 >(parts: {
