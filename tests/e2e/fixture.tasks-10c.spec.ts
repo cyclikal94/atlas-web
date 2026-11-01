@@ -2330,7 +2330,10 @@ test.describe("E-M11: a reconnection past the first page, and a fence across a r
     });
   });
 
-  test("a marker of the day's unrecorded outcome (real localStorage) fences it across a full reload; Try again ends that marker and resends the stored key", async ({
+  // Revision 12 (review 13 R36-A, design assessment C3): CORRECTED. Revision 11 expected the press to end this marker and resend the stored
+  // key: with only the marker left, nothing says whether the unrecorded answer was a 429 with a deadline or a success that may only
+  // continue with its position read, so the press now ends nothing and transmits nothing (the stop stays shown, the marker stays).
+  test("a marker of the day's unrecorded outcome (real localStorage) fences it across a full reload; Try again, with no outcome behind the marker, ends nothing and transmits nothing", async ({
     context,
   }, info) => {
     const task = repeating(420, "Water the plants");
@@ -2393,11 +2396,25 @@ test.describe("E-M11: a reconnection past the first page, and a fence across a r
       "1",
     );
     await notice.getByRole("button", { name: "Try again" }).click();
-    await expect.poll(() => posts(r10c).length, { timeout: 15_000 }).toBe(1);
-    expect(posts(r10c)[0]?.key).toBe(key);
-    expect(
-      await page.evaluate((k) => localStorage.getItem(k), marker),
-    ).toBeNull();
+    // Longer than the lost issue's 1-second pace that revision 11 resent after: still nothing, the stop and the marker standing.
+    await page.waitForTimeout(3_000);
+    expect(posts(r10c)).toHaveLength(0);
+    await expect(notice).toHaveAttribute("data-catch-up-stopped", "storage");
+    expect(await page.evaluate((k) => localStorage.getItem(k), marker)).toBe(
+      "1",
+    );
+    // The durable row is the issued one still: its attempt kept, nothing reduced as lost. Read through `rowsOf`, which opens the store
+    // when the rebooted page has none open (`__atlasData.rows` then throws "no open store", as revision 12's first WebKit run showed).
+    const after = (
+      (await rowsOf(page, "materialise_sequences")) as Array<{
+        task_id: string;
+        phase: string;
+        attempt: { key: string } | null;
+      }>
+    ).filter((r) => r.task_id === task.taskId);
+    expect(after).toHaveLength(1);
+    expect(after[0]?.phase).toBe("submitting");
+    expect(after[0]?.attempt?.key).toBe(key);
     recordEvidence(info, "e-m11-fence", {
       log: r10c.log.map(({ from: _from, ...e }) => e),
     });

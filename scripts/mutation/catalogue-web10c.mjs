@@ -1330,8 +1330,14 @@ export const UNIT_10C = [
     file: "src/features/tasks/catchup/runner.ts",
     tests: RUNNER_TESTS,
     expect: /Try again pressed under the ended binding/,
-    // Re-anchored (revision 10): the press is taken off the item before its lift is tried.
-    patch: (t) => sub(t, "      pressed.service === service &&\n", ""),
+    // Re-anchored (revision 10): the press is taken off the item before its lift is tried. Revision 12: the press and a reconnection's
+    // lift beside it are both filtered by their binding; the same fault (the binding not compared).
+    patch: (t) =>
+      sub(
+        t,
+        "      (r): r is Retry => r !== undefined && r.service === service,",
+        "      (r): r is Retry => r !== undefined,",
+      ),
   },
   // ---- revision 4 (review 4 R19-R22, design assessment of 27 October 2026): one fault per new guard ---------------------------
   {
@@ -2975,9 +2981,10 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        // Re-anchored (revision 11): the stop is now `storage()` after the fence; the same fault (a pause, taken up by a kick).
-        "          async () => (await write()) !== null,\n        );\n        return storage();",
-        "          async () => (await write()) !== null,\n        );\n        return unapplied(at);",
+        // Re-anchored (revision 11): the stop is now `storage()` after the fence; the same fault (a pause, taken up by a kick). Revision
+        // 12: the outcome is written through `protect`; the same fault over its `fenced` answer.
+        '      if (settled.kind === "fenced") return storage();',
+        '      if (settled.kind === "fenced") return unapplied(at);',
       ),
   },
   {
@@ -3006,9 +3013,10 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        // Re-anchored (revision 11): the withdrawal now writes an explicit schedule; the same fault (the admission kept).
-        "      const back = await record(captured, {\n        ...issued,\n        schedule: withdrawn(issued.schedule as Schedule),\n      });",
-        "      const back = await record(captured, issued);",
+        // Re-anchored (revision 11): the withdrawal now writes an explicit schedule; the same fault (the admission kept). Revision 12:
+        // the withdrawal is written as a protected outcome (`answered`); the same fault.
+        "      const back = await answered(captured, {\n        ...issued,\n        schedule: withdrawn(issued.schedule as Schedule),\n      });",
+        "      const back = await answered(captured, issued);",
       ),
   },
   {
@@ -3296,7 +3304,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "        if (back === null || !owns(at) || !mayRun() || permit() || refused > 1)\n          return PAUSED;",
+        // Re-anchored (revision 12): the withdrawal's failure is answered by `protect` before this decision; the same fault.
+        "        if (!owns(at) || !mayRun() || permit() || refused > 1) return PAUSED;",
         "        if (back !== undefined) return PAUSED;",
       ),
   },
@@ -3326,8 +3335,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    if (m.set(scope, op, () => owns(at)).state === "unavailable")\n      m.stops.hold(scope, op);',
-        "    void m.stops.instance(scope, op);",
+        // Re-anchored (revision 12): the fence is published by `publish`; the same fault (no marker written, no page hold taken).
+        "    const out = m.set(scope, op, () => owns(at));",
+        '    const out = { state: "recorded" as const };',
       ),
   },
   {
@@ -3383,8 +3393,10 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "        if (!(await repair())) {",
-        "        if (repair === null) {",
+        // Re-anchored (revision 12): the kept outcome is a `Protected` record written by the press first; the same fault (taken as
+        // written without writing it, so its fence ends and the work carries on from the issued record).
+        "        const verdict = await record.repair();",
+        '        const verdict: Verdict = "written";',
       ),
   },
   {
@@ -3393,12 +3405,15 @@ export const UNIT_10C = [
       "R36-2: WEB-10c A19: the person's press ends every fence of the operation, not only the instances it saw",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
-    expect: /a press ends only the fence instances it saw/,
+    expect:
+      /a press ends only the fence instances it saw|Q6: a repair ends only the instance it published/,
     patch: (t) =>
       sub(
         t,
-        "          m.retire(fences.scope, f.op, f.marker, { explicit: true });",
-        "          m.clear(fences.scope, f.op);",
+        // Re-anchored (revision 12, R36-A): a press no longer ends the instances it witnessed; an outcome written at last ends the one
+        // instance it published (`reconcile`). The same fault: every marker of the operation ended, another page's included.
+        '      m.retire(scope, record.op, {\n        kind: "instance",\n        instances: [record.marker],\n      });',
+        "      m.clear(scope, record.op);",
       ),
   },
   {
@@ -3425,8 +3440,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      const back = await record(captured, {\n        ...issued,\n        schedule: withdrawn(issued.schedule as Schedule),\n      });",
-        "      const { schedule: _, ...rest } = issued;\n      const kept = withdrawn(issued.schedule as Schedule);\n      const back = await record(\n        captured,\n        kept === null ? rest : { ...rest, schedule: kept },\n      );",
+        // Re-anchored (revision 12): the withdrawal is written through `answered`; the same fault.
+        "      const back = await answered(captured, {\n        ...issued,\n        schedule: withdrawn(issued.schedule as Schedule),\n      });",
+        "      const { schedule: _, ...rest } = issued;\n      const kept = withdrawn(issued.schedule as Schedule);\n      const back = await answered(\n        captured,\n        kept === null ? rest : { ...rest, schedule: kept },\n      );",
       ),
   },
   {
@@ -3518,8 +3534,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '      const written = await settle(\n        at,\n        () => record(captured, next),\n        (w) => w !== "failed",\n      );',
-        "      const written = await record(captured, next);",
+        // Re-anchored (revision 12): the answer is written through `protect`; the same fault (a failed write is given up, not repaired).
+        '            : w === "failed" || w === "refused"\n              ? "failed"',
+        '            : w === "failed" || w === "refused"\n              ? "ended"',
       ),
   },
   {
@@ -3546,6 +3563,140 @@ export const UNIT_10C = [
     expect:
       /never written: a marker fences the day|after a reload only the marker survives/,
     patch: (t) => sub(t, "      if (fenced(at, op)) return storage();\n", ""),
+  },
+  // ---- Revision 12 (review 13 R36-A to R36-D; design assessment Q1 to Q9) ------------------------------------------------------
+  {
+    id: "MU-3262",
+    title:
+      "R36-B: WEB-10c A19 (review 13): a failed outcome write is fenced only after its repairs are spent (unfenced during the waits)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /WITNESS \(R36-B\)|Q2 (discovery|command|position): the first failed outcome write is fenced before/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '    const published = publish(at, op);\n    if (published === null) return { kind: "ended" };',
+          "    const published = { marker: null, memory: null };",
+        ),
+        '      if (verdict === "stale") return { kind: "fenced" };\n    }\n    return { kind: "fenced" };',
+        '      if (verdict === "stale") return { kind: "fenced" };\n    }\n    if (publish(at, op) === null) return { kind: "ended" };\n    return { kind: "fenced" };',
+      ),
+  },
+  {
+    id: "MU-3263",
+    title:
+      "R36-A: WEB-10c A19 (review 13): the person's press ends a fence whose outcome this page does not hold (a reload's marker only)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /WITNESS \(R36-A\) recreated runner|after a reload only the marker survives \(/,
+    patch: (t) =>
+      sub(
+        t,
+        "      return held();\n    const now = deps.now();",
+        "      for (const op of [fenceOf(item.taskId), ...(day === undefined ? [] : [fenceOf(item.taskId, day)])])\n        markers()?.clear(scopeOf(at.service), op);\n    const now = deps.now();",
+      ),
+  },
+  {
+    id: "MU-3264",
+    title:
+      "R36-A/C1: WEB-10c A19 (review 13): a repair that finds another record stored is taken as its outcome recorded (its fence ends)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /Q5: a repair that finds ANOTHER row stored/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (verdict === "written" || verdict === "landed") {\n        reconcile(record);',
+        '      if (verdict !== "failed") {\n        reconcile(record);',
+      ),
+  },
+  {
+    id: "MU-3265",
+    title:
+      "R36/C1: WEB-10c A19 (review 13): a repair never recognises its own transition already stored (an applied write whose answer was lost stays fenced)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /Q5 control: a first write that applied but answered `failed`/,
+    patch: (t) =>
+      sub(
+        t,
+        '          : landedRow(expected, next, out.stored)\n            ? "landed"',
+        '          : false\n            ? "landed"',
+      ),
+  },
+  {
+    id: "MU-3266",
+    title:
+      "R36-C: WEB-10c A19 (review 13): a reconnection's scan replaces the person's queued press (the fresh budget lost)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /WITNESS \(R36-C\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (queued.retry !== undefined && queued.retry.online !== true)\n        queued.edge = item.retry as Retry;\n      else queued.retry = item.retry as Retry;",
+        "      queued.retry = item.retry as Retry;",
+      ),
+  },
+  {
+    id: "MU-3267",
+    title:
+      "R36-C: WEB-10c A19 (review 13): a reconnection's lift kept beside a press is never tried when the press's stop no longer stands",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /Q8: a press whose stop no longer stands/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const entitled = [item.retry, item.edge].filter(",
+        "    const entitled = [item.retry].filter(",
+      ),
+  },
+  {
+    id: "MU-3268",
+    title:
+      "R36-D: WEB-10c A19 (review 13): a reconnection observed while the bound service is momentarily not displayed is dropped",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /WITNESS \(R36-D\)|Q9: the kept edge is consumed once/,
+    patch: (t) =>
+      sub(
+        t,
+        "        service ?? (deps.service() === null && bound?.live ? bound : null);",
+        "        service;",
+      ),
+  },
+  {
+    id: "MU-3269",
+    title:
+      "R36/C2: WEB-10c A19 (review 13): a command known not to have been sent whose withdrawal fails is given up unfenced (a reload counts it as lost)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /Q7 command: a call known not to have been sent/,
+    patch: (t) =>
+      sub(
+        t,
+        "          () => commit(service, captured, key, issued, unsent),\n          judgeRow(issued, unsent),",
+        '          () => commit(service, captured, key, issued, unsent),\n          (o) => (o === null ? "ended" : judgeRow(issued, unsent)(o)),',
+      ),
+  },
+  {
+    id: "MU-3270",
+    title:
+      "R36/Q4: WEB-10c A19 (review 13): a position read's outcome that cannot be recorded is fenced under an operation no caller consults",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /Q4 position|Q2 position: the first failed outcome write is fenced before/,
+    patch: (t) =>
+      sub(
+        t,
+        "        op,\n        () => commit(service, captured, key, issued, outcome),",
+        '        plan.kind === "read" ? `${op}:read` : op,\n        () => commit(service, captured, key, issued, outcome),',
+      ),
   },
 ];
 

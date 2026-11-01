@@ -119,13 +119,31 @@ import { todayIn } from "../model/time";
  *   is transmitted). One still not written FENCES its caller (a write-failure marker of the account's database lifetime, `fenceOf`; this
  *   page's memory of it when no marker can be written): no page transmits for that caller automatically while it stands, a reload and
  *   another tab included, and a marker that cannot be read counts as standing. The outcome is kept in this page's memory, and the
- *   person's "Try again" writes it first, then ends exactly the marker instances its press saw. After a reload only the marker survives
- *   (no deadline or success it recorded can be known), so the press carries on from the durable record: its issue counts as lost.
+ *   person's "Try again" writes it first (revision 12: see below for what it ends, and what it never ends).
  * - MIGRATION: a discovery entry of an earlier build with a claim (`attempt`) or failures and no schedule is a visible manual stop, its
  *   claim and counts kept; a withdrawn admission keeps an explicit `schedule: null`, so it is never mistaken for one.
  * - RECONNECTION reaches every row: the account is read a keyset page at a time (`readSequencePageNow`) until a short page, and only
  *   pauses that stood at the reconnection (`seen` no later than it) are lifted. A page that cannot be read leaves the scan where it was,
  *   for the next kick under the same binding (never another binding's).
+ *
+ * REVISION 12 (review 13's R36-A to R36-D; design assessment C1 to C5):
+ * - THE FIRST FAILURE IS FENCED AT ONCE (R36-B): an outcome (an answer's record, or the withdrawal of a call known not to have been sent)
+ *   whose first write fails is a PROTECTED transition (`Protected`): its fence is published in the same step, before any repair wait,
+ *   while its binding is still the displayed one (never into another lifetime), and the exact failure instance it published is kept with
+ *   it. Its repairs then write the SAME transition again (persistence only; the deadline and the timestamps it was classified with). A
+ *   repair that lands, or finds that very transition stored already (`landed`), ends that instance and no other. A repair that finds
+ *   another record (`stale`), or never lands, keeps the fence and shows the stop. A runner that ends during a wait leaves the fence standing.
+ * - EVIDENCE BEFORE RETIREMENT (R36-A): the person's "Try again" writes this page's protected outcomes of the task FIRST, before any stop is
+ *   lifted, and ends only the instances they published. A fence with no outcome behind it in this page (a reload, another runner, another
+ *   tab, an instance whose publication could not be named) is never ended by a press: its stop stays shown and nothing is transmitted, however
+ *   long ago it was recorded, because a marker never says what the call's answer was (a 429's deadline, or a success that may only continue
+ *   with its position read). Only a page that holds the outcome can end it.
+ * - RETRY AUTHORITY SURVIVES COALESCING (R36-C): the person's press and an observed reconnection for the same work are kept apart (`retry`,
+ *   then `edge`): a reconnection's lift never replaces a queued press (a fresh budget), and a press replaces a queued reconnection's lift
+ *   only in front of it: if the stop the press saw no longer stands, the reconnection's own (as it read it) is tried, each consumed once.
+ * - AN EDGE WHILE NO SERVICE IS DISPLAYED (R36-D): a reconnection observed while the service this page's work is bound to is still live
+ *   but momentarily not displayed is kept, with its time, for THAT service: the next kick that finds it displayed again scans; another
+ *   service (a replacement), an ended one or none ever bound takes nothing from it.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -391,27 +409,77 @@ interface Item {
   rebound?: boolean;
   /** Revision 10: parked until this time, when its schedule admits the next transmission (woken then; a kick does not take it up). */
   due?: number;
-  retry?: {
-    /** Revision 10: lifted by an observed reconnection (only a `window` pause), not by the person. */
-    online?: boolean;
-    /** The discovery entry as read at the press: its stop is lifted only while it stands so; none (or one with no stop): none may stand. */
-    discovery: MaterialiseDiscovery | null;
-    sequence: Sequence | null;
-    /** The service it was pressed under: a press of an ended binding lifts nothing in another (review R17). */
-    service: AccountService | null;
-    /** Revision 11 (review R36): the fences of the task that stood when it was pressed (the only ones its lift may end). */
-    fences?: Fences;
-  };
+  /**
+   * Revision 12 (R36-C): an observed reconnection's lift of this work that arrived while the person's press (`retry`) was queued for it:
+   * kept beside the press, never in its place, and tried only when the stop the press saw no longer stands.
+   */
+  edge?: Retry;
+  retry?: Retry;
 }
 
-/** Revision 11 (review R36): the fences of some operations as they stood when a press was made: this page's hold and the marker's instances. */
-interface Fences {
-  scope: { account: string; incarnationId: string };
-  stood: Array<{
-    op: string;
-    memory: string | null;
-    marker: ReturnType<PageDataHost["markers"]["witness"]>;
-  }>;
+/** A lift of one piece of work: the person's press, or an observed reconnection (`online`). */
+interface Retry {
+  /** Revision 10: lifted by an observed reconnection (only a `window` pause), not by the person. */
+  online?: boolean;
+  /** The discovery entry as read at the press: its stop is lifted only while it stands so; none (or one with no stop): none may stand. */
+  discovery: MaterialiseDiscovery | null;
+  sequence: Sequence | null;
+  /** The service it was pressed under: a press of an ended binding lifts nothing in another (review R17). */
+  service: AccountService | null;
+}
+
+/**
+ * Revision 12 (R36-A/B; design assessment C1/C2): how a protected write ended. `landed`: a repair found this very transition stored
+ * already (an earlier attempt applied and its answer was lost); `stale`: another record stands; `ended`: its binding is not displayed.
+ */
+type Verdict = "written" | "landed" | "stale" | "failed" | "ended";
+
+/**
+ * Revision 12 (R36-A/B): an outcome this page could not record, kept in its memory with the failure instance it published: the marker's
+ * own instance (`marker`; `null` when none could be named, which nothing then ends) or this page's hold of it (`memory`).
+ */
+interface Protected {
+  service: AccountService;
+  task: string;
+  op: string;
+  marker: string | null;
+  memory: string | null;
+  /** Writes the same transition again (persistence only): what it found. */
+  repair(): Promise<Verdict>;
+}
+
+/** Revision 12 (R36, C1): two records alike, field by field (an absent field and an `undefined` one alike). */
+function same(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (
+    typeof a !== "object" ||
+    typeof b !== "object" ||
+    a === null ||
+    b === null
+  )
+    return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const x = a as Record<string, unknown>;
+  const y = b as Record<string, unknown>;
+  const keys = (o: Record<string, unknown>) =>
+    Object.keys(o).filter((k) => o[k] !== undefined);
+  const kx = keys(x);
+  return kx.length === keys(y).length && kx.every((k) => same(x[k], y[k]));
+}
+
+/**
+ * Revision 12 (R36, C1): the row a repair found is the transition it writes (`next` over `expected`), landed already: the same content
+ * one revision after the row expected, or, for a removal, no row.
+ */
+function landedRow(
+  expected: Sequence,
+  next: Sequence | null,
+  stored: Sequence | null,
+): boolean {
+  if (next === null || stored === null) return next === null && stored === null;
+  const { revision: was, ...rest } = stored;
+  const { revision: _, ...want } = next;
+  return was === (expected.revision ?? 0) + 1 && same(rest, want);
 }
 
 /** The binding one piece of work began with (review R17): it reads, writes and stamps through this service only. */
@@ -662,39 +730,121 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     account: deps.accountId,
     incarnationId: service.incarnationId,
   });
-  /** An outcome of `op` that could not be recorded stands (a marker, or this page's hold of one); a marker that cannot be read stands. */
+  /** The outcomes this page could not record, by binding and operation (revision 12: each with the failure instance it published). */
+  const repairs = new Map<string, Protected>();
+  const repairKey = (service: AccountService, op: string) =>
+    `${service.incarnationId}|${op}`;
+  /**
+   * An outcome of `op` that could not be recorded stands (a marker, this page's hold of one, or, revision 12, an outcome this runner
+   * keeps); a marker that cannot be read stands.
+   */
   const fenced = (at: Binding, op: string) => {
+    if (repairs.has(repairKey(at.service, op))) return true;
     const m = markers();
     if (m === null) return false;
     const scope = scopeOf(at.service);
     return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";
   };
-  /** Fences `op`: a marker written now, in this binding's lifetime only; held in this page's memory when none can be written. */
-  const fence = (at: Binding, op: string) => {
+  /**
+   * Revision 12 (R36-B, C2): fences `op` NOW, in this binding's lifetime only (`null`: that lifetime ended, nothing is written), and names
+   * the failure instance published: the marker's new instance (the one its witness shows after the write and not before, in the same
+   * synchronous step; none when that cannot be told), or this page's hold when no marker can be written.
+   */
+  const publish = (
+    at: Binding,
+    op: string,
+  ): { marker: string | null; memory: string | null } | null => {
+    if (!owns(at)) return null;
+    const m = markers();
+    if (m === null) return { marker: null, memory: null };
+    const scope = scopeOf(at.service);
+    const before = m.witness(scope, op);
+    const out = m.set(scope, op, () => owns(at));
+    if (out.state === "obsolete") return null;
+    if (out.state === "unavailable")
+      return { marker: null, memory: m.stops.hold(scope, op) };
+    const after = m.witness(scope, op);
+    const had = new Set(before.kind === "instance" ? before.instances : []);
+    const mine =
+      after.kind === "instance"
+        ? after.instances.filter((i) => !had.has(i))
+        : [];
+    return {
+      marker: mine.length === 1 ? (mine[0] as string) : null,
+      memory: null,
+    };
+  };
+  /** Revision 12 (R36-A, C2): a protected outcome recorded at last ends the failure it published, and no other. */
+  const reconcile = (record: Protected) => {
+    const key = repairKey(record.service, record.op);
+    if (repairs.get(key) === record) repairs.delete(key);
     const m = markers();
     if (m === null) return;
-    const scope = scopeOf(at.service);
-    if (m.set(scope, op, () => owns(at)).state === "unavailable")
-      m.stops.hold(scope, op);
+    const scope = scopeOf(record.service);
+    if (record.memory !== null)
+      m.stops.release(scope, record.op, record.memory);
+    if (record.marker !== null)
+      m.retire(scope, record.op, {
+        kind: "instance",
+        instances: [record.marker],
+      });
   };
-  /** The outcomes this page could not record, by binding and operation: written first by the person's press (`lift`). */
-  const repairs = new Map<string, () => Promise<boolean>>();
-  const repairKey = (service: AccountService, op: string) =>
-    `${service.incarnationId}|${op}`;
-  /** Writes `write`'s record again after each of `REPAIR_MS` while it is not written and the binding stands (persistence only). */
-  const settle = async <T>(
+  /**
+   * Revision 12 (R36-A/B; C1/C2): writes an outcome's record. A first write that fails makes it PROTECTED at once: its fence is published
+   * before any wait, it is kept (`repairs`) with the instance published, and it is written again after each of `REPAIR_MS` (persistence
+   * only). `out`: the first write's own answer (`stale` as before), or a repair's that landed; `fenced`: not recorded (kept, its fence
+   * standing); `ended`: its binding is not the displayed one (the fence, if published, stands).
+   */
+  const protect = async <T>(
     at: Binding,
+    task: string,
+    op: string,
     write: () => Promise<T>,
-    written: (out: T) => boolean,
-  ): Promise<T> => {
+    judge: (out: T) => Verdict,
+  ): Promise<
+    | { kind: "out"; out: T; verdict: Verdict }
+    | { kind: "fenced" }
+    | { kind: "ended" }
+  > => {
     let out = await write();
+    let verdict = judge(out);
+    if (verdict === "ended" || !owns(at)) return { kind: "ended" };
+    // The first write's answer is the caller's, as before: a record of another page (`stale`) is adopted.
+    if (verdict !== "failed")
+      return {
+        kind: "out",
+        out,
+        verdict: verdict === "landed" ? "stale" : verdict,
+      };
+    const published = publish(at, op);
+    if (published === null) return { kind: "ended" };
+    const record: Protected = {
+      service: at.service,
+      task,
+      op,
+      ...published,
+      repair: async () => {
+        const again = judge(await write());
+        return again === "written" || again === "landed" || owns(at)
+          ? again
+          : "ended";
+      },
+    };
+    repairs.set(repairKey(at.service, op), record);
     for (const ms of REPAIR_MS) {
-      if (written(out) || !owns(at)) break;
       await sleep(ms);
-      if (!owns(at)) break;
+      if (!owns(at)) return { kind: "ended" };
       out = await write();
+      verdict = judge(out);
+      if (verdict === "ended" || !owns(at)) return { kind: "ended" };
+      if (verdict === "written" || verdict === "landed") {
+        reconcile(record);
+        return { kind: "out", out, verdict };
+      }
+      // Another record stands where this one was to be written: nothing proves this outcome landed, so its fence stays.
+      if (verdict === "stale") return { kind: "fenced" };
     }
-    return out;
+    return { kind: "fenced" };
   };
   /**
    * The permission of one admitted transmission (header: PERMISSION AT ISSUE), asked at the send boundary and before each hidden
@@ -779,6 +929,17 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     if (out.kind !== "applied") return null;
     return { stored: out.value.stored, written: out.value.kind === "written" };
   };
+  /** Revision 12 (R36, C1): what one commit of `next` over `expected` came to, for `protect`. */
+  const judgeRow =
+    (expected: Sequence, next: Sequence | null) =>
+    (out: { stored: Sequence | null; written: boolean } | null): Verdict =>
+      out === null
+        ? "failed"
+        : out.written
+          ? "written"
+          : landedRow(expected, next, out.stored)
+            ? "landed"
+            : "stale";
   /**
    * A NEW row (revision 5): its growth admitted through the quota ledger first. `refused`: not admitted, nothing written; `null`: not
    * applied; on `stale`, what is stored now (adopted).
@@ -848,8 +1009,9 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
    *
    * Revision 10 (Decision B): each transmission is admitted first (`step`: written before it is made), and a wait parks the work until its
    * schedule's time (`at`). Revision 11 (R36): the call is issued only while its permission holds (`transmits`), and an answer whose
-   * record is not applied after its repairs while the binding still stands fences the day (`storage`, in memory and by its marker): what
-   * it answered is never transmitted again automatically, on this page or another, before or after a reload.
+   * record is not applied while the binding still stands fences the day (`storage`, in memory and by its marker): what it answered is
+   * never transmitted again automatically, on this page or another, before or after a reload. Revision 12 (R36-B): fenced at the FIRST
+   * failed write, before its repairs wait (`protect`); a withdrawal of a call known not to have been sent alike.
    */
   const drive = async (
     at: Binding,
@@ -912,17 +1074,26 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (answered.kind === "pause") {
         // `closed` may follow a transmission: its admission stays (counted as lost when the work is taken up again).
         if (!answered.unsent) return PAUSED;
-        // Not transmitted: the admission is withdrawn, nothing counted.
-        const back = await commit(service, captured, key, issued, {
+        // Not transmitted: the admission is withdrawn, nothing counted. Revision 12 (R36, C2): a withdrawal that cannot be written is
+        // protected like an answer, so a reload never counts a call known not to have been made as a lost one.
+        const unsent: Sequence = {
           ...issued,
           schedule: withdrawn(issued.schedule as Schedule),
-        });
+        };
+        const back = await protect(
+          at,
+          key.task_id,
+          op,
+          () => commit(service, captured, key, issued, unsent),
+          judgeRow(issued, unsent),
+        );
+        if (back.kind === "ended") return lost(at);
+        if (back.kind === "fenced") return storage();
         // Refused by its own permission (the window ended, the clock moved, a fence): the schedule decides again, sending nothing
         // until it admits. Any other refusal (the session held it) waits for a kick, as before.
-        if (back === null || !owns(at) || !mayRun() || permit() || refused > 1)
-          return PAUSED;
+        if (!owns(at) || !mayRun() || permit() || refused > 1) return PAUSED;
         refused += 1;
-        row = back.stored;
+        row = (back.out as { stored: Sequence | null }).stored;
         continue;
       }
       next =
@@ -930,23 +1101,27 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           ? onSent(issued, answered as SendAnswer, deps.now())
           : onRead(issued, answered as ReadAnswer, todayOf(), deps.now());
       const outcome = next;
-      const write = () => commit(service, captured, key, issued, outcome);
-      const out = await settle(at, write, (o) => o !== null);
-      if (out === null) {
-        if (!owns(at)) return lost(at);
-        // Revision 11 (R36): never written: fenced across pages and reloads; the outcome is kept for the person's press.
-        fence(at, op);
-        repairs.set(
-          repairKey(service, op),
-          async () => (await write()) !== null,
-        );
-        return storage();
-      }
+      // Revision 12 (R36-B): a record that fails is fenced at once (across pages and reloads) and kept for its repairs and the person's
+      // press; one never written stops the day here.
+      const settled = await protect(
+        at,
+        key.task_id,
+        op,
+        () => commit(service, captured, key, issued, outcome),
+        judgeRow(issued, outcome),
+      );
+      if (settled.kind === "ended") return lost(at);
+      if (settled.kind === "fenced") return storage();
       if (!owns(at)) return lost(at);
+      const out = settled.out as { stored: Sequence | null; written: boolean };
       row = out.stored;
       if (row === null) {
         // The position covers this day; the task's other days it covers are satisfied too (revision 5).
-        if (out.written && next === null && read?.answer.kind === "ok")
+        if (
+          (out.written || settled.verdict === "landed") &&
+          next === null &&
+          read?.answer.kind === "ok"
+        )
           await clearSatisfied(
             at,
             captured,
@@ -975,15 +1150,45 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
    * the day's stopped sequence it was pressed on, if they still stand as seen, in ONE compare-and-set (revision 4, review R20: both or
    * neither; the sequence compared by its revision, so a stop that came back the same way after another press's budget is not the one
    * pressed on). Only a lift WRITTEN here admits a fresh budget: another press, here or in another tab, that lifted them first leaves this
-   * one with nothing to add. `false`: nothing more is done (the stop stays shown, or the other press's work carries on).
+   * one with nothing to add. An observed reconnection's lift (`online`) is made the same way, keeping the calls counted.
+   *
+   * Revision 12 (R36-A; C3): the outcomes of the task this page kept are written FIRST (a press's own act), each ending only the failure
+   * it published, before anything is lifted: a lift over the record a repair must apply to would make that repair stale. A fence still
+   * standing then (one with no outcome here: a reload's, another page's, a newer one) is never ended by the press: the stop stays shown and
+   * nothing is lifted or transmitted. `lifted`: the work goes on; `stale`: the stop pressed on no longer stands as seen (what stands is
+   * shown); `held`: a fence, or a repair not written, keeps it stopped.
    */
   const lift = async (
     at: Binding,
-    item: Item & { retry: NonNullable<Item["retry"]> },
-  ): Promise<boolean> => {
-    const seen = item.retry.discovery;
-    const stopped = item.retry.sequence;
-    const online = item.retry.online === true;
+    item: Item,
+    retry: Retry,
+  ): Promise<"lifted" | "stale" | "held"> => {
+    const seen = retry.discovery;
+    const stopped = retry.sequence;
+    const online = retry.online === true;
+    const day = item.throughDate;
+    const held = () => {
+      if (!online && owns(at))
+        stopInMemory(item.taskId, {
+          reason: "storage",
+          ...(day === undefined ? {} : { throughDate: day }),
+        });
+      return "held" as const;
+    };
+    if (!online)
+      for (const record of [...repairs.values()]) {
+        if (record.service !== at.service || record.task !== item.taskId)
+          continue;
+        const verdict = await record.repair();
+        if (!owns(at)) return "held";
+        if (verdict !== "written" && verdict !== "landed") return held();
+        reconcile(record);
+      }
+    if (
+      fenced(at, fenceOf(item.taskId)) ||
+      (day !== undefined && fenced(at, fenceOf(item.taskId, day)))
+    )
+      return held();
     const now = deps.now();
     if (seen?.stop || stopped !== null) {
       const out = await commitMaterialiseLift(
@@ -1019,33 +1224,12 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
                 },
         },
       );
-      if (out.kind !== "applied" || out.value.kind !== "written") return false;
+      if (out.kind !== "applied" || out.value.kind !== "written")
+        return "stale";
     }
-    if (!owns(at)) return false;
-    // Revision 11 (R36): an outcome this page could not record is written first (its repair, persistence only); then the fences the
-    // press saw end, exactly those instances (a fence recorded since is a newer failure and stays). A repair still not written keeps the
-    // fence and shows the stop again.
-    const fences = item.retry.fences;
-    if (fences !== undefined) {
-      for (const { op } of fences.stood) {
-        const key = repairKey(at.service, op);
-        const repair = repairs.get(key);
-        if (repair === undefined) continue;
-        if (!(await repair())) {
-          if (owns(at)) stopInMemory(item.taskId, { reason: "storage" });
-          return false;
-        }
-        repairs.delete(key);
-      }
-      const m = markers();
-      if (m !== null)
-        for (const f of fences.stood) {
-          if (f.memory !== null) m.stops.release(fences.scope, f.op, f.memory);
-          m.retire(fences.scope, f.op, f.marker, { explicit: true });
-        }
-    }
+    if (!owns(at)) return "held";
     unrecord(item.taskId);
-    return true;
+    return "lifted";
   };
 
   /**
@@ -1095,6 +1279,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       return end(DONE);
     }
     const quota = deps.quota?.() ?? null;
+    /** Revision 12: what the last `stale` write found stored (a repair's proof that its own transition landed). */
+    let found: MaterialiseDiscovery | null = null;
     /** `next` over the entry this work admitted, through its own service, stamped as given (an answer: its read's issue). */
     const record = async (
       captured: ReturnType<AccountService["capture"]>,
@@ -1109,31 +1295,45 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (!owns(at)) return "lost" as const;
       // Revision 11 (R36): dropped while the binding stands (the persistence hold could not vouch for it) is not written either.
       if (out.kind !== "applied") return "failed" as const;
+      if (out.value.kind === "stale") found = out.value.stored;
       if (out.value.kind !== "written") return out.value.kind;
       entry = out.value.stored;
       return "written" as const;
     };
     /**
-     * Revision 11 (R36): an ANSWER's record, written again after each of `REPAIR_MS` while it fails; one never written fences the
-     * discovery (header) and is kept for the person's press, which writes it first.
+     * An ANSWER's record (revision 11), or a withdrawal's (revision 12, C2: a call known not to have been made). Revision 12 (R36-A/B):
+     * PROTECTED: a first write that fails (or that the quota ledger refuses) fences the discovery at once and is written again after each
+     * of `REPAIR_MS`; one never written stays fenced (header) and is kept for the person's press, which writes it first. A repair that
+     * finds this very entry stored already (`landed`) is written; one that finds another (`stale`) proves nothing and stays fenced.
+     * `failed`: not recorded, fenced.
      */
     const answered = async (
       captured: ReturnType<AccountService["capture"]>,
       next: MaterialiseDiscovery | null,
     ) => {
-      const written = await settle(
+      const p = await protect(
         at,
+        item.taskId,
+        op,
         () => record(captured, next),
-        (w) => w !== "failed",
+        (w): Verdict =>
+          w === "lost"
+            ? "ended"
+            : w === "failed" || w === "refused"
+              ? "failed"
+              : w === "stale"
+                ? same(found, next)
+                  ? "landed"
+                  : "stale"
+                : "written",
       );
-      if (written === "failed" && owns(at)) {
-        fence(at, op);
-        repairs.set(repairKey(at.service, op), async () => {
-          const w = await record(captured, next);
-          return w === "written" || w === "stale";
-        });
+      if (p.kind === "ended") return "lost" as const;
+      if (p.kind === "fenced") return "failed" as const;
+      if (p.verdict === "landed") {
+        entry = found;
+        return "written" as const;
       }
-      return written;
+      return p.out === "stale" ? ("stale" as const) : ("written" as const);
     };
     /** The entry with `s` as its schedule (a pause is its stop, kept with the claim it stopped on). */
     const scheduled = (
@@ -1252,11 +1452,14 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       // `closed` may follow a transmission (revision 11): its claim stays, counted as lost when the task is taken up again.
       if (!read.answer.unsent) return end(PAUSED);
       // Not sent after all: the admission is withdrawn, nothing counted. Revision 11 (R36): with an explicit `schedule: null` when
-      // nothing is outstanding, so it is never read as an earlier build's unanswered claim.
-      const back = await record(captured, {
+      // nothing is outstanding, so it is never read as an earlier build's unanswered claim. Revision 12 (C2): protected like an answer.
+      const back = await answered(captured, {
         ...issued,
         schedule: withdrawn(issued.schedule as Schedule),
       });
+      if (back === "lost") return end(lost(at));
+      if (back === "failed")
+        return end(stopInMemory(item.taskId, { reason: "storage" }));
       // Refused by its own permission: the schedule decides again at once (a pause written, or a wait), sending nothing.
       if (back === "written" && !again && owns(at) && mayRun() && !permit())
         return discover(at, item, true);
@@ -1319,15 +1522,21 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     rebind(service);
     const at: Binding = { service };
     // A press made under another binding lifts nothing here: the work is asked as the person asked it, and a stop still standing shows.
-    // A press is spent once its lift is tried (revision 10): work it parks later resumes as plain work.
-    const pressed = item.retry;
+    // A press is spent once its lift is tried (revision 10): work it parks later resumes as plain work. Revision 12 (R36-C): the press
+    // first, then a reconnection's lift kept beside it, only if the press's stop no longer stood; each is consumed here, once.
+    const entitled = [item.retry, item.edge].filter(
+      (r): r is Retry => r !== undefined && r.service === service,
+    );
     delete item.retry;
-    if (
-      pressed !== undefined &&
-      pressed.service === service &&
-      !(await lift(at, { ...item, retry: pressed }))
-    )
-      return owns(at) ? DONE : lost(at);
+    delete item.edge;
+    if (entitled.length > 0) {
+      let verdict: "lifted" | "stale" | "held" = "stale";
+      for (const retry of entitled) {
+        verdict = await lift(at, item, retry);
+        if (verdict !== "stale" || !owns(at)) break;
+      }
+      if (verdict !== "lifted") return owns(at) ? DONE : lost(at);
+    }
     if (!owns(at)) return lost(at);
     // Revision 10: paused work of a known day whose zone this page read under this binding is taken up where it stood, with no discovery
     // read (a discovery read is never the sequence's position read).
@@ -1575,10 +1784,15 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       const key = workKey(item);
       parked.delete(key);
       const queued = queue.find((q) => workKey(q) === key);
-      if (queued !== undefined) {
-        queued.manual = true;
-        queued.retry = item.retry as NonNullable<Item["retry"]>;
-      } else queue.push(item);
+      if (queued === undefined) {
+        queue.push(item);
+        return;
+      }
+      queued.manual = true;
+      // Revision 12 (R36-C): a press queued for the work keeps its fresh budget; this lift is kept beside it, never in its place.
+      if (queued.retry !== undefined && queued.retry.online !== true)
+        queued.edge = item.retry as Retry;
+      else queued.retry = item.retry as Retry;
     };
     try {
       if (e.entries === null) {
@@ -1715,31 +1929,13 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         const pressed = workKey({ taskId, throughDate: day });
         for (const [key, p] of parked)
           if (workKey(p) === pressed) parked.delete(key);
-        // Revision 11 (R36): the task's fences as they stand at the press (the discovery's and the day's): only these may end.
-        const m = markers();
-        const fences: Fences | undefined =
-          m === null || service === null
-            ? undefined
-            : {
-                scope: scopeOf(service),
-                stood: [
-                  fenceOf(taskId),
-                  ...(day === undefined ? [] : [fenceOf(taskId, day)]),
-                ].map((op) => ({
-                  op,
-                  memory: m.stops.instance(scopeOf(service), op),
-                  marker: m.witness(scopeOf(service), op),
-                })),
-              };
-        const retry = {
-          discovery,
-          sequence,
-          service,
-          ...(fences === undefined ? {} : { fences }),
-        };
+        // Revision 12 (R36-A): no fence is witnessed to be ended by the press: the press ends only failures whose outcome this page writes.
+        const retry: Retry = { discovery, sequence, service };
         const queued = queue.find((q) => workKey(q) === pressed);
         if (queued !== undefined) {
           queued.manual = true;
+          // Revision 12 (R36-C): a reconnection's lift queued for the work stays, behind the press (an earlier press is replaced).
+          if (queued.retry?.online === true) queued.edge = queued.retry;
           queued.retry = retry;
         } else
           queue.push({
@@ -1768,21 +1964,27 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       const service = alive();
       rebind(service);
       if (unpark()) publishQueue();
-      if (service === null) {
+      // Revision 12 (R36-D): no service displayed at the moment, while the one this page's work is bound to is still live: the edge is
+      // kept for THAT service, with its time, and scanned by the next kick that finds it displayed again. None bound yet, an ended one or
+      // another displayed: nothing is kept.
+      const owner =
+        service ?? (deps.service() === null && bound?.live ? bound : null);
+      if (owner === null) {
         pump();
         return;
       }
       // The stops as stored at the reconnection: each is lifted only while it still stands so (a later stop is another one). A newer
       // reconnection replaces a scan still going (its stops are a superset); revision 11: every page of the account is read.
       edgeScan = {
-        service,
+        service: owner,
         edge: deps.now(),
         after: null,
         entries: null,
         paired: new Set(),
         busy: false,
       };
-      void scan(edgeScan);
+      if (service === null) pump();
+      else void scan(edgeScan);
     },
     get: () => state,
     subscribe(listener) {

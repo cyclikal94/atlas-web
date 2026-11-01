@@ -1908,34 +1908,34 @@ describe("REVIEW12 R36-1 through the production client: the permission reaches t
   });
 });
 
-describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences its caller across pages and reloads", () => {
-  /** The outcome commit of the caller's issued transmission (not an admission), the first `n` times it is made. */
-  const failOutcome = (
-    w: Awaited<ReturnType<typeof setup>>,
-    plan: string,
-    expectedPhase: string | null,
-    n: number,
-  ) => {
-    let failed = 0;
-    const service = intercepted(w, async (name, input, run) => {
-      const expected = input.expected as { phase?: string } | null;
-      if (
-        failed < n &&
-        name === plan &&
-        !admitting(input) &&
-        (expectedPhase === null
-          ? (input.expected as { attempt?: string | null } | null)?.attempt !=
-            null
-          : expected?.phase === expectedPhase)
-      ) {
-        failed += 1;
-        return { kind: "failed" };
-      }
-      return run();
-    });
-    return { service, failed: () => failed };
-  };
+/** The outcome commit of the caller's issued transmission (not an admission), the first `n` times it is made. */
+const failOutcome = (
+  w: Awaited<ReturnType<typeof setup>>,
+  plan: string,
+  expectedPhase: string | null,
+  n: number,
+) => {
+  let failed = 0;
+  const service = intercepted(w, async (name, input, run) => {
+    const expected = input.expected as { phase?: string } | null;
+    if (
+      failed < n &&
+      name === plan &&
+      !admitting(input) &&
+      (expectedPhase === null
+        ? (input.expected as { attempt?: string | null } | null)?.attempt !=
+          null
+        : expected?.phase === expectedPhase)
+    ) {
+      failed += 1;
+      return { kind: "failed" };
+    }
+    return run();
+  });
+  return { service, failed: () => failed };
+};
 
+describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences its caller across pages and reloads", () => {
   test("CONTROL: a healthy catch-up with markers writes no marker", async () => {
     const m = markerWorld();
     const w = await setup({
@@ -2094,37 +2094,77 @@ describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences it
     }
   });
 
-  test("after a reload only the marker survives: the press ends it and carries on from the durable record (its issue counted as lost, the same key)", async () => {
-    const m = markerWorld();
-    const w = await setup({
-      positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
-      sends: [await http(429, "rate_limited", "60")],
-    });
-    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 99);
-    const first = w.make({ service: () => f.service, markers: m.page("p1") });
-    first.ensure(TASK, "daily");
-    await w.idle(first);
-    first.dispose();
-    const second = w.make({ markers: m.page("p2") });
-    try {
-      second.ensure(TASK, "daily");
-      await w.idle(second);
-      const stop = second.get().unrecorded.get(TASK);
-      expect(stop?.reason).toBe("storage");
-      expect(w.sent()).toHaveLength(1);
-      second.tryAgain(TASK, TODAY, { kind: "memory", id: stop?.id as string });
-      await w.idle(second);
-      const sends = w.sent();
-      expect(sends.length).toBeGreaterThanOrEqual(2);
-      expect(new Set(sends.map((x) => x.key))).toEqual(
-        new Set([sends[0]?.key]),
+  /**
+   * Revision 12 (review 13 R36-A, design assessment C3): CORRECTED maintained assertion. Revision 11's case here expected the press after a
+   * reload to end the marker and send again after only the lost issue's 1-second pace (its comment called the deadline unknowable). That
+   * codified the defect: a marker never says whether the answer was a 429 with a deadline or a success that may only continue with its
+   * position read. Its intent (the outcome of a reload with only the marker left) is kept; the expectation is now the approved
+   * conservative rule: the stop stays shown, the marker stays, and nothing is transmitted, before the observed deadline and long after it
+   * (60 s and 180 s of the fake clock), whatever asks (a press, ensure, a kick, a reconnection).
+   */
+  test.each([
+    ["a 429's record (Retry-After 60)", "429"],
+    ["a successful command's record", "ok"],
+  ] as const)(
+    "after a reload only the marker survives (%s): no press ends it, the stop stays shown and nothing is transmitted, then or later",
+    async (_, what) => {
+      const m = markerWorld();
+      const w = await setup({
+        positions: [
+          detail("2026-10-01", true),
+          detail("2026-10-01", true),
+          detail("2026-10-01", true),
+          detail("2026-10-01", true),
+        ],
+        sends: [what === "429" ? await http(429, "rate_limited", "60") : OK],
+      });
+      const f = failOutcome(
+        w,
+        "data.writeMaterialiseSequence",
+        "submitting",
+        99,
       );
-      // The lost issue's pace (not the unknowable deadline): the disclosed limit of a record never written anywhere.
-      expect((sends[1]?.at ?? 0) - NOW).toBeGreaterThanOrEqual(1_000);
-    } finally {
-      second.dispose();
-    }
-  });
+      const first = w.make({ service: () => f.service, markers: m.page("p1") });
+      first.ensure(TASK, "daily");
+      await w.idle(first);
+      first.dispose();
+      const scope = {
+        account: ACCOUNT,
+        incarnationId: (w.t.env.service() as AccountService).incarnationId,
+      };
+      const second = w.make({ markers: m.page("p2") });
+      try {
+        second.ensure(TASK, "daily");
+        await w.idle(second);
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+        expect(w.sent()).toHaveLength(1);
+        for (const later of [0, 61_000, 181_000]) {
+          w.setNow(NOW + later);
+          const stop = second.get().unrecorded.get(TASK);
+          expect(stop?.reason, `+${later} ms`).toBe("storage");
+          second.tryAgain(TASK, TODAY, {
+            kind: "memory",
+            id: stop?.id as string,
+          });
+          await w.idle(second);
+          second.ensure(TASK, "daily");
+          second.kick();
+          second.reconnected();
+          await w.idle(second);
+          expect(w.sent(), `+${later} ms`).toHaveLength(1);
+          expect(m.page("p9").probe(scope, fenceOf(TASK, TODAY))).toBe(
+            "marked",
+          );
+          expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+        }
+        // The durable row is the issued one still (nothing reduced it as a lost issue, nothing replaced its attempt).
+        expect(w.stored()?.phase).toBe("submitting");
+        expect(w.stored()?.attempt?.key).toBe(w.sent()[0]?.key);
+      } finally {
+        second.dispose();
+      }
+    },
+  );
 
   test("a press ends only the fence instances it saw: one recorded by another page while the press works stays, and still fences the day", async () => {
     const m = markerWorld();
@@ -2707,4 +2747,927 @@ describe("REVIEW12 R36-2 (production composition): the page's own markers fence 
         expect(runner.get().unrecorded.get(TASK)?.reason).toBe("storage");
     },
   );
+});
+
+/**
+ * Independent Review 13 (R36-A to R36-D; design assessment Q1): the reviewer's five witnesses and their five paired controls, maintained
+ * as they were run (`.agtx/evidence/WEB-10c/review-13/recovery.test.ts`), each assertion and message kept. A recreated runner is another
+ * runner over the same database and marker storage: service-level evidence, not a browser reload or a measured 180-second observation.
+ */
+describe("REVIEW13 Q1: the five witnesses of review 13 and their paired controls", () => {
+  const scopeOf = (w: Awaited<ReturnType<typeof setup>>) => ({
+    account: ACCOUNT,
+    incarnationId: (w.t.env.service() as AccountService).incarnationId,
+  });
+
+  for (const recreate of [false, true])
+    for (const outcome of ["429", "ok"] as const)
+      test(`${recreate ? "WITNESS (R36-A) recreated runner" : "CONTROL same runner"}: manual recovery of ${outcome} preserves the observed result`, async () => {
+        const m = markerWorld();
+        const w = await setup({
+          positions: [
+            detail("2026-10-01", true),
+            detail("2026-10-01", true),
+            detail(TODAY, false),
+          ],
+          sends: [
+            outcome === "429" ? await http(429, "rate_limited", "60") : OK,
+          ],
+        });
+        const f = failOutcome(
+          w,
+          "data.writeMaterialiseSequence",
+          "submitting",
+          3,
+        );
+        const first = w.make({
+          service: () => f.service,
+          markers: m.page("p1"),
+        });
+        let runner = first;
+        try {
+          first.ensure(TASK, "daily");
+          await w.idle(first);
+          expect(f.failed()).toBe(3);
+          expect(w.sent()).toHaveLength(1);
+          const initial = w.stored();
+          expect(initial?.phase).toBe("submitting");
+          expect(initial?.schedule?.issued).not.toBeNull();
+          expect(
+            m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY)),
+          ).toBe("marked");
+          if (recreate) {
+            first.dispose();
+            runner = w.make({ markers: m.page("p2") });
+            runner.ensure(TASK, "daily");
+            await w.idle(runner);
+          }
+          const stop = runner.get().unrecorded.get(TASK);
+          expect(stop?.reason).toBe("storage");
+          runner.tryAgain(TASK, TODAY, {
+            kind: "memory",
+            id: stop?.id as string,
+          });
+          await w.idle(runner);
+          if (outcome === "429")
+            expect(
+              w.sent().filter((x) => x.at < NOW + 60_000),
+              "No manual press may bypass the observed Retry-After deadline",
+            ).toHaveLength(1);
+          else
+            expect(
+              w.sent(),
+              "A known successful command must continue only with its position GET",
+            ).toHaveLength(1);
+        } finally {
+          first.dispose();
+          runner.dispose();
+        }
+      });
+
+  const pausedRow = (count = 0) =>
+    row({
+      phase: "stopped",
+      stop: { reason: "unreachable" },
+      attempt: { key: "frozen-r13", body: attemptBody(TASK, TODAY) },
+      successful_calls: count,
+      schedule: schedule({
+        caller: "command",
+        pause: "window",
+        since: NOW - WINDOW_MS,
+        failures: 10,
+        next: NOW,
+        seen: NOW,
+      }),
+    });
+
+  for (const missing of [false, true])
+    test(`${missing ? "WITNESS (R36-D)" : "CONTROL"} reconnection while the original live service is ${missing ? "temporarily unbound" : "bound"}`, async () => {
+      const w = await setup({ seed: [pausedRow()] });
+      const real = w.t.env.service() as AccountService;
+      let service: AccountService | null = real;
+      const r = w.make({ service: () => service });
+      try {
+        // Establish this runner's binding before a transient missing-service interval, never switch account/incarnation.
+        r.kick();
+        w.setOnline(false);
+        r.kick();
+        if (missing) service = null;
+        w.setOnline(true);
+        r.reconnected();
+        await w.settle();
+        service = real;
+        r.kick();
+        await w.settle();
+        await w.idle(r);
+        expect(
+          w.sent(),
+          "The genuine edge must remain actionable for the same original binding",
+        ).toHaveLength(1);
+      } finally {
+        r.dispose();
+      }
+    });
+
+  for (const reconnect of [false, true])
+    test(`${reconnect ? "WITNESS (R36-C)" : "CONTROL"} explicit retry queued behind the account lock ${reconnect ? "then overlapped by a reconnection scan" : "alone"}`, async () => {
+      const w = await setup({
+        seed: [pausedRow(7)],
+        positions: [
+          detail("2026-10-01", true),
+          detail("2026-10-18", true),
+          detail(TODAY, false),
+        ],
+      });
+      let take: (() => Promise<unknown>) | null = null;
+      const locks = {
+        request: (_name: string, _opts: unknown, fn: () => Promise<unknown>) =>
+          new Promise<void>((resolve, reject) => {
+            take = async () => {
+              try {
+                await fn();
+                resolve();
+              } catch (e) {
+                reject(e);
+              }
+            };
+          }),
+      } as unknown as LockManager;
+      const r = w.make({ locks });
+      try {
+        r.tryAgain(
+          TASK,
+          TODAY,
+          seenSequence(w.stored() as MaterialiseSequenceRow, null),
+        );
+        await w.settle();
+        expect(r.get().waiting).toBe(true);
+        expect(take).not.toBeNull();
+        if (reconnect) {
+          w.setOnline(false);
+          r.kick();
+          w.setOnline(true);
+          r.reconnected();
+          await w.settle();
+        }
+        await (take as unknown as () => Promise<unknown>)();
+        await w.idle(r);
+        expect(
+          w.sent(),
+          "The explicit retry grants a fresh call budget, even when connectivity also returns",
+        ).toHaveLength(2);
+        expect(w.stored()).toBeUndefined();
+      } finally {
+        r.dispose();
+      }
+    });
+
+  for (const endBeforeRepair of [false, true])
+    test(`${endBeforeRepair ? "WITNESS (R36-B)" : "CONTROL"} runner ends ${endBeforeRepair ? "during the first repair delay" : "after the outcome repair"}`, async () => {
+      const m = markerWorld();
+      const w = await setup({
+        positions: [
+          detail("2026-10-01", true),
+          detail("2026-10-01", true),
+          detail(TODAY, false),
+        ],
+        sends: [await http(429, "rate_limited", "60")],
+      });
+      const f = failOutcome(
+        w,
+        "data.writeMaterialiseSequence",
+        "submitting",
+        1,
+      );
+      let release: (() => void) | null = null;
+      let entered = false;
+      const first = w.make({
+        service: () => f.service,
+        markers: m.page("p1"),
+        sleep: (ms) => {
+          if (ms === REPAIR_MS[0]) {
+            entered = true;
+            return new Promise<void>((r) => {
+              release = () => {
+                w.setNow(w.now() + ms);
+                r();
+              };
+            });
+          }
+          return new Promise<void>(() => undefined);
+        },
+      });
+      let second: CatchUpRunner | null = null;
+      const free = () => (release as (() => void) | null)?.();
+      try {
+        first.ensure(TASK, "daily");
+        for (let k = 0; k < 40 && !entered; k++) await w.settle();
+        expect(entered).toBe(true);
+        expect(f.failed()).toBe(1);
+        expect(w.sent()).toHaveLength(1);
+        if (!endBeforeRepair) {
+          free();
+          await w.settle();
+          expect(w.stored()?.schedule?.server).toBe(NOW + 60_000);
+        }
+        first.dispose();
+        if (endBeforeRepair) free();
+        await w.settle();
+        second = w.make({ markers: m.page("p2") });
+        second.ensure(TASK, "daily");
+        await w.idle(second);
+        expect(
+          w.sent().filter((x) => x.at < NOW + 60_000),
+          "An observed outcome-write failure cannot be forgotten during its persistence retry wait",
+        ).toHaveLength(1);
+      } finally {
+        first.dispose();
+        second?.dispose();
+        free();
+      }
+    });
+});
+
+/**
+ * Revision 12 (review 13 R36-A to R36-D; design assessment Q2 and Q4 to Q9): the protected outcome's lifecycle (published at its first
+ * failure, repaired as the same transition, ended only as its own instance, never ended without its outcome), its withdrawal variant,
+ * and the ownership of a press and a reconnection. Production runner, reducers, W27 plans, account service and marker implementation on
+ * the IndexedDB and storage doubles; waits are held or move the fake clock. FIXTURE evidence: no browser, no real reload.
+ */
+describe("REVISION12 R36: protected outcomes and retry ownership", () => {
+  const scopeOf = (w: Awaited<ReturnType<typeof setup>>) => ({
+    account: ACCOUNT,
+    incarnationId: (w.t.env.service() as AccountService).incarnationId,
+  });
+  const materialiseKeys = (m: ReturnType<typeof markerWorld>) =>
+    [...m.storage.items.keys()].filter((k) => k.includes("materialise"));
+  /** A runner whose first repair wait is held (entry observable, released by hand); other waits never end. */
+  const heldRepair = (w: Awaited<ReturnType<typeof setup>>) => {
+    let release: (() => void) | null = null;
+    let entered = false;
+    return {
+      sleep: (ms: number) => {
+        if (ms === REPAIR_MS[0] && !entered) {
+          entered = true;
+          return new Promise<void>((r) => {
+            release = () => {
+              w.setNow(w.now() + ms);
+              r();
+            };
+          });
+        }
+        if (ms <= Math.max(...REPAIR_MS))
+          return Promise.resolve(w.setNow(w.now() + ms));
+        return new Promise<void>(() => undefined);
+      },
+      entered: () => entered,
+      release: () => (release as (() => void) | null)?.(),
+    };
+  };
+  const until = async (
+    w: Awaited<ReturnType<typeof setup>>,
+    ok: () => boolean,
+    what: string,
+  ) => {
+    for (let k = 0; k < 60 && !ok(); k += 1) await w.settle();
+    // An assertion, never a thrown error: a mutant that breaks the precondition is caught by it, not made INVALID.
+    expect(ok(), `precondition: ${what}`).toBe(true);
+  };
+
+  /** Each caller's world: its answer, the plan and expected phase of its outcome write, and its own transmissions. */
+  const CALLER_WORLDS = {
+    discovery: {
+      options: async () => ({
+        positions: [await TRANSIENT_503(), detail(TODAY, false)],
+      }),
+      plan: "data.writeMaterialiseDiscovery",
+      phase: null,
+      op: () => fenceOf(TASK),
+    },
+    command: {
+      options: async () => ({
+        positions: [
+          detail("2026-10-01", true),
+          detail("2026-10-01", true),
+          detail(TODAY, false),
+        ],
+        sends: [await http<{ revision: number }>(429, "rate_limited", "60")],
+      }),
+      plan: "data.writeMaterialiseSequence",
+      phase: "submitting",
+      op: () => fenceOf(TASK, TODAY),
+    },
+    position: {
+      options: async () => ({
+        positions: [
+          detail("2026-10-01", true),
+          await TRANSIENT_503(),
+          detail(TODAY, false),
+        ],
+        sends: [OK],
+      }),
+      plan: "data.writeMaterialiseSequence",
+      phase: "awaiting_position_read",
+      op: () => fenceOf(TASK, TODAY),
+    },
+  } as const;
+
+  test.each(CALLERS)(
+    "Q2 %s: the first failed outcome write is fenced before the first repair wait; a repair that lands ends that fence and the work goes on",
+    async (caller) => {
+      const c = CALLER_WORLDS[caller];
+      const m = markerWorld();
+      const w = await setup(await c.options());
+      const f = failOutcome(w, c.plan, c.phase, 1);
+      const h = heldRepair(w);
+      const r = w.make({
+        service: () => f.service,
+        markers: m.page("p1"),
+        sleep: h.sleep,
+      });
+      try {
+        r.ensure(TASK, "daily");
+        await until(w, h.entered, "the first repair wait was entered");
+        expect(f.failed()).toBe(1);
+        // Inside the wait: the fence is durable already, for this caller's operation only.
+        expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+        expect(materialiseKeys(m)).toHaveLength(1);
+        h.release();
+        await until(
+          w,
+          () => m.page("observer").probe(scopeOf(w), c.op()) === "unmarked",
+          "the repair ended its fence",
+        );
+        expect(materialiseKeys(m)).toEqual([]);
+        expect(r.get().unrecorded.has(TASK)).toBe(false);
+      } finally {
+        r.dispose();
+        h.release();
+      }
+    },
+  );
+
+  /** Q4: every outcome of every caller whose record is never written: fenced at once, and a recreated runner transmits nothing for it. */
+  const OUTCOMES: Array<
+    [
+      caller: CallerName,
+      answer: string,
+      options: () => Promise<Parameters<typeof setup>[0]>,
+    ]
+  > = [
+    [
+      "discovery",
+      "success (the entry's removal)",
+      async () => ({ positions: [detail(TODAY, false)] }),
+    ],
+    [
+      "discovery",
+      "refusal (404)",
+      async () => ({ positions: [await http<TaskDetail>(404, "not_found")] }),
+    ],
+    [
+      "discovery",
+      "429 (Retry-After 60)",
+      async () => ({
+        positions: [await http<TaskDetail>(429, "rate_limited", "60")],
+      }),
+    ],
+    ["discovery", "unrecognised", async () => ({ positions: [UNRECOGNISED] })],
+    [
+      "command",
+      "success",
+      async () => ({ positions: [detail("2026-10-01", true)], sends: [OK] }),
+    ],
+    [
+      "command",
+      "refusal (409)",
+      async () => ({
+        positions: [detail("2026-10-01", true)],
+        sends: [await http(409, "precondition_failed")],
+      }),
+    ],
+    [
+      "command",
+      "slice capacity",
+      async () => ({
+        positions: [detail("2026-10-01", true)],
+        sends: [await http(503, "slice_capacity")],
+      }),
+    ],
+    [
+      "command",
+      "429 (Retry-After 60)",
+      async () => ({
+        positions: [detail("2026-10-01", true)],
+        sends: [await http(429, "rate_limited", "60")],
+      }),
+    ],
+    [
+      "position",
+      "complete (the row's removal)",
+      async () => ({
+        positions: [detail("2026-10-01", true), detail(TODAY, false)],
+        sends: [OK],
+      }),
+    ],
+    [
+      "position",
+      "continue (still pending)",
+      async () => ({
+        positions: [detail("2026-10-01", true), detail("2026-10-18", true)],
+        sends: [OK],
+      }),
+    ],
+    [
+      "position",
+      "refusal (404)",
+      async () => ({
+        positions: [
+          detail("2026-10-01", true),
+          await http<TaskDetail>(404, "not_found"),
+        ],
+        sends: [OK],
+      }),
+    ],
+    [
+      "position",
+      "429 (Retry-After 60)",
+      async () => ({
+        positions: [
+          detail("2026-10-01", true),
+          await http<TaskDetail>(429, "rate_limited", "60"),
+        ],
+        sends: [OK],
+      }),
+    ],
+    [
+      "position",
+      "unrecognised",
+      async () => ({
+        positions: [detail("2026-10-01", true), UNRECOGNISED],
+        sends: [OK],
+      }),
+    ],
+  ];
+  test.each(OUTCOMES)(
+    "Q4 %s, %s, never recorded: fenced at the first failure; a recreated runner and another page transmit nothing for it",
+    async (caller, _, options) => {
+      const c = CALLER_WORLDS[caller];
+      const m = markerWorld();
+      const w = await setup(await options());
+      const f = failOutcome(w, c.plan, c.phase, 99);
+      const h = heldRepair(w);
+      const first = w.make({
+        service: () => f.service,
+        markers: m.page("p1"),
+        sleep: h.sleep,
+      });
+      await until(
+        w,
+        () => {
+          first.ensure(TASK, "daily");
+          return h.entered();
+        },
+        "the first repair wait was entered",
+      );
+      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+      h.release();
+      await until(
+        w,
+        // Shown in this page's memory (its reason the answer's, as before: a refusal, or the caller's pace; a recreated page's is `storage`).
+        () => first.get().unrecorded.has(TASK),
+        "the stop is shown",
+      );
+      expect(f.failed()).toBe(1 + REPAIR_MS.length);
+      first.dispose();
+      const reads = w.reads().length;
+      const sends = w.sent().length;
+      for (const page of ["p2", "p3"]) {
+        const next = w.make({ markers: m.page(page) });
+        try {
+          next.ensure(TASK, "daily");
+          next.kick();
+          next.reconnected();
+          await w.idle(next);
+          const stop = next.get().unrecorded.get(TASK);
+          expect(stop?.reason).toBe("storage");
+          next.tryAgain(TASK, caller === "discovery" ? undefined : TODAY, {
+            kind: "memory",
+            id: stop?.id as string,
+          });
+          await w.idle(next);
+          expect(w.sent(), `${page}: no command`).toHaveLength(sends);
+          // A fenced discovery reads nothing; a fenced day costs only the next page's discovery read, never its own caller's.
+          expect(w.reads().length - reads, page).toBe(
+            caller === "discovery" ? 0 : page === "p2" ? 1 : 2,
+          );
+          expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+        } finally {
+          next.dispose();
+        }
+      }
+    },
+  );
+
+  test("Q5: a repair writes the transition as classified: a clock moved during the wait leaves the 429's deadline where it was", async () => {
+    const m = markerWorld();
+    const w = await setup(await CALLER_WORLDS.command.options());
+    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 1);
+    const h = heldRepair(w);
+    const r = w.make({
+      service: () => f.service,
+      markers: m.page("p1"),
+      sleep: h.sleep,
+    });
+    try {
+      r.ensure(TASK, "daily");
+      await until(w, h.entered, "the first repair wait was entered");
+      w.setNow(NOW + 30_000);
+      h.release();
+      await until(
+        w,
+        () => w.stored()?.schedule?.server != null,
+        "the repair landed",
+      );
+      expect(w.stored()?.schedule?.server).toBe(NOW + 60_000);
+      expect(materialiseKeys(m)).toEqual([]);
+    } finally {
+      r.dispose();
+      h.release();
+    }
+  });
+
+  test("Q5: a repair that finds ANOTHER row stored (a peer's write meanwhile) proves nothing: the fence stays, the stop shows, nothing is sent", async () => {
+    const m = markerWorld();
+    const w = await setup(await CALLER_WORLDS.command.options());
+    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 1);
+    const h = heldRepair(w);
+    const r = w.make({
+      service: () => f.service,
+      markers: m.page("p1"),
+      sleep: h.sleep,
+    });
+    try {
+      r.ensure(TASK, "daily");
+      await until(w, h.entered, "the first repair wait was entered");
+      const issued = w.stored() as MaterialiseSequenceRow;
+      // A peer (no Web Locks) advanced the row: its revision moved; what it holds is not this page's 429.
+      w.t.world.idb.seed(DB, "materialise_sequences", [
+        { ...issued, revision: (issued.revision ?? 0) + 1, read_seq: 5 },
+      ]);
+      h.release();
+      await until(
+        w,
+        () => r.get().unrecorded.get(TASK)?.reason === "storage",
+        "the stop is shown",
+      );
+      expect(f.failed()).toBe(1);
+      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY))).toBe(
+        "marked",
+      );
+      expect(w.stored()?.read_seq).toBe(5);
+      r.ensure(TASK, "daily");
+      r.kick();
+      await w.settle();
+      expect(w.sent()).toHaveLength(1);
+    } finally {
+      r.dispose();
+      h.release();
+    }
+  });
+
+  test("Q5 control: a first write that applied but answered `failed` is found LANDED by its repair: its fence ends and the deadline holds", async () => {
+    const m = markerWorld();
+    const w = await setup(await CALLER_WORLDS.command.options());
+    let lied = false;
+    const service = intercepted(w, async (plan, input, run) => {
+      const out = await run();
+      const expected = input.expected as { phase?: string } | null;
+      if (
+        !lied &&
+        plan === "data.writeMaterialiseSequence" &&
+        !admitting(input) &&
+        expected?.phase === "submitting"
+      ) {
+        lied = true;
+        return { kind: "failed" };
+      }
+      return out;
+    });
+    const h = heldRepair(w);
+    const r = w.make({
+      service: () => service,
+      markers: m.page("p1"),
+      sleep: h.sleep,
+    });
+    try {
+      r.ensure(TASK, "daily");
+      await until(w, h.entered, "the first repair wait was entered");
+      expect(lied).toBe(true);
+      expect(w.stored()?.schedule?.server).toBe(NOW + 60_000);
+      expect(materialiseKeys(m)).toHaveLength(1);
+      h.release();
+      await until(w, () => materialiseKeys(m).length === 0, "the fence ended");
+      expect(r.get().unrecorded.has(TASK)).toBe(false);
+      expect(w.stored()?.schedule?.server).toBe(NOW + 60_000);
+    } finally {
+      r.dispose();
+      h.release();
+    }
+  });
+
+  test("Q6: a repair ends only the instance it published: another page's fence recorded before it stays, and still stops the day", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      positions: [detail("2026-10-01", true), detail("2026-10-01", true)],
+      sends: [
+        async () => {
+          // Another page fences the same day while this page's command is answered.
+          m.page("peer").set(scopeOf(w), fenceOf(TASK, TODAY));
+          return http<{ revision: number }>(429, "rate_limited", "60");
+        },
+      ],
+    });
+    const f = failOutcome(w, "data.writeMaterialiseSequence", "submitting", 1);
+    const r = w.make({ service: () => f.service, markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(f.failed()).toBe(1);
+      // The repair landed (the deadline is durable) and ended its own instance; the peer's stays.
+      expect(w.stored()?.schedule?.server).toBe(NOW + 60_000);
+      const keys = materialiseKeys(m);
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toContain("peer");
+      w.setNow(NOW + 61_000);
+      r.ensure(TASK, "daily");
+      r.kick();
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(1);
+      expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test.each(["command", "discovery"] as const)(
+    "Q7 %s: a call known not to have been sent whose withdrawal is never written is fenced; a recreated runner counts nothing and sends nothing",
+    async (caller) => {
+      const m = markerWorld();
+      const NOT_SENT = { ok: false, kind: "not_sent" } as const;
+      const w = await setup(
+        (caller === "command"
+          ? { positions: [detail("2026-10-01", true)], sends: [NOT_SENT] }
+          : { positions: [NOT_SENT] }) as Parameters<typeof setup>[0],
+      );
+      const c = CALLER_WORLDS[caller];
+      const f = failOutcome(w, c.plan, c.phase, 99);
+      const first = w.make({ service: () => f.service, markers: m.page("p1") });
+      first.ensure(TASK, "daily");
+      await w.idle(first);
+      expect(f.failed()).toBe(1 + REPAIR_MS.length);
+      expect(first.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+      first.dispose();
+      const calls = w.log.length;
+      const next = w.make({ markers: m.page("p2") });
+      try {
+        next.ensure(TASK, "daily");
+        next.kick();
+        await w.idle(next);
+        // Only the recreated runner's discovery read (a fenced day) or nothing at all (a fenced discovery): never the unsent call again.
+        expect(w.log.length - calls).toBe(caller === "command" ? 1 : 0);
+        expect(w.sent()).toHaveLength(caller === "command" ? 1 : 0);
+        // Nothing reduced the unsent call as a lost one.
+        const s =
+          caller === "command" ? w.stored()?.schedule : w.discovery()?.schedule;
+        expect(s?.failures ?? 0).toBe(0);
+      } finally {
+        next.dispose();
+      }
+    },
+  );
+
+  test.each(["command", "discovery"] as const)(
+    "Q7 control %s: a withdrawal written at its repair counts nothing and leaves no fence; the call is made later with its admission",
+    async (caller) => {
+      const m = markerWorld();
+      const NOT_SENT = { ok: false, kind: "not_sent" } as const;
+      const w = await setup(
+        (caller === "command"
+          ? {
+              positions: [detail("2026-10-01", true), detail(TODAY, false)],
+              sends: [NOT_SENT, OK],
+            }
+          : { positions: [NOT_SENT, detail(TODAY, false)] }) as Parameters<
+          typeof setup
+        >[0],
+      );
+      const c = CALLER_WORLDS[caller];
+      const f = failOutcome(w, c.plan, c.phase, 1);
+      const r = w.make({ service: () => f.service, markers: m.page("p1") });
+      try {
+        r.ensure(TASK, "daily");
+        await w.idle(r);
+        expect(f.failed()).toBe(1);
+        expect(materialiseKeys(m)).toEqual([]);
+        const s =
+          caller === "command" ? w.stored()?.schedule : w.discovery()?.schedule;
+        expect(s?.issued ?? null).toBeNull();
+        expect(s?.failures ?? 0).toBe(0);
+        r.kick();
+        await w.idle(r);
+        expect(w.stored()).toBeUndefined();
+        expect(r.get().unrecorded.has(TASK)).toBe(false);
+      } finally {
+        r.dispose();
+      }
+    },
+  );
+
+  const windowPaused = (count: number, revision = 1) =>
+    row({
+      phase: "stopped",
+      stop: { reason: "unreachable" },
+      attempt: { key: "frozen-r12", body: attemptBody(TASK, TODAY) },
+      successful_calls: count,
+      revision,
+      schedule: schedule({
+        caller: "command",
+        pause: "window",
+        since: NOW - WINDOW_MS,
+        failures: 10,
+        next: NOW,
+        seen: NOW,
+      }),
+    });
+  /** A Web Lock held until `take()`. */
+  const heldLock = () => {
+    let take: (() => Promise<unknown>) | null = null;
+    const locks = {
+      request: (_name: string, _opts: unknown, fn: () => Promise<unknown>) =>
+        new Promise<void>((resolve, reject) => {
+          take = async () => {
+            try {
+              await fn();
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          };
+        }),
+    } as unknown as LockManager;
+    return {
+      locks,
+      queued: () => take !== null,
+      take: () => (take as unknown as () => Promise<unknown>)(),
+    };
+  };
+  const SEVEN = () => ({
+    seed: [windowPaused(7)],
+    positions: [
+      detail("2026-10-01", true),
+      detail("2026-10-18", true),
+      detail(TODAY, false),
+    ],
+  });
+
+  test("Q8 (other order): a reconnection's lift queued first, then the person's press: the press's fresh budget completes the work", async () => {
+    const w = await setup(SEVEN());
+    const l = heldLock();
+    const r = w.make({ locks: l.locks });
+    try {
+      w.setOnline(false);
+      r.kick();
+      w.setOnline(true);
+      r.reconnected();
+      await w.settle();
+      expect(l.queued()).toBe(true);
+      r.tryAgain(
+        TASK,
+        TODAY,
+        seenSequence(w.stored() as MaterialiseSequenceRow, null),
+      );
+      await w.settle();
+      await l.take();
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(2);
+      expect(w.stored()).toBeUndefined();
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("Q8 control: a reconnection alone keeps the counted calls: one send, then the existing bound stops it again", async () => {
+    const w = await setup(SEVEN());
+    const r = w.make();
+    try {
+      w.setOnline(false);
+      r.kick();
+      w.setOnline(true);
+      r.reconnected();
+      await w.settle();
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(1);
+      expect(w.stored()?.phase).toBe("stopped");
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("Q8: a press whose stop no longer stands lifts nothing; the reconnection's own lift behind it resumes the NEWER pause, keeping its calls", async () => {
+    const w = await setup(SEVEN());
+    const l = heldLock();
+    const r = w.make({ locks: l.locks });
+    try {
+      r.tryAgain(
+        TASK,
+        TODAY,
+        seenSequence(w.stored() as MaterialiseSequenceRow, null),
+      );
+      await w.settle();
+      expect(l.queued()).toBe(true);
+      // Another page's budget ended in the same pause again meanwhile: a newer stop (its revision moved), which the press never saw.
+      w.t.world.idb.seed(DB, "materialise_sequences", [windowPaused(7, 9)]);
+      w.setOnline(false);
+      r.kick();
+      w.setOnline(true);
+      r.reconnected();
+      await w.settle();
+      await l.take();
+      await w.idle(r);
+      // The reconnection's resumption (seven calls counted): one send, then the bound; never the press's fresh budget.
+      expect(w.sent()).toHaveLength(1);
+      expect(w.stored()?.phase).toBe("stopped");
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("Q9: an edge kept for the original service is never taken by another: a replacement, an ended original, or no binding yet", async () => {
+    for (const schedule of ["replacement", "ended", "unbound"] as const) {
+      const w = await setup({ seed: [windowPaused(0)] });
+      const real = w.t.env.service() as AccountService;
+      let live = true;
+      const original = new Proxy(real, {
+        get(target, key, receiver) {
+          return key === "live"
+            ? live && target.live
+            : Reflect.get(target, key, receiver);
+        },
+      }) as AccountService;
+      let service: AccountService | null = original;
+      const r = w.make({ service: () => service });
+      try {
+        if (schedule !== "unbound") r.kick();
+        w.setOnline(false);
+        service = null;
+        if (schedule === "ended") live = false;
+        w.setOnline(true);
+        r.reconnected();
+        await w.settle();
+        service =
+          schedule === "unbound"
+            ? original
+            : (new Proxy(real, {}) as AccountService);
+        r.kick();
+        await w.settle();
+        await w.idle(r);
+        expect(w.sent(), schedule).toHaveLength(0);
+        // A kick is never an edge.
+        r.kick();
+        await w.idle(r);
+        expect(w.sent(), schedule).toHaveLength(0);
+      } finally {
+        r.dispose();
+      }
+    }
+  });
+
+  test("Q9: the kept edge is consumed once: a second kick after the resumed work sends nothing more", async () => {
+    const w = await setup({ seed: [windowPaused(0)] });
+    const real = w.t.env.service() as AccountService;
+    let service: AccountService | null = real;
+    const r = w.make({ service: () => service });
+    try {
+      r.kick();
+      w.setOnline(false);
+      service = null;
+      w.setOnline(true);
+      r.reconnected();
+      await w.settle();
+      expect(w.sent()).toHaveLength(0);
+      service = real;
+      r.kick();
+      await w.idle(r);
+      const after = w.sent().length;
+      expect(after).toBeGreaterThanOrEqual(1);
+      r.kick();
+      r.kick();
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(after);
+    } finally {
+      r.dispose();
+    }
+  });
 });
