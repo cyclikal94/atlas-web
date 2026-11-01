@@ -14,6 +14,10 @@
 //                           bridge (an owned Unix socket and a per-attempt secret), and the sequenced shutdown that removes the fixture.
 //                           Each attempt's envelope and each X0/X2 proof are re-validated here (diagnostic-evidence.mjs). Independent
 //                           review of this exact adapter must precede any such paired run (approval of 1 Nov 2026).
+//                           Revision 27: every attempt has ONE causal journal (causal-journal.mjs) that its tap, control and bridge
+//                           record into (R27-DIAG.a), five causal cases (X0, X2, their fenced-recovery variants XR0/XR2, and XL0 with
+//                           named local work and a reload), and the evidence is validated BEFORE the shutdown decides whether the fixture
+//                           is removed (DA-DIAG-F), then again after it.
 // on an owned disposable SQLite database, behind the PASSIVE tap (pair-tap.mjs) and the delaying proxy, with a fixture build made by this
 // invocation from the current source and served by its own `vite preview`.
 //
@@ -59,11 +63,14 @@ import {
   ATTEMPT_SCHEMA,
   attemptProblems,
   PROOF_VALIDATORS,
+  attemptJournal as readAttemptJournal,
   readTranscript,
 } from "./diagnostic-evidence.mjs";
 import {
+  attemptJournal,
   childEnvironment,
-  createControlServer,
+  composeAttemptTransport,
+  concludeAttempt,
   finishAttempt,
   launchAttempt,
   newAttemptId,
@@ -797,7 +804,11 @@ async function diagnosticStack(browser, caseId) {
   const exchanges = [];
   const attempt = newAttemptId(caseId, browser);
   const transcriptFile = join(attemptDir, "transcript.jsonl");
+  const journalFile = join(attemptDir, "journal.jsonl");
+  // Revision 27 (R27-DIAG.a): the attempt's ONE causal order, recorded by its tap, its control and its bridge, persisted line by line.
+  const journal = attemptJournal(attempt, journalFile);
   const specCalls = [];
+  const specMarks = [];
   // The fixture's PARENT is the attempt's own directory, outside the invocation's recursively removed tree and unknown to the reaper:
   // nobody ever removes it recursively, so a kept fixture or a replacement file survives every clean-up path.
   const fixtureParent = mkdtempSync(
@@ -819,8 +830,19 @@ async function diagnosticStack(browser, caseId) {
     ready: null,
     ready_problems: null,
     transcript: { file: relative(evidence, transcriptFile), sha256: null },
+    journal: { file: relative(evidence, journalFile), sha256: null },
+    clocks: {
+      order:
+        "the causal journal's positions (j): the one total order of the events this runner observed",
+      transcript_at: "runner Date.now() (epoch ms), diagnosis only",
+      journal_at: "runner Date.now() (epoch ms), diagnosis only",
+      tap_t:
+        "runner performance.now() (ms since the runner's time origin), durations within the tap only",
+      spec: "the spec's own clock is never compared: it brackets its actions with acknowledged bridge markers",
+    },
     accounts: {},
     spec_calls: specCalls,
+    spec_marks: specMarks,
     shutdown: null,
     exit: null,
     latched: null,
@@ -829,7 +851,7 @@ async function diagnosticStack(browser, caseId) {
   };
   let running = null;
   let bridge = null;
-  let passed = false;
+  let browserPassed = false;
   try {
     const staged = stageDiagnosticExecutable(tmp);
     envelope.executable = staged;
@@ -875,6 +897,7 @@ async function diagnosticStack(browser, caseId) {
         features: DIAGNOSTIC_SELECTION.features,
         retentionSeconds: DIAGNOSTIC_SELECTION.retentionSeconds,
         env: childEnvironment(),
+        journal,
       },
     );
     stackState.diagnostic = running;
@@ -925,20 +948,24 @@ async function diagnosticStack(browser, caseId) {
       );
     stopIfInterrupted();
     const token = randomBytes(24).toString("hex");
-    bridge = createControlServer({
+    const composed = composeAttemptTransport({
+      journal,
       control: running.control,
       socketPath,
       token,
       onCall: (call) => specCalls.push(call),
+      onMark: (mark) => specMarks.push(mark),
+      tap: {
+        upstream: backendUrl,
+        port: tapPort,
+        controlPort: tapControlPort,
+        bodiesDir: join(out, "bodies"),
+        correlation: CORRELATION_HEADER,
+      },
     });
+    bridge = composed.bridge;
     await bridge.listen();
-    stackState.tap = createTap({
-      upstream: backendUrl,
-      port: tapPort,
-      controlPort: tapControlPort,
-      bodiesDir: join(out, "bodies"),
-      correlation: CORRELATION_HEADER,
-    });
+    stackState.tap = composed.tap;
     const tap = await stackState.tap.start();
     stackState.proxy = createProxy({
       upstream: tap.tapUrl,
@@ -1045,183 +1072,250 @@ async function diagnosticStack(browser, caseId) {
       record.problems.push(
         `${caseId} did not pass (${record.judged.outcomes?.[caseId] ?? "no result"})`,
       );
-    passed =
-      record.problems.length === 0 &&
-      record.judged.selected_ok === true &&
-      running.control.latched() === null;
+    browserPassed =
+      record.problems.length === 0 && record.judged.selected_ok === true;
   } catch (error) {
     record.problems.push(
       `prepare: ${String(error?.message ?? error).slice(0, 600)}`,
     );
   }
-  // The attempt ends BEFORE any generic clean-up: no new work (the browser is gone), the tap and proxy stop (their connections to the
-  // backend close, so it can drain), the bridge closes, then the sequenced shutdown, removing the fixture only for a passing attempt.
-  for (const [what, part] of [
-    ["proxy", stackState.proxy],
-    ["tap", stackState.tap],
-  ])
-    if (part) {
-      await part
-        .stop()
-        .catch((e) => record.problems.push(`${what} stop: ${e?.message ?? e}`));
-      stackState[what] = null;
-    }
-  if (bridge) await bridge.close();
-  rmSync(socketPath, { force: true });
-  try {
-    rmdirSync(bridgeDir);
-  } catch (e) {
-    record.problems.push(`bridge directory: ${e?.code ?? e}`);
-  }
-  if (running) {
-    const finished = await finishAttempt(running, { remove: passed });
-    envelope.shutdown = {
-      requested_remove: finished.requested_remove,
-      eof: finished.eof,
-      error: finished.shutdown_error,
-      stopped: finished.stopped,
-    };
-    envelope.exit = finished.exit;
-    envelope.latched = finished.latched;
-  }
-  envelope.fixture_after =
-    envelope.fixture.leaf === null
-      ? null
-      : { leaf_exists: existsSync(envelope.fixture.leaf) };
-  envelope.parent_removed = removeParentIfEmpty(
-    { rmdir: rmdirSync },
-    fixtureParent,
-  );
-  if (!envelope.parent_removed.removed)
-    record.problems.push(
-      `the attempt's fixture is kept for inspection at ${fixtureParent} (${envelope.parent_removed.error})`,
-    );
-  if (existsSync(transcriptFile))
-    envelope.transcript.sha256 = sha256Of(readFileSync(transcriptFile));
-  writeFileSync(
-    join(attemptDir, "attempt.json"),
-    `${JSON.stringify(envelope, null, 2)}\n`,
-  );
-  // The independent re-reading: the attempt from its retained transcript, then every interval and the case's causal proof.
+  // The independent re-reading of everything the attempt retained (the envelope as written now, every interval, each causal proof with
+  // the journal). Used BEFORE the shutdown (to decide whether the fixture may be removed) and AFTER it (the terminal verdict).
   const readEvidence = (file) => readFileSync(join(evidence, file));
-  record.attempt = attemptProblems(envelope, {
-    readFile: readEvidence,
-    expected: {
-      selectionIdentity: DIAGNOSTIC_IDENTITY,
-      executableSha256: DIAGNOSTIC_SELECTION.executable.sha256,
-      apiVersion: DIAGNOSTIC_SELECTION.backend.apiVersion,
-      features: DIAGNOSTIC_SELECTION.features,
-      retentionSeconds: RETENTION_SECONDS,
-      publicOrigin: envelope.public_origin,
-    },
-  });
-  for (const p of record.attempt) record.problems.push(`attempt: ${p}`);
-  const row = CASES.find((c) => c.id === caseId);
-  record.intervals = {};
-  const all = existsSync(join(out, "intervals"))
-    ? readdirSync(join(out, "intervals"))
-    : [];
-  record.incomplete_intervals = all.filter((f) =>
-    f.endsWith(".incomplete.json"),
-  );
-  for (const f of record.incomplete_intervals)
-    record.problems.push(`an incomplete interval record ${f}`);
-  const files = all.filter(
-    (f) => f.endsWith(".json") && !f.endsWith(".incomplete.json"),
-  );
-  if (
-    row.workload !== null &&
-    record.judged?.outcomes?.[caseId] === "passed" &&
-    files.length !== 1
-  )
-    record.problems.push(
-      `${caseId} passed with ${files.length} interval records (one is required)`,
+  const expected = {
+    selectionIdentity: DIAGNOSTIC_IDENTITY,
+    executableSha256: DIAGNOSTIC_SELECTION.executable.sha256,
+    apiVersion: DIAGNOSTIC_SELECTION.backend.apiVersion,
+    features: DIAGNOSTIC_SELECTION.features,
+    retentionSeconds: RETENTION_SECONDS,
+    publicOrigin: envelope.public_origin,
+  };
+  const seal = () => {
+    envelope.latched = running ? running.control.latched() : null;
+    envelope.journal = {
+      file: relative(evidence, journalFile),
+      sha256: existsSync(journalFile)
+        ? sha256Of(readFileSync(journalFile))
+        : null,
+      ...journal.state(),
+    };
+    if (existsSync(transcriptFile))
+      envelope.transcript.sha256 = sha256Of(readFileSync(transcriptFile));
+    writeFileSync(
+      join(attemptDir, "attempt.json"),
+      `${JSON.stringify(envelope, null, 2)}\n`,
     );
-  for (const file of files) {
-    let interval = null;
+  };
+  const row = CASES.find((c) => c.id === caseId);
+  const evidenceProblems = () => {
+    const problems = [];
+    record.intervals = {};
+    const all = existsSync(join(out, "intervals"))
+      ? readdirSync(join(out, "intervals"))
+      : [];
+    record.incomplete_intervals = all.filter((f) =>
+      f.endsWith(".incomplete.json"),
+    );
+    for (const f of record.incomplete_intervals)
+      problems.push(`an incomplete interval record ${f}`);
+    const files = all.filter(
+      (f) => f.endsWith(".json") && !f.endsWith(".incomplete.json"),
+    );
+    if (row.workload !== null && files.length !== 1)
+      problems.push(
+        `${caseId} left ${files.length} interval records (one is required)`,
+      );
+    let events = new Map();
     try {
-      interval = JSON.parse(readFileSync(join(out, "intervals", file), "utf8"));
-    } catch (error) {
-      record.intervals[file] = [
-        `unreadable: ${String(error?.message ?? error).split("\n")[0]}`,
-      ];
+      events = readAttemptJournal(envelope, readEvidence).events;
+    } catch {
+      problems.push("the causal journal cannot be re-read for the proof");
     }
-    if (interval !== null) {
-      record.intervals[file] = [
-        ...validateInterval(interval, {
-          readBody: (f) => readFileSync(join(out, "bodies", f)),
-        }),
-        ...identityProblems(interval, {
-          file,
-          engine: browser,
-          backend: "diagnostic",
-          manifest: DIAGNOSTIC_IDENTITY,
-          row: CASES.find((c) => c.id === interval.case),
-        }),
-      ];
-      if (interval.case !== caseId)
-        record.intervals[file].push(
-          `the attempt for ${caseId} holds an interval of ${interval.case}`,
+    for (const file of files) {
+      let interval = null;
+      try {
+        interval = JSON.parse(
+          readFileSync(join(out, "intervals", file), "utf8"),
         );
-      const validator = PROOF_VALIDATORS[interval.case];
-      if (validator) {
-        const ref = interval.extra?.diagnostic_proof;
-        const proofFile = join(out, "diagnostic", String(ref?.file ?? ""));
-        let proof = null;
-        try {
-          const bytes = readFileSync(proofFile);
-          if (sha256Of(bytes) !== ref?.sha256)
-            record.intervals[file].push(
-              "the interval's proof reference does not name the proof's bytes",
-            );
-          proof = JSON.parse(String(bytes));
-        } catch (error) {
+      } catch (error) {
+        record.intervals[file] = [
+          `unreadable: ${String(error?.message ?? error).split("\n")[0]}`,
+        ];
+      }
+      if (interval !== null) {
+        record.intervals[file] = [
+          ...validateInterval(interval, {
+            readBody: (f) => readFileSync(join(out, "bodies", f)),
+          }),
+          ...identityProblems(interval, {
+            file,
+            engine: browser,
+            backend: "diagnostic",
+            manifest: DIAGNOSTIC_IDENTITY,
+            row: CASES.find((c) => c.id === interval.case),
+          }),
+        ];
+        if (interval.case !== caseId)
           record.intervals[file].push(
-            `the causal proof cannot be read: ${String(error?.message ?? error).split("\n")[0]}`,
+            `the attempt for ${caseId} holds an interval of ${interval.case}`,
           );
-        }
-        if (proof !== null) {
-          if (proof.interval !== interval.interval)
-            record.intervals[file].push("the proof names another interval");
-          let entries = [];
+        const validator = PROOF_VALIDATORS[interval.case];
+        if (validator) {
+          const ref = interval.extra?.diagnostic_proof;
+          const proofFile = join(out, "diagnostic", String(ref?.file ?? ""));
+          let proof = null;
           try {
-            entries = readTranscript(readEvidence(envelope.transcript.file));
-          } catch {
+            const bytes = readFileSync(proofFile);
+            if (sha256Of(bytes) !== ref?.sha256)
+              record.intervals[file].push(
+                "the interval's proof reference does not name the proof's bytes",
+              );
+            proof = JSON.parse(String(bytes));
+          } catch (error) {
             record.intervals[file].push(
-              "the transcript cannot be re-read for the proof",
+              `the causal proof cannot be read: ${String(error?.message ?? error).split("\n")[0]}`,
             );
           }
+          if (proof !== null) {
+            if (proof.interval !== interval.interval)
+              record.intervals[file].push("the proof names another interval");
+            let entries = [];
+            try {
+              entries = readTranscript(readEvidence(envelope.transcript.file));
+            } catch {
+              record.intervals[file].push(
+                "the transcript cannot be re-read for the proof",
+              );
+            }
+            record.intervals[file].push(
+              ...validator(proof, {
+                attempt: envelope,
+                entries,
+                journal: events,
+                interval,
+                requests: [
+                  ...(interval.requests ?? []),
+                  ...(interval.other_requests ?? []),
+                ],
+                readFile: (f) => readFileSync(join(out, "bodies", f)),
+              }),
+            );
+          }
+        } else if (row.workload !== null)
           record.intervals[file].push(
-            ...validator(proof, {
-              attempt: envelope,
-              entries,
-              requests: [
-                ...(interval.requests ?? []),
-                ...(interval.other_requests ?? []),
-              ],
-              readFile: (f) => readFileSync(join(out, "bodies", f)),
-            }),
+            `${interval.case} has no causal proof validator`,
           );
-        }
       }
+      if (record.intervals[file].length > 0)
+        problems.push(`interval ${file}: ${record.intervals[file].join("; ")}`);
     }
-    if (record.intervals[file].length > 0)
-      record.problems.push(
-        `interval ${file}: ${record.intervals[file].join("; ")}`,
+    if (exchanges.some((e) => e.status === 429))
+      problems.push(
+        "the backend answered 429: the stack's throttle was exceeded",
       );
-  }
-  if (exchanges.some((e) => e.status === 429))
+    if (exchanges.some((e) => e.status === 503))
+      problems.push(
+        "an answer was 503: a diagnostic refusal or capacity answer is never passing evidence",
+      );
+    return problems;
+  };
+  // Revision 27 (DA-DIAG-F): the attempt ends BEFORE any generic clean-up, and the evidence is judged BEFORE the shutdown decides whether
+  // the fixture is removed: the transports stop (no new work; their streams settle), the preliminary validation runs while the fixture still
+  // exists, removal is asked only for an attempt with no known problem, and the terminal validation follows the shutdown.
+  const concluded = await concludeAttempt({
+    stopTransports: async () => {
+      const problems = [];
+      for (const [what, part] of [
+        ["proxy", stackState.proxy],
+        ["tap", stackState.tap],
+      ])
+        if (part) {
+          await part
+            .stop()
+            .catch((e) => problems.push(`${what} stop: ${e?.message ?? e}`));
+          stackState[what] = null;
+        }
+      if (bridge) await bridge.close();
+      rmSync(socketPath, { force: true });
+      try {
+        rmdirSync(bridgeDir);
+      } catch (e) {
+        problems.push(`bridge directory: ${e?.code ?? e}`);
+      }
+      return problems;
+    },
+    preliminary: async () => {
+      const problems = [...record.problems];
+      if (!browserPassed)
+        problems.push(`${caseId} did not pass in the browser`);
+      if (!running) problems.push("no attempt was launched");
+      seal();
+      problems.push(
+        ...attemptProblems(envelope, {
+          readFile: readEvidence,
+          expected,
+          stage: "preliminary",
+        }).map((p) => `attempt (preliminary): ${p}`),
+      );
+      problems.push(...evidenceProblems());
+      return problems;
+    },
+    latched: () =>
+      running ? running.control.latched() : { kind: "not_launched" },
+    finish: async (eligible) => {
+      if (!running) return null;
+      const finished = await finishAttempt(running, { remove: eligible });
+      envelope.shutdown = {
+        requested_remove: finished.requested_remove,
+        eof: finished.eof,
+        error: finished.shutdown_error,
+        stopped: finished.stopped,
+      };
+      envelope.exit = finished.exit;
+      return finished;
+    },
+    terminal: async () => {
+      envelope.fixture_after =
+        envelope.fixture.leaf === null
+          ? null
+          : { leaf_exists: existsSync(envelope.fixture.leaf) };
+      envelope.parent_removed = removeParentIfEmpty(
+        { rmdir: rmdirSync },
+        fixtureParent,
+      );
+      seal();
+      return [
+        ...attemptProblems(envelope, { readFile: readEvidence, expected }).map(
+          (p) => `attempt: ${p}`,
+        ),
+        ...evidenceProblems(),
+      ];
+    },
+  });
+  record.removal = {
+    eligible: concluded.eligible,
+    latched_at_decision: concluded.latched_at_decision,
+    requested_remove: concluded.finished?.requested_remove ?? false,
+  };
+  record.attempt = concluded.terminal;
+  for (const p of concluded.transport) record.problems.push(`transport: ${p}`);
+  for (const p of concluded.preliminary)
+    if (!record.problems.includes(p))
+      record.problems.push(`before the shutdown: ${p}`);
+  for (const p of concluded.finish_problems)
+    record.problems.push(`shutdown: ${p}`);
+  for (const p of concluded.terminal) record.problems.push(p);
+  if (!envelope.parent_removed?.removed)
     record.problems.push(
-      "the backend answered 429: the stack's throttle was exceeded",
-    );
-  if (exchanges.some((e) => e.status === 503))
-    record.problems.push(
-      "an answer was 503: a diagnostic refusal or capacity answer is never passing evidence",
+      `the attempt's fixture is kept for inspection at ${fixtureParent} (${envelope.parent_removed?.error})`,
     );
   stackState.diagnostic = null;
   record.cleanup = await cleanupStack();
   record.problems.push(...record.cleanup);
-  record.complete = record.problems.length === 0 && passed;
+  record.complete =
+    record.problems.length === 0 &&
+    concluded.eligible &&
+    concluded.terminal.length === 0;
   record.finished_at = new Date().toISOString();
   writeJson(`stack-${browser}-${caseId}.json`, record);
   return record;

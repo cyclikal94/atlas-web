@@ -28,8 +28,20 @@ const DIAG = ["diagnostic"];
  * (null: the page is told nothing, as production). `injected`: null for unaltered server answers; otherwise who altered what.
  * `driven` (revision 25): how the interval's record must be driven, checked by the runner against the record (never the producer's claim):
  * `full` (every answer through the feed's completion held by the common driver), `prefix` (held until an explicit hand-off: a 410 recovery
- * or a replaced session), `none` (the fenced recovery runs unheld). `observations`: the named observations the record must bind.
+ * or a replaced session), `none` (the fenced recovery runs unheld), `rearmed_prefix` (revision 27: the opening's hold is released for the
+ * fence, a NEW hold is armed before the grant and before the recovery caller can ask for the target, and the drive holds that caller's
+ * answers until the hand-off). `observations`: the named observations the record must bind. `caller`: whose requests the case drives
+ * (`ordinary`: the sync engine; `recovery`: the fenced recovery job), checked against the record. `local_work` (revision 27): the case
+ * admits named local work and declares it; every other case keeps the zero-draft premise.
  */
+/** Revision 27 (R27-DIAG.b, design assessment C2): what every real-410 case must observe of its recovery, at held snapshot pages. */
+export const RECOVERY_OBSERVATIONS = Object.freeze([
+  "reader_old_at_refusal",
+  "recovery_invalidated",
+  "recovery_staged_hidden",
+  "recovery_final_held",
+  "recovery_exposed",
+]);
 export const CASES = Object.freeze([
   {
     id: "PAIR-P0",
@@ -228,7 +240,7 @@ export const CASES = Object.freeze([
     m: 4,
     caller: "ordinary",
     driven: "prefix",
-    observations: ["reader_old_at_refusal"],
+    observations: RECOVERY_OBSERVATIONS,
     injected: null,
     diagnostic:
       "advance_clock (E−1, E, E+1) with the continuation queued at the request gate; no collection, no ageing",
@@ -240,10 +252,51 @@ export const CASES = Object.freeze([
     m: 4,
     caller: "ordinary",
     driven: "prefix",
-    observations: ["reader_old_at_refusal"],
+    observations: RECOVERY_OBSERVATIONS,
     injected: null,
     diagnostic:
       "age_history of the target batch before any of it is requested, then collect at the sync start with the continuation queued; no clock step",
+  },
+  // Revision 27 (R27-DIAG.b; design assessment C3/C4): the finite caller and local-work variants. XR0/XR2 drive the FENCED RECOVERY
+  // caller (RC1's real revocation, real 401 and password sign-in) into the same real expiry/pruning, so its refusal is W24's (server
+  // restart: both stagings cleared, a new generation, a snapshot restart), never the ordinary W18. XL0 is X0 with one named admitted
+  // command of the reader (production outbox, receipted before the clock steps) and a reload after E.
+  {
+    id: "PAIR-XR0",
+    backends: DIAG,
+    workload: "W-real",
+    m: 4,
+    caller: "recovery",
+    driven: "rearmed_prefix",
+    observations: RECOVERY_OBSERVATIONS,
+    injected: null,
+    diagnostic:
+      "fence (revoke, real 401), re-armed hold, grant, sign-in; advance_clock (E−1, E, E+1) with the recovery catch-up's continuation queued at the gate",
+  },
+  {
+    id: "PAIR-XR2",
+    backends: DIAG,
+    workload: "W-real",
+    m: 4,
+    caller: "recovery",
+    driven: "rearmed_prefix",
+    observations: RECOVERY_OBSERVATIONS,
+    injected: null,
+    diagnostic:
+      "fence (revoke, real 401), re-armed hold, gate drained, grant, age_history of the target batch, sign-in; collect at the sync start with the recovery catch-up's continuation queued",
+  },
+  {
+    id: "PAIR-XL0",
+    backends: DIAG,
+    workload: "W-real",
+    m: 4,
+    caller: "ordinary",
+    driven: "prefix",
+    observations: RECOVERY_OBSERVATIONS,
+    injected: null,
+    local_work: true,
+    diagnostic:
+      "X0's clock steps with one named admitted create_person of the reader (production outbox, receipted before the steps) and a reload after E",
   },
   {
     id: "PAIR-RC1",
@@ -304,7 +357,9 @@ export const accountNames = () => [
 export const diagnosticAccounts = (caseId) => [
   "pair-writer",
   `pair-${caseId.toLowerCase()}`,
-  ...(caseId === "PAIR-X2" ? ["pair-x2-control"] : []),
+  ...(caseId === "PAIR-X2" || caseId === "PAIR-XR2"
+    ? [`pair-${caseId.slice(5).toLowerCase()}-control`]
+    : []),
 ];
 /** The diagnostic cases, in the order the runner gives each its own attempt. */
 export const diagnosticCases = (cases = CASES) =>

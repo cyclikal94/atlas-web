@@ -61,12 +61,15 @@ export interface IntervalParts {
     sources: unknown[];
   } | null;
   handOff: { at_seq: number; reason: string } | null;
+  /** Revision 27: the recovery caller's re-armed hold. */
+  rearm?: { at_seq: number; reason: string; released_rule: string };
   opening: unknown;
   holdReleases: unknown[];
   observations: unknown[];
   terminal: { final_seq: number; activated_by_seq: number } | null;
   traces: unknown[];
 }
+export const RECOVERY_KINDS: readonly string[];
 export function assembleInterval<
   R extends { seq: number; method: string; path: string },
 >(parts: {
@@ -79,8 +82,11 @@ export function assembleInterval<
     apiVersion: string;
     workload: "W-real" | "W-synthetic";
     preGrantCursor: string;
-    driven: "full" | "prefix" | "none";
+    driven: "full" | "prefix" | "none" | "rearmed_prefix";
     requiredObservations: string[];
+    /** Revision 27: the matrix row's caller and local-work declaration (recovery-observed cases only). */
+    caller?: "none" | "ordinary" | "recovery";
+    localWork?: boolean;
     terminal: "activated" | "recovered";
     appliedRevision: number | null;
     oracle: { verdict: "match" | "mismatch"; problems: string[] };

@@ -32,6 +32,13 @@
 //   - the case's REQUIRED observations (T1's follower at the actual last piece, and after the activation), bound to those exchanges and to
 //     the old and activated cache digests.
 // A schema-1 or schema-2 record is refused, never upgraded or re-annotated.
+// Revision 27 (R27-DIAG.b; design assessment C2/C3, additive to schema 3, so every earlier record keeps its meaning): the drive mode
+// `rearmed_prefix` (the recovery caller's hold, armed again before the grant: `rearm`) and the RECOVERY observations every real-410
+// diagnostic case must bind at held snapshot pages: `recovery_invalidated` (the refusal processed: cache hidden, cursor and both stagings
+// abandoned, a new generation; W24's snapshot restart and the job's notice for the recovery caller), `recovery_staged_hidden` (snapshot rows
+// staged while the live cache is untouched and hidden), `recovery_final_held` (the last snapshot page held, still hidden), and
+// `recovery_exposed` (one atomic exposure of the complete cache, nothing staged), each made by the LEADER and an independent FOLLOWER page
+// reading its own connection. The caller and the local-work declaration are the matrix row's (`identityProblems`).
 import { createHash } from "node:crypto";
 import {
   activates,
@@ -89,6 +96,8 @@ export function validateInterval(record, { readBody } = {}) {
     !isText(record.selection_manifest_sha256)
   )
     bad(`a ${record.backend} interval names no selection manifest hash`);
+  if (!["ordinary", "recovery", "none", undefined].includes(record.caller))
+    bad(`unknown caller ${record.caller}`);
   if (!["W-real", "W-synthetic", null].includes(record.workload ?? null))
     bad(`unknown workload ${record.workload}`);
   if (record.workload === "W-synthetic" && record.synthetic !== true)
@@ -296,14 +305,26 @@ export function validateInterval(record, { readBody } = {}) {
 
   // How the record was driven (the runner checks it against the matrix row), and the attempts, joined both ways.
   const driven = record.driven;
-  if (!["full", "prefix", "none"].includes(driven))
+  if (!["full", "prefix", "none", "rearmed_prefix"].includes(driven))
     bad(`driven ${JSON.stringify(driven)}`);
+  const partly = driven === "prefix" || driven === "rearmed_prefix";
   const handOff = record.hand_off ?? null;
-  if (driven === "prefix") {
+  if (partly) {
     if (!Number.isInteger(handOff?.at_seq) || !isText(handOff?.reason))
       bad("a partly driven record names no hand-off");
   } else if (handOff !== null)
     bad("only a partly driven record has a hand-off");
+  // Revision 27: the re-armed hold of the recovery caller (`rearm.at_seq`: the tap's last sequence number when the new hold was armed).
+  const rearm = record.rearm ?? null;
+  if (driven === "rearmed_prefix") {
+    if (!Number.isInteger(rearm?.at_seq) || !isText(rearm?.reason))
+      bad("a re-armed record names no re-arming");
+    else if (
+      Number.isInteger(handOff?.at_seq) &&
+      !(rearm.at_seq < handOff.at_seq)
+    )
+      bad("the hold was re-armed after the hand-off");
+  } else if (rearm !== null) bad("only a re-armed record has a re-arming");
   const attempts = Array.isArray(record.attempts) ? record.attempts : null;
   if (!attempts) bad("the attempts are not recorded");
   const attemptOf = new Map();
@@ -346,7 +367,7 @@ export function validateInterval(record, { readBody } = {}) {
       bad(`exchange ${r.seq} carries an attempt the record does not list`);
   if (driven === "none" && (attempts?.length ?? 0) > 0)
     bad("an undriven record lists attempts");
-  if (driven === "prefix" && attemptOf.get(handOff?.at_seq)?.step == null)
+  if (partly && attemptOf.get(handOff?.at_seq)?.step == null)
     bad(`the hand-off ${handOff?.at_seq} is not a driven attempt`);
   // Coverage: every exchange up to the drive's end is an attempt; every held answer is an attempt or a recorded release of the hold.
   const releases = Array.isArray(record.hold_releases)
@@ -357,12 +378,30 @@ export function validateInterval(record, { readBody } = {}) {
   const end =
     driven === "full"
       ? record.terminal?.final_seq
-      : driven === "prefix"
+      : partly
         ? handOff?.at_seq
         : null;
+  const from =
+    driven === "rearmed_prefix" && Number.isInteger(rearm?.at_seq)
+      ? rearm.at_seq
+      : Number.NEGATIVE_INFINITY;
   for (const r of requests ?? []) {
-    if (Number.isInteger(end) && r.seq <= end && !attemptOf.has(r.seq))
+    if (
+      Number.isInteger(end) &&
+      r.seq <= end &&
+      r.seq > from &&
+      !attemptOf.has(r.seq)
+    )
       bad(`exchange ${r.seq} precedes the end of the drive but is no attempt`);
+    if (driven === "rearmed_prefix" && r.seq <= from) {
+      // Before the new hold: the fence and its 401; nothing of the workload may have been answered unheld.
+      if (attemptOf.has(r.seq))
+        bad(`exchange ${r.seq} is an attempt before the hold was re-armed`);
+      if (roleOf(r) === "target")
+        bad(
+          `exchange ${r.seq} carried the target before the hold was re-armed`,
+        );
+    }
     if (
       (r.downstream?.events ?? []).includes("held") &&
       !attemptOf.has(r.seq) &&
@@ -610,7 +649,19 @@ export function validateInterval(record, { readBody } = {}) {
         bad(`${kind} does not show the old live cache`);
       if (!(Number.isInteger(o.stage?.next_index) && o.stage.next_index >= 1))
         bad(`${kind} does not show a persisted stage`);
-    } else bad(`unknown required observation ${kind}`);
+    } else if (RECOVERY_KINDS.includes(kind))
+      problems.push(
+        ...recoveryObservationProblems(kind, o, {
+          record,
+          bySeq,
+          releasedIds,
+          pre,
+          handOff,
+          terminal: t,
+          observations: observations ?? [],
+        }),
+      );
+    else bad(`unknown required observation ${kind}`);
   }
 
   // Memory: samples of a named kind, or null with a reason.
@@ -660,6 +711,17 @@ export function identityProblems(
     // Revision 25: how the record must be driven and what it must observe are the matrix's, never the producer's choice.
     if ((record?.driven ?? null) !== (row.driven ?? null))
       problems.push(`driven ${record?.driven}, the matrix says ${row.driven}`);
+    // Revision 27: the caller and the local-work declaration are the matrix's (a recovery case cannot be filed as ordinary, or the reverse).
+    if (row.observations?.some((k) => RECOVERY_KINDS.includes(k))) {
+      if (record?.caller !== row.caller)
+        problems.push(
+          `caller ${record?.caller}, the matrix says ${row.caller}`,
+        );
+      if ((record?.local_work ?? false) !== (row.local_work ?? false))
+        problems.push(
+          `local work ${record?.local_work ?? false}, the matrix says ${row.local_work ?? false}`,
+        );
+    }
     if (
       JSON.stringify(record?.required_observations ?? null) !==
       JSON.stringify(row.observations ?? [])
@@ -763,7 +825,12 @@ export function assembleInterval({
       "proxy log entry id (x-atlas-pair-proxy-id), joined to the proxy's downstream outcome",
     target: iv.target,
     driven: details.driven,
+    ...(details.caller ? { caller: details.caller } : {}),
+    ...(details.localWork !== undefined
+      ? { local_work: details.localWork }
+      : {}),
     hand_off: iv.handOff ?? null,
+    ...(iv.rearm ? { rearm: iv.rearm } : {}),
     opening: iv.opening,
     hold_releases: iv.holdReleases,
     collection,
@@ -818,4 +885,160 @@ export function assembleInterval({
     memory,
     ...(details.extra ? { extra: details.extra } : {}),
   };
+}
+
+// ---- revision 27 (R27-DIAG.b): the recovery observations ---------------------------------------------------------------------------
+export const RECOVERY_KINDS = Object.freeze([
+  "recovery_invalidated",
+  "recovery_staged_hidden",
+  "recovery_final_held",
+  "recovery_exposed",
+]);
+/** A reader's state is hidden: the live cache is not shown (not valid, or the rendered cache gate says refreshing, or the view is not
+ *  displaying the account). */
+const hidden = (r) =>
+  r?.cache_status !== "valid" ||
+  r?.gate === "refreshing" ||
+  r?.view !== "displaying";
+/**
+ * One recovery observation's problems. Each is made at a HELD snapshot answer after the hand-off (so the client has committed everything
+ * before that request and nothing after it), released by a recorded release of the hold, by two readers: `leader` (the leading page) and
+ * `follower` (another page, its own connection). States: {reader, page, cache_status, cursor, delta_stage, staged, staging_rows,
+ * staging_generations, recovery_generation, cache_digest, applied_revision, phase, gate, view, notice}.
+ */
+function recoveryObservationProblems(kind, o, ctx) {
+  const problems = [];
+  const bad = (p) => problems.push(`${kind}: ${p}`);
+  const { record, bySeq, releasedIds, pre, handOff, terminal } = ctx;
+  const at = bySeq.get(o.at_seq);
+  const old = pre?.detail?.cache_digest;
+  const leader = o.detail?.leader;
+  const follower = o.detail?.follower;
+  if (!at) {
+    bad(`made at ${o.at_seq}, not an exchange of the interval`);
+    return problems;
+  }
+  if (!(Number.isInteger(handOff?.at_seq) && at.seq > handOff.at_seq))
+    bad("not made after the hand-off at the refusal");
+  if (at.status !== 200 || at.phase !== "snapshot")
+    bad(`exchange ${at.seq} is not a snapshot page (${at.status} ${at.phase})`);
+  if (
+    !(at.downstream?.events ?? []).includes("held") ||
+    !releasedIds.has(at.proxy_id)
+  )
+    bad(`exchange ${at.seq} was not held and released by a recorded release`);
+  if (leader?.reader !== "leader" || follower?.reader !== "follower")
+    bad("not made by the leader AND a follower");
+  else if (leader.page === follower.page)
+    bad("the follower is the leading page itself");
+  const readers = [leader, follower].filter(Boolean);
+  const refusalGen = o.detail?.generation_at_refusal;
+  const invalidated = ctx.observations.find(
+    (x) => x?.kind === "recovery_invalidated",
+  );
+  const gen = invalidated?.detail?.leader?.recovery_generation;
+  if (kind === "recovery_invalidated") {
+    for (const r of readers) {
+      if (r.cache_status === "valid")
+        bad(`${r.reader} still shows a valid cache`);
+      if (r.cursor !== null) bad(`${r.reader} keeps a cursor`);
+      if (r.delta_stage !== null || r.staged !== 0)
+        bad(`${r.reader} keeps the abandoned delta stage`);
+      if (r.staging_rows !== 0)
+        bad(`${r.reader} holds snapshot rows before the first page`);
+      if (!(Number.isInteger(refusalGen) && r.recovery_generation > refusalGen))
+        bad(`${r.reader} has no new recovery generation`);
+      if (r.cache_digest !== old)
+        bad(`${r.reader}'s live cache changed before the snapshot`);
+      if (!hidden(r)) bad(`${r.reader} shows the cache while it is invalid`);
+    }
+    if (
+      leader &&
+      follower &&
+      leader.recovery_generation !== follower.recovery_generation
+    )
+      bad("the follower does not read the leader's generation");
+    if (record.caller === "recovery") {
+      // W24 (server restart), not W18: the snapshot restart and the job's own notice of it.
+      if (leader?.phase !== "snapshot")
+        bad("the recovery caller's refusal did not restart the snapshot");
+      if (leader?.notice?.reason !== "resync_required")
+        bad(
+          "the recovery job did not record its server restart (no resync_required notice)",
+        );
+      if (leader?.fenced !== true)
+        bad("the recovery caller is no longer fenced");
+    } else if (leader?.fenced === true) bad("an ordinary caller is fenced");
+  } else if (
+    kind === "recovery_staged_hidden" ||
+    kind === "recovery_final_held"
+  ) {
+    if (!invalidated || !(at.seq > invalidated.at_seq))
+      bad("not made after the invalidation was observed");
+    for (const r of readers) {
+      if (!(Number.isInteger(r.staging_rows) && r.staging_rows > 0))
+        bad(`${r.reader} holds no staged snapshot rows`);
+      if (
+        !(
+          r.staging_generations?.length === 1 &&
+          r.staging_generations[0] === gen
+        )
+      )
+        bad(
+          `${r.reader}'s staged rows are not all of the recovery's generation`,
+        );
+      if (r.recovery_generation !== gen)
+        bad(`${r.reader} moved to another generation`);
+      if (r.cache_digest !== old)
+        bad(`${r.reader}'s live cache changed before the activation`);
+      if (r.cache_status === "valid")
+        bad(`${r.reader} shows a valid cache before the last page`);
+      if (!hidden(r))
+        bad(`${r.reader} shows the cache while the snapshot is staged`);
+      if (
+        record.caller === "recovery" &&
+        r.reader === "leader" &&
+        r.fenced !== true
+      )
+        bad("the fence was cleared before the snapshot was complete");
+    }
+    if (kind === "recovery_final_held") {
+      if (at.has_more !== false)
+        bad(`exchange ${at.seq} is not the last snapshot page`);
+      if (terminal?.activated_by_seq !== at.seq)
+        bad(
+          "the last snapshot page held is not the terminal's activating answer",
+        );
+      const staged = ctx.observations.find(
+        (x) => x?.kind === "recovery_staged_hidden",
+      );
+      if (!(staged && staged.at_seq <= at.seq))
+        bad(
+          "no staged page was observed by the last one (fewer than two snapshot pages)",
+        );
+      else if (!(leader?.staging_rows >= staged.detail?.leader?.staging_rows))
+        bad("the staged rows went backwards");
+    }
+  } else if (kind === "recovery_exposed") {
+    if (terminal?.activated_by_seq !== at.seq)
+      bad("not made at the terminal's activating snapshot page");
+    for (const r of readers) {
+      if (r.cache_status !== "valid")
+        bad(`${r.reader} does not show a valid cache`);
+      if (r.staging_rows !== 0 || r.delta_stage !== null || r.staged !== 0)
+        bad(`${r.reader} still holds staged rows after the activation`);
+      if (r.cache_digest === old) bad(`${r.reader} still shows the old cache`);
+      if (r.applied_revision !== terminal?.applied_revision)
+        bad(
+          `${r.reader} applied ${r.applied_revision}, the terminal ${terminal?.applied_revision}`,
+        );
+      if (r.split === true) bad(`${r.reader} observed a split activation`);
+    }
+    if (leader && follower && leader.cache_digest !== follower.cache_digest)
+      bad("the follower does not read the activated cache");
+    if (leader?.cache_digest !== o.cache_digest)
+      bad("the observation's digest is not the leader's");
+    if (!isText(o.detail?.rows_sha256)) bad("the exposed rows are not hashed");
+  }
+  return problems;
 }

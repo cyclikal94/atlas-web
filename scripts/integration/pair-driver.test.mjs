@@ -1259,3 +1259,97 @@ describe("Q3: the real hop boundary: stand-in backend → tap → holding proxy 
     assert.equal(faults[0].fired, 1);
   });
 });
+
+// ---- revision 27 (C4): named local work is DECLARED by its case; the zero-draft premise stands everywhere else ---------------------
+describe("revision 27: declared local work", () => {
+  test("control: a case that declares its admitted draft (count and composition) is driven to its activation", async () => {
+    const w = world();
+    let declared = false;
+    const run = await driveOk(w, {
+      localWork: true,
+      start: async () => grant(w),
+      onHeld: async ({ piece, declareLocalWork }) => {
+        if (piece?.index !== 1 || declared) return undefined;
+        // The admitted local work: one draft and one composition step, read and declared by the case.
+        w.client.st.drafts = 1;
+        w.client.st.composition_seq += 1;
+        declareLocalWork({
+          drafts: 1,
+          composition_seq: w.client.st.composition_seq,
+          reason: "the admitted create_person L1",
+        });
+        declared = true;
+        return undefined;
+      },
+    });
+    assert.equal(declared, true);
+    assert.equal(run.activations.length, 1);
+  });
+  test("refused: a draft appears in a case that declared none (the zero-draft premise)", async () => {
+    const w = world();
+    const message = await driveFails(w, {
+      start: async () => grant(w),
+      onHeld: async ({ piece }) => {
+        if (piece?.index === 1) w.client.st.drafts = 1;
+        return undefined;
+      },
+    });
+    assert.match(
+      message,
+      /the reader holds no local work \(the fixture's premise\)/,
+    );
+  });
+  test("refused: declaring local work in a case that did not opt in", async () => {
+    const w = world();
+    const message = await driveFails(w, {
+      start: async () => grant(w),
+      onHeld: async ({ declareLocalWork }) => {
+        declareLocalWork({ drafts: 1, composition_seq: 9, reason: "x" });
+        return undefined;
+      },
+    });
+    assert.match(message, /this case declared no local work/);
+  });
+  test("refused: local work that vanishes after its declaration (lost at a later barrier)", async () => {
+    const w = world();
+    let step = 0;
+    const message = await driveFails(w, {
+      localWork: true,
+      start: async () => grant(w),
+      onHeld: async ({ declareLocalWork }) => {
+        step += 1;
+        if (step === 1) {
+          w.client.st.drafts = 1;
+          declareLocalWork({
+            drafts: 1,
+            composition_seq: w.client.st.composition_seq,
+            reason: "L1",
+          });
+        } else w.client.st.drafts = 0;
+        return undefined;
+      },
+    });
+    assert.match(message, /holds 0 drafts, the declared local work 1 \(L1\)/);
+  });
+  test("refused: a composition change after the declaration that the case did not declare", async () => {
+    const w = world();
+    let step = 0;
+    const message = await driveFails(w, {
+      localWork: true,
+      start: async () => grant(w),
+      onHeld: async ({ declareLocalWork }) => {
+        step += 1;
+        if (step === 1) {
+          w.client.st.drafts = 1;
+          declareLocalWork({
+            drafts: 1,
+            composition_seq: w.client.st.composition_seq,
+            reason: "L1",
+          });
+        } else if (step === 2) w.client.st.composition_seq += 5;
+        return undefined;
+      },
+    });
+    assert.match(message, /composition \d+, predicted \d+/);
+  });
+});

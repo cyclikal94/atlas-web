@@ -82,11 +82,11 @@ describe("the released path is untouched", () => {
       "scripts/integration/schedule.mjs",
     ])
       expect(read(file)).not.toMatch(
-        /pair-(selection|matrix|tap|evidence|attempts|driver)|run-development-pair|diagnostic-(fixture|evidence|fake)/,
+        /pair-(selection|matrix|tap|evidence|attempts|driver|recovery)|run-development-pair|diagnostic-(fixture|evidence|fake)|causal-journal/,
       );
   });
 
-  it("revision 26: no product, fixture or service-worker source reaches the diagnostic adapter, its bridge or its stand-in", () => {
+  it("revision 26/27: no product, fixture or service-worker source reaches the diagnostic adapter, its bridge, its stand-in, the causal journal or the recovery observer", () => {
     const sources = execFileSync(
       "git",
       [
@@ -107,7 +107,7 @@ describe("the released path is untouched", () => {
     expect(sources.length).toBeGreaterThan(100);
     for (const file of sources)
       expect(read(file), file).not.toMatch(
-        /diagnostic-(fixture|evidence|fake)|ATLAS_PAIR_DIAGNOSTIC|atlas-sync-diagnostic/,
+        /diagnostic-(fixture|evidence|fake)|ATLAS_PAIR_DIAGNOSTIC|atlas-sync-diagnostic|causal-journal|pair-recovery/,
       );
   });
 

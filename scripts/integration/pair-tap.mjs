@@ -32,6 +32,12 @@
 // connection to the proxy, never the browser's: a held answer the proxy later releases to a departed page is the PROXY's observation. With
 // `correlation` (a header name the pair runner gives the proxy as well), each record carries the proxy's log entry id as `proxy_id`, and
 // the header is removed before the request reaches the backend, so each tap exchange is joined to exactly one downstream outcome.
+//
+// Clocks (revision 27, R27-DIAG.a): every `t_*` field is the tap's `now()`, by default `performance.now()` of the RUNNER process (milliseconds
+// since its time origin, `GET /log` says so in `clock`). Those times measure durations within the tap only; they are never compared with
+// another component's clock. With a `journal` (causal-journal.mjs: the diagnostic attempt's), the tap also records each request's arrival,
+// its gate opening, its upstream end and its delivery as journal events, and the record carries their positions (`j_request`,
+// `j_gate_open`, `j_upstream_end`, `j_delivered`): the causal order the diagnostic reader uses.
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -147,7 +153,9 @@ export function createTap({
   bodiesDir,
   maxRecords = 4000,
   now = () => performance.now(),
+  clockLabel = "runner performance.now(): milliseconds since the runner process's time origin",
   correlation = null,
+  journal = null,
 }) {
   const target = new URL(upstream);
   if (target.hostname !== "127.0.0.1")
@@ -215,6 +223,8 @@ export function createTap({
       t_upstream_end: null,
       t_delivered: null,
     };
+    if (journal)
+      record.j_request = journal.record("tap", "request", { seq: id });
     keep(record);
     if (stopped) {
       res.destroy();
@@ -237,6 +247,11 @@ export function createTap({
             upstreamRes.pipe(res);
             upstreamRes.on("end", () => {
               record.t_upstream_end = now();
+              if (journal)
+                record.j_upstream_end = journal.record("tap", "upstream_end", {
+                  seq: id,
+                  status: upstreamRes.statusCode,
+                });
             });
             return;
           }
@@ -245,6 +260,11 @@ export function createTap({
           upstreamRes.on("end", () => {
             record.t_upstream_end = now();
             record.status = upstreamRes.statusCode;
+            if (journal)
+              record.j_upstream_end = journal.record("tap", "upstream_end", {
+                seq: id,
+                status: upstreamRes.statusCode,
+              });
             const body = Buffer.concat(chunks);
             const file = `${String(id).padStart(6, "0")}.upstream.json`;
             Object.assign(record, {
@@ -321,6 +341,10 @@ export function createTap({
               res.writeHead(status, headers);
               res.end(payload);
               record.t_delivered = now();
+              if (journal)
+                record.j_delivered = journal.record("tap", "delivered", {
+                  seq: id,
+                });
             }
             persist(file, body);
           });
@@ -379,6 +403,11 @@ export function createTap({
           pending_writes: writes.size,
           write_errors: writeErrors,
           gate: { closed: gate.closed, waiting: gate.waiting.length },
+          clock: {
+            t_fields: clockLabel,
+            time_origin_epoch_ms: performance.timeOrigin,
+            journal: journal ? journal.attempt : null,
+          },
           records: records.filter((r) => r.seq > since),
         });
       }
@@ -388,6 +417,10 @@ export function createTap({
         const opened = closed ? [] : gate.waiting.splice(0);
         for (const w of opened) {
           w.record.t_gate_open = now();
+          if (journal)
+            w.record.j_gate_open = journal.record("tap", "gate_open", {
+              seq: w.record.seq,
+            });
           w.forward();
         }
         return json(200, {

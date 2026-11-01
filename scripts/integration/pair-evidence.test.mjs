@@ -1568,3 +1568,337 @@ test("refused (revision 26): a diagnostic interval naming no selection", () => {
     "no selection",
   );
 });
+
+// ---- revision 27 (R27-DIAG.b): the recovery observed at held snapshot pages; the recovery caller's re-armed hold --------------------
+const readerState = (reader, extra = {}) => ({
+  reader,
+  page: `${reader}-page`,
+  cache_status: "invalid",
+  cursor: null,
+  phase: "snapshot",
+  delta_stage: null,
+  staged: 0,
+  staging_rows: 0,
+  staging_generations: [],
+  recovery_generation: 6,
+  cache_digest: "old-cache",
+  applied_revision: 6,
+  gate: "refreshing",
+  view: "displaying",
+  notice: null,
+  fenced: false,
+  ...extra,
+});
+const pair = (extra = {}, follower = {}) => ({
+  leader: readerState("leader", extra),
+  follower: readerState("follower", { ...extra, ...follower }),
+});
+/** X0's real 410 at 13 (the hand-off), then three snapshot pages 14, 15, 16, each held and released by a recorded release. */
+function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
+  const w = world();
+  const pre = rearmed
+    ? [exchange(w, 12, "c0", error401, { status: 401, held: false })]
+    : [];
+  const first = rearmed ? 13 : 12;
+  const requests = [
+    ...pre,
+    exchange(w, first, "c0", piece(7, 0, false, true, "c1"), { step: 0 }),
+    exchange(w, first + 1, "c1", error410, { status: 410, step: 1 }),
+    exchange(w, first + 2, null, whole([7], true, "s1", "snapshot")),
+    exchange(w, first + 3, "s1", whole([7], true, "s2", "snapshot")),
+    exchange(w, first + 4, "s2", whole([7], false, "s3", "snapshot")),
+  ];
+  const [p1, p2, p3] = [first + 2, first + 3, first + 4];
+  const record = base(w, requests, [other(11)], {
+    driven: rearmed ? "rearmed_prefix" : "prefix",
+    hand_off: { at_seq: first + 1, reason: "the server's real 410" },
+    hold_releases: [p1, p2, p3].map((seq) => ({
+      proxy_id: 100 + seq,
+      outcome: "delivered",
+      reason: "recovery observation",
+    })),
+    barriers: barriers(persisted(first, first + 1), {
+      name: "activation_complete",
+      detail: { recovered: true, applied_revision: 7 },
+    }),
+    pieces_persisted: 1,
+    terminal: {
+      kind: "recovered",
+      applied_revision: 7,
+      final_seq: p3,
+      activated_by_seq: p3,
+    },
+  });
+  if (rearmed)
+    record.rearm = {
+      at_seq: 12,
+      reason: "re-armed before the grant",
+      released_rule: "r0",
+    };
+  record.case = rearmed ? "PAIR-XR0" : "PAIR-X0";
+  record.caller = caller;
+  record.local_work = false;
+  const recovery = caller === "recovery";
+  const fence = recovery
+    ? { fenced: true, notice: { reason: "resync_required" }, view: "fenced" }
+    : {};
+  record.required_observations = [
+    "reader_old_at_refusal",
+    "recovery_invalidated",
+    "recovery_staged_hidden",
+    "recovery_final_held",
+    "recovery_exposed",
+  ];
+  const staged = { staging_rows: 4, staging_generations: [6], ...fence };
+  record.observations = [
+    {
+      kind: "reader_old_at_refusal",
+      at_seq: first + 1,
+      cache_digest: "old-cache",
+      stage: { revision: 7, next_index: 1 },
+    },
+    {
+      kind: "recovery_invalidated",
+      at_seq: p1,
+      cache_digest: "old-cache",
+      detail: { ...pair(fence), generation_at_refusal: 5 },
+    },
+    {
+      kind: "recovery_staged_hidden",
+      at_seq: p2,
+      cache_digest: "old-cache",
+      detail: pair(staged),
+    },
+    {
+      kind: "recovery_final_held",
+      at_seq: p3,
+      cache_digest: "old-cache",
+      detail: pair({ ...staged, staging_rows: 8 }),
+    },
+    {
+      kind: "recovery_exposed",
+      at_seq: p3,
+      cache_digest: "new-cache",
+      detail: {
+        ...pair({
+          cache_status: "valid",
+          cache_digest: "new-cache",
+          applied_revision: 7,
+          gate: null,
+          ...(recovery ? { fenced: true, view: "fenced" } : {}),
+        }),
+        rows_sha256: "a".repeat(64),
+      },
+    },
+  ];
+  return { w, record, p1, p2, p3 };
+}
+const obs = (r, kind) => r.record.observations.find((o) => o.kind === kind);
+test("accepted (revision 27): the ordinary caller's recovery observed invalidated, staged hidden, last page held and exposed once, by leader and follower", () => {
+  accept(observedRecovery());
+});
+test("accepted (revision 27): the recovery caller's W24 restart (notice, snapshot phase, fenced) with the hold re-armed after the 401", () => {
+  accept(observedRecovery({ caller: "recovery", rearmed: true }));
+});
+for (const [name, edit, expected] of [
+  [
+    "the invalidation observation missing",
+    (r) => r.record.observations.splice(1, 1),
+    /required observation recovery_invalidated is missing/,
+  ],
+  [
+    "a valid cache at the invalidation",
+    (r) =>
+      (obs(r, "recovery_invalidated").detail.leader.cache_status = "valid"),
+    /leader still shows a valid cache/,
+  ],
+  [
+    "no new generation at the invalidation",
+    (r) => (obs(r, "recovery_invalidated").detail.generation_at_refusal = 6),
+    /has no new recovery generation/,
+  ],
+  [
+    "the delta stage kept at the invalidation",
+    (r) => (obs(r, "recovery_invalidated").detail.leader.staged = 3),
+    /keeps the abandoned delta stage/,
+  ],
+  [
+    "snapshot rows before the first page",
+    (r) => (obs(r, "recovery_invalidated").detail.follower.staging_rows = 2),
+    /holds snapshot rows before the first page/,
+  ],
+  [
+    "the follower is the leading page",
+    (r) =>
+      (obs(r, "recovery_staged_hidden").detail.follower.page = "leader-page"),
+    /follower is the leading page itself/,
+  ],
+  [
+    "no follower",
+    (r) => delete obs(r, "recovery_staged_hidden").detail.follower,
+    /not made by the leader AND a follower/,
+  ],
+  [
+    "the live cache changed while staged (a partial exposure)",
+    (r) =>
+      (obs(r, "recovery_staged_hidden").detail.leader.cache_digest = "partly"),
+    /live cache changed before the activation/,
+  ],
+  [
+    "staged rows of another generation",
+    (r) =>
+      (obs(r, "recovery_staged_hidden").detail.follower.staging_generations = [
+        6, 7,
+      ]),
+    /not all of the recovery's generation/,
+  ],
+  [
+    "shown while staged",
+    (r) =>
+      Object.assign(obs(r, "recovery_final_held").detail.leader, {
+        cache_status: "valid",
+      }),
+    /shows a valid cache before the last page/,
+  ],
+  [
+    "the last page held is not the last page",
+    (r) => (obs(r, "recovery_final_held").at_seq = r.p2),
+    /is not the last snapshot page/,
+  ],
+  [
+    "the exposure not at the activating page",
+    (r) => (obs(r, "recovery_exposed").at_seq = r.p2),
+    /not made at the terminal's activating snapshot page/,
+  ],
+  [
+    "the follower reads another cache after the exposure",
+    (r) => (obs(r, "recovery_exposed").detail.follower.cache_digest = "other"),
+    /follower does not read the activated cache/,
+  ],
+  [
+    "rows still staged after the exposure",
+    (r) => (obs(r, "recovery_exposed").detail.leader.staging_rows = 1),
+    /still holds staged rows after the activation/,
+  ],
+  [
+    "the old cache shown after the exposure",
+    (r) =>
+      (obs(r, "recovery_exposed").detail.follower.cache_digest = "old-cache"),
+    /still shows the old cache/,
+  ],
+  [
+    "no row hash",
+    (r) => delete obs(r, "recovery_exposed").detail.rows_sha256,
+    /exposed rows are not hashed/,
+  ],
+  [
+    "a page that was not released by a recorded release",
+    (r) => r.record.hold_releases.splice(0, 1),
+    /not held and released by a recorded release|neither an attempt nor a recorded release/,
+  ],
+  [
+    "an ordinary caller that is fenced",
+    (r) => (obs(r, "recovery_invalidated").detail.leader.fenced = true),
+    /an ordinary caller is fenced/,
+  ],
+])
+  test(`refused (revision 27): ${name}`, () => {
+    const r = observedRecovery();
+    edit(r);
+    refuse(r, expected, name);
+  });
+for (const [name, edit, expected] of [
+  [
+    "W18's state filed as the recovery caller (no snapshot restart, no notice)",
+    (r) =>
+      Object.assign(obs(r, "recovery_invalidated").detail.leader, {
+        phase: "delta",
+        notice: null,
+      }),
+    /did not restart the snapshot|did not record its server restart/,
+  ],
+  [
+    "the fence cleared while staged",
+    (r) => (obs(r, "recovery_staged_hidden").detail.leader.fenced = false),
+    /fence was cleared before the snapshot was complete/,
+  ],
+  [
+    "an attempt before the re-arming",
+    (r) => (r.record.rearm.at_seq = 13),
+    /an attempt before the hold was re-armed|re-armed after/,
+  ],
+  [
+    "the hold re-armed after the hand-off",
+    (r) => (r.record.rearm.at_seq = 20),
+    /re-armed after the hand-off/,
+  ],
+  ["no re-arming recorded", (r) => delete r.record.rearm, /names no re-arming/],
+  [
+    "the 401 before the re-arming made an attempt",
+    (r) => (r.record.rearm.at_seq = 11),
+    /precedes the end of the drive but is no attempt/,
+  ],
+])
+  test(`refused (revision 27, recovery caller): ${name}`, () => {
+    const r = observedRecovery({ caller: "recovery", rearmed: true });
+    edit(r);
+    refuse(r, expected, name);
+  });
+test("refused (revision 27): a re-arming on a record that is not re-armed", () => {
+  const r = observedRecovery();
+  r.record.rearm = { at_seq: 11, reason: "x", released_rule: "r0" };
+  refuse(r, /only a re-armed record has a re-arming/, "rearm");
+});
+test("refused (revision 27): the target answered unheld before the re-armed hold", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  const w = r.w;
+  r.record.requests.splice(
+    0,
+    1,
+    exchange(w, 12, "c0", piece(7, 0, false, true, "c1"), { held: false }),
+  );
+  refuse(r, /carried the target before the hold was re-armed/, "unheld target");
+});
+test("identity (revision 27): the caller and the local-work declaration are the matrix row's", () => {
+  const r = observedRecovery();
+  const row = {
+    id: "PAIR-X0",
+    workload: "W-real",
+    driven: "prefix",
+    caller: "ordinary",
+    observations: r.record.required_observations,
+  };
+  const at = {
+    file: "PAIR-X0.chromium.json",
+    engine: "chromium",
+    backend: "development",
+    manifest: "f434df4a",
+    row,
+  };
+  r.record.interval = "PAIR-X0:chromium:iv";
+  assert.deepEqual(identityProblems(r.record, at), []);
+  assert.ok(
+    identityProblems({ ...r.record, caller: "recovery" }, at).some((p) =>
+      /caller recovery, the matrix says ordinary/.test(p),
+    ),
+  );
+  assert.ok(
+    identityProblems({ ...r.record, local_work: true }, at).some((p) =>
+      /local work true, the matrix says false/.test(p),
+    ),
+  );
+});
+test("refused (revision 27): the last page held with no staged page observed by it (fewer than two snapshot pages)", () => {
+  const r = observedRecovery();
+  r.record.observations = r.record.observations.filter(
+    (o) => o.kind !== "recovery_staged_hidden",
+  );
+  r.record.required_observations = r.record.required_observations.filter(
+    (k) => k !== "recovery_staged_hidden",
+  );
+  refuse(
+    r,
+    /recovery_final_held: no staged page was observed by the last one \(fewer than two snapshot pages\)/,
+    "single",
+  );
+});

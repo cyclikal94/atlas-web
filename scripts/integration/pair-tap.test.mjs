@@ -311,3 +311,71 @@ test("the tap forwards to loopback only", () => {
     /loopback only/,
   );
 });
+
+// ---- revision 27 (R27-DIAG.a): the tap's events in the attempt's causal journal ---------------------------------------------------
+test("revision 27: with a journal, a gated request's arrival, its gate opening, its upstream end and its delivery are journal events, in order", async () => {
+  const { createJournal } = await import("./causal-journal.mjs");
+  const { createServer } = await import("node:http");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const events = [];
+  const journal = createJournal({
+    attempt: "a1",
+    append: (l) => events.push(JSON.parse(l)),
+  });
+  const backend = createServer((_req, res) => {
+    res.writeHead(410, { "content-type": "application/json" });
+    res.end(JSON.stringify({ code: "resync_required" }));
+  });
+  await new Promise((r) => backend.listen(0, "127.0.0.1", r));
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? "/tmp", "tap-journal-"));
+  const { createTap } = await import("./pair-tap.mjs");
+  const tap = createTap({
+    upstream: `http://127.0.0.1:${backend.address().port}`,
+    bodiesDir: dir,
+    journal,
+  });
+  try {
+    const urls = await tap.start();
+    await fetch(`${urls.controlUrl}/gate`, {
+      method: "POST",
+      body: JSON.stringify({ closed: true }),
+    });
+    const pending = fetch(`${urls.tapUrl}/api/experimental/v1/sync?cursor=c1`);
+    for (let i = 0; i < 200 && !tap.records.some((r) => r.gated); i += 1)
+      await new Promise((r) => setTimeout(r, 5));
+    journal.record("control", "stdin", { n: 1 });
+    await fetch(`${urls.controlUrl}/gate`, {
+      method: "POST",
+      body: JSON.stringify({ closed: false }),
+    });
+    const answer = await pending;
+    assert.equal(answer.status, 410);
+    await answer.arrayBuffer();
+    const r = tap.records[0];
+    assert.deepEqual(
+      events.map((e) => `${e.producer}.${e.kind}`),
+      [
+        "tap.request",
+        "control.stdin",
+        "tap.gate_open",
+        "tap.upstream_end",
+        "tap.delivered",
+      ],
+    );
+    assert.deepEqual(
+      [r.j_request, r.j_gate_open, r.j_upstream_end, r.j_delivered],
+      [1, 3, 4, 5],
+    );
+    assert.deepEqual(events[3].ref, { seq: r.seq, status: 410 });
+    // The raw tap times stay the tap's own clock (process-relative), named in the log.
+    const log = await (await fetch(`${urls.controlUrl}/log`)).json();
+    assert.match(log.clock.t_fields, /performance\.now/);
+    assert.equal(log.clock.journal, "a1");
+    assert.ok(r.t_request < 1e9);
+  } finally {
+    await tap.stop();
+    await new Promise((r) => backend.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

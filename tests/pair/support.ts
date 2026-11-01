@@ -33,6 +33,10 @@ import {
   designedSkipReason,
 } from "../../scripts/integration/pair-matrix.mjs";
 import {
+  observeRecovery,
+  type RecoveryReader,
+} from "../../scripts/integration/pair-recovery.mjs";
+import {
   BACKEND,
   challengeFor,
   expect,
@@ -43,6 +47,7 @@ import {
   paceSignIn,
   proxy,
   raw,
+  records,
   test,
 } from "../integration/helpers";
 
@@ -154,6 +159,11 @@ export interface TapRecord {
   /** The request waited at the tap's closed gate (revision 25), forwarded at `t_gate_open`. */
   gated?: boolean;
   t_gate_open?: number;
+  /** Revision 27: the attempt's causal-journal positions of this exchange (diagnostic runs only). */
+  j_request?: number;
+  j_gate_open?: number;
+  j_upstream_end?: number;
+  j_delivered?: number;
   delivered?: {
     injected: string;
     status: number;
@@ -612,6 +622,31 @@ export interface Stored {
   cache_digest: string;
   cache_count: number;
   rows?: CacheLike[];
+  /** Revision 27 (R27-DIAG.b): the recovery's own fields and its hidden snapshot staging, read in the SAME transaction. */
+  recovery_generation: number | null;
+  staging_position: unknown | null;
+  staging_rows: number;
+  /** The distinct `recovery_generation` tags of the staged snapshot rows (sorted). */
+  staging_generations: number[];
+  /** Revision 27 (C4): the local work, only when asked (`local`): every draft row and pending effect, and whether the cache holds `ids`. */
+  local?: LocalWork;
+}
+export interface LocalWork {
+  drafts: Array<{
+    local_id: string;
+    status: string;
+    command_digest: string;
+    receipt_revision: number | null;
+    target_resource_ids: string[];
+    attempts: number;
+  }>;
+  effects: Array<{
+    local_id: string;
+    resource_id: string;
+    receipt_revision: number | null;
+    submitted_at_request_seq: number | null;
+  }>;
+  in_cache: Record<string, number>;
 }
 /**
  * The account database read with RAW IndexedDB in ONE read-only transaction (a connection opened without a version, closed at once): the
@@ -622,9 +657,10 @@ export const stored = (
   page: Page,
   account: string,
   withRows = false,
+  localIds: string[] | null = null,
 ): Promise<Stored | null> =>
   page.evaluate(
-    async ({ name, rows }) => {
+    async ({ name, rows, local }) => {
       const names = (await indexedDB.databases()).map((d) => d.name);
       if (!names.includes(name)) return null;
       return new Promise<Stored | null>((resolve, reject) => {
@@ -632,7 +668,14 @@ export const stored = (
         open.onerror = () => reject(open.error);
         open.onsuccess = () => {
           const db = open.result;
-          const wanted = ["sync_state", "cache", "delta_staging", "drafts"];
+          const wanted = [
+            "sync_state",
+            "cache",
+            "delta_staging",
+            "drafts",
+            "cache_staging",
+            "pending_effects",
+          ];
           if (!wanted.every((s) => db.objectStoreNames.contains(s))) {
             db.close();
             resolve(null);
@@ -643,6 +686,12 @@ export const stored = (
           const cache = tx.objectStore("cache").getAll();
           const staged = tx.objectStore("delta_staging").count();
           const drafts = tx.objectStore("drafts").count();
+          // Revision 27: the hidden snapshot staging (its size and generations, never its values) and, when asked, the local work.
+          const staging = tx.objectStore("cache_staging").getAll();
+          const draftRows = local ? tx.objectStore("drafts").getAll() : null;
+          const effects = local
+            ? tx.objectStore("pending_effects").getAll()
+            : null;
           tx.oncomplete = async () => {
             db.close();
             const row = (sync.result ?? {}) as Record<string, unknown>;
@@ -674,6 +723,55 @@ export const stored = (
               drafts: drafts.result,
               cache_digest: digest,
               cache_count: all.length,
+              recovery_generation:
+                (row.recovery_generation as number | null) ?? null,
+              staging_position: row.staging_position ?? null,
+              staging_rows: (staging.result as unknown[]).length,
+              staging_generations: [
+                ...new Set(
+                  (
+                    staging.result as Array<{ recovery_generation: number }>
+                  ).map((x) => x.recovery_generation),
+                ),
+              ].sort((a, b) => a - b),
+              ...(local
+                ? {
+                    local: {
+                      drafts: (
+                        (draftRows?.result ?? []) as Array<
+                          Record<string, unknown>
+                        >
+                      ).map((d) => ({
+                        local_id: d.local_id as string,
+                        status: d.status as string,
+                        command_digest: d.command_digest as string,
+                        receipt_revision:
+                          (d.receipt_revision as number | null) ?? null,
+                        target_resource_ids:
+                          (d.target_resource_ids as string[]) ?? [],
+                        attempts: (d.attempts as number) ?? 0,
+                      })),
+                      effects: (
+                        (effects?.result ?? []) as Array<
+                          Record<string, unknown>
+                        >
+                      ).map((e) => ({
+                        local_id: e.local_id as string,
+                        resource_id: e.resource_id as string,
+                        receipt_revision:
+                          (e.receipt_revision as number | null) ?? null,
+                        submitted_at_request_seq:
+                          (e.submitted_at_request_seq as number | null) ?? null,
+                      })),
+                      in_cache: Object.fromEntries(
+                        local.map((id: string) => [
+                          id,
+                          all.filter((r) => r.id === id).length,
+                        ]),
+                      ),
+                    },
+                  }
+                : {}),
               ...(rows
                 ? {
                     rows: all.map((r) => ({
@@ -692,7 +790,7 @@ export const stored = (
         };
       });
     },
-    { name: `atlas-${account}`, rows: withRows },
+    { name: `atlas-${account}`, rows: withRows, local: localIds },
   );
 
 /** Polls (from Node: an async page predicate would resolve at once) until `predicate` holds; throws with the last state. */
@@ -883,7 +981,10 @@ export interface Interval {
     at_seq: number;
     cache_digest: string;
     stage?: { revision: number; next_index: number } | null;
+    detail?: Record<string, unknown>;
   }>;
+  /** Revision 27: the recovery caller's hold, armed again before the grant (`rearmed_prefix`): the tap's last sequence number then. */
+  rearm?: { at_seq: number; reason: string; released_rule: string };
   /** Each page lifetime's trace, taken BEFORE a reload or close and at the end, so no observation depends on the surviving page. */
   traces: Array<{
     lifetime: number;
@@ -1013,12 +1114,14 @@ export const observe = (
   atSeq: number,
   cacheDigest: string,
   stage?: { revision: number; next_index: number } | null,
+  detail?: Record<string, unknown>,
 ) => {
   iv.observations.push({
     kind,
     at_seq: atSeq,
     cache_digest: cacheDigest,
     ...(stage === undefined ? {} : { stage }),
+    ...(detail === undefined ? {} : { detail }),
   });
 };
 /**
@@ -1139,6 +1242,10 @@ export async function endInterval(
       apiVersion: API_VERSION,
       driven: row.driven,
       requiredObservations: [...row.observations],
+      // Revision 27: the caller and the local-work declaration are the matrix row's, never the case's.
+      ...(row.observations.some((k) => k.startsWith("recovery_"))
+        ? { caller: row.caller, localWork: row.local_work ?? false }
+        : {}),
     },
     memory:
       iv.heap.kind === null
@@ -1190,6 +1297,7 @@ export async function abandonOpenIntervals(reason: string) {
       target: iv.target,
       opening: iv.opening,
       hand_off: iv.handOff,
+      rearm: iv.rearm ?? null,
       barriers: iv.barriers,
       attempts: iv.attempts,
       persisted: iv.persisted,
@@ -1240,6 +1348,8 @@ export async function drivePieces(options: {
   start: () => Promise<Milestone>;
   onHeld?: (step: HeldStep) => Promise<HookAnswer | undefined>;
   maxSteps?: number;
+  /** Revision 27 (C4): the case admits named local work (its matrix row says so); every other case keeps the zero-draft premise. */
+  localWork?: boolean;
 }): Promise<Driven<TapRecord, Stored>> {
   const { account, iv } = options;
   if (!iv.hold || iv.hold.closed)
@@ -1285,6 +1395,7 @@ export async function drivePieces(options: {
       onHeld: options.onHeld,
       ledger,
       maxSteps: options.maxSteps,
+      localWork: options.localWork ?? false,
     },
   );
   iv.target = { ...run.goal, sources: run.sources };
@@ -1520,3 +1631,207 @@ export function writeProof(
   }
   return { file, sha256: sha256(bytes) };
 }
+
+// ---- revision 27 (R27-DIAG.a): acknowledged markers instead of the spec's clock ------------------------------------------------------
+/**
+ * The spec's MARKERS (the runner's bridge `POST /mark`): each is an event of the attempt's causal journal, positioned when the runner
+ * receives it, answered before the spec goes on. A probe or an action is bracketed by `<label>:begin` (acknowledged before it starts) and
+ * `<label>:end` (sent after its awaited result). The proof carries `marks` (name → position) and `mark_prefix`; the runner's reader binds
+ * each to the journal. Nothing compares the spec's clock with the runner's.
+ */
+export function markers(caseId: string) {
+  const prefix = caseId.toLowerCase().replace("pair-", "");
+  const marks: Record<string, number> = {};
+  const mark = async (name: string): Promise<number> => {
+    if (!BRIDGE.socketPath)
+      throw new Error("no diagnostic attempt: run with --backend diagnostic");
+    if (name in marks) throw new Error(`the marker ${name} was already made`);
+    const r = await bridgeCall(BRIDGE, "POST", "/mark", {
+      name: `${prefix}:${name}`,
+    });
+    if (r.status !== 200 || typeof r.body.j !== "number")
+      throw new Error(
+        `marker ${name}: ${r.status} ${JSON.stringify(r.body).slice(0, 300)}`,
+      );
+    marks[name] = r.body.j as number;
+    return marks[name];
+  };
+  return {
+    prefix,
+    marks,
+    mark,
+    /** `<label>:begin`, the action, `<label>:end`; resolves with the action's result. */
+    async bracket<T>(label: string, action: () => Promise<T>): Promise<T> {
+      await mark(`${label}:begin`);
+      const out = await action();
+      await mark(`${label}:end`);
+      return out;
+    },
+  };
+}
+export type Markers = ReturnType<typeof markers>;
+
+// ---- revision 27 (R27-DIAG.b, C2): the recovery observed at held snapshot pages, by the leader and an independent follower ------------
+/** One reader's view for the recovery observer: its own raw IndexedDB read, its rendered cache gate, its view and the leader's job. */
+export async function recoveryReader(
+  page: Page,
+  account: string,
+  reader: "leader" | "follower",
+  pageId: string,
+  o: { rows?: boolean; local?: string[] | null } = {},
+): Promise<RecoveryReader & { local?: LocalWork }> {
+  const s = await stored(page, account, o.rows ?? false, o.local ?? null);
+  if (!s) throw new Error(`the ${reader} has no account database`);
+  const gate =
+    (await page.locator('[data-cache-gate="refreshing"]').count()) > 0
+      ? "refreshing"
+      : null;
+  const v = (await page
+    .evaluate(() => window.__s?.view?.get?.() ?? null)
+    .catch(() => null)) as { kind?: string } | null;
+  const host = (await leaderOf(page).catch(() => null)) as {
+    notice?: { reason?: string } | null;
+  } | null;
+  const fences = (await records(page).catch(() => null))?.auth_state?.fences;
+  return {
+    ...s,
+    reader,
+    page: pageId,
+    gate,
+    view: v?.kind ?? null,
+    notice: host?.notice ?? null,
+    // The account's own auth fences (an invalid_session fence stands until the recovery finishes and clears it).
+    fenced: (fences?.[account] ?? []).length > 0,
+  } as RecoveryReader & { local?: LocalWork };
+}
+
+/**
+ * Observes the recovery after the real 410 (pair-recovery.mjs `observeRecovery`) with the interval's hold still armed: every snapshot
+ * answer held, observed by the leader and the follower page, and released with a recorded release. Then the hold is released (the
+ * remaining answers kept), and the activation and the oracle are the observer's. Returns the final leader state (rows included).
+ */
+export async function observeRecoveryOf(options: {
+  iv: Interval;
+  account: string;
+  leader: () => Page;
+  follower: Page;
+  caller: "ordinary" | "recovery";
+  refusal: { seq: number; generation: number };
+  oldDigest: string;
+  expectFinal: (rows: CacheLike[]) => string[];
+  onPage?: (
+    kind: string,
+    record: Record<string, unknown>,
+    leader: RecoveryReader,
+  ) => Promise<void> | void;
+}): Promise<Stored> {
+  const { iv } = options;
+  if (!iv.hold || iv.hold.closed)
+    throw new Error("the interval's hold is not in force at the hand-off");
+  const ruleId = iv.hold.ruleId;
+  const done = await observeRecovery(
+    {
+      held: async (rule) => (await holds.entries())[rule] ?? [],
+      records: async () =>
+        syncRecords(await tap.log(iv.since)).filter((r) => r.label === iv.id),
+      release: (rule, entry) => holds.releaseOne(rule, entry),
+      read: (who, o) =>
+        recoveryReader(
+          who === "leader" ? options.leader() : options.follower,
+          options.account,
+          who,
+          who === "leader" ? "leader-page" : "follower-page",
+          { rows: o?.rows ?? false },
+        ),
+      recordRelease: (r) => {
+        iv.holdReleases.push(r);
+      },
+      observe: (kind, atSeq, digest, detail) =>
+        observe(iv, kind, atSeq, digest, undefined, detail),
+      onPage: options.onPage,
+      now: () => Date.now(),
+      sleep,
+    },
+    {
+      ruleId,
+      caller: options.caller,
+      refusal: options.refusal,
+      oldDigest: options.oldDigest,
+      expectFinal: (rows) => options.expectFinal(rows as CacheLike[]),
+    },
+  );
+  await releaseHold(iv, "after the recovery's observed exposure");
+  return done.final as unknown as Stored;
+}
+
+/**
+ * Revision 27 (C3): the recovery caller's hold. The opening's hold was released (the fence needs the ordinary engine's request answered);
+ * a NEW hold is armed before the grant, so no answer of the workload is ever unheld; the tap's last sequence number then bounds the drive.
+ */
+export async function rearmHold(iv: Interval, reason: string) {
+  if (!iv.hold?.closed)
+    throw new Error("the opening's hold must be released before re-arming");
+  const released = iv.hold.ruleId;
+  // The tap's last sequence number BEFORE the rule exists: every exchange up to it entered before the new hold (and is not held); the
+  // fenced page makes no request meanwhile, so every later /sync of the interval is held.
+  const { seq } = await tap.label(iv.id);
+  const rule = await proxy.addRule({
+    method: "GET",
+    path: SYNC,
+    action: "hold",
+  });
+  iv.hold = { ruleId: rule.id, closed: false };
+  iv.rearm = { at_seq: seq, reason, released_rule: released };
+  return iv.rearm;
+}
+
+/** Every command POST the page sends (the production dispatcher's), with its Idempotency-Key and body digest; answers joined by URL order. */
+export function observeCommandPosts(page: Page) {
+  const sent: Array<{
+    idempotency_key: string | null;
+    body_sha256: string;
+    path: string;
+    status: number | null;
+  }> = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (request.method() !== "POST" || !url.pathname.endsWith("/commands"))
+      return;
+    const entry = {
+      idempotency_key: request.headers()["idempotency-key"] ?? null,
+      body_sha256: sha256(request.postData() ?? ""),
+      path: url.pathname,
+      status: null as number | null,
+    };
+    sent.push(entry);
+    request
+      .response()
+      .then((r) => {
+        entry.status = r?.status() ?? null;
+      })
+      .catch(() => undefined);
+  });
+  return sent;
+}
+/** A save through the PRODUCTION controller's outbox facade (the production leader's dispatcher sends it). */
+export const enqueueThroughProduction = (page: Page, spec: unknown) =>
+  page.evaluate(
+    (given) =>
+      (
+        window as unknown as {
+          __atlasFixture: {
+            session: { enqueue(spec: unknown): Promise<unknown> };
+          };
+        }
+      ).__atlasFixture.session.enqueue(given),
+    spec,
+  ) as Promise<{ kind: string; localId?: string }>;
+/** The page's own trace length now: a count-ordered window start (never a clock). */
+export const traceLength = (page: Page) =>
+  page.evaluate(() => window.__atlasFixture?.session?.trace?.length ?? 0);
+export const traceFrom = async (page: Page, from: number) =>
+  (
+    (await page.evaluate(
+      () => window.__atlasFixture?.session?.trace ?? [],
+    )) as TraceLine[]
+  ).slice(from);

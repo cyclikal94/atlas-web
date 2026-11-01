@@ -21,8 +21,18 @@
 //     again produce passing evidence (`latched`), and no further command is sent;
 //   - success needs the sequenced `shutdown {remove: true}` answered by its `stopped` with `served: true`, the owned files removed and no
 //     cleanup error; the fixture's PARENT is never removed recursively (`removeParentIfEmpty`).
+//
+// Revision 27 (R27-DIAG.a, design assessment C1): with the attempt's `journal` (causal-journal.mjs), every transcript line the control
+// writes or reads and every bridge call, answer and marker is ALSO an event of the attempt's one causal order, and carries its position `j`.
+// The `at` fields stay raw `Date.now()` of the runner (diagnosis only); no reader orders events by them. The spec's actions are bracketed by
+// acknowledged markers (`POST /mark`), so nothing compares the spec's own clock with the runner's.
+// Revision 27 (DA-DIAG-F, C5): `concludeAttempt` validates the evidence BEFORE the owned shutdown decides whether the fixture is removed,
+// and again after it (terminal); a known failure keeps the fixture.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
+import { createJournal } from "./causal-journal.mjs";
+import { createTap } from "./pair-tap.mjs";
 
 export const RETENTION_SECONDS = 90 * 86400;
 export const MAX_COMMAND_BYTES = 8192;
@@ -221,6 +231,7 @@ export function createControl({
   errors,
   attempt,
   record = () => undefined,
+  journal = null,
   now = () => Date.now(),
   timeoutMs = 30_000,
   readyTimeoutMs = 60_000,
@@ -242,7 +253,13 @@ export function createControl({
     settleReady = { resolve, reject };
   });
   ready.catch(() => undefined);
-  const note = (stream, line) => record({ n: ++n, at: now(), stream, line });
+  const note = (stream, line, ref = {}) => {
+    n += 1;
+    const j = journal
+      ? journal.record("control", stream, { n, ...ref })
+      : undefined;
+    record({ n, ...(j === undefined ? {} : { j }), at: now(), stream, line });
+  };
   const latch = (kind, detail) => {
     if (latched === null) latched = { kind, detail, at: now() };
     cancel(readyTimer);
@@ -447,7 +464,7 @@ export function createControl({
           }
         }, timeoutMs),
       };
-      note("stdin", line);
+      note("stdin", line, { seq, op });
       input.write(`${line}\n`);
     });
   };
@@ -495,12 +512,15 @@ const tokenOk = (presented, token) => {
  * `allowed` operations pass; one at a time (the control refuses an overlapping one). Every call is reported to `onCall` (the runner keeps
  * them with the attempt). Answers: 200 {answer}; 409 {failed: answer} (accepted, ok:false); 423 {latched}; 400/401/403 refusals.
  */
+export const MARK_PATTERN = /^[a-z0-9][a-z0-9_.:-]{0,79}$/;
 export function createControlServer({
   control,
   socketPath,
   token,
   allowed = SPEC_OPERATIONS,
   onCall = () => undefined,
+  onMark = () => undefined,
+  journal = null,
   now = () => Date.now(),
 }) {
   const server = createServer(async (req, res) => {
@@ -512,7 +532,12 @@ export function createControlServer({
       return reply(401, { error: "unauthorised" });
     if (req.method === "GET" && req.url === "/state")
       return reply(200, control.state());
-    if (!(req.method === "POST" && req.url === "/command"))
+    if (
+      !(
+        req.method === "POST" &&
+        (req.url === "/command" || req.url === "/mark")
+      )
+    )
       return reply(404, { error: "not found" });
     let body = "";
     for await (const chunk of req) {
@@ -525,22 +550,51 @@ export function createControlServer({
     } catch {
       return reply(400, { error: "not JSON" });
     }
+    if (req.url === "/mark") {
+      // An acknowledged MARKER of the spec (revision 27): its position is assigned now, when the runner receives it, and answered before
+      // the spec acts; the spec's own clock is never used.
+      if (!journal) return reply(409, { error: "this attempt has no journal" });
+      if (!MARK_PATTERN.test(String(call?.name ?? "")))
+        return reply(400, {
+          error: `the marker name ${call?.name} is refused`,
+        });
+      const j = journal.record("bridge", "mark", { name: call.name });
+      onMark({ name: call.name, j, at: now() });
+      return reply(200, { name: call.name, j });
+    }
     if (!allowed.includes(call?.op))
       return reply(403, { error: `the spec may not send ${call?.op}` });
     const entry = { op: call.op, args: call.args ?? {}, at_request: now() };
+    if (journal)
+      entry.j_request = journal.record("bridge", "call", { op: call.op });
+    const answered = (outcome, seq) => {
+      entry.at_answer = now();
+      if (journal)
+        entry.j_answer = journal.record("bridge", "answer", {
+          op: call.op,
+          seq: seq ?? null,
+          outcome,
+        });
+    };
     try {
       const answer = await control.send(call.op, call.args ?? {});
-      Object.assign(entry, {
-        seq: answer.seq,
-        at_answer: now(),
-        outcome: "ok",
-      });
+      answered("ok", answer.seq);
+      Object.assign(entry, { seq: answer.seq, outcome: "ok" });
       onCall(entry);
-      return reply(200, { answer });
+      return reply(200, {
+        answer,
+        ...(journal
+          ? { j_request: entry.j_request, j_answer: entry.j_answer }
+          : {}),
+      });
     } catch (error) {
+      const outcome = error?.constructor?.name ?? "Error";
+      answered(
+        outcome,
+        error instanceof CommandFailed ? error.answer.seq : null,
+      );
       Object.assign(entry, {
-        at_answer: now(),
-        outcome: error?.constructor?.name ?? "Error",
+        outcome,
         error: String(error?.message ?? error),
       });
       if (error instanceof CommandFailed) {
@@ -644,6 +698,7 @@ export async function launchAttempt(
     features,
     retentionSeconds = RETENTION_SECONDS,
     env = childEnvironment(),
+    journal = null,
     timeoutMs,
     readyTimeoutMs,
   },
@@ -665,6 +720,7 @@ export async function launchAttempt(
     errors: child.stderr,
     attempt,
     record: deps.record,
+    journal,
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(readyTimeoutMs ? { readyTimeoutMs } : {}),
   });
@@ -771,4 +827,91 @@ export function removeParentIfEmpty(deps, parent) {
       error: String(error?.code ?? error?.message ?? error),
     };
   }
+}
+
+/**
+ * Revision 27 (DA-DIAG-F, design assessment C5): the end of one attempt, in an order that cannot remove the fixture of a failed attempt.
+ *   1. `stopTransports()` — the browser is gone; the proxy, the tap and the bridge stop, so every stream is settled. Its problems are kept.
+ *   2. `preliminary()` — the evidence is validated NOW, while the fixture still exists: the interval records, the causal proofs, the journal
+ *      and the attempt's transcript so far (no shutdown yet), the transport answers (503, 429), the browser's verdict.
+ *   3. removal is ELIGIBLE only when the transports stopped cleanly, the preliminary validation found nothing and the control is not latched
+ *      (read again after the stop). `finish(eligible)` then asks the executable's own sequenced shutdown to remove the owned files (or to
+ *      keep them: `finishAttempt` sends `remove:false`, or EOF when an answer is outstanding). Nothing here removes anything itself.
+ *   4. `terminal(finished)` — the complete validation after the shutdown (its stopped event, served:true, the removal, the exit).
+ * Every step runs even after an earlier failure (so the evidence of a failure is complete); a thrown step is a problem of that step.
+ */
+export async function concludeAttempt({
+  stopTransports,
+  preliminary,
+  latched,
+  finish,
+  terminal,
+}) {
+  const run = async (step, ...args) => {
+    try {
+      return { value: await step(...args), problems: [] };
+    } catch (error) {
+      return {
+        value: null,
+        problems: [
+          `${step.name || "step"}: ${String(error?.message ?? error)}`,
+        ],
+      };
+    }
+  };
+  const stop = await run(stopTransports);
+  const transport = [...(stop.value ?? []), ...stop.problems];
+  const pre = await run(preliminary);
+  const before = [...(pre.value ?? []), ...pre.problems];
+  const latch = latched();
+  const eligible =
+    transport.length === 0 && before.length === 0 && latch === null;
+  const done = await run(finish, eligible);
+  const end = await run(terminal, done.value);
+  return {
+    transport,
+    preliminary: before,
+    latched_at_decision: latch,
+    eligible,
+    finished: done.value,
+    finish_problems: done.problems,
+    terminal: [...(end.value ?? []), ...end.problems],
+  };
+}
+
+/**
+ * Revision 27 (R27-DIAG.a): the attempt's causal journal, persisted line by line to `file` (the runner's composition; the composed
+ * qualification uses this same function with its DEFAULT clock).
+ */
+export function attemptJournal(attempt, file, options = {}) {
+  return createJournal({
+    attempt,
+    append: (line) => appendFileSync(file, line),
+    ...options,
+  });
+}
+/**
+ * Revision 27: the attempt's transports composed as the runner composes them — the spec's private bridge and the tap, BOTH recording into
+ * the attempt's one journal (the control already does, through `launchAttempt`). Defaults are the maintained ones (the tap's
+ * `performance.now()`, the bridge's `Date.now()`); nothing compares them.
+ */
+export function composeAttemptTransport({
+  journal,
+  control,
+  socketPath,
+  token,
+  onCall,
+  onMark,
+  tap,
+}) {
+  const bridge = createControlServer({
+    control,
+    socketPath,
+    token,
+    journal,
+    onCall,
+    onMark,
+  });
+  const tapServer = createTap({ ...tap, journal });
+  return { bridge, tap: tapServer };
 }

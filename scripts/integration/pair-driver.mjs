@@ -229,6 +229,7 @@ export async function drive(io, o) {
   const activations = [];
   const steps = [];
   const handled = new Set();
+  let localWork = { drafts: 0, reason: null };
   const started = await o.start();
   const target = createTarget(started);
   await io.barrier("grant_complete", {
@@ -310,9 +311,13 @@ export async function drive(io, o) {
       `attempt ${index}: stored stage next index ${before.delta_stage?.next_index ?? null}, the model ${model.stage?.next_index ?? null}`,
     );
     // The live state is the one the validated commits predict: nothing of an unfinished revision is visible (I3); W27 advances nothing.
+    // Revision 27 (C4): the zero-draft premise stands for every case except one that DECLARED its local work (its matrix row), and then
+    // the driver holds the count and composition the case declared after admitting it: nothing else may change them.
     check(
-      before.drafts === 0,
-      `attempt ${index}: the reader holds no local work (the fixture's premise)`,
+      before.drafts === localWork.drafts,
+      localWork.reason === null
+        ? `attempt ${index}: the reader holds no local work (the fixture's premise)`
+        : `attempt ${index}: the reader holds ${before.drafts} drafts, the declared local work ${localWork.drafts} (${localWork.reason})`,
     );
     check(
       before.page_seq === base.page_seq + model.pages,
@@ -381,6 +386,17 @@ export async function drive(io, o) {
         release,
         addMilestone: (m) => {
           addMilestone(target, m);
+        },
+        // Revision 27 (C4): the case's own admitted local work, declared with the state it reads once the work is admitted.
+        declareLocalWork: ({ drafts, composition_seq, reason }) => {
+          if (o.localWork !== true)
+            throw new Error(
+              "this case declared no local work: the zero-draft premise stands",
+            );
+          if (!(Number.isInteger(drafts) && drafts > 0) || !reason)
+            throw new Error("local work is declared with a count and a reason");
+          localWork = { drafts, reason };
+          live.composition_seq = composition_seq;
         },
       })) ?? {};
     await release();

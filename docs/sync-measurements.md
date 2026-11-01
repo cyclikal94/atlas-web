@@ -224,7 +224,7 @@ reviewed, UNRELEASED BE-Q23 backend, and requires the exact recipe, source appli
 reviewed **before** paired execution. Nothing below is integration, activation or acceptance evidence; the production pin (`0.29.0-rc.1`), API types and
 opt-in (`segmentedMinApiVersion: null`) are unchanged.
 
-* **Runner:** `node scripts/integration/run-development-pair.mjs --backend development|released [--browsers …] [--evidence <fresh dir>] [--grep …] [--check]`.
+* **Runner:** `node scripts/integration/run-development-pair.mjs --backend development|released|diagnostic [--browsers …] [--evidence <fresh dir>] [--grep …] [--check]`.
   `development` selects the approved artefacts through `scripts/integration/pair-selection.mjs` (the orchestrator's `backend-pairing/manifest.json`,
   SHA-256 `f434df4a…`, and every file it names: executable, OpenAPI, bounded contract, backend review, dense fixture, generator lock, types tarball
   `0.0.0-pairing.20261029`; backend HEAD and tree; tracked-clean checkout; darwin/arm64). Any difference refuses the run. The executable is copied into the
@@ -268,14 +268,29 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   to the drive's end an attempt, joined both ways; every driven answer held, every other held answer a recorded release of the hold; exactly one
   persistence witness per received staged piece with a later held request; one durable activation witness per activating attempt; and T1's follower
   observations at the actual last piece and after the activation. A case that fails first leaves an `.incomplete.json` record, never counted.
-* **Matrix (`scripts/integration/pair-matrix.mjs`, 20 cases per engine):** P0 selection witness; W1 whole (both backends); W2/W3 W-real at 4 and 100 with a
+* **Matrix (`scripts/integration/pair-matrix.mjs`, 20 cases per engine on the development backend; 25 in all since revision 27, the five X0/X2/XR0/XR2/XL0
+  cases being diagnostic-only and designed skips elsewhere):** P0 selection witness; W1 whole (both backends); W2/W3 W-real at 4 and 100 with a
   barrier at every piece; S1/S2 W-synthetic at 100 and whole; R1 reload mid-revision; R2 connection dropped after the server answered; T1 second tab across
   the held activation; T2 leader closed mid-revision and real takeover; A1 revocation between pieces (no never-sent identifier disclosed); B1/B2/B3 tampered,
   foreign-device and foreign-account continuations refused by the SERVER (410); G1/G2/G3 gap, repeat and revision change (tap-injected, restart at the
   boundary); X1 tap-injected 410 (client-only, NOT server expiry/pruning); RC1 the fenced recovery catch-up in pieces; L1 the same account's session
-  replaced mid-revision. **Unrun, with owners:** real expiry (X0) and pruning (X2) — the executable offers no bounded control (retention is at least one day,
-  no frozen clock), reported to the BE-Q23 fixture owner and coordinator; a retired own device (B4) and an account switch or confirmed Keep/Delete logout
-  mid-revision (L2) — WEB-09d's composed lifecycle.
+  replaced mid-revision. **Unrun, with owners:** a retired own device (B4) and an account switch or confirmed Keep/Delete logout mid-revision (L2) —
+  WEB-09d's composed lifecycle. (Before 1 November 2026 real expiry (X0) and pruning (X2) were listed here as a capability limit of the normal executables;
+  they are no longer a backend capability request — see the next item.)
+* **Real expiry and pruning: the approved DIAGNOSTIC selection (1 November 2026; revisions 26 and 27).** The backend owner supplied, and the approval of
+  1 November 2026 authorised, the exact `atlas-sync-diagnostic` executable (frozen sync clock, real collector, private stdin controls). WEB-09c owns its
+  client adapter (`--backend diagnostic`; `scripts/integration/diagnostic-fixture.mjs`, `diagnostic-evidence.mjs`, `causal-journal.mjs`,
+  `pair-recovery.mjs`) and five causal cases, each in its own fresh fixture attempt: **X0** (real continuation expiry: the continuation queued at the tap's
+  request gate while the sync clock moves to E−1, where the same token is still answered, and to E), **X2** (real pruning: the gate drained before the grant,
+  the target batch aged in setup, the real collector at the sync start while the token is unexpired and an untouched account keeps its history), **XR0/XR2**
+  (the same causes reaching the FENCED RECOVERY caller's catch-up, so the refusal is W24's server restart, not the ordinary W18) and **XL0** (X0 with one
+  named create_person of the reader admitted through the production outbox and receipted before the clock steps, and a reload after E). Every order a case
+  claims is between positions of the attempt's causal journal (the runner's tap, control and bridge events and the spec's acknowledged markers), never
+  between clocks (revision 27, R27-DIAG.a). After the server's real 410 the hold stays armed and the recovery is observed at held snapshot pages by the leader
+  and an independent follower page: invalidated, staged hidden, the last page held, and one atomic exposure (R27-DIAG.b). The fixture is removed only after
+  the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases are qualified with stand-ins only; the approved executable has
+  NOT been launched and no diagnostic case has run in a browser.** The approval requires an independent review of the exact client source, selection and
+  recipe BEFORE any execution (design assessment Q6), then the three-engine qualification (Q7). Nothing here is expiry/pruning evidence yet.
 * **Qualified so far (revision 23):** the selection, matrix accounting, tap and validator with doubles (`scripts/integration/pair-*.test.mjs`); real
   discovery of the matrix; the released-backend control (P0, W1) in Chromium, Firefox and WebKit; targeted mutants of the seam and of the spec's precondition
   and oracle. **Revision 24:** the attempt accounting at the real stand-in backend → tap → holding proxy → departed client boundary, the schema-2 validator's

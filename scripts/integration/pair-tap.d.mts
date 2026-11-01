@@ -18,7 +18,12 @@ export function createTap(options: {
   bodiesDir: string;
   maxRecords?: number;
   now?: () => number;
+  clockLabel?: string;
   correlation?: string | null;
+  journal?: {
+    attempt: string;
+    record(producer: string, kind: string, ref?: unknown): number;
+  } | null;
 }): {
   start(): Promise<{ tapUrl: string; controlUrl: string }>;
   stop(): Promise<{ ok: boolean }>;

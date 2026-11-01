@@ -11,6 +11,7 @@ import {
   diagnosticCases,
   discoveryProblems,
   judgeResults,
+  RECOVERY_OBSERVATIONS,
   SPEC,
   UNSUPPORTED,
 } from "./pair-matrix.mjs";
@@ -68,17 +69,40 @@ const every = (browsers, shape, cases = CASES) =>
     })),
   );
 
-test("the matrix: unique ids, every case on the development backend except the diagnostic-only X0/X2, the released control whole-revision only, accounts per case", () => {
+test("the matrix: unique ids, every case on the development backend except the diagnostic-only X0/X2/XR0/XR2/XL0, the released control whole-revision only, accounts per case", () => {
   const ids = CASES.map((c) => c.id);
   assert.equal(new Set(ids).size, ids.length);
   // Revision 26 (R26-DIAG): PAIR-X0/X2 run ONLY on the diagnostic selection (real expiry/pruning controls); every other case keeps the
   // development backend exactly as before, and the diagnostic selection runs P0 and X0/X2 alone (no synthetic SQL writer: S1/S2 stay off).
-  const diagnosticOnly = ["PAIR-X0", "PAIR-X2"];
+  // Revision 27 (R27-DIAG.b): the finite caller and local-work variants XR0/XR2/XL0 are diagnostic-only too.
+  const diagnosticOnly = [
+    "PAIR-X0",
+    "PAIR-X2",
+    "PAIR-XR0",
+    "PAIR-XR2",
+    "PAIR-XL0",
+  ];
   for (const c of CASES)
     if (diagnosticOnly.includes(c.id))
       assert.deepEqual(c.backends, ["diagnostic"], c.id);
     else assert.ok(c.backends.includes("development"), c.id);
-  assert.deepEqual(diagnosticCases(), ["PAIR-P0", "PAIR-X0", "PAIR-X2"]);
+  assert.deepEqual(diagnosticCases(), [
+    "PAIR-P0",
+    "PAIR-X0",
+    "PAIR-X2",
+    "PAIR-XR0",
+    "PAIR-XR2",
+    "PAIR-XL0",
+  ]);
+  assert.deepEqual(diagnosticAccounts("PAIR-XR2"), [
+    "pair-writer",
+    "pair-pair-xr2",
+    "pair-xr2-control",
+  ]);
+  assert.deepEqual(diagnosticAccounts("PAIR-XL0"), [
+    "pair-writer",
+    "pair-pair-xl0",
+  ]);
   assert.deepEqual(diagnosticAccounts("PAIR-X2"), [
     "pair-writer",
     "pair-pair-x2",
@@ -88,7 +112,11 @@ test("the matrix: unique ids, every case on the development backend except the d
     "pair-writer",
     "pair-pair-x0",
   ]);
-  assert.equal(ids.length, 22, "20 cases before revision 26, plus X0 and X2");
+  assert.equal(
+    ids.length,
+    25,
+    "20 cases before revision 26, plus X0 and X2, plus XR0, XR2 and XL0 (revision 27)",
+  );
   for (const c of CASES.filter((x) => x.backends.includes("released")))
     assert.equal(c.m, null, `${c.id} needs max_changes`);
   assert.equal(new Set(accountNames()).size, accountNames().length);
@@ -107,20 +135,52 @@ test("revision 25: every workload case names how its record must be driven, and 
   for (const id of ["PAIR-B1", "PAIR-B2", "PAIR-B3", "PAIR-X1", "PAIR-L1"])
     assert.equal(mode[id], "prefix", id);
   assert.equal(mode["PAIR-RC1"], "none");
+  // Revision 27: the recovery caller's re-armed hold, and only there.
+  for (const id of ["PAIR-XR0", "PAIR-XR2"])
+    assert.equal(mode[id], "rearmed_prefix", id);
+  for (const id of ["PAIR-X0", "PAIR-X2", "PAIR-XL0"])
+    assert.equal(mode[id], "prefix", id);
   for (const c of CASES.filter(
-    (x) => x.workload !== null && !["prefix", "none"].includes(x.driven),
+    (x) =>
+      x.workload !== null &&
+      !["prefix", "none", "rearmed_prefix"].includes(x.driven),
   ))
     assert.equal(c.driven, "full", c.id);
+  const real410 = ["PAIR-X0", "PAIR-X2", "PAIR-XR0", "PAIR-XR2", "PAIR-XL0"];
   for (const c of CASES)
     assert.deepEqual(
-      c.observations,
+      [...c.observations],
       c.id === "PAIR-T1"
         ? ["follower_old_at_last_piece", "follower_new_after_activation"]
-        : ["PAIR-X0", "PAIR-X2"].includes(c.id)
-          ? ["reader_old_at_refusal"]
+        : real410.includes(c.id)
+          ? [
+              "reader_old_at_refusal",
+              "recovery_invalidated",
+              "recovery_staged_hidden",
+              "recovery_final_held",
+              "recovery_exposed",
+            ]
           : [],
       c.id,
     );
+  assert.deepEqual(
+    [...RECOVERY_OBSERVATIONS],
+    [...CASES.find((c) => c.id === "PAIR-X0").observations],
+  );
+});
+
+test("revision 27: the callers and the one local-work case are declared, never inferred", () => {
+  const caller = Object.fromEntries(CASES.map((c) => [c.id, c.caller]));
+  for (const id of ["PAIR-XR0", "PAIR-XR2", "PAIR-RC1", "PAIR-L1"])
+    assert.equal(caller[id], "recovery", id);
+  for (const id of ["PAIR-X0", "PAIR-X2", "PAIR-XL0"])
+    assert.equal(caller[id], "ordinary", id);
+  assert.deepEqual(
+    CASES.filter((c) => c.local_work === true).map((c) => c.id),
+    ["PAIR-XL0"],
+  );
+  for (const c of CASES.filter((x) => x.backends.includes("diagnostic")))
+    assert.ok(c.id === "PAIR-P0" || c.diagnostic, c.id);
 });
 
 test("discovery: exactly the matrix in every selected engine is accepted", () => {
@@ -216,11 +276,11 @@ test("judge: development, every case passed: complete; the unsupported rows are 
   const out = judged("development", (c) => designed(c, "development"));
   assert.deepEqual(out.problems, []);
   assert.equal(out.complete, true);
-  // Revision 26: every case except the diagnostic-only X0/X2, which are designed skips on the development backend.
-  assert.equal(out.counts.passed, CASES.length - 2);
-  assert.equal(out.counts.designed_skip, 2);
-  assert.equal(out.outcomes["PAIR-X0"], "designed_skip");
-  assert.equal(out.outcomes["PAIR-X2"], "designed_skip");
+  // Revision 26/27: every case except the five diagnostic-only ones, which are designed skips on the development backend.
+  assert.equal(out.counts.passed, CASES.length - 5);
+  assert.equal(out.counts.designed_skip, 5);
+  for (const id of ["PAIR-X0", "PAIR-X2", "PAIR-XR0", "PAIR-XR2", "PAIR-XL0"])
+    assert.equal(out.outcomes[id], "designed_skip", id);
   assert.ok(
     out.unsupported.length > 0 &&
       out.unsupported.every((u) => u.outcome === "unrun"),

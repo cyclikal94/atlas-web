@@ -5,12 +5,15 @@ export interface PairCase {
   workload: "W-real" | "W-synthetic" | null;
   m: number | null;
   caller: "none" | "ordinary" | "recovery";
-  driven: "full" | "prefix" | "none" | null;
+  driven: "full" | "prefix" | "none" | "rearmed_prefix" | null;
   observations: string[];
   injected: string | null;
   /** Revision 26: the diagnostic controls a diagnostic-only case uses. */
   diagnostic?: string;
+  /** Revision 27: the case admits named local work (every other case keeps the zero-draft premise). */
+  local_work?: boolean;
 }
+export const RECOVERY_OBSERVATIONS: readonly string[];
 export interface PairUnrun {
   id: string;
   kind: "capability" | "transferred";

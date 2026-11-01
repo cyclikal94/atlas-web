@@ -123,6 +123,12 @@ export interface HeldStep<R, S> {
   release(): Promise<void>;
   /** A later milestone of the workload (A1's revocation receipt). */
   addMilestone(m: Milestone): void;
+  /** Revision 27 (C4): the case's admitted local work (only when the drive was started with `localWork: true`). */
+  declareLocalWork(work: {
+    drafts: number;
+    composition_seq: number;
+    reason: string;
+  }): void;
 }
 export interface HookAnswer {
   /** false: the held answer must not reach the client (the hook reloaded or closed the page); it is released to nobody. */
@@ -157,6 +163,7 @@ export function drive<R, S extends StoredLike>(
     ledger?: ReturnType<typeof createLedger>;
     maxSteps?: number;
     heldTimeoutMs?: number;
+    localWork?: boolean;
   },
 ): Promise<Driven<R, S>>;
 export type { Attempt, Persisted };

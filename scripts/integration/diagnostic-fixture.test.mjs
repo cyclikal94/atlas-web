@@ -15,9 +15,11 @@ import {
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { createJournal } from "./causal-journal.mjs";
 import {
   CommandFailed,
   childEnvironment,
+  concludeAttempt,
   continuationOf,
   controlCall,
   createControl,
@@ -896,6 +898,296 @@ test("bridge: only the spec's operations, only with the attempt's secret, each c
     assert.equal(calls.at(-1).outcome, "CommandFailed");
   } finally {
     await server.close();
+    reap();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+// ---- revision 27 (R27-DIAG.a): the control and the bridge record into the attempt's causal journal ---------------------------------
+test("journal: every transcript line is a journal event of its own (control.<stream>, its n), in the order the control saw them", async () => {
+  const lines = [];
+  const journal = createJournal({
+    attempt: "a1",
+    append: (l) => lines.push(JSON.parse(l)),
+  });
+  const s = streams({ journal });
+  s.emit(READY);
+  await s.control.ready;
+  const pending = s.control.send("inspect", {});
+  s.emit(ok(1, "inspect"));
+  await pending;
+  s.stderr.write("a log line\n");
+  await flush();
+  assert.deepEqual(
+    s.entries.map((e) => [e.n, e.j, e.stream]),
+    [
+      [1, 1, "stdout"],
+      [2, 2, "stdin"],
+      [3, 3, "stdout"],
+      [4, 4, "stderr"],
+    ],
+  );
+  assert.deepEqual(
+    lines.map((l) => [l.j, l.producer, l.kind, l.ref.n]),
+    [
+      [1, "control", "stdout", 1],
+      [2, "control", "stdin", 2],
+      [3, "control", "stdout", 3],
+      [4, "control", "stderr", 4],
+    ],
+  );
+  assert.deepEqual(lines[1].ref, { n: 2, seq: 1, op: "inspect" });
+});
+test("journal: without one, the transcript is as before (no positions)", async () => {
+  const s = streams();
+  s.emit(READY);
+  await s.control.ready;
+  assert.equal(s.entries[0].j, undefined);
+});
+test("bridge: a call is bracketed in the journal (call → command → acknowledgement → answer); a marker is positioned when received", async () => {
+  const parent = tmp();
+  const events = [];
+  const journal = createJournal({
+    attempt: "a1",
+    append: (l) => events.push(JSON.parse(l)),
+  });
+  const s = streams({ journal });
+  s.emit(READY);
+  await s.control.ready;
+  const calls = [];
+  const marks = [];
+  const socketPath = join(parent, "c.sock");
+  const server = createControlServer({
+    control: s.control,
+    socketPath,
+    token: "secret",
+    journal,
+    onCall: (c) => calls.push(c),
+    onMark: (m) => marks.push(m),
+  });
+  await server.listen();
+  try {
+    const at = { socketPath, token: "secret" };
+    const m1 = (
+      await within(controlCall(at, "POST", "/mark", { name: "x0:probe:begin" }))
+    ).value;
+    assert.equal(m1?.status, 200);
+    const pending = controlCall(at, "POST", "/command", {
+      op: "inspect",
+      args: {},
+    });
+    for (let i = 0; i < 50 && s.written.length === 0; i += 1)
+      await new Promise((r) => setTimeout(r, 5));
+    s.emit(ok(1, "inspect"));
+    const answered = (await within(pending)).value;
+    assert.equal(answered?.status, 200);
+    const m2 = (
+      await within(controlCall(at, "POST", "/mark", { name: "x0:probe:end" }))
+    ).value;
+    const kinds = events.map((e) => `${e.producer}.${e.kind}`);
+    assert.deepEqual(kinds, [
+      "control.stdout",
+      "bridge.mark",
+      "bridge.call",
+      "control.stdin",
+      "control.stdout",
+      "bridge.answer",
+      "bridge.mark",
+    ]);
+    assert.equal(m1.body.j, 2);
+    assert.equal(m2.body.j, 7);
+    assert.deepEqual(
+      [
+        calls[0].j_request,
+        calls[0].j_answer,
+        answered.body.j_request,
+        answered.body.j_answer,
+      ],
+      [3, 6, 3, 6],
+    );
+    assert.deepEqual(events[5].ref, { op: "inspect", seq: 1, outcome: "ok" });
+    assert.deepEqual(
+      marks.map((x) => [x.name, x.j]),
+      [
+        ["x0:probe:begin", 2],
+        ["x0:probe:end", 7],
+      ],
+    );
+    // A malformed marker name is refused and positions nothing.
+    const bad = (
+      await within(controlCall(at, "POST", "/mark", { name: "Not A Name" }))
+    ).value;
+    assert.equal(bad?.status, 400);
+    assert.equal(events.length, 7);
+  } finally {
+    await server.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+test("bridge: without a journal a marker is refused (409), never answered with a made-up position", async () => {
+  const parent = tmp();
+  const s = streams();
+  s.emit(READY);
+  await s.control.ready;
+  const socketPath = join(parent, "c.sock");
+  const server = createControlServer({
+    control: s.control,
+    socketPath,
+    token: "t",
+  });
+  await server.listen();
+  try {
+    const r = (
+      await within(
+        controlCall({ socketPath, token: "t" }, "POST", "/mark", {
+          name: "x0:a",
+        }),
+      )
+    ).value;
+    assert.equal(r?.status, 409);
+  } finally {
+    await server.close();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+// ---- revision 27 (DA-DIAG-F; design assessment Q4): the evidence is judged BEFORE the removal is decided --------------------------
+/** concludeAttempt with recording fakes: what was asked of `finish`, and in which order the steps ran. */
+async function conclude({
+  transport = [],
+  preliminary = [],
+  latched = null,
+  terminal = [],
+  throwIn = null,
+} = {}) {
+  const order = [];
+  const step =
+    (name, value) =>
+    async (...args) => {
+      order.push(name);
+      if (throwIn === name) throw new Error(`${name} broke`);
+      return typeof value === "function" ? value(...args) : value;
+    };
+  let asked = null;
+  const out = await concludeAttempt({
+    stopTransports: step("stop", transport),
+    preliminary: step("preliminary", preliminary),
+    latched: () => {
+      order.push("latched");
+      return latched;
+    },
+    finish: step("finish", (eligible) => {
+      asked = eligible;
+      return { requested_remove: eligible };
+    }),
+    terminal: step("terminal", terminal),
+  });
+  return { out, order, asked };
+}
+test("DA-DIAG-F: a healthy attempt is judged first, then asked to remove its fixture, then judged again", async () => {
+  const { out, order, asked } = await conclude();
+  assert.deepEqual(order, [
+    "stop",
+    "preliminary",
+    "latched",
+    "finish",
+    "terminal",
+  ]);
+  assert.equal(asked, true);
+  assert.equal(out.eligible, true);
+  assert.deepEqual(out.terminal, []);
+});
+for (const [name, opts] of [
+  [
+    "a browser pass with a missing or corrupt proof (a reader failure)",
+    { preliminary: ["interval X: the causal proof cannot be read"] },
+  ],
+  [
+    "a diagnostic 503 among the answers",
+    { preliminary: ["an answer was 503"] },
+  ],
+  [
+    "a transport that did not stop cleanly after the preliminary pass",
+    { transport: ["tap stop: EBUSY"] },
+  ],
+  [
+    "a latched control (ownership replaced, no acknowledgement)",
+    { latched: { kind: "ownership_lost" } },
+  ],
+  ["a preliminary validation that threw", { throwIn: "preliminary" }],
+  ["a transport stop that threw", { throwIn: "stop" }],
+])
+  test(`DA-DIAG-F: ${name} is NEVER asked to remove its fixture`, async () => {
+    const { out, asked, order } = await conclude(opts);
+    assert.equal(asked, false);
+    assert.equal(out.eligible, false);
+    // Every step still runs: the failure's evidence is complete, and the terminal validation is made too.
+    assert.deepEqual(order, [
+      "stop",
+      "preliminary",
+      "latched",
+      "finish",
+      "terminal",
+    ]);
+  });
+test("DA-DIAG-F: a terminal-only failure after a healthy removal request stays a failure (and is not reported as retained)", async () => {
+  const { out, asked } = await conclude({
+    terminal: ["attempt: shutdown #9 was not answered by its stopped event"],
+  });
+  assert.equal(asked, true);
+  assert.equal(out.eligible, true);
+  assert.deepEqual(out.terminal, [
+    "attempt: shutdown #9 was not answered by its stopped event",
+  ]);
+  assert.equal(out.finished.requested_remove, true);
+});
+test("DA-DIAG-F with the real stand-in child: a known preliminary failure keeps the fixture (remove:false is sent), its files survive", async () => {
+  const parent = tmp();
+  try {
+    const { running } = await launch("normal", parent);
+    assert.deepEqual(running.problems, []);
+    const sentinel = join(running.fixtureDir, "receipt.json");
+    const out = await concludeAttempt({
+      stopTransports: async () => [],
+      preliminary: async () => [
+        "interval PAIR-X0.chromium.json: the causal proof cannot be read",
+      ],
+      latched: () => running.control.latched(),
+      finish: (eligible) => finishAttempt(running, { remove: eligible }),
+      terminal: async () => [],
+    });
+    assert.equal(out.eligible, false);
+    assert.equal(out.finished.requested_remove, false);
+    assert.equal(out.finished.stopped?.removed ?? null, null);
+    assert.ok(existsSync(sentinel), "the retained fixture's files survive");
+    assert.deepEqual(
+      removeParentIfEmpty({ rmdir: rmdirSync }, parent).removed,
+      false,
+    );
+  } finally {
+    reap();
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+test("DA-DIAG-F with the real stand-in child: an outstanding unanswered command ends by EOF and keeps the fixture", async () => {
+  const parent = tmp();
+  try {
+    const { running } = await launch("no-ack-inspect", parent, {
+      timeoutMs: 200,
+    });
+    const sent = within(running.control.send("inspect", {}), 2000);
+    await sent;
+    const out = await concludeAttempt({
+      stopTransports: async () => [],
+      preliminary: async () => [],
+      latched: () => running.control.latched(),
+      finish: (eligible) => finishAttempt(running, { remove: eligible }),
+      terminal: async () => [],
+    });
+    assert.equal(out.eligible, false, "a latched control is not eligible");
+    assert.equal(out.finished.eof, true);
+    assert.ok(existsSync(join(running.fixtureDir, "receipt.json")));
+  } finally {
     reap();
     rmSync(parent, { recursive: true, force: true });
   }
