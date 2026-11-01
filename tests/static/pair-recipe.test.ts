@@ -144,7 +144,7 @@ describe("the spec is exactly the explicit matrix", () => {
       /from "\.\.\/\.\.\/scripts\/integration\/pair-schedule\.mjs"/,
     );
     // Exactly the five real-410 callers use the shared helper, and the one afterE hook is the maintained reload hook.
-    expect(src.match(/token = \(await queueContinuation\(/g)?.length).toBe(5);
+    expect(src.match(/token = \(\s*await queueContinuation\(/g)?.length).toBe(5);
     expect(src.match(/afterE:/g)?.length).toBe(1);
     expect(src).toMatch(/afterE: reloadHook\(\{/);
     // The spec's own wrapper delegates; it neither awaits the control nor re-implements the reload poll.
