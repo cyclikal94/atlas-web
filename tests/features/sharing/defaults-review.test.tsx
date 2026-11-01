@@ -726,6 +726,19 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     await waitFor(() => expect(confirmButton()).not.toBeDisabled());
   });
 
+  /**
+   * The current review's "Now" panel, which must exist (exactly one review is mounted). The review's failure is asserted where the review
+   * shows it. Its Banner also announces the same sentence: the assertive live region is emptied and re-written on the next animation
+   * frame (announcer.tsx), so once that frame has run the document holds the sentence twice and a document-wide single-element query
+   * throws "Found multiple elements" whatever the review shows. Whether the frame runs before `waitFor` returns is a scheduling race
+   * (review 17/18, family sharing-review-announcer-query-race; coordinator assignment of 1 November 2026, SHA-256 9f8074f2…3b16).
+   */
+  function reviewNowPanel() {
+    const panels = document.querySelectorAll<HTMLElement>("[data-review-now]");
+    expect(panels).toHaveLength(1);
+    return panels[0] as HTMLElement;
+  }
+
   test("MU-S50: a Retry answered with a record issued before the Retry (199 for a Retry at 200) is still not 'Now'", async () => {
     const world = staleOpening();
     const retry = await expectStaleOpeningRefused();
@@ -735,7 +748,9 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
     await waitFor(() =>
       expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
     );
-    expect(screen.queryByText(copy.REVIEW_NOW_FAILED)).not.toBeNull();
+    expect(
+      within(reviewNowPanel()).queryByText(copy.REVIEW_NOW_FAILED),
+    ).not.toBeNull();
     expect(
       screen.queryByRole("button", { name: copy.TRY_AGAIN }),
     ).not.toBeNull();
