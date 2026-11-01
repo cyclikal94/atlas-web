@@ -710,7 +710,9 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
       expect(screen.queryByText(copy.REVIEW_NOW_LOADING)).toBeNull(),
     );
     expect(confirmButton()).toBeDisabled();
-    expect(screen.queryByText(copy.REVIEW_NOW_FAILED)).not.toBeNull();
+    expect(
+      within(reviewNowPanel()).queryByText(copy.REVIEW_NOW_FAILED),
+    ).not.toBeNull();
     const retry = screen.queryByRole("button", { name: copy.TRY_AGAIN });
     expect(retry).not.toBeNull();
     return retry as HTMLElement;
@@ -727,11 +729,13 @@ describe("R7: 'Now' is the review's OWN read, asked for after it opened", () => 
   });
 
   /**
-   * The current review's "Now" panel, which must exist (exactly one review is mounted). The review's failure is asserted where the review
-   * shows it. Its Banner also announces the same sentence: the assertive live region is emptied and re-written on the next animation
-   * frame (announcer.tsx), so once that frame has run the document holds the sentence twice and a document-wide single-element query
-   * throws "Found multiple elements" whatever the review shows. Whether the frame runs before `waitFor` returns is a scheduling race
-   * (review 17/18, family sharing-review-announcer-query-race; coordinator assignment of 1 November 2026, SHA-256 9f8074f2…3b16).
+   * The current review's "Now" panel, which must exist (exactly one review is mounted: MU-S50 reviews one kind). The review's failure is
+   * asserted where the review shows it, at the opening (expectStaleOpeningRefused) and after a Retry. Its Banner also announces the same
+   * sentence: the assertive live region is emptied and re-written on the next animation frame (announcer.tsx), so once that frame has
+   * run the document holds the sentence twice and a document-wide single-element query throws "Found multiple elements" whatever the
+   * review shows. Whether the frame runs before `waitFor` returns is a scheduling race (family sharing-review-announcer-query-race).
+   * Post-Retry: review 17/18, coordinator assignment of 1 November 2026, SHA-256 9f8074f2…3b16. Opening: review 20, approved action A
+   * of 1 November 2026, SHA-256 9d348077…2ec5.
    */
   function reviewNowPanel() {
     const panels = document.querySelectorAll<HTMLElement>("[data-review-now]");
