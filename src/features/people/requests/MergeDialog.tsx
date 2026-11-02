@@ -170,16 +170,24 @@ function ConflictNote({
   );
 }
 
-/** The consequence, BEFORE the action in reading and focus order (shown whenever the merge freezes field policies). */
+/**
+ * The consequence, BEFORE the action in reading and focus order (shown whenever the merge freezes field policies). It is a focusable,
+ * labelled region: Tab reaches the warning itself before the button (the design's focus-order note), and the dialog's scrolling body
+ * always holds something focusable (axe `scrollable-region-focusable`; the recipient's review has no input of its own).
+ */
 function FreezeNote({ id, freezes }: { id: string; freezes: boolean }) {
+  const heading = useId();
   if (!freezes) return null;
   return (
     <section
       id={id}
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: a labelled region reached by Tab before the action it warns about
+      tabIndex={0}
+      aria-labelledby={heading}
       data-merge-consequence=""
       className="flex flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3.5"
     >
-      <h3 className="text-[13.5px] font-medium text-ink-1">
+      <h3 id={heading} className="text-[13.5px] font-medium text-ink-1">
         {copy.FREEZE_TITLE}
       </h3>
       <p className="text-[13px] leading-[1.6] text-ink-1">{copy.FREEZE_BODY}</p>
@@ -471,9 +479,27 @@ export function SenderMerge({
       onClose={onClose}
       footer={
         footer ?? (
-          <Button variant="quiet" onClick={onClose}>
-            {copy.CLOSE}
-          </Button>
+          <>
+            <Button variant="quiet" onClick={onClose}>
+              {copy.CLOSE}
+            </Button>
+            {/* A retained uncertain merge stays reachable whatever the comparison shows now: it is sent again as it was. */}
+            {retained ? (
+              blocked === null ? (
+                <Button
+                  variant="primary"
+                  data-people-action="confirm-merge"
+                  onClick={() => void press()}
+                >
+                  {copy.TRY_AGAIN}
+                </Button>
+              ) : (
+                <Button variant="primary" disabled reason={blocked}>
+                  {copy.TRY_AGAIN}
+                </Button>
+              )
+            ) : null}
+          </>
         )
       }
     >
@@ -716,47 +742,50 @@ export function RecipientReview({
   }
   const gone = drawn !== null && !drawn.value.ok && !expired;
   const declineReason = blocked;
-  const footer = gone ? (
-    <Button variant="quiet" onClick={onClose}>
-      {copy.CLOSE}
-    </Button>
-  ) : (
-    <>
+  // A retained uncertain answer stays reachable whatever the preview shows now (it is sent again as it was).
+  const footer =
+    gone && retained === null ? (
       <Button variant="quiet" onClick={onClose}>
         {copy.CLOSE}
       </Button>
-      {declineReason === null ? (
-        <Button
-          data-people-action="decline-merge"
-          onClick={() => void respond(false)}
-        >
-          {retained === false ? copy.TRY_AGAIN : copy.DECLINE}
+    ) : (
+      <>
+        <Button variant="quiet" onClick={onClose}>
+          {copy.CLOSE}
         </Button>
-      ) : (
-        <Button disabled reason={declineReason}>
-          {copy.DECLINE}
-        </Button>
-      )}
-      {expired ? null : acceptReason === null && preview !== null ? (
-        <Button
-          variant="primary"
-          data-people-action="accept-merge"
-          aria-describedby={consequence}
-          onClick={() => void respond(true)}
-        >
-          {retained === true ? copy.TRY_AGAIN : copy.ACCEPT}
-        </Button>
-      ) : (
-        <Button
-          variant="primary"
-          disabled
-          reason={acceptReason ?? copy.LOAD_FIRST}
-        >
-          {copy.ACCEPT}
-        </Button>
-      )}
-    </>
-  );
+        {declineReason === null ? (
+          <Button
+            data-people-action="decline-merge"
+            onClick={() => void respond(false)}
+          >
+            {retained === false ? copy.TRY_AGAIN : copy.DECLINE}
+          </Button>
+        ) : (
+          <Button disabled reason={declineReason}>
+            {copy.DECLINE}
+          </Button>
+        )}
+        {expired && retained !== true ? null : acceptReason === null &&
+          (preview !== null || retained === true) ? (
+          <Button
+            variant="primary"
+            data-people-action="accept-merge"
+            aria-describedby={consequence}
+            onClick={() => void respond(true)}
+          >
+            {retained === true ? copy.TRY_AGAIN : copy.ACCEPT}
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            disabled
+            reason={acceptReason ?? copy.LOAD_FIRST}
+          >
+            {copy.ACCEPT}
+          </Button>
+        )}
+      </>
+    );
   return (
     <Dialog
       open

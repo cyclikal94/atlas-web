@@ -283,6 +283,30 @@ describe("the sender's merge (A6)", () => {
     expect(commands(w)[1]).toEqual(first);
   });
 
+  test("a retained uncertain merge stays reachable while the comparison is refused: Try again resends it exactly", async () => {
+    const w = world();
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    await w.mount(COMPARE);
+    await waitFor(() =>
+      expect(action(copy.MERGE_THEM)).toHaveProperty("disabled", false),
+    );
+    // Every later comparison read is refused.
+    for (let n = 0; n < 10; n += 1)
+      w.api.next.mergePreview.push({
+        ok: false,
+        kind: "forbidden",
+        requestId: "ref-403",
+      });
+    fireEvent.click(action(copy.MERGE_THEM));
+    expect(
+      (await screen.findAllByText(copy.PREVIEW_FORBIDDEN)).length,
+    ).toBeGreaterThan(0);
+    const first = commands(w)[0];
+    fireEvent.click(action(copy.TRY_AGAIN));
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(first);
+  });
+
   test("Cancel sends nothing and returns to the duplicates", async () => {
     const w = world();
     const { router } = await w.mount(COMPARE);

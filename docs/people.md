@@ -31,6 +31,7 @@ Import from `src/features/people` only:
 peopleSlots: { headerActions?(personId), duplicateActions?(personId, otherId) }   // WEB-11b fills them ("Ask to link…", "Compare & merge")
 usePersonLinkage(personId): { linkage, retry() }       // from GET /people/{id} only; unknown is never "unlinked"
 personPath(id), duplicatesPath(id)                     // deep links
+requestsPath(), mergePath(personId, otherId)           // WEB-11b: WF-PEOPLE-06; "Compare & merge" (otherId merged into personId)
 parseFieldValue, valueProblem, labelProblem, formatValue, formatDate, type FieldValue, type FieldKind
 PeopleBoundary, PeopleEnvProvider, type PeopleEnv      // the people env (over the sharing env); a test or fixture may provide its own
 archivedLedgerKinds.register({ id, order, Rows })      // add a kind to Settings → "Archived items"; Rows reports a LedgerReport (or null)
@@ -517,3 +518,120 @@ Escalations and their decisions (revision 1, 13 October 2026):
   D-11a-23), with the product decisions of 14 October (`delivery/handoffs/people-summary-product-decisions-20261014.md`); no owner-only
   policy read fills any of them. The independent review of the complete result follows.
 - **E-3** the list's duplicate banner (one read per person) and the Requests entry (WEB-11b) are not built; recorded for the checkpoint.
+
+# WEB-11b: merges, links and requests (WF-PEOPLE-05/06)
+
+Built on WEB-11a's public interface; backend `v0.29.0-rc.1` (API 0.29.0), whose Q16 reads (recipient-safe merge preview, server-backed sent
+history) are in the pinned contract. Plan: `.agtx/plan.md` of the WEB-11b task (decisions D-11b-1 to D-11b-13).
+
+## Routes and modules
+
+| Route | Screen |
+| --- | --- |
+| `/people/requests` | WF-PEOPLE-06: "Waiting for you", "Sent", "New request" (two columns from 1280 px; below, "For you · N" / "Sent" tabs and a "New request" sheet) |
+| `/people/requests/$requestId` | the recipient's review of a merge request (WF-PEOPLE-05, recipient) |
+| `/people/requests/merge/$sourceId/$targetId` | a merge chosen in "Ask to merge" (WF-PEOPLE-05, sender) |
+| `/people/$personId/duplicates/$otherId` | "Compare & merge" over the duplicates: `$otherId` merged into `$personId` (kept) |
+
+Every dialog is route-addressed and keeps its state in page memory, so a `403` remount of the protected tree reopens it as it was (D-11b-1).
+The four routes share ONE lazy component; `requests/screens.tsx` picks the screen by its own match. The screens are in the people chunk,
+not a chunk of their own: a nested chunk importing the people chunk's modules was measured to split ten shared modules out of the fixture
+entry (+5.3 KB of first-load gzip). The first load carries only the four route definitions (+86 B; see "Budget" below).
+
+`src/features/people/requests/`: `screens.tsx` (route dispatcher), `RequestsScreen.tsx` (incoming, sent, tabs), `NewRequest.tsx` (the two
+forms, the person picker, `DirectoryLookup` as a view), `MergeDialog.tsx` (sender and recipient), `entries.tsx` (People 01's "Requests"
+entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, `sender.ts`, `copy.ts`. Pure model: `model/requests.ts`.
+
+## Decisions as built
+
+- **D-11b-2 slots.** `requests/entries.tsx`, imported by `screens.tsx`, fills `peopleSlots.headerActions` (the merged alias's note, else
+  "Ask to link…") and `peopleSlots.duplicateActions` ("Compare & merge") when it is evaluated; `slots.ts` is unchanged. "Ask to link…" is
+  offered only for a person known (online `GET /people/{id}`) to be unlinked and known (its viewer-safe summary) to be the reader's own,
+  not archived; while either is unknown it is disabled with "Needs a connection to check who controls this profile."; it is absent when
+  linked. It opens the Requests page with the person chosen (page memory, not a search parameter: no first-load bytes).
+- **D-11b-3/4 reads.** The incoming requests, each page of the sent history and both previews are read with the summaries' machinery
+  (`useSummary`, keys `requests:incoming`, `requests:sent:<after>`, `requests:review:<id>`, `merge:<source>:<target>`), so they share its
+  generation: any people command that was sent, any receipt or synced change, reconnection, the 60-second refresh and the page becoming
+  visible read them again; a late answer of an earlier generation or another identity is dropped; offline nothing is shown. (The plan's
+  separate requests generation and `invalidateRequests()` are therefore not needed: `sendOnline` already invalidates the generation they
+  share.) A refusal the screens explain (`404`, `410`, `403`, `422`, `409`) is kept as the read's value with its reference; anything else
+  is the view's failure with Try again. The page says "Checked at {time}" with Refresh. The count in People 01's header is the latest
+  successful read ("99+" above 99; nothing while unknown, offline or failed). Sent: 50 a page in the server's id order, Next/Previous over a
+  cursor stack, "Nothing on this page — there are more to check" for an empty page with a cursor, "No sent requests yet" only for a first
+  page that is also the last; each state verbatim; Cancel only on pending; no device caveat (§4c, Q16 landed).
+- **D-11b-5 sender.** From the B5 snapshot's household members, then the summaries this page read; otherwise "Someone outside your
+  households" with "Atlas can't show who sent this request. Only accept it if you were expecting it." An account id is never shown.
+- **D-11b-6 comparison.** The kept person's column first. A field's value only from a synced row with the same id at the preview's
+  version or later (`useCachedResources`, which reads at most 100 ids: a preview of more than 100 fields shows the rest as "Not on this
+  device yet"); "—" where a side has no such field; "Not visible to you" for a side the recipient cannot see. Conflicts: a label both sides
+  have (trimmed, case-insensitive) gets "Both have a {label}. You'll keep both — …nothing is deleted."
+- **D-11b-7 linkage.** Both linkages are read before the action is offered. Both linked: the cause, no action, Reload. One linked: its
+  name, fixed, with "A profile linked to an account keeps its account's name.", sent exactly. Unknown: disabled, "Needs a connection to
+  check who controls these profiles.", Try again. Neither: a choice of the two labels, the kept person's by default (kept in page memory).
+  The recipient's review checks the sides it can see the same way; a hidden side cannot be checked ("The server checks when you accept.").
+- **D-11b-8.** `merge` or `request_merge` is chosen only by the preview's `requires_approval`; the owner named from the other side's
+  summary (`owner.you === false`), else "the other owner".
+- **D-11b-9 outcomes and §4.7.** `requests/commands.ts` `runCommand`: one key per target (`request-link:<person>`, `merge:<s>:<t>`,
+  `respond:<request>`, `cancel:<request>`); admission is taken synchronously at the press, then the body is prepared in the same turn (the
+  `request_link` re-verification may answer later); a retained uncertain attempt is the only thing a press of its key sends, exactly; a
+  different answer to a request whose answer is uncertain is refused ("Your earlier answer may already have been recorded. Try it again
+  first."). Every press uses the comparison SHOWN: the preview object this render drew, and only while it is still the current read.
+  What a command said is kept by key (`memory.requestReports`) for whichever row or dialog shows it now; an answer whose row is gone (a
+  `404` after the list was read again) stays said above the list until closed. `PeopleRefusal` gains `expired` (`410`; no longer folded
+  into `not_found`) and `capacity` (a people command's `503 slice_capacity`, `classifyPeopleAnswer(…, { capacity: true })`).
+- **D-11b-10/11 New request.** Ask to link: a picker over `GET /people/summaries?scope=not_linked` (owner, not archived), 100 a page, at most
+  three pages (Q9) with "Show more" and a name filter over what was read; the recipient from the shared `DirectoryLookup` as a view; at the
+  press the person's linkage must be known unlinked, its version is `expected_version`, and the recipient is checked again with the exact
+  lookup (the shared sharing client's `lookup`, not a second people client): only exactly one entry with the same id sends. Ask to merge:
+  "One of your people" (owner) and "The same person" (any visible, not the first); "Compare" opens the sender's dialog. The two forms keep
+  their values while the other is shown (PRODUCT-DECISIONS item 2); a success clears only the input it sent.
+- **D-11b-12 aliases.** An archived person whose value names `canonical_person_id` says "Merged into {name}" (a link when this device
+  holds that person, else "another person"); WEB-11a's Archive/Restore is disabled for it with "This person was merged into another;
+  restore isn't available." (the backend redirects `archive` of an alias to its canonical person).
+- **D-11b-13 recovery** (`model/recovery.ts`): `people-request-link:<formId>`, `people-request-merge:<formId>`,
+  `people-merge-name:<sourceId>:<targetId>`; pure, WEB-14a captures them.
+- **Shared change:** `usePersonLinkage(null)` reads nothing and answers unknown (a hidden side of a merge).
+
+## Limits (WEB-11b)
+
+- Senders outside the reader's households, whose people the reader cannot see, cannot be named (no sender username in the contract; E-2b).
+- `request_link` to an account deleted after the re-verification answers `401` (backend), which the session treats as an invalidation
+  (E-2a). An over-200-resource scope answers `500`, shown as uncertain (E-2c). Both-linked and linked-name refusals happen only when the merge
+  commits (E-2d); the sender is checked first, the recipient's accept can still be refused `409`.
+- No push: the incoming list is as of its "Checked at" time (and the summaries' refresh rules).
+- Self-link, `reference_account` UI and a "swap" of which person is kept are not built.
+- Household invitation history (`/invitations/sent`) is WEB-12b's; no household screen changes here.
+
+## Not claimed (WEB-11b)
+
+Component tests and `tests/e2e/fixture.people-requests.spec.ts` are fixture evidence. The real-backend cases I-PPL17 to I-PPL23
+(`tests/integration/integration.people.spec.ts`) are focused consumer evidence against the released `v0.29.0-rc.1` on SQLite, not BE-Q16's
+acceptance and not integration acceptance; `integration_passed` stays false. No PostgreSQL, HTTPS, device or manual screen-reader evidence
+(WEB-09d), no copy or visual approval (WEB-15).
+
+## Budget
+
+WEB-11b-FIXTURE-JS-20261102 (Kieran, 2 November 2026): one-off dist-fixture initial JavaScript ceiling 279,900 B for this candidate (its
+route definitions, +86 B over HEAD's 279,783 B), baseline the final measured candidate; production unchanged.
+
+## Additions and deviations for the connected-app checkpoint (WEB-11b plan §9)
+
+Collected for WEB-15's sign-off; none is approved by being listed. Strings marked provisional are in `requests/copy.ts`.
+
+| Item | Route | Reproduce |
+| --- | --- | --- |
+| "Sent" heading and states without "from this device"; "Nothing on this page — there are more to check"; "No sent requests yet" | `/people/requests` | E-R6, `requests-screen.test.tsx` |
+| Mobile "Sent" tab without a count (the total is unknown without reading every page) | `/people/requests` (390 px) | E-R15 |
+| "Requests need a connection."; "Checked at {time}"; Refresh; "Checking for requests…"; "Atlas couldn't check your requests." | `/people/requests` | E-R1 |
+| Unnamed sender "Someone outside your households" and its caution | `/people/requests` | E-R2 |
+| Link-row copy perspective corrected (E-3): "{sender} wants to link “{name}” to your profile … If you already have a profile, the two become one." | `/people/requests` | E-R3 |
+| No "asked N days ago" (the contract gives only `expires_at`); time left "N days left", "N hours left", "Less than an hour left", "Expires soon" | `/people/requests` | E-R1 |
+| Recipient review: "Not visible to you" column; the drawn "Accept is checked against what Kieran can see, not what you can" replaced by "accepting checks both what {sender} can see and what you can see now"; stale, expired and withdrawn banners | `/people/requests/$id` | E-R4, E-R5 |
+| "Note (optional)" removed from Ask to link (the contract has no note) | `/people/requests` | E-R8 |
+| Pickers ("Which of your people", "One of your people", "The same person", "Filter by name", "Show more"), "Choose", "Compare"; the Ask to merge intro sentence | `/people/requests` | E-R8 |
+| Both-linked banner; fixed linked name with its sentence; "Not on this device yet"; "Loading the comparison…"; "Load the comparison first." | `/people/$id/duplicates/$other` | E-R9, E-R11 |
+| Merged-alias note "Merged into {name}" and disabled Archive/Restore with its reason | `/people/$alias` | E-R10 |
+| Outcome copy of D-11b-9 (capacity, out of date, already answered, couldn't confirm, answer uncertain first, account no longer exists) | all | E-R3, E-R5, E-R7, E-R8, E-R13 |
+| People 01: "Requests" with its count beside the list header (desktop); "N requests waiting for you →" banner below 1280 px | `/people` | E-R1 |
+| The merge dialog uses the shared 440 px dialog (the drawn comparison is wider) | `/people/$id/duplicates/$other` | E-R15 |
+| Not built: self-link, `reference_account` UI, a "Swap" of the kept person | — | — |

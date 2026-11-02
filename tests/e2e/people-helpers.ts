@@ -125,6 +125,23 @@ export interface Served {
   } | null;
   preferencesVersion: number;
   summaryScript: Answer[];
+  /**
+   * WEB-11b: every request to its endpoints (`GET /people/requests`, `GET /people/requests/sent?…`, `GET /people/requests/{id}/merge-preview`,
+   * `POST /people/merge-preview`, `GET /directory?username=…`) and each `/people-commands` call as `POST /people-commands <kind>`, in order;
+   * kept apart from `log`, whose order earlier cases assert. `incoming`/`sent` are what the two lists answer (sent paged in id order);
+   * `recipientPreviews` by request id (absent: 404); `mergePreviews` overrides by `source:target` (default: both people, no fields, no
+   * approval, token "a"×64); `directory` the accounts an exact lookup finds; `requestScript` answers the next requests of a key
+   * (`incoming`, `sent`, `review`, `merge`, `directory`) first, in order.
+   */
+  requestLog: string[];
+  incoming: unknown[];
+  sent: Array<{ id: string } & Record<string, unknown>>;
+  /** Sent pages answered by their cursor (`""`: the first page), every time that page is read; else `sent` is paged. */
+  sentPages: Map<string, unknown>;
+  recipientPreviews: Map<string, unknown>;
+  mergePreviews: Map<string, Record<string, unknown>>;
+  directory: Array<{ id: string; username: string }>;
+  requestScript: Map<string, Answer[]>;
 }
 
 /** Not one of the viewer-safe summary reads (finding 8), which any invalidation repeats: for logs that assert another order. */
@@ -209,7 +226,16 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
     home: { id: HOME, name: "Home", version: 1, member_count: 2 },
     preferencesVersion: 1,
     summaryScript: [],
+    requestLog: [],
+    incoming: [],
+    sent: [],
+    sentPages: new Map(),
+    recipientPreviews: new Map(),
+    mergePreviews: new Map(),
+    directory: [],
+    requestScript: new Map(),
   };
+  const scripted = (name: string) => served.requestScript.get(name)?.shift();
   const summaryOf = (entry: { person: Projection; linked: string | null }) => {
     const { person, linked } = entry;
     return {
@@ -296,6 +322,65 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
         json(200, (served.snapshot as { households: unknown[] }).households),
       );
     if (path === "/invitations") return route.fulfill(json(200, []));
+    // ---- WEB-11b ----
+    if (path === "/people/requests") {
+      served.requestLog.push(`GET ${path}`);
+      return answer(route, scripted("incoming"), () => ({
+        items: served.incoming,
+      }));
+    }
+    if (path === "/people/requests/sent") {
+      served.requestLog.push(`GET ${path}${url.search}`);
+      const after = url.searchParams.get("after");
+      const limit = Number(url.searchParams.get("limit") ?? "50");
+      const items = [...served.sent]
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+        .filter((item) => after === null || item.id > after)
+        .slice(0, limit);
+      const fixed = served.sentPages.get(after ?? "");
+      if (fixed !== undefined) return route.fulfill(json(200, fixed));
+      return answer(route, scripted("sent"), () => ({
+        items,
+        next_after: items.length === limit ? (items.at(-1)?.id ?? null) : null,
+      }));
+    }
+    const review = /^\/people\/requests\/([0-9a-f-]{36})\/merge-preview$/.exec(
+      path,
+    );
+    if (review) {
+      served.requestLog.push(`GET ${path}`);
+      const known = served.recipientPreviews.get(review[1] as string);
+      const next = scripted("review");
+      if (next === undefined && known === undefined)
+        return route.fulfill(json(404, atlas("not_found")));
+      return answer(route, next, () => known);
+    }
+    if (path === "/people/merge-preview" && method === "POST") {
+      served.requestLog.push(`POST ${path}`);
+      const { source_id, target_id } = body() as {
+        source_id: string;
+        target_id: string;
+      };
+      return answer(route, scripted("merge"), () => ({
+        token: "a".repeat(64),
+        source: served.people.get(source_id)?.person,
+        target: served.people.get(target_id)?.person,
+        fields: [],
+        requires_approval: false,
+        combines_identity_audiences: true,
+        freezes_field_policies: true,
+        ...(served.mergePreviews.get(`${source_id}:${target_id}`) ?? {}),
+      }));
+    }
+    if (path === "/directory") {
+      served.requestLog.push(`GET ${path}${url.search}`);
+      const username = url.searchParams.get("username");
+      return answer(route, scripted("directory"), () =>
+        served.directory.filter(
+          (entry) => username === null || entry.username === username,
+        ),
+      );
+    }
     if (path === "/people/summaries") {
       served.log.push(`GET ${path}${url.search}`);
       const scope = url.searchParams.get("scope") ?? "all";
@@ -388,8 +473,18 @@ export async function servePeople(context: BrowserContext): Promise<Served> {
       served.log.push(`POST ${path}`);
       served.peopleCommands.push({ key: key(), body: body() });
       revision += 1;
-      const personId = (body() as { command: { person_id: string } }).command
-        .person_id;
+      const command = (body() as { command: Record<string, unknown> }).command;
+      served.requestLog.push(`POST ${path} ${String(command.kind)}`);
+      // A receipt names the canonical person: a merge's target; a request or an answer, the person it is about (WEB-11b).
+      const about = [...served.incoming, ...served.sent].find(
+        (request) => (request as { id: string }).id === command.id,
+      ) as { proposal?: Record<string, string> } | undefined;
+      const personId =
+        (command.person_id as string | undefined) ??
+        (command.target_id as string | undefined) ??
+        about?.proposal?.person_id ??
+        about?.proposal?.target_id ??
+        ME;
       return answer(route, served.peopleScript.shift(), () => ({
         revision,
         person_id: personId,
