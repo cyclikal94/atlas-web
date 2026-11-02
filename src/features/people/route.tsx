@@ -10,7 +10,12 @@ import { PAGE_TITLE } from "./titles";
  * `/people/$personId/fields/$fieldId` (route-addressed, so a remount of the protected tree reopens it with its draft).
  *
  * The screens are one lazy chunk (`screens.tsx`): this module imports only what the router needs. WEB-11b fills the detail's slots
- * (`peopleSlots`); WEB-11a renders nothing in them.
+ * (`peopleSlots`) from that chunk; WEB-11a renders nothing in them.
+ *
+ * WEB-11b (D-11b-1): `/people/requests` (WF-PEOPLE-06, a page of its own) with two dialogs over it, the recipient's review of a merge
+ * request (`requests/$requestId`) and a merge chosen in "Ask to merge" (`requests/merge/$sourceId/$targetId`), and "Compare & merge" over
+ * the duplicates (`$personId/duplicates/$otherId`: the page's person is kept). Every one is route-addressed (a `403` remounts the tree and
+ * reopens it with its state from page memory). Their screens are in the people chunk (`screens.tsx` says why not a chunk of their own).
  */
 export { peopleSlots } from "./slots";
 
@@ -18,6 +23,10 @@ export const personPath = (id: string): string =>
   `/people/${encodeURIComponent(id)}`;
 export const duplicatesPath = (id: string): string =>
   `${personPath(id)}/duplicates`;
+export const requestsPath = (): string => "/people/requests";
+/** "Compare & merge": `otherId` merged into `personId` (the person kept). */
+export const mergePath = (personId: string, otherId: string): string =>
+  `${duplicatesPath(personId)}/${encodeURIComponent(otherId)}`;
 
 declare module "@tanstack/react-router" {
   interface StaticDataRouteOption {
@@ -39,6 +48,12 @@ const FieldEditorScreen = lazy(() =>
 const DuplicatesScreen = lazy(() =>
   screens().then((m) => ({ default: m.DuplicatesScreen })),
 );
+// WEB-11b's four routes share ONE lazy component from the people chunk (`requests/screens.tsx` picks the screen by its own match): the
+// first load carries only their definitions.
+const Requests = lazy(() =>
+  screens().then((m) => ({ default: m.RequestsRoutes })),
+);
+const dialog = { dialog: true };
 
 function PeopleLayout() {
   // A shell rendered without the data layer (the shell's own tests) shows the destination's heading and no account data.
@@ -112,9 +127,37 @@ export const peopleRoute = (parent: AnyRoute) => {
       );
     },
   });
+  const compare = createRoute({
+    getParentRoute: () => duplicates,
+    path: "$otherId",
+    staticData: dialog,
+    component: Requests,
+    wrapInSuspense: true,
+  });
+  const requestsPage = createRoute({
+    getParentRoute: () => people,
+    path: "requests",
+    component: Requests,
+    wrapInSuspense: true,
+  });
+  const review = createRoute({
+    getParentRoute: () => requestsPage,
+    path: "$requestId",
+    staticData: dialog,
+    component: Requests,
+    wrapInSuspense: true,
+  });
+  const merge = createRoute({
+    getParentRoute: () => requestsPage,
+    path: "merge/$sourceId/$targetId",
+    staticData: dialog,
+    component: Requests,
+    wrapInSuspense: true,
+  });
   return people.addChildren([
     index,
+    requestsPage.addChildren([review, merge]),
     person.addChildren([personIndex, newField, editField]),
-    duplicates,
+    duplicates.addChildren([compare]),
   ]);
 };

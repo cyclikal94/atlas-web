@@ -63,6 +63,13 @@ export interface SummaryEntry {
     | { kind: "failed"; reason: "failed" | "not_found" | "stale" };
 }
 
+/** A request command's last word (`requestReports`): the message, a copyable reference, and whether its outcome is uncertain. */
+export interface RequestReport {
+  text: string;
+  requestId?: string;
+  uncertain?: boolean;
+}
+
 type Listener = () => void;
 
 export class PeopleMemory {
@@ -134,6 +141,12 @@ export class PeopleMemory {
   /** The count "Possible duplicates" showed from its first page, per person ("2", "2+"; null: none claimed). */
   readonly duplicateCounts = new Map<string, string | null>();
   readonly attempts = new Map<string, Attempt>();
+  /**
+   * WEB-11b: what a request command last said that is not a success (a refusal, an uncertain outcome), by its attempt key
+   * (`respond:<id>`, `cancel:<id>`, `request-link:<person>`, `merge:<source>:<target>`), for whichever row or dialog shows that request
+   * now: the one that pressed may be gone (a remount, another page of the history). Cleared by the key's next send.
+   */
+  readonly requestReports = new Map<string, RequestReport>();
   /** Bumped by every invalidation: every earlier summary read is superseded, and none of its answers is applied. */
   summaryGeneration = 0;
   /** The highest `preferences_version` a summary applied in this epoch (0: none yet). */
