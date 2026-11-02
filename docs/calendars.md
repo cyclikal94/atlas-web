@@ -304,6 +304,11 @@ drawn nor remembered, and a card whose read then finds no row says nothing; a NE
 shown and remembered again; an older resolved reading does not retire a review seen reopened since. A local acknowledgement is still not
 a resolution. Ids and versions only; nothing persists beyond the panel. Evidence: `review-panel.test.tsx` "revision 24", the revision-24
 case of `fixture.calendar-reviews.spec.ts`, MU-2771 to MU-2782.
+**Revision 25 (review 29 F29-1):** the page's list and a card's own read are published separately, so a card can still be listed when its
+read finds no row. It says "no longer available" only when the current page's history holds the review (a card on that page drew it),
+the same rule a departed review follows. A review whose card was only ever loading (inserted, then deleted before its first read arrived)
+was never shown, so it simply goes; another page's history, or an earlier panel's, does not count. Evidence: `review-panel.test.tsx`
+"revision 25", MU-2783 to MU-2785.
 
 **Historical finding (F-13b-1; as recorded on 25 October 2026 at the first Running checkpoint `bfe4118`, pre-existing at `b9fd602`, not
 fixed in that checkpoint; kept as it was written):** an ordinary `403` to ANY queued command sent by the production

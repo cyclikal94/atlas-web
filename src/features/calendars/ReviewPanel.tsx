@@ -110,6 +110,8 @@ interface Memory {
   retire(id: string, version: number): void;
   /** Whether this panel saw the review published resolved at this version or a later one (at any version when `version` is null). */
   settled(id: string, version: number | null): boolean;
+  /** Whether a card on the CURRENT page drew this review (revision 25, review 29 F29-1): only then can it be said to be gone. */
+  shown(id: string): boolean;
 }
 
 /**
@@ -137,6 +139,10 @@ interface Memory {
  * also keeps the version it saw resolved: an older reading of that review still arriving (a slower list or card reading) neither shows it
  * again nor remembers it, and a card whose reading then finds no row says nothing. A NEWER unresolved version (reopened) is shown and
  * remembered as before. A local acknowledgement waiting to be sent or confirmed is still not a resolution.
+ *
+ * Revision 25 (review 29 F29-1): the card's own reading can find no row while the list still names the review (the two are published
+ * separately). That says "no longer available" only when this page's history holds the review (`shown`), the same rule a departed review
+ * follows; a review whose card was only ever loading (inserted and deleted before its first reading arrived) was never shown, so it goes.
  */
 export function ReviewPanel() {
   const env = useOptionalDataEnv();
@@ -194,6 +200,7 @@ export function ReviewPanel() {
           (version === null || version <= known.version)
         );
       },
+      shown: (id) => shownHere?.has(id) === true,
     }),
     [seen, shownHere],
   );
@@ -487,9 +494,10 @@ function ReviewCard({ row, memory }: { row: ListedResource; memory: Memory }) {
     );
   // Seen published resolved by this panel: it goes, even once it has also left the cache or while an older reading of it arrives.
   if (superseded) return null;
-  // The review left the cache (deleted, or access lost) before the list said so: the panel's "gone" treatment, never the older copy.
+  // The review left the cache (deleted, or access lost) before the list said so: the panel's "gone" treatment, never the older copy, but
+  // only for a review this page actually showed. One whose card was only ever loading was never shown, so it simply goes (review 29 F29-1).
   if (shownRow === null || view.value.merged === null)
-    return <GoneItem id={id} />;
+    return memory.shown(id) ? <GoneItem id={id} /> : null;
   // Published resolved (by this device or another) before the list said so: the card goes, as it does once the list shows it.
   if (base?.resolved === true) return null;
   const taskName = task?.label ?? A_TASK;

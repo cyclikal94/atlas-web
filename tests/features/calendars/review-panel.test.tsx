@@ -1929,4 +1929,223 @@ describe("revision 24 (review 28 F28-1): a published resolution retires the revi
     await ctl.release(`view:${rid(1000)}`);
     expect(gone()).toEqual([rid(1000)]);
   });
+
+  describe("revision 25 (review 29 F29-1): a card says 'no longer available' only of a review its page actually showed", () => {
+    /** The ids the held (or live) page list last gave the screen: the card is still mounted from it while the list is held. */
+    const listed = (ctl: ReturnType<typeof control>, key: string) =>
+      (
+        ctl.capture(key) as {
+          status: string;
+          value: { rows: Array<{ base: { id: string } }> };
+        }
+      ).value.rows.map((row) => row.base.id);
+    /** What a card's own reading last gave the screen. */
+    const viewOf = (ctl: ReturnType<typeof control>, n: number) =>
+      ctl.capture(`view:${rid(n)}`) as {
+        status: string;
+        value: { base: { id: string } | null; merged: unknown };
+      };
+    /** 100 shown (an unrelated live card); a new panel whose list and cards are read through `control`. */
+    const live = async () => {
+      const w = await start([many(100)]);
+      const ctl = control(w);
+      await w.remount();
+      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      expect(ctl.made("list:first")).toBeGreaterThan(0);
+      return { w, ctl };
+    };
+    /** …then 200 inserted with its card's FIRST reading held: the card is drawn only as loading (it has never shown the review). */
+    const loadingOnly = async () => {
+      const { w, ctl } = await live();
+      ctl.hold(`view:${rid(200)}`);
+      await w.commit({ put: { store: "cache", rows: [many(200)] } });
+      expect(ctl.made(`view:${rid(200)}`)).toBeGreaterThan(0);
+      expect(item(200)).toHaveAttribute("data-review-state", "loading");
+      expect(item(200)).toHaveAttribute("aria-busy", "true");
+      return { w, ctl };
+    };
+
+    test("F29-1 the review's own schedule: a card only ever loading, its review deleted while the list is held, says nothing when its first reading finds no row (before and after the list arrives)", async () => {
+      const { w, ctl } = await loadingOnly();
+      ctl.hold("list:first");
+      await remove(w, 200);
+      expect(ctl.waited("list:first")).toBeGreaterThan(0);
+      expect(ctl.waited(`view:${rid(200)}`)).toBeGreaterThan(0);
+      expect(item(200)).toHaveAttribute("data-review-state", "loading");
+      await ctl.release(`view:${rid(200)}`);
+      // The held list still names 200 (so its card is mounted), and the card's own first reading says the cache holds no such row.
+      expect(listed(ctl, "list:first")).toContain(rid(200));
+      expect(viewOf(ctl, 200)).toMatchObject({
+        status: "ready",
+        value: { base: null, merged: null },
+      });
+      // Never shown, so never "no longer available": asserted while the list is still held (the window of the defect).
+      expect(item(200)).toBeNull();
+      expect(gone()).toEqual([]);
+      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      expect(drafts(w)).toEqual([]);
+      await ctl.release("list:first");
+      expect(listed(ctl, "list:first")).not.toContain(rid(200));
+      expect(item(200)).toBeNull();
+      expect(gone()).toEqual([]);
+      expect(states()).toEqual([`${rid(100)}:open`]);
+    });
+
+    test("F29-1 control: the held first reading released while the review is still cached opens it from that reading (nothing saved)", async () => {
+      const { w, ctl } = await loadingOnly();
+      expect(ctl.waited(`view:${rid(200)}`)).toBeGreaterThan(0);
+      await ctl.release(`view:${rid(200)}`);
+      expect(viewOf(ctl, 200)).toMatchObject({
+        status: "ready",
+        value: { base: { id: rid(200) } },
+      });
+      expect(item(200)).toHaveAttribute("data-review-state", "open");
+      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      expect(drafts(w)).toEqual([]);
+    });
+
+    test("F29-1 control: a review its card SHOWED, deleted while the list is held, is 'no longer available' at once and after the list arrives", async () => {
+      const { w, ctl } = await live();
+      await w.commit({ put: { store: "cache", rows: [many(200)] } });
+      expect(item(200)).toHaveAttribute("data-review-state", "open");
+      ctl.hold("list:first");
+      await remove(w, 200);
+      expect(ctl.waited("list:first")).toBeGreaterThan(0);
+      // Still listed (the list held): this is the card's own "no longer available", not a departed review's.
+      expect(listed(ctl, "list:first")).toContain(rid(200));
+      expect(gone()).toEqual([rid(200)]);
+      const card = present(item(200));
+      expect(card).toHaveTextContent(words.NO_LONGER_AVAILABLE);
+      for (const button of within(card).getAllByRole("button"))
+        expect(button).toBeDisabled();
+      expect(within(card).queryByRole("link")).toBeNull();
+      expect(elements(200)).toBe(1);
+      expect(item(100)).toHaveAttribute("data-review-state", "open");
+      await ctl.release("list:first");
+      expect(listed(ctl, "list:first")).not.toContain(rid(200));
+      expect(gone()).toEqual([rid(200)]);
+      expect(elements(200)).toBe(1);
+      expect(drafts(w)).toEqual([]);
+    });
+
+    test("F29-1 control: an UNREADABLE review its card showed counts as shown: deleted while the list is held, it is 'no longer available'", async () => {
+      const { w, ctl } = await live();
+      await w.commit({
+        put: {
+          store: "cache",
+          rows: [
+            review(
+              { reason: "teleported", resolved: false, slot: null },
+              { id: rid(200), label: "Review 200" },
+            ),
+          ],
+        },
+      });
+      expect(present(item(200))).toHaveTextContent(words.UNREADABLE);
+      ctl.hold("list:first");
+      await remove(w, 200);
+      expect(listed(ctl, "list:first")).toContain(rid(200));
+      expect(gone()).toEqual([rid(200)]);
+      await ctl.release("list:first");
+      expect(gone()).toEqual([rid(200)]);
+    });
+
+    test("F29-1 the PAGE's history decides, not the card: shown on page one, moved off and back (a new card whose first reading is held), then deleted: 'no longer available'", async () => {
+      const w = await start(range(1000, 100));
+      const ctl = control(w);
+      await w.remount();
+      await showAll(w);
+      expect(item(1099)).toHaveAttribute("data-review-state", "open");
+      // 999 moves 1099 to page two (its card unmounts); removing 999 brings it back to page one as a NEW card, its first reading held.
+      await w.commit({ put: { store: "cache", rows: [many(999)] } });
+      expect(item(1099)).toBeNull();
+      const views = ctl.made(`view:${rid(1099)}`);
+      ctl.hold(`view:${rid(1099)}`);
+      await remove(w, 999);
+      expect(ctl.made(`view:${rid(1099)}`)).toBeGreaterThan(views);
+      expect(item(1099)).toHaveAttribute("data-review-state", "loading");
+      // 999 was shown on page one too (first on it) before it was deleted: genuinely no longer available, the unrelated control.
+      expect(gone()).toEqual([rid(999)]);
+      ctl.hold("list:first");
+      await remove(w, 1099);
+      expect(ctl.waited("list:first")).toBeGreaterThan(0);
+      await ctl.release(`view:${rid(1099)}`);
+      expect(listed(ctl, "list:first")).toContain(rid(1099));
+      expect(gone()).toEqual([rid(1099), rid(999)]);
+      await ctl.release("list:first");
+      expect(gone()).toEqual([rid(1099), rid(999)]);
+      expect(elements(1099)).toBe(1);
+    });
+
+    test("F29-1 ANOTHER page's history is not this page's: shown on page one, only loading on page two, deleted there while its list is held: nothing on page two, 'no longer available' back on page one", async () => {
+      const w = await start(range(1000, 100));
+      const ctl = control(w);
+      await w.remount();
+      await showAll(w);
+      expect(item(1099)).toHaveAttribute("data-review-state", "open");
+      await w.commit({ put: { store: "cache", rows: [many(999)] } });
+      expect(item(1099)).toBeNull();
+      ctl.hold(`view:${rid(1099)}`);
+      await next(w);
+      expect(states()).toEqual([`${rid(1099)}:loading`]);
+      ctl.hold("list:*");
+      await remove(w, 1099);
+      expect(ctl.waited("list:")).toBeGreaterThan(0);
+      await ctl.release(`view:${rid(1099)}`);
+      expect(listed(ctl, `list:${rid(1098)}`)).toContain(rid(1099));
+      expect(viewOf(ctl, 1099)).toMatchObject({
+        status: "ready",
+        value: { base: null },
+      });
+      // Page two never showed 1099 (its card was only loading there): nothing is said here.
+      expect(item(1099)).toBeNull();
+      expect(gone()).toEqual([]);
+      await ctl.release("list:*");
+      expect(gone()).toEqual([]);
+      // Page one showed it: there it is no longer available.
+      await back(w);
+      expect(gone()).toEqual([rid(1099)]);
+    });
+
+    test("F29-1 published resolved before its card showed it, then deleted while the list is held: never shown, never gone", async () => {
+      const { w, ctl } = await loadingOnly();
+      ctl.hold("list:first");
+      await publish(w, 200, true, 2);
+      // The card's first reading is the resolution: not drawn, retired.
+      await ctl.release(`view:${rid(200)}`);
+      expect(viewOf(ctl, 200)).toMatchObject({
+        status: "ready",
+        value: { base: { id: rid(200), version: 2 } },
+      });
+      expect(item(200)).toBeNull();
+      await remove(w, 200);
+      expect(listed(ctl, "list:first")).toContain(rid(200));
+      expect(item(200)).toBeNull();
+      expect(gone()).toEqual([]);
+      await ctl.release("list:first");
+      expect(gone()).toEqual([]);
+      expect(states()).toEqual([`${rid(100)}:open`]);
+    });
+
+    test("F29-1 lifetime: shown by an EARLIER panel, then only loading in a new one, deleted while its list is held: the new panel says nothing", async () => {
+      const { w, ctl } = await live();
+      await w.commit({ put: { store: "cache", rows: [many(200)] } });
+      expect(item(200)).toHaveAttribute("data-review-state", "open");
+      // A new panel (the screen left and come back to): its card for 200 waits for its first reading.
+      ctl.hold(`view:${rid(200)}`);
+      const views = ctl.made(`view:${rid(200)}`);
+      await w.remount();
+      expect(ctl.made(`view:${rid(200)}`)).toBeGreaterThan(views);
+      expect(item(200)).toHaveAttribute("data-review-state", "loading");
+      ctl.hold("list:first");
+      await remove(w, 200);
+      await ctl.release(`view:${rid(200)}`);
+      expect(listed(ctl, "list:first")).toContain(rid(200));
+      expect(item(200)).toBeNull();
+      expect(gone()).toEqual([]);
+      await ctl.release("list:first");
+      expect(gone()).toEqual([]);
+      expect(states()).toEqual([`${rid(100)}:open`]);
+    });
+  });
 });
