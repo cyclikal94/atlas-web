@@ -2506,6 +2506,19 @@ test("R35-RET T4: each missing part of the guard's proof refuses the anchors of 
         (o) => (o.stopped = null),
         /removal did not find the guarded WAL/,
       ],
+      // Revision 36: a removal record lacking the WAL now reaches `retired-into-database` only when it names the database; one that
+      // names neither is still judged here, by the guarded proof's own removal check.
+      [
+        "a removal that found neither the database nor the WAL",
+        (o) =>
+          (o.stopped = {
+            seq: 1,
+            removed: o.stopped.removed.filter(
+              (n) => !["fixture.sqlite", "fixture.sqlite-wal"].includes(n),
+            ),
+          }),
+        /removal did not find the guarded WAL/,
+      ],
     ]) {
       const o = { ...options };
       edit(o);
@@ -3622,6 +3635,55 @@ test("R36-RET T5 with real SQLite: the guard killed after the removal was admitt
     );
     assert.equal(out.retention.selection.method, "retired-into-database");
     assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+
+test("R36-RET T2 the anchor: a database replaced between the owned-source check and its link is never anchored as the fixture (the loop's own identity check), and the anchor is not ready", () => {
+  try {
+    const w = r36World();
+    w.replace.database();
+    // The owned-source check is shown the receipt's database (the replacement happens just after it); every later look is real.
+    let first = true;
+    const deps = {
+      ...retentionDeps(),
+      lstat: (path) => {
+        if (path === w.path && first) {
+          first = false;
+          return lstatSync(join(w.aside, "fixture.sqlite"), { bigint: true });
+        }
+        return lstatSync(path, { bigint: true });
+      },
+    };
+    const kept = preserveFixture(deps, {
+      fixtureDir: w.leaf,
+      receipt: w.receipt,
+      receiptSha256: w.receiptSha256,
+      retainedParent: w.privateParent,
+      attempt: "r36",
+    });
+    assert.equal(
+      first,
+      false,
+      "the owned-source check passed on the receipt's identity",
+    );
+    assert.notEqual(kept.dir, null, "the anchor was begun");
+    assert.ok(
+      kept.problems.includes(
+        "the fixture database is not the receipt's: not anchored",
+      ),
+      JSON.stringify(kept.problems),
+    );
+    assert.ok(!kept.anchors.some((a) => a.name === "fixture.sqlite"));
+    assert.equal(
+      existsSync(join(kept.dir, "fixture.sqlite")),
+      false,
+      "the replacement is never linked",
+    );
+    assert.equal(kept.anchored, false);
+    assert.equal(kept.ready, false);
+    w.writer.close();
   } finally {
     clean();
   }
