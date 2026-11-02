@@ -38,6 +38,7 @@ import { createProxy } from "./delaying-proxy.mjs";
 import {
   ATTEMPT_SCHEMA,
   attemptProblems,
+  exchangesOf,
   PROOF_SCHEMA,
   PROOF_VALIDATORS,
   proofExchanges,
@@ -517,6 +518,11 @@ async function composed({ kind, journalNow, invert = false, corrupt = null }) {
       await gate(true);
       await mark("drain_complete");
       await mark("grant_begin");
+      // Revision 37 (R37-DIAG; design assessment C2): the grant's own two public requests inside its bracket, after the drain and
+      // before the ageing, through the real proxy and tap (tests/pair/support.ts `access`: the person's policy version, then the
+      // access command), as the real X2 attempt recorded them.
+      await browser("GET", "/people/p1");
+      await browser("POST", "/access-commands", { command: "grant" });
       await mark("grant_end");
       const st = await op("inspect");
       controls.inspect_before_ageing = st.seq;
@@ -829,6 +835,12 @@ async function composed({ kind, journalNow, invert = false, corrupt = null }) {
     return {
       attempt: attemptProblems(envelope, { readFile, expected }),
       proof: (kind === "x0" ? x0Problems : x2Problems)(proof, ctx),
+      // Revision 37: the proof as the spec wrote it, and the ageing command's journal position (X2), for the schedule's own assertions.
+      proofRecord: proof,
+      ageSent:
+        exchangesOf(ctx.entries, attempt).commands.find(
+          (c) => c.seq === controls.age_history,
+        )?.j ?? null,
       records,
       transcript: ctx.entries,
       window,
@@ -922,9 +934,30 @@ for (const kind of ["x0", "x2"])
     );
     assert.equal(
       others.length,
-      4,
-      "the four non-sync exchanges of the schedule",
+      kind === "x2" ? 6 : 4,
+      "the non-sync exchanges of the schedule (X2: and the grant's two)",
     );
+    if (kind === "x2") {
+      // Revision 37: the grant's GET and POST lie strictly inside the acknowledged grant bracket, which follows the drain and precedes
+      // the ageing's command (journal positions, asserted independently of the validator).
+      const { marks } = r.proofRecord;
+      const age = r.ageSent;
+      const inside = others.filter(
+        (o) =>
+          o.j_request > marks.grant_begin && o.j_upstream_end < marks.grant_end,
+      );
+      assert.deepEqual(
+        inside.map((o) => [o.method, o.path]),
+        [
+          ["GET", "/api/experimental/v1/people/p1"],
+          ["POST", "/api/experimental/v1/access-commands"],
+        ],
+      );
+      assert.ok(
+        marks.drain_complete < marks.grant_begin && marks.grant_end < age,
+        JSON.stringify({ marks, age }),
+      );
+    }
     // Each one's references are its tap record's own, exactly; the tap writes no gate or delivery reference for a non-sync exchange,
     // and none is invented. Nothing else of the tap record is persisted.
     const bySeq = new Map(r.window.map((w) => [w.seq, w]));

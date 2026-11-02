@@ -705,6 +705,15 @@ function contextOf(proof, { journal, requests, interval }, bad) {
 /** When an exchange went to the backend: its gate opening if it waited at the gate, else its arrival. Null: never forwarded. */
 const forwardedAt = (r) =>
   r.gated === true ? (r.j_gate_open ?? null) : (r.j_request ?? null);
+/**
+ * Revision 37 (R37-DIAG; design assessment C1): the traffic the tap's gate holds, classified exactly as the tap (pair-tap.mjs `isSync`) and
+ * the assembler (`assembleInterval`'s `requests`) classify it: a GET of a path ending `/sync`. True: sync; false: other traffic; null: the
+ * record names no method or path, so its class is UNKNOWN (never an exemption).
+ */
+export function syncTraffic(r) {
+  if (typeof r?.method !== "string" || typeof r?.path !== "string") return null;
+  return r.method === "GET" && r.path.endsWith("/sync");
+}
 /** A labelled probe the spec bracketed with two acknowledged markers (`<label>:begin`, `<label>:end`). */
 function probeMarks(probe, ctx, what, bad) {
   const begin = ctx.mark(`${probe?.label}:begin`);
@@ -1068,12 +1077,41 @@ export function x2Problems(proof, ctx) {
     bad(
       "the gate was not closed and drained before the grant, or the grant did not precede the ageing",
     );
+  // Revision 37 (R37-DIAG): every exchange stays bound to its own journal events (contextOf, above) and is judged here; the grant's own
+  // policy GET and access-command POST, inside the grant's bracket, are not the gate's traffic. The saved route's two collections must
+  // agree with the traffic class and together be exactly the exchanges this reader was given, so relabelling or leaving out a record can
+  // never move a /sync out of the prohibition.
+  if (ctx.interval !== undefined) {
+    const saved = proofExchanges(ctx.interval);
+    for (const r of ctx.interval?.requests ?? [])
+      if (syncTraffic(r) !== true)
+        bad(
+          `exchange ${r?.seq} is in the sync collection but is not /sync traffic`,
+        );
+    for (const r of ctx.interval?.other_requests ?? [])
+      if (syncTraffic(r) !== false)
+        bad(
+          `exchange ${r?.seq} is in the other collection but is not other traffic`,
+        );
+    const given = (requests ?? []).map((r) => r?.seq);
+    if (!same([...given].sort(), saved.map((r) => r?.seq).sort()))
+      bad(
+        "the proof's reader was not given exactly the saved interval's exchanges",
+      );
+  }
   for (const r of requests) {
+    const sync = syncTraffic(r);
+    if (sync === null)
+      bad(`exchange ${r.seq} names no method and path: its traffic is unknown`);
+    else if (!sync && r.gated === true)
+      bad(`exchange ${r.seq} was gated but is not /sync traffic`);
     const forwarded = forwardedAt(r);
-    // Nothing reached the backend between the drain and the ageing's acknowledgement (the gate held every /sync).
+    // No /sync reached the backend after the drain and up to the ageing's acknowledgement (the gate held every one): judged at its
+    // FORWARDING, so a /sync queued before the drain and released inside the interval is refused too. Unknown traffic is judged as /sync.
     if (
+      sync !== false &&
       forwarded !== null &&
-      before(drained, r.j_request) &&
+      before(drained, forwarded) &&
       !before(aged.ack, forwarded)
     )
       bad(

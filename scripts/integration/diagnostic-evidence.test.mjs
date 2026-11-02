@@ -15,14 +15,20 @@ import {
   ATTEMPT_SCHEMA,
   attemptJournal,
   attemptProblems,
+  exchangesOf,
   PROOF_SCHEMA,
   PROOF_VALIDATORS,
   proofExchanges,
   retentionProblems,
+  syncTraffic,
   x0Problems,
   x2Problems,
 } from "./diagnostic-evidence.mjs";
-import { GUARD_METHOD, RETAINED_SCHEMA } from "./diagnostic-fixture.mjs";
+import {
+  concludeAttempt,
+  GUARD_METHOD,
+  RETAINED_SCHEMA,
+} from "./diagnostic-fixture.mjs";
 import { assembleInterval, CAUSAL_FIELDS } from "./pair-evidence.mjs";
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
@@ -41,6 +47,10 @@ const EXPECTED = {
   publicOrigin: "http://127.0.0.1:5000",
 };
 const clone = (v) => structuredClone(v);
+// Revision 37 (R37-DIAG): the paths of the tap's records (the real ones carry a method and a path; the worlds below do too).
+const SYNC_PATH = "/api/experimental/v1/sync";
+const PEOPLE_PATH = "/api/experimental/v1/people/P1";
+const GRANT_PATH = "/api/experimental/v1/access-commands";
 
 /**
  * Writes the world's journal from its intended order (artificial times, ties in insertion order): every transcript entry, every tap
@@ -903,6 +913,8 @@ function x2World() {
   const requests = [
     {
       seq: 30,
+      method: "GET",
+      path: SYNC_PATH,
       status: 200,
       query: { cursor: "c-before" },
       next_cursor: token,
@@ -914,6 +926,8 @@ function x2World() {
     },
     {
       seq: 31,
+      method: "GET",
+      path: SYNC_PATH,
       status: 410,
       code: "resync_required",
       gated: true,
@@ -921,6 +935,25 @@ function x2World() {
       t_request: 1950,
       t_gate_open: 2020,
       t_upstream_end: 2025,
+    },
+    // Revision 37 (R37-DIAG; design assessment C2): the grant's own two public requests (tests/pair/support.ts `access`: the person's
+    // policy version, then the access command), INSIDE the grant's bracket (599 to 600), after the drain (500) and before the target's
+    // inspection (650) and ageing (700/701), as the real X2 attempt recorded them (drain, grant begin, GET, POST, grant end, age).
+    {
+      seq: 26,
+      method: "GET",
+      path: PEOPLE_PATH,
+      status: 200,
+      t_request: 599.2,
+      t_upstream_end: 599.4,
+    },
+    {
+      seq: 27,
+      method: "POST",
+      path: GRANT_PATH,
+      status: 200,
+      t_request: 599.6,
+      t_upstream_end: 599.8,
     },
   ];
   const proof = {
@@ -2541,6 +2574,8 @@ test("X2 refused: a /sync (not of the target) reached the backend between the dr
   const w = x2World();
   w.requests.unshift({
     seq: 29,
+    method: "GET",
+    path: SYNC_PATH,
     status: 200,
     query: { cursor: "c-poll" },
     next_cursor: "c-before",
@@ -2609,29 +2644,43 @@ const SAVED_CASES = {
   "PAIR-XR2": xr2World,
   "PAIR-XL0": xl0World,
 };
-const SYNC_PATH = "/api/experimental/v1/sync";
-/** The world with its non-sync exchanges, finalised, assembled and reloaded. `strip`: revision 32's projection (no causal references). */
-function savedOf(make, { strip = false } = {}) {
+/**
+ * The world with its non-sync exchanges, finalised, assembled and reloaded. `strip`: revision 32's projection (no causal references).
+ * Revision 37 (R37-DIAG; design assessment C2): a world that already holds its own non-sync exchanges (X2 and XR2: the grant's GET and POST
+ * inside the grant's bracket) keeps exactly those, in their real chronology; the others get two before their first /sync, as before.
+ * `edit(saved, w)` changes the RELOADED record before it is judged (a saved-route negative); `given(saved)` is what the reader is given.
+ */
+function savedOf(
+  make,
+  { strip = false, edit = null, given = proofExchanges, before = null } = {},
+) {
   const w = make();
-  const first = Math.min(...w.requests.map((r) => r.t_request));
-  const others = [
-    {
-      seq: 90,
-      method: "GET",
-      path: "/api/experimental/v1/people/P1",
-      status: 200,
-      t_request: first - 2,
-      t_upstream_end: first - 1.5,
-    },
-    {
-      seq: 91,
-      method: "POST",
-      path: "/api/experimental/v1/access-commands",
-      status: 200,
-      t_request: first - 1,
-      t_upstream_end: first - 0.5,
-    },
-  ];
+  if (before) before(w);
+  const own = w.requests.filter((r) => syncTraffic(r) === false);
+  const first = Math.min(
+    ...w.requests.filter((r) => !own.includes(r)).map((r) => r.t_request),
+  );
+  const others =
+    own.length > 0
+      ? []
+      : [
+          {
+            seq: 90,
+            method: "GET",
+            path: PEOPLE_PATH,
+            status: 200,
+            t_request: first - 2,
+            t_upstream_end: first - 1.5,
+          },
+          {
+            seq: 91,
+            method: "POST",
+            path: GRANT_PATH,
+            status: 200,
+            t_request: first - 1,
+            t_upstream_end: first - 0.5,
+          },
+        ];
   w.requests.push(...others);
   finalise(w);
   const label = `${w.proof.case}:node:iv`;
@@ -2685,22 +2734,31 @@ function savedOf(make, { strip = false } = {}) {
     for (const o of saved.other_requests)
       for (const k of CAUSAL_FIELDS) delete o[k];
   saved.interval = label;
+  if (edit) edit(saved, w);
   const problems = PROOF_VALIDATORS[w.proof.case](w.proof, {
     ...ctxOf(w),
     interval: saved,
-    requests: proofExchanges(saved),
+    requests: given(saved),
   });
   return { w, saved, problems };
 }
+/** Revision 37: the non-sync exchanges each saved case carries (X2/XR2: the grant's own; the others: two before their first /sync). */
+const setupOf = (id) =>
+  id === "PAIR-X2" || id === "PAIR-XR2"
+    ? [
+        [26, "GET"],
+        [27, "POST"],
+      ]
+    : [
+        [90, "GET"],
+        [91, "POST"],
+      ];
 for (const [id, make] of Object.entries(SAVED_CASES)) {
   test(`R33 Q2 ${id}: the saved route (non-sync GET and POST, assembler, JSON reload, both collections) is accepted by the case's validator`, () => {
     const r = savedOf(make);
     assert.deepEqual(
       r.saved.other_requests.map((o) => [o.seq, o.method]),
-      [
-        [90, "GET"],
-        [91, "POST"],
-      ],
+      setupOf(id),
     );
     for (const o of r.saved.other_requests) {
       assert.ok(
@@ -2718,10 +2776,500 @@ for (const [id, make] of Object.entries(SAVED_CASES)) {
     const r = savedOf(make, { strip: true });
     assert.deepEqual(
       r.problems.filter((p) => /arrival/.test(p)),
-      [
-        "exchange 90's arrival names no journal position",
-        "exchange 91's arrival names no journal position",
-      ],
+      setupOf(id).map(
+        ([seq]) => `exchange ${seq}'s arrival names no journal position`,
+      ),
     );
   });
 }
+
+// ---- revision 37 (R37-DIAG; design assessment C1-C3, T1-T7): the pruning predicate judges the GATE's traffic, at its forwarding ----------
+// The real X2 attempt recorded: drain, grant begin, the grant's GET /people and POST /access-commands, grant end, inspect, age. Revision 36
+// refused both setup requests because it prohibited EVERY exchange between the drain and the ageing. Every exchange is still bound to its
+// journal events; only /sync traffic (the tap's own class) is prohibited, judged at its forwarding (gate opening, else arrival).
+const positionsOf = (w) => {
+  const x = exchangesOf(w.entries, w.envelope.attempt);
+  const cmd = (seq) => x.commands.find((c) => c.seq === seq);
+  const age = cmd(w.proof.controls.age_history);
+  const inspect = cmd(w.proof.controls.inspect_before_ageing);
+  return {
+    marks: w.proof.marks,
+    inspectSent: inspect.j,
+    ageSent: age.j,
+    ageAck: age.answers[0].j,
+  };
+};
+for (const id of ["PAIR-X2", "PAIR-XR2"]) {
+  test(`R37 T1 ${id}: the saved route in the REAL grant chronology (drain, grant GET and POST inside the bracket, inspect, age) is accepted`, () => {
+    const r = savedOf(SAVED_CASES[id]);
+    const p = positionsOf(r.w);
+    const [get, post] = r.saved.other_requests;
+    assert.deepEqual(
+      [get.method, get.path, post.method, post.path],
+      ["GET", PEOPLE_PATH, "POST", GRANT_PATH],
+    );
+    // The schedule itself, asserted independently of the validator (journal positions, strictly increasing).
+    const order = [
+      p.marks.drain_complete,
+      p.marks.grant_begin,
+      get.j_request,
+      get.j_upstream_end,
+      post.j_request,
+      post.j_upstream_end,
+      p.marks.grant_end,
+      p.inspectSent,
+      p.ageSent,
+      p.ageAck,
+      Math.min(...r.saved.requests.map((x) => x.j_request)),
+    ];
+    assert.ok(
+      order.every(
+        (v, i) => Number.isInteger(v) && (i === 0 || order[i - 1] < v),
+      ),
+      JSON.stringify(order),
+    );
+    assert.equal(r.saved.requests.length + r.saved.other_requests.length, 4);
+    assert.deepEqual(r.problems, []);
+  });
+  for (const seq of [26, 27]) {
+    const other = seq === 26 ? 27 : 26;
+    for (const [name, edit, expected] of [
+      [
+        "its arrival missing",
+        (o) => delete o.j_request,
+        `exchange ${seq}'s arrival names no journal position`,
+      ],
+      [
+        "its arrival naming the other setup request's",
+        (o, saved) =>
+          (o.j_request = saved.other_requests.find(
+            (x) => x.seq === other,
+          ).j_request),
+        new RegExp(
+          `exchange ${seq}'s arrival names journal event \\d+, whose seq is ${other}, not ${seq}`,
+        ),
+      ],
+      [
+        "its arrival naming its own upstream end (another event kind)",
+        (o) => (o.j_request = o.j_upstream_end),
+        new RegExp(
+          `exchange ${seq}'s arrival names journal event \\d+, a tap\\.upstream_end, not a tap\\.request`,
+        ),
+      ],
+      [
+        "its upstream end naming the other setup request's",
+        (o, saved) =>
+          (o.j_upstream_end = saved.other_requests.find(
+            (x) => x.seq === other,
+          ).j_upstream_end),
+        new RegExp(
+          `exchange ${seq}'s upstream end names journal event \\d+, whose seq is ${other}, not ${seq}`,
+        ),
+      ],
+      [
+        "its upstream end beyond the journal",
+        (o) => (o.j_upstream_end = 99999),
+        `exchange ${seq}'s upstream end names journal event 99999, which the journal does not hold`,
+      ],
+    ])
+      test(`R37 T2 ${id} refused: grant setup exchange ${seq} with ${name}`, () => {
+        const r = savedOf(SAVED_CASES[id], {
+          edit: (saved) =>
+            edit(
+              saved.other_requests.find((x) => x.seq === seq),
+              saved,
+            ),
+        });
+        assert.ok(
+          r.problems.some((p) =>
+            typeof expected === "string" ? p === expected : expected.test(p),
+          ),
+          JSON.stringify(r.problems),
+        );
+      });
+  }
+  test(`R37 T2 ${id} refused: the reader given the sync collection only (the grant's exchanges left out)`, () => {
+    const r = savedOf(SAVED_CASES[id], { given: (saved) => saved.requests });
+    assert.ok(
+      r.problems.includes(
+        "the proof's reader was not given exactly the saved interval's exchanges",
+      ),
+      JSON.stringify(r.problems),
+    );
+  });
+  test(`R37 T5 ${id} refused: an exchange given twice, or one more than the saved interval holds`, () => {
+    for (const given of [
+      (saved) => [...proofExchanges(saved), saved.other_requests[0]],
+      // A real, correctly bound exchange the saved record no longer lists (its collection lost it after the reader's input was taken).
+      (saved) => {
+        const all = proofExchanges(saved);
+        saved.other_requests = saved.other_requests.slice(0, 1);
+        return all;
+      },
+    ]) {
+      const r = savedOf(SAVED_CASES[id], { given });
+      assert.ok(
+        r.problems.includes(
+          "the proof's reader was not given exactly the saved interval's exchanges",
+        ),
+        JSON.stringify(r.problems),
+      );
+    }
+  });
+  test(`R37 T5 ${id} refused: a /sync relabelled out of the sync collection, or other traffic in it`, () => {
+    const relabelled = savedOf(SAVED_CASES[id], {
+      edit: (saved) => (saved.requests[0].method = "POST"),
+    });
+    assert.ok(
+      relabelled.problems.includes(
+        `exchange ${relabelled.saved.requests[0].seq} is in the sync collection but is not /sync traffic`,
+      ),
+      JSON.stringify(relabelled.problems),
+    );
+    const moved = savedOf(SAVED_CASES[id], {
+      edit: (saved) => {
+        Object.assign(saved.other_requests[1], {
+          method: "GET",
+          path: SYNC_PATH,
+        });
+      },
+    });
+    assert.ok(
+      moved.problems.includes(
+        "exchange 27 is in the other collection but is not other traffic",
+      ),
+      JSON.stringify(moved.problems),
+    );
+    const unnamed = savedOf(SAVED_CASES[id], {
+      edit: (saved) => delete saved.other_requests[0].path,
+    });
+    assert.ok(
+      unnamed.problems.includes(
+        "exchange 26 is in the other collection but is not other traffic",
+      ) &&
+        unnamed.problems.includes(
+          "exchange 26 names no method and path: its traffic is unknown",
+        ),
+      JSON.stringify(unnamed.problems),
+    );
+  });
+  test(`R37 T3 ${id} refused: a non-target /sync forwarded between the drain and the ageing, through the saved route`, () => {
+    const r = savedOf(SAVED_CASES[id], {
+      before: (w) =>
+        w.requests.push({
+          seq: 28,
+          method: "GET",
+          path: SYNC_PATH,
+          status: 200,
+          query: { cursor: "c-poll" },
+          next_cursor: "c-before",
+          segment: null,
+          has_more: false,
+          revision: null,
+          last_revision: null,
+          t_request: 650.5,
+          t_upstream_end: 650.6,
+        }),
+    });
+    assert.ok(
+      r.problems.includes(
+        "exchange 28 reached the backend between the drain and the ageing",
+      ),
+      JSON.stringify(r.problems),
+    );
+    assert.ok(
+      !r.problems.some((p) => /exchange 2[67] /.test(p)),
+      JSON.stringify(r.problems),
+    );
+  });
+}
+
+/** An X2 world with one more /sync (non-target unless `fields` say otherwise): seq 40, `fields` its times and contents. */
+const withSync = (fields) => {
+  const w = x2World();
+  w.requests.push({
+    seq: 40,
+    method: "GET",
+    path: SYNC_PATH,
+    query: { cursor: "c-poll" },
+    status: 200,
+    next_cursor: "c-before",
+    segment: null,
+    has_more: false,
+    revision: null,
+    last_revision: null,
+    ...fields,
+  });
+  return w;
+};
+const INTERVAL_40 =
+  "exchange 40 reached the backend between the drain and the ageing";
+const TARGET_40 =
+  "exchange 40 carried the target before the ageing was acknowledged";
+// T3: the interval rule and the target rule are INDEPENDENT; each refuses on its own.
+for (const [name, fields, expectInterval, expectTarget] of [
+  [
+    "a non-target /sync arriving and forwarded after the drain",
+    { t_request: 680, t_upstream_end: 681 },
+    true,
+    false,
+  ],
+  [
+    "a target /sync (body revision) forwarded before the drain",
+    { t_request: 450, t_upstream_end: 451, revision: 9 },
+    false,
+    true,
+  ],
+  [
+    "a target /sync (last revision) forwarded before the drain",
+    { t_request: 450, t_upstream_end: 451, last_revision: 9 },
+    false,
+    true,
+  ],
+  [
+    "a target /sync (continuation of the target) forwarded before the drain",
+    {
+      t_request: 450,
+      t_upstream_end: 451,
+      query: {
+        cursor: tokenOf({ boundary: 5, expiry: E, revision: 9, index: 2 }),
+      },
+    },
+    false,
+    true,
+  ],
+  [
+    "a target /sync forwarded inside the interval",
+    { t_request: 680, t_upstream_end: 681, revision: 9 },
+    true,
+    true,
+  ],
+])
+  test(`R37 T3 X2 refused: ${name}`, () => {
+    const found = x2(withSync(fields));
+    assert.equal(
+      found.includes(INTERVAL_40),
+      expectInterval,
+      JSON.stringify(found),
+    );
+    assert.equal(
+      found.includes(TARGET_40),
+      expectTarget,
+      JSON.stringify(found),
+    );
+  });
+// T4: a /sync queued at the gate BEFORE the drain is judged at its forwarding, never at its arrival alone.
+for (const [name, fields, refused] of [
+  [
+    "queued before the drain and still held",
+    { t_request: 450, gated: true, status: null },
+    false,
+  ],
+  [
+    "queued before the drain, released after the ageing's acknowledgement",
+    { t_request: 450, gated: true, t_gate_open: 701.5, t_upstream_end: 701.6 },
+    false,
+  ],
+  [
+    "queued before the drain, released between the drain and the ageing",
+    { t_request: 450, gated: true, t_gate_open: 680, t_upstream_end: 681 },
+    true,
+  ],
+  [
+    "queued before the drain, released between the ageing's command and its acknowledgement",
+    { t_request: 450, gated: true, t_gate_open: 700.5, t_upstream_end: 700.6 },
+    true,
+  ],
+  [
+    "queued after the drain, released between the drain and the ageing",
+    { t_request: 520, gated: true, t_gate_open: 680, t_upstream_end: 681 },
+    true,
+  ],
+  [
+    "queued after the drain, released after the ageing's acknowledgement",
+    { t_request: 520, gated: true, t_gate_open: 701.5, t_upstream_end: 701.6 },
+    false,
+  ],
+])
+  test(`R37 T4 X2: a non-target /sync ${name} is ${refused ? "refused" : "accepted"}`, () => {
+    const found = x2(withSync(fields));
+    if (refused) assert.ok(found.includes(INTERVAL_40), JSON.stringify(found));
+    else assert.deepEqual(found, []);
+  });
+test("R37 T4 X2 refused: a released gated /sync whose gate opening is unrecorded", () => {
+  const found = x2(
+    withSync({ t_request: 450, gated: true, t_upstream_end: 681 }),
+  );
+  assert.ok(
+    found.includes(
+      "exchange 40 was gated but answered without a recorded gate opening",
+    ),
+    JSON.stringify(found),
+  );
+});
+// T5: the traffic class is the tap's; a record without one is UNKNOWN (judged as /sync and refused), never exempt.
+test("R37 T5: syncTraffic classifies exactly as the tap and the assembler do", () => {
+  for (const [r, want] of [
+    [{ method: "GET", path: SYNC_PATH }, true],
+    [{ method: "GET", path: "/sync" }, true],
+    [{ method: "POST", path: SYNC_PATH }, false],
+    [{ method: "GET", path: `${SYNC_PATH}/x` }, false],
+    [{ method: "GET", path: PEOPLE_PATH }, false],
+    [{ method: "POST", path: GRANT_PATH }, false],
+    [{ method: "get", path: SYNC_PATH }, false],
+    [{ path: SYNC_PATH }, null],
+    [{ method: "GET" }, null],
+    [{ method: "GET", path: null }, null],
+    [null, null],
+  ])
+    assert.equal(syncTraffic(r), want, JSON.stringify(r));
+  // The assembler's partition agrees with the class for every classified shape.
+  const records = [
+    { seq: 1, method: "GET", path: SYNC_PATH },
+    { seq: 2, method: "POST", path: SYNC_PATH },
+    { seq: 3, method: "GET", path: PEOPLE_PATH },
+    { seq: 4, method: "POST", path: GRANT_PATH },
+    { seq: 5, method: "GET", path: `${SYNC_PATH}/x` },
+  ].map((r) => ({ ...r, label: "iv", status: 200, downstream: null }));
+  const a = assembleInterval({
+    iv: {
+      id: "iv",
+      caseId: "PAIR-X2",
+      engine: "node",
+      barriers: [],
+      attempts: [],
+      observations: [],
+      traces: [],
+      terminal: { final_seq: null, activated_by_seq: null },
+    },
+    records,
+    collection: null,
+    details: {
+      requiredObservations: [],
+      oracle: { verdict: "match", problems: [] },
+    },
+    memory: { kind: null, reason: "none" },
+    readBody: () => Buffer.from("{}"),
+  });
+  assert.deepEqual(
+    a.requests.map((r) => r.seq),
+    records.filter((r) => syncTraffic(r) === true).map((r) => r.seq),
+  );
+  assert.deepEqual(
+    a.other_requests.map((r) => r.seq),
+    records.filter((r) => syncTraffic(r) === false).map((r) => r.seq),
+  );
+});
+for (const [name, edit, expected, alsoInterval] of [
+  [
+    "a record naming no method",
+    (r) => delete r.method,
+    "exchange 40 names no method and path: its traffic is unknown",
+    true,
+  ],
+  [
+    "a record naming no path",
+    (r) => delete r.path,
+    "exchange 40 names no method and path: its traffic is unknown",
+    true,
+  ],
+  [
+    "other traffic recorded as gated",
+    (r) =>
+      Object.assign(r, {
+        method: "POST",
+        path: GRANT_PATH,
+        gated: true,
+        t_gate_open: 690,
+      }),
+    "exchange 40 was gated but is not /sync traffic",
+    false,
+  ],
+])
+  test(`R37 T5 X2 refused: ${name}`, () => {
+    const w = withSync({ t_request: 680, t_upstream_end: 681 });
+    edit(w.requests.at(-1));
+    const found = x2(w);
+    assert.ok(found.includes(expected), JSON.stringify(found));
+    assert.equal(
+      found.includes(INTERVAL_40),
+      alsoInterval,
+      JSON.stringify(found),
+    );
+  });
+for (const [name, fields] of [
+  ["a POST to the sync path", { method: "POST" }],
+  ["a GET of another endpoint", { path: PEOPLE_PATH }],
+  ["the grant's access command", { method: "POST", path: GRANT_PATH }],
+])
+  test(`R37 T5 X2: other traffic forwarded between the drain and the ageing (${name}) is accepted`, () => {
+    const w = withSync({ t_request: 680, t_upstream_end: 681, ...fields });
+    assert.deepEqual(x2(w), []);
+  });
+
+// T7: the same pruning records through the attempt's conclusion (concludeAttempt, with owned stand-ins): only the positive is eligible and
+// asked to remove its fixture; the negative stays failed with its first reason, and removal is withheld even though retention succeeds.
+async function concludePruning(problems) {
+  const asked = [];
+  const out = await concludeAttempt({
+    stopTransports: async () => [],
+    preliminary: async () => problems.map((p) => `interval PAIR-X2: ${p}`),
+    latched: () => null,
+    guard: async () => ({
+      held: true,
+      problems: [],
+      record: { held: true },
+      alive: () => true,
+    }),
+    preserve: async () => ({
+      ready: true,
+      problems: [],
+      dir: "/retained",
+      anchors: [],
+    }),
+    finish: async (remove) => {
+      asked.push(remove);
+      return { requested_remove: remove };
+    },
+    release: async () => ({ released: true, lost: false, problems: [] }),
+    materialise: async () => ({ status: "verified", problems: [] }),
+    terminal: async (finished) =>
+      finished.requested_remove
+        ? []
+        : ["the fixture was kept: the attempt is not complete"],
+  });
+  return { out, asked };
+}
+test("R37 T7: the positive pruning record is eligible and its removal asked; the sync-forwarding negative is failed and kept", async () => {
+  const good = savedOf(SAVED_CASES["PAIR-X2"]);
+  assert.deepEqual(good.problems, []);
+  const pos = await concludePruning(good.problems);
+  assert.equal(pos.out.eligible, true);
+  assert.equal(pos.out.remove_requested, true);
+  assert.deepEqual(pos.asked, [true]);
+  assert.deepEqual(pos.out.terminal, []);
+  const badRun = savedOf(SAVED_CASES["PAIR-X2"], {
+    before: (w) =>
+      w.requests.push({
+        seq: 28,
+        method: "GET",
+        path: SYNC_PATH,
+        status: 200,
+        query: { cursor: "c-poll" },
+        revision: null,
+        last_revision: null,
+        t_request: 650.5,
+        t_upstream_end: 650.6,
+      }),
+  });
+  const neg = await concludePruning(badRun.problems);
+  assert.equal(neg.out.eligible, false);
+  assert.equal(neg.out.remove_requested, false);
+  assert.deepEqual(neg.asked, [false]);
+  assert.equal(
+    neg.out.preliminary[0],
+    "interval PAIR-X2: exchange 28 reached the backend between the drain and the ageing",
+  );
+  assert.equal(neg.out.preserved, true);
+  assert.ok(neg.out.terminal.length > 0);
+});

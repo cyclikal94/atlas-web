@@ -337,11 +337,21 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   retention `/3`), corroborated by replaying the anchored WAL over a copy and finding no change; a complete attempt still needs the guarded anchors.
   The bounded completion of 2 November 2026 (hand-off `9160a197…d05d`, authority `e212d374…948e`) transfers universal failed-fixture reconstruction to
   WEB-17 as deferred/unpassed; this correction is the safe-ownership route the remaining attempts use, pending independent verification.
+  Revision 37 (R37-DIAG): the X2/XR2 saved reader prohibited EVERY exchange between the drain and the ageing, so the grant's own policy GET and
+  access-command POST (inside the grant's bracket, both 200) failed the second Q7 run's Chromium X2 attempt (2 November 2026; that attempt stays
+  failed). The prohibition now applies to the gate's traffic only (`syncTraffic`: a GET of a path ending `/sync`, as the tap and the assembler classify
+  it), judged at each /sync's forwarding (its gate opening, else its arrival), so a /sync queued before the drain and released inside the interval is
+  refused too. Every exchange still binds to its own journal events; a record with no method or path is unknown (judged as /sync and refused), a gated
+  non-sync record is refused, and the saved collections must agree with the class and together be exactly the exchanges the reader is given. The
+  target-consumption, collector, expiry and control-account checks are unchanged. The maintained X2/XR2 fixtures and the composed X2 now place the
+  grant's GET and POST inside its bracket, asserted independently of the reader.
   A refused anchor or guard keeps the source (`remove:false`); a complete attempt needs that retention verified; nothing removes the retained directory, on any outcome
   (it survives the outer driver only under the reviewed retention wrapper, whose TMPDIR is outside the shared driver's purge). A startup failure before
   `ready` is removed by the executable itself and is NOT covered (design assessment D2, owner decision open). **Status: the adapter and the five cases
   are qualified with stand-ins (the retention with a real-SQLite stand-in), and the rendering adapter against the fixture DOM, only; the approved executable
-  was launched once (Q7, 2 Nov 2026: P0 complete, X0 failed its saved-evidence validation, sixteen attempts unrun) and no diagnostic case has passed.** The approval requires an independent review of the exact client source, selection and
+  was launched once (Q7, 2 Nov 2026: P0 complete, X0 failed its saved-evidence validation, sixteen attempts unrun), and again by the independent review
+  (Chromium P0 and X0 complete; X2 failed its saved-evidence validation, R37-DIAG; fifteen attempts unrun); no X2/XR2/XR0/XL0 cell and no Firefox or
+  WebKit cell has passed.** The approval requires an independent review of the exact client source, selection and
   recipe BEFORE any execution (design assessment Q6), then the three-engine qualification (Q7). Nothing here is expiry/pruning evidence yet.
 * **Qualified so far (revision 23):** the selection, matrix accounting, tap and validator with doubles (`scripts/integration/pair-*.test.mjs`); real
   discovery of the matrix; the released-backend control (P0, W1) in Chromium, Firefox and WebKit; targeted mutants of the seam and of the spec's precondition
