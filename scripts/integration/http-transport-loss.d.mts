@@ -102,8 +102,17 @@ export interface WitnessOrigin {
   options: {
     answer: ((nonce: string) => { status: number; body: string } | null) | null;
   };
+  /** What it still owns (revision 20): its lifecycle state, listener and connections. */
+  owned(): {
+    state: "new" | "starting" | "listening" | "closing" | "closed";
+    listening: boolean;
+    connections: number;
+  };
+  /** Idempotent; joins a start in progress and every connection; resolves null or an Error naming what stayed open (revision 20). */
   close(): Promise<Error | null>;
 }
 export function createWitnessOrigin(options?: {
   stamp?: () => TransportStamp;
+  /** Harness bound on joining its connections and closing its listener (default 10,000 ms). */
+  closeBoundMs?: number;
 }): WitnessOrigin;

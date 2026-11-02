@@ -1,8 +1,11 @@
-import type { Page } from "@playwright/test";
+import { connect } from "node:net";
+import type { Browser, BrowserContext, Page } from "@playwright/test";
 import { expect, test } from "./helpers";
 import {
+  type Interpose,
   type LaneReport,
   type LaneVerdict,
+  type OpenStage,
   type OriginRoute,
   openTransportLanes,
   type TransportLane,
@@ -127,6 +130,7 @@ async function settle(
   });
   expect(report.closeErrors, "everything the lane owned closed").toEqual([]);
   expect(report.reportErrors).toEqual([]);
+  expect(report.openErrors, "every open finished").toEqual([]);
   return { report, verdict };
 }
 
@@ -353,6 +357,252 @@ test.describe("native transport guard (revision 19 qualification in real engines
       expect(report.failures).toEqual([]);
     } finally {
       await lanes.settle();
+    }
+  });
+});
+
+// ---- Revision 20 (Review 24 F24-1; design assessment token 1fd56474…, L04–L07 in real engines) -------------------------------------
+
+const deferred = <T = void>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+};
+/** True when nothing listens on `url` any more (an independent observation of a lane listener). */
+const refused = (url: unknown) =>
+  new Promise<boolean>((resolve) => {
+    const at = new URL(String(url));
+    const socket = connect({ host: at.hostname, port: Number(at.port) });
+    socket.once("connect", () => {
+      socket.destroy();
+      resolve(false);
+    });
+    socket.once("error", () => resolve(true));
+  });
+const LISTENERS: OpenStage[] = ["witness", "scripted origin", "front"];
+const STAGES: OpenStage[] = [
+  "witness",
+  "scripted origin",
+  "front",
+  "context",
+  "init script",
+  "publication",
+];
+/** The qualification seam: the REAL acquisition at `stage` (its n-th call), then its delivery held until `release`. */
+function holdAfter(stage: OpenStage, nth = 1) {
+  const handles: Array<{ stage: OpenStage; handle: unknown }> = [];
+  const seen: OpenStage[] = [];
+  const counts = new Map<OpenStage, number>();
+  const reached = deferred();
+  const release = deferred();
+  const interpose = (async (st: OpenStage, acquire: () => Promise<unknown>) => {
+    seen.push(st);
+    const n = (counts.get(st) ?? 0) + 1;
+    counts.set(st, n);
+    const handle = await acquire();
+    handles.push({ stage: st, handle });
+    if (st === stage && n === nth) {
+      reached.resolve();
+      await release.promise;
+    }
+    return handle;
+  }) as Interpose;
+  return { interpose, handles, seen, reached, release };
+}
+const contextsOf = (browser: Browser) => new Set(browser.contexts());
+/** A settlement that does NOT join pending work would finish within this window (a sensitivity window, not a duration under test). */
+const turns = () => new Promise((resolve) => setTimeout(resolve, 100));
+
+test.describe("native transport lane manager (revision 20 qualification in real engines)", () => {
+  for (const [index, stage] of STAGES.entries())
+    test(`L02–L06 ${stage} held after its real acquisition while settlement begins: settlement waits, disposes it, starts no later stage and publishes nothing; the browser and an unrelated context survive`, async ({
+      browser,
+    }) => {
+      const sentinel = await browser.newContext();
+      try {
+        const baseline = contextsOf(browser);
+        const seam = holdAfter(stage);
+        const lanes = openTransportLanes(browser, test.info(), {
+          interpose: seam.interpose,
+        });
+        const outcome = lanes.open({ mode: "fixture" }).then(
+          () => "published",
+          (error: unknown) => String(error),
+        );
+        await seam.reached.promise;
+        let released = false;
+        let settledAt: string | null = null;
+        const settling = lanes.settle();
+        void settling.then(() => {
+          settledAt = released ? "after release" : "before release";
+        });
+        await turns();
+        expect(
+          settledAt,
+          "settlement cannot report while an acquisition it owns is held",
+        ).toBeNull();
+        released = true;
+        seam.release.resolve();
+        const report = await settling;
+        expect(settledAt).toBe("after release");
+        const when = stage === "publication" ? "at" : "after";
+        expect(report).toEqual({
+          closeErrors: [],
+          reportErrors: [],
+          failures: [],
+          openErrors: [
+            `open 1 cancelled at ${stage}: LaneCancelled: open 1 cancelled ${when} ${stage}: settlement began while it was opening`,
+          ],
+        });
+        expect(await outcome).toContain(`cancelled ${when} ${stage}`);
+        expect(seam.seen, "no later stage began").toEqual(
+          STAGES.slice(0, index + 1),
+        );
+        expect(lanes.lanes).toEqual([]);
+        for (const h of seam.handles.filter((x) => LISTENERS.includes(x.stage)))
+          expect(await refused(h.handle), `${h.stage} closed`).toBe(true);
+        expect(
+          contextsOf(browser),
+          "only the lane's own context was closed",
+        ).toEqual(baseline);
+        const own = seam.handles.find((h) => h.stage === "context")?.handle as
+          | BrowserContext
+          | undefined;
+        if (own !== undefined)
+          expect(browser.contexts().includes(own)).toBe(false);
+        expect(await lanes.settle()).toBe(report);
+        expect(browser.isConnected()).toBe(true);
+        expect(browser.contexts().includes(sentinel)).toBe(true);
+      } finally {
+        await sentinel.close();
+      }
+    });
+
+  test("L04 the review's exact F24-1 schedule: a context delivered late by browser.newContext is closed by the settlement it overlapped, and no lane is published", async ({
+    browser,
+  }) => {
+    const acquired = deferred<BrowserContext>();
+    const release = deferred();
+    const delayed = {
+      newContext: async (options?: Parameters<Browser["newContext"]>[0]) => {
+        const context = await browser.newContext(options);
+        acquired.resolve(context);
+        await release.promise;
+        return context;
+      },
+    } as Pick<Browser, "newContext">;
+    const lanes = openTransportLanes(delayed, test.info());
+    const opening = lanes.open({ mode: "fixture" }).catch((e: unknown) => e);
+    const context = await acquired.promise;
+    let settled = false;
+    const settling = lanes.settle();
+    void settling.then(() => {
+      settled = true;
+    });
+    await turns();
+    expect(
+      settled,
+      "no successful report while the acquired context is undelivered",
+    ).toBe(false);
+    expect(browser.contexts().includes(context)).toBe(true);
+    release.resolve();
+    const report = await settling;
+    expect(report.closeErrors).toEqual([]);
+    expect(report.openErrors).toEqual([
+      "open 1 cancelled at context: LaneCancelled: open 1 cancelled after context: settlement began while it was opening",
+    ]);
+    expect(String(await opening)).toContain("cancelled after context");
+    expect(
+      browser.contexts().includes(context),
+      "the late context is closed",
+    ).toBe(false);
+    expect(lanes.lanes).toEqual([]);
+    expect(await lanes.settle()).toBe(report);
+  });
+
+  test("L05 a context not delivered within settlement's join bound: settlement fails by name; the context arriving later is closed and recorded", async ({
+    browser,
+  }) => {
+    const seam = holdAfter("context");
+    const lateSeen = deferred();
+    const late: string[] = [];
+    const lanes = openTransportLanes(browser, test.info(), {
+      interpose: seam.interpose,
+      joinBoundMs: 1_000,
+      onLate: (line) => {
+        late.push(line);
+        if (line.includes("late context")) lateSeen.resolve();
+      },
+    });
+    void lanes.open({ mode: "fixture" }).catch(() => undefined);
+    await seam.reached.promise;
+    const context = seam.handles.find((h) => h.stage === "context")
+      ?.handle as BrowserContext;
+    const report = await lanes.settle();
+    expect(report.closeErrors).toEqual([
+      "open 1: context acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)",
+      "open 1: unfinished at context when settlement's join bound ended",
+    ]);
+    expect(
+      browser.contexts().includes(context),
+      "honestly still open at the report",
+    ).toBe(true);
+    seam.release.resolve();
+    await lateSeen.promise;
+    expect(late).toContain(
+      "open 1: late context arrived after settlement; disposed",
+    );
+    expect(browser.contexts().includes(context)).toBe(false);
+    expect(await lanes.settle(), "never turns into success").toBe(report);
+  });
+
+  test("L07 a working lane, an open held at its context, and another manager's working lane: settlement ends only its own manager's resources", async ({
+    browser,
+    browserName,
+  }) => {
+    const seam = holdAfter("context", 2);
+    const a = openTransportLanes(browser, test.info(), {
+      interpose: seam.interpose,
+    });
+    const b = openTransportLanes(browser, test.info());
+    try {
+      const first = await guardLane(a);
+      const firstPage = await open(first);
+      expect(await fetchStatus(firstPage, `${GUARD}/status/200`)).toBe(200);
+      const held = a.open({ mode: "fixture" }).catch((e: unknown) => e);
+      await seam.reached.promise;
+      const other = await guardLane(b);
+      const otherPage = await open(other);
+      const settling = a.settle();
+      await turns();
+      seam.release.resolve();
+      const report = await settling;
+      expect(report.closeErrors).toEqual([]);
+      expect(report.reportErrors).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(report.openErrors).toEqual([
+        "open 2 cancelled at context: LaneCancelled: open 2 cancelled after context: settlement began while it was opening",
+      ]);
+      expect(String(await held)).toContain("open 2 cancelled after context");
+      expect(a.lanes).toEqual([first]);
+      expect(browser.contexts().includes(first.context)).toBe(false);
+      const heldContext = seam.handles.filter((h) => h.stage === "context")[1]
+        ?.handle as BrowserContext;
+      expect(browser.contexts().includes(heldContext)).toBe(false);
+      for (const h of seam.handles.filter((x) => LISTENERS.includes(x.stage)))
+        expect(await refused(h.handle)).toBe(true);
+      expect(browser.contexts().includes(other.context)).toBe(true);
+      expect(
+        await fetchStatus(otherPage, `${GUARD}/status/200`),
+        `the other manager's lane still works (${browserName})`,
+      ).toBe(200);
+    } finally {
+      await a.settle();
+      const report = await b.settle();
+      expect(report.openErrors).toEqual([]);
+      expect(report.closeErrors).toEqual([]);
     }
   });
 });

@@ -1109,11 +1109,249 @@ export interface CleanupStep {
   run: () => Promise<unknown>;
 }
 
+/** How long one disposer may run before settlement reports it and moves on (a harness bound, not a duration under test). */
+const DISPOSE_BOUND_MS = 10_000;
+/** How long settlement waits for admitted opens and their pending acquisitions (a harness bound, not a duration under test). */
+const JOIN_BOUND_MS = 10_000;
+
+/**
+ * Revision 20 (Review 24 F24-1, design assessment correction 1–2): the stages of opening a lane, in order. Each is admitted, owned and
+ * gated by the open's scope; `publication` is the hand-over of a finished lane to its manager.
+ */
+export type OpenStage =
+  | "witness"
+  | "scripted origin"
+  | "front"
+  | "context"
+  | "init script"
+  | "publication";
+
+/**
+ * A QUALIFICATION seam only (default: none): wraps each stage. `acquire` performs the stage's real acquisition, and refuses to begin once
+ * settlement has begun; a control can hold before or after it, release, or reject. Never used by an application case.
+ */
+export type Interpose = <T>(
+  stage: OpenStage,
+  acquire: () => Promise<T>,
+) => Promise<T>;
+
+export interface TransportLanesOptions {
+  /** Bound on joining admitted opens and their pending acquisitions once settlement begins (default 10,000 ms). */
+  joinBoundMs?: number;
+  /** Bound on each disposer (default 10,000 ms). */
+  disposeBoundMs?: number;
+  interpose?: Interpose;
+  /** Where an outcome arriving AFTER the report was returned is written (default: the worker's stderr); it is also kept in `late`. */
+  onLate?: (line: string) => void;
+}
+
+/** A stage refused because settlement began (the open is cancelled, never published). */
+export class LaneCancelled extends Error {
+  override name = "LaneCancelled";
+}
+
+type Outcome<T> =
+  | { kind: "value"; value: T }
+  | { kind: "error"; error: unknown }
+  | { kind: "pending"; later: Promise<Outcome<T>> };
+
+/** Runs `run` and reports what it did within `ms`; a pending one keeps its eventual outcome (`later`). */
+async function within<T>(
+  run: () => Promise<T>,
+  ms: number,
+): Promise<Outcome<T>> {
+  const settled: Promise<Outcome<T>> = (async () => {
+    try {
+      return { kind: "value", value: await run() } as const;
+    } catch (error) {
+      return { kind: "error", error } as const;
+    }
+  })();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pending = new Promise<Outcome<T>>((resolve) => {
+    timer = setTimeout(
+      () => resolve({ kind: "pending", later: settled }),
+      Math.max(0, ms),
+    );
+  });
+  const first = await Promise.race([settled, pending]);
+  clearTimeout(timer);
+  return first;
+}
+
+/** A disposer's failure, if any: a thrown error, a resolved Error, or still running at its bound (its eventual outcome goes to `late`). */
+async function runStep(
+  step: CleanupStep,
+  boundMs: number,
+  late?: (line: string) => void,
+): Promise<string | null> {
+  const outcome = await within(step.run, boundMs);
+  if (outcome.kind === "error")
+    return `${step.label}: ${String(outcome.error)}`;
+  if (outcome.kind === "value")
+    return outcome.value instanceof Error
+      ? `${step.label}: ${String(outcome.value)}`
+      : null;
+  void outcome.later.then((o) =>
+    late?.(
+      `${step.label}: its close ended after its bound (${o.kind === "error" ? String(o.error) : o.kind === "value" && o.value instanceof Error ? String(o.value) : "closed"})`,
+    ),
+  );
+  return `${step.label}: still running ${boundMs} ms after it began`;
+}
+
+/** One stage's holding: owned from admission, before its acquisition starts. */
+interface Holding {
+  stage: OpenStage;
+  state: "acquiring" | "acquired" | "failed" | "disposed" | "dispose_failed";
+  arrived: Promise<void>;
+  handle?: unknown;
+  error?: string;
+  late?: boolean;
+  dispose: ((handle: unknown) => Promise<unknown>) | null;
+  /** The ONE disposal of this holding (shared by every caller: an open's own unwinding and settlement). */
+  disposal?: Promise<string | null>;
+}
+
+/** One admitted open: registered synchronously at admission, whether or not it ever produces a lane. */
+interface OpenRecord {
+  id: number;
+  stage: OpenStage | "admitted";
+  stages: Array<{ stage: OpenStage | "admitted"; at: number }>;
+  outcome: "opening" | "published" | "cancelled" | "failed";
+  error: string | null;
+  done: Promise<void>;
+  holdings: Holding[];
+}
+
+/**
+ * The scope of one open (design assessment correction 2): every stage is ADMITTED only while the manager is open, OWNED (with its
+ * disposer) before its acquisition starts, and its result is owned the moment it arrives; after each stage, the open stops if settlement
+ * has begun (no further listener, context set-up, stage or publication). Disposal is in reverse order of admission.
+ */
+class OpenScope {
+  constructor(
+    readonly record: OpenRecord,
+    private readonly closing: () => boolean,
+    private readonly interpose: Interpose,
+  ) {}
+
+  gate(stage: OpenStage, when: "before" | "after" | "at"): void {
+    if (this.closing())
+      throw new LaneCancelled(
+        `open ${this.record.id} cancelled ${when} ${stage}: settlement began while it was opening`,
+      );
+  }
+
+  acquire<T>(
+    stage: OpenStage,
+    start: () => Promise<T>,
+    dispose: ((handle: T) => Promise<unknown>) | null,
+    gateAfter = true,
+  ): Promise<T> {
+    this.gate(stage, "before");
+    this.record.stage = stage;
+    this.record.stages.push({ stage, at: Date.now() });
+    const holding: Holding = {
+      stage,
+      state: "acquiring",
+      arrived: Promise.resolve(),
+      dispose: dispose as Holding["dispose"],
+    };
+    this.record.holdings.push(holding);
+    const begun = new Promise<T>((resolve) =>
+      resolve(
+        this.interpose(stage, () => {
+          this.gate(stage, "before");
+          return start();
+        }),
+      ),
+    );
+    // Observed at once: the result is owned when it arrives, and a rejection is recorded, whoever (if anyone) awaits the open.
+    holding.arrived = begun.then(
+      (handle) => {
+        holding.state = "acquired";
+        holding.handle = handle;
+      },
+      (error) => {
+        holding.state = "failed";
+        holding.error = String(error);
+      },
+    );
+    return begun.then((handle) => {
+      if (gateAfter) this.gate(stage, "after");
+      return handle;
+    });
+  }
+
+  private async disposeHolding(
+    holding: Holding,
+    boundMs: number,
+    late: (line: string) => void,
+  ): Promise<string | null> {
+    if (holding.disposal !== undefined) return holding.disposal;
+    if (holding.state !== "acquired" || holding.dispose === null) return null;
+    const dispose = holding.dispose;
+    holding.disposal = runStep(
+      {
+        label: `open ${this.record.id} ${holding.stage}`,
+        run: () => dispose(holding.handle),
+      },
+      boundMs,
+      late,
+    ).then((failure) => {
+      holding.state = failure === null ? "disposed" : "dispose_failed";
+      return failure;
+    });
+    return holding.disposal;
+  }
+
+  /** Disposes every holding, newest first, attempting each whatever the others did; a pending acquisition is joined within `deadline`. */
+  async dispose(
+    deadline: number,
+    boundMs: number,
+    late: (line: string) => void,
+  ): Promise<string[]> {
+    const errors: string[] = [];
+    for (const holding of [...this.record.holdings].reverse()) {
+      if (holding.state === "acquiring") {
+        const arrived = await settlesWithin(
+          holding.arrived,
+          Math.max(0, deadline - Date.now()),
+        );
+        if (!arrived) {
+          // Not cancelled by the bound: still owned. Its result is disposed (or its rejection recorded) when it arrives.
+          holding.late = true;
+          errors.push(
+            `open ${this.record.id}: ${holding.stage} acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)`,
+          );
+          void holding.arrived.then(async () => {
+            if (holding.state === "failed")
+              late(
+                `open ${this.record.id}: late ${holding.stage} rejected after settlement: ${holding.error}`,
+              );
+            else {
+              const failure = await this.disposeHolding(holding, boundMs, late);
+              late(
+                `open ${this.record.id}: late ${holding.stage} arrived after settlement; ${failure === null ? "disposed" : `dispose failed: ${failure}`}`,
+              );
+            }
+          });
+          continue;
+        }
+      }
+      const failure = await this.disposeHolding(holding, boundMs, late);
+      if (failure !== null) errors.push(failure);
+    }
+    return errors;
+  }
+}
+
 async function openLane(
   options: TransportLaneOptions,
   browser: Browser,
   testInfo: TestInfo,
-  cleanup: CleanupStep[],
+  scope: OpenScope,
 ): Promise<TransportLane> {
   if ("provokes" in (options as unknown as Record<string, unknown>))
     throw new Error(
@@ -1136,9 +1374,13 @@ async function openLane(
   let transport: Transport | null = null;
   const stamp = (): TransportStamp =>
     transport?.stamp() ?? { generation: 0, phase: "online", nonce: null };
+  // Revision 20 (F24-1): each stage is admitted, owned and gated by the open's scope (its disposer is registered before it starts).
   const witness = createWitnessOrigin({ stamp });
-  cleanup.push({ label: "witness origin", run: () => witness.close() });
-  const witnessUrl = await witness.start();
+  const witnessUrl = await scope.acquire(
+    "witness",
+    () => witness.start(),
+    () => witness.close(),
+  );
   let origin: ScriptedOrigin | null = null;
   const routes = [
     { name: "witness", prefix: "/__transport/", target: witnessUrl },
@@ -1146,8 +1388,11 @@ async function openLane(
   if (options.mode === "fixture") {
     const scripted = createScriptedOrigin({ stamp, fallback: base });
     origin = scripted;
-    cleanup.push({ label: "scripted origin", run: () => scripted.close() });
-    const originUrl = await scripted.start();
+    const originUrl = await scope.acquire(
+      "scripted origin",
+      () => scripted.start(),
+      () => scripted.close(),
+    );
     routes.push(
       { name: "api", prefix: "/api/", target: originUrl },
       { name: "health", prefix: "/health", target: originUrl },
@@ -1166,17 +1411,24 @@ async function openLane(
     observe: (attempt) => journal.attempts.push({ seq: next(), attempt }),
   });
   transport = owned;
-  cleanup.push({ label: "front origin", run: () => owned.close() });
-  const front = await owned.start();
+  const front = await scope.acquire(
+    "front",
+    () => owned.start(),
+    () => owned.close(),
+  );
   const contextOptions: BrowserContextOptions = {};
   for (const key of CONTEXT_KEYS)
     if (use[key] !== undefined)
       (contextOptions as Record<string, unknown>)[key] = use[key];
   // The lane's context talks to the FRONT origin directly (no browser proxy setting): the front carries all of the application's HTTP.
   contextOptions.baseURL = front;
-  const context = await browser.newContext(contextOptions);
+  // Owned BEFORE `newContext` is called: a context that arrives after settlement began is closed, never published (F24-1).
+  const context = await scope.acquire(
+    "context",
+    () => browser.newContext(contextOptions),
+    (c) => c.close(),
+  );
   // Playwright's own `trace: retain-on-failure` instrumentation already records every context a test creates, this one included.
-  cleanup.push({ label: "lane context", run: () => context.close() });
   const foreign: string[] = [];
   const declaredForeign = new Set<string>();
   context.on("request", (request) => {
@@ -1185,7 +1437,11 @@ async function openLane(
     if (new URL(url).origin !== front)
       foreign.push(`${request.method()} ${url}`);
   });
-  await context.addInitScript(installUiStimulus);
+  await scope.acquire(
+    "init script",
+    () => context.addInitScript(installUiStimulus),
+    null,
+  );
   const refuse = (what: string) => () => {
     throw new Error(
       `native transport lane: ${what} would answer without the network (a fixture route is not transport evidence)`,
@@ -1481,31 +1737,33 @@ export type OpenTransportLane = (
   options: TransportLaneOptions,
 ) => Promise<TransportLane>;
 
-/** What a settled set of lanes found: every failure retained (cleanup, report and the classified journal). */
+/** What a settled set of lanes found: every failure retained (cleanup, report, the classified journal, and opens that never finished). */
 export interface LaneReport {
   closeErrors: string[];
   reportErrors: string[];
   failures: string[];
+  /** Revision 20: each admitted open that was not published, with its stage (cancelled by settlement, or failed). */
+  openErrors: string[];
 }
 
-/** Runs EVERY disposer, newest first, even after one fails; returns each failure (a thrown error or a resolved Error) with its label. */
-export async function runCleanup(steps: CleanupStep[]): Promise<string[]> {
+/** Runs EVERY disposer, newest first, even after one fails or overruns its bound; returns each failure with its label. */
+export async function runCleanup(
+  steps: CleanupStep[],
+  boundMs = DISPOSE_BOUND_MS,
+  late?: (line: string) => void,
+): Promise<string[]> {
   const errors: string[] = [];
-  for (const step of [...steps].reverse())
-    try {
-      const result = await step.run();
-      if (result instanceof Error)
-        errors.push(`${step.label}: ${String(result)}`);
-    } catch (error) {
-      errors.push(`${step.label}: ${String(error)}`);
-    }
+  for (const step of [...steps].reverse()) {
+    const failure = await runStep(step, boundMs, late);
+    if (failure !== null) errors.push(failure);
+  }
   return errors;
 }
 
 /**
- * The defined final boundary: close everything the lanes own (contexts first, so no further browser event arrives; then the fronts,
- * scripted origins and witnesses), then classify each lane's settled journal and attach its ledger. Each part is attempted whatever the
- * others did, and every failure is kept.
+ * The defined final boundary: `close` ends everything the lanes own (each lane's context first, then its front, scripted origin and
+ * witness), then each lane's settled journal is classified and its ledger attached. Each part, and each lane's ledger, classification,
+ * origin errors and foreign requests, is attempted whatever the others did (revision 20), and every failure is kept.
  */
 export async function settleLanes(
   lanes: Array<
@@ -1513,11 +1771,16 @@ export async function settleLanes(
       origin: Pick<ScriptedOrigin, "errors"> | null;
     }
   >,
-  cleanup: CleanupStep[],
+  close: () => Promise<string[]>,
   attach: (name: string, body: string) => Promise<void>,
-): Promise<LaneReport> {
-  const closeErrors = await runCleanup(cleanup);
+): Promise<Omit<LaneReport, "openErrors">> {
   const reportErrors: string[] = [];
+  let closeErrors: string[];
+  try {
+    closeErrors = await close();
+  } catch (error) {
+    closeErrors = [`close: ${String(error)}`];
+  }
   const failures: string[] = [];
   for (const [i, lane] of lanes.entries()) {
     try {
@@ -1528,44 +1791,217 @@ export async function settleLanes(
     } catch (error) {
       reportErrors.push(`lane ${i} ledger: ${String(error)}`);
     }
-    let verdict: LaneVerdict;
     try {
-      verdict = lane.verdict();
+      const verdict = lane.verdict();
+      for (const p of verdict.unexpected)
+        failures.push(
+          `lane ${i} page ${p.page} document ${p.document} ${p.type} [${p.category}]: ${p.text} (${p.reason})`,
+        );
+      for (const v of verdict.violations) failures.push(`lane ${i}: ${v}`);
     } catch (error) {
       reportErrors.push(`lane ${i} classification: ${String(error)}`);
-      continue;
     }
-    for (const p of verdict.unexpected)
-      failures.push(
-        `lane ${i} page ${p.page} document ${p.document} ${p.type} [${p.category}]: ${p.text} (${p.reason})`,
-      );
-    for (const v of verdict.violations) failures.push(`lane ${i}: ${v}`);
-    for (const e of lane.origin?.errors ?? [])
-      failures.push(`lane ${i} scripted origin handler: ${e}`);
-    for (const f of lane.undeclaredForeign())
-      failures.push(`lane ${i}: a request outside the lane's origin: ${f}`);
+    try {
+      for (const e of lane.origin?.errors ?? [])
+        failures.push(`lane ${i} scripted origin handler: ${e}`);
+    } catch (error) {
+      reportErrors.push(`lane ${i} scripted origin errors: ${String(error)}`);
+    }
+    try {
+      for (const f of lane.undeclaredForeign())
+        failures.push(`lane ${i}: a request outside the lane's origin: ${f}`);
+    } catch (error) {
+      reportErrors.push(`lane ${i} foreign requests: ${String(error)}`);
+    }
   }
   return { closeErrors, reportErrors, failures };
 }
 
-/** Lanes for one test: `open` as many as it needs; `settle` (once; repeated calls share it) ends them all and reports. */
-export function openTransportLanes(browser: Browser, testInfo: TestInfo) {
+/**
+ * Lanes for one test: `open` as many as it needs; `settle` (once; repeated and concurrent calls share it) ends them all and reports.
+ *
+ * Revision 20 (Review 24 F24-1, family native-transport-upstream-cleanup; design assessment token 1fd56474…, invariants 1–6): the manager
+ * OWNS every admitted open from admission to disposal, including resources whose acquisition has not returned. `open` registers its
+ * record synchronously (before any acquisition) and only while the manager is open. `settle` enters `closing` synchronously, before any
+ * teardown: no open or stage is admitted after that, no stage's result is used for further set-up, and no unfinished lane is published.
+ * It then disposes every open's holdings (newest first within an open; opens independently), JOINING a pending acquisition within a
+ * harness bound. A result arriving later is still disposed and a late rejection still recorded (`late`), but the report has already
+ * failed by name: a timeout is never success. Opens that were not published are reported with their stage (`openErrors`). The borrowed
+ * worker browser and any context the manager did not create are never closed.
+ */
+export function openTransportLanes(
+  browser: Pick<Browser, "newContext">,
+  testInfo: Pick<TestInfo, "project" | "attach">,
+  settings: TransportLanesOptions = {},
+) {
+  const joinBoundMs = settings.joinBoundMs ?? JOIN_BOUND_MS;
+  const disposeBoundMs = settings.disposeBoundMs ?? DISPOSE_BOUND_MS;
+  const interpose: Interpose =
+    settings.interpose ??
+    (<T>(_: OpenStage, acquire: () => Promise<T>) => acquire());
   const lanes: TransportLane[] = [];
-  const cleanup: CleanupStep[] = [];
-  let settled: Promise<LaneReport> | null = null;
-  return {
-    lanes,
-    open: (async (options) => {
-      if (settled !== null) throw new Error("transport lanes already settled");
-      const lane = await openLane(options, browser, testInfo, cleanup);
+  const records: OpenRecord[] = [];
+  const scopes: OpenScope[] = [];
+  const late: string[] = [];
+  let state: "open" | "closing" | "settled" = "open";
+  let settling: Promise<LaneReport> | null = null;
+  const noteLate = (line: string) => {
+    late.push(line);
+    if (state === "settled")
+      (
+        settings.onLate ??
+        ((l: string) =>
+          void process.stderr.write(`[native transport lane] ${l}\n`))
+      )(line);
+  };
+  const snapshot = () =>
+    records.map((r) => ({
+      id: r.id,
+      stage: r.stage,
+      outcome: r.outcome,
+      error: r.error,
+      stages: r.stages,
+      holdings: r.holdings.map(({ stage, state: s, error, late: l }) => ({
+        stage,
+        state: s,
+        ...(error !== undefined ? { error } : {}),
+        ...(l ? { late: true } : {}),
+      })),
+    }));
+
+  const open = ((options) => {
+    // Refused BEFORE anything is allocated once settlement has begun.
+    if (state !== "open")
+      return Promise.reject(
+        new LaneCancelled(
+          `transport lanes: open refused, settlement began (${state})`,
+        ),
+      );
+    const record: OpenRecord = {
+      id: records.length + 1,
+      stage: "admitted",
+      stages: [{ stage: "admitted", at: Date.now() }],
+      outcome: "opening",
+      error: null,
+      done: Promise.resolve(),
+      holdings: [],
+    };
+    records.push(record);
+    const scope = new OpenScope(record, () => state !== "open", interpose);
+    scopes.push(scope);
+    const run = (async () => {
+      const lane = await openLane(
+        options,
+        browser as Browser,
+        testInfo as TestInfo,
+        scope,
+      );
+      await scope.acquire("publication", async () => lane, null, false);
+      // The final gate and the publication in ONE turn: a lane is published only while the manager is open.
+      scope.gate("publication", "at");
+      record.outcome = "published";
+      record.stage = "publication";
       lanes.push(lane);
       return lane;
-    }) as OpenTransportLane,
-    settle: (): Promise<LaneReport> => {
-      settled ??= settleLanes(lanes, cleanup, (name, body) =>
+    })();
+    // Observed at registration: the open's end (and any rejection) is recorded whether or not its caller awaits it.
+    record.done = run.then(
+      () => undefined,
+      (error) => {
+        record.outcome =
+          error instanceof LaneCancelled ? "cancelled" : "failed";
+        record.error = String(error);
+        // A FAILED open unwinds what it had acquired at once (settlement shares the same disposals and reports their failures); a
+        // cancelled one is being disposed by the settlement that cancelled it.
+        if (record.outcome === "failed")
+          void scope.dispose(
+            Date.now() + joinBoundMs,
+            disposeBoundMs,
+            noteLate,
+          );
+      },
+    );
+    return run;
+  }) as OpenTransportLane;
+
+  const settleNow = async (): Promise<LaneReport> => {
+    const deadline = Date.now() + joinBoundMs;
+    const admitted = [...records];
+    const reported = await settleLanes(
+      lanes,
+      async () => {
+        const errors = (
+          await Promise.all(
+            scopes.map((scope) =>
+              scope.dispose(deadline, disposeBoundMs, noteLate),
+            ),
+          )
+        ).flat();
+        await settlesWithin(
+          Promise.all(admitted.map((r) => r.done)),
+          Math.max(0, deadline - Date.now()),
+        );
+        for (const r of admitted)
+          if (r.outcome === "opening") {
+            errors.push(
+              `open ${r.id}: unfinished at ${r.stage} when settlement's join bound ended`,
+            );
+            void r.done.then(() =>
+              noteLate(
+                `open ${r.id}: ended ${r.outcome} after settlement (${r.error})`,
+              ),
+            );
+          }
+        return errors;
+      },
+      (name, body) =>
         testInfo.attach(name, { body, contentType: "application/json" }),
-      );
-      return settled;
+    );
+    const openErrors = admitted
+      .filter((r) => r.outcome === "cancelled" || r.outcome === "failed")
+      .map((r) => `open ${r.id} ${r.outcome} at ${r.stage}: ${r.error}`);
+    const report: LaneReport = { ...reported, openErrors };
+    try {
+      await testInfo.attach("transport-teardown", {
+        body: JSON.stringify({ report, opens: snapshot(), late }, null, 1),
+        contentType: "application/json",
+      });
+    } catch (error) {
+      report.reportErrors.push(`teardown record: ${String(error)}`);
+    }
+    return report;
+  };
+
+  return {
+    /** The published lanes. */
+    lanes,
+    /** Outcomes that arrived after settlement's join bound (each also written to `onLate` once the report was returned). */
+    late,
+    /** Every admitted open: its stages, holdings and outcome. */
+    snapshot,
+    get state() {
+      return state;
+    },
+    open,
+    settle: (): Promise<LaneReport> => {
+      if (settling === null) {
+        // Closing is entered synchronously, before any teardown work: nothing is admitted or published after this line.
+        state = "closing";
+        settling = settleNow()
+          .catch(
+            (error): LaneReport => ({
+              closeErrors: [],
+              reportErrors: [`settlement: ${String(error)}`],
+              failures: [],
+              openErrors: [],
+            }),
+          )
+          .then((report) => {
+            state = "settled";
+            return report;
+          });
+      }
+      return settling;
     },
   };
 }
@@ -1574,21 +2010,43 @@ export function openTransportLanes(browser: Browser, testInfo: TestInfo) {
  * The `transportLane` fixture: `await transportLane({ mode })` opens one lane (its own context) for the case. A spec adds it with
  * `test.extend<{ transportLane: OpenTransportLane }>({ transportLane: transportLaneFixture })`. At teardown (whatever the test did) it
  * closes every context, listener and owned request, attaches each lane's ledger, and fails the case on any cleanup or report failure,
- * unexpected console problem, unmet or exceeded HTTP declaration, scripted-origin handler error or undeclared foreign request.
+ * unexpected console problem, unmet or exceeded HTTP declaration, scripted-origin handler error, undeclared foreign request or open that
+ * never finished (revision 20).
  */
 export async function transportLaneFixture(
   { browser }: Pick<PlaywrightWorkerArgs, "browser">,
   use: (open: OpenTransportLane) => Promise<void>,
   testInfo: TestInfo,
 ): Promise<void> {
-  const lanes = openTransportLanes(browser, testInfo);
+  await runTransportLaneFixture(browser, use, testInfo);
+}
+
+/** The fixture's body (its own controls pass bounds or a qualification seam; the fixture passes none). */
+export async function runTransportLaneFixture(
+  browser: Pick<Browser, "newContext">,
+  use: (open: OpenTransportLane) => Promise<void>,
+  testInfo: Pick<TestInfo, "project" | "attach">,
+  settings: TransportLanesOptions = {},
+): Promise<void> {
+  const lanes = openTransportLanes(browser, testInfo, settings);
   let primary: { error: unknown } | null = null;
   try {
     await use(lanes.open);
   } catch (error) {
     primary = { error };
   }
-  const report = await lanes.settle();
+  let report: LaneReport;
+  try {
+    report = await lanes.settle();
+  } catch (error) {
+    // settle() does not reject; kept so that the original failure survives whatever settlement does.
+    report = {
+      closeErrors: [],
+      reportErrors: [`settlement threw: ${String(error)}`],
+      failures: [],
+      openErrors: [],
+    };
+  }
   if (primary !== null)
     throw new Error(
       `transport lane fixture: ${String(primary.error)}; teardown ${JSON.stringify(report)}`,
@@ -1596,6 +2054,11 @@ export async function transportLaneFixture(
     );
   expect(
     report,
-    "transport lane teardown: everything owned closed, ledgers attached, and no console problem but a request-attributed transport loss or a declared HTTP response",
-  ).toEqual({ closeErrors: [], reportErrors: [], failures: [] });
+    "transport lane teardown: everything owned closed, ledgers attached, every open finished, and no console problem but a request-attributed transport loss or a declared HTTP response",
+  ).toEqual({
+    closeErrors: [],
+    reportErrors: [],
+    failures: [],
+    openErrors: [],
+  });
 }

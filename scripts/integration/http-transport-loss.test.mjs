@@ -497,3 +497,72 @@ test("witness origin: probe answers no-store with its nonce, cacheable answers m
     await witness.close();
   }
 });
+
+// Revision 20 (Review 24 F24-1, design assessment correction 5 / L02): the witness has the same start/close lifecycle as the front.
+test("L02 witness origin: close is idempotent, joins a start in progress (no listener outlives it), and a closed witness never starts", async () => {
+  const witness = createWitnessOrigin({ closeBoundMs: 1_000 });
+  const starting = witness.start();
+  const first = witness.close();
+  assert.equal(witness.close(), first, "one shared close");
+  assert.equal(await first, null);
+  const url = await starting;
+  assert.equal(await listening(Number(new URL(url).port)), false);
+  assert.deepEqual(witness.owned(), {
+    state: "closed",
+    listening: false,
+    connections: 0,
+  });
+  await assert.rejects(
+    witness.start(),
+    /witness origin: start\(\) in state closed/,
+  );
+  const never = createWitnessOrigin();
+  assert.equal(await never.close(), null);
+  await assert.rejects(never.start(), /start\(\) in state closed/);
+});
+
+test("L02 witness origin: close destroys and joins an idle connection on its close event before it resolves", async () => {
+  const witness = createWitnessOrigin({ closeBoundMs: 1_000 });
+  const url = await witness.start();
+  const idle = connect({ host: "127.0.0.1", port: Number(new URL(url).port) });
+  idle.on("error", () => undefined);
+  await new Promise((resolve) => idle.once("connect", resolve));
+  while (witness.owned().connections === 0)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(await witness.close(), null);
+  assert.equal(
+    witness.owned().connections,
+    0,
+    "the idle connection's close is delivered before close() resolves",
+  );
+  idle.destroy();
+});
+
+// Design assessment correction 5: `done()` reads the socket's join when it is CALLED. Asked before the request has its socket (the
+// scripted origin's forward asks at once), it must still not resolve before that socket has closed.
+test("C21 ownUpstream: done() asked before the request is given its socket still resolves only after that socket has closed", async () => {
+  const app = await target();
+  try {
+    const req = request(`${app.url}/app/hold`, { agent: false });
+    req.on("error", () => undefined);
+    const owned = ownUpstream(req);
+    const joined = owned.done();
+    assert.equal(owned.socket, null, "asked before the socket event");
+    req.end();
+    while (app.held.length === 0)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    const socket = owned.socket;
+    assert.notEqual(socket, null);
+    req.destroy();
+    await joined;
+    assert.equal(owned.requestClosed, true);
+    assert.equal(socket.destroyed, true);
+    assert.equal(
+      owned.socketClosed,
+      true,
+      "the socket's close was delivered first",
+    );
+  } finally {
+    await app.close();
+  }
+});

@@ -34,12 +34,38 @@ const listen = (server) =>
     });
   });
 
-const closeServer = (server) =>
-  new Promise((resolve) => {
-    if (!server.listening) return resolve(null);
-    server.closeAllConnections?.();
-    server.close((error) => resolve(error ?? null));
-  });
+/**
+ * Revision 20 (Review 24 F24-1, design assessment correction 5): closes a listener, BOUNDED. `server.close` waits for every connection, so
+ * a connection the caller could not end would otherwise hang the teardown; the bound turns that into a named failure. Resolves null, or
+ * an Error (the listener's own error, or what it was still waiting for).
+ */
+const closeListener = async (server, boundMs, name) => {
+  if (!server.listening) return null;
+  server.closeAllConnections?.();
+  let error = null;
+  const closed = await settlesWithin(
+    new Promise((resolve) =>
+      server.close((e) => {
+        error = e ?? null;
+        resolve();
+      }),
+    ),
+    boundMs,
+  );
+  if (!closed)
+    return new Error(
+      `${name} listener: still waiting for its connections ${boundMs} ms after close`,
+    );
+  return error;
+};
+
+/** One Error carrying EVERY failure (revision 20: a close keeps each simultaneous failure, not only the first), or null. */
+const allOf = (errors) => {
+  const found = errors.filter((e) => e !== null && e !== undefined);
+  if (found.length === 0) return null;
+  if (found.length === 1) return found[0];
+  return new Error(found.map((e) => e.message ?? String(e)).join("; "));
+};
 
 /** Resolves true when `promise` settles within `ms`, false otherwise (a harness bound on joining owned work, not a duration under test). */
 export const settlesWithin = (promise, ms) =>
@@ -380,7 +406,7 @@ export function createTransport({
     },
     /**
      * Stops listening and destroys every socket and every forwarded request, and resolves when all of them have CLOSED (revision 19), with
-     * the first failure, if any (null otherwise). Idempotent: repeated or concurrent calls share one close. A start still in progress is
+     * every failure, if any, in one Error (revision 20; null otherwise). The listener's own close is bounded too (revision 20). Idempotent: repeated or concurrent calls share one close. A start still in progress is
      * joined first, so no listener outlives the close.
      */
     close() {
@@ -393,16 +419,16 @@ export function createTransport({
           Promise.all([...upstreams].map((o) => o.done())),
           joinBoundMs,
         );
-        const closed = await closeServer(server);
-        return (
-          dropped ??
-          (joined
+        const closed = await closeListener(server, joinBoundMs, "transport");
+        return allOf([
+          dropped,
+          joined
             ? null
             : new Error(
                 `transport: ${[...upstreams].filter((o) => o.open).length} forwarded request(s) still open after ${joinBoundMs} ms`,
-              )) ??
-          closed
-        );
+              ),
+          closed,
+        ]);
       })();
       return closing;
     },
@@ -414,10 +440,23 @@ export function createTransport({
  * /__transport/cacheable/<nonce>` answers the same, cacheable for an hour (the cache-bypass NEGATIVE only). Every request is recorded
  * when it ARRIVES (`receipts`), stamped with `stamp()` (the transport's generation and phase at arrival). `answer` replaces the probe's
  * answer, for the wrong-status/wrong-body negatives.
+ *
+ * Revision 20 (Review 24 F24-1, design assessment correction 5 / L02): it has the same start/close lifecycle as the front and the scripted
+ * origin. `start()` once; `close()` is idempotent (repeated and concurrent calls share one close), goes terminal at once (a connection
+ * arriving then is destroyed), JOINS a start still in progress (so no listener outlives the close), destroys and joins every connection on
+ * its `close` event, and closes the listener within a harness bound. It resolves null, or an Error naming what stayed open. A closed
+ * witness never starts.
  */
-export function createWitnessOrigin({ stamp = () => ({}) } = {}) {
+export function createWitnessOrigin({
+  stamp = () => ({}),
+  closeBoundMs = JOIN_BOUND_MS,
+} = {}) {
   const receipts = [];
   const options = { answer: null };
+  const connections = new Set();
+  let state = "new";
+  let starting = null;
+  let closing = null;
   const server = createServer((req, res) => {
     const path = new URL(req.url ?? "/", "http://witness").pathname;
     const match = /^\/__transport\/(probe|cacheable)\/([0-9a-f-]{36})$/.exec(
@@ -446,17 +485,69 @@ export function createWitnessOrigin({ stamp = () => ({}) } = {}) {
     });
     res.end(answer.body);
   });
+  server.on("connection", (socket) => {
+    if (state === "closing" || state === "closed") {
+      socket.destroy();
+      return;
+    }
+    connections.add(socket);
+    socket.once("close", () => connections.delete(socket));
+  });
   let url = null;
   return {
-    async start() {
-      url = await listen(server);
-      return url;
+    start() {
+      if (state !== "new")
+        return Promise.reject(
+          new Error(`witness origin: start() in state ${state}`),
+        );
+      state = "starting";
+      starting = listen(server).then((u) => {
+        url = u;
+        if (state === "starting") state = "listening";
+        return u;
+      });
+      return starting;
     },
     get url() {
       return url;
     },
+    /** What it still owns (revision 20): for the lane's cleanup controls. */
+    owned: () => ({
+      state,
+      listening: server.listening,
+      connections: connections.size,
+    }),
     receipts,
     options,
-    close: () => closeServer(server),
+    close() {
+      closing ??= (async () => {
+        state = "closing";
+        if (starting !== null) await starting.catch(() => undefined);
+        // Each connection still in the set has not emitted "close" (its listener removes it): wait for that event itself.
+        const joins = [...connections].map(
+          (socket) =>
+            new Promise((resolve) => {
+              socket.once("close", resolve);
+              socket.destroy();
+            }),
+        );
+        const joined = await settlesWithin(Promise.all(joins), closeBoundMs);
+        const closed = await closeListener(
+          server,
+          closeBoundMs,
+          "witness origin",
+        );
+        state = "closed";
+        return allOf([
+          joined
+            ? null
+            : new Error(
+                `witness origin: ${connections.size} connection(s) still open ${closeBoundMs} ms after close`,
+              ),
+          closed,
+        ]);
+      })();
+      return closing;
+    },
   };
 }

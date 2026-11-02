@@ -336,3 +336,10 @@ exact count), which the front saw answered with that status. Anything ambiguous 
 forwards: a closed downstream cancels its request, and the origin's close cancels, joins and reports anything it could not end. Its own
 qualification is `tests/static/native-transport.test.ts`, `scripts/integration/http-transport-loss.test.mjs` and
 `tests/e2e/fixture.native-transport-guard.spec.ts` (real engines).
+
+The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
+origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
+once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins
+every pending acquisition within a harness bound and closes each lane's context before its network. If the bound expires, settlement fails
+by name and the late result is still closed when it arrives. Opens that never finished are reported with their stage, and each lane's
+report checks run whatever the others did.
