@@ -13,7 +13,6 @@ import type {
   ConsoleMessage,
   Page,
   PlaywrightWorkerArgs,
-  Request,
   TestInfo,
 } from "@playwright/test";
 import { expect } from "@playwright/test";
@@ -75,6 +74,16 @@ import {
  * them when their downstream closes or the origin closes, and its close JOINS them (bounded; a failure names what stayed open). The
  * fixture closes everything a lane owns first (every step attempted), then classifies the settled journal and attaches the ledger.
  * FIXTURE evidence on the fixture lane; the released backend's lane is the integration runner's.
+ *
+ * Revision 26 (Review 31 F31-1, family native-transport-console-attribution, harness incomplete_fix; design assessment token
+ * 37c3b6402c…, C1–C5, invariants 1–7): revision 19 advanced a page's document at a main-frame navigation's RESPONSE, while the request
+ * kept the document it was issued from; a declared navigation's own HTTP-status message (Chromium logs it after the commit) was then
+ * the next document's and matched no request. Now (`recordPage`) the document moves on at the main frame's COMMIT of the pending
+ * navigation, the request keeps its initiating document and records the document it committed, and the classifier admits an HTTP-status
+ * message in that committed document for that navigation alone (`Relation`), in an engine that logs such statuses. Every other
+ * exclusion is unchanged: page, initiating document, URL, request before message, its own terminal and front record, the declaration
+ * and its exact count, one message per request. Each problem is a frozen envelope taken in the native listener; an optional
+ * qualification seam (`Ingest`) can hold its delivery to the journal, and settlement seals the journal before classifying it.
  */
 
 export interface TransportLaneOptions {
@@ -655,10 +664,13 @@ export function categorise(
 }
 
 export interface Problem {
-  /** The lane-wide journal sequence when this process observed it. */
+  /** The lane-wide journal sequence when this process observed it (taken at the native listener: revision 26's ingestion envelope). */
   seq: number;
   page: number;
-  /** The page's document when observed: it moves on at each main-frame navigation's response. */
+  /**
+   * The page's document when the native listener received it. Revision 26 (F31-1): it moves on when a main-frame document COMMITS
+   * (`DocumentTransition`), not at a navigation's response (which a redirect hop, a 204 or a download also has).
+   */
   document: number;
   type: string;
   text: string;
@@ -678,16 +690,44 @@ export interface RequestRecord {
   /** The journal sequence of the browser's `request` event. */
   seq: number;
   page: number;
+  /** The INITIATING document: the page's document when the request was issued (never rewritten: revision 26). */
   document: number;
   method: string;
   url: string;
-  /** A main-frame navigation (its response starts the page's next document). */
+  /** A main-frame navigation (it may commit the page's next document: `commit`). */
   navigation: boolean;
   observed: TransportStamp;
   /** The request's FIRST end: its response (headers) or its failure. */
   terminal: RequestTerminal | null;
   failedAfterResponse?: { seq: number; errorText: string };
   finishedSeq?: number;
+  /** Revision 26: the journal sequence of the redirect hop this request continues (Playwright's `redirectedFrom`). */
+  redirectedFrom?: number;
+  /**
+   * Revision 26 (F31-1), a main-frame navigation only: the document its response COMMITTED (the main frame's commit of this request's
+   * URL, observed while it was the page's pending navigation), or null once it can no longer commit one (`commitReason`: redirected,
+   * superseded by a later navigation, or ended after its response without a commit, as a 204 or a download does). Absent while pending.
+   */
+  commit?: { seq: number; document: number } | null;
+  commitReason?: string;
+}
+
+/**
+ * Revision 26 (F31-1): each main-frame `framenavigated` of a lane page, as the recorder judged it. `new-document`: a committed document
+ * (`request`: the pending navigation of that URL that committed it, or null, unattributed, for a commit to another origin or a non-HTTP
+ * document, such as an engine's error page, with no navigation of its URL pending). `same-document`: a URL change within the document
+ * (a fragment or the history API), with no navigation of its URL pending; the document does not change.
+ */
+export interface DocumentTransition {
+  seq: number;
+  page: number;
+  url: string;
+  kind: "new-document" | "same-document";
+  /** The page's document before and after. */
+  from: number;
+  document: number;
+  request: number | null;
+  reason: string;
 }
 
 export interface AttemptRecord {
@@ -714,7 +754,22 @@ export interface Journal {
   requests: RequestRecord[];
   attempts: AttemptRecord[];
   expectations: HttpExpectation[];
+  /** Revision 26: every main-frame document transition (audit; each problem and request already carries its document). */
+  navigations?: DocumentTransition[];
+  /**
+   * Revision 26: the lane's engine (`chromium`, `firefox`, `webkit`), when known. Only an engine observed to log a navigation's HTTP
+   * status (`ENGINES_LOGGING_HTTP`) can have that message attributed through the navigation's commit; unknown is not one.
+   */
+  engine?: string;
+  /** Revision 26: problems delivered by the ingestion seam AFTER the journal was sealed for classification (never classified). */
+  late?: Problem[];
 }
+
+/**
+ * How a message was related to its request (revision 26): `same-document`, the message's document is the request's initiating document;
+ * `committed-by-navigation`, an HTTP-status message in the document that the request (a main-frame navigation) itself committed.
+ */
+export type Relation = "same-document" | "committed-by-navigation";
 
 export interface Classified extends Problem {
   verdict: "expected" | "unexpected";
@@ -724,6 +779,7 @@ export interface Classified extends Problem {
     attempts: number[];
     generations: number[];
     expectation?: number;
+    relation: Relation;
   };
 }
 
@@ -742,6 +798,8 @@ export interface RequestAttribution {
   /** The expectation it met, if any. */
   declared: number | null;
   reason: string;
+  /** Revision 26, a main-frame navigation only: the document it committed (null: none; absent: still pending when classified). */
+  commit?: { seq: number; document: number } | null;
 }
 
 export interface LaneVerdict {
@@ -778,6 +836,16 @@ const pathOf = (url: string) => {
 };
 const pathMatches = (path: string | RegExp, url: string) =>
   typeof path === "string" ? pathOf(url) === path : path.test(pathOf(url));
+
+/**
+ * Revision 26 (F31-1): the engines observed to log a main-frame navigation's HTTP status (revision-26 diagnostics): Chromium after the
+ * main frame's commit, WebKit between the response and the commit. Firefox logs none (for a fetch or a navigation), so in Firefox a status
+ * message in a navigation's committed document can only be the page's own text and is never attributed through that commit.
+ */
+export const ENGINES_LOGGING_HTTP: ReadonlySet<string> = new Set([
+  "chromium",
+  "webkit",
+]);
 
 /**
  * Judges every problem of a lane's journal (pure and repeatable: no mutable credit outlives one call). See the module comment for the
@@ -873,6 +941,7 @@ export function classifyJournal(journal: Journal): LaneVerdict {
       ambiguous: isAmbiguous,
       declared: null,
       reason,
+      ...(r.navigation && r.commit !== undefined ? { commit: r.commit } : {}),
     });
   }
 
@@ -937,6 +1006,24 @@ export function classifyJournal(journal: Journal): LaneVerdict {
 
   // 4. Every problem, once, in journal order. A message can only be its own page and document's, for a request that started before it
   //    and ended after that page/document/URL's previous message of the same category; at most one message per request.
+  //    Revision 26 (F31-1): "its own document" is the request's INITIATING document, or, for an HTTP-status message only, the document
+  //    that the request (a main-frame navigation answered with that status) itself committed, observed after that commit, in an engine
+  //    that logs such a status (`ENGINES_LOGGING_HTTP`). No other request becomes eligible in either document.
+  const committedBy = (r: RequestRecord, p: Problem) =>
+    p.category === "http" &&
+    r.navigation &&
+    r.terminal?.kind === "response" &&
+    r.commit != null &&
+    r.commit.document === p.document &&
+    r.commit.seq < p.seq &&
+    journal.engine !== undefined &&
+    ENGINES_LOGGING_HTTP.has(journal.engine);
+  const relationOf = (r: RequestRecord, p: Problem): Relation | null =>
+    r.document === p.document
+      ? "same-document"
+      : committedBy(r, p)
+        ? "committed-by-navigation"
+        : null;
   const credited = new Set<RequestRecord>();
   const previous = new Map<string, number>();
   const problems: Classified[] = [];
@@ -973,7 +1060,7 @@ export function classifyJournal(journal: Journal): LaneVerdict {
     const candidates = journal.requests.filter(
       (r) =>
         r.page === p.page &&
-        r.document === p.document &&
+        relationOf(r, p) !== null &&
         r.url === p.url &&
         r.seq < p.seq &&
         r.terminal !== null &&
@@ -1013,11 +1100,12 @@ export function classifyJournal(journal: Journal): LaneVerdict {
     );
     credited.add(nearest);
     const attempts = segment.get(nearest) ?? [];
+    const relation = relationOf(nearest, p) as Relation;
     out(
       "expected",
       p.category === "network"
         ? `request #${nearest.seq} ${own(nearest).reason}`
-        : `request #${nearest.seq} met declaration ${own(nearest).declared}`,
+        : `request #${nearest.seq} met declaration ${own(nearest).declared}${relation === "committed-by-navigation" ? ` (the navigation's own response, in the document it committed at #${(nearest.commit as { seq: number }).seq})` : ""}`,
       {
         request: nearest.seq,
         attempts: attempts.map((a) => a.seq),
@@ -1025,6 +1113,7 @@ export function classifyJournal(journal: Journal): LaneVerdict {
         ...(p.category === "http"
           ? { expectation: own(nearest).declared as number }
           : {}),
+        relation,
       },
     );
   }
@@ -1039,6 +1128,233 @@ export function classifyJournal(journal: Journal): LaneVerdict {
     expectations,
     violations,
   };
+}
+
+// ---- Revision 26: the page recorder (F31-1) ------------------------------------------------------------------------------------------
+
+/** The parts of a Playwright request the recorder reads. */
+export interface RecordedRequest {
+  method(): string;
+  url(): string;
+  isNavigationRequest(): boolean;
+  frame(): unknown;
+  failure(): { errorText: string } | null;
+  redirectedFrom(): RecordedRequest | null;
+}
+/** The parts of a Playwright page the recorder reads (a static test drives it with an event sequence an engine was observed to emit). */
+export interface RecordedPage {
+  mainFrame(): unknown;
+  on(event: string, listener: (value: never) => void): unknown;
+}
+export interface RecorderSink {
+  journal: Journal;
+  /** The lane-wide journal sequence. */
+  next: () => number;
+  stamp: () => TransportStamp;
+  /** Receives each problem's frozen envelope (taken at the native listener) and puts it in the journal, now or when the seam releases it. */
+  ingest: (problem: Readonly<Problem>) => void;
+}
+
+const withoutFragment = (url: string) => url.replace(/#.*$/, "");
+/** Both HTTP(S) and of one origin: only then can a URL change be the same document's (fragment or history API). */
+const sameHttpOrigin = (a: string, b: string) => {
+  try {
+    const x = new URL(a);
+    const y = new URL(b);
+    return /^https?:$/.test(x.protocol) && x.origin === y.origin;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Records one lane page's requests, document transitions and problems in the journal (revision 26, Review 31 F31-1, family
+ * native-transport-console-attribution; design assessment token 37c3b6402c…, C2–C4, invariants 1–7).
+ *
+ * The page's DOCUMENT moves on only when its main frame commits one (`framenavigated` of the main frame), never at a response: a redirect
+ * hop, a 204 and a download each have a navigation response but commit nothing (revision 19 counted each of them as a new document). The
+ * page has at most one PENDING navigation: its latest main-frame navigation request. A later navigation request supersedes it (a redirect
+ * hop is "redirected"); its failure after its response (a 204, a download) ends it without a commit. A main-frame commit of the pending
+ * navigation's URL (fragment aside) is THAT navigation's commit: the request keeps its initiating `document` and records the document it
+ * committed (`commit`). A commit with no pending navigation of its URL is a new, unattributed document when it leaves the HTTP origin (an
+ * engine's error page, `about:blank`, `data:`), and otherwise a same-document URL change (a fragment or the history API: the document
+ * does not change). Observed orders (revision-26 diagnostics, all three engines): request, response, then the commit; Chromium logs a
+ * navigation's HTTP status after the commit, WebKit between the response and the commit, Firefox not at all.
+ *
+ * Each problem is an immutable ENVELOPE taken synchronously in the native listener (sequence, page, document and transport stamp of that
+ * moment) and only then handed to `ingest`. A hold downstream of the listener (the qualification seam) therefore cannot change its
+ * provenance; an event the engine delivers to the listener only after a later commit is that later document's, and can only be
+ * attributed as such (an unknown is never guessed into the earlier document).
+ *
+ * Known limit (recorded, not handled): a document restored without a request (a back/forward-cache restore of the same origin) looks like
+ * a same-document change; a history-API change to exactly the pending navigation's URL before it commits would be taken as its commit.
+ */
+export function recordPage(
+  page: RecordedPage,
+  index: number,
+  sink: RecorderSink,
+): void {
+  const { journal, next, stamp } = sink;
+  journal.navigations ??= [];
+  const navigations = journal.navigations;
+  let documentNo = 0;
+  let lastUrl = "about:blank";
+  let pending: RequestRecord | null = null;
+  const records = new Map<RecordedRequest, RequestRecord>();
+  const on = page.on.bind(page) as (
+    event: string,
+    listener: (value: never) => void,
+  ) => unknown;
+  const mainFrameNavigation = (request: RecordedRequest) => {
+    try {
+      return (
+        request.isNavigationRequest() && request.frame() === page.mainFrame()
+      );
+    } catch {
+      return false;
+    }
+  };
+  const end = (record: RequestRecord, reason: string) => {
+    if (record.commit === undefined) {
+      record.commit = null;
+      record.commitReason = reason;
+    }
+    if (pending === record) pending = null;
+  };
+  on("request", (request: RecordedRequest) => {
+    const record: RequestRecord = {
+      seq: next(),
+      page: index,
+      document: documentNo,
+      method: request.method(),
+      url: request.url(),
+      navigation: mainFrameNavigation(request),
+      observed: stamp(),
+      terminal: null,
+    };
+    let hop: RequestRecord | undefined;
+    try {
+      const from = request.redirectedFrom();
+      hop = from === null ? undefined : records.get(from);
+    } catch {
+      hop = undefined;
+    }
+    if (hop !== undefined) record.redirectedFrom = hop.seq;
+    records.set(request, record);
+    journal.requests.push(record);
+    if (record.navigation) {
+      if (pending !== null)
+        end(
+          pending,
+          pending === hop
+            ? `redirected to #${record.seq}`
+            : `superseded by navigation #${record.seq}`,
+        );
+      pending = record;
+    }
+  });
+  on(
+    "response",
+    (response: { request(): RecordedRequest; status(): number }) => {
+      const seq = next();
+      const record = records.get(response.request());
+      if (record === undefined) return;
+      // A response is not a commit: the document changes only at the main frame's commit (below).
+      if (record.terminal === null)
+        record.terminal = { seq, kind: "response", status: response.status() };
+    },
+  );
+  on("requestfailed", (request: RecordedRequest) => {
+    const seq = next();
+    const record = records.get(request);
+    if (record === undefined) return;
+    const errorText = request.failure()?.errorText ?? "";
+    if (record.terminal === null)
+      record.terminal = { seq, kind: "failed", errorText };
+    else {
+      record.failedAfterResponse = { seq, errorText };
+      if (record === pending)
+        end(record, "ended after its response without committing a document");
+    }
+  });
+  on("requestfinished", (request: RecordedRequest) => {
+    const seq = next();
+    const record = records.get(request);
+    if (record !== undefined) record.finishedSeq = seq;
+  });
+  on("framenavigated", (frame: { url(): string }) => {
+    if (frame !== page.mainFrame()) return;
+    const seq = next();
+    const url = frame.url();
+    const from = documentNo;
+    let transition: DocumentTransition;
+    if (
+      pending !== null &&
+      withoutFragment(pending.url) === withoutFragment(url)
+    ) {
+      documentNo += 1;
+      pending.commit = { seq, document: documentNo };
+      transition = {
+        seq,
+        page: index,
+        url,
+        kind: "new-document",
+        from,
+        document: documentNo,
+        request: pending.seq,
+        reason: `committed by navigation #${pending.seq}`,
+      };
+      pending = null;
+    } else if (!sameHttpOrigin(lastUrl, url)) {
+      documentNo += 1;
+      transition = {
+        seq,
+        page: index,
+        url,
+        kind: "new-document",
+        from,
+        document: documentNo,
+        request: null,
+        reason:
+          "a commit leaving the HTTP origin with no navigation of its URL pending (unattributed)",
+      };
+    } else
+      transition = {
+        seq,
+        page: index,
+        url,
+        kind: "same-document",
+        from,
+        document: documentNo,
+        request: null,
+        reason:
+          "a URL change within the document (fragment or history API): no navigation of its URL pending",
+      };
+    lastUrl = url;
+    navigations.push(transition);
+  });
+  const problem = (type: string, text: string, location: string) => {
+    const { category, url, status } = categorise(type, text, location);
+    // The envelope: everything that attributes it is taken HERE, in the native listener, and frozen before anything can hold it.
+    sink.ingest(
+      Object.freeze({
+        seq: next(),
+        page: index,
+        document: documentNo,
+        type,
+        text,
+        url,
+        category,
+        ...(status !== undefined ? { status } : {}),
+        observed: Object.freeze(stamp()),
+      }),
+    );
+  };
+  on("console", (message: ConsoleMessage) => {
+    if (message.type() === "error" || message.type() === "warning")
+      problem(message.type(), message.text(), message.location().url ?? "");
+  });
+  on("pageerror", (error: Error) => problem("pageerror", error.message, ""));
 }
 
 export interface TransportLane {
@@ -1079,6 +1395,13 @@ export interface TransportLane {
   journal: Journal;
   /** The current classification of the journal (pure: recomputed each call). */
   verdict(): LaneVerdict;
+  /** Revision 26: envelopes the ingestion seam still holds (captured at the native listener, not yet in the journal). */
+  heldProblems(): Array<Readonly<Problem>>;
+  /**
+   * Revision 26: seals the journal for classification (settlement calls it after closing): a later delivery is late, never classified.
+   * Returns the failures it found: each envelope still held, and each misuse of the ingestion seam.
+   */
+  seal(): string[];
   /** Requests of the lane's pages to any origin but the front (each fails the case: the loss would not cover them). */
   foreign: string[];
   /** Declares one exact `METHOD url` outside the lane's origin as provoked on purpose (the check's own negative); others still fail. */
@@ -1140,12 +1463,21 @@ export type Interpose = <T>(
   acquire: () => Promise<T>,
 ) => Promise<T>;
 
+/**
+ * Revision 26 (F31-1, design assessment C4): a QUALIFICATION seam only (default: none), downstream of the native listener. It receives
+ * each problem's frozen envelope, already attributed at the listener, and `deliver`, which puts that envelope in the journal (single use).
+ * A control may hold delivery. A delivery after the lane's journal was sealed for classification is recorded as late and never classified;
+ * an envelope still held at the seal fails the report by name. Never used by an application case.
+ */
+export type Ingest = (problem: Readonly<Problem>, deliver: () => void) => void;
+
 export interface TransportLanesOptions {
   /** Bound on joining admitted opens and their pending acquisitions once settlement begins (default 10,000 ms). */
   joinBoundMs?: number;
   /** Bound on each disposer (default 10,000 ms). */
   disposeBoundMs?: number;
   interpose?: Interpose;
+  ingest?: Ingest;
   /** Where an outcome arriving AFTER the report was returned is written (default: the worker's stderr); it is also kept in `late`. */
   onLate?: (line: string) => void;
 }
@@ -1531,11 +1863,26 @@ class OpenScope {
   }
 }
 
+/** The lane context's engine (`chromium`, `firefox`, `webkit`), or undefined when it cannot be read. */
+const engineOf = (context: BrowserContext): string | undefined => {
+  try {
+    return (context as { browser?: () => Browser | null })
+      .browser?.()
+      ?.browserType()
+      .name();
+  } catch {
+    return undefined;
+  }
+};
+
 async function openLane(
   options: TransportLaneOptions,
   browser: Browser,
   testInfo: TestInfo,
   scope: OpenScope,
+  ingestion: { seam?: Ingest; late: (line: string) => void } = {
+    late: () => undefined,
+  },
 ): Promise<TransportLane> {
   if ("provokes" in (options as unknown as Record<string, unknown>))
     throw new Error(
@@ -1558,6 +1905,46 @@ async function openLane(
   let transport: Transport | null = null;
   const stamp = (): TransportStamp =>
     transport?.stamp() ?? { generation: 0, phase: "online", nonce: null };
+  // Revision 26 (F31-1, C4): envelopes the ingestion seam holds, its misuse, and the seal settlement sets before classifying.
+  const held = new Set<Readonly<Problem>>();
+  const seamErrors: string[] = [];
+  let sealed = false;
+  const put = (problem: Readonly<Problem>) => {
+    if (!sealed) {
+      journal.problems.push(problem);
+      return;
+    }
+    journal.late ??= [];
+    journal.late.push(problem);
+    ingestion.late(
+      `journal #${problem.seq} (page ${problem.page} document ${problem.document} ${problem.type}) delivered after the lane's journal was classified; not classified: ${problem.text}`,
+    );
+  };
+  const ingest = (problem: Readonly<Problem>) => {
+    const seam = ingestion.seam;
+    if (seam === undefined) return put(problem);
+    held.add(problem);
+    let delivered = false;
+    const deliver = () => {
+      if (delivered) {
+        seamErrors.push(
+          `the ingestion seam delivered journal #${problem.seq} more than once (delivery is single-use)`,
+        );
+        return;
+      }
+      delivered = true;
+      held.delete(problem);
+      put(problem);
+    };
+    try {
+      seam(problem, deliver);
+    } catch (error) {
+      seamErrors.push(
+        `the ingestion seam threw for journal #${problem.seq}: ${String(error)}`,
+      );
+      if (!delivered) deliver();
+    }
+  };
   // Revision 20 (F24-1): each stage is admitted, owned and gated by the open's scope (its disposer is registered before it starts).
   const witness = createWitnessOrigin({ stamp });
   const witnessUrl = await scope.acquire(
@@ -1616,6 +2003,7 @@ async function openLane(
     () => browser.newContext(contextOptions),
     (c) => c.close(),
   );
+  journal.engine = engineOf(context);
   // Playwright's own `trace: retain-on-failure` instrumentation already records every context a test creates, this one included.
   const foreign: string[] = [];
   const declaredForeign = new Set<string>();
@@ -1646,74 +2034,12 @@ async function openLane(
     const own = page as unknown as Record<string, unknown>;
     own.route = refuse("page.route");
     own.routeFromHAR = refuse("page.routeFromHAR");
-    const index = pageIndex++;
-    let documentNo = 0;
-    const records = new Map<Request, RequestRecord>();
-    const mainFrameNavigation = (request: Request) => {
-      try {
-        return (
-          request.isNavigationRequest() && request.frame() === page.mainFrame()
-        );
-      } catch {
-        return false;
-      }
-    };
-    page.on("request", (request) => {
-      const record: RequestRecord = {
-        seq: next(),
-        page: index,
-        document: documentNo,
-        method: request.method(),
-        url: request.url(),
-        navigation: mainFrameNavigation(request),
-        observed: stamp(),
-        terminal: null,
-      };
-      records.set(request, record);
-      journal.requests.push(record);
+    recordPage(page as unknown as RecordedPage, pageIndex++, {
+      journal,
+      next,
+      stamp,
+      ingest,
     });
-    page.on("response", (response) => {
-      const seq = next();
-      const record = records.get(response.request());
-      if (record === undefined) return;
-      if (record.terminal === null)
-        record.terminal = { seq, kind: "response", status: response.status() };
-      // A navigation's response begins the page's next document: later messages are that document's, not the previous one's.
-      if (record.navigation) documentNo += 1;
-    });
-    page.on("requestfailed", (request) => {
-      const seq = next();
-      const record = records.get(request);
-      if (record === undefined) return;
-      const errorText = request.failure()?.errorText ?? "";
-      if (record.terminal === null)
-        record.terminal = { seq, kind: "failed", errorText };
-      else record.failedAfterResponse = { seq, errorText };
-    });
-    page.on("requestfinished", (request) => {
-      const seq = next();
-      const record = records.get(request);
-      if (record !== undefined) record.finishedSeq = seq;
-    });
-    const problem = (type: string, text: string, location: string) => {
-      const { category, url, status } = categorise(type, text, location);
-      journal.problems.push({
-        seq: next(),
-        page: index,
-        document: documentNo,
-        type,
-        text,
-        url,
-        category,
-        ...(status !== undefined ? { status } : {}),
-        observed: stamp(),
-      });
-    };
-    page.on("console", (message: ConsoleMessage) => {
-      if (message.type() === "error" || message.type() === "warning")
-        problem(message.type(), message.text(), message.location().url ?? "");
-    });
-    page.on("pageerror", (error) => problem("pageerror", error.message, ""));
   });
   const routeHost =
     origin === null
@@ -1891,6 +2217,17 @@ async function openLane(
     },
     journal,
     verdict: () => classifyJournal(journal),
+    heldProblems: () => [...held],
+    seal: () => {
+      sealed = true;
+      return [
+        ...[...held].map(
+          (p) =>
+            `a console problem captured at journal #${p.seq} (page ${p.page} document ${p.document} ${p.type}) was still held by the ingestion seam when the journal was classified: ${p.text}`,
+        ),
+        ...seamErrors,
+      ];
+    },
     foreign,
     declareForeign: (entry) => {
       declaredForeign.add(entry);
@@ -1915,6 +2252,10 @@ async function openLane(
         path: String(e.path),
       })),
       problems: journal.problems,
+      navigations: journal.navigations ?? [],
+      engine: journal.engine ?? null,
+      late: journal.late ?? [],
+      held: [...held],
       console: classifyJournal(journal),
     }),
   };
@@ -1957,6 +2298,8 @@ export async function settleLanes(
   lanes: Array<
     Pick<TransportLane, "verdict" | "ledger" | "undeclaredForeign"> & {
       origin: Pick<ScriptedOrigin, "errors"> | null;
+      /** Revision 26: seals the journal before it is classified (optional for a lane without the ingestion seam). */
+      seal?: TransportLane["seal"];
     }
   >,
   close: () => Promise<string[]>,
@@ -1971,6 +2314,12 @@ export async function settleLanes(
   }
   const failures: string[] = [];
   for (const [i, lane] of lanes.entries()) {
+    // Revision 26 (C4): sealed FIRST, so the ledger and the verdict judge one fixed journal; a held envelope fails by name.
+    try {
+      for (const f of lane.seal?.() ?? []) failures.push(`lane ${i}: ${f}`);
+    } catch (error) {
+      reportErrors.push(`lane ${i} seal: ${String(error)}`);
+    }
     try {
       await attach(
         `transport-ledger-${i}`,
@@ -2104,6 +2453,7 @@ export function openTransportLanes(
         browser as Browser,
         testInfo as TestInfo,
         scope,
+        { seam: settings.ingest, late: noteLate },
       );
       await scope.acquire("publication", async () => lane, null, {
         gateAfter: false,

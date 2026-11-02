@@ -358,6 +358,13 @@ forwards: a closed downstream cancels its request, and the origin's close cancel
 qualification is `tests/static/native-transport.test.ts`, `scripts/integration/http-transport-loss.test.mjs` and
 `tests/e2e/fixture.native-transport-guard.spec.ts` (real engines).
 
+A page's document moves on when its main frame commits one, not when a navigation is answered (revision 26). A redirect hop, a 204 and
+a download are answered but commit nothing. A request keeps the document it was issued from. A navigation also records the document it
+committed, and only that navigation's own declared HTTP-status message may be excused in that document. This matters because Chromium
+logs the status after the commit and WebKit before it; Firefox logs none, so no message is excused that way there. Each console problem
+is captured, with its page and document, at the moment the browser delivers it to the lane. A message the browser delivers only after a
+later commit belongs to that later document.
+
 The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
 origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
 once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins

@@ -23,7 +23,10 @@ import {
   type OpenStage,
   type OriginRoute,
   openTransportLanes,
+  type Problem,
+  type RecordedRequest,
   type RequestRecord,
+  recordPage,
   runCleanup,
   runTransportLaneFixture,
   settleLanes,
@@ -2407,5 +2410,651 @@ describe("F25-1 Q07–Q08: concurrent opens and managers; the fixture", () => {
     expect((error as Error).cause).toBe(s.thrown[0]);
     expect(browser.live.size).toBe(0);
     expect(browser.made.map((c) => c.closes)).toEqual([1]);
+  });
+});
+
+// ---- Revision 26 (Review 31 F31-1, family native-transport-console-attribution; design assessment token 37c3b6402c…, NAV1–NAV5) -------
+
+const S503 =
+  "Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
+const N = `${FRONT}/api/__guard/status/503`;
+
+/** A navigation of `page` from `document`, answered `status` through the front, committing `commit` (or nothing when null). */
+function navigated(
+  b: ReturnType<typeof journal>,
+  page: number,
+  document: number,
+  url: string,
+  status: number,
+  commit: number | null,
+) {
+  const r = b.answered(page, document, url, status);
+  r.navigation = true;
+  r.commit = commit === null ? null : { seq: nextSeq(b), document: commit };
+  return r;
+}
+/** The next journal sequence of `b` (a commit takes one, as the recorder's framenavigated does). */
+const nextSeq = (b: ReturnType<typeof journal>) => {
+  const all = [
+    ...b.j.problems.map((p) => p.seq),
+    ...b.j.requests.flatMap((r) => [r.seq, r.terminal?.seq ?? 0]),
+    ...b.j.attempts.map((a) => a.seq),
+    ...b.j.expectations.map((e) => e.seq),
+  ];
+  // The builder's own counter is private: a commit is stamped just after the latest event, and every later call is later still.
+  return Math.max(0, ...all) + 0.5;
+};
+
+describe("F31-1 classifyJournal: a navigation's own HTTP-status message and the document it committed", () => {
+  it("positive (Chromium's order): the declared navigation's 503, logged after its commit, is expected through that commit alone", () => {
+    const b = journal();
+    b.j.engine = "chromium";
+    b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+    const nav = navigated(b, 0, 1, N, 503, 2);
+    b.problem(0, 2, "error", S503, N);
+    const v = classifyJournal(b.j);
+    expect(v.unexpected).toEqual([]);
+    expect(v.violations).toEqual([]);
+    expect(v.expected[0]?.evidence).toMatchObject({
+      request: nav.seq,
+      expectation: 1,
+      relation: "committed-by-navigation",
+    });
+    expect(v.expected[0]?.reason).toMatch(
+      /the navigation's own response, in the document it committed/,
+    );
+    expect(v.requests[0]).toMatchObject({
+      document: 1,
+      commit: { document: 2 },
+    });
+    expect(classifyJournal(b.j), "repeatable").toEqual(v);
+  });
+  it("positive (WebKit's order): logged before the commit, the message is its initiating document's (no commit relation needed)", () => {
+    const b = journal();
+    b.j.engine = "webkit";
+    b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+    const nav = b.answered(0, 1, N, 503);
+    nav.navigation = true;
+    b.problem(0, 1, "error", S503, N);
+    nav.commit = { seq: nextSeq(b), document: 2 };
+    const v = classifyJournal(b.j);
+    expect(v.unexpected).toEqual([]);
+    expect(v.expected[0]?.evidence?.relation).toBe("same-document");
+  });
+  for (const engine of ["firefox", undefined])
+    it(`negative: in ${engine ?? "an unknown engine"} (no navigation status is logged) a status message in the committed document is unexpected`, () => {
+      const b = journal();
+      if (engine !== undefined) b.j.engine = engine;
+      b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+      navigated(b, 0, 1, N, 503, 2);
+      b.problem(0, 2, "error", S503, N);
+      expect(classifyJournal(b.j).unexpected[0]?.reason).toMatch(
+        /no 503 response of this page's document for this URL/,
+      );
+    });
+  it("negative: the commit relation admits only the navigation: an old document's fetch of the same URL is not eligible in the new document, and the navigation answers once", () => {
+    const b = journal();
+    b.j.engine = "chromium";
+    b.expectHttp("/api/__guard/status/503", 503, 2, "GET");
+    b.answered(0, 1, N, 503);
+    b.problem(0, 1, "error", S503, N);
+    navigated(b, 0, 1, N, 503, 2);
+    b.problem(0, 2, "error", S503, N);
+    b.problem(0, 2, "error", S503, N);
+    expect(
+      classifyJournal(b.j).problems.map((p) => [p.document, p.verdict]),
+    ).toEqual([
+      [1, "expected"],
+      [2, "expected"],
+      [2, "unexpected"],
+    ]);
+  });
+  it("negative: one navigation answers one message across BOTH its documents (WebKit's message before the commit, then the document's own forged text after it)", () => {
+    const b = journal();
+    b.j.engine = "webkit";
+    b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+    const nav = b.answered(0, 1, N, 503);
+    nav.navigation = true;
+    b.problem(0, 1, "error", S503, N);
+    nav.commit = { seq: nextSeq(b), document: 2 };
+    b.problem(0, 2, "error", S503, N);
+    expect(
+      classifyJournal(b.j).problems.map((p) => [p.document, p.verdict]),
+    ).toEqual([
+      [1, "expected"],
+      [2, "unexpected"],
+    ]);
+  });
+  it("negative: an undeclared navigation's own status message is unexpected", () => {
+    const b = journal();
+    b.j.engine = "chromium";
+    navigated(b, 0, 1, N, 503, 2);
+    b.problem(0, 2, "error", S503, N);
+    expect(classifyJournal(b.j).unexpected[0]?.reason).toMatch(
+      /HTTP 503 of #\d+ GET was not declared/,
+    );
+  });
+  it("negative: a network message cannot use a navigation's commit (only an HTTP status of its own response)", () => {
+    const b = journal();
+    b.j.engine = "chromium";
+    const nav = b.lost(0, 1, N);
+    nav.navigation = true;
+    nav.commit = { seq: nextSeq(b), document: 2 };
+    b.problem(0, 2, "error", CHROMIUM, N);
+    expect(classifyJournal(b.j).unexpected[0]?.reason).toMatch(
+      /no failed request of this page's document/,
+    );
+  });
+  it("negative: a later document, another page, and a message ordered before the commit cannot use the commit", () => {
+    const b = journal();
+    b.j.engine = "chromium";
+    b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+    navigated(b, 0, 1, N, 503, 2);
+    b.problem(0, 3, "error", S503, N);
+    b.problem(1, 2, "error", S503, N);
+    const v = classifyJournal(b.j);
+    expect(v.unexpected).toHaveLength(2);
+    const c = journal();
+    c.j.engine = "chromium";
+    c.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+    const nav = c.answered(0, 1, N, 503);
+    nav.navigation = true;
+    c.problem(0, 2, "error", S503, N);
+    nav.commit = { seq: nextSeq(c), document: 2 };
+    expect(
+      classifyJournal(c.j).unexpected[0]?.reason,
+      "the commit must precede its message",
+    ).toMatch(/no 503 response of this page's document/);
+  });
+  it("negative: a request that is not a main-frame navigation, or a navigation that committed nothing, gets no commit relation", () => {
+    for (const shape of ["not-navigation", "no-commit"] as const) {
+      const b = journal();
+      b.j.engine = "chromium";
+      b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+      const r = b.answered(0, 1, N, 503);
+      r.navigation = shape === "no-commit";
+      r.commit =
+        shape === "no-commit" ? null : { seq: nextSeq(b), document: 2 };
+      b.problem(0, 2, "error", S503, N);
+      expect(classifyJournal(b.j).unexpected, shape).toHaveLength(1);
+    }
+  });
+});
+
+/** A page double emitting exactly the event sequence an engine was observed to emit (revision-26 diagnostics, diag/order-1). */
+function recorderPage() {
+  const listeners = new Map<string, Array<(value: unknown) => void>>();
+  let mainUrl = "about:blank";
+  const main = { url: () => mainUrl };
+  const page = {
+    mainFrame: () => main,
+    on(event: string, listener: (value: never) => void) {
+      listeners.set(event, [
+        ...(listeners.get(event) ?? []),
+        listener as (v: unknown) => void,
+      ]);
+    },
+  };
+  const emit = (event: string, value: unknown) => {
+    for (const l of listeners.get(event) ?? []) l(value);
+  };
+  const request = (
+    url: string,
+    options: { nav?: boolean; from?: RecordedRequest; failure?: string } = {},
+  ) => {
+    const r: RecordedRequest & { failed?: string } = {
+      method: () => "GET",
+      url: () => url,
+      isNavigationRequest: () => options.nav ?? true,
+      frame: () => main,
+      failure: () => (r.failed === undefined ? null : { errorText: r.failed }),
+      redirectedFrom: () => options.from ?? null,
+    };
+    emit("request", r);
+    return r;
+  };
+  return {
+    page,
+    request,
+    respond: (r: RecordedRequest, status: number) =>
+      emit("response", { request: () => r, status: () => status }),
+    fail: (r: RecordedRequest & { failed?: string }, errorText: string) => {
+      r.failed = errorText;
+      emit("requestfailed", r);
+    },
+    finish: (r: RecordedRequest) => emit("requestfinished", r),
+    /** The MAIN frame's framenavigated (the same frame object, as Playwright's). */
+    commit: (url: string) => {
+      mainUrl = url;
+      emit("framenavigated", main);
+    },
+    /** Another frame's framenavigated: ignored by the recorder. */
+    subframe: (url: string) => emit("framenavigated", { url: () => url }),
+    console: (type: string, text: string, url: string) =>
+      emit("console", {
+        type: () => type,
+        text: () => text,
+        location: () => ({ url }),
+      }),
+  };
+}
+function recorded(engine: string, hold?: (p: Readonly<Problem>) => boolean) {
+  let seq = 0;
+  const j: Journal = {
+    problems: [],
+    requests: [],
+    attempts: [],
+    expectations: [],
+    engine,
+  };
+  const held: Array<Readonly<Problem>> = [];
+  const d = recorderPage();
+  recordPage(d.page, 0, {
+    journal: j,
+    next: () => {
+      seq += 1;
+      return seq;
+    },
+    stamp,
+    ingest: (p) => (hold?.(p) ? held.push(p) : j.problems.push(p)),
+  });
+  /** The front's record of a forwarded answer (as the transport's observer journals it, before the browser's response). */
+  const forwarded = (url: string, status: number) => {
+    seq += 1;
+    j.attempts.push({
+      seq,
+      attempt: {
+        seq,
+        generation: 0,
+        phase: "online",
+        nonce: null,
+        method: "GET",
+        url,
+        at: 0,
+        outcome: "forwarded",
+        status,
+      },
+    });
+  };
+  const declare = (path: string, status: number, count = 1) => {
+    seq += 1;
+    j.expectations.push({
+      id: j.expectations.length + 1,
+      seq,
+      method: "GET",
+      path,
+      status,
+      count,
+      reason: "test",
+    });
+  };
+  return { j, d, held, forwarded, declare };
+}
+const docs = (j: Journal) =>
+  j.requests.map((r) => [
+    new URL(r.url).pathname,
+    r.document,
+    r.commit === undefined
+      ? "pending"
+      : r.commit === null
+        ? r.commitReason
+        : r.commit.document,
+  ]);
+
+describe("F31-1 recordPage: the document moves on at the main frame's commit of its pending navigation", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  it("NAV1 Chromium's order (request, response, commit, status message): the request keeps document 1, commits 2, and its message is expected", () => {
+    const { j, d, forwarded, declare } = recorded("chromium");
+    const first = d.request(P);
+    forwarded(P, 200);
+    d.respond(first, 200);
+    d.commit(P);
+    declare("/api/__guard/status/503", 503);
+    const nav = d.request(N);
+    forwarded(N, 503);
+    d.respond(nav, 503);
+    d.commit(N);
+    d.console("error", S503, N);
+    expect(docs(j)).toEqual([
+      ["/api/__guard/page", 0, 1],
+      ["/api/__guard/status/503", 1, 2],
+    ]);
+    expect(j.problems.map((p) => p.document)).toEqual([2]);
+    const v = classifyJournal(j);
+    expect(v.unexpected).toEqual([]);
+    expect(v.violations).toEqual([]);
+    expect(v.expected[0]?.evidence?.relation).toBe("committed-by-navigation");
+  });
+  it("NAV1 WebKit's order (status message between response and commit): the message is document 1's and expected", () => {
+    const { j, d, forwarded, declare } = recorded("webkit");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.commit(P);
+    declare("/api/__guard/status/503", 503);
+    const nav = d.request(N);
+    forwarded(N, 503);
+    d.respond(nav, 503);
+    d.console("error", S503, N);
+    d.commit(N);
+    expect(j.problems.map((p) => p.document)).toEqual([1]);
+    const v = classifyJournal(j);
+    expect(v.unexpected).toEqual([]);
+    expect(v.expected[0]?.evidence?.relation).toBe("same-document");
+  });
+  it("NAV2 a redirect chain commits ONE document, by its final hop; the hop is redirected and the final hop names it", () => {
+    const { j, d } = recorded("chromium");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.commit(P);
+    const hop = d.request(`${FRONT}/api/__guard/redirect/502`);
+    d.respond(hop, 302);
+    const last = d.request(`${FRONT}/api/__guard/status/502`, { from: hop });
+    d.respond(last, 502);
+    d.commit(`${FRONT}/api/__guard/status/502`);
+    expect(docs(j)).toEqual([
+      ["/api/__guard/page", 0, 1],
+      ["/api/__guard/redirect/502", 1, `redirected to #${j.requests[2]?.seq}`],
+      ["/api/__guard/status/502", 1, 2],
+    ]);
+    expect(j.requests[2]?.redirectedFrom).toBe(j.requests[1]?.seq);
+    expect(j.navigations?.map((n) => [n.kind, n.document])).toEqual([
+      ["new-document", 1],
+      ["new-document", 2],
+    ]);
+  });
+  it("NAV2 a 204 and a download (WebKit: two responses) end without a commit; a later same-document change to that URL is not a commit", () => {
+    const { j, d } = recorded("webkit");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.commit(P);
+    const empty = d.request(`${FRONT}/api/__guard/nocontent`);
+    d.respond(empty, 204);
+    d.fail(empty, "Aborted: 204 No Content");
+    const file = d.request(`${FRONT}/api/__guard/download`);
+    d.respond(file, 200);
+    d.respond(file, 200);
+    d.fail(file, "Frame load interrupted");
+    d.commit(`${FRONT}/api/__guard/download`);
+    const fetchAfter = d.request(`${FRONT}/api/__guard/status/500`, {
+      nav: false,
+    });
+    expect(docs(j)).toEqual([
+      ["/api/__guard/page", 0, 1],
+      [
+        "/api/__guard/nocontent",
+        1,
+        "ended after its response without committing a document",
+      ],
+      [
+        "/api/__guard/download",
+        1,
+        "ended after its response without committing a document",
+      ],
+      ["/api/__guard/status/500", 1, "pending"],
+    ]);
+    expect(j.requests[2]?.terminal).toMatchObject({
+      kind: "response",
+      status: 200,
+    });
+    expect(j.requests[2]?.failedAfterResponse?.errorText).toBe(
+      "Frame load interrupted",
+    );
+    expect(j.navigations?.at(-1)).toMatchObject({
+      kind: "same-document",
+      document: 1,
+    });
+    expect(fetchAfter.url()).toMatch(/500$/);
+  });
+  it("NAV2 reloads commit a new document each; fragments and history changes do not; a subframe's navigation is ignored", () => {
+    const { j, d } = recorded("chromium");
+    for (let i = 0; i < 3; i += 1) {
+      const r = d.request(N);
+      d.respond(r, 503);
+      d.commit(N);
+    }
+    d.commit(`${N}#frag`);
+    d.commit(`${FRONT}/api/__guard/pushed`);
+    d.subframe(`${FRONT}/api/__guard/frame`);
+    expect(docs(j).map((x) => x[2])).toEqual([1, 2, 3]);
+    expect(j.navigations?.map((n) => [n.kind, n.document])).toEqual([
+      ["new-document", 1],
+      ["new-document", 2],
+      ["new-document", 3],
+      ["same-document", 3],
+      ["same-document", 3],
+    ]);
+  });
+  it("NAV2 a failed navigation: Chromium's error page is a new unattributed document; Firefox's error page at the URL is that navigation's commit", () => {
+    const chromium = recorded("chromium");
+    const a = chromium.d.request(P);
+    chromium.d.respond(a, 200);
+    chromium.d.commit(P);
+    const lostNav = chromium.d.request(`${FRONT}/api/__guard/reset/x`);
+    chromium.d.fail(lostNav, "net::ERR_EMPTY_RESPONSE");
+    chromium.d.commit("chrome-error://chromewebdata/");
+    expect(chromium.j.navigations?.at(-1)).toMatchObject({
+      kind: "new-document",
+      document: 2,
+      request: null,
+    });
+    expect(
+      chromium.j.requests[1]?.commit,
+      "unattributed: no commit is invented for it",
+    ).toBeUndefined();
+    const firefox = recorded("firefox");
+    const b = firefox.d.request(P);
+    firefox.d.respond(b, 200);
+    firefox.d.commit(P);
+    const failed = firefox.d.request(`${FRONT}/api/__guard/reset/x`);
+    firefox.d.fail(failed, "NS_ERROR_NET_RESET");
+    firefox.d.commit(`${FRONT}/api/__guard/reset/x`);
+    expect(firefox.j.requests[1]?.commit).toMatchObject({ document: 2 });
+  });
+  it("NAV2 a superseded navigation never commits: a commit of its URL after a later navigation began is not its commit", () => {
+    const { j, d } = recorded("chromium");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.commit(P);
+    d.request(N);
+    const second = d.request(`${FRONT}/api/__guard/status/504`);
+    d.commit(N);
+    expect(j.requests[1]).toMatchObject({
+      commit: null,
+      commitReason: `superseded by navigation #${second ? j.requests[2]?.seq : 0}`,
+    });
+    expect(j.navigations?.at(-1)).toMatchObject({
+      kind: "same-document",
+      document: 1,
+    });
+  });
+  it("NAV2 a navigation of a new page (no request seen) is a new unattributed document", () => {
+    const { j, d } = recorded("chromium");
+    d.commit(P);
+    expect(j.navigations).toMatchObject([
+      { kind: "new-document", document: 1, request: null },
+    ]);
+  });
+  it("revision 19's schedule (the review's): a fetch control, then the declared navigation; nothing is unexpected", () => {
+    const { j, d, forwarded, declare } = recorded("chromium");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.commit(P);
+    declare("/api/__guard/status/500", 500);
+    const f = d.request(`${FRONT}/api/__guard/status/500`, { nav: false });
+    forwarded(`${FRONT}/api/__guard/status/500`, 500);
+    d.respond(f, 500);
+    d.console(
+      "error",
+      "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+      `${FRONT}/api/__guard/status/500`,
+    );
+    declare("/api/__guard/status/503", 503);
+    const nav = d.request(N);
+    forwarded(N, 503);
+    d.respond(nav, 503);
+    d.commit(N);
+    d.console("error", S503, N);
+    const v = classifyJournal(j);
+    expect(
+      v.unexpected,
+      "the navigation's own message belongs to the document it committed",
+    ).toEqual([]);
+    expect(v.expected.map((p) => [p.document, p.evidence?.relation])).toEqual([
+      [1, "same-document"],
+      [2, "committed-by-navigation"],
+    ]);
+  });
+  it("NAV5 the envelope: frozen at the native listener, with the document of that moment, whenever it reaches the journal", () => {
+    const { j, d, held } = recorded("chromium", () => true);
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.commit(P);
+    d.console("error", CHROMIUM, `${FRONT}/x`);
+    const next = d.request(N);
+    d.respond(next, 200);
+    d.commit(N);
+    expect(held).toHaveLength(1);
+    expect(Object.isFrozen(held[0])).toBe(true);
+    expect(Object.isFrozen(held[0]?.observed)).toBe(true);
+    expect(
+      held[0]?.document,
+      "the document when the listener received it",
+    ).toBe(1);
+    expect(j.problems).toEqual([]);
+  });
+});
+
+describe("F31-1 the ingestion seam and the seal (C4)", () => {
+  /** A browser double whose context reports its engine and gives the lane one page double (driven by the case). */
+  function seamBrowser() {
+    let pageListener: ((page: unknown) => void) | null = null;
+    const pages: Array<ReturnType<typeof recorderPage>> = [];
+    const browser = {
+      newContext: (async () => ({
+        on: (event: string, listener: (page: unknown) => void) => {
+          if (event === "page") pageListener = listener;
+        },
+        addInitScript: async () => undefined,
+        close: async () => undefined,
+        browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
+      })) as unknown as Browser["newContext"],
+    };
+    const page = () => {
+      const d = recorderPage();
+      pages.push(d);
+      pageListener?.(d.page);
+      return d;
+    };
+    return { browser, page, pages };
+  }
+  const P = `${FRONT}/api/__guard/page`;
+  it("held then released before settlement: classified with its listener-time document; the engine is the context's", async () => {
+    const { browser, page } = seamBrowser();
+    const { info } = fakeInfo();
+    const holds: Array<() => void> = [];
+    const lanes = openTransportLanes(browser, info, {
+      ingest: (_p, deliver) => void holds.push(deliver),
+    });
+    const lane = await lanes.open({ mode: "fixture" });
+    expect(lane.journal.engine).toBe("chromium");
+    const d = page();
+    const r = d.request(P);
+    d.respond(r, 200);
+    d.commit(P);
+    d.console("warning", "held warning", P);
+    d.commit(`${FRONT}/elsewhere`);
+    expect(lane.heldProblems()).toHaveLength(1);
+    expect(lane.journal.problems).toEqual([]);
+    for (const deliver of holds.splice(0)) deliver();
+    expect(lane.journal.problems.map((p) => [p.document, p.type])).toEqual([
+      [1, "warning"],
+    ]);
+    const report = await lanes.settle();
+    expect(report.failures).toEqual([
+      expect.stringMatching(
+        /^lane 0 page 0 document 1 warning \[warning\]: held warning \(a warning always fails\)$/,
+      ),
+    ]);
+  });
+  it("held through settlement: the report fails by name; a delivery after the seal is late and never classified; a second delivery is misuse", async () => {
+    const { browser, page } = seamBrowser();
+    const { info, attached } = fakeInfo();
+    const holds: Array<() => void> = [];
+    const lateLines: string[] = [];
+    const lanes = openTransportLanes(browser, info, {
+      ingest: (_p, deliver) => void holds.push(deliver),
+      onLate: (l) => void lateLines.push(l),
+    });
+    const lane = await lanes.open({ mode: "fixture" });
+    const d = page();
+    d.console("error", CHROMIUM, P);
+    const report = await lanes.settle();
+    expect(report.failures).toEqual([
+      expect.stringMatching(
+        /^lane 0: a console problem captured at journal #\d+ \(page 0 document 0 error\) was still held by the ingestion seam when the journal was classified/,
+      ),
+    ]);
+    const [deliver] = holds;
+    deliver?.();
+    expect(lane.journal.problems, "never classified after the seal").toEqual(
+      [],
+    );
+    expect(lane.journal.late).toHaveLength(1);
+    expect(lanes.late).toEqual([
+      expect.stringMatching(
+        /delivered after the lane's journal was classified; not classified/,
+      ),
+    ]);
+    expect(lateLines).toEqual(lanes.late);
+    expect(attached.has("transport-ledger-0")).toBe(true);
+    deliver?.();
+    expect(lane.seal()).toEqual([
+      expect.stringMatching(/delivered journal #\d+ more than once/),
+    ]);
+  });
+  it("released during settlement (closing, before the seal): classified normally", async () => {
+    const { browser, page } = seamBrowser();
+    const { info } = fakeInfo();
+    const holds: Array<() => void> = [];
+    const lanes = openTransportLanes(browser, info, {
+      ingest: (_p, deliver) => void holds.push(deliver),
+    });
+    const lane = await lanes.open({ mode: "fixture" });
+    page().console("warning", "during", P);
+    const settling = lanes.settle();
+    for (const deliver of holds.splice(0)) deliver();
+    const report = await settling;
+    expect(report.failures).toEqual([
+      expect.stringMatching(/during \(a warning always fails\)$/),
+    ]);
+    expect(lane.journal.late ?? []).toEqual([]);
+  });
+  it("a seam that throws: the envelope is delivered at once and the misuse fails the report", async () => {
+    const { browser, page } = seamBrowser();
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(browser, info, {
+      ingest: () => {
+        throw new Error("seam broke");
+      },
+    });
+    const lane = await lanes.open({ mode: "fixture" });
+    page().console("warning", "thrown", P);
+    expect(lane.journal.problems).toHaveLength(1);
+    const report = await lanes.settle();
+    expect(report.failures).toContainEqual(
+      expect.stringMatching(
+        /the ingestion seam threw for journal #\d+: Error: seam broke/,
+      ),
+    );
+  });
+  it("without a seam: delivered at once, nothing held", async () => {
+    const { browser, page } = seamBrowser();
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(browser, info);
+    const lane = await lanes.open({ mode: "fixture" });
+    page().console("warning", "direct", P);
+    expect(lane.journal.problems).toHaveLength(1);
+    expect(lane.heldProblems()).toEqual([]);
+    await lanes.settle();
   });
 });

@@ -2,6 +2,7 @@ import { connect } from "node:net";
 import type { Browser, BrowserContext, Page } from "@playwright/test";
 import { expect, test } from "./helpers";
 import {
+  type Ingest,
   type Interpose,
   type LaneReport,
   LaneSeamMisuse,
@@ -24,6 +25,11 @@ import {
  * logs nothing for a failed fetch). HTTP statuses are provoked with fetch (Chromium and WebKit log them; Firefox does not, so its HTTP
  * schedules have no message to judge, and the declaration counts are judged from the browser's own responses in every engine). Delivery DELAY of a console event cannot be
  * controlled through Playwright: D06 is qualified on the pure journal only (tests/static/native-transport.test.ts).
+ *
+ * Revision 26 (Review 31 F31-1; NAV1–NAV5): a navigation's own response and its message, the document transitions of redirects, reloads,
+ * 204s, downloads, failed navigations and same-document changes, and a REAL native message held downstream of the lane's native listener
+ * (the `ingest` qualification seam) until after a restoration, a navigation, a page close or settlement. A delay BEFORE the listener (in
+ * the engine or Playwright) is still not controllable here: such a message is attributed to the document current when it arrives.
  */
 
 const GUARD = "/api/__guard";
@@ -357,6 +363,435 @@ test.describe("native transport guard (revision 19 qualification in real engines
       });
       expect(report.failures).toEqual([]);
     } finally {
+      await lanes.settle();
+    }
+  });
+});
+
+// ---- Revision 26 (Review 31 F31-1, family native-transport-console-attribution; design assessment token 37c3b6402c…, NAV1–NAV5) -------
+
+const S503 =
+  "Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
+/** The guard's lane with the navigation answers: a redirect, a 204, a download and a 503 document that forges the engine's message. */
+async function navigationLane(
+  lanes: ReturnType<typeof openTransportLanes>,
+): Promise<TransportLane> {
+  const lane = await guardLane(lanes);
+  await lane.routes.route(`**${GUARD}/redirect/*`, (route) =>
+    (route as unknown as OriginRoute).fulfill({
+      status: 302,
+      headers: {
+        location: `${GUARD}/status/${route.request().url().split("/").pop()}`,
+        "cache-control": "no-store",
+      },
+    }),
+  );
+  await lane.routes.route(`**${GUARD}/nocontent`, (route) =>
+    (route as unknown as OriginRoute).fulfill({
+      status: 204,
+      headers: { "cache-control": "no-store" },
+    }),
+  );
+  await lane.routes.route(`**${GUARD}/download`, (route) =>
+    (route as unknown as OriginRoute).fulfill({
+      status: 200,
+      contentType: "application/octet-stream",
+      headers: {
+        "content-disposition": "attachment; filename=guard.bin",
+        "cache-control": "no-store",
+      },
+      body: "guard",
+    }),
+  );
+  // The document's OWN console.error in the engine's wording, located at the document's URL (the navigation's URL).
+  await lane.routes.route(`**${GUARD}/forged`, (route) =>
+    (route as unknown as OriginRoute).fulfill({
+      status: 503,
+      contentType: "text/html",
+      headers: { "cache-control": "no-store" },
+      body: `<!doctype html><title>Forged</title><body>forged<script>console.error(${JSON.stringify(S503)})</script></body>`,
+    }),
+  );
+  return lane;
+}
+const path = (url: string) => url.replace(/^https?:\/\/[^/]+/, "");
+/** A page.goto that the engine refuses on purpose (a 204, a download, a lost navigation): its rejection is the point. */
+const refusedGoto = (page: Page, url: string) =>
+  page.goto(url).then(
+    () => "committed",
+    () => "refused",
+  );
+/**
+ * Each expected HTTP message's relation agrees with its own request: `same-document` exactly when the message is in the request's
+ * initiating document, otherwise `committed-by-navigation` for the document that request (a navigation) committed.
+ */
+const relationAgrees = (v: LaneVerdict, lane: TransportLane) =>
+  v.expected
+    .filter((p) => p.category === "http")
+    .every((p) => {
+      const r = lane.journal.requests.find(
+        (q) => q.seq === p.evidence?.request,
+      );
+      if (r === undefined) return false;
+      return p.document === r.document
+        ? p.evidence?.relation === "same-document"
+        : p.evidence?.relation === "committed-by-navigation" &&
+            r.navigation &&
+            r.commit?.document === p.document;
+    });
+
+test.describe("native transport navigation attribution (revision 26 qualification in real engines)", () => {
+  test("NAV1 Review 31's ordinary schedule: a declared fetch 500 and a declared navigation 503 are each expected once, by their own requests; the navigation keeps its initiating document and records the one it committed", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await navigationLane(lanes);
+      const page = await open(lane);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/status/500`,
+        status: 500,
+        count: 1,
+        reason: "NAV1 fetch control",
+      });
+      expect(await fetchStatus(page, `${GUARD}/status/500`)).toBe(500);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/status/503`,
+        status: 503,
+        count: 1,
+        reason: "NAV1 the navigation itself",
+      });
+      expect((await page.goto(`${GUARD}/status/503`))?.status()).toBe(503);
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(verdict.unexpected).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(
+        verdict.expected.map((p) => [p.category, p.status, path(p.url)]),
+      ).toEqual(
+        logsHttp(browserName)
+          ? [
+              ["http", 500, `${GUARD}/status/500`],
+              ["http", 503, `${GUARD}/status/503`],
+            ]
+          : [],
+      );
+      expect(relationAgrees(verdict, lane)).toBe(true);
+      const nav = lane.journal.requests.find((r) =>
+        r.url.endsWith(`${GUARD}/status/503`),
+      );
+      expect(nav).toMatchObject({
+        navigation: true,
+        document: 1,
+        terminal: { kind: "response", status: 503 },
+        commit: { document: 2 },
+      });
+      expect(verdict.expectations.map((e) => e.matched.length)).toEqual([1, 1]);
+      expect(lane.journal.engine).toBe(browserName);
+      await test.info().attach("nav1-relations", {
+        body: JSON.stringify(
+          verdict.expected.map((p) => ({
+            document: p.document,
+            relation: p.evidence?.relation,
+          })),
+        ),
+        contentType: "application/json",
+      });
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  test("NAV2 the document moves on only at a commit: a redirect chain commits once, a reload commits, a 204 and a download do not, fragments and history changes do not; a lost navigation's own message is its initiating document's", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await navigationLane(lanes);
+      const page = await open(lane);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/status/502`,
+        status: 502,
+        count: 2,
+        reason: "NAV2 the redirect's final hop and its reload",
+      });
+      expect((await page.goto(`${GUARD}/redirect/502`))?.status()).toBe(502);
+      expect((await page.reload())?.status()).toBe(502);
+      expect(await refusedGoto(page, `${GUARD}/nocontent`)).toBe("refused");
+      expect(await refusedGoto(page, `${GUARD}/download`)).toBe("refused");
+      await page.evaluate(() => {
+        location.hash = "fragment";
+        history.pushState({}, "", "/api/__guard/pushed");
+      });
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/status/500`,
+        status: 500,
+        count: 1,
+        reason: "NAV2 a fetch of the document the reload committed",
+      });
+      expect(await fetchStatus(page, `${GUARD}/status/500`)).toBe(500);
+      await quiet(lane);
+      await lane.lose();
+      expect(await refusedGoto(page, `${GUARD}/reset/navigation`)).toBe(
+        "refused",
+      );
+      await quiet(lane);
+      expect(await lane.restore()).toEqual([]);
+      await page.goto(`${GUARD}/page?after`);
+      await quiet(lane);
+      const { verdict } = await settle(lanes, lane);
+      expect(verdict.unexpected).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      const req = (suffix: string) =>
+        lane.journal.requests.filter((r) => r.url.endsWith(suffix));
+      expect(req(`${GUARD}/redirect/502`)).toMatchObject([
+        {
+          document: 1,
+          commit: null,
+          commitReason: expect.stringMatching(/^redirected to #\d+$/),
+        },
+      ]);
+      const finals = req(`${GUARD}/status/502`);
+      expect(finals.map((r) => [r.document, r.commit?.document])).toEqual([
+        [1, 2],
+        [2, 3],
+      ]);
+      expect(finals[0]?.redirectedFrom).toBe(
+        req(`${GUARD}/redirect/502`)[0]?.seq,
+      );
+      for (const suffix of [`${GUARD}/nocontent`, `${GUARD}/download`])
+        expect(req(suffix), suffix).toMatchObject([
+          {
+            document: 3,
+            commit: null,
+            commitReason: expect.stringMatching(
+              /^(ended after its response without committing a document|superseded by navigation #\d+)$/,
+            ),
+          },
+        ]);
+      expect(req(`${GUARD}/status/500`).map((r) => r.document)).toEqual([3]);
+      const lost = req(`${GUARD}/reset/navigation`);
+      expect(lost.every((r) => r.document === 3)).toBe(true);
+      // Chromium and Firefox commit an error document for the lost navigation (Chromium's off the HTTP origin, unattributed; Firefox's at
+      // its URL, that navigation's commit); WebKit commits none.
+      const errorDocument = browserName !== "webkit";
+      expect(req(`${GUARD}/page?after`).map((r) => r.document)).toEqual([
+        errorDocument ? 4 : 3,
+      ]);
+      expect(
+        (lane.journal.navigations ?? []).map((n) => [
+          n.kind,
+          n.document,
+          n.request === null ? null : "request",
+        ]),
+      ).toEqual([
+        ["new-document", 1, "request"],
+        ["new-document", 2, "request"],
+        ["new-document", 3, "request"],
+        ["same-document", 3, null],
+        ["same-document", 3, null],
+        ...(browserName === "chromium"
+          ? [["new-document", 4, null]]
+          : browserName === "firefox"
+            ? [["new-document", 4, "request"]]
+            : []),
+        ["new-document", errorDocument ? 5 : 4, "request"],
+      ]);
+      expect(
+        verdict.expected.map((p) => [p.category, p.status ?? null]),
+      ).toEqual([
+        ...(logsHttp(browserName)
+          ? [
+              ["http", 502],
+              ["http", 502],
+              ["http", 500],
+            ]
+          : []),
+        // WebKit logs the lost navigation's failure in the document it was issued from (no error document is committed).
+        ...(browserName === "webkit" ? [["network", null]] : []),
+      ]);
+      expect(relationAgrees(verdict, lane)).toBe(true);
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  test("NAV3 two pages navigate to one URL with one declared status: only the first is declared; the other's message is unexpected and its response is beyond the declaration", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await navigationLane(lanes);
+      const a = await open(lane, 1);
+      const b = await open(lane, 2);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/status/503`,
+        status: 503,
+        count: 1,
+        reason: "NAV3 page A's navigation",
+      });
+      expect((await a.goto(`${GUARD}/status/503`))?.status()).toBe(503);
+      await quiet(lane);
+      expect((await b.goto(`${GUARD}/status/503`))?.status()).toBe(503);
+      await quiet(lane);
+      const { verdict } = await settle(lanes, lane);
+      expect(
+        verdict.problems.map((p) => [p.page, p.category, p.verdict]),
+      ).toEqual(
+        logsHttp(browserName)
+          ? [
+              [0, "http", "expected"],
+              [1, "http", "unexpected"],
+            ]
+          : [],
+      );
+      expect(verdict.violations).toEqual([
+        expect.stringMatching(/1 response\(s\) beyond the declared 1/),
+      ]);
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  test("NAV4 a document's own message forged in the engine's wording at the navigation's URL, and an undeclared navigation status, stay unexpected; the declared navigation's message is credited once", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await navigationLane(lanes);
+      const page = await open(lane);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/forged`,
+        status: 503,
+        count: 1,
+        reason: "NAV4 the forging document's navigation",
+      });
+      expect((await page.goto(`${GUARD}/forged`))?.status()).toBe(503);
+      await quiet(lane);
+      expect((await page.goto(`${GUARD}/status/504`))?.status()).toBe(504);
+      await quiet(lane);
+      const { verdict } = await settle(lanes, lane);
+      expect(
+        verdict.problems.map((p) => [
+          path(p.url),
+          p.category,
+          p.status,
+          p.verdict,
+        ]),
+      ).toEqual([
+        ...(logsHttp(browserName)
+          ? [
+              [`${GUARD}/forged`, "http", 503, "expected"],
+              [`${GUARD}/forged`, "http", 503, "unexpected"],
+              [`${GUARD}/status/504`, "http", 504, "unexpected"],
+            ]
+          : [[`${GUARD}/forged`, "http", 503, "unexpected"]]),
+      ]);
+      expect(verdict.violations).toEqual([]);
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  for (const release of ["restore", "navigate", "close"] as const)
+    test(`NAV5 a real native message held at the ingestion seam, released after ${release}: it keeps the page and document its listener saw; the unrelated page still works`, async ({
+      browser,
+      browserName,
+    }) => {
+      const holds: Array<() => void> = [];
+      let holding = false;
+      const ingest: Ingest = (p, deliver) => {
+        if (holding && p.category === "network") holds.push(deliver);
+        else deliver();
+      };
+      const lanes = openTransportLanes(browser, test.info(), { ingest });
+      try {
+        const lane = await guardLane(lanes);
+        const a = await open(lane, 1);
+        const b = await open(lane, 2);
+        const url = `${GUARD}/reset/held`;
+        await lane.lose();
+        holding = true;
+        expect(await networkFailure(a, url, browserName)).toBe("failed");
+        await expect.poll(() => holds.length).toBe(1);
+        expect(lane.heldProblems()).toMatchObject([
+          { page: 0, document: 1, category: "network" },
+        ]);
+        expect(lane.journal.problems).toEqual([]);
+        expect(await lane.restore()).toEqual([]);
+        if (release === "navigate") await a.goto(`${GUARD}/page?new`);
+        if (release === "close") await a.close();
+        holding = false;
+        for (const deliver of holds.splice(0)) deliver();
+        if (release === "navigate")
+          expect(await networkFailure(a, url, browserName)).toBe("failed");
+        expect(lane.judge(await lane.probe(b), "online")).toEqual([]);
+        await quiet(lane);
+        const { verdict } = await settle(lanes, lane);
+        expect(
+          verdict.problems.map((p) => [
+            p.page,
+            p.document,
+            p.category,
+            p.verdict,
+          ]),
+        ).toEqual([
+          [0, 1, "network", "expected"],
+          ...(release === "navigate" ? [[0, 2, "network", "unexpected"]] : []),
+        ]);
+      } finally {
+        holding = false;
+        for (const deliver of holds.splice(0)) deliver();
+        await lanes.settle();
+      }
+    });
+
+  test("NAV5 a real native message still held when settlement classifies: the report fails by name; its later delivery is late and never classified", async ({
+    browser,
+    browserName,
+  }) => {
+    const holds: Array<() => void> = [];
+    const lateLines: string[] = [];
+    const lanes = openTransportLanes(browser, test.info(), {
+      ingest: (p, deliver) => {
+        if (p.category === "network") holds.push(deliver);
+        else deliver();
+      },
+      onLate: (line) => void lateLines.push(line),
+    });
+    try {
+      const lane = await guardLane(lanes);
+      const a = await open(lane, 1);
+      await lane.lose();
+      expect(
+        await networkFailure(a, `${GUARD}/reset/settled`, browserName),
+      ).toBe("failed");
+      await expect.poll(() => holds.length).toBe(1);
+      expect(await lane.restore()).toEqual([]);
+      const report = await lanes.settle();
+      expect(report.closeErrors).toEqual([]);
+      expect(report.failures).toEqual([
+        expect.stringMatching(
+          /^lane 0: a console problem captured at journal #\d+ \(page 0 document 1 error\) was still held by the ingestion seam when the journal was classified/,
+        ),
+      ]);
+      for (const deliver of holds.splice(0)) deliver();
+      expect(lane.journal.problems).toEqual([]);
+      expect(lane.journal.late).toHaveLength(1);
+      expect(lateLines).toEqual([expect.stringMatching(/not classified/)]);
+    } finally {
+      for (const deliver of holds.splice(0)) deliver();
       await lanes.settle();
     }
   });
