@@ -15,6 +15,7 @@
 // after the reload began) is at the gate BEFORE the gate opens. A failing control or hook propagates and leaves the gate CLOSED (the owner's
 // conclusion decides what happens to the attempt); nothing here opens it on failure.
 import assert from "node:assert/strict";
+import { pickHeld } from "./pair-attempts.mjs";
 
 /** The keys of the diagnostic `inspect` result the expiry's clock steps must leave unchanged (the durable baseline). */
 export const UNCHANGED_BY_CLOCK = Object.freeze([
@@ -39,7 +40,8 @@ export function continuationOf(record, headerOf) {
 /**
  * The shared schedule at the chosen piece. `io`: gate(open) (the tap's request gate); release() (the held piece to the client);
  * untilStored(ctx) (the piece persisted as the stage: the stored cursor is ctx.token and the stage's next index the header's);
- * untilGated(ctx) (the client's next request, with ctx.token, recorded at the closed gate and not forwarded). `control(ctx)` runs the
+ * untilGated(ctx) → the client's next request, with ctx.token, recorded at the closed gate and not forwarded; optional queued(request,
+ * ctx) (revision 39: XL0 binds that request as the DEPARTED one, `refusalPair`, before the control runs). `control(ctx)` runs the
  * diagnostic command(s); the gate opens only after it resolves. Resolves with the context.
  */
 export async function queueContinuation(io, record, control) {
@@ -47,7 +49,8 @@ export async function queueContinuation(io, record, control) {
   await io.gate(true);
   await io.release();
   await io.untilStored(ctx);
-  await io.untilGated(ctx);
+  const queued = await io.untilGated(ctx);
+  await io.queued?.(queued, ctx);
   await control(ctx);
   await io.gate(false);
   return ctx;
@@ -99,22 +102,32 @@ export function expiryControl(io, hooks = {}) {
 
 /**
  * The reloaded page's own request (XL0): a /sync of the interval `label`, at the closed gate, with the context's cursor, requested at a
- * causal position AFTER the reload began (`begin`). The departed page's request (requested before) is never it.
+ * causal position AFTER the reload began (`begin`). The departed page's request (requested before) is never it. Revision 39: more than one
+ * such request is ambiguity and throws (never the first of several).
  */
-export const reloadedRequest = (records, { label, token, begin }) =>
-  records.find(
+export const reloadedRequest = (records, { label, token, begin }) => {
+  const found = records.filter(
     (r) =>
       r.label === label &&
       r.gated === true &&
+      typeof token === "string" &&
+      token.length > 0 &&
       r.query?.cursor === token &&
       (r.j_request ?? 0) > begin,
-  ) ?? null;
+  );
+  if (found.length > 1)
+    throw new Error(
+      `requests ${found.map((r) => r.seq).join(",")} all claim to be the reloaded page's request: ambiguity, not a choice`,
+    );
+  return found[0] ?? null;
+};
 
 /**
  * XL0's `afterE` hook: the reload after E is acknowledged and before the gate opens. `io`: mark(name) → journal position; beforeReload()
  * (the trace kept); reload() (the page navigated away and booted again on the same page object); records() → the tap's /sync records;
  * stored() → the reloaded page's stored state; until(read, accept, what) (bounded poll; throws on its deadline); label; after(stored) (the
- * local-work barrier). Every comparison is with `ctx.token` — the continuation handed to the hook, never a value assigned later.
+ * local-work barrier); optional reloaded(request, {begin, ctx}) (revision 39: XL0 binds the request as the LIVE one, `refusalPair`, while
+ * the gate is still closed). Every comparison is with `ctx.token` — the continuation handed to the hook, never a value assigned later.
  */
 export function reloadHook(io) {
   return async (ctx) => {
@@ -123,18 +136,204 @@ export function reloadHook(io) {
     await io.reload();
     await io.mark("reload_end");
     // The reloaded page's own request, with the SAME stored continuation, queued at the gate after the reload began.
+    let request = null;
     const s = await io.until(
-      async () =>
-        reloadedRequest(await io.records(), {
+      async () => {
+        const found = reloadedRequest(await io.records(), {
           label: io.label,
           token: ctx.token,
           begin,
-        })
-          ? await io.stored()
-          : null,
+        });
+        if (!found) return null;
+        request = found;
+        return await io.stored();
+      },
       (x) => x?.cursor === ctx.token,
       "the reloaded page asks again from the stored continuation",
     );
+    await io.reloaded?.(request, { begin, ctx });
     await io.after(s);
+  };
+}
+
+/**
+ * Revision 39 (R39-DIAG, family `segmented-sync-development-pairing`; design assessment C1/C2): XL0's TWO refusals of one continuation,
+ * bound by identity and handled in that order whatever order their answers become available in.
+ *
+ * The defect: XL0 recognised the reloaded page's live 410 only once the departed page's 410 had been handled. The tap forwards both gated
+ * requests when the gate opens without awaiting either answer, and the holding proxy holds an answer only once its upstream completed, so
+ * request order says nothing about which answer is held first. When the live answer completed first, the driver released it as an ordinary
+ * answer (no held-refusal observation, no hand-off), the client began its snapshot recovery, and the driver's next check of the stored
+ * cursor failed against a model that had not seen the 410 (review run PAIR-XL0-chromium-370f3ae03603: request 237 completed at journal 1252,
+ * departed request 231 at 1256).
+ *
+ * Invariants: the DEPARTED request D (queued at the closed gate before the clock steps, `queued`) and the LIVE request L (the reloaded page's
+ * own request, queued after the reload began and still gated, `reloaded`) are bound before the gate opens, each with its tap seq, proxy
+ * correlation and causal request position, distinct, of this interval, carrying the context's continuation and unforwarded. The selection
+ * (`select`, given to the driver) then chooses ONLY D while D is unaccounted — a held L is left untouched, never released, whatever its
+ * arrival — and only L after D was handled; any other held answer, a duplicate, a mis-joined entry or a D still held after its release
+ * fails the drive. `answer` (the case's hook) requires both answers to be the server's own, unaltered 410 resync_required: D is released
+ * to nobody (`{delivered: false}`, its real downstream outcome kept by the driver's ledger), then L, while still HELD, is given to
+ * `hooks.live` (the held-refusal observation and follower) and the drive hands off at it. Nothing is waited for by a clock here; the
+ * driver's own bounded deadline applies. A failing hook or release propagates and leaves L held for the failure's owner.
+ */
+export function refusalPair({ label }) {
+  if (typeof label !== "string" || label.length === 0)
+    throw new Error("a refusal pair belongs to one named interval");
+  let token = null;
+  let departed = null;
+  let live = null;
+  let begin = null;
+  let accounted = false;
+  let handedOff = false;
+  const fail = (what) => {
+    throw new Error(`XL0 refusal pair: ${what}`);
+  };
+  const bindable = (r, ctx, what) => {
+    if (!(Number.isInteger(r?.seq) && Number.isInteger(r?.proxy_id)))
+      fail(`${what} carries no tap seq and proxy correlation`);
+    if (r.label !== label)
+      fail(`${what} ${r.seq} belongs to ${r.label}, not ${label}`);
+    if (r.gated !== true) fail(`${what} ${r.seq} was not queued at the gate`);
+    if (
+      !(typeof ctx?.token === "string" && ctx.token.length > 0) ||
+      r.query?.cursor !== ctx.token
+    )
+      fail(`${what} ${r.seq} does not carry the continuation`);
+    if (
+      r.t_gate_open !== undefined ||
+      !(r.status === null || r.status === undefined)
+    )
+      fail(`${what} ${r.seq} was already forwarded`);
+    if (!Number.isInteger(r.j_request))
+      fail(`${what} ${r.seq} has no causal request position`);
+    return Object.freeze({
+      seq: r.seq,
+      proxy_id: r.proxy_id,
+      j_request: r.j_request,
+    });
+  };
+  const which = (record) => {
+    if (record?.seq === departed.seq) return ["departed", departed];
+    if (record?.seq === live.seq) return ["live", live];
+    return [null, null];
+  };
+  const select = {
+    pick(heldIds, records) {
+      if (departed === null && live === null) return pickHeld(heldIds, records);
+      if (live === null)
+        fail("an answer is selected while only the departed request is bound");
+      if (handedOff) fail("an answer is selected after the hand-off");
+      const ids = [...heldIds];
+      const others = ids.filter(
+        (id) => id !== departed.proxy_id && id !== live.proxy_id,
+      );
+      if (others.length > 0)
+        fail(
+          `held proxy entries ${others.join(",")} are neither the departed (${departed.proxy_id}) nor the live (${live.proxy_id}) request`,
+        );
+      if (accounted && ids.includes(departed.proxy_id))
+        fail(
+          `the departed answer (proxy ${departed.proxy_id}) is still held after its release`,
+        );
+      const want = accounted ? live : departed;
+      if (!ids.includes(want.proxy_id)) return null;
+      const picked = pickHeld([want.proxy_id], records);
+      if (picked && picked.record.seq !== want.seq)
+        fail(
+          `proxy entry ${want.proxy_id} is joined to tap record ${picked.record.seq}, not the bound ${want.seq}`,
+        );
+      return picked;
+    },
+    waiting() {
+      if (live === null) return "nothing (the pair is not bound)";
+      const want = accounted ? ["live", live] : ["departed", departed];
+      return `the ${want[0]} request's answer (tap ${want[1].seq}, proxy ${want[1].proxy_id})`;
+    },
+  };
+  return {
+    select,
+    /** `queueContinuation`'s `queued`: the departed page's request, at the closed gate before the control. */
+    queued(record, ctx) {
+      if (departed !== null) fail("the departed request is bound twice");
+      departed = bindable(record, ctx, "the departed request");
+      token = ctx.token;
+    },
+    /** `reloadHook`'s `reloaded`: the reloaded page's own request, at the still-closed gate after the reload began. */
+    reloaded(record, { begin: at, ctx }) {
+      if (departed === null)
+        fail("the live request is bound before the departed one");
+      if (live !== null) fail("the live request is bound twice");
+      if (ctx?.token !== token)
+        fail("the live request is bound with another continuation");
+      const l = bindable(record, ctx, "the reloaded request");
+      if (
+        !(Number.isInteger(at) && departed.j_request < at && at < l.j_request)
+      )
+        fail(
+          `the requests are not on either side of the reload (departed ${departed.j_request}, reload ${at}, live ${l.j_request})`,
+        );
+      if (l.seq === departed.seq || l.proxy_id === departed.proxy_id)
+        fail(`the reloaded request ${l.seq} is the departed one`);
+      live = l;
+      begin = at;
+    },
+    /** The bound identities (for the proof's checks and diagnosis); null until both are bound. */
+    bound() {
+      return live === null
+        ? null
+        : Object.freeze({ label, departed, live, reload_begin: begin });
+    },
+    /**
+     * The case's held-answer hook once the pair is bound (undefined before: pieces before the schedule are ordinary). `hooks.lost(record)`
+     * after D's release; `hooks.live(record)` while L is held (its rejection propagates, L stays held).
+     */
+    async answer({ record, release }, hooks) {
+      if (live === null) {
+        if (departed !== null)
+          fail(
+            `answer ${record?.seq} is handled while only the departed request is bound`,
+          );
+        return undefined;
+      }
+      const [role, bound] = which(record);
+      if (role === null)
+        fail(
+          `answer ${record?.seq} is neither the departed (${departed.seq}) nor the live (${live.seq}) request`,
+        );
+      if (record.proxy_id !== bound.proxy_id)
+        fail(
+          `answer ${record.seq} came through proxy entry ${record.proxy_id}, not ${bound.proxy_id}`,
+        );
+      if (
+        record.status !== 410 ||
+        record.code !== "resync_required" ||
+        record.delivered !== undefined ||
+        record.dropped !== undefined
+      )
+        fail(
+          `the ${role} request ${record.seq} was answered ${record.status} ${record.code ?? ""}, not the server's own 410 resync_required`,
+        );
+      if (role === "departed") {
+        if (accounted)
+          fail(`the departed answer ${record.seq} is handled twice`);
+        await release();
+        accounted = true;
+        await hooks?.lost?.(record);
+        return { delivered: false };
+      }
+      if (!accounted)
+        fail(
+          `the live refusal ${record.seq} is handled before the departed request ${departed.seq} was accounted`,
+        );
+      if (handedOff) fail(`the live refusal ${record.seq} is handled twice`);
+      await hooks.live(record);
+      handedOff = true;
+      return {
+        stop: true,
+        reason:
+          "the server's real 410 (expiry) to the reloaded page: the recovery is observed",
+      };
+    },
   };
 }

@@ -152,6 +152,11 @@ export interface Driven<R, S> {
   handOff: { at_seq: number; reason: string } | null;
   terminal: { final_seq: number; activated_by_seq: number } | null;
 }
+/** Revision 39 (R39-DIAG): an identity-aware choice of the next held answer (pair-schedule.mjs `refusalPair`); default `pickHeld`. */
+export interface HeldSelection<R> {
+  pick(heldIds: number[], records: R[]): { record: R; proxyId: number } | null;
+  waiting?(): string;
+}
 export function drive<R, S extends StoredLike>(
   io: DriveIo<R, S>,
   options: {
@@ -164,6 +169,7 @@ export function drive<R, S extends StoredLike>(
     maxSteps?: number;
     heldTimeoutMs?: number;
     localWork?: boolean;
+    select?: HeldSelection<R>;
   },
 ): Promise<Driven<R, S>>;
 export type { Attempt, Persisted };

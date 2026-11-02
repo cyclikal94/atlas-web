@@ -214,12 +214,19 @@ export async function openHold(io, { label, maxWaitMs = 30_000 }) {
  *
  * io: held(ruleId); records() (the interval's sync records); read(); release(ruleId, proxyId) → {released, outcomes}; nudge();
  *     waitFor(predicate, what, {rows}) → the stored state once it holds; barrier(name, detail); now(); sleep(ms).
+ *
+ * Revision 39 (R39-DIAG; design assessment C2): `o.select` is an optional, identity-aware selection of the next held answer, consulted at
+ * this one point BEFORE an entry is marked handled, an attempt is opened or anything is released: `pick(held, records)` → {record,
+ * proxyId} | null (null: nothing selectable yet, keep waiting within `heldTimeoutMs`; a throw fails the drive), `waiting()` → what it waits
+ * for (the timeout's diagnosis). Without it the driver picks the oldest held entry (`pickHeld`), as before. A selection never releases,
+ * reorders the network or rewrites an answer: it only chooses WHICH held answer the driver handles next (pair-schedule.mjs `refusalPair`).
  */
 export async function drive(io, o) {
   const { ruleId, base } = o;
   const ledger = o.ledger ?? createLedger();
   const maxSteps = o.maxSteps ?? 600;
   const heldTimeoutMs = o.heldTimeoutMs ?? 90_000;
+  const select = o.select ?? null;
   let model = { pages: 0, ...o.model };
   let live = {
     applied_revision: base.applied_revision,
@@ -281,12 +288,16 @@ export async function drive(io, o) {
             phase: phase(),
           });
         }
-      picked = pickHeld(held, records);
+      picked = select ? select.pick(held, records) : pickHeld(held, records);
       if (picked) break;
       if (io.now() > deadline)
         throw new Error(
           diagnose(
-            `no /sync answer was held within ${heldTimeoutMs} ms (after attempt ${index})`,
+            `no /sync answer was held within ${heldTimeoutMs} ms (after attempt ${index})${
+              select?.waiting
+                ? `; the selection waits for ${select.waiting()}`
+                : ""
+            }`,
           ),
         );
       await io.sleep(25);

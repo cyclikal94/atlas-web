@@ -362,6 +362,19 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   production range are unchanged, and the production build contains none of it. Qualified against the fixture DOM in three engines
   (`tests/e2e/fixture.pair-compat.spec.ts`), not yet against the executable: it changes every diagnostic page's composition, so no earlier
   diagnostic cell is carried forward without the reviewer's impact assessment.
+  Revision 39 (R39-DIAG): with the compatibility corrected, the independent review's Chromium XL0 attempt (2 November 2026, that attempt stays failed)
+  sent and receipted its command and reloaded, then failed `stored cursor`: XL0 recognised the reloaded page's live 410 only after the departed page's
+  410 had been handled, but the tap forwards both gated requests at once and the holding proxy holds an answer only when its upstream completes, so the
+  live answer (completed first) was released as an ordinary answer, unobserved, and the client began its snapshot recovery. Now the two requests are
+  bound by identity before the gate opens (`pair-schedule.mjs` `refusalPair`: the departed one when `queueContinuation` sees it gated, the live one in
+  `reloadHook` after the reload began; distinct, of this interval, with the continuation, unforwarded, on either side of the reload; an ambiguous
+  reloaded request fails), and the driver's optional selection (`drive`'s `select`, consulted before anything is handled or released) takes ONLY the
+  departed answer while it is unaccounted, leaving a held live refusal untouched, then the live one. Both must be the server's own 410; the departed
+  answer is released to nobody (lost, its real downstream outcome kept), the live refusal is observed while held and handed off; any other held answer,
+  a mis-joined entry or a failed release or preparation fails with the live refusal still held. Request forwarding, the completion chronology, every
+  cursor/stage check, the real command/receipt, expiry, reload, recovery observation and settlement are unchanged. Qualified with the maintained code in
+  every completion order, the verbatim old branches as the sensitivity control, and the real tap → holding proxy hop
+  (`scripts/integration/pair-refusal-order.test.mjs`); not yet against the executable.
   A refused anchor or guard keeps the source (`remove:false`); a complete attempt needs that retention verified; nothing removes the retained directory, on any outcome
   (it survives the outer driver only under the reviewed retention wrapper, whose TMPDIR is outside the shared driver's purge). A startup failure before
   `ready` is removed by the executable itself and is NOT covered (design assessment D2, owner decision open). **Status: the adapter and the five cases

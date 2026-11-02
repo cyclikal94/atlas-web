@@ -15,6 +15,8 @@ export function queueContinuation<H>(
     release(): Promise<void>;
     untilStored(ctx: ContinuationContext<H>): Promise<unknown>;
     untilGated(ctx: ContinuationContext<H>): Promise<unknown>;
+    /** Revision 39: the gated request `untilGated` resolved with, before the control (XL0's departed request, `refusalPair`). */
+    queued?(request: unknown, ctx: ContinuationContext<H>): unknown;
   },
   record: { seq?: number; next_cursor?: unknown },
   control: (ctx: ContinuationContext<H>) => Promise<void>,
@@ -64,4 +66,54 @@ export function reloadHook<S extends { cursor: string | null }>(io: {
   ): Promise<S>;
   label: string;
   after(s: S): Promise<void>;
+  /** Revision 39: the reloaded page's own request, while the gate is still closed (XL0's live request, `refusalPair`). */
+  reloaded?(
+    request: unknown,
+    at: { begin: number; ctx: ContinuationContext },
+  ): unknown;
 }): (ctx: ContinuationContext) => Promise<void>;
+
+/** Revision 39 (R39-DIAG): one bound request of the pair. */
+export interface BoundRequest {
+  readonly seq: number;
+  readonly proxy_id: number;
+  readonly j_request: number;
+}
+export interface RefusalRecord {
+  seq: number;
+  proxy_id?: number | null;
+  status?: number | null;
+  code?: string | null;
+  delivered?: unknown;
+  dropped?: unknown;
+}
+/** Revision 39 (R39-DIAG): XL0's departed and live refusals, bound by identity and handled in that order (pair-schedule.mjs). */
+export function refusalPair<R extends RefusalRecord>(o: {
+  label: string;
+}): {
+  select: {
+    pick(
+      heldIds: number[],
+      records: R[],
+    ): { record: R; proxyId: number } | null;
+    waiting(): string;
+  };
+  queued(request: unknown, ctx: ContinuationContext<unknown>): void;
+  reloaded(
+    request: unknown,
+    at: { begin: number; ctx: ContinuationContext<unknown> },
+  ): void;
+  bound(): {
+    readonly label: string;
+    readonly departed: BoundRequest;
+    readonly live: BoundRequest;
+    readonly reload_begin: number;
+  } | null;
+  answer(
+    step: { record: R; release(): Promise<void> },
+    hooks: {
+      lost?: (record: R) => unknown;
+      live: (record: R) => Promise<unknown>;
+    },
+  ): Promise<{ delivered: false } | { stop: true; reason: string } | undefined>;
+};

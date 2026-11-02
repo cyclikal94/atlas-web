@@ -251,6 +251,22 @@ describe("the spec is exactly the explicit matrix", () => {
     expect(src).not.toMatch(/\(tok: string\)/);
   });
 
+  it("revision 39 (R39-DIAG): XL0's two refusals are the maintained refusalPair, bound at the gate and the reload and selected by identity", () => {
+    const src = code("tests/pair/pair.development.spec.ts");
+    expect(src).toMatch(
+      /const pair = refusalPair<TapRecord>\(\{\s*label: o\.iv\.id\s*\}\)/,
+    );
+    expect(src.match(/select: pair\.select,/g)?.length).toBe(1);
+    expect(src).toMatch(
+      /reloaded: \(request, at\) => pair\.reloaded\(request, at\)/,
+    );
+    expect(src).toMatch(/\(request, ctx\) => pair\.queued\(request, ctx\)/);
+    expect(src).toMatch(/return pair\.answer\(/);
+    // The order-dependent branches (the departed 410 required to be handled first) are gone.
+    expect(src).not.toMatch(/lost !== null && refused === null/);
+    expect(src).not.toMatch(/j_request \?\? 0\) < \(m\.marks\.reload_begin/);
+  });
+
   it("every case asks for its own matrix row (the designed skip on a backend it is not executable on)", () => {
     const rows = spec.match(/caseRow\((?:"(PAIR-[A-Z]+[0-9]+)"|id)\)/g) ?? [];
     const literal = rows.filter((r) => r.includes('"')).length;

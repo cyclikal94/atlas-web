@@ -20,6 +20,7 @@ import {
   type Driven,
   type HeldStep as DriverStep,
   drive,
+  type HeldSelection,
   type HookAnswer,
   type Milestone,
   openHold,
@@ -1278,6 +1279,8 @@ export async function drivePieces(options: {
   maxSteps?: number;
   /** Revision 27 (C4): the case admits named local work (its matrix row says so); every other case keeps the zero-draft premise. */
   localWork?: boolean;
+  /** Revision 39 (R39-DIAG): an identity-aware choice of the next held answer (XL0's `refusalPair`); default the oldest held entry. */
+  select?: HeldSelection<TapRecord>;
 }): Promise<Driven<TapRecord, Stored>> {
   const { account, iv } = options;
   if (!iv.hold || iv.hold.closed)
@@ -1324,6 +1327,7 @@ export async function drivePieces(options: {
       ledger,
       maxSteps: options.maxSteps,
       localWork: options.localWork ?? false,
+      select: options.select,
     },
   );
   iv.target = { ...run.goal, sources: run.sources };

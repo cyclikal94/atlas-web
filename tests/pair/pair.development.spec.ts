@@ -9,6 +9,7 @@ import {
   type ContinuationContext,
   expiryControl as expirySchedule,
   queueContinuation as queueSchedule,
+  refusalPair,
   reloadHook,
 } from "../../scripts/integration/pair-schedule.mjs";
 import {
@@ -1116,6 +1117,8 @@ function queueContinuation(
   record: TapRecord,
   release: () => Promise<void>,
   control: (ctx: Continuation) => Promise<void>,
+  // Revision 39 (R39-DIAG): XL0 binds the gated request as its departed request before the control runs (pair-schedule.mjs `refusalPair`).
+  queued?: (request: TapRecord, ctx: Continuation) => void,
 ): Promise<Continuation> {
   return queueSchedule(
     {
@@ -1131,6 +1134,9 @@ function queueContinuation(
           "the staged piece persisted, its continuation stored",
         ),
       untilGated: (ctx) => untilGated(o.iv, ctx.token),
+      queued: queued
+        ? (request, ctx) => queued(request as TapRecord, ctx)
+        : undefined,
     },
     record,
     control,
@@ -1637,6 +1643,9 @@ test("PAIR-XL0: REAL EXPIRY with named admitted LOCAL WORK and a RELOAD: one cre
   let refused: TapRecord | null = null;
   let held: Awaited<ReturnType<typeof atHeldRefusal>> | null = null;
   let token = "";
+  // Revision 39 (R39-DIAG): the departed and the live request are bound by identity before the gate opens, and the driver handles the
+  // departed answer first and the live refusal (still held) second, whichever the proxy held first (pair-schedule.mjs `refusalPair`).
+  const pair = refusalPair<TapRecord>({ label: o.iv.id });
   await drivePieces({
     page: () => o.page,
     account,
@@ -1644,6 +1653,7 @@ test("PAIR-XL0: REAL EXPIRY with named admitted LOCAL WORK and a RELOAD: one cre
     old: o.old,
     model: o.model,
     localWork: true,
+    select: pair.select,
     start: () => access(o.w, "grant", o.workload.person, account),
     onHeld: async ({ record, piece, before, release, declareLocalWork }) => {
       if (staged === null && isScheduledPiece(piece)) {
@@ -1760,33 +1770,29 @@ test("PAIR-XL0: REAL EXPIRY with named admitted LOCAL WORK and a RELOAD: one cre
                     P,
                   );
                 },
+                // The reloaded page's own request, bound as the live one while the gate is still closed.
+                reloaded: (request, at) => pair.reloaded(request, at),
               }),
             }),
+            // The request the departed page queued before the clock steps, bound before the control runs.
+            (request, ctx) => pair.queued(request, ctx),
           )
         ).token;
         return undefined;
       }
-      if (
-        staged !== null &&
-        lost === null &&
-        record.status === 410 &&
-        (record.j_request ?? 0) < (m.marks.reload_begin ?? 0)
-      ) {
-        // The request the departed page queued before the clock steps: the server's 410 reaches nobody.
-        lost = record;
-        await release();
-        return { delivered: false };
-      }
-      if (lost !== null && refused === null && record.status === 410) {
-        refused = record;
-        held = await atHeldRefusal(o, context, record, before, controls);
-        return {
-          stop: true,
-          reason:
-            "the server's real 410 (expiry) to the reloaded page: the recovery is observed",
-        };
-      }
-      return undefined;
+      // The departed page's 410 reaches nobody (lost, released first); the live 410 is observed while held and handed off.
+      return pair.answer(
+        { record, release },
+        {
+          lost: (r) => {
+            lost = r;
+          },
+          live: async (r) => {
+            refused = r;
+            held = await atHeldRefusal(o, context, r, before, controls);
+          },
+        },
+      );
     },
   });
   const answer = refused as TapRecord | null;

@@ -2368,6 +2368,30 @@ test("XL0: expiry with admitted local work and a reload is accepted (settled by 
   };
   assert.deepEqual(xl0(owed), []);
 });
+// Revision 39 (R39-DIAG; design assessment Q6): the saved route judges XL0 by request identity and causal request/gate positions, never by
+// which answer completed first. The live refusal completing BEFORE the departed one (review attempt PAIR-XL0-chromium-370f3ae03603's
+// order) is the same valid proof; swapping the two identities is refused.
+test("XL0 (revision 39): the live refusal's answer completing before the departed one's is accepted; the identities swapped are refused", () => {
+  const liveFirst = xl0World();
+  const departed = liveFirst.requests.find((r) => r.seq === 21);
+  const live = liveFirst.requests.find((r) => r.seq === 22);
+  departed.t_upstream_end = 2027;
+  assert.ok(live.t_upstream_end < departed.t_upstream_end);
+  assert.deepEqual(xl0(liveFirst), []);
+  const swapped = xl0World();
+  swapped.proof.lost = { tap_seq: 22 };
+  swapped.proof.refused = { tap_seq: 21 };
+  swapped.proof.hand_off_seq = 21;
+  const found = xl0(swapped);
+  assert.ok(
+    found.some((p) =>
+      /departed page's continuation was not queued at the gate before the clock steps|does not precede the refusal/.test(
+        p,
+      ),
+    ),
+    JSON.stringify(found),
+  );
+});
 for (const [name, edit, expected] of [
   [
     "sent twice (a duplicate effect)",
