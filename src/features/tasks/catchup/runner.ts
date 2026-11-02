@@ -144,6 +144,24 @@ import { todayIn } from "../model/time";
  * - AN EDGE WHILE NO SERVICE IS DISPLAYED (R36-D): a reconnection observed while the service this page's work is bound to is still live
  *   but momentarily not displayed is kept, with its time, for THAT service: the next kick that finds it displayed again scans; another
  *   service (a replacement), an ended one or none ever bound takes nothing from it.
+ *
+ * REVISION 13 (review 14's R36-E and R36-F; design assessment C1 to C6):
+ * - AN OUTCOME IS PROTECTED FROM ITS RECEIPT (C1/C4): an answer (or a withdrawal of a call known not to have been sent) is classified
+ *   once, when it arrives, into one immutable transition (the record it is written over, the record it writes, the stamp of its call, the
+ *   time it was observed), kept before its first write. An outcome whose loss would let a later call break the protocol (`mustKeep`: a
+ *   stop, a server minimum still ahead, a command's known success) has its fence published in that same step, BEFORE the first write: a
+ *   write that never lands (the page closes, the runner is disposed, the service ends while it is on its way) leaves the fence standing.
+ *   Any other (a transport uncertainty, an unrecognised or transient answer, a position read, a discovery's success, a withdrawal) is
+ *   fenced by its first write that does not land, as in revision 12: lost, it reads as its call lost (counted and paced), which is no less
+ *   conservative, and a page that closes while its call is on its way (the browser cancels it) does not stop the work for good. Only that
+ *   transition stored, written here (`written`) or found stored exactly so (`landed`), ends the instance published, and no other.
+ * - THE FIRST STALE WRITE IS NOT ADOPTED (R36-E, C2/C5): a first write that finds another record (`stale`) is treated as every later one is:
+ *   nothing proves its outcome was recorded, so its fence stays and the day (or the task's discovery) shows a `storage` stop; the record that
+ *   stands (a peer's) is left untouched and no call is made from it. A stale write is never written again (it cannot become current).
+ * - AN ANSWER DURING A MOMENT WITH NO SERVICE DISPLAYED (R36-F, C3): while the service the work is bound to has not ended and no other is
+ *   displayed (`gap`), an answer is kept (`pending`, its fence published under its own binding's scope) and nothing is written or sent; the
+ *   next work of the task under THAT service writes it first, before anything else of the task (a lift, a read, a call). A replacement
+ *   service, an ended one or a disposed runner takes nothing from it (its fence stands). Permission to SEND is unchanged: never in a gap.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -429,24 +447,44 @@ interface Retry {
 }
 
 /**
- * Revision 12 (R36-A/B; design assessment C1/C2): how a protected write ended. `landed`: a repair found this very transition stored
- * already (an earlier attempt applied and its answer was lost); `stale`: another record stands; `ended`: its binding is not displayed.
+ * Revision 12 (R36-A/B; design assessment C1/C2): how one write of a protected transition ended. `landed`: this very transition is stored
+ * already (an earlier attempt applied and its answer was lost, or, for a removal, the record is gone); `stale`: another record stands;
+ * `failed`: not written (a store failure, a quota refusal, a dropped commit). Revision 13: the same for a first write and a repair.
  */
-type Verdict = "written" | "landed" | "stale" | "failed" | "ended";
+type Verdict = "written" | "landed" | "stale" | "failed";
 
 /**
- * Revision 12 (R36-A/B): an outcome this page could not record, kept in its memory with the failure instance it published: the marker's
- * own instance (`marker`; `null` when none could be named, which nothing then ends) or this page's hold of it (`memory`).
+ * Revision 12 (R36-A/B), revision 13 (R36-E/F): an outcome this page holds until it is recorded, with the failure instance it published:
+ * the marker's own instance (`marker`; `null` when none could be named, which nothing then ends) or this page's hold of it (`memory`).
  */
 interface Protected {
   service: AccountService;
   task: string;
+  /** The day of a sequence's outcome (none: the task's discovery). */
+  day?: string;
   op: string;
   marker: string | null;
   memory: string | null;
-  /** Writes the same transition again (persistence only): what it found. */
-  repair(): Promise<Verdict>;
+  /** Revision 13 (C4): its fence is published (at its receipt when `early`, otherwise at its first unrecorded write or gap). */
+  published: boolean;
+  /** Revision 13 (R36-F): observed (or left mid-write) while its binding was not displayed: written by the task's next work under it. */
+  pending: boolean;
+  /** Writes the same transition (persistence only, nothing is transmitted): the verdict and what the write answered. */
+  attempt(): Promise<{ verdict: Verdict; out: unknown }>;
 }
+
+/** Revision 13: how a protected outcome ended for its caller. */
+type Protection<T> =
+  | { kind: "out"; out: T; verdict: "written" | "landed" }
+  /** Not recorded: kept, its fence standing (a store failure, or another record where it was to be written). */
+  | { kind: "fenced" }
+  /** Revision 13 (R36-F): kept for its binding, not displayed at the moment; its fence standing. */
+  | { kind: "pending" }
+  /** Its binding ended (another service displayed, its service ended, the runner disposed): its fence, published, stands. */
+  | { kind: "ended" };
+const FENCED = { kind: "fenced" } as const;
+const PENDING = { kind: "pending" } as const;
+const ENDED_P = { kind: "ended" } as const;
 
 /** Revision 12 (R36, C1): two records alike, field by field (an absent field and an `undefined` one alike). */
 function same(a: unknown, b: unknown): boolean {
@@ -754,12 +792,13 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     at: Binding,
     op: string,
   ): { marker: string | null; memory: string | null } | null => {
-    if (!owns(at)) return null;
+    // Revision 13 (R36-F): also while its binding is momentarily not displayed (`gap`): the fence is content-free and of its own scope.
+    if (!entitled(at)) return null;
     const m = markers();
     if (m === null) return { marker: null, memory: null };
     const scope = scopeOf(at.service);
     const before = m.witness(scope, op);
-    const out = m.set(scope, op, () => owns(at));
+    const out = m.set(scope, op, () => entitled(at));
     if (out.state === "obsolete") return null;
     if (out.state === "unavailable")
       return { marker: null, memory: m.stops.hold(scope, op) };
@@ -790,10 +829,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       });
   };
   /**
-   * Revision 12 (R36-A/B; C1/C2): writes an outcome's record. A first write that fails makes it PROTECTED at once: its fence is published
-   * before any wait, it is kept (`repairs`) with the instance published, and it is written again after each of `REPAIR_MS` (persistence
-   * only). `out`: the first write's own answer (`stale` as before), or a repair's that landed; `fenced`: not recorded (kept, its fence
-   * standing); `ended`: its binding is not the displayed one (the fence, if published, stands).
+   * Revision 12 (R36-A/B), revision 13 (R36-E/F; C1/C2/C4): writes an outcome's record, PROTECTED from the moment it is observed: it is kept
+   * (`repairs`) before the first write is begun. `write` writes the one transition classified (it is never recomputed) and `judge` tells what
+   * that write came to. `early` (C4): an outcome whose loss would let a later call break the protocol (`mustKeep`) has its fence published
+   * at once, before the first write, so a write that never lands (the page closing, the runner disposed) leaves it standing; any other is
+   * fenced by the first write that does not land, a stale write or a gap (a lost one reads as its call lost: the conservative count).
    */
   const protect = async <T>(
     at: Binding,
@@ -801,50 +841,90 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     op: string,
     write: () => Promise<T>,
     judge: (out: T) => Verdict,
-  ): Promise<
-    | { kind: "out"; out: T; verdict: Verdict }
-    | { kind: "fenced" }
-    | { kind: "ended" }
-  > => {
-    let out = await write();
-    let verdict = judge(out);
-    if (verdict === "ended" || !owns(at)) return { kind: "ended" };
-    // The first write's answer is the caller's, as before: a record of another page (`stale`) is adopted.
-    if (verdict !== "failed")
-      return {
-        kind: "out",
-        out,
-        verdict: verdict === "landed" ? "stale" : verdict,
-      };
-    const published = publish(at, op);
-    if (published === null) return { kind: "ended" };
+    early: boolean,
+    day?: string,
+  ): Promise<Protection<T>> => {
+    // An answer for a binding that ended, or was replaced, is dropped: nothing of it is written or published in another lifetime (R17).
+    if (!entitled(at)) return ENDED_P;
+    const published = early
+      ? publish(at, op)
+      : { marker: null, memory: null, unpublished: true };
+    if (published === null) return ENDED_P;
     const record: Protected = {
       service: at.service,
       task,
+      ...(day === undefined ? {} : { day }),
       op,
-      ...published,
-      repair: async () => {
-        const again = judge(await write());
-        return again === "written" || again === "landed" || owns(at)
-          ? again
-          : "ended";
+      marker: published.marker,
+      memory: published.memory,
+      published: !("unpublished" in published),
+      pending: false,
+      attempt: async () => {
+        const out = await write();
+        return { verdict: judge(out), out };
       },
     };
     repairs.set(repairKey(at.service, op), record);
-    for (const ms of REPAIR_MS) {
-      await sleep(ms);
-      if (!owns(at)) return { kind: "ended" };
-      out = await write();
-      verdict = judge(out);
-      if (verdict === "ended" || !owns(at)) return { kind: "ended" };
+    return (await settle(at, record)) as Protection<T>;
+  };
+  /** Revision 13: publishes a protected outcome's fence once (`publish`; `false`: its lifetime ended, nothing written). */
+  const fence = (at: Binding, record: Protected): boolean => {
+    if (record.published) return true;
+    const published = publish(at, record.op);
+    if (published === null) return false;
+    record.marker = published.marker;
+    record.memory = published.memory;
+    record.published = true;
+    return true;
+  };
+  /**
+   * Revision 13 (C4): an outcome whose loss would let a later call break the protocol, so it is fenced from its receipt: a stop (a
+   * refusal, a pause), a server minimum still ahead, or (`success`) a command's known success, which may only continue with its position
+   * read. Anything else lost reads as its call lost when the work is taken up (counted, paced), which is no less conservative.
+   */
+  const mustKeep = (
+    next: {
+      phase?: string;
+      stop?: unknown;
+      schedule?: Schedule | null;
+    } | null,
+    success = false,
+  ): boolean => {
+    if (success) return true;
+    if (next === null) return false;
+    if (next.phase === "stopped" || (next.stop ?? null) !== null) return true;
+    const server = next.schedule?.server ?? null;
+    return server !== null && server > deps.now();
+  };
+  /**
+   * Revision 13 (R36-E/F; C2): writes a protected outcome, while its binding is displayed, after each of `REPAIR_MS` while its writes FAIL
+   * (persistence only). Written or landed ends the instance it published, whatever is displayed by then (the transition is stored). Stale
+   * is final: nothing proves the outcome was recorded, and a compare-and-set that lost never wins later, so the fence stays. A binding not
+   * displayed at the moment keeps it `pending`; one that ended leaves its fence standing.
+   */
+  const settle = async (
+    at: Binding,
+    record: Protected,
+  ): Promise<Protection<unknown>> => {
+    for (let i = 0; ; i += 1) {
+      if (!owns(at)) {
+        if (!gap(at) || !fence(at, record)) return ENDED_P;
+        record.pending = true;
+        return PENDING;
+      }
+      record.pending = false;
+      const { verdict, out } = await record.attempt();
       if (verdict === "written" || verdict === "landed") {
         reconcile(record);
         return { kind: "out", out, verdict };
       }
-      // Another record stands where this one was to be written: nothing proves this outcome landed, so its fence stays.
-      if (verdict === "stale") return { kind: "fenced" };
+      // Not recorded (another record stands, or the write failed): fenced now if it was not already, in its own lifetime only.
+      if (!fence(at, record)) return ENDED_P;
+      if (verdict === "stale") return FENCED;
+      const wait = REPAIR_MS[i];
+      if (wait === undefined) return FENCED;
+      await sleep(wait);
     }
-    return { kind: "fenced" };
   };
   /**
    * The permission of one admitted transmission (header: PERMISSION AT ISSUE), asked at the send boundary and before each hidden
@@ -871,6 +951,18 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   /** This work's binding is still the displayed one (review R17). */
   const owns = (at: Binding) =>
     !disposed && at.service.live && deps.service() === at.service;
+  /**
+   * Revision 13 (R36-F; C3): the binding is not displayed at the moment, and has not ended: this runner is not disposed, its service has not
+   * ended, it is still the service this runner's work is bound to (no other began since), and no other service is displayed. Evidence it
+   * observed is kept for it; nothing is SENT in a gap (`owns` is the permission).
+   */
+  const gap = (at: Binding) => {
+    if (disposed || at.service.ended || bound !== at.service) return false;
+    const now = deps.service();
+    return now === null || now === at.service;
+  };
+  /** Revision 13: what may keep (and fence) an observed outcome: its displayed binding, or its binding in a gap. */
+  const entitled = (at: Binding) => owns(at) || gap(at);
   /** How work whose binding is no longer the displayed one ends: another service displayed, ended; none at the moment, a pause. */
   const lost = (at: Binding): Outcome => {
     if (disposed) return DONE;
@@ -1070,10 +1162,9 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         read = await readPosition(issued.task_id, permit);
         answered = read.answer;
       }
-      if (!owns(at)) return lost(at);
       if (answered.kind === "pause") {
         // `closed` may follow a transmission: its admission stays (counted as lost when the work is taken up again).
-        if (!answered.unsent) return PAUSED;
+        if (!answered.unsent) return owns(at) ? PAUSED : lost(at);
         // Not transmitted: the admission is withdrawn, nothing counted. Revision 12 (R36, C2): a withdrawal that cannot be written is
         // protected like an answer, so a reload never counts a call known not to have been made as a lost one.
         const unsent: Sequence = {
@@ -1086,8 +1177,12 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           op,
           () => commit(service, captured, key, issued, unsent),
           judgeRow(issued, unsent),
+          false,
+          key.through_date,
         );
         if (back.kind === "ended") return lost(at);
+        // Revision 13 (R36-F): kept for this binding, which is not displayed at the moment: written first when it is again.
+        if (back.kind === "pending") return PAUSED;
         if (back.kind === "fenced") return storage();
         // Refused by its own permission (the window ended, the clock moved, a fence): the schedule decides again, sending nothing
         // until it admits. Any other refusal (the session held it) waits for a kick, as before.
@@ -1102,26 +1197,28 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           : onRead(issued, answered as ReadAnswer, todayOf(), deps.now());
       const outcome = next;
       // Revision 12 (R36-B): a record that fails is fenced at once (across pages and reloads) and kept for its repairs and the person's
-      // press; one never written stops the day here.
+      // press; one never written stops the day here. Revision 13 (R36-E/F): fenced from its receipt, before the first write; a first write
+      // that finds another record is never adopted (no call is made from a peer's row on this answer's behalf: the day stops, `storage`);
+      // an answer that arrives in a gap of its binding is kept for it (classified now, at its receipt, and written as classified).
       const settled = await protect(
         at,
         key.task_id,
         op,
         () => commit(service, captured, key, issued, outcome),
         judgeRow(issued, outcome),
+        mustKeep(outcome, plan.kind === "send" && answered.kind === "ok"),
+        key.through_date,
       );
       if (settled.kind === "ended") return lost(at);
+      if (settled.kind === "pending") return PAUSED;
       if (settled.kind === "fenced") return storage();
       if (!owns(at)) return lost(at);
       const out = settled.out as { stored: Sequence | null; written: boolean };
       row = out.stored;
       if (row === null) {
-        // The position covers this day; the task's other days it covers are satisfied too (revision 5).
-        if (
-          (out.written || settled.verdict === "landed") &&
-          next === null &&
-          read?.answer.kind === "ok"
-        )
+        // The position covers this day; the task's other days it covers are satisfied too (revision 5). Revision 13: written or landed
+        // (the row was gone already: its day is covered, as this read shows).
+        if (next === null && read?.answer.kind === "ok")
           await clearSatisfied(
             at,
             captured,
@@ -1179,7 +1276,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       for (const record of [...repairs.values()]) {
         if (record.service !== at.service || record.task !== item.taskId)
           continue;
-        const verdict = await record.repair();
+        const { verdict } = await record.attempt();
         if (!owns(at)) return "held";
         if (verdict !== "written" && verdict !== "landed") return held();
         reconcile(record);
@@ -1279,8 +1376,6 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       return end(DONE);
     }
     const quota = deps.quota?.() ?? null;
-    /** Revision 12: what the last `stale` write found stored (a repair's proof that its own transition landed). */
-    let found: MaterialiseDiscovery | null = null;
     /** `next` over the entry this work admitted, through its own service, stamped as given (an answer: its read's issue). */
     const record = async (
       captured: ReturnType<AccountService["capture"]>,
@@ -1295,45 +1390,50 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (!owns(at)) return "lost" as const;
       // Revision 11 (R36): dropped while the binding stands (the persistence hold could not vouch for it) is not written either.
       if (out.kind !== "applied") return "failed" as const;
-      if (out.value.kind === "stale") found = out.value.stored;
       if (out.value.kind !== "written") return out.value.kind;
       entry = out.value.stored;
       return "written" as const;
     };
     /**
      * An ANSWER's record (revision 11), or a withdrawal's (revision 12, C2: a call known not to have been made). Revision 12 (R36-A/B):
-     * PROTECTED: a first write that fails (or that the quota ledger refuses) fences the discovery at once and is written again after each
-     * of `REPAIR_MS`; one never written stays fenced (header) and is kept for the person's press, which writes it first. A repair that
-     * finds this very entry stored already (`landed`) is written; one that finds another (`stale`) proves nothing and stays fenced.
-     * `failed`: not recorded, fenced.
+     * PROTECTED: a first write that fails (or that the quota ledger refuses) is written again after each of `REPAIR_MS`; one never written
+     * stays fenced (header) and is kept for the person's press, which writes it first. Revision 13 (R36-E/F; C1): fenced from its receipt;
+     * written over the entry as it was when the answer arrived (`expected`, never a later one), so a repair compares what the answer was
+     * decided on. A write that finds this very entry stored (`landed`; for a success, no entry: its removal) is recorded; one that finds
+     * another (`stale`, the first write included) proves nothing and stays fenced. `failed`: not recorded, fenced; `pending`: kept for this
+     * binding, not displayed at the moment.
      */
     const answered = async (
       captured: ReturnType<AccountService["capture"]>,
       next: MaterialiseDiscovery | null,
     ) => {
+      const expected = entry;
       const p = await protect(
         at,
         item.taskId,
         op,
-        () => record(captured, next),
-        (w): Verdict =>
-          w === "lost"
-            ? "ended"
-            : w === "failed" || w === "refused"
-              ? "failed"
-              : w === "stale"
-                ? same(found, next)
-                  ? "landed"
-                  : "stale"
-                : "written",
+        () =>
+          commitMaterialiseDiscovery(
+            at.service,
+            captured,
+            { task_id: item.taskId, expected, next },
+            quota === null ? null : { quota },
+          ),
+        (out): Verdict =>
+          out.kind !== "applied" || out.value.kind === "refused"
+            ? "failed"
+            : out.value.kind === "written"
+              ? "written"
+              : same(out.value.stored, next)
+                ? "landed"
+                : "stale",
+        mustKeep(next),
       );
       if (p.kind === "ended") return "lost" as const;
+      if (p.kind === "pending") return "pending" as const;
       if (p.kind === "fenced") return "failed" as const;
-      if (p.verdict === "landed") {
-        entry = found;
-        return "written" as const;
-      }
-      return p.out === "stale" ? ("stale" as const) : ("written" as const);
+      if (p.out.kind === "applied") entry = p.out.value.stored;
+      return "written" as const;
     };
     /** The entry with `s` as its schedule (a pause is its stop, kept with the claim it stopped on). */
     const scheduled = (
@@ -1359,6 +1459,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         ? await answered(captured, next)
         : await record(captured, next);
       if (written === "lost") return end(lost(at));
+      // Revision 13 (R36-F): an answer kept for its binding in a gap is written when the binding is displayed again.
+      if (written === "pending") return end(PAUSED);
       if (written === "stale") return end(DONE);
       if (written !== "written")
         return end(
@@ -1446,11 +1548,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     const read: PositionRead = permit()
       ? await readPosition(item.taskId, permit)
       : { answer: UNSENT, zone: null };
-    // An answer for an ended binding is dropped: it is never recorded in another database (R17).
-    if (!owns(at)) return end(lost(at));
+    // An answer for an ended binding is dropped: it is never recorded in another database (R17). Revision 13 (R36-F): one that arrives
+    // while its binding is momentarily not displayed is kept for it (`answered`: `pending`).
     if (read.answer.kind === "pause") {
       // `closed` may follow a transmission (revision 11): its claim stays, counted as lost when the task is taken up again.
-      if (!read.answer.unsent) return end(PAUSED);
+      if (!read.answer.unsent) return end(owns(at) ? PAUSED : lost(at));
       // Not sent after all: the admission is withdrawn, nothing counted. Revision 11 (R36): with an explicit `schedule: null` when
       // nothing is outstanding, so it is never read as an earlier build's unanswered claim. Revision 12 (C2): protected like an answer.
       const back = await answered(captured, {
@@ -1458,6 +1560,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         schedule: withdrawn(issued.schedule as Schedule),
       });
       if (back === "lost") return end(lost(at));
+      if (back === "pending") return end(PAUSED);
       if (back === "failed")
         return end(stopInMemory(item.taskId, { reason: "storage" }));
       // Refused by its own permission: the schedule decides again at once (a pause written, or a wait), sending nothing.
@@ -1469,7 +1572,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       // Found: the discovery's failures are over (its entry goes, only its own); a page's memory stop of it is lifted by its success.
       const done = await answered(captured, null);
       if (done === "lost") return end(lost(at));
-      if (done === "stale") return end(DONE);
+      if (done === "pending") return end(PAUSED);
       // Revision 10: its record could not be written: nothing more is sent automatically for the task here.
       if (done !== "written")
         return end(stopInMemory(item.taskId, { reason: "storage" }));
@@ -1509,7 +1612,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       return stopWith(captured, scheduled(issued, after), true);
     const written = await answered(captured, scheduled(issued, after));
     if (written === "lost") return end(lost(at));
-    if (written === "stale") return end(DONE);
+    if (written === "pending") return end(PAUSED);
     if (written !== "written")
       return end(stopInMemory(item.taskId, { reason: "unreachable" }));
     return end({ kind: "paused", at: after.next });
@@ -1521,6 +1624,24 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     if (service === null) return PAUSED;
     rebind(service);
     const at: Binding = { service };
+    // Revision 13 (R36-F; C3/C6): an outcome this binding observed while it was not displayed is written FIRST, before the task's lifts,
+    // reads or calls: its work then goes on from what it recorded (a 429's deadline, a success's position read). One not written stops it.
+    for (const record of [...repairs.values()]) {
+      if (
+        !record.pending ||
+        record.service !== service ||
+        record.task !== item.taskId
+      )
+        continue;
+      const kept = await settle(at, record);
+      if (kept.kind === "pending") return PAUSED;
+      if (kept.kind === "ended") return lost(at);
+      if (kept.kind === "fenced")
+        return stopInMemory(item.taskId, {
+          reason: "storage",
+          ...(record.day === undefined ? {} : { throughDate: record.day }),
+        });
+    }
     // A press made under another binding lifts nothing here: the work is asked as the person asked it, and a stop still standing shows.
     // A press is spent once its lift is tried (revision 10): work it parks later resumes as plain work. Revision 12 (R36-C): the press
     // first, then a reconnection's lift kept beside it, only if the press's stop no longer stood; each is consumed here, once.

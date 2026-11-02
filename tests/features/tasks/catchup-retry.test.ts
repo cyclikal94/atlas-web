@@ -3671,3 +3671,912 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
     }
   });
 });
+
+/**
+ * Review 14's six witnesses and six paired controls (R36-E: `stale.test.ts`; R36-F: `binding.test.ts`), maintained here with their
+ * barriers and assertions as the reviewer wrote them (only the archived observation log is not written). Baseline on 788bfb2: the six
+ * witnesses fail, the six controls pass (`.agtx/evidence/WEB-10c/revision-13/q1-baseline-788bfb2.txt`).
+ */
+describe("REVIEW14 Q1: the six witnesses of review 14 and their paired controls", () => {
+  for (const peer of [false, true])
+    for (const answer of ["429", "ok"] as const)
+      test(`STALE-OUTCOME ${peer ? "WITNESS (R36-E)" : "CONTROL"} ${answer}: observed answer survives a peer admission before its first commit`, async () => {
+        const m = markerWorld();
+        let releaseFirst!: (x: TasksResult<{ revision: number }>) => void;
+        let releasePeer!: (x: TasksResult<{ revision: number }>) => void;
+        const first = new Promise<TasksResult<{ revision: number }>>(
+          (r) => (releaseFirst = r),
+        );
+        const second = new Promise<TasksResult<{ revision: number }>>(
+          (r) => (releasePeer = r),
+        );
+        const w = await setup({
+          positions: peer
+            ? [
+                detail("2026-10-01", true),
+                detail("2026-10-01", true),
+                detail(TODAY, false),
+              ]
+            : [detail("2026-10-01", true), detail(TODAY, false)],
+          sends: peer ? [() => first, () => second, OK] : [() => first, OK],
+        });
+        const a = w.make({ markers: m.page("origin"), locks: null });
+        const b = w.make({ markers: m.page("peer"), locks: null });
+        try {
+          a.ensure(TASK, "daily");
+          for (let i = 0; i < 40 && w.sent().length < 1; i++) await w.settle();
+          expect(w.sent()).toHaveLength(1);
+          const original = w.stored() as MaterialiseSequenceRow;
+          expect(original.phase).toBe("submitting");
+          if (peer) {
+            b.ensure(TASK, "daily");
+            for (let i = 0; i < 80 && w.sent().length < 2; i++)
+              await w.settle();
+            expect(w.sent()).toHaveLength(2);
+            expect(w.stored()?.revision).toBeGreaterThan(
+              original.revision as number,
+            );
+            expect(w.sent()[1]?.key).toBe(w.sent()[0]?.key);
+          }
+          const before = w.sent().length;
+          const observedAt = w.now();
+          releaseFirst(
+            answer === "429" ? await http(429, "rate_limited", "60") : OK,
+          );
+          await w.idle(a);
+          if (answer === "429")
+            expect(
+              w
+                .sent()
+                .slice(before)
+                .filter((x) => x.at < observedAt + 60_000),
+              "No NEW issue may bypass a 429 already observed by this live owner, even when the first outcome CAS is stale",
+            ).toHaveLength(0);
+          else
+            expect(
+              w.sent().slice(before),
+              "A known successful command may only continue through its position GET, not a new issue from a stale first outcome CAS",
+            ).toHaveLength(0);
+        } finally {
+          a.dispose();
+          b.dispose();
+          releaseFirst(OK);
+          releasePeer(OK);
+          await w.settle();
+        }
+      });
+
+  for (const caller of [
+    "command",
+    "discovery",
+    "position",
+    "command-success",
+  ] as const)
+    for (const gap of [false, true])
+      test(`BINDING-ANSWER ${gap ? "WITNESS (R36-F)" : "CONTROL"} ${caller}: same live service preserves an answer received during a temporary accessor gap`, async () => {
+        const m = markerWorld();
+        let service: AccountService | null = null;
+        let observed = false;
+        let observedAt = 0;
+        let w: Awaited<ReturnType<typeof setup>>;
+        const response = async () => {
+          observed = true;
+          observedAt = w.now();
+          if (gap) service = null;
+          return caller === "command-success"
+            ? OK
+            : await http(429, "rate_limited", "60");
+        };
+        const command = caller.startsWith("command");
+        w = await setup({
+          positions:
+            caller === "discovery"
+              ? [response as never, detail(TODAY, false)]
+              : caller === "position"
+                ? [
+                    detail("2026-10-01", true),
+                    response as never,
+                    detail(TODAY, false),
+                  ]
+                : [detail("2026-10-01", true), detail(TODAY, false)],
+          sends: command ? [response as never, OK] : [OK],
+        });
+        const original = w.t.env.service() as AccountService;
+        service = original;
+        const r = w.make({ service: () => service, markers: m.page("origin") });
+        try {
+          r.ensure(TASK, "daily");
+          await w.idle(r);
+          expect(observed).toBe(true);
+          expect(original.live).toBe(true);
+          if (gap) {
+            expect(service).toBeNull();
+            service = original;
+            r.kick();
+            await w.idle(r);
+          }
+          const calls = command
+            ? w.sent()
+            : caller === "position"
+              ? w.reads().slice(1)
+              : w.reads();
+          if (caller === "command-success")
+            expect(
+              calls,
+              "Known success must not be downgraded to a lost command when the identical live service returns",
+            ).toHaveLength(1);
+          else
+            expect(
+              calls.slice(1).filter((x) => x.at < observedAt + 60_000),
+              "A temporary accessor gap must not erase the already-observed Retry-After minimum",
+            ).toHaveLength(0);
+        } finally {
+          r.dispose();
+        }
+      });
+});
+
+/**
+ * Revision 13 (review 14's R36-E/F; design assessment Q2 to Q6): an observed outcome is protected from its receipt. Every case asserts its
+ * barrier (the held write entered, the peer's admission, the gap) before the step it qualifies, and a healthy control makes progress.
+ */
+describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt", () => {
+  const scopeOf = (w: Awaited<ReturnType<typeof setup>>) => ({
+    account: ACCOUNT,
+    incarnationId: (w.t.env.service() as AccountService).incarnationId,
+  });
+  const until = async (
+    w: Awaited<ReturnType<typeof setup>>,
+    ok: () => boolean,
+    what: string,
+  ) => {
+    for (let k = 0; k < 80 && !ok(); k += 1) await w.settle();
+    expect(ok(), `precondition: ${what}`).toBe(true);
+  };
+  const OP = {
+    discovery: () => fenceOf(TASK),
+    command: () => fenceOf(TASK, TODAY),
+    position: () => fenceOf(TASK, TODAY),
+  } as const;
+  /** Each caller answered 429 (Retry-After 60) once, then healthy. */
+  const WORLD_429 = {
+    discovery: async () => ({
+      positions: [
+        await http<TaskDetail>(429, "rate_limited", "60"),
+        detail(TODAY, false),
+      ],
+    }),
+    command: async () => ({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+      sends: [await http<{ revision: number }>(429, "rate_limited", "60"), OK],
+    }),
+    position: async () => ({
+      positions: [
+        detail("2026-10-01", true),
+        await http<TaskDetail>(429, "rate_limited", "60"),
+        detail(TODAY, false),
+      ],
+      sends: [OK],
+    }),
+  } as const;
+  /** WORLD_429 with the caller's 429 delivered through `onAnswer` (called with the clock at its receipt, before it is returned). */
+  const gapWorld = async (caller: CallerName, onAnswer: () => void) => {
+    const world = (await WORLD_429[caller]()) as {
+      positions: Array<Answer<TaskDetail>>;
+      sends?: Array<Answer<{ revision: number }>>;
+    };
+    const deliver =
+      <T>(answer: Answer<T>) =>
+      async () => {
+        onAnswer();
+        return typeof answer === "function" ? answer() : answer;
+      };
+    if (caller === "command" && world.sends)
+      world.sends[0] = deliver(world.sends[0] as Answer<{ revision: number }>);
+    else
+      world.positions[caller === "discovery" ? 0 : 1] = deliver(
+        world.positions[caller === "discovery" ? 0 : 1] as Answer<TaskDetail>,
+      );
+    return world;
+  };
+  /** The server deadline the caller's record holds now. */
+  const deadlineOf = (
+    w: Awaited<ReturnType<typeof setup>>,
+    caller: CallerName,
+  ) =>
+    caller === "discovery"
+      ? (w.discovery()?.schedule?.server ?? null)
+      : (w.stored()?.schedule?.server ?? null);
+  /** Holds the caller's first OUTCOME write (never an admission) until released: `fail` answers it failed, otherwise the real commit runs. */
+  const holdOutcome = (
+    w: Awaited<ReturnType<typeof setup>>,
+    caller: CallerName,
+  ) => {
+    let entered = false;
+    let release: ((fail: boolean) => void) | null = null;
+    const service = intercepted(w, async (name, input, run) => {
+      const expected = input.expected as {
+        phase?: string;
+        attempt?: string | null;
+      } | null;
+      const outcome =
+        name === PLAN_OF[caller] &&
+        !admitting(input) &&
+        (caller === "discovery"
+          ? expected?.attempt != null
+          : expected?.phase ===
+            (caller === "command" ? "submitting" : "awaiting_position_read"));
+      if (!outcome || entered) return run();
+      entered = true;
+      const fail = await new Promise<boolean>((r) => {
+        release = r;
+      });
+      return fail ? { kind: "failed" } : run();
+    });
+    return {
+      service,
+      entered: () => entered,
+      release: (fail: boolean) =>
+        (release as ((fail: boolean) => void) | null)?.(fail),
+    };
+  };
+
+  // ---- Q4/Q5: the first write's await --------------------------------------------------------------------------------------------
+  for (const caller of CALLERS)
+    test(`Q5 ${caller}: the fence stands while the FIRST outcome write is on its way; the write that lands ends it and the work goes on`, async () => {
+      const m = markerWorld();
+      const w = await setup(await WORLD_429[caller]());
+      const h = holdOutcome(w, caller);
+      const r = w.make({ service: () => h.service, markers: m.page("p1") });
+      try {
+        r.ensure(TASK, "daily");
+        await until(w, h.entered, "the first outcome write was entered");
+        const observedAt = w.now();
+        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+          "marked",
+        );
+        h.release(false);
+        await w.idle(r);
+        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+          "unmarked",
+        );
+        expect(r.get().unrecorded.has(TASK)).toBe(false);
+        const calls = transmissionsOf(w, caller);
+        expect(calls.length).toBeGreaterThanOrEqual(2);
+        expect(calls[1]?.at).toBeGreaterThanOrEqual(observedAt + 60_000);
+      } finally {
+        r.dispose();
+        h.release(false);
+      }
+    });
+
+  for (const caller of CALLERS)
+    for (const lands of [false, true])
+      test(`Q5 ${caller}: a runner disposed while its first outcome write is on its way (${lands ? "the write lands" : "the write fails"}): ${lands ? "control, the record decides" : "its fence survives, and a recreated runner transmits nothing"}`, async () => {
+        const m = markerWorld();
+        const w = await setup(await WORLD_429[caller]());
+        const h = holdOutcome(w, caller);
+        const first = w.make({
+          service: () => h.service,
+          markers: m.page("p1"),
+        });
+        let second: CatchUpRunner | null = null;
+        try {
+          first.ensure(TASK, "daily");
+          await until(w, h.entered, "the first outcome write was entered");
+          const observedAt = w.now();
+          const before = transmissionsOf(w, caller).length;
+          first.dispose();
+          // Before the barrier is released: the fence is durable already.
+          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+            "marked",
+          );
+          h.release(!lands);
+          await w.settle();
+          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+            lands ? "unmarked" : "marked",
+          );
+          second = w.make({ markers: m.page("p2") });
+          second.ensure(TASK, "daily");
+          await w.idle(second);
+          // The recreated runner's own discovery read (a GET of the discovery caller) is not the position caller's call.
+          const all = transmissionsOf(w, caller).slice(before);
+          const calls = caller === "position" ? all.slice(1) : all;
+          if (lands) {
+            expect(deadlineOf(w, caller) ?? observedAt + 60_000).toBe(
+              observedAt + 60_000,
+            );
+            expect(calls.length).toBeGreaterThanOrEqual(1);
+            expect(calls[0]?.at).toBeGreaterThanOrEqual(observedAt + 60_000);
+          } else {
+            expect(calls).toHaveLength(0);
+            expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+          }
+        } finally {
+          second?.dispose();
+          h.release(false);
+        }
+      });
+
+  /** Each caller's call ended by a transport failure (as when the browser cancels it because the page closes), then healthy. */
+  const TRANSPORT = {
+    ok: false,
+    kind: "uncertain",
+    retry: { cause: "transport" },
+  } as never;
+  const WORLD_TRANSPORT = {
+    discovery: () => ({ positions: [TRANSPORT, detail(TODAY, false)] }),
+    command: () => ({
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+      sends: [TRANSPORT, OK],
+    }),
+    position: () => ({
+      positions: [detail("2026-10-01", true), TRANSPORT, detail(TODAY, false)],
+      sends: [OK],
+    }),
+  } as const;
+  for (const caller of CALLERS)
+    test(`Q5 ${caller}: a transport failure whose record never lands (the runner disposed, as when the page closes) is not fenced at its receipt: the recreated runner counts the call as lost and makes it again`, async () => {
+      const m = markerWorld();
+      const w = await setup(WORLD_TRANSPORT[caller]());
+      const h = holdOutcome(w, caller);
+      const first = w.make({ service: () => h.service, markers: m.page("p1") });
+      let second: CatchUpRunner | null = null;
+      try {
+        first.ensure(TASK, "daily");
+        await until(w, h.entered, "the first outcome write was entered");
+        const before = transmissionsOf(w, caller).length;
+        // No fence while the write of an outcome whose loss reads as its call lost is on its way.
+        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+          "unmarked",
+        );
+        first.dispose();
+        h.release(true);
+        await w.settle();
+        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+          "unmarked",
+        );
+        second = w.make({ markers: m.page("p2") });
+        second.ensure(TASK, "daily");
+        await w.idle(second);
+        const all = transmissionsOf(w, caller).slice(before);
+        const calls = caller === "position" ? all.slice(1) : all;
+        expect(
+          calls.length,
+          "the call is made again (its issue counted as lost), not stopped for good",
+        ).toBeGreaterThanOrEqual(1);
+        expect(second.get().unrecorded.has(TASK)).toBe(false);
+      } finally {
+        second?.dispose();
+        h.release(false);
+      }
+    });
+
+  // ---- Q4: a gap of the binding (no service displayed, the same service live) -------------------------------------------------------
+  for (const caller of CALLERS)
+    for (const applied of [false, true])
+      test(`Q4 ${caller}: a gap while the first outcome write is on its way (${applied ? "it applies" : "it fails"}); the same service back: the answer recorded as observed, paced by its deadline`, async () => {
+        const m = markerWorld();
+        const w = await setup(await WORLD_429[caller]());
+        const h = holdOutcome(w, caller);
+        let service: AccountService | null = h.service;
+        const r = w.make({ service: () => service, markers: m.page("p1") });
+        try {
+          r.ensure(TASK, "daily");
+          await until(w, h.entered, "the first outcome write was entered");
+          const observedAt = w.now();
+          const before = transmissionsOf(w, caller).length;
+          service = null;
+          h.release(!applied);
+          await w.idle(r);
+          expect((w.t.env.service() as AccountService).live).toBe(true);
+          // Nothing is sent in the gap; the fence stands unless the write landed (exact proof).
+          expect(transmissionsOf(w, caller)).toHaveLength(before);
+          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+            applied ? "unmarked" : "marked",
+          );
+          service = h.service;
+          r.kick();
+          await w.idle(r);
+          expect(r.get().unrecorded.has(TASK)).toBe(false);
+          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+            "unmarked",
+          );
+          const calls = transmissionsOf(w, caller).slice(before);
+          expect(
+            calls.length,
+            "the work goes on from the recorded answer",
+          ).toBeGreaterThanOrEqual(1);
+          expect(
+            calls[0]?.at,
+            "the answer kept through the gap is recorded: nothing before its deadline",
+          ).toBeGreaterThanOrEqual(observedAt + 60_000);
+        } finally {
+          r.dispose();
+          h.release(false);
+        }
+      });
+
+  for (const caller of CALLERS)
+    test(`Q4 ${caller}: an answer kept through a gap is written as it was observed (the clock moved 120 s): its deadline is the observed one, not one recomputed at the return`, async () => {
+      const m = markerWorld();
+      let service: AccountService | null = null;
+      let observedAt = -1;
+      const w: Awaited<ReturnType<typeof setup>> = await setup(
+        await gapWorld(caller, () => {
+          observedAt = w.now();
+          service = null;
+        }),
+      );
+      const original = w.t.env.service() as AccountService;
+      service = original;
+      const r = w.make({ service: () => service, markers: m.page("p1") });
+      try {
+        r.ensure(TASK, "daily");
+        await w.idle(r);
+        expect(
+          observedAt,
+          "precondition: the answer arrived in the gap",
+        ).toBeGreaterThan(0);
+        expect(service).toBeNull();
+        const before = transmissionsOf(w, caller).length;
+        w.setNow(w.now() + 120_000);
+        const returnedAt = w.now();
+        service = original;
+        r.kick();
+        await w.idle(r);
+        expect(deadlineOf(w, caller) ?? observedAt + 60_000).not.toBe(
+          returnedAt + 60_000,
+        );
+        const calls = transmissionsOf(w, caller).slice(before);
+        expect(calls.length).toBeGreaterThanOrEqual(1);
+        expect(
+          calls[0]?.at,
+          "the observed deadline (already past) decides, not a deadline recomputed at the return",
+        ).toBeLessThan(returnedAt + 60_000);
+      } finally {
+        r.dispose();
+      }
+    });
+
+  for (const caller of CALLERS)
+    for (const end of ["replaced", "ended", "disposed"] as const)
+      test(`Q4 ${caller}: an answer in a gap whose binding is then ${end} writes nothing in another lifetime; its fence stands and nothing is transmitted for it`, async () => {
+        const m = markerWorld();
+        let service: AccountService | null = null;
+        let observedAt = -1;
+        const w: Awaited<ReturnType<typeof setup>> = await setup(
+          await gapWorld(caller, () => {
+            observedAt = w.now();
+            service = null;
+          }),
+        );
+        const real = w.t.env.service() as AccountService;
+        service = real;
+        const r = w.make({ service: () => service, markers: m.page("p1") });
+        let reload: CatchUpRunner | null = null;
+        try {
+          r.ensure(TASK, "daily");
+          await w.idle(r);
+          expect(
+            observedAt,
+            "precondition: the answer arrived in the gap",
+          ).toBeGreaterThan(0);
+          const before = transmissionsOf(w, caller).length;
+          const row = w.stored();
+          const entry = w.discovery();
+          const scope = scopeOf(w);
+          expect(m.page("observer").probe(scope, OP[caller]())).toBe("marked");
+          if (end === "replaced") {
+            // The same account, epoch and incarnation, another service object: a replacement, not the original's return.
+            service = new Proxy(real, {}) as AccountService;
+            r.kick();
+            await w.idle(r);
+          } else if (end === "ended") {
+            real.dispose("closed");
+            service = real;
+            r.kick();
+            // An ended service is never displayed again: its queued work waits (it is not idle), and nothing is written or sent.
+            await w.settle();
+          } else {
+            r.dispose();
+            service = real;
+            reload = w.make({ markers: m.page("p2") });
+            reload.ensure(TASK, "daily");
+            await w.idle(reload);
+          }
+          // A new runner's own discovery read (a GET of the discovery caller) is not the position caller's call.
+          const calls = transmissionsOf(w, caller).slice(before);
+          expect(
+            caller === "position" && calls.length > 0 && end !== "ended"
+              ? calls.slice(1)
+              : calls,
+          ).toEqual([]);
+          if (end !== "ended") {
+            expect(w.stored()).toEqual(row);
+            expect(w.discovery()).toEqual(entry);
+          }
+          expect(m.page("observer").probe(scope, OP[caller]())).toBe("marked");
+        } finally {
+          reload?.dispose();
+          r.dispose();
+        }
+      });
+
+  for (const caller of CALLERS)
+    test(`Q4 ${caller}: an answer that arrives after its service ended (no service displayed) publishes nothing and writes nothing`, async () => {
+      const m = markerWorld();
+      let service: AccountService | null = null;
+      let real: AccountService | null = null;
+      const w: Awaited<ReturnType<typeof setup>> = await setup(
+        await gapWorld(caller, () => {
+          (real as AccountService).dispose("closed");
+          service = null;
+        }),
+      );
+      real = w.t.env.service() as AccountService;
+      const scope = scopeOf(w);
+      service = real;
+      const r = w.make({ service: () => service, markers: m.page("p1") });
+      try {
+        r.ensure(TASK, "daily");
+        await w.settle();
+        await w.settle();
+        expect(
+          real.ended,
+          "precondition: the service ended at the answer",
+        ).toBe(true);
+        expect(m.page("observer").probe(scope, OP[caller]())).toBe("unmarked");
+        expect(
+          [...m.storage.items.keys()].filter((k) => k.includes("materialise")),
+        ).toEqual([]);
+      } finally {
+        r.dispose();
+      }
+    });
+
+  for (const caller of CALLERS)
+    test(`Q4 ${caller}: an answer that arrives while ANOTHER service is displayed (the original still live: a replacement) publishes nothing and writes nothing in either`, async () => {
+      const m = markerWorld();
+      let service: AccountService | null = null;
+      let real: AccountService | null = null;
+      let replaced = false;
+      const w: Awaited<ReturnType<typeof setup>> = await setup(
+        await gapWorld(caller, () => {
+          // The same account, epoch and incarnation, another service object, displayed as the answer arrives.
+          service = new Proxy(real as AccountService, {}) as AccountService;
+          replaced = true;
+        }),
+      );
+      real = w.t.env.service() as AccountService;
+      service = real;
+      const r = w.make({ service: () => service, markers: m.page("p1") });
+      try {
+        r.ensure(TASK, "daily");
+        await until(
+          w,
+          () => replaced,
+          "the answer arrived under a replacement",
+        );
+        const row = w.stored();
+        const entry = w.discovery();
+        await w.settle();
+        expect(
+          real.live && !real.ended,
+          "precondition: the original is still live",
+        ).toBe(true);
+        expect(
+          [...m.storage.items.keys()].filter((k) => k.includes("materialise")),
+          "nothing of the old binding's answer is published",
+        ).toEqual([]);
+        if (caller !== "discovery")
+          expect(w.stored()?.schedule?.server ?? null).toBe(
+            row?.schedule?.server ?? null,
+          );
+        else
+          expect(w.discovery()?.schedule?.server ?? null).toBe(
+            entry?.schedule?.server ?? null,
+          );
+      } finally {
+        r.dispose();
+      }
+    });
+
+  test("Q4 command: a call admitted just before a gap is never sent in it; its withdrawal is written on the return and the call is made then", async () => {
+    const m = markerWorld();
+    const w = await setup(await WORLD_429.command());
+    let held: (() => void) | null = null;
+    let entered = false;
+    const service = intercepted(w, async (name, input, run) => {
+      if (!entered && name === PLAN_OF.command && admitting(input)) {
+        entered = true;
+        const out = await run();
+        await new Promise<void>((r) => {
+          held = r;
+        });
+        return out;
+      }
+      return run();
+    });
+    let shown: AccountService | null = service;
+    const r = w.make({ service: () => shown, markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await until(
+        w,
+        () => held !== null,
+        "the command's first admission was held",
+      );
+      expect(w.sent()).toEqual([]);
+      expect(w.stored()?.schedule?.issued).not.toBeNull();
+      shown = null;
+      (held as unknown as () => void)();
+      await w.idle(r);
+      expect(w.sent(), "nothing is sent while no service is displayed").toEqual(
+        [],
+      );
+      shown = service;
+      r.kick();
+      await w.idle(r);
+      expect(w.sent().length).toBeGreaterThanOrEqual(1);
+      expect(r.get().unrecorded.has(TASK)).toBe(false);
+    } finally {
+      r.dispose();
+      (held as (() => void) | null)?.();
+    }
+  });
+
+  // ---- Q2/Q3/Q6: the first write finds another record ----------------------------------------------------------------------------
+  /** Two runners without Web Locks: a's call of `caller` held, b's admission of the same caller made and its call held. */
+  async function peerAdmitted(caller: CallerName, answer: "429" | "ok") {
+    const m = markerWorld();
+    const held: Array<(x: TasksResult<unknown>) => void> = [];
+    const hold = () =>
+      new Promise<TasksResult<never>>((r) => {
+        held.push(r as never);
+      });
+    const w = await setup(
+      caller === "discovery"
+        ? { positions: [hold, hold, detail(TODAY, false)] }
+        : caller === "command"
+          ? {
+              positions: [
+                detail("2026-10-01", true),
+                detail("2026-10-01", true),
+                detail(TODAY, false),
+              ],
+              sends: [hold as never, hold as never, OK],
+            }
+          : {
+              positions: [
+                detail("2026-10-01", true),
+                hold,
+                detail("2026-10-01", true),
+                hold,
+                detail(TODAY, false),
+              ],
+              sends: [OK],
+            },
+    );
+    const a = w.make({ markers: m.page("a"), locks: null });
+    const b = w.make({ markers: m.page("b"), locks: null });
+    a.ensure(TASK, "daily");
+    await until(w, () => held.length === 1, "a's call is on its way");
+    const mine = caller === "discovery" ? w.discovery() : w.stored();
+    b.ensure(TASK, "daily");
+    await until(w, () => held.length === 2, "b's call is on its way");
+    const peer = caller === "discovery" ? w.discovery() : w.stored();
+    // b admitted the same caller again over a's admission: a's record of it is gone (another claim, a higher revision).
+    if (caller === "discovery")
+      expect((peer as MaterialiseDiscovery).attempt).not.toBe(
+        (mine as MaterialiseDiscovery).attempt,
+      );
+    else
+      expect((peer as MaterialiseSequenceRow).revision).toBeGreaterThan(
+        (mine as MaterialiseSequenceRow).revision as number,
+      );
+    if (caller === "command") expect(w.sent()[1]?.key).toBe(w.sent()[0]?.key);
+    const before = transmissionsOf(w, caller).length;
+    const observedAt = w.now();
+    const value =
+      answer === "429"
+        ? await http(429, "rate_limited", "60")
+        : caller === "command"
+          ? OK
+          : caller === "discovery"
+            ? detail(TODAY, false)
+            : detail(TODAY, false);
+    (held[0] as (x: unknown) => void)(value);
+    await w.idle(a);
+    return { m, w, a, b, held, peer, before, observedAt };
+  }
+
+  for (const caller of CALLERS)
+    for (const answer of ["429", "ok"] as const)
+      test(`Q3 ${caller} ${answer}: the first write of a's answer finds b's admission (stale): a keeps it fenced, transmits nothing more and leaves b's record as it was`, async () => {
+        const { m, w, a, b, held, peer, before } = await peerAdmitted(
+          caller,
+          answer,
+        );
+        try {
+          expect(
+            transmissionsOf(w, caller).slice(before),
+            "no call is made from the peer's record on behalf of an answer the first write could not record",
+          ).toEqual([]);
+          expect(caller === "discovery" ? w.discovery() : w.stored()).toEqual(
+            peer,
+          );
+          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+            "marked",
+          );
+          expect(a.get().unrecorded.has(TASK)).toBe(true);
+          // a's later work (ensure, kick, its own press) never ends the fence: nothing proves its answer was recorded.
+          a.ensure(TASK, "daily");
+          a.kick();
+          await w.idle(a);
+          expect(transmissionsOf(w, caller).slice(before)).toEqual([]);
+        } finally {
+          a.dispose();
+          b.dispose();
+          for (const r of held) r(OK as never);
+          await w.settle();
+        }
+      });
+
+  test("Q6 discovery: a success whose entry another page removed already is recorded (landed: the removal it writes); the work goes on, no fence left", async () => {
+    const m = markerWorld();
+    let releaseA: ((x: TasksResult<TaskDetail>) => void) | null = null;
+    const w = await setup({
+      positions: [
+        () =>
+          new Promise<TasksResult<TaskDetail>>((r) => {
+            releaseA = r;
+          }),
+        detail(TODAY, false),
+      ],
+    });
+    const a = w.make({ markers: m.page("a"), locks: null });
+    const b = w.make({ markers: m.page("b"), locks: null });
+    try {
+      a.ensure(TASK, "daily");
+      await until(w, () => releaseA !== null, "a's read is on its way");
+      // b: a's claim counts as lost, b's own read succeeds and removes the entry (its 1 s pace moves the clock).
+      b.ensure(TASK, "daily");
+      await w.idle(b);
+      expect(w.discovery()).toBeUndefined();
+      (releaseA as unknown as (x: TasksResult<TaskDetail>) => void)(
+        detail(TODAY, false),
+      );
+      await w.idle(a);
+      expect(a.get().unrecorded.has(TASK)).toBe(false);
+      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+        "unmarked",
+      );
+    } finally {
+      a.dispose();
+      b.dispose();
+    }
+  });
+
+  test("Q6 discovery: a success whose entry was removed AND admitted again by another page (another claim) is not taken as recorded: fenced", async () => {
+    const m = markerWorld();
+    let releaseA: ((x: TasksResult<TaskDetail>) => void) | null = null;
+    let releaseC: ((x: TasksResult<TaskDetail>) => void) | null = null;
+    const w = await setup({
+      positions: [
+        () =>
+          new Promise<TasksResult<TaskDetail>>((r) => {
+            releaseA = r;
+          }),
+        detail(TODAY, false),
+        () =>
+          new Promise<TasksResult<TaskDetail>>((r) => {
+            releaseC = r;
+          }),
+      ],
+    });
+    const a = w.make({ markers: m.page("a"), locks: null });
+    const b = w.make({ markers: m.page("b"), locks: null });
+    const c = w.make({ markers: m.page("c"), locks: null });
+    try {
+      a.ensure(TASK, "daily");
+      await until(w, () => releaseA !== null, "a's read is on its way");
+      b.ensure(TASK, "daily");
+      await w.idle(b);
+      expect(w.discovery()).toBeUndefined();
+      c.ensure(TASK, "daily");
+      await until(w, () => releaseC !== null, "c's read is on its way");
+      const recreated = w.discovery();
+      expect(recreated?.attempt).toEqual(expect.any(String));
+      (releaseA as unknown as (x: TasksResult<TaskDetail>) => void)(
+        detail(TODAY, false),
+      );
+      await w.idle(a);
+      expect(w.discovery()).toEqual(recreated);
+      expect(a.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+        "marked",
+      );
+    } finally {
+      a.dispose();
+      b.dispose();
+      c.dispose();
+      (releaseC as ((x: TasksResult<TaskDetail>) => void) | null)?.(
+        detail(TODAY, false),
+      );
+      await w.settle();
+    }
+  });
+
+  test("Q6 position: a completing read whose row another page removed already is recorded (landed); a recreated row of the day is not", async () => {
+    for (const recreate of [false, true]) {
+      const m = markerWorld();
+      let release: ((x: TasksResult<TaskDetail>) => void) | null = null;
+      const w = await setup({
+        positions: [
+          detail("2026-10-01", true),
+          () =>
+            new Promise<TasksResult<TaskDetail>>((r) => {
+              release = r;
+            }),
+        ],
+        sends: [OK],
+      });
+      const a = w.make({ markers: m.page("a"), locks: null });
+      try {
+        a.ensure(TASK, "daily");
+        await until(
+          w,
+          () => release !== null,
+          "a's position read is on its way",
+        );
+        const issued = w.stored() as MaterialiseSequenceRow;
+        expect(issued.phase).toBe("awaiting_position_read");
+        // Another page's completing read removed the row (and, when recreated, a new generation of the day was begun since).
+        w.t.world.idb.clearStore(DB, "materialise_sequences");
+        if (recreate)
+          w.t.world.idb.seed(DB, "materialise_sequences", [
+            row({ sequence_generation: "g-other", revision: 1 }),
+          ]);
+        const other = w.stored();
+        (release as unknown as (x: TasksResult<TaskDetail>) => void)(
+          detail(TODAY, false),
+        );
+        await w.idle(a);
+        expect(w.stored()).toEqual(other);
+        expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY))).toBe(
+          recreate ? "marked" : "unmarked",
+        );
+        expect(a.get().unrecorded.has(TASK)).toBe(recreate);
+      } finally {
+        a.dispose();
+      }
+    }
+  });
+
+  test("Q6: retiring a's own instance after its outcome lands never retires another page's marker of the operation", async () => {
+    const m = markerWorld();
+    const w = await setup(await WORLD_429.command());
+    const h = holdOutcome(w, "command");
+    const r = w.make({ service: () => h.service, markers: m.page("p1") });
+    try {
+      r.ensure(TASK, "daily");
+      await until(w, h.entered, "the first outcome write was entered");
+      const peer = m.page("p9").set(scopeOf(w), fenceOf(TASK, TODAY));
+      expect(peer.state).toBe("recorded");
+      h.release(false);
+      await w.idle(r);
+      // a's own instance ended; the peer's still marks the day, so the day stays stopped here.
+      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY))).toBe(
+        "marked",
+      );
+      const keys = [...m.storage.items.keys()].filter((k) =>
+        k.includes("materialise"),
+      );
+      expect(keys).toHaveLength(1);
+    } finally {
+      r.dispose();
+      h.release(false);
+    }
+  });
+});

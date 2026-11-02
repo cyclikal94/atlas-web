@@ -3336,7 +3336,8 @@ export const UNIT_10C = [
       sub(
         t,
         // Re-anchored (revision 12): the fence is published by `publish`; the same fault (no marker written, no page hold taken).
-        "    const out = m.set(scope, op, () => owns(at));",
+        // Re-anchored (revision 13): its lifetime check is `entitled` (a gap included); the same fault.
+        "    const out = m.set(scope, op, () => entitled(at));",
         '    const out = { state: "recorded" as const };',
       ),
   },
@@ -3395,7 +3396,8 @@ export const UNIT_10C = [
         t,
         // Re-anchored (revision 12): the kept outcome is a `Protected` record written by the press first; the same fault (taken as
         // written without writing it, so its fence ends and the work carries on from the issued record).
-        "        const verdict = await record.repair();",
+        // Re-anchored (revision 13): the record is written by its `attempt`; the same fault.
+        "        const { verdict } = await record.attempt();",
         '        const verdict: Verdict = "written";',
       ),
   },
@@ -3535,8 +3537,9 @@ export const UNIT_10C = [
       sub(
         t,
         // Re-anchored (revision 12): the answer is written through `protect`; the same fault (a failed write is given up, not repaired).
-        '            : w === "failed" || w === "refused"\n              ? "failed"',
-        '            : w === "failed" || w === "refused"\n              ? "ended"',
+        // Re-anchored (revision 13): the discovery answer's own verdict; given up = classified final (`stale`), never written again.
+        '          out.kind !== "applied" || out.value.kind === "refused"\n            ? "failed"',
+        '          out.kind !== "applied" || out.value.kind === "refused"\n            ? "stale"',
       ),
   },
   {
@@ -3574,16 +3577,19 @@ export const UNIT_10C = [
     expect:
       /WITNESS \(R36-B\)|Q2 (discovery|command|position): the first failed outcome write is fenced before/,
     patch: (t) =>
+      // Re-anchored (revision 13): publication is at receipt for an outcome that must be kept (`protect`), otherwise at the first
+      // unrecorded write (`fence` in `settle`); the same fault (nothing published until the repairs are spent).
       sub(
         sub(
           t,
-          '    const published = publish(at, op);\n    if (published === null) return { kind: "ended" };',
-          "    const published = { marker: null, memory: null };",
+          '      if (!fence(at, record)) return ENDED_P;\n      if (verdict === "stale") return FENCED;',
+          '      if (verdict === "stale") return fence(at, record) ? FENCED : ENDED_P;',
         ),
-        '      if (verdict === "stale") return { kind: "fenced" };\n    }\n    return { kind: "fenced" };',
-        '      if (verdict === "stale") return { kind: "fenced" };\n    }\n    if (publish(at, op) === null) return { kind: "ended" };\n    return { kind: "fenced" };',
+        "      if (wait === undefined) return FENCED;",
+        "      if (wait === undefined) return fence(at, record) ? FENCED : ENDED_P;",
       ),
   },
+
   {
     id: "MU-3263",
     title:
@@ -3679,8 +3685,10 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "          () => commit(service, captured, key, issued, unsent),\n          judgeRow(issued, unsent),",
-        '          () => commit(service, captured, key, issued, unsent),\n          (o) => (o === null ? "ended" : judgeRow(issued, unsent)(o)),',
+        // Re-anchored (revision 13): verdicts no longer include `ended` (every unwritten verdict is repaired), so the same fault is the
+        // withdrawal written outside `protect`: nothing published, a failed write given up as a pause.
+        "        const back = await protect(\n          at,\n          key.task_id,\n          op,\n          () => commit(service, captured, key, issued, unsent),\n          judgeRow(issued, unsent),\n          false,\n          key.through_date,\n        );",
+        '        const plain = await commit(service, captured, key, issued, unsent);\n        const back = (plain === null ? { kind: "ended" } : { kind: "out", out: plain, verdict: "written" }) as { kind: string; out?: unknown };',
       ),
   },
   {
@@ -3696,6 +3704,177 @@ export const UNIT_10C = [
         t,
         "        op,\n        () => commit(service, captured, key, issued, outcome),",
         '        plan.kind === "read" ? `${op}:read` : op,\n        () => commit(service, captured, key, issued, outcome),',
+      ),
+  },
+
+  // ---- Revision 13 (review 14 R36-E/R36-F; design assessment Q2 to Q6, Q10) -------------------------------------------------------
+  {
+    id: "MU-3271",
+    title:
+      "R36-E: WEB-10c A19 (review 14): a FIRST outcome write that finds another record (stale) is adopted as recorded (its fence ends, the work goes on from the peer's row)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /STALE-OUTCOME WITNESS \(R36-E\)|Q3 (discovery|command|position) (429|ok): the first write of a's answer finds b's admission/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (verdict === "stale") return FENCED;',
+        '      if (verdict === "stale" && i === 0) {\n        reconcile(record);\n        return { kind: "out", out, verdict: "written" };\n      }\n      if (verdict === "stale") return FENCED;',
+      ),
+  },
+  {
+    id: "MU-3272",
+    title:
+      "R36-F: WEB-10c A19 (review 14): an answer that arrives while no service is displayed (its own still live) is dropped unrecorded",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /BINDING-ANSWER WITNESS \(R36-F\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (!entitled(at)) return ENDED_P;",
+        "    if (!owns(at)) return ENDED_P;",
+      ),
+  },
+  {
+    id: "MU-3273",
+    title:
+      "R36-F: WEB-10c A19 (review 14): an outcome left mid-write by a gap is forgotten by the runner (its fence stands, nothing writes it on the return)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /Q4 (discovery|command|position): a gap while the first outcome write is on its way \(it fails\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "        record.pending = true;\n        return PENDING;",
+        "        repairs.delete(repairKey(record.service, record.op));\n        return PENDING;",
+      ),
+  },
+  {
+    id: "MU-3274",
+    title:
+      "R36-F/C1: WEB-10c A19 (review 14): a command's answer kept through a gap is classified again when it is written (its deadline recomputed from the return)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /Q4 command: an answer kept through a gap is written as it was observed/,
+    patch: (t) =>
+      sub(
+        t,
+        '        () => commit(service, captured, key, issued, outcome),\n        judgeRow(issued, outcome),\n        mustKeep(outcome, plan.kind === "send" && answered.kind === "ok"),\n        key.through_date,',
+        '        () => commit(service, captured, key, issued, plan.kind === "send" ? onSent(issued, answered as SendAnswer, deps.now()) : outcome),\n        judgeRow(issued, outcome),\n        mustKeep(outcome, plan.kind === \"send\" && answered.kind === \"ok\"),\n        key.through_date,',
+      ),
+  },
+  {
+    id: "MU-3275",
+    title:
+      "R36-E/C5: WEB-10c A19 (review 14): a stored row with the same attempt key is taken as this outcome landed (a peer's admission of the same command)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /STALE-OUTCOME WITNESS \(R36-E\)|Q3 command (429|ok): the first write of a's answer finds b's admission/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return was === (expected.revision ?? 0) + 1 && same(rest, want);",
+        "  return (was === (expected.revision ?? 0) + 1 && same(rest, want)) || (rest.attempt != null && same(rest.attempt, want.attempt));",
+      ),
+  },
+  {
+    id: "MU-3276",
+    title:
+      "R36-F/invariant 11: WEB-10c A19 (review 14): a call's permission at issue accepts a gap of its binding (sent while no service is displayed)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a call admitted just before a gap is never sent in it/,
+    patch: (t) =>
+      sub(
+        t,
+        "          owns(at) &&\n          mayRun() &&",
+        "          entitled(at) &&\n          deps.online() &&\n          deps.writable() &&",
+      ),
+  },
+  {
+    id: "MU-3277",
+    title:
+      "R36/C4: WEB-10c A19 (review 14): nothing is published before the first outcome write answers (a write that never lands leaves no fence)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /Q5 (discovery|command|position): (the fence stands while the FIRST outcome write|a runner disposed while its first outcome write)/,
+    patch: (t) =>
+      // Revision 13 (after the native E-M2 failure): only an outcome that must be kept is published at receipt; the fault: none is.
+      sub(
+        t,
+        "    const published = early\n      ? publish(at, op)\n      : { marker: null, memory: null, unpublished: true };",
+        "    const published = { marker: null, memory: null, unpublished: true };",
+      ),
+  },
+
+  {
+    id: "MU-3278",
+    title:
+      "R36-F/C6: WEB-10c A19 (review 14): the task's work does not write an outcome kept through a gap before it goes on (the day stays stopped)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /Q4 (discovery|command|position): a gap while the first outcome write is on its way/,
+    patch: (t) => sub(t, "        !record.pending ||\n", "        true ||\n"),
+  },
+  {
+    id: "MU-3279",
+    title:
+      "R36-F/C3: WEB-10c A19 (review 14): an answer that arrives while ANOTHER service is displayed (a replacement) is kept as if in a gap",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /an answer that arrives while ANOTHER service is displayed/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return now === null || now === at.service;",
+        "    return true;",
+      ),
+  },
+  {
+    id: "MU-3280",
+    title:
+      "R36-F/C3: WEB-10c A19 (review 14): an ended service counts as a gap (its answer publishes a fence into a lifetime that ended)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /an answer that arrives after its service ended/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (disposed || at.service.ended || bound !== at.service) return false;",
+        "    if (disposed || bound !== at.service) return false;",
+      ),
+  },
+  {
+    id: "MU-3282",
+    title:
+      "R36/C4: WEB-10c A19 (revision 13): every outcome is fenced at its receipt (a call the browser cancels as its page closes stops the work for good)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /a transport failure whose record never lands \(the runner disposed, as when the page closes\)/,
+    patch: (t) =>
+      sub(t, "    if (success) return true;\n", "    return true;\n"),
+  },
+  {
+    id: "MU-3281",
+    title:
+      "F-10C-13a: WEB-10c A19 (revision 13): the outbox's Try again of all drafts ends every stop the page holds in memory (the task catch-up's fence too)",
+    file: "src/data/engine/outbox-dispatcher.ts",
+    tests: ["tests/data/outbox-foreign-stops.test.ts"],
+    expect:
+      /a catch-up fence \(memory hold\) held beside the outbox's own stop stays/,
+    patch: (t) =>
+      sub(
+        t,
+        "            (operation) => outboxOperation(operation) && covers(operation),",
+        "            (operation) => covers(operation),",
       ),
   },
 ];

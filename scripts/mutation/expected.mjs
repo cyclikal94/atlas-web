@@ -1,7 +1,7 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2098;
+export const EXPECTED_UNIT = 2110;
 export const EXPECTED_ENGINE = 265;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
@@ -25,4 +25,7 @@ export const EXPECTED_ENGINE = 265;
 // WEB-10c revision 11 (review 12 R36): +33 unit (MU-3227..MU-3259) and +2 real-engine (MU-3260, MU-3261 over E-M11).
 // WEB-10c revision 12 (review 13 R36-A to R36-D): +9 unit (MU-3262..MU-3270); MU-3101, MU-3219, MU-3221, MU-3241, MU-3243, MU-3247, MU-3248,
 // MU-3250 and MU-3257 re-anchored (the same faults over the protected-outcome and queue code).
+// WEB-10c revision 13 (review 14 R36-E/R36-F, finding F-10C-13a): +12 unit (MU-3271..MU-3282; MU-3281 over the outbox dispatcher's
+// retry); MU-3243, MU-3247, MU-3257, MU-3262 and MU-3269 re-anchored (the same faults over the outcome protected from its receipt), and
+// WEB-09a's MU-830, MU-831 and MU-832 re-anchored (the same faults over the dispatcher's page memory narrowed to the outbox's operations).
 // Combined inventory: accepted WEB-10b (1737 unit, 255 engine), WEB-08d (105 unit, 5 engine), and WEB-10c (214 unit, 3 engine).

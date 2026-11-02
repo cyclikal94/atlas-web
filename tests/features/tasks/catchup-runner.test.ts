@@ -1139,6 +1139,33 @@ const admitting = {
 } as never;
 
 describe("R16: a first read is admitted before it is sent", () => {
+  // Revision 13: MU-3082 survived on 788bfb2 too (a record failure is now also fenced, so its old case could not tell); a refused new entry
+  // has no fence behind its page stop, so only the page's memory stop keeps automatic work from it.
+  test("a new entry whose record cannot be written (the ledger refused it) keeps its page stop when the ledger admits again: automatic work reads nothing; only Try again does", async () => {
+    const w = await setup();
+    let ledger = refusing;
+    const r = w.make({ quota: () => ledger });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.reads()).toBe(0);
+      const stop = r.get().unrecorded.get(TASK);
+      expect(stop?.reason).toBe("storage");
+      ledger = admitting;
+      r.ensure(TASK, "daily");
+      r.ensure(TASK, "streak");
+      r.kick();
+      await w.idle(r);
+      expect(w.reads()).toBe(0);
+      expect(r.get().unrecorded.get(TASK)).toEqual(stop);
+      r.tryAgain(TASK, undefined, { kind: "memory", id: stop?.id as string });
+      await w.idle(r);
+      expect(w.reads()).toBeGreaterThan(0);
+    } finally {
+      r.dispose();
+    }
+  });
+
   test("the quota ledger refuses the task's record: nothing is read, a storage stop is shown; a reload reads nothing until it is admitted", async () => {
     const w = await setup();
     const first = w.make({ quota: () => refusing });
@@ -1203,7 +1230,14 @@ describe("R16: a first read is admitted before it is sent", () => {
     await w.idle(a);
     expect(w.discovery()).toMatchObject({ failures: 2, stop: null });
     expect(w.discovery()?.attempt).not.toBe(claimed);
-    expect(a.get().unrecorded.size).toBe(0);
+    // ADAPTATION (revision 13, review 14's R36-E; design assessment C2/C5). Old assertion: `a.get().unrecorded.size` is 0, i.e. a, whose
+    // first write of its answer found b's claim (stale), forgot that answer. Old intent kept above: the late refusal changes nothing in the
+    // record (b's claim and count stand) and spends no budget. Reversed part, by the approved correction: a stale first write proves nothing
+    // about the answer, so a keeps it (its refusal held in its memory, its fence standing) instead of discarding it, and reads no more.
+    expect(a.get().unrecorded.get(TASK)?.reason).toBe("rejected");
+    a.ensure(TASK, "daily");
+    await w.idle(a);
+    expect(w.reads()).toBe(2);
     a.dispose();
     b.dispose();
   });
