@@ -13,16 +13,27 @@
 // because the stored status is invalid. The cache-valid negative stays a separate storage control.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { recoverySample, renderingOf } from "./pair-capture.mjs";
 import {
+  ENDPOINT_FIELDS,
+  recoverySample,
+  renderingOf,
+} from "./pair-capture.mjs";
+import {
+  activationProblems,
   admissibilityProblems,
+  captureProblems,
   hiddenProblems,
   holdsComplete,
+  interpretations,
   MAX_UNRESOLVED_REREADS,
   OBSERVATION_SCHEMA,
   observationProblems,
   observeRecovery,
   shownProblems,
+  storedActivatedProblems,
+  storedInvalidatedProblems,
+  storedProblemsAt,
+  storedStagedProblems,
 } from "./pair-recovery.mjs";
 
 const OLD = "old-digest";
@@ -306,7 +317,26 @@ function world({
   }
   return { io, releases, observations, records, reads, state };
 }
-const run = (w, { caller = "ordinary", expectFinal = () => [] } = {}) =>
+/** The fields of a stored state as its second coherent transaction (pair-capture.mjs `ENDPOINT_FIELDS`). */
+const endpointOf = (s) =>
+  Object.fromEntries(ENDPOINT_FIELDS.map((k) => [k, s[k] ?? null]));
+/**
+ * Revision 31 (R31-DIAG; labelled test double): a sample of the plain world (not `composed`) states a STABLE storage bracket, so its second
+ * stored transaction is the stored state it returned — supplied here, OUTSIDE every test's own read wrapper, so a test that alters a stored
+ * field alters both transactions alike. A sample that already states `stored_after` (every `composed` capture, or a test that sets it, even
+ * to null) is left as it is.
+ */
+const run = (w, { caller = "ordinary", expectFinal = () => [] } = {}) => {
+  const read = w.io.read;
+  w.io.read = async (who, o) => {
+    const r = await read(who, o);
+    return r && typeof r === "object" && r.stored_after === undefined
+      ? { ...r, stored_after: endpointOf(r) }
+      : r;
+  };
+  return observe(w, { caller, expectFinal });
+};
+const observe = (w, { caller, expectFinal }) =>
   observeRecovery(w.io, {
     ruleId: "r1",
     caller,
@@ -638,16 +668,21 @@ test("Q3 refused (revision 28, recovery caller): a fence never cleared never rea
 
 // The pure rules on their own, for the reader-parity table (pair-evidence.test.mjs applies the same shapes to the interval reader).
 test("Q2 rules (revision 28): hidden/shown are judged from the rendering alone, never from the stored status", () => {
-  const sample = (rendering, extra = {}) => ({
-    reader: "leader",
-    account: ACCOUNT,
-    cache_status: "invalid",
-    fenced: false,
-    incarnation: "incarnation-1",
-    capture: { auth: { status: "stable" }, storage: { status: "stable" } },
-    rendering,
-    ...extra,
-  });
+  // Revision 31 (labelled adaptation, C3): a complete sample now states its second stored transaction; with a stable bracket it is the
+  // sample's own stored state. The rules judged below are unchanged.
+  const sample = (rendering, extra = {}) => {
+    const x = {
+      reader: "leader",
+      account: ACCOUNT,
+      cache_status: "invalid",
+      fenced: false,
+      incarnation: "incarnation-1",
+      capture: { auth: { status: "stable" }, storage: { status: "stable" } },
+      rendering,
+      ...extra,
+    };
+    return { ...x, stored_after: endpointOf(x) };
+  };
   const ordinary = healthyRendering("leader", {
     caller: "ordinary",
     phase: "before",
@@ -1151,6 +1186,7 @@ const STORED_KEYS = (s) => {
     notice: _n,
     fenced: _f,
     capture: _c,
+    stored_after: _e,
     ...stored
   } = s;
   return stored;
@@ -1266,6 +1302,8 @@ for (const [who, at] of [
       );
       const r = await run(w, { caller: "recovery" });
       const injected = log.find((x) => x.after === at);
+      // Revision 31 (test robustness, no assertion changed): the site's presence is itself asserted before it is read.
+      assert.ok(injected, "the injected site was read");
       assert.equal(injected.who, who);
       assert.equal(
         injected.sample.fenced,
@@ -1313,6 +1351,7 @@ for (const [who, at] of [
       assert.ok(!w.observations.some((o) => o.kind === "recovery_rendered"));
       // The first failure's facts (C3): this page, this phase, both bracket outcomes as captured.
       assert.equal(failures.length, 1);
+      assert.ok(failures[0]?.capture, "the failure carries its facts");
       const f = failures[0].capture;
       assert.equal(f.reader, who);
       assert.equal(f.read, 1);
@@ -1512,7 +1551,10 @@ for (const caller of ["ordinary", "recovery"])
           );
           assert.equal(failures.length, 1, "one first failure, recorded once");
           if (moving)
-            assert.equal(failures[0].capture.capture.storage.status, "changed");
+            assert.equal(
+              failures[0]?.capture?.capture?.storage?.status,
+              "changed",
+            );
         });
 
 // Q4: LAWFUL transitions are re-read (bounded, counted by cause), never refused and never published mixed; identity lost during a re-read is
@@ -1662,6 +1704,7 @@ for (const [caller, fenced, rendering, refused] of [
     );
     const r = await run(w, { caller });
     const commit = log.find((x) => x.after === 1);
+    assert.ok(commit, "the first activation poll was read");
     assert.equal(commit.out.capture.storage.status, "changed");
     assert.ok(commit.out.capture.storage.fields.includes("cache_status"));
     if (refused) {
@@ -1891,6 +1934,41 @@ for (const [name, change, refused] of [
     },
     /account database names no incarnation/,
   ],
+  // Revision 31 (R31-DIAG, C3): the second coherent stored transaction is part of the envelope.
+  [
+    "a stable storage bracket whose second stored read is not retained",
+    (r) => {
+      r.stored_after = null;
+    },
+    /leader's second stored read is not retained/,
+  ],
+  [
+    "a second stored read of another incarnation under a stable bracket",
+    (r) => {
+      r.stored_after = { ...endpointOf(r), incarnation: "incarnation-2" };
+    },
+    /leader's second stored read names another incarnation \(incarnation-2\)/,
+  ],
+  [
+    "a stable storage bracket whose second read differs",
+    (r) => {
+      r.stored_after = { ...endpointOf(r), cache_digest: "moved" };
+    },
+    /leader's stable storage bracket disagrees with its second read \(differing: cache_digest\)/,
+  ],
+  [
+    "a changed storage bracket naming another field than the one that moved",
+    (r) => {
+      r.stored_after = { ...endpointOf(r), composition_seq: 11 };
+      r.capture.storage = {
+        status: "changed",
+        fields: ["cursor"],
+        before: {},
+        after: {},
+      };
+    },
+    /leader's changed storage bracket disagrees with its second read \(differing: composition_seq\)/,
+  ],
 ])
   test(`R30 C1 refused: ${name} is an incomplete observation`, async () => {
     const { w, r } = await envelope(change)();
@@ -1938,4 +2016,876 @@ test("R30 C3: the FIRST failure is handed to `failed` once, before the throw, an
     assert.equal(order.at(-1), "failed");
     assert.equal(order.filter((x) => x === "failed").length, 1);
   }
+});
+
+// ---- revision 31 (R31-DIAG, family `segmented-sync-development-pairing`, incomplete_fix of R30-DIAG; design assessment Q1-Q5) -------------
+// Each raw stored read is ONE coherent IndexedDB transaction. Revision 30 judged the stored-data predicates only on a RESOLVED capture after
+// `read()` returned, so a capture whose bracket moved (an unrelated composition write, a legal activation, an auth change) discarded an
+// independently invalid transaction and a later healthy sample passed (the review's atomicity and family probes, preserved unchanged under
+// .agtx/evidence/WEB-09c/review-r30-20261102). Now BOTH coherent transactions of every capture are judged against the barrier's frozen
+// read context before any re-read. Injected faults are labelled test interventions on doubled IO (harness sensitivity, never product
+// corruption); one fault is injected and the IO is healthy again at once, so each refusal also proves first-failure retention.
+const WRONG = "independently-wrong-live-cache";
+const OTHER = "another-new-cache";
+const STAGED_END = {
+  cache_status: "invalid",
+  cache_digest: OLD,
+  staging_rows: 6,
+  staging_generations: [6],
+  applied_revision: 8,
+};
+const COMPLETE_END = {
+  cache_status: "valid",
+  cache_digest: NEW,
+  staging_rows: 0,
+  staging_generations: [],
+  applied_revision: 12,
+};
+const SPLIT_END = {
+  ...COMPLETE_END,
+  staging_rows: 3,
+  staging_generations: [6],
+};
+
+// Q1: the pure stored predicates on one transaction and an explicit context (no rendering, no fence, no bracket consulted).
+test("R31 Q1: the stored invalidation — each predicate on its own, and a healthy control", () => {
+  const ok = {
+    cache_status: "invalid",
+    cursor: null,
+    phase: "snapshot",
+    delta_stage: null,
+    staged: 0,
+    staging_rows: 0,
+    recovery_generation: 6,
+    cache_digest: OLD,
+  };
+  const ctx = {
+    who: "leader",
+    caller: "recovery",
+    oldDigest: OLD,
+    refusalGeneration: 5,
+  };
+  assert.deepEqual(storedInvalidatedProblems(ok, ctx), []);
+  for (const [change, expected, c = {}] of [
+    [{ cache_status: "valid" }, /still shows a valid cache/],
+    [{ cursor: "c9" }, /keeps a cursor/],
+    [{ delta_stage: { revision: 9 } }, /keeps the abandoned delta stage/],
+    [{ staged: 2 }, /keeps the abandoned delta stage/],
+    [{ staging_rows: 1 }, /holds snapshot rows before the first page/],
+    [{ recovery_generation: 5 }, /has no new recovery generation/],
+    [{ cache_digest: WRONG }, /live cache changed before the snapshot/],
+    [{ phase: "delta" }, /refusal did not restart the snapshot/],
+    [{}, /does not read the leader's generation 7 \(6\)/, { generation: 7 }],
+  ])
+    assert.match(
+      storedInvalidatedProblems({ ...ok, ...change }, { ...ctx, ...c }).join(),
+      expected,
+    );
+  // The stored phase is the RECOVERY leader's obligation only (unchanged scope).
+  assert.deepEqual(
+    storedInvalidatedProblems(
+      { ...ok, phase: "delta" },
+      { ...ctx, who: "follower" },
+    ),
+    [],
+  );
+});
+test("R31 Q1: the stored staging — row floor, one generation, the old live cache, never valid; and a healthy control", () => {
+  const ok = { ...STAGED_END, recovery_generation: 6 };
+  const ctx = {
+    who: "follower",
+    oldDigest: OLD,
+    generation: 6,
+    rowsAtLeast: 6,
+  };
+  assert.deepEqual(storedStagedProblems(ok, ctx), []);
+  for (const [change, expected] of [
+    [{ staging_rows: 5 }, /holds 5 staged rows, expected at least 6/],
+    [{ staging_generations: [6, 7] }, /not all of generation 6/],
+    [{ recovery_generation: 7 }, /moved to generation 7/],
+    [{ cache_digest: WRONG }, /live cache changed before the activation/],
+    [{ cache_status: "valid" }, /shows a valid cache before the last page/],
+  ])
+    assert.match(
+      storedStagedProblems({ ...ok, ...change }, ctx).join(),
+      expected,
+    );
+});
+test("R31 Q1: the stored activation — wholly staged or wholly complete; a split refused; never backwards once a complete cache was validated", () => {
+  const base = { delta_stage: null, staged: 0, recovery_generation: 6 };
+  const ctx = { who: "leader", oldDigest: OLD, generation: 6, rowsAtLeast: 6 };
+  assert.deepEqual(activationProblems({ ...base, ...STAGED_END }, ctx), []);
+  assert.deepEqual(activationProblems({ ...base, ...COMPLETE_END }, ctx), []);
+  assert.match(
+    activationProblems({ ...base, ...SPLIT_END }, ctx).join(),
+    /a split activation: neither the staged nor the complete state/,
+  );
+  // A changed live cache before validity (the old split form).
+  assert.match(
+    activationProblems(
+      { ...base, ...STAGED_END, cache_digest: OTHER },
+      ctx,
+    ).join(),
+    /a split activation/,
+  );
+  const after = { ...ctx, witness: NEW };
+  assert.deepEqual(activationProblems({ ...base, ...COMPLETE_END }, after), []);
+  assert.match(
+    activationProblems({ ...base, ...STAGED_END }, after).join(),
+    /the activation went backwards: a complete cache new-digest was read, then/,
+  );
+  assert.match(
+    activationProblems(
+      { ...base, ...COMPLETE_END, cache_digest: OTHER },
+      after,
+    ).join(),
+    /the activation went backwards: .*does not hold the activated cache new-digest \(another-new-cache\)/,
+  );
+});
+test("R31 Q1: the stored activated state — valid, nothing staged, a new cache, and the bound digest named by its site", () => {
+  const ok = { ...COMPLETE_END, delta_stage: null, staged: 0 };
+  const ctx = {
+    who: "follower",
+    oldDigest: OLD,
+    digest: NEW,
+    mismatch: "the follower does not read the activated cache",
+  };
+  assert.deepEqual(storedActivatedProblems(ok, ctx), []);
+  for (const [change, expected] of [
+    [{ cache_status: "invalid" }, /does not hold a valid cache/],
+    [{ staging_rows: 1 }, /still holds staged rows after the activation/],
+    [
+      { delta_stage: { revision: 3 } },
+      /still holds staged rows after the activation/,
+    ],
+    [{ cache_digest: OLD }, /still holds the old cache/],
+    [
+      { cache_digest: OTHER },
+      /^the follower does not read the activated cache$/,
+    ],
+  ])
+    assert.match(
+      storedActivatedProblems({ ...ok, ...change }, ctx).join(),
+      expected,
+    );
+  assert.throws(
+    () => storedProblemsAt(ok, { barrier: "rendered" }, { who: "leader" }),
+    /unknown stored barrier rendered/,
+  );
+});
+test("R31 Q1/C2: an activation poll's phases come from its two KNOWN transactions — both staged: before only; both complete: after only; one of each: both", () => {
+  const moving = (first, second) => ({
+    reader: "leader",
+    fenced: false,
+    ...first,
+    stored_after: { ...second },
+    capture: {
+      auth: { status: "stable" },
+      storage: { status: "changed", fields: ["composition_seq"] },
+    },
+  });
+  const phases = (r) => interpretations(r, "activation").map((i) => i.phase);
+  assert.deepEqual(phases(moving(STAGED_END, STAGED_END)), [
+    "before_activation",
+  ]);
+  assert.deepEqual(phases(moving(COMPLETE_END, COMPLETE_END)), [
+    "after_activation",
+  ]);
+  assert.deepEqual(phases(moving(STAGED_END, COMPLETE_END)), [
+    "before_activation",
+    "after_activation",
+  ]);
+});
+test("R31 C1/C3: the capture envelope requires the second stored transaction under a stable or changed bracket", () => {
+  const sample = {
+    reader: "follower",
+    fenced: false,
+    incarnation: "incarnation-1",
+    composition_seq: 10,
+    cache_digest: OLD,
+    capture: { auth: { status: "stable" }, storage: { status: "stable" } },
+  };
+  assert.deepEqual(
+    captureProblems({ ...sample, stored_after: endpointOf(sample) }),
+    [],
+  );
+  assert.deepEqual(
+    captureProblems({
+      ...sample,
+      stored_after: { ...endpointOf(sample), composition_seq: 11 },
+      capture: {
+        ...sample.capture,
+        storage: { status: "changed", fields: ["composition_seq"] },
+      },
+    }),
+    [],
+  );
+  assert.match(
+    captureProblems({ ...sample }).join(),
+    /follower's second stored read is not retained/,
+  );
+});
+
+// Q2: the review's preserved stimuli, carried forward through the MAINTAINED composition (`composed`: pair-capture.mjs `recoverySample`
+// and `renderingOf` with the real in-page capture over doubled globals, into `observeRecovery`), with the corrected expectations.
+const refusedAt = (r, log, failures, injected, observedBefore, w, expected) => {
+  assert.match(String(r.error?.message), expected);
+  assert.equal(
+    log.at(-1),
+    injected,
+    "refused AT the injected capture: no later read",
+  );
+  assert.equal(w.observations.length, observedBefore, "no milestone after it");
+  assert.equal(failures.length, 1, "one first failure, recorded once");
+  assert.ok(failures[0]?.capture, "the failure carries its facts");
+  assert.equal(
+    r.error.capture,
+    failures[0].capture,
+    "the thrown error carries the same facts",
+  );
+  return failures[0].capture;
+};
+// The atomicity probe's four variants per caller, at the leader's first activation poll after the last page's release.
+const ATOMICITY = {
+  "healthy, stable storage": {
+    split: false,
+    change: () => null,
+    refused: null,
+  },
+  "a lawful atomic transition: the first transaction wholly staged, the second wholly complete":
+    {
+      split: false,
+      change: () => ({ storageBefore: STAGED_END }),
+      refused: null,
+    },
+  "the maintained split-activation fault, stable storage": {
+    split: true,
+    change: () => ({}),
+    refused:
+      /a split activation: neither the staged nor the complete state .*\[the first stored read of capture 1\]/,
+    endpoint: "first",
+  },
+  "the same split first transaction, the second complete": {
+    split: true,
+    change: () => ({ storageAfter: COMPLETE_END }),
+    refused:
+      /a split activation: neither the staged nor the complete state .*\[the first stored read of capture 1\]/,
+    endpoint: "first",
+    storage: "changed",
+  },
+  // DA31-ENDPOINT (the reverse direction): a lawful first transaction, then an invalid SECOND one.
+  "a lawful staged first transaction, then a split second one": {
+    split: false,
+    change: () => ({ storageBefore: STAGED_END, storageAfter: SPLIT_END }),
+    refused: /a split activation: .*\[the second stored read of capture 1\]/,
+    endpoint: "second",
+    storage: "changed",
+  },
+  "a complete first transaction, then a staged second one (backwards)": {
+    split: false,
+    change: () => ({ storageAfter: STAGED_END }),
+    refused:
+      /the activation went backwards: a complete cache new-digest was read, then .*\[the second stored read of capture 1\]/,
+    endpoint: "second",
+    storage: "changed",
+  },
+};
+for (const caller of ["ordinary", "recovery"])
+  for (const [name, v] of Object.entries(ATOMICITY))
+    test(`R31 Q2 composed (${caller}, atomicity): ${name}`, async () => {
+      // Three pages of three rows: the activation's row floor is the six rows of STAGED_END.
+      const w = world({
+        caller,
+        pages: 3,
+        fault: v.split ? "split" : null,
+        fencedReadsAfter: 12,
+      });
+      let injected = null;
+      let observedBefore = 0;
+      const { log, failures } = composed(w, (c) => {
+        if (injected !== null || c.who !== "leader" || c.after !== 1)
+          return null;
+        injected = c;
+        observedBefore = w.observations.length;
+        return v.change(c);
+      });
+      const r = await run(w, { caller });
+      assert.ok(injected, "the first activation poll was read");
+      const at = log.find((x) => x.n === injected.n && x.who === "leader");
+      if (v.split)
+        assert.deepEqual(
+          [at.out.cache_status, at.out.staging_rows > 0, at.out.cache_digest],
+          ["valid", true, NEW],
+          "the maintained world's own split fault, unchanged",
+        );
+      if (v.refused === null) {
+        assert.equal(r.error?.message, undefined);
+        assert.ok(w.observations.some((o) => o.kind === "recovery_rendered"));
+        assert.deepEqual(failures, []);
+        return;
+      }
+      const f = refusedAt(r, log, failures, at, observedBefore, w, v.refused);
+      assert.equal(f.predicate, "stored.activation");
+      assert.equal(f.endpoint, v.endpoint);
+      assert.equal(f.barrier, "activation");
+      assert.equal(f.capture.storage.status, v.storage ?? "stable");
+      assert.ok(!w.observations.some((o) => o.kind === "recovery_activated"));
+    });
+
+// Q2: the family probe's 48 variants (two callers × two pages × four sites × three controls): a wrong live cache in BOTH coherent
+// transactions, only `composition_seq` moving between them (or not). The stable negative and the moving negative now both refuse at once.
+const FAMILY_SITES = {
+  invalidated: (c) => c.after === 0 && c.barrier === "invalidated",
+  staged: (c) => c.after === 0 && c.barrier === "staged",
+  "final-held": (c) => c.after === 0 && c.barrier === "final",
+  settlement: (_c, w) =>
+    w.observations.some((o) => o.kind === "recovery_activated"),
+};
+for (const caller of ["ordinary", "recovery"])
+  for (const who of ["leader", "follower"])
+    for (const [site, matches] of Object.entries(FAMILY_SITES))
+      for (const variant of ["healthy-moving", "bad-stable", "bad-moving"])
+        test(`R31 Q2 composed (${caller}, family): the ${who} at ${site}, ${variant}`, async () => {
+          const w = world({ caller, fencedReadsAfter: 12 });
+          let injected = null;
+          let observedBefore = 0;
+          const { log, failures } = composed(w, (c) => {
+            if (injected !== null || c.who !== who || !matches(c, w))
+              return null;
+            injected = c;
+            observedBefore = w.observations.length;
+            const digest = variant.startsWith("bad")
+              ? { cache_digest: WRONG }
+              : {};
+            return {
+              storageBefore: digest,
+              storageAfter: {
+                ...digest,
+                composition_seq: variant.endsWith("moving") ? 11 : 10,
+              },
+            };
+          });
+          const r = await run(w, { caller });
+          assert.ok(injected);
+          if (variant === "healthy-moving") {
+            assert.equal(r.error?.message, undefined);
+            assert.ok(
+              w.observations.some((o) => o.kind === "recovery_rendered"),
+            );
+            return;
+          }
+          const at = log.find((x) => x.who === who && x.n === injected.n);
+          const f = refusedAt(
+            r,
+            log,
+            failures,
+            at,
+            observedBefore,
+            w,
+            site === "invalidated"
+              ? /live cache changed before the snapshot \[the first stored read/
+              : site === "settlement"
+                ? new RegExp(
+                    `the ${who}'s cache changed after the activation \\[the first stored read`,
+                  )
+                : /live cache changed before the activation \[the first stored read/,
+          );
+          assert.equal(f.endpoint, "first");
+          assert.equal(f.stored.cache_digest, WRONG);
+          assert.equal(
+            f.stored_after?.cache_digest,
+            WRONG,
+            "the second transaction is retained too",
+          );
+          assert.equal(
+            f.capture.storage.status,
+            variant === "bad-moving" ? "changed" : "stable",
+          );
+          if (variant === "bad-moving")
+            assert.deepEqual(f.capture.storage.fields, ["composition_seq"]);
+          assert.ok(
+            !w.observations.some((o) => o.kind === "recovery_rendered"),
+          );
+        });
+
+// Q3: every read site, both callers, each direction of the fault across the two transactions and each kind of movement. `bad` is the
+// independently invalid stored state of that site; it is in the FIRST, the SECOND or BOTH transactions, with the storage stable or moving
+// (composition only, or because the bad transaction differs from the healthy one), the auth bracket stable or changing. Controls: the
+// healthy capture with each movement (re-read, then lawful).
+const R31_SITES = [
+  ...["invalidated", "staged", "intermediate", "final"].flatMap((barrier) =>
+    ["leader", "follower"].map((who) => ({
+      who,
+      barrier,
+      name: `the ${who} at the ${barrier} page`,
+      bad: { cache_digest: WRONG },
+      expected:
+        barrier === "invalidated"
+          ? /live cache changed before the snapshot/
+          : /live cache changed before the activation/,
+      predicate: `stored.${barrier === "invalidated" ? "invalidated" : "staged"}`,
+    })),
+  ),
+  {
+    who: "leader",
+    after: 1,
+    name: "the leader's first complete activation poll",
+    bad: SPLIT_END,
+    expected: /a split activation|the activation went backwards/,
+    predicate: "stored.activation",
+  },
+  {
+    who: "follower",
+    after: 2,
+    name: "the follower's complete read",
+    bad: { cache_digest: OTHER },
+    expected: /the follower does not read the activated cache/,
+    predicate: "stored.activated",
+  },
+  {
+    who: "leader",
+    after: 3,
+    name: "the leader's row-bearing read",
+    bad: { cache_digest: OTHER },
+    expected: /the cache changed between the activation and its rows/,
+    predicate: "stored.activated",
+  },
+  {
+    who: "leader",
+    after: 4,
+    name: "the leader's first settlement poll",
+    bad: { staging_rows: 2 },
+    expected: /leader still holds staged rows after the activation/,
+    predicate: "stored.activated",
+  },
+  {
+    who: "follower",
+    after: 5,
+    name: "the follower's first settlement poll",
+    bad: { cache_digest: OTHER },
+    expected: /the follower's cache changed after the activation/,
+    predicate: "stored.activated",
+  },
+];
+// [name, first bad?, second bad?, composition moves?, auth moves?]
+const DIRECTIONS = [
+  ["healthy, composition moving", false, false, true, false],
+  ["healthy, the auth bracket changing", false, false, false, true],
+  ["healthy, both brackets changing", false, false, true, true],
+  ["the first bad, stable", true, true, false, false],
+  ["the first bad, the second healthy", true, false, false, false],
+  ["the first healthy, the second bad", false, true, false, false],
+  ["both bad, composition only moving", true, true, true, false],
+  ["the first bad, the auth bracket changing", true, true, false, true],
+  ["the first bad, both brackets changing", true, false, true, true],
+];
+for (const caller of ["ordinary", "recovery"])
+  for (const site of R31_SITES)
+    for (const [
+      direction,
+      firstBad,
+      secondBad,
+      composition,
+      auth,
+    ] of DIRECTIONS)
+      test(`R31 Q3 composed (${caller}): ${site.name} — ${direction}`, async () => {
+        const w = world({ caller, pages: 5, fencedReadsAfter: 3 });
+        let injected = null;
+        let observedBefore = 0;
+        const { log, failures } = composed(w, (c) => {
+          if (injected !== null || c.who !== site.who) return null;
+          if (
+            site.after
+              ? c.after !== site.after
+              : c.after !== 0 || c.barrier !== site.barrier
+          )
+            return null;
+          injected = c;
+          observedBefore = w.observations.length;
+          return {
+            storageBefore: firstBad ? site.bad : {},
+            storageAfter: {
+              ...(secondBad ? site.bad : {}),
+              composition_seq: composition ? 11 : 10,
+            },
+            ...(auth ? { fences: [c.sample.fenced, !c.sample.fenced] } : {}),
+          };
+        });
+        const r = await run(w, { caller });
+        assert.ok(injected, "the site was read");
+        const at = log.find((x) => x.who === site.who && x.n === injected.n);
+        if (!firstBad && !secondBad) {
+          assert.equal(r.error?.message, undefined, String(r.error?.message));
+          assert.ok(w.observations.some((o) => o.kind === "recovery_rendered"));
+          assert.equal(
+            log[log.indexOf(at) + 1]?.who,
+            site.who,
+            "the unresolved capture is re-read",
+          );
+          return;
+        }
+        const f = refusedAt(
+          r,
+          log,
+          failures,
+          at,
+          observedBefore,
+          w,
+          site.expected,
+        );
+        assert.equal(f.predicate, site.predicate);
+        assert.equal(f.endpoint, firstBad ? "first" : "second");
+        assert.equal(f.reader, site.who);
+        assert.equal(f.read, 1);
+        assert.equal(f.capture.auth.status, auth ? "changed" : "stable");
+        const moved = composition || firstBad !== secondBad;
+        assert.equal(f.capture.storage.status, moved ? "changed" : "stable");
+        for (const k of ENDPOINT_FIELDS) {
+          assert.ok(k in f.stored, `the first transaction's ${k} is reported`);
+          assert.ok(
+            f.stored_after !== null && k in f.stored_after,
+            `the second transaction's ${k} is reported`,
+          );
+        }
+      });
+
+// Q4: legitimate transitions are preserved, and the new pairwise/oracle checks have their controls.
+test("R31 Q4 refused: the recovery generation moves between the two transactions of a held invalidation capture (a restart is never a new baseline)", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 9 });
+  let injected = null;
+  const { log, failures } = composed(w, (c) => {
+    if (injected || c.who !== "leader" || c.barrier !== "invalidated")
+      return null;
+    injected = c;
+    return { storageAfter: { recovery_generation: 7 } };
+  });
+  const r = await run(w, { caller: "recovery" });
+  const f = refusedAt(
+    r,
+    log,
+    failures,
+    log.at(0),
+    0,
+    w,
+    /the leader's recovery generation moved during a held capture \(6, then 7\)/,
+  );
+  assert.equal(f.predicate, "stored.generation_moved");
+});
+test("R31 Q4 refused: the staged rows go backwards between the two transactions of a held capture (the floor raised by the first)", async () => {
+  const w = world({ pages: 4 });
+  let injected = null;
+  const { log, failures } = composed(w, (c) => {
+    if (injected || c.who !== "follower" || c.barrier !== "intermediate")
+      return null;
+    injected = c;
+    // The context's floor is the leader's six rows; the first transaction raises it to nine, the second has seven.
+    return {
+      storageBefore: { staging_rows: 9 },
+      storageAfter: { staging_rows: 7, composition_seq: 11 },
+    };
+  });
+  const r = await run(w);
+  const at = log.find((x) => x.who === "follower" && x.n === injected.n);
+  const f = refusedAt(
+    r,
+    log,
+    failures,
+    at,
+    2,
+    w,
+    /follower holds 7 staged rows, expected at least 9 \[the second stored read/,
+  );
+  assert.equal(f.expected.rowsAtLeast, 9);
+});
+test("R31 Q4 control: the row floor and generation stand between two lawful transactions at a held page (composition moving)", async () => {
+  const w = world({ pages: 4 });
+  composed(w, (c) =>
+    c.who === "follower" && c.barrier === "intermediate" && c.n === 3
+      ? { storageAfter: { composition_seq: 11 } }
+      : null,
+  );
+  const r = await run(w);
+  assert.equal(r.error?.message, undefined);
+});
+for (const moving of [false, true])
+  test(`R31 Q4 refused: the row-bearing capture's rows fail the oracle${moving ? " while the storage moves" : ""} — judged on that capture, never repaired by a later valid read`, async () => {
+    const w = world({ pages: 3 });
+    let injected = null;
+    const calls = [];
+    const { log, failures } = composed(w, (c) => {
+      if (injected || c.after !== 3) return null;
+      injected = c;
+      return {
+        storageBefore: { rows: [{ id: "a" }] },
+        storageAfter: { composition_seq: moving ? 11 : 10 },
+      };
+    });
+    const r = await run(w, {
+      expectFinal: (rows) => {
+        calls.push(rows.length);
+        return rows.length === 2 ? [] : ["person b missing"];
+      },
+    });
+    const at = log.find((x) => x.after === 3);
+    const f = refusedAt(
+      r,
+      log,
+      failures,
+      at,
+      3,
+      w,
+      /the activated cache against the oracle: person b missing \(capture 1\)/,
+    );
+    assert.equal(f.predicate, "rows.oracle");
+    assert.equal(f.rows.count, 1);
+    assert.match(f.rows.sha256, /^[0-9a-f]{64}$/);
+    assert.deepEqual(f.rows.problems, ["person b missing"]);
+    assert.deepEqual(
+      calls,
+      [1],
+      "the oracle judged the injected capture's own rows",
+    );
+  });
+test("R31 Q4 control: lawful rows on a row-bearing capture whose storage moves — the oracle judges each capture, then the resolved one is published", async () => {
+  const w = world({ pages: 3 });
+  const calls = [];
+  composed(w, (c) =>
+    c.after === 3 ? { storageAfter: { composition_seq: 11 } } : null,
+  );
+  const r = await run(w, {
+    expectFinal: (rows) => {
+      calls.push(rows.length);
+      return [];
+    },
+  });
+  assert.equal(r.error?.message, undefined);
+  assert.deepEqual(calls, [2, 2]);
+  const activated = w.observations.find((o) => o.kind === "recovery_activated");
+  assert.deepEqual(activated.detail.leader.rereads, {
+    total: 1,
+    auth: 0,
+    storage: 1,
+  });
+});
+test("R31 Q4 refused: the requested rows were not read (never judged as an empty cache)", async () => {
+  const w = world({ pages: 3 });
+  const { failures } = composed(w, (c) =>
+    c.after === 3 ? { storageBefore: { rows: undefined } } : null,
+  );
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /the leader's row-bearing read after the activation: the requested rows were not read \(capture 1\)/,
+  );
+  assert.equal(failures[0]?.capture?.predicate, "rows.missing");
+});
+for (const [name, first, second, rendering, refused] of [
+  [
+    "both transactions staged, the page SHOWN (before the activation)",
+    STAGED_END,
+    STAGED_END,
+    (g) => SHOWN_AS(g),
+    /shows the account's cache content at activation \(shown\)/,
+  ],
+  [
+    "both transactions complete, the page SHOWN unfenced",
+    COMPLETE_END,
+    COMPLETE_END,
+    (g) => SHOWN_AS(g),
+    null,
+  ],
+  [
+    "both transactions complete, the page hidden while it waits",
+    COMPLETE_END,
+    COMPLETE_END,
+    (g) => g,
+    null,
+  ],
+])
+  test(`R31 Q4 ${refused ? "refused" : "control"} (ordinary): an activation poll with composition moving — ${name}`, async () => {
+    const w = world({ pages: 3 });
+    const { log } = composed(w, (c) =>
+      c.after === 1
+        ? {
+            storageBefore: first,
+            storageAfter: { ...second, composition_seq: 11 },
+            fences: [false, false],
+            rendering: rendering(c.sample.rendering),
+          }
+        : null,
+    );
+    const r = await run(w);
+    const at = log.find((x) => x.after === 1);
+    assert.ok(at, "the first activation poll was read");
+    assert.equal(at.out.capture.storage.status, "changed");
+    if (refused) {
+      assert.match(String(r.error?.message), refused);
+      assert.equal(log.at(-1), at);
+      return;
+    }
+    assert.equal(r.error?.message, undefined);
+    assert.equal(
+      log[log.indexOf(at) + 1]?.who,
+      "leader",
+      "re-read for the association",
+    );
+  });
+test("R31 Q4 control (recovery caller): complete-but-fenced and hidden while composition moves at every activation read — re-read, never refused", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 30 });
+  const moved = new Set();
+  composed(w, (c) => {
+    if (c.after < 1 || c.after > 3 || moved.has(c.after)) return null;
+    moved.add(c.after);
+    return { storageAfter: { composition_seq: 11 } };
+  });
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  const activated = w.observations.find((o) => o.kind === "recovery_activated");
+  assert.equal(activated.detail.leader.fenced, true);
+});
+test("R31 Q4 control: an activation witnessed in the SECOND transaction of an unresolved capture binds the next one (complete, the same cache)", async () => {
+  const w = world({ pages: 3 });
+  let n = 0;
+  const { log } = composed(w, (c) => {
+    if (c.who !== "leader" || c.after < 1) return null;
+    n += 1;
+    return n === 1 ? { storageBefore: STAGED_END } : null;
+  });
+  const r = await run(w);
+  assert.equal(r.error?.message, undefined);
+  assert.equal(
+    log.find((x) => x.after === 1).out.capture.storage.status,
+    "changed",
+  );
+});
+test("R31 Q4 refused: after an activation witnessed in an unresolved capture, the next capture's cache is ANOTHER complete one", async () => {
+  const w = world({ pages: 3 });
+  let n = 0;
+  const { log, failures } = composed(w, (c) => {
+    if (c.who !== "leader" || c.after < 1) return null;
+    n += 1;
+    if (n === 1) return { storageBefore: STAGED_END };
+    if (n === 2)
+      return {
+        storageBefore: { cache_digest: OTHER },
+        storageAfter: { cache_digest: OTHER },
+      };
+    return null;
+  });
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /the activation went backwards: a complete cache new-digest was read, then leader does not hold the activated cache new-digest \(another-new-cache\) \[the first stored read of capture 2\]/,
+  );
+  assert.equal(log.at(-1).after, 2);
+  assert.equal(failures[0]?.capture?.expected?.witness, NEW);
+  assert.ok(!w.observations.some((o) => o.kind === "recovery_activated"));
+});
+
+// C5: every failure carries bounded facts — stored, rendering-side, pairwise, oracle and barrier failures alike.
+test("R31 C5: a stored failure's facts — barrier, held answer, predicate, endpoint, frozen expectations, both transactions, both brackets", async () => {
+  const w = world({ pages: 4 });
+  composed(w, (c) =>
+    c.who === "follower" && c.barrier === "staged"
+      ? { storageAfter: { cache_digest: WRONG, composition_seq: 11 } }
+      : null,
+  );
+  const failures = [];
+  w.io.failed = (f) => failures.push(f);
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /the follower at snapshot page 42: follower's live cache changed before the activation \[the second stored read of capture 1\]/,
+  );
+  assert.ok(failures[0]?.capture, "the failure carries its facts");
+  const f = failures[0].capture;
+  assert.deepEqual(
+    [f.reader, f.barrier, f.held_seq, f.phase, f.predicate, f.endpoint, f.read],
+    [
+      "follower",
+      "staged",
+      42,
+      "before_activation",
+      "stored.staged",
+      "second",
+      1,
+    ],
+  );
+  assert.deepEqual(
+    [
+      f.expected.oldDigest,
+      f.expected.generation,
+      f.expected.rowsAtLeast,
+      f.expected.witness,
+    ],
+    [OLD, 6, 3, null],
+  );
+  assert.equal(f.stored.cache_digest, OLD);
+  assert.equal(f.stored_after?.cache_digest, WRONG);
+  assert.equal(f.capture.storage.status, "changed");
+  assert.equal(f.document, "follower-document");
+  assert.equal(f.incarnation, "incarnation-1");
+  assert.ok(!("label" in f.expected) && !("mismatch" in f.expected));
+});
+for (const [name, opts, caller, predicate] of [
+  [
+    "a rendering-side invalidation failure (no notice)",
+    { fault: "no-notice", caller: "recovery" },
+    "recovery",
+    "rendering.invalidated",
+  ],
+  [
+    "a rendering-side staging failure (the fence cleared early)",
+    { fault: "early-fence-clear", caller: "recovery" },
+    "recovery",
+    "rendering.staged",
+  ],
+  [
+    "a barrier failure (a single snapshot page)",
+    { pages: 1 },
+    "ordinary",
+    "held.pages",
+  ],
+  [
+    "a barrier failure (a foreign answer held)",
+    { fault: "foreign-held", pages: 4 },
+    "ordinary",
+    "held.snapshot",
+  ],
+])
+  test(`R31 C5: ${name} carries its facts (revision 30 passed none)`, async () => {
+    const w = world(opts);
+    const failures = [];
+    w.io.failed = (f) => failures.push(f);
+    const r = await run(w, { caller });
+    assert.ok(r.error);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0]?.capture?.predicate, predicate);
+    if (predicate.startsWith("rendering."))
+      assert.equal(failures[0]?.capture?.stored?.incarnation, "incarnation-1");
+  });
+test("R31 Q4 refused: the follower reads a NEWER generation than the leader's at the invalidation (bound from the leader's validated sample, before the follower's read)", async () => {
+  const w = world({ pages: 3 });
+  let injected = null;
+  const { log, failures } = composed(w, (c) => {
+    if (injected || c.who !== "follower" || c.barrier !== "invalidated")
+      return null;
+    injected = c;
+    return {
+      storageBefore: { recovery_generation: 7 },
+      storageAfter: { recovery_generation: 7 },
+    };
+  });
+  const r = await run(w);
+  const at = log.find((x) => x.who === "follower" && x.n === injected.n);
+  const f = refusedAt(
+    r,
+    log,
+    failures,
+    at,
+    0,
+    w,
+    /follower does not read the leader's generation 6 \(7\) \[the first stored read of capture 1\]/,
+  );
+  assert.equal(f.expected.generation, 6);
 });

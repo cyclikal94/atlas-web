@@ -45,6 +45,10 @@ export interface RecoveryReader {
   capture?: { auth: AuthBracket | null; storage: StorageBracket };
   /** Revision 30 (C3): the unresolved captures of this read re-read before this one, by cause. */
   rereads?: { total: number; auth: number; storage: number };
+  /** Revision 31 (R31-DIAG, C3): the capture's SECOND coherent stored transaction (pair-capture.mjs `ENDPOINT_FIELDS`). */
+  stored_after?: Record<string, unknown> | null;
+  /** Revision 31: the read number of the capture the observer returned. */
+  read?: number;
   rows?: unknown[];
   [key: string]: unknown;
 }
@@ -116,6 +120,67 @@ export function activatedProblems(
   r: RecoveryReader,
   o: { oldDigest: string },
 ): string[];
+// Revision 31 (R31-DIAG; design assessment C1/C2): the stored-data predicates on ONE coherent transaction and an explicit context.
+/** One coherent stored transaction: a sample's own stored fields, or its `stored_after`. */
+export type StoredEndpoint = Record<string, unknown>;
+export const STORED_BARRIERS: readonly [
+  "invalidated",
+  "staged",
+  "activation",
+  "activated",
+];
+export function storedInvalidatedProblems(
+  s: StoredEndpoint,
+  o: {
+    who: string;
+    caller: string;
+    oldDigest: string;
+    refusalGeneration: number;
+    generation?: number | null;
+  },
+): string[];
+export function invalidatedRenderingProblems(
+  r: RecoveryReader,
+  o: { caller: string },
+): string[];
+export function storedStagedProblems(
+  s: StoredEndpoint,
+  o: {
+    who: string;
+    oldDigest: string;
+    generation: number;
+    rowsAtLeast?: number;
+  },
+): string[];
+export function stagedRenderingProblems(
+  r: RecoveryReader,
+  o: { caller: string },
+): string[];
+export function storedActivatedProblems(
+  s: StoredEndpoint,
+  o: {
+    who: string;
+    oldDigest: string;
+    digest?: string | null;
+    mismatch?: string | null;
+  },
+): string[];
+export function activationProblems(
+  s: StoredEndpoint,
+  o: {
+    who: string;
+    oldDigest: string;
+    generation: number;
+    rowsAtLeast: number;
+    witness?: string | null;
+  },
+): string[];
+/** The stored problems of one transaction at a read context (`ctx.barrier` one of STORED_BARRIERS, with its expectations). */
+export function storedProblemsAt(
+  s: StoredEndpoint,
+  ctx: Record<string, unknown>,
+  o: { who: string; rowsAtLeast?: number; witness?: string | null },
+): string[];
 export function observeRecovery(
   io: {
     held(ruleId: string): Promise<number[]>;
@@ -142,7 +207,11 @@ export function observeRecovery(
       cacheDigest: string,
       detail: Record<string, unknown>,
     ): Promise<void> | void;
-    /** Revision 30 (C3): receives the first failure's reason and the failing capture's facts before the observer throws. */
+    /**
+     * Revision 30 (C3): receives the first failure's reason and the failing capture's facts before the observer throws. Revision 31 (C5):
+     * every failure has facts (reader, barrier, held_seq, phase, read, rereads, predicate, endpoint, expected, both brackets, fence,
+     * notice, document, incarnation, both stored transactions and, for the oracle, the rows' count/hash/problems).
+     */
     failed?(f: { reason: string; capture: unknown }): void;
     onPage?(
       kind: string,

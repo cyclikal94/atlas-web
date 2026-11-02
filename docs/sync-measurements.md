@@ -301,8 +301,14 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   unavailable or malformed rendering, a wrong account, role, document or database incarnation, a failed second read, and a page that displays while a
   stable fence stands or that no phase the moving storage allows would admit, all fail on that capture — and only a lawful capture whose fence or stored
   state moved is re-read (at most 20 in a row, counted by cause), never published. A bracket detects some uncertainty; it neither serialises the product's
-  writers nor proves that every transient state was observed. The observer's re-read captures and settlement polls are not persisted, so the reader can
-  judge only the recorded samples; the live observer's first failure is kept in the incomplete interval (`observation_failure`). The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
+  writers nor proves that every transient state was observed. Since revision 31 (R31-DIAG) each stored read is judged as the coherent IndexedDB
+  transaction it is: BOTH stored transactions of every capture (the first read and the bracket's second, retained as `stored_after`; contract `/5`) are
+  checked against the barrier's frozen expectations — the invalidated tuple, the staged generation/row floor/old live cache, the wholly-staged-or-wholly-
+  complete activation (never backwards once a complete cache was validated), the activated cache at the follower, row-bearing and settlement reads, and the
+  caller's oracle on the requested rows — BEFORE any re-read, so a composition write, an auth change or a legal activation around a capture never discards
+  an already invalid transaction; only the rendering's association with the data still needs a stable bracket. The observer's re-read captures and
+  settlement polls are not persisted, so the reader can judge only the recorded samples; the live observer's first failure, with its predicate, endpoint,
+  expectations and both transactions, is kept in the incomplete interval (`observation_failure`). The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
   are qualified with stand-ins, and the rendering adapter against the fixture DOM, only; the approved executable has NOT been launched and no diagnostic case
   has run in a browser.** The approval requires an independent review of the exact client source, selection and
   recipe BEFORE any execution (design assessment Q6), then the three-engine qualification (Q7). Nothing here is expiry/pruning evidence yet.

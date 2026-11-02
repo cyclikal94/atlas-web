@@ -10,6 +10,7 @@ import {
   renderingProblems,
   resolved,
   shownProblems,
+  storedProblemsAt,
   surfaceOf,
 } from "../../scripts/integration/pair-recovery.mjs";
 import { renderingOf } from "../pair/rendering";
@@ -484,10 +485,12 @@ const latchCapture = (page: Page, o: { fence?: boolean; hideView?: boolean }) =>
       hideView: o.hideView ?? false,
     },
   );
+/** Revision 31 (R31-DIAG; labelled TEST INTERVENTION): the cache digest one stored transaction is reported with (never written). */
+const INTERVENTION_DIGEST = "intervention-wrong-live-cache";
 async function capturedAcrossWrite(
   leader: Page,
   follower: Page,
-  o: { fence?: boolean; hideView?: boolean },
+  o: { fence?: boolean; hideView?: boolean; corrupt?: 1 | 2 },
 ) {
   await latchCapture(leader, o);
   let reads = 0;
@@ -498,7 +501,10 @@ async function capturedAcrossWrite(
         reads += 1;
         const s = await stored(leader, ACCOUNT, rows, local);
         if (reads === 1) first = s;
-        return s;
+        // Revision 31: the REAL transaction, reported with a wrong live cache (intervention) when `corrupt` names this read.
+        return s && o.corrupt === reads
+          ? { ...s, cache_digest: INTERVENTION_DIGEST }
+          : s;
       },
       rendering: () => renderingOf(leader, ACCOUNT),
     },
@@ -592,6 +598,67 @@ const AFTER = {
   what: "x",
 } as const;
 
+/**
+ * WEB-09c revision 31 (R31-DIAG; design assessment Q6b): BOTH coherent stored transactions of a capture across a REAL admitted
+ * second-connection write (the follower's W2 enqueue committed between them) are judged on their own by the maintained stored predicate
+ * (`storedProblemsAt`, the activated barrier bound to the page's real live cache). Lawful: both transactions pass, the second retained with
+ * the real later `composition_seq`. The wrong live cache in the FIRST or the SECOND transaction is a labelled intervention on the reported
+ * value (no product write is altered): it is refused on that transaction whatever the real storage movement. The full observer over held
+ * real snapshot answers is the diagnostic qualification's (Q7), not this fixture's.
+ */
+async function realCache(page: Page) {
+  const now = await stored(page, ACCOUNT);
+  expect(now?.cache_status, "a valid live cache before the capture").toBe(
+    "valid",
+  );
+  return {
+    barrier: "activated",
+    label: "x",
+    oldDigest: "no-earlier-cache-in-this-fixture",
+    digest: (now as { cache_digest: string }).cache_digest,
+  };
+}
+const endpointsOf = (out: RecoveryReader, ctx: Record<string, unknown>) => [
+  storedProblemsAt(out, ctx, { who: "leader" }),
+  storedProblemsAt(
+    (out as unknown as { stored_after: RecoveryReader }).stored_after,
+    ctx,
+    { who: "leader" },
+  ),
+];
+
+test.describe("WEB-09c r31: both coherent stored transactions judged across a REAL second-connection write (Q6b)", () => {
+  test("lawful: both real transactions hold the bound live cache; the second is retained with the real later composition", async ({
+    context,
+  }) => {
+    const { leader, follower } = await shownPair(context);
+    const ctx = await realCache(leader);
+    const out = await capturedAcrossWrite(leader, follower, {});
+    const second = (out as unknown as { stored_after: Record<string, unknown> })
+      .stored_after;
+    expect(second.incarnation).toBe(out.incarnation);
+    expect(second.composition_seq as number).toBeGreaterThan(
+      out.composition_seq as number,
+    );
+    expect(endpointsOf(out, ctx)).toEqual([[], []]);
+  });
+  for (const corrupt of [1, 2] as const)
+    test(`refused: the ${corrupt === 1 ? "FIRST" : "SECOND"} transaction reported with a wrong live cache (intervention) — refused on that transaction despite the real storage change`, async ({
+      context,
+    }) => {
+      const { leader, follower } = await shownPair(context);
+      const ctx = await realCache(leader);
+      const out = await capturedAcrossWrite(leader, follower, { corrupt });
+      expect(out.capture.storage.fields).toContain("composition_seq");
+      const [first, second] = endpointsOf(out, ctx);
+      const wrong = (corrupt === 1 ? first : second) ?? [];
+      expect(wrong.join()).toMatch(
+        /leader does not hold the activated cache .* \(intervention-wrong-live-cache\)/,
+      );
+      expect(corrupt === 1 ? second : first).toEqual([]);
+    });
+});
+
 test.describe("WEB-09c r30: the maintained capture composition across a REAL second-connection write (Q6b)", () => {
   test("lawful: the shown, unfenced page with a real write committed inside its bracket is a CHANGED storage bracket, admissible — re-read, never refused", async ({
     context,
@@ -672,11 +739,26 @@ test.describe("WEB-09c r30: the maintained capture composition across a REAL sec
         },
         { reader, page: `${reader}-page`, account: ACCOUNT },
       ) as unknown as Promise<RecoveryReader>;
+    // Revision 31 (R31-DIAG): once the first resolved complete sample binds the activated cache, BOTH stored transactions of every later
+    // capture of either page are judged against it (the observer's settlement context; no earlier cache is known to this fixture).
+    let bound: Record<string, unknown> | null = null;
     /** A resolved sample, judging every capture on the way for what it establishes (as the observer's read does). */
     const resolvedOf = async (page: Page, reader: "leader" | "follower") => {
       for (let i = 0; i < 21; i += 1) {
         const r = await composedSample(page, reader);
         expect(captureProblems(r), JSON.stringify(r)).toEqual([]);
+        if (bound !== null)
+          expect(
+            [
+              storedProblemsAt(r, bound, { who: reader }),
+              storedProblemsAt(
+                (r as unknown as { stored_after: RecoveryReader }).stored_after,
+                bound,
+                { who: reader },
+              ),
+            ],
+            JSON.stringify(r),
+          ).toEqual([[], []]);
         expect(
           renderingProblems(r, { account: ACCOUNT }),
           JSON.stringify(r),
@@ -699,6 +781,12 @@ test.describe("WEB-09c r30: the maintained capture composition across a REAL sec
     ] as const) {
       const r = await resolvedOf(page, reader);
       expect(holdsComplete(r), "the complete data is committed").toBe(true);
+      bound ??= {
+        barrier: "activated",
+        label: "x",
+        oldDigest: "no-earlier-cache-in-this-fixture",
+        digest: r.cache_digest,
+      };
       expect(r.cursor).toBe("delta-1");
       expect(r.fenced, `${reader}: the fence stands while finish is held`).toBe(
         true,

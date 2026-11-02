@@ -1487,6 +1487,8 @@ export { renderingOf };
  * One reader's sample for the recovery observer. Revision 30 (R30-DIAG; design assessment C1): the maintained composition
  * (pair-capture.mjs `recoverySample`) of its raw IndexedDB read, its rendering with the auth bracket (`renderingOf`) and the stored state
  * read AGAIN after the capture (the storage bracket). The brackets stay separate outcomes: nothing here merges them or decides a re-read.
+ * Revision 31 (R31-DIAG; C3): the second read's own coherent transaction is retained (`stored_after`) for the observer to judge; this
+ * adapter adds no policy.
  */
 export async function recoveryReader(
   page: Page,

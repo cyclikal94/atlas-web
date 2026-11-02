@@ -52,6 +52,15 @@ export const STAMP_FIELDS = Object.freeze([
   "staging_generations",
 ]);
 
+/**
+ * Revision 31 (R31-DIAG, family `segmented-sync-development-pairing`, incomplete_fix of R30-DIAG; design assessment C3, DA31-ENDPOINT): the
+ * fields of the SECOND coherent stored transaction a sample retains as `stored_after` — the database incarnation and every stamp field, i.e.
+ * every stored input of the observer's data predicates. Revision 30 reduced that transaction to the bracket's changed-field summary, so an
+ * independently invalid second endpoint was never judged. Its requested rows and local work are never read (the second read asks for
+ * neither) and never copied from the first.
+ */
+export const ENDPOINT_FIELDS = Object.freeze(["incarnation", ...STAMP_FIELDS]);
+
 const message = (error) =>
   String(error?.message ?? error ?? "unknown error").slice(0, 300);
 const pick = (s, fields) =>
@@ -225,6 +234,8 @@ export function storageBracket(before, after, error = null) {
  * bracket (`io.rendering()`, i.e. `renderingOf`), and the stored state read AGAIN after the capture (the storage bracket). The stored
  * fields are the FIRST read's; the brackets say whether the rendering may be associated with them. A missing database at the first read
  * throws (no sample at all); everything else is reported in the sample for the observer to judge — nothing here decides to re-read.
+ * Revision 31 (C3): the second read is ALSO a coherent transaction, retained as `stored_after` (`ENDPOINT_FIELDS`; null when it failed or
+ * found no database) so the observer judges both endpoints' own data before any re-read. No observer policy lives here.
  */
 export async function recoverySample(
   io,
@@ -248,6 +259,7 @@ export async function recoverySample(
     rendering: seen?.rendering,
     notice: seen?.notice ?? null,
     fenced: seen?.auth?.status === "stable" ? seen.fenced : null,
+    stored_after: error === null && again ? pick(again, ENDPOINT_FIELDS) : null,
     capture: {
       auth: seen?.auth ?? null,
       storage: storageBracket(s, again, error),

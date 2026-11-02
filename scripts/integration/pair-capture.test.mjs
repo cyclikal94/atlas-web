@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   AUTH_BRACKETS,
   captureInPage,
+  ENDPOINT_FIELDS,
   recoverySample,
   renderingOf,
   STAMP_FIELDS,
@@ -395,4 +396,76 @@ test("R30 Q1: the composed sample — no database at the first read throws; a fa
     null,
     "a malformed rendering result has no auth bracket (the observer refuses it)",
   );
+});
+
+// Revision 31 (R31-DIAG; design assessment C3, DA31-ENDPOINT): the second read is a coherent transaction of its own and is RETAINED.
+test("R31 Q1: the composed sample retains the SECOND stored transaction (incarnation and every stamp field), never rows or local work", async () => {
+  assert.deepEqual(ENDPOINT_FIELDS, ["incarnation", ...STAMP_FIELDS]);
+  const asked = [];
+  let n = 0;
+  const out = await recoverySample(
+    {
+      stored: async (rows, local) => {
+        asked.push([rows, local]);
+        n += 1;
+        return n === 1
+          ? { ...STORED, rows: ["r"], local: { drafts: [] } }
+          : {
+              ...STORED,
+              cache_digest: "second-digest",
+              composition_seq: 11,
+              rows: ["leaked"],
+              local: { drafts: ["x"] },
+            };
+      },
+      rendering: () => renderingOf(page(), ACCOUNT),
+    },
+    {
+      reader: "leader",
+      page: "p",
+      account: ACCOUNT,
+      rows: true,
+      local: ["l1"],
+    },
+  );
+  assert.deepEqual(
+    asked,
+    [
+      [true, ["l1"]],
+      [false, null],
+    ],
+    "the second read asks for neither rows nor local work",
+  );
+  assert.ok(out.stored_after, "the second transaction is retained");
+  assert.deepEqual(Object.keys(out.stored_after), [...ENDPOINT_FIELDS]);
+  assert.equal(out.stored_after.cache_digest, "second-digest");
+  assert.equal(out.stored_after.composition_seq, 11);
+  assert.equal(out.stored_after.incarnation, STORED.incarnation);
+  assert.ok(!("rows" in out.stored_after) && !("local" in out.stored_after));
+  assert.equal(
+    out.cache_digest,
+    STORED.cache_digest,
+    "the sample's own fields stay the first read's",
+  );
+  assert.deepEqual(out.rows, ["r"]);
+});
+test("R31 Q1: no second transaction is retained when the second read failed or found no database (never the first copied in)", async () => {
+  for (const second of [
+    () => Promise.reject(new Error("aborted")),
+    async () => null,
+  ]) {
+    let n = 0;
+    const out = await recoverySample(
+      {
+        stored: async () => {
+          n += 1;
+          return n === 1 ? { ...STORED } : second();
+        },
+        rendering: () => renderingOf(page(), ACCOUNT),
+      },
+      { reader: "leader", page: "p", account: ACCOUNT },
+    );
+    assert.equal(out.stored_after, null);
+    assert.equal(out.capture.storage.status, "unavailable");
+  }
 });

@@ -307,10 +307,53 @@ function segmented() {
   });
   return { w, record };
 }
+/**
+ * Revision 31 (R31-DIAG, contract /5; labelled test double): a recorded recovery sample states a STABLE storage bracket, so its second
+ * coherent stored transaction is its own stored state. It is supplied at validation time, after each test's edits, for every recorded
+ * sample that does not state `stored_after` itself (a test that sets it, even to null, keeps its own). Other records are untouched.
+ */
+const SECOND_FIELDS = [
+  "incarnation",
+  "composition_seq",
+  "cache_status",
+  "cache_digest",
+  "applied_revision",
+  "cursor",
+  "phase",
+  "delta_stage",
+  "staged",
+  "recovery_generation",
+  "staging_rows",
+  "staging_generations",
+];
+function withSecondTransactions(record) {
+  for (const o of record?.observations ?? []) {
+    const d = o?.detail;
+    if (!d || typeof d !== "object") continue;
+    const samples = [
+      d.leader,
+      d.follower,
+      ...(Array.isArray(d.pages)
+        ? d.pages.flatMap((x) => [x?.leader, x?.follower])
+        : []),
+    ];
+    for (const x of samples)
+      if (x && typeof x === "object" && x.stored_after === undefined)
+        x.stored_after = Object.fromEntries(
+          SECOND_FIELDS.map((k) => [k, x[k] ?? null]),
+        );
+  }
+  return record;
+}
 const accept = ({ w, record }) =>
-  assert.deepEqual(validateInterval(record, { readBody: w.readBody }), []);
+  assert.deepEqual(
+    validateInterval(withSecondTransactions(record), { readBody: w.readBody }),
+    [],
+  );
 const refuse = ({ w, record }, expected, name) => {
-  const found = validateInterval(record, { readBody: w.readBody });
+  const found = validateInterval(withSecondTransactions(record), {
+    readBody: w.readBody,
+  });
   assert.ok(
     found.some((p) => expected.test(p)),
     `${name}: ${JSON.stringify(found)}`,
@@ -1630,7 +1673,7 @@ const pair = (extra = {}, follower = {}) => ({
   leader: readerState("leader", extra),
   follower: readerState("follower", { ...extra, ...follower }),
 });
-const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/4" };
+const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/5" };
 /** X0's real 410 at 13 (the hand-off), then three snapshot pages 14, 15, 16, each held and released by a recorded release. */
 function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
   const w = world();
@@ -2379,6 +2422,7 @@ test("accepted (revision 30, C4): a resolved sample after re-reads counted by ca
 for (const old of [
   "web09c-recovery-observation/2",
   "web09c-recovery-observation/3",
+  "web09c-recovery-observation/4",
 ])
   test(`refused (revision 29/30): an observation of the earlier contract ${old} is incomplete, never upgraded`, () => {
     const r = observedRecovery();
@@ -2405,4 +2449,58 @@ test("refused (revision 29): a fenced sample DISPLAYING over a gated tree is not
     /recovery_final_held: follower's page is not the neutral covered surface while its recovery fence stands/,
     "displaying covered fenced",
   );
+});
+
+// Revision 31 (R31-DIAG; contract /5, design assessment C3/C6): the recorded second coherent stored transaction.
+for (const [name, edit, expected] of [
+  [
+    "no second stored transaction",
+    (x) => {
+      x.stored_after = null;
+    },
+    /recovery_staged_hidden: an incomplete sample: follower's second stored transaction is not recorded/,
+  ],
+  [
+    "a second stored transaction of another incarnation",
+    (x) => {
+      x.stored_after = {
+        ...Object.fromEntries(SECOND_FIELDS.map((k) => [k, x[k] ?? null])),
+        incarnation: "incarnation-2",
+      };
+    },
+    /follower's second stored transaction is of another incarnation/,
+  ],
+  [
+    "a second stored transaction holding another cache under a stable bracket",
+    (x) => {
+      x.stored_after = {
+        ...Object.fromEntries(SECOND_FIELDS.map((k) => [k, x[k] ?? null])),
+        cache_digest: "independently-wrong-live-cache",
+      };
+    },
+    /follower's second stored transaction differs from its first under a stable bracket \(cache_digest\)/,
+  ],
+  [
+    "a second stored transaction with rows staged again under a stable bracket",
+    (x) => {
+      x.stored_after = {
+        ...Object.fromEntries(SECOND_FIELDS.map((k) => [k, x[k] ?? null])),
+        staging_rows: 1,
+      };
+    },
+    /follower's second stored transaction differs from its first under a stable bracket \(staging_rows\)/,
+  ],
+])
+  test(`refused (revision 31, /5): a saved sample with ${name}`, () => {
+    const r = observedRecovery();
+    edit(obs(r, "recovery_staged_hidden").detail.follower);
+    refuse(r, expected, name);
+  });
+test("accepted (revision 31, /5): a saved sample whose second stored transaction is recorded and equal to the first", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  const x = obs(r, "recovery_final_held").detail.pages[0].leader;
+  x.stored_after = Object.fromEntries(
+    SECOND_FIELDS.map((k) => [k, x[k] ?? null]),
+  );
+  accept(r);
 });

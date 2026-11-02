@@ -40,7 +40,7 @@
 // `recovery_exposed` (one atomic exposure of the complete cache, nothing staged), each made by the LEADER and an independent FOLLOWER page
 // reading its own connection. The caller and the local-work declaration are the matrix row's (`identityProblems`).
 // Revision 28 (R28-DIAG.b; design assessment C2-C5): the stored cache status is never evidence of what a page shows. Every recovery
-// observation must carry the observation contract `web09c-recovery-observation/2` (revision 30: `/4`; an earlier one, such as revision 27's, is INCOMPLETE and
+// observation must carry the observation contract `web09c-recovery-observation/2` (revision 30: `/4`; revision 31: `/5`; an earlier one, such as revision 27's, is INCOMPLETE and
 // refused, never upgraded): each reader's separate RENDERING (session view, protected root, visible refreshing placeholders, attachment, a
 // per-document identity) and its fences, complete, for the same account and documents throughout. Hidden and shown are judged here from
 // the rendering alone, written independently of the live observer (pair-recovery.mjs). `recovery_exposed` is renamed `recovery_activated`
@@ -913,7 +913,25 @@ export const RECOVERY_KINDS = Object.freeze([
 // observation), and its permitted re-reads by cause (`rereads: {total, auth, storage}`, every re-read with at least one cause). /2 and /3
 // records are incomplete for /4, never upgraded. Unrecorded re-read captures and settlement polls cannot be replayed from these records:
 // the live observer refuses them as they occur (its first failure is kept in the incomplete interval's `observation_failure`).
-export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/4";
+// Revision 31 (R31-DIAG; design assessment C3/C6, written independently of pair-recovery.mjs): /5 — each recorded sample also records its
+// SECOND coherent stored transaction (`stored_after`), of the same database incarnation; its storage bracket being stable, that transaction
+// agrees with the first on every stored field this reader judges. A /4 record was made by an observer that judged only the first
+// transaction of a resolved capture: incomplete for /5, never upgraded. (A discarded capture still cannot be replayed from these records.)
+export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/5";
+/** The stored fields of a recorded sample this reader judges (every one of them is in both coherent transactions of a sample). */
+const SAMPLE_STORED_FIELDS = Object.freeze([
+  "composition_seq",
+  "cache_status",
+  "cursor",
+  "phase",
+  "delta_stage",
+  "staged",
+  "staging_rows",
+  "staging_generations",
+  "recovery_generation",
+  "cache_digest",
+  "applied_revision",
+]);
 const isCount = (n) => Number.isInteger(n) && n >= 0;
 /** Why a reader's sample is not a complete observation of its page (the same account `account`); none: it is one. */
 function sampleProblems(r, account) {
@@ -954,6 +972,21 @@ function sampleProblems(r, account) {
     );
   if (!isText(r.incarnation))
     p.push(`${who}'s account database incarnation is not recorded`);
+  // Revision 31 (/5): the second coherent stored transaction, of this incarnation and equal to the first under the stable bracket.
+  const second = r.stored_after;
+  if (!second || typeof second !== "object")
+    p.push(`${who}'s second stored transaction is not recorded`);
+  else {
+    if (second.incarnation !== r.incarnation)
+      p.push(`${who}'s second stored transaction is of another incarnation`);
+    const differing = SAMPLE_STORED_FIELDS.filter(
+      (k) => JSON.stringify(second[k] ?? null) !== JSON.stringify(r[k] ?? null),
+    );
+    if (differing.length > 0)
+      p.push(
+        `${who}'s second stored transaction differs from its first under a stable bracket (${differing.join(", ")})`,
+      );
+  }
   const n = r.rereads;
   if (
     !(

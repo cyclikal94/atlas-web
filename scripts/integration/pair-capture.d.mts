@@ -7,6 +7,8 @@ export const STORAGE_BRACKETS: readonly [
   "unavailable",
 ];
 export const STAMP_FIELDS: readonly string[];
+/** Revision 31 (R31-DIAG, C3): the fields of the second coherent stored transaction a sample retains as `stored_after`. */
+export const ENDPOINT_FIELDS: readonly string[];
 export type AuthBracket =
   | { status: "stable" }
   | { status: "changed"; reason: string }
@@ -61,6 +63,8 @@ export function recoverySample<S extends object>(
     rendering: unknown;
     notice: unknown;
     fenced: boolean | null;
+    /** Revision 31 (C3): the second stored transaction's `ENDPOINT_FIELDS`; null when that read failed or found no database. */
+    stored_after: Record<string, unknown> | null;
     capture: { auth: AuthBracket | null; storage: StorageBracket };
   }
 >;
