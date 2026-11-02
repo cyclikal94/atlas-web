@@ -2,16 +2,22 @@
 // owned lifecycle (the protocol stand-in diagnostic-fake.mjs as a real child process: never the backend, never backend evidence).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
   existsSync,
+  linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
+  renameSync,
   rmdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -33,6 +39,8 @@ import {
   launchAttempt,
   MATERIALISED_FILES,
   materialiseRetained,
+  OWNERSHIP_LOST_LATCHES,
+  ownedSource,
   parseLine,
   preserveFixture,
   readyProblems,
@@ -1293,6 +1301,7 @@ function preserveOf(
   retainedParent,
   deps = retentionDeps(),
   guard = null,
+  latch = null,
 ) {
   return preserveFixture(deps, {
     fixtureDir: running.fixtureDir,
@@ -1301,6 +1310,7 @@ function preserveOf(
     retainedParent,
     attempt: "att-1",
     guard: guard?.record ?? null,
+    latch,
   });
 }
 /** Revision 35: the reader guard on the attempt's database, spawned as the runner spawns it (a child reaped with the others). */
@@ -1311,9 +1321,18 @@ const guardDeps = {
     return child;
   },
 };
-const guardOf = (running) =>
+/**
+ * Revision 36 (R36-RET): the guard is bound to the attempt's ready-receipt authority, as the runner binds it, with its private directory
+ * in `privateParent` (the attempt's retained parent; never nested with the fixture's parent).
+ */
+const guardOf = (running, privateParent, options = {}) =>
   acquireGuard(guardDeps, {
-    database: join(running.fixtureDir, "fixture.sqlite"),
+    attempt: "att-1",
+    fixtureDir: running.fixtureDir,
+    receipt: running.ready.receipt,
+    receiptSha256: running.ready.receipt_sha256,
+    privateParent,
+    ...options,
   });
 const scratch = [];
 const fresh = () => {
@@ -1367,6 +1386,9 @@ async function realAttempt(
     // Revision 35: the reader guard is composed as the runner composes it unless `guarded: false` (no guard step at all).
     guarded = true,
     afterGuard = null,
+    // Revision 36: the latch the conclusion reads (default: the control's own) and a step run just before the shutdown is sent.
+    latched = null,
+    beforeFinish = null,
   } = {},
 ) {
   const parent = fresh();
@@ -1393,25 +1415,28 @@ async function realAttempt(
     concludeAttempt({
       stopTransports: async () => [],
       preliminary: async () => preliminary,
-      latched: () => running.control.latched(),
+      latched: latched ?? (() => running.control.latched()),
       ...(guarded
         ? {
-            guard: async () => {
-              const held = await guardOf(running);
+            guard: async (latch) => {
+              const held = await guardOf(running, retained, { latch });
               await afterGuard?.(running, held);
               return held;
             },
           }
         : {}),
-      preserve: async (guard) => {
-        const kept = preserveOf(running, retained, deps, guard);
+      preserve: async (guard, latch) => {
+        const kept = preserveOf(running, retained, deps, guard, latch);
         if (kill) {
           running.child.kill("SIGKILL");
           await running.exited;
         }
         return kept;
       },
-      finish: (remove) => finishAttempt(running, { remove }),
+      finish: async (remove) => {
+        await beforeFinish?.(running, remove);
+        return finishAttempt(running, { remove });
+      },
       release: (guard, finished) =>
         guard.release({
           exitObserved: finished?.exit !== null && finished?.exit !== undefined,
@@ -1609,11 +1634,12 @@ test("R34-RET with real SQLite: a replaced database is never anchored as the fix
       readFileSync(join(running.fixtureDir, "fixture.sqlite"), "utf8"),
       "a replacement, not the fixture",
     );
-    assert.equal(
-      existsSync(join(out.preservation.dir, "fixture.sqlite")),
-      false,
-    );
-    assert.notEqual(out.retention.status, "verified");
+    // Revision 36 (labelled adaptation, R36-RET): the one owned-source check now refuses BEFORE any retained directory is made, so
+    // "nothing of the replacement is anchored" is asserted as no retained directory at all (and so no anchored fixture.sqlite in it).
+    assert.equal(out.preservation.dir, null, "no retained directory is made");
+    assert.deepEqual(out.preservation.anchors, []);
+    assert.equal(out.guard.spawned, false, "the guard is never started on it");
+    assert.notEqual(out.retention?.status, "verified");
   } finally {
     clean();
   }
@@ -1718,7 +1744,7 @@ test("R34-RET with real SQLite: before the exit is observed nothing is materiali
       username: "ada",
       password: "p",
     });
-    const held = await guardOf(running);
+    const held = await guardOf(running, retained);
     const kept = preserveOf(running, retained, retentionDeps(), held);
     assert.equal(kept.ready, true);
     const early = await materialiseRetained(retentionDeps(), kept, {
@@ -1787,19 +1813,23 @@ test("R34-RET: the runner composes the maintained preservation, materialisation 
     "utf8",
   );
   // Revision 35 (labelled adaptation): preserve now receives the guard and materialise the guard's release result.
+  // Revision 36 (labelled adaptation): preserve also receives the latch, and passes it on.
   assert.match(
     runner,
-    /preserve: async \(guard\) =>\s+running\s+\? preserveFixture\(retentionDeps\(\), \{[\s\S]{0,240}guard: guard\?\.record \?\? null,/,
+    /preserve: async \(guard, latch\) =>\s+running\s+\? preserveFixture\(retentionDeps\(\), \{[\s\S]{0,240}guard: guard\?\.record \?\? null,\s+latch,/,
   );
   assert.match(
     runner,
     /materialise: async \(preservation, finished, released\) => \{[\s\S]{0,120}materialiseRetained\([\s\S]{0,400}guard: released \?\? null,/,
   );
   // Revision 35: the reader guard is an owned process on the attempt's database, acquired before the anchor and released after the exit.
+  // Revision 36 (labelled adaptation, R36-RET): it is given the ready receipt's authority and the latch, never a bare database path, and
+  // its private directory is the attempt's retained parent.
   assert.match(
     runner,
-    /guard: async \(\) =>\s+running\s+\? acquireGuard\(\s+\{\s+spawn: \(command, argv, options\) =>\s+groups\.spawn\("diagnostic-guard", command, argv, options\),\s+\},\s+\{ database: `\$\{running\.fixtureDir\}\/fixture\.sqlite` \},/,
+    /guard: async \(latch\) =>\s+running\s+\? acquireGuard\(\s+\{\s+spawn: \(command, argv, options\) =>\s+groups\.spawn\("diagnostic-guard", command, argv, options\),\s+\},\s+\{\s+attempt,\s+fixtureDir: running\.fixtureDir,\s+receipt: running\.ready\?\.receipt,\s+receiptSha256: running\.ready\?\.receipt_sha256,\s+latch,\s+privateParent: retainedParent,\s+\},/,
   );
+  assert.doesNotMatch(runner, /acquireGuard\([\s\S]{0,200}database:/);
   assert.match(
     runner,
     /release: async \(guard, finished\) =>\s+guard\.release\(\{\s+exitObserved: finished\?\.exit !== null && finished\?\.exit !== undefined,/,
@@ -1861,6 +1891,34 @@ const idOf = (path) => {
   return { dev: String(s.dev), ino: String(s.ino) };
 };
 const idOrNull = (path) => (existsSync(path) ? idOf(path) : null);
+/** Revision 36: a fixture directory and a private parent that do not nest, as the runner lays them out. */
+function guardLayout() {
+  const container = fresh();
+  const leaf = join(container, "source", "fixture-g");
+  mkdirSync(leaf, { recursive: true });
+  const privateParent = join(container, "retained");
+  mkdirSync(privateParent);
+  return { container, leaf, privateParent, path: join(leaf, "fixture.sqlite") };
+}
+/** The ready-receipt authority of `layout` (its database must exist): receipt.json is written once and hashed. */
+function authorityOf(layout) {
+  const receipt = {
+    fixture_dir: { path: layout.leaf, ...idOf(layout.leaf) },
+    database: { path: layout.path, ...idOf(layout.path) },
+  };
+  const file = join(layout.leaf, "receipt.json");
+  if (!existsSync(file)) writeFileSync(file, JSON.stringify(receipt));
+  return { receipt, receiptSha256: fileSha(file) };
+}
+/** A guard bound to `layout`'s authority (attempt `g1`), as the runner binds it. */
+const boundGuard = (layout, options = {}) =>
+  acquireGuard(guardDeps, {
+    attempt: "g1",
+    fixtureDir: layout.leaf,
+    ...authorityOf(layout),
+    privateParent: layout.privateParent,
+    ...options,
+  });
 /**
  * Rows (all columns, by id) and schema of the database in `files` ({name: path}), read through a fresh copy. A database without the
  * table yields `rows: null` (so a wrong selection fails the content ASSERTION, never with an SQLite error).
@@ -1956,7 +2014,14 @@ const SCHEDULES = {
  */
 async function schedule(
   name,
-  { guarded, keep, journal = "WAL", walAbsentAtGuard = false },
+  {
+    guarded,
+    keep,
+    journal = "WAL",
+    walAbsentAtGuard = false,
+    // Revision 36 (T5): the guard killed after the anchor (before the last writer's close) or after that close (before the removal).
+    loseGuard = null,
+  },
 ) {
   const container = fresh();
   const leaf = join(container, "source", "fixture-r35");
@@ -1981,9 +2046,24 @@ async function schedule(
   };
   writeFileSync(join(leaf, "receipt.json"), JSON.stringify(receipt));
   const receiptSha256 = fileSha(join(leaf, "receipt.json"));
+  const entriesBeforeGuard = readdirSync(leaf).sort();
   const held = guarded
-    ? await guardOf({ fixtureDir: leaf, ready: { receipt } })
+    ? await acquireGuard(guardDeps, {
+        attempt: "r35",
+        fixtureDir: leaf,
+        receipt,
+        receiptSha256,
+        privateParent: retainedParent,
+      })
     : null;
+  const entriesAfterGuard = readdirSync(leaf).sort();
+  const kill = async () => {
+    process.kill(held.record.pid, "SIGKILL");
+    await new Promise((resolve) => {
+      const poll = () => (held.alive() ? setTimeout(poll, 5) : resolve());
+      poll();
+    });
+  };
   const anchoredWal = idOrNull(`${path}-wal`);
   const kept = preserveFixture(retentionDeps(), {
     fixtureDir: leaf,
@@ -1993,9 +2073,11 @@ async function schedule(
     attempt: "r35",
     guard: held?.record ?? null,
   });
+  if (loseGuard === "after-anchor") await kill();
   writer ??= new Sqlite(path);
   writer = SCHEDULES[name](writer, path);
   writer.close();
+  if (loseGuard === "after-final-close") await kill();
   const finalWal = idOrNull(`${path}-wal`);
   const expected = contentOf(namedSet(leaf));
   let removed = null;
@@ -2038,27 +2120,41 @@ async function schedule(
     anchoredWal,
     finalWal,
     removed,
+    entriesBeforeGuard,
+    entriesAfterGuard,
   };
 }
 
 test("R35-RET: while the reader guard is held SQLite never retires the WAL (close, reopen, write, close keep ONE inode); without it the same schedule makes a new WAL (control)", async () => {
   try {
     for (const guarded of [true, false]) {
-      const dir = fresh();
-      const path = join(dir, "fixture.sqlite");
+      const layout = guardLayout();
+      const { path } = layout;
       let w = new Sqlite(path);
       w.exec(
         "PRAGMA journal_mode=WAL; CREATE TABLE facts (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO facts VALUES (1, 'a')",
       );
-      const held = guarded
-        ? await acquireGuard(guardDeps, { database: path })
-        : null;
+      authorityOf(layout);
+      const entries = readdirSync(layout.leaf).sort();
+      const held = guarded ? await boundGuard(layout) : null;
       const first = idOf(`${path}-wal`);
       if (guarded) {
         assert.equal(held.held, true, JSON.stringify(held.problems));
-        assert.deepEqual(held.record.wal, first, "the guard holds that WAL");
+        // Revision 36 (labelled adaptation): the record's WAL identity now also carries its link count (SQLite's own file alone).
+        assert.deepEqual(
+          held.record.wal,
+          { ...first, nlink: "1" },
+          "the guard holds that WAL",
+        );
         assert.deepEqual(held.record.database, idOf(path));
         assert.equal(held.record.journal_mode, "wal");
+        // Revision 36: the connection is the guard's private link of the receipt's inode; the fixture directory gained nothing.
+        assert.deepEqual(held.record.opened, {
+          name: "guard.sqlite",
+          ...idOf(path),
+        });
+        assert.equal(held.record.namespace, "private");
+        assert.deepEqual(readdirSync(layout.leaf).sort(), entries);
       }
       w.close();
       assert.deepEqual(
@@ -2100,22 +2196,38 @@ test("R35-RET: while the reader guard is held SQLite never retires the WAL (clos
 
 test("R35-RET: the guard refuses what it cannot hold (rollback journal mode, an absent database, a relative path); a refusal is never `held`", async () => {
   try {
-    const dir = fresh();
-    const path = join(dir, "fixture.sqlite");
+    const layout = guardLayout();
+    const { path } = layout;
     const w = new Sqlite(path);
     w.exec("PRAGMA journal_mode=DELETE; CREATE TABLE facts (id INTEGER)");
     w.close();
-    const deleteMode = await acquireGuard(guardDeps, { database: path });
+    const deleteMode = await boundGuard(layout);
     assert.equal(deleteMode.held, false);
     assert.match(deleteMode.problems[0], /delete journal mode, not WAL/);
     assert.equal(deleteMode.record.held, false);
+    // Revision 36 (labelled adaptation): an absent database and a relative path are now refused by the owned-source check BEFORE the
+    // child is started (revision 35's child reported `failed` after trying to open them).
+    const { receipt, receiptSha256 } = authorityOf(layout);
+    rmSync(path);
     const absent = await acquireGuard(guardDeps, {
-      database: join(dir, "missing.sqlite"),
+      attempt: "g1",
+      fixtureDir: layout.leaf,
+      receipt,
+      receiptSha256,
+      privateParent: layout.privateParent,
     });
     assert.equal(absent.held, false);
-    assert.match(absent.problems[0], /the guard was not held \(failed: /);
+    assert.equal(absent.record.spawned, false);
+    assert.match(
+      absent.problems[0],
+      /^the guard was not started: the fixture database is not the receipt's/,
+    );
     const relative = await acquireGuard(guardDeps, {
-      database: "fixture.sqlite",
+      attempt: "g1",
+      fixtureDir: "fixture-g",
+      receipt,
+      receiptSha256,
+      privateParent: layout.privateParent,
     });
     assert.equal(relative.held, false);
     assert.match(relative.problems[0], /not a safe absolute path/);
@@ -2129,11 +2241,10 @@ test("R35-RET: the guard refuses what it cannot hold (rollback journal mode, an 
 
 test("R35-RET: a guard that ended before its release is LOST: the release says so and proves nothing", async () => {
   try {
-    const dir = fresh();
-    const path = join(dir, "fixture.sqlite");
-    const w = new Sqlite(path);
+    const layout = guardLayout();
+    const w = new Sqlite(layout.path);
     w.exec("PRAGMA journal_mode=WAL; CREATE TABLE facts (id INTEGER)");
-    const held = await acquireGuard(guardDeps, { database: path });
+    const held = await boundGuard(layout);
     assert.equal(held.alive(), true);
     process.kill(held.record.pid, "SIGKILL");
     const settled = await within(
@@ -2154,6 +2265,8 @@ test("R35-RET: a guard that ended before its release is LOST: the release says s
   }
 });
 
+/** Revision 36: the schedules whose anchored (earlier) WAL generation is older than pages a later generation checkpointed. */
+const RETIRED_STALE = new Set(["rotate", "rotate-many", "schema-change"]);
 for (const name of Object.keys(SCHEDULES)) {
   test(`R35-RET T1 ${name}: guarded, removed source — verified, and the inspectable copy IS the stopped state (rows, values, schema)`, async () => {
     try {
@@ -2206,18 +2319,41 @@ for (const name of Object.keys(SCHEDULES)) {
       clean();
     }
   });
-  test(`R35-RET T1 ${name}: UNGUARDED, removed source — never verified (the anchors are kept, labelled unproven)`, async () => {
+  // Revision 36 (labelled adaptation of "UNGUARDED, removed source — never verified"): the intent kept is that a removed source's anchors
+  // are never PRESENTED as the stopped state without proof. Unguarded, the last writer's close retires the WAL, so the executable's removal
+  // finds none and `retired-into-database` applies: the database alone, verified only when replaying the anchored WAL changes nothing.
+  // Where a later generation was checkpointed over an earlier anchored one (the rotations) that corroboration fails and the anchors stay
+  // raw, unverified — revision 35's refusal, now by the content check. Where it is verified, it must EQUAL the independent stopped state.
+  test(`R35-RET T1 ${name}: UNGUARDED, removed source — the anchored database alone only when the anchored WAL adds nothing, equal to the stopped state; otherwise never verified`, async () => {
     try {
       const r = await schedule(name, { guarded: false, keep: false });
-      assert.equal(r.retention.status, "failed");
-      assert.equal(r.retention.inspect, null);
-      assert.match(
-        r.retention.problems[0],
-        /^the anchors of a removed source are not one proven SQLite state: no reader guard was held before the anchor/,
-      );
-      assert.ok(
-        existsSync(join(r.kept.dir, "fixture.sqlite")),
-        "raw anchors kept",
+      assert.equal(r.finalWal, null, "the last close retired the WAL");
+      assert.ok(!r.removed.includes("fixture.sqlite-wal"));
+      if (RETIRED_STALE.has(name)) {
+        assert.equal(r.retention.status, "failed");
+        assert.equal(r.retention.inspect, null);
+        assert.match(
+          r.retention.problems[0],
+          /^the anchored WAL changes the database it was retired into/,
+        );
+        assert.ok(
+          existsSync(join(r.kept.dir, "fixture.sqlite")),
+          "raw anchors kept",
+        );
+      } else {
+        assert.equal(
+          r.retention.status,
+          "verified",
+          JSON.stringify(r.retention.problems),
+        );
+        assert.equal(r.retention.selection.method, "retired-into-database");
+        assert.equal(r.retention.selection.corroboration.equal, true);
+        assert.deepEqual(r.observed, r.expected);
+      }
+      // Whatever the verdict, the anchored database itself holds the stopped state (the WAL was checkpointed into it before deletion).
+      assert.deepEqual(
+        contentOf({ "fixture.sqlite": join(r.kept.dir, "fixture.sqlite") }),
+        r.expected,
       );
     } finally {
       clean();
@@ -2248,21 +2384,33 @@ test("R35-RET T1 (the review's own stimulus): unguarded rotation replaced the WA
   }
 });
 
-test("R35-RET T1: no WAL at the first observation — the guard's own read opens one generation, and it is the one every later commit uses", async () => {
+// Revision 36 (labelled adaptation of revision 35's "no WAL at the first observation — the guard's own read opens one generation"): the
+// guard no longer opens the fixture's namespace, so it can create no WAL there. Intent kept: with no WAL at acquisition no generation can
+// be bound, so removal is not asked (the guard refuses, creating nothing in the fixture directory); and should the source be removed
+// anyway, its later WAL was retired by the last close, so the database alone is the stopped state.
+test("R35-RET T1: no WAL at the first observation — the guard creates nothing in the fixture directory and refuses (removal not asked); a source removed anyway is its database alone, equal to the stopped state", async () => {
   try {
     const r = await schedule("same-wal", {
       guarded: true,
       keep: false,
       walAbsentAtGuard: true,
     });
-    // Observed with the pinned Node 22.23.2 / SQLite 3.51.3: the read-only reader opens the WAL; a SQLite that refused would keep the source.
-    assert.equal(r.held.held, true, JSON.stringify(r.held.problems));
-    assert.notEqual(r.anchoredWal, null);
+    assert.equal(r.held.held, false);
+    assert.equal(r.held.record.stage, "observe");
+    assert.match(
+      r.held.problems[0],
+      /no WAL file is present while the guard is held/,
+    );
+    assert.deepEqual(r.entriesAfterGuard, r.entriesBeforeGuard);
+    assert.equal(r.anchoredWal, null);
+    assert.equal(r.kept.ready, false, "removal would not be asked");
     assert.equal(
       r.retention.status,
       "verified",
       JSON.stringify(r.retention.problems),
     );
+    assert.equal(r.retention.selection.method, "retired-into-database");
+    assert.equal(r.retention.selection.corroboration.with_wal, null);
     assert.deepEqual(r.observed, r.expected);
   } finally {
     clean();
@@ -2340,6 +2488,8 @@ test("R35-RET T4: each missing part of the guard's proof refuses the anchors of 
         /not released after the exit/,
       ],
       ["no release result", (o) => (o.guard = null), /the guard was lost/],
+      // Revision 36 (labelled adaptation): a removal claiming no WAL now selects `retired-into-database`, whose corroboration refuses
+      // it — the guarded WAL was never checkpointed, so replaying it changes the database. Still `failed`, never the guarded anchors.
       [
         "the removal did not find the WAL",
         (o) =>
@@ -2349,7 +2499,7 @@ test("R35-RET T4: each missing part of the guard's proof refuses the anchors of 
               (n) => n !== "fixture.sqlite-wal",
             ),
           }),
-        /removal did not find the guarded WAL/,
+        /^the anchored WAL changes the database it was retired into/,
       ],
       [
         "no stopped event",
@@ -2380,6 +2530,30 @@ test("R35-RET T4: each missing part of the guard's proof refuses the anchors of 
         /the guard method other\/1/,
       ],
       ["no guard", null, /no reader guard was held before the anchor/],
+      // Revision 36: the guard's authority and its private binding.
+      [
+        "a guard bound to another attempt",
+        { ...base.kept.guard, attempt: "other" },
+        /the guard was bound to another attempt or receipt/,
+      ],
+      [
+        "a guard bound to another receipt",
+        { ...base.kept.guard, receipt_sha256: "0".repeat(64) },
+        /the guard was bound to another attempt or receipt/,
+      ],
+      [
+        "a guard that opened the fixture's own name",
+        { ...base.kept.guard, namespace: "fixture" },
+        /did not open the receipt's database through its private name/,
+      ],
+      [
+        "a guard that opened another file",
+        {
+          ...base.kept.guard,
+          opened: { name: "guard.sqlite", dev: "1", ino: "1" },
+        },
+        /did not open the receipt's database through its private name/,
+      ],
     ]) {
       const r = await again({ ...base.kept, guard }, options);
       assert.equal(r.status, "failed", why);
@@ -2625,7 +2799,8 @@ test("R35-RET: preserveFixture binds the anchor to the guard it is given (method
         receipt,
         receiptSha256: fileSha(join(leaf, "receipt.json")),
         retainedParent: parent,
-        attempt: "bind",
+        // Revision 36 (labelled adaptation): the guard is bound to attempt `r35`, so the anchor is that attempt's.
+        attempt: "r35",
         guard,
       });
     };
@@ -2641,7 +2816,28 @@ test("R35-RET: preserveFixture binds the anchor to the guard it is given (method
       [
         "another method",
         { ...good, method: "other/1" },
-        /^the guard method other\/1 is not sqlite-shared-reader\/1$/,
+        /^the guard method other\/1 is not sqlite-private-name-reader\/2$/,
+      ],
+      // Revision 36: bound to the attempt's authority and opened through its private name as the receipt's inode.
+      [
+        "another attempt",
+        { ...good, attempt: "other" },
+        /^the guard was bound to another attempt or receipt$/,
+      ],
+      [
+        "another receipt digest",
+        { ...good, receipt_sha256: "0".repeat(64) },
+        /^the guard was bound to another attempt or receipt$/,
+      ],
+      [
+        "the fixture's own namespace",
+        { ...good, namespace: null },
+        /^the guard did not open the receipt's database through its private name$/,
+      ],
+      [
+        "another opened file",
+        { ...good, opened: { name: "guard.sqlite", dev: "1", ino: "1" } },
+        /^the guard did not open the receipt's database through its private name$/,
       ],
       [
         "another journal mode",
@@ -2688,11 +2884,10 @@ test("R35-RET: preserveFixture binds the anchor to the guard it is given (method
 });
 test("R35-RET: a guard released before the executable's exit was observed says so", async () => {
   try {
-    const dir = fresh();
-    const path = join(dir, "fixture.sqlite");
-    const w = new Sqlite(path);
+    const layout = guardLayout();
+    const w = new Sqlite(layout.path);
     w.exec("PRAGMA journal_mode=WAL; CREATE TABLE facts (id INTEGER)");
-    const held = await acquireGuard(guardDeps, { database: path });
+    const held = await boundGuard(layout);
     const released = await held.release({ exitObserved: false });
     assert.equal(released.released, true);
     assert.equal(released.exit_observed_before_release, false);
@@ -2700,6 +2895,733 @@ test("R35-RET: a guard released before the executable's exit was observed says s
       "the guard was released before the executable's exit was observed",
     ]);
     w.close();
+  } finally {
+    clean();
+  }
+});
+
+// ---- revision 36 (R36-RET; design assessment of 2 Nov 2026, token 41c6b27cf2ff4ddf898b1066cb9640d4, T1-T5): ownership before SQLite --------
+// Real node:sqlite files in disposable directories and the maintained guard CHILD (its explicit `pause` points are the deterministic
+// boundaries of T2). The oracle of every schedule is the before/after INVENTORY of every directory a replacement involves (names, kinds,
+// identities, sizes, link counts, regular files' hashes, link targets), never the guard's own report alone.
+const inventoryOf = (dir) =>
+  existsSync(dir)
+    ? Object.fromEntries(
+        readdirSync(dir)
+          .sort()
+          .map((name) => {
+            const path = join(dir, name);
+            const s = lstatSync(path, { bigint: true });
+            return [
+              name,
+              {
+                kind: s.isFile()
+                  ? "file"
+                  : s.isDirectory()
+                    ? "directory"
+                    : s.isSymbolicLink()
+                      ? "symlink"
+                      : "other",
+                ino: String(s.ino),
+                size: s.isFile() ? String(s.size) : null,
+                nlink: s.isFile() ? String(s.nlink) : null,
+                sha256: s.isFile() ? fileSha(path) : null,
+                target: s.isSymbolicLink() ? readlinkSync(path) : null,
+              },
+            ];
+          }),
+      )
+    : null;
+const OWNED_TRIO = [
+  "fixture.sqlite",
+  "fixture.sqlite-wal",
+  "fixture.sqlite-shm",
+];
+/**
+ * The R36 world: the owned WAL-mode fixture with its writer OPEN (as the executable's pool is at the conclusion), its ready-receipt
+ * authority, and a FOREIGN valid WAL-mode database whose last writer closed (so its `-wal`/`-shm` names are absent), in its own directory.
+ */
+function r36World() {
+  const layout = guardLayout();
+  const writer = new Sqlite(layout.path);
+  writer.exec(
+    "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE facts (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO facts VALUES (1, 'owned')",
+  );
+  const authority = authorityOf(layout);
+  const foreignDir = join(layout.container, "foreign");
+  mkdirSync(foreignDir);
+  const foreign = join(foreignDir, "foreign.sqlite");
+  const f = new Sqlite(foreign);
+  f.exec(
+    "PRAGMA journal_mode=WAL; CREATE TABLE other (v TEXT); INSERT INTO other VALUES ('foreign')",
+  );
+  f.close();
+  assert.equal(
+    existsSync(`${foreign}-wal`),
+    false,
+    "the foreign WAL is absent",
+  );
+  const aside = join(layout.container, "aside");
+  mkdirSync(aside);
+  const w = {
+    ...layout,
+    ...authority,
+    writer,
+    foreignDir,
+    foreign,
+    aside,
+    /** The owned database's names moved out of the fixture directory (the writer keeps its descriptors). */
+    moveOwnedAside: () => {
+      for (const n of OWNED_TRIO)
+        if (existsSync(join(layout.leaf, n)))
+          renameSync(join(layout.leaf, n), join(aside, n));
+    },
+    moveOwnedBack: () => {
+      for (const n of OWNED_TRIO)
+        if (existsSync(join(aside, n)))
+          renameSync(join(aside, n), join(layout.leaf, n));
+    },
+  };
+  /** Each replacement of the owned source by a foreign one, made after the receipt. Returns the directories it involves. */
+  w.replace = {
+    database: () => {
+      w.moveOwnedAside();
+      renameSync(foreign, layout.path);
+      return [layout.leaf, foreignDir];
+    },
+    directory: () => {
+      renameSync(layout.leaf, `${layout.leaf}.moved`);
+      mkdirSync(layout.leaf);
+      renameSync(foreign, layout.path);
+      writeFileSync(
+        join(layout.leaf, "receipt.json"),
+        readFileSync(join(`${layout.leaf}.moved`, "receipt.json")),
+      );
+      return [layout.leaf, foreignDir];
+    },
+    ancestor: () => {
+      const source = join(layout.container, "source");
+      renameSync(source, `${source}.moved`);
+      mkdirSync(layout.leaf, { recursive: true });
+      renameSync(foreign, layout.path);
+      return [layout.leaf, foreignDir];
+    },
+    symlink: () => {
+      w.moveOwnedAside();
+      symlinkSync(foreign, layout.path);
+      return [layout.leaf, foreignDir];
+    },
+  };
+  /** Every directory a replacement can involve (the inventories are compared across all of them). */
+  w.involved = () => [
+    layout.leaf,
+    foreignDir,
+    aside,
+    `${layout.leaf}.moved`,
+    join(layout.container, "source.moved", "fixture-g"),
+  ];
+  return w;
+}
+const inventories = (dirs) =>
+  Object.fromEntries(dirs.map((d) => [d, inventoryOf(d)]));
+/** The guard (bound as the runner binds it) and then the anchor, in the runner's order, with optional pause stimuli. */
+async function acquireAndPreserve(
+  w,
+  { pause = [], onPause = null, latch = null, afterGuard = null } = {},
+) {
+  const held = await acquireGuard(guardDeps, {
+    attempt: "r36",
+    fixtureDir: w.leaf,
+    receipt: w.receipt,
+    receiptSha256: w.receiptSha256,
+    privateParent: w.privateParent,
+    latch,
+    pause,
+    onPause,
+  });
+  await afterGuard?.(held);
+  const kept = preserveFixture(retentionDeps(), {
+    fixtureDir: w.leaf,
+    receipt: w.receipt,
+    receiptSha256: w.receiptSha256,
+    retainedParent: w.privateParent,
+    attempt: "r36",
+    guard: held.record,
+    latch,
+  });
+  return { held, kept };
+}
+
+test("R36-RET T1 control: the owned database (its writer open) — the guard is bound and held through its private name, the anchor is ready, and the fixture directory gains no name", async () => {
+  try {
+    const w = r36World();
+    const before = inventoryOf(w.leaf);
+    const { held, kept } = await acquireAndPreserve(w);
+    assert.equal(held.held, true, JSON.stringify(held.problems));
+    assert.deepEqual(held.record.authority, {
+      attempt: "r36",
+      fixture_dir: { ...w.receipt.fixture_dir },
+      database: { ...w.receipt.database },
+      receipt_sha256: w.receiptSha256,
+    });
+    assert.equal(held.record.namespace, "private");
+    assert.deepEqual(held.record.opened, {
+      name: "guard.sqlite",
+      ...idOf(w.path),
+    });
+    assert.equal(
+      kept.ready,
+      true,
+      JSON.stringify([kept.problems, kept.guard_problems]),
+    );
+    // The guard's private directory holds only its own link (the receipt's inode) and its own companions.
+    const own = inventoryOf(join(w.privateParent, "guard-r36"));
+    assert.deepEqual(Object.keys(own), [
+      "guard.sqlite",
+      "guard.sqlite-shm",
+      "guard.sqlite-wal",
+    ]);
+    assert.equal(own["guard.sqlite"].ino, idOf(w.path).ino);
+    // The fixture directory: the same names and identities; only the anchors raised the owned files' link counts.
+    const after = inventoryOf(w.leaf);
+    assert.deepEqual(Object.keys(after), Object.keys(before));
+    for (const name of Object.keys(before))
+      assert.equal(after[name].ino, before[name].ino, name);
+    await held.release({ exitObserved: true });
+    w.writer.close();
+  } finally {
+    clean();
+  }
+});
+
+for (const kind of ["database", "directory", "symlink"])
+  test(`R36-RET T1 ${kind} replaced after the receipt, before the acquisition: refused BEFORE the guard starts; no foreign entry, byte or companion changes; nothing is anchored`, async () => {
+    try {
+      const w = r36World();
+      const involved = w.replace[kind]();
+      const before = inventories(w.involved());
+      const { held, kept } = await acquireAndPreserve(w);
+      assert.equal(held.held, false);
+      assert.equal(
+        held.record.spawned,
+        false,
+        "the guard child is never started",
+      );
+      assert.equal(held.record.stage, "before-spawn");
+      assert.match(
+        held.problems[0],
+        /^the guard was not started: the fixture (directory|database) is not the receipt's/,
+      );
+      assert.equal(kept.ready, false);
+      assert.equal(kept.dir, null, "no retained directory is made");
+      assert.deepEqual(kept.anchors, []);
+      assert.deepEqual(
+        readdirSync(w.privateParent),
+        [],
+        "no private directory either",
+      );
+      assert.deepEqual(
+        inventories(w.involved()),
+        before,
+        "every involved directory is unchanged",
+      );
+      for (const dir of involved)
+        for (const n of Object.keys(inventoryOf(dir) ?? {}))
+          assert.ok(
+            !/-(wal|shm)$/.test(n) || n.startsWith("fixture.sqlite") === false,
+            `${dir}/${n}`,
+          );
+      assert.equal(existsSync(`${w.foreign}-wal`), false);
+      assert.equal(
+        existsSync(join(w.leaf, "fixture.sqlite-wal")),
+        false,
+        "no companion beside the replacement",
+      );
+      assert.equal(existsSync(join(w.leaf, "fixture.sqlite-shm")), false);
+      w.writer.close();
+    } finally {
+      clean();
+    }
+  });
+
+test("R36-RET T1 the child's own check: a replacement between the parent's check and the child's (the parent shown the receipt's identities) is refused by the child at `ownership`, before its private directory, link or any open", async () => {
+  try {
+    const w = r36World();
+    w.replace.database();
+    const before = inventories(w.involved());
+    const lying = (path) => ({
+      isDirectory: () => path === w.leaf,
+      isFile: () => path !== w.leaf,
+      ...(path === w.leaf ? w.receipt.fixture_dir : w.receipt.database),
+    });
+    const held = await acquireGuard(
+      { ...guardDeps, lstat: lying },
+      {
+        attempt: "r36",
+        fixtureDir: w.leaf,
+        receipt: w.receipt,
+        receiptSha256: w.receiptSha256,
+        privateParent: w.privateParent,
+      },
+    );
+    assert.equal(held.record.spawned, true, "the parent's check passed");
+    assert.equal(held.held, false);
+    assert.equal(held.record.stage, "ownership");
+    assert.match(
+      held.record.refused,
+      /^the fixture database is not the receipt's: nothing is opened/,
+    );
+    assert.deepEqual(
+      readdirSync(w.privateParent),
+      [],
+      "refused before its private directory",
+    );
+    assert.deepEqual(inventories(w.involved()), before);
+    w.writer.close();
+  } finally {
+    clean();
+  }
+});
+
+for (const kind of ["database", "directory", "ancestor", "symlink"])
+  test(`R36-RET T2 ${kind} replaced at the child's barrier between its check and its link: the link is not the receipt's inode, so it is removed and never opened; no foreign entry, byte or companion changes`, async () => {
+    try {
+      const w = r36World();
+      let before = null;
+      const { held, kept } = await acquireAndPreserve(w, {
+        pause: ["before-link"],
+        onPause: (at) => {
+          assert.equal(at, "before-link");
+          w.replace[kind]();
+          before = inventories(w.involved());
+        },
+      });
+      assert.notEqual(before, null, "the barrier was reached");
+      assert.equal(held.held, false);
+      assert.equal(held.record.stage, "link");
+      assert.match(
+        held.record.refused,
+        /^the linked file is not the receipt's database \(replaced between the check and the link\): never opened/,
+      );
+      assert.deepEqual(
+        readdirSync(join(w.privateParent, "guard-r36")),
+        [],
+        "the guard's own refused link is gone; no companion",
+      );
+      // Every involved directory is exactly as the replacement left it: names, identities, bytes, and the foreign file's link count back.
+      assert.deepEqual(inventories(w.involved()), before);
+      assert.equal(
+        existsSync(join(w.leaf, "fixture.sqlite-wal")),
+        false,
+        "no companion beside the replacement",
+      );
+      assert.equal(kept.ready, false);
+      w.writer.close();
+    } finally {
+      clean();
+    }
+  });
+
+test("R36-RET T2 the database name swapped AFTER the private link is bound (before the open): SQLite opens only the private link — the receipt's inode — creates nothing beside the foreign name, and the guard refuses because the fixture's name changed", async () => {
+  try {
+    const w = r36World();
+    let before = null;
+    const { held } = await acquireAndPreserve(w, {
+      pause: ["before-open"],
+      onPause: () => {
+        w.replace.database();
+        before = inventories(w.involved());
+      },
+    });
+    assert.equal(held.held, false);
+    assert.equal(held.record.stage, "observe");
+    assert.match(
+      held.record.refused,
+      /^the fixture database name changed while the guard was acquired/,
+    );
+    assert.deepEqual(
+      inventories(w.involved()),
+      before,
+      "nothing beside the foreign name",
+    );
+    const own = inventoryOf(join(w.privateParent, "guard-r36"));
+    assert.equal(
+      own["guard.sqlite"].ino,
+      w.receipt.database.ino,
+      "the private link is the receipt's inode",
+    );
+    assert.ok(
+      own["guard.sqlite-shm"],
+      "the connection's companions are the guard's own",
+    );
+    w.writer.close();
+  } finally {
+    clean();
+  }
+});
+
+test("R36-RET T2 swapped and swapped BACK before the post-open look: the pathname looks owned again, and the proof that the CONNECTION is the receipt's inode is SQLite's own: the last writer's close cannot retire the owned WAL", async () => {
+  try {
+    const w = r36World();
+    const firstWal = idOf(join(w.leaf, "fixture.sqlite-wal"));
+    const { held, kept } = await acquireAndPreserve(w, {
+      pause: ["before-open", "before-report"],
+      onPause: (at) => {
+        if (at === "before-open") w.replace.database();
+        else {
+          renameSync(w.path, w.foreign);
+          w.moveOwnedBack();
+        }
+      },
+    });
+    assert.equal(held.held, true, JSON.stringify(held.problems));
+    assert.deepEqual(held.record.opened, {
+      name: "guard.sqlite",
+      ...idOf(w.path),
+    });
+    assert.equal(kept.ready, true, JSON.stringify(kept.guard_problems));
+    assert.equal(
+      existsSync(`${w.foreign}-wal`),
+      false,
+      "nothing beside the foreign database",
+    );
+    assert.equal(existsSync(`${w.foreign}-shm`), false);
+    w.writer.close();
+    assert.deepEqual(
+      idOrNull(join(w.leaf, "fixture.sqlite-wal")),
+      firstWal,
+      "the guard's connection holds the receipt's database: its WAL is not retired",
+    );
+    await held.release({ exitObserved: true });
+  } finally {
+    clean();
+  }
+});
+
+for (const [name, stimulus, want] of [
+  [
+    "the WAL name replaced by a symlink",
+    (w) => {
+      writeFileSync(join(w.foreignDir, "target-wal"), "foreign bytes");
+      renameSync(
+        join(w.leaf, "fixture.sqlite-wal"),
+        join(w.aside, "fixture.sqlite-wal"),
+      );
+      symlinkSync(
+        join(w.foreignDir, "target-wal"),
+        join(w.leaf, "fixture.sqlite-wal"),
+      );
+    },
+    /^the WAL is not a regular file/,
+  ],
+  [
+    "the WAL given a second link",
+    (w) =>
+      linkSync(
+        join(w.leaf, "fixture.sqlite-wal"),
+        join(w.aside, "second-link"),
+      ),
+    /^the WAL has 2 links: it is not SQLite's own file alone/,
+  ],
+  [
+    "the fixture directory replaced",
+    (w) => {
+      renameSync(w.leaf, `${w.leaf}.moved`);
+      mkdirSync(w.leaf);
+    },
+    /^the fixture directory changed while the guard was acquired/,
+  ],
+])
+  test(`R36-RET T2 ${name} at the observation barrier: refused, never followed or opened (the foreign state unchanged)`, async () => {
+    try {
+      const w = r36World();
+      let before = null;
+      let afterGuard = null;
+      const { held, kept } = await acquireAndPreserve(w, {
+        pause: ["before-report"],
+        onPause: () => {
+          stimulus(w);
+          before = inventories(w.involved());
+        },
+        // The guard's oracle is taken before the anchor (which links the owned regular files, raising their link counts).
+        afterGuard: () => {
+          afterGuard = inventories(w.involved());
+        },
+      });
+      assert.equal(held.held, false);
+      assert.equal(held.record.stage, "observe");
+      assert.match(held.record.refused, want);
+      assert.deepEqual(afterGuard, before);
+      assert.ok(
+        !kept.anchors.some(
+          (a) => a.name === "fixture.sqlite-wal" && name.includes("symlink"),
+        ),
+        "a symlinked WAL is never anchored",
+      );
+      assert.equal(kept.ready, false);
+      w.writer.close();
+    } finally {
+      clean();
+    }
+  });
+
+test("R36-RET T1: the guard's held report must be its authority's own (a report naming another opened file, attempt or namespace is refused, never held)", async () => {
+  try {
+    const w = r36World();
+    for (const [why, edit] of [
+      [
+        "another opened file",
+        (r) => ({ ...r, opened: { name: "guard.sqlite", dev: "1", ino: "1" } }),
+      ],
+      ["another attempt", (r) => ({ ...r, attempt: "other" })],
+      ["the fixture's own namespace", (r) => ({ ...r, namespace: "fixture" })],
+      [
+        "another receipt digest",
+        (r) => ({ ...r, receipt_sha256: "0".repeat(64) }),
+      ],
+    ]) {
+      const fake = (_command, args) => {
+        const child = new EventEmitter();
+        child.pid = 1;
+        child.stdin = new PassThrough();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        const authority = JSON.parse(args[args.indexOf("--authority") + 1]);
+        const report = edit({
+          event: "held",
+          method: "sqlite-private-name-reader/2",
+          attempt: authority.attempt,
+          receipt_sha256: authority.receipt_sha256,
+          namespace: "private",
+          private_dir: { path: authority.private_dir, dev: "1", ino: "2" },
+          opened: {
+            name: "guard.sqlite",
+            dev: authority.database.dev,
+            ino: authority.database.ino,
+          },
+          journal_mode: "wal",
+          database: {
+            dev: authority.database.dev,
+            ino: authority.database.ino,
+          },
+          wal: { dev: "1", ino: "9", nlink: "1" },
+          journal: false,
+        });
+        setImmediate(() => child.stdout.write(`${JSON.stringify(report)}\n`));
+        return child;
+      };
+      const held = await acquireGuard(
+        { spawn: fake },
+        {
+          attempt: "r36",
+          fixtureDir: w.leaf,
+          receipt: w.receipt,
+          receiptSha256: w.receiptSha256,
+          privateParent: w.privateParent,
+        },
+      );
+      assert.equal(held.held, false, why);
+      assert.match(
+        held.problems[0],
+        /^the guard's report is not bound to its authority: /,
+        why,
+      );
+    }
+    w.writer.close();
+  } finally {
+    clean();
+  }
+});
+
+test("R36-RET T3: the owned-source check refuses a missing or wrong authority before anything (no digest, another directory path, an unsafe attempt, a lost-ownership latch) and passes the owned source", () => {
+  try {
+    const w = r36World();
+    const deps = { lstat: (p) => lstatSync(p, { bigint: true }) };
+    const base = {
+      attempt: "r36",
+      fixtureDir: w.leaf,
+      receipt: w.receipt,
+      receiptSha256: w.receiptSha256,
+    };
+    assert.deepEqual(ownedSource(deps, base).problems, []);
+    assert.equal(ownedSource(deps, base).owned, true);
+    for (const [why, edit, want] of [
+      ["no digest", { receiptSha256: null }, /^no ready receipt/],
+      ["no receipt", { receipt: null }, /^no ready receipt/],
+      [
+        "another directory",
+        { fixtureDir: `${w.leaf}x` },
+        /^the receipt does not name this fixture directory's database/,
+      ],
+      ["an unsafe attempt", { attempt: "../x" }, /is not one$/],
+      ...OWNERSHIP_LOST_LATCHES.map((kind) => [
+        `a ${kind} latch`,
+        { latch: { kind, detail: "x" } },
+        new RegExp(`^the attempt lost its fixture \\(${kind}\\)`),
+      ]),
+    ]) {
+      const r = ownedSource(deps, { ...base, ...edit });
+      assert.equal(r.owned, false, why);
+      assert.match(r.problems[0], want, why);
+    }
+    assert.equal(
+      ownedSource(deps, { ...base, latch: { kind: "exited", detail: "x" } })
+        .owned,
+      true,
+      "an owned failure stays owned",
+    );
+    w.writer.close();
+  } finally {
+    clean();
+  }
+});
+
+for (const kind of OWNERSHIP_LOST_LATCHES)
+  test(`R36-RET T3 with real SQLite: a ${kind} latch at the decision — the guard is never started and nothing is anchored or removed; the source is untouched`, async () => {
+    try {
+      const { out, running } = await realAttempt("normal", {
+        latched: () => ({ kind, detail: "x" }),
+      });
+      assert.equal(out.eligible, false);
+      assert.equal(out.guard.spawned, false);
+      assert.match(
+        out.guard_problems[0],
+        new RegExp(`lost its fixture \\(${kind}\\)`),
+      );
+      assert.equal(out.preservation.dir, null);
+      assert.equal(out.remove_requested, false);
+      assert.equal(out.retention.status, "unavailable");
+      assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+    } finally {
+      clean();
+    }
+  });
+
+test("R36-RET T3 with real SQLite: an OWNED failure (an exited latch) is still guarded and anchored, never removed; its kept source is retained verified", async () => {
+  try {
+    const { out } = await realAttempt("normal", {
+      latched: () => ({ kind: "exited", detail: "x" }),
+    });
+    assert.equal(out.eligible, false);
+    assert.equal(out.guarded, true, JSON.stringify(out.guard_problems));
+    assert.equal(out.preserved, true);
+    assert.equal(out.remove_requested, false);
+    assert.equal(out.retention.status, "verified");
+    assert.equal(out.retention.selection.method, "final-named-after-exit");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+
+// T5: the guard lost after the anchor. Before the last writer's close: that close retires the WAL (the anchored database then holds every
+// commit) and the removal finds none — `retired-into-database` when the anchored WAL adds nothing. After that close: the WAL was kept and
+// named at the removal, the guard's proof is incomplete — `failed`, the anchored pair kept raw. In BOTH the oracle is the content that
+// survives in the anchors, never the verdict alone.
+for (const name of Object.keys(SCHEDULES)) {
+  test(`R36-RET T5 ${name}: the guard lost after the anchor, before the last close — the coherent stopped state survives in the anchored database, and is verified unless the anchored WAL is an older generation`, async () => {
+    try {
+      const r = await schedule(name, {
+        guarded: true,
+        keep: false,
+        loseGuard: "after-anchor",
+      });
+      assert.equal(r.held.held, true, JSON.stringify(r.held.problems));
+      assert.equal(r.kept.ready, true);
+      assert.equal(r.released.lost, true);
+      assert.equal(
+        r.finalWal,
+        null,
+        "with no guard the last close retired the WAL",
+      );
+      assert.deepEqual(
+        contentOf({ "fixture.sqlite": join(r.kept.dir, "fixture.sqlite") }),
+        r.expected,
+        "the anchored database holds the stopped state",
+      );
+      if (RETIRED_STALE.has(name)) {
+        assert.equal(r.retention.status, "failed");
+        assert.match(
+          r.retention.problems[0],
+          /^the anchored WAL changes the database it was retired into/,
+        );
+      } else {
+        assert.equal(
+          r.retention.status,
+          "verified",
+          JSON.stringify(r.retention.problems),
+        );
+        assert.equal(r.retention.selection.method, "retired-into-database");
+        assert.deepEqual(r.observed, r.expected);
+      }
+    } finally {
+      clean();
+    }
+  });
+  test(`R36-RET T5 ${name}: the guard lost after the last close, before the removal — never verified (its proof is incomplete), and the anchored database and WAL still hold the stopped state`, async () => {
+    try {
+      const r = await schedule(name, {
+        guarded: true,
+        keep: false,
+        loseGuard: "after-final-close",
+      });
+      assert.equal(r.released.lost, true);
+      assert.deepEqual(
+        r.finalWal,
+        r.anchoredWal,
+        "the guard held through the last close: one generation",
+      );
+      assert.ok(r.removed.includes("fixture.sqlite-wal"));
+      assert.equal(r.retention.status, "failed");
+      assert.match(r.retention.problems[0], /the guard was lost/);
+      assert.deepEqual(
+        contentOf({
+          "fixture.sqlite": join(r.kept.dir, "fixture.sqlite"),
+          "fixture.sqlite-wal": join(r.kept.dir, "fixture.sqlite-wal"),
+        }),
+        r.expected,
+        "the raw anchored pair is the stopped state (unproven, kept)",
+      );
+    } finally {
+      clean();
+    }
+  });
+}
+
+test("R36-RET T5 with real SQLite: the guard killed after the removal was admitted, before the shutdown — the executable's close retires the WAL, its removal finds none, and the anchored database alone is retained verified with the committed rows", async () => {
+  try {
+    let killed = false;
+    let guard = null;
+    const { out, running } = await realAttempt("normal", {
+      afterGuard: (_r, held) => {
+        guard = held;
+      },
+      // After the removal decision (the guard was alive for it), before the shutdown command: the death is awaited, not timed.
+      beforeFinish: async (_r, remove) => {
+        if (!remove) return;
+        process.kill(guard.record.pid, "SIGKILL");
+        await new Promise((resolve) => {
+          const poll = () => (guard.alive() ? setTimeout(poll, 5) : resolve());
+          poll();
+        });
+        killed = true;
+      },
+    });
+    assert.equal(killed, true);
+    assert.equal(out.remove_requested, true);
+    assert.equal(existsSync(running.fixtureDir), false);
+    assert.equal(out.released.lost, true);
+    assert.ok(
+      !out.finished.stopped.removed.includes("fixture.sqlite-wal"),
+      "the WAL was retired by the close",
+    );
+    assert.equal(
+      out.retention.status,
+      "verified",
+      JSON.stringify(out.retention.problems),
+    );
+    assert.equal(out.retention.selection.method, "retired-into-database");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
   } finally {
     clean();
   }

@@ -43,6 +43,15 @@
 // needs the guard; (2) `materialiseRetained` selects ONE authoritative set: the final named state when the source was kept, or the anchors
 // of a removed source only with the guard's complete proof (held, never lost, released after the exit, the WAL found by the executable's
 // own removal); otherwise `failed`, the raw anchors kept; (3) the retention record (/2) states that selection and proof.
+// Revision 36 (R36-RET, regression of revision 35; design assessment of 2 Nov 2026, token 41c6b27cf2ff4ddf898b1066cb9640d4, C1-C4):
+// revision 35's guard opened the fixture's PATHNAME with SQLite before ownership was bound, creating companions beside a replacement. Now
+// (1) ONE owned-source check (`ownedSource`: the ready receipt's directory/database paths and identities, its digest, the attempt, no
+// ownership-loss latch, lstat only) gates both the guard (before its child is spawned) and the anchor (before any directory or link is
+// made); (2) the guard is given that authority and binds the file SQLite opens to the receipt's inode through a private hard link in its
+// own directory (diagnostic-guard.mjs), so SQLite never opens a fixture path; (3) a removed source whose WAL the executable's last close
+// retired is materialised as its anchored database ALONE (`retired-into-database`: SQLite deletes a WAL only after checkpointing all of
+// it), corroborated by replaying the anchored WAL over a copy and finding no change — so a guard lost before that close no longer costs
+// the coherent state; (4) the retention record (/3) and the guard method (/2) carry the authority and the binding, for both readers.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   appendFileSync,
@@ -57,6 +66,11 @@ import {
 } from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { createJournal } from "./causal-journal.mjs";
+import {
+  GUARD_METHOD,
+  GUARD_NAME,
+  authorityProblems as guardAuthorityProblems,
+} from "./diagnostic-guard.mjs";
 import { createTap } from "./pair-tap.mjs";
 
 export const RETENTION_SECONDS = 90 * 86400;
@@ -861,27 +875,126 @@ export function removeParentIfEmpty(deps, parent) {
 /** The guard child (diagnostic-guard.mjs: why it is a separate process, and its protocol). */
 export const GUARD_SCRIPT = new URL("./diagnostic-guard.mjs", import.meta.url)
   .pathname;
-export const GUARD_METHOD = "sqlite-shared-reader/1";
+export { GUARD_METHOD };
+/** Revision 36: the control latches that mean the fixture is no longer the attempt's (createControl): nothing of it is opened or anchored. */
+export const OWNERSHIP_LOST_LATCHES = Object.freeze([
+  "ownership_lost",
+  "http_refused",
+]);
 /**
- * Holds the attempt's database with the reader guard. `deps.spawn(command, args, options)` → child (the runner's owned-group spawn).
- * Resolves with a handle: `held` (true only on the guard's `held` report), `record` (JSON: method, pid, journal mode, the database and WAL
- * identities it holds, or why not), `problems`, `alive()` (when held: the guard has not ended), and `release({ exitObserved })` →
- * { released, lost, exit_observed_before_release, exit,
+ * Revision 36 (R36-RET, design assessment C1): the ONE owned-source check before the guard and the anchor. `fixtureDir`, the ready
+ * `receipt` (its `fixture_dir`/`database` paths and identities) and `receiptSha256` are the attempt's authority; `latch` the control's
+ * latch at the decision. Only `deps.lstat` is used (never following a link; nothing is opened, read, linked or created). Returns
+ * { owned, authority: {attempt, fixture_dir, database, receipt_sha256} | null, problems }.
+ */
+export function ownedSource(
+  deps,
+  { attempt, fixtureDir, receipt, receiptSha256, latch = null },
+) {
+  const problems = [];
+  const bad = (p) => {
+    problems.push(p);
+    return { owned: false, authority: null, problems };
+  };
+  if (!ATTEMPT_PATTERN.test(String(attempt ?? "")))
+    return bad(`the attempt id ${JSON.stringify(attempt)} is not one`);
+  if (OWNERSHIP_LOST_LATCHES.includes(latch?.kind))
+    return bad(
+      `the attempt lost its fixture (${latch.kind}): nothing of it is opened or anchored`,
+    );
+  if (!receipt?.fixture_dir || !receipt?.database || !receiptSha256)
+    return bad("no ready receipt: nothing can be attributed to this attempt");
+  if (!FIXTURE_PATH_PATTERN.test(String(fixtureDir ?? "")))
+    return bad(`the fixture path ${fixtureDir} is not a safe absolute path`);
+  if (
+    receipt.fixture_dir.path !== fixtureDir ||
+    receipt.database.path !== `${fixtureDir}/fixture.sqlite`
+  )
+    return bad("the receipt does not name this fixture directory's database");
+  const authority = {
+    attempt,
+    fixture_dir: {
+      path: fixtureDir,
+      dev: String(receipt.fixture_dir.dev),
+      ino: String(receipt.fixture_dir.ino),
+    },
+    database: {
+      path: receipt.database.path,
+      dev: String(receipt.database.dev),
+      ino: String(receipt.database.ino),
+    },
+    receipt_sha256: receiptSha256,
+  };
+  const shape = guardAuthorityProblems({
+    ...authority,
+    private_dir: "/not-nested-shape-check",
+  });
+  if (shape.length > 0) return bad(shape.join("; "));
+  const kindOf = (path) => {
+    try {
+      const s = deps.lstat(path);
+      return {
+        directory: s.isDirectory(),
+        file: s.isFile(),
+        id: identityOf(s),
+      };
+    } catch (error) {
+      return { error: codeOf(error) };
+    }
+  };
+  const dir = kindOf(fixtureDir);
+  if (!dir.directory || !sameIdentity(dir.id, authority.fixture_dir))
+    return bad("the fixture directory is not the receipt's: nothing anchored");
+  const db = kindOf(authority.database.path);
+  if (!db.file || !sameIdentity(db.id, authority.database))
+    return bad("the fixture database is not the receipt's: not anchored");
+  return { owned: true, authority, problems };
+}
+/**
+ * Holds the attempt's database with the reader guard. `deps.spawn(command, args, options)` → child (the runner's owned-group spawn);
+ * `deps.lstat`/`deps.realpath` (default: the real ones) for the owned-source check.
+ * Resolves with a handle: `held` (true only on the guard's `held` report), `record` (JSON: method, pid, the authority it was bound to, its
+ * private directory and the identity it opened, journal mode, the database and WAL identities it holds, or why not), `problems`, `alive()`
+ * (when held: the guard has not ended), and `release({ exitObserved })` → { released, lost, exit_observed_before_release, exit,
  * problems }. `lost` is true when the guard ended BEFORE its release was asked (its hold, and so the single-generation proof, ended
  * early). A guard that never reported `held` is told EOF (it then closes and exits) and proves nothing.
+ *
+ * Revision 36 (R36-RET): the authority comes first. `ownedSource` (the receipt's identities, its digest, the attempt, no ownership-loss
+ * `latch`) must pass BEFORE the child is spawned; otherwise nothing is started and nothing of the fixture is touched. The child gets that
+ * authority and `privateParent` (the runner's own retained parent, which must not nest with the fixture's parent); it creates
+ * `<privateParent>/guard-<attempt>` and opens only its private link of the receipt's inode (diagnostic-guard.mjs). `onPause(at)`
+ * (qualification only) is awaited at each of the child's `pause` points before it is told to continue.
  */
 export async function acquireGuard(
   deps,
-  { database, timeoutMs = 10_000, releaseTimeoutMs = 10_000 },
+  {
+    attempt,
+    fixtureDir,
+    receipt,
+    receiptSha256,
+    latch = null,
+    privateParent,
+    pause = [],
+    onPause = null,
+    timeoutMs = 10_000,
+    releaseTimeoutMs = 10_000,
+  },
 ) {
   const record = {
     method: GUARD_METHOD,
-    database_path: database ?? null,
+    attempt: attempt ?? null,
+    receipt_sha256: receiptSha256 ?? null,
+    authority: null,
     pid: null,
+    spawned: false,
     held: false,
+    namespace: null,
+    private_dir: null,
+    opened: null,
     journal_mode: null,
     database: null,
     wal: null,
+    stage: null,
     refused: null,
   };
   const problems = [];
@@ -903,22 +1016,54 @@ export async function acquireGuard(
       problems: ["the guard was never held"],
     }),
   };
-  if (!FIXTURE_PATH_PATTERN.test(String(database ?? ""))) {
-    problems.push(
-      `the guarded database ${database} is not a safe absolute path`,
-    );
+  const refuseBefore = (reason) => {
+    record.stage = "before-spawn";
+    record.refused = reason;
+    problems.push(`the guard was not started: ${reason}`);
     return handle;
+  };
+  const owned = ownedSource(
+    { lstat: deps.lstat ?? ((path) => lstatSync(path, { bigint: true })) },
+    { attempt, fixtureDir, receipt, receiptSha256, latch },
+  );
+  if (!owned.owned) return refuseBefore(owned.problems.join("; "));
+  record.authority = owned.authority;
+  let parent;
+  try {
+    parent = (deps.realpath ?? realpathSync)(privateParent);
+  } catch (error) {
+    return refuseBefore(
+      `the guard's private parent ${privateParent}: ${codeOf(error)}`,
+    );
   }
+  const fixtureParent = fixtureDir.slice(0, fixtureDir.lastIndexOf("/"));
+  if (within(parent, fixtureParent) || within(fixtureParent, parent))
+    return refuseBefore(
+      `the guard's private parent ${parent} and the fixture's parent ${fixtureParent} nest`,
+    );
+  const authority = {
+    ...owned.authority,
+    private_dir: `${parent}/guard-${attempt}`,
+  };
+  const shape = guardAuthorityProblems(authority);
+  if (shape.length > 0) return refuseBefore(shape.join("; "));
   try {
     child = deps.spawn(
       process.execPath,
-      ["--no-warnings", GUARD_SCRIPT, "--database", database],
+      [
+        "--no-warnings",
+        GUARD_SCRIPT,
+        "--authority",
+        JSON.stringify(authority),
+        ...(pause.length > 0 ? ["--pause", pause.join(",")] : []),
+      ],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
   } catch (error) {
     problems.push(`the guard could not start: ${codeOf(error)}`);
     return handle;
   }
+  record.spawned = true;
   record.pid = child.pid ?? null;
   child.stdin?.on("error", () => undefined);
   child.stderr?.resume();
@@ -974,9 +1119,19 @@ export async function acquireGuard(
       }),
     ]).finally(() => clearTimeout(timer));
   };
-  const first = await next(timeoutMs);
+  let first = await next(timeoutMs);
+  while (first?.event === "paused") {
+    // Qualification only: a deterministic boundary inside the child; the stimulus runs, then the child continues.
+    try {
+      await onPause?.(first.at);
+    } finally {
+      child.stdin?.write("continue\n");
+    }
+    first = await next(timeoutMs);
+  }
   if (first?.event !== "held") {
     record.refused = first?.reason ?? first?.error ?? null;
+    record.stage = first?.stage ?? null;
     if (first?.event === "refused") {
       record.journal_mode = first.journal_mode ?? null;
       record.database = first.database ?? null;
@@ -992,7 +1147,34 @@ export async function acquireGuard(
     child.stdin?.end();
     return handle;
   }
+  // The held report must be the authority's own: the method, attempt, digest, its private namespace and the receipt's inode opened.
+  const unbound = [];
+  if (first.method !== GUARD_METHOD) unbound.push(`method ${first.method}`);
+  if (first.attempt !== authority.attempt) unbound.push("another attempt");
+  if (first.receipt_sha256 !== authority.receipt_sha256)
+    unbound.push("another receipt digest");
+  if (
+    first.namespace !== "private" ||
+    first.private_dir?.path !== authority.private_dir
+  )
+    unbound.push("not its private namespace");
+  if (
+    first.opened?.name !== GUARD_NAME ||
+    !sameIdentity(first.opened, authority.database)
+  )
+    unbound.push("it opened another file than the receipt's database");
+  if (!sameIdentity(first.database, authority.database))
+    unbound.push("the database it observed is not the receipt's");
+  if (unbound.length > 0) {
+    record.refused = `the guard's report is not bound to its authority: ${unbound.join("; ")}`;
+    problems.push(record.refused);
+    child.stdin?.end();
+    return handle;
+  }
   record.held = true;
+  record.namespace = first.namespace;
+  record.private_dir = first.private_dir;
+  record.opened = first.opened;
   record.journal_mode = first.journal_mode;
   record.database = first.database;
   record.wal = first.wal;
@@ -1039,7 +1221,8 @@ export async function acquireGuard(
 // ---- revision 34 (R34-RET): the owned fixture is anchored before its removal can be asked, and materialised after the exit ----------
 // Revision 35 (R35-RET): /2 — the retention names the ONE source set it materialised and how it was selected (`selection`), with the reader
 // guard's proof when that set is the anchors of a removed source. A /1 retention is refused, never upgraded.
-export const RETAINED_SCHEMA = "web09c-diagnostic-retained/2";
+// Revision 36 (R36-RET): /3 — the guard proof carries its authority and private binding; `retired-into-database` is a selection.
+export const RETAINED_SCHEMA = "web09c-diagnostic-retained/3";
 /** SQLite's own state, materialised together for inspection (the shared-memory index is rebuilt by SQLite and is never needed). */
 export const MATERIALISED_FILES = Object.freeze([
   "fixture.sqlite",
@@ -1091,7 +1274,15 @@ const within = (path, dir) => path === dir || path.startsWith(`${dir}/`);
  */
 export function preserveFixture(
   deps,
-  { fixtureDir, receipt, receiptSha256, retainedParent, attempt, guard = null },
+  {
+    fixtureDir,
+    receipt,
+    receiptSha256,
+    retainedParent,
+    attempt,
+    guard = null,
+    latch = null,
+  },
 ) {
   const out = {
     schema: RETAINED_SCHEMA,
@@ -1108,6 +1299,11 @@ export function preserveFixture(
         : {
             method: guard.method ?? null,
             held: guard.held === true,
+            attempt: guard.attempt ?? null,
+            receipt_sha256: guard.receipt_sha256 ?? null,
+            namespace: guard.namespace ?? null,
+            private_dir: guard.private_dir ?? null,
+            opened: guard.opened ?? null,
             journal_mode: guard.journal_mode ?? null,
             database: guard.database ?? null,
             wal: guard.wal ?? null,
@@ -1119,12 +1315,18 @@ export function preserveFixture(
     out.problems.push(p);
     return out;
   };
-  if (!ATTEMPT_PATTERN.test(String(attempt ?? "")))
-    return bad(`the attempt id ${JSON.stringify(attempt)} is not one`);
-  if (!receipt?.fixture_dir || !receipt?.database || !receiptSha256)
-    return bad("no ready receipt: nothing can be attributed to this attempt");
-  if (!FIXTURE_PATH_PATTERN.test(String(fixtureDir ?? "")))
-    return bad(`the fixture path ${fixtureDir} is not a safe absolute path`);
+  // Revision 36 (R36-RET): the one owned-source check BEFORE any directory or link is made (a rejected source is never traversed).
+  const source = ownedSource(deps, {
+    attempt,
+    fixtureDir,
+    receipt,
+    receiptSha256,
+    latch,
+  });
+  if (!source.owned) {
+    for (const p of source.problems) out.problems.push(p);
+    return out;
+  }
   let parent;
   try {
     parent = deps.realpath(retainedParent);
@@ -1234,6 +1436,19 @@ export function preserveFixture(
   else {
     if (out.guard.method !== GUARD_METHOD)
       unguarded(`the guard method ${out.guard.method} is not ${GUARD_METHOD}`);
+    // Revision 36: bound to THIS attempt's authority, opened through its private namespace as the receipt's inode.
+    if (
+      out.guard.attempt !== attempt ||
+      out.guard.receipt_sha256 !== receiptSha256
+    )
+      unguarded("the guard was bound to another attempt or receipt");
+    if (
+      out.guard.namespace !== "private" ||
+      !sameIdentity(out.guard.opened, receipt.database)
+    )
+      unguarded(
+        "the guard did not open the receipt's database through its private name",
+      );
     if (out.guard.journal_mode !== "wal")
       unguarded(`the guarded database is in ${out.guard.journal_mode} mode`);
     if (!sameIdentity(out.guard.database, receipt.database))
@@ -1271,6 +1486,43 @@ const tablesOf = (db) =>
   );
 
 /**
+ * Revision 36: the logical content of the database at `path` (an exclusive copy the caller owns; opened writable so SQLite replays a WAL
+ * beside it): every schema row and every table's rows, values exact (64-bit integers, blobs as hex), order-independent. Its SHA-256.
+ */
+async function contentDigestOf(deps, path) {
+  const db = await deps.openDatabase(path);
+  try {
+    const exact = (row) =>
+      JSON.stringify(Object.values(row), (_, v) =>
+        typeof v === "bigint"
+          ? `i:${v}`
+          : v instanceof Uint8Array
+            ? `b:${Buffer.from(v).toString("hex")}`
+            : v,
+      );
+    const read = (sql) => {
+      const statement = db.prepare(sql);
+      statement.setReadBigInts(true);
+      return statement.all();
+    };
+    const schema = read(
+      "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name",
+    ).map(exact);
+    const tables = read(
+      "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name",
+    ).map(({ name }) => [
+      name,
+      read(`SELECT * FROM ${quoteIdentifier(name)}`)
+        .map(exact)
+        .sort(),
+    ]);
+    return sha256(JSON.stringify({ schema, tables }));
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * After the shutdown: ONE coherent SQLite state made inspectable (revision 35, R35-RET; design assessment invariants 1-5). Nothing is
  * judged until the executable's EXIT was observed (no writer of it is left). The anchors are re-identified and hashed; they are the raw
  * evidence and are never opened. Then exactly ONE authoritative source set is selected (never a retired WAL with a later database):
@@ -1280,6 +1532,9 @@ const tablesOf = (db) =>
  *     receipt's database before the anchor, the anchored WAL being the generation it held, no rollback journal, never lost, released only
  *     after the exit, and the executable's own removal finding that WAL (so SQLite never retired it). Without every part the status is
  *     `failed`: the anchors stay, labelled, and are never presented as the stopped state.
+ *   - `retired-into-database` (revision 36): the executable REMOVED the source and its own removal found no WAL and no journal: the last
+ *     connection checkpointed the whole WAL into the database and deleted it, so the anchored database alone is the stopped state, with or
+ *     without the guard. Corroborated: the anchored WAL replayed over a copy changes no content; otherwise `failed`.
  *   - a replaced directory or database name is `failed`: a replacement is never inspected as the fixture.
  * The selected files are copied to `work/`, checked by SQLite's integrity check, materialised by VACUUM INTO as one self-contained
  * `inspect.sqlite`, checked again read-only, and sealed by an exclusively written, read-back manifest (attempt, receipt, identities, the
@@ -1429,6 +1684,22 @@ export async function materialiseRetained(
         : walAnchor !== null && sameIdentity(finalWal, walAnchor)
           ? "anchored"
           : "replaced";
+  } else if (
+    Array.isArray(stopped?.removed) &&
+    stopped.removed.includes("fixture.sqlite") &&
+    !stopped.removed.includes("fixture.sqlite-wal") &&
+    !stopped.removed.includes("fixture.sqlite-journal")
+  ) {
+    // Revision 36 (R36-RET, design assessment C3/T5): removed, and the executable's own removal found NO WAL and no journal. SQLite
+    // deletes a WAL only after its last connection checkpointed ALL of it into the database (https://sqlite.org/wal.html), and after the
+    // pool's close nothing reopens it (atlas-sync-diagnostic.rs: pool close, owner check, remove, exit), so the anchored database inode
+    // ALONE is the stopped state, whatever became of the guard. Corroborated below: replaying the anchored WAL (if any) over a copy of the
+    // database changes nothing — a retired generation older than later checkpointed pages (revision 35's stale replay) would.
+    method = "retired-into-database";
+    walGeneration = "retired";
+    if (anchorOf("fixture.sqlite-journal") !== null)
+      return fail("a rollback journal was anchored beside a retired WAL");
+    files.push({ ...anchorOf("fixture.sqlite"), origin: "anchor" });
   } else {
     // Removed by the executable: only the guard's whole proof makes the anchors that state.
     method = "guarded-anchors";
@@ -1442,6 +1713,19 @@ export async function materialiseRetained(
         unproven.push(`the guard method ${held.method}`);
       if (!sameIdentity(held.database, receipt?.database))
         unproven.push("the guard held another database");
+      // Revision 36: the guard's authority and the identity it opened (through its private name) are this attempt's receipt's.
+      if (
+        held.attempt !== preservation.attempt ||
+        held.receipt_sha256 !== receiptSha256
+      )
+        unproven.push("the guard was bound to another attempt or receipt");
+      if (
+        held.namespace !== "private" ||
+        !sameIdentity(held.opened, receipt?.database)
+      )
+        unproven.push(
+          "the guard did not open the receipt's database through its private name",
+        );
       if (walAnchor === null) unproven.push("no WAL was anchored");
       else if (!sameIdentity(walAnchor, held.wal))
         unproven.push("the anchored WAL is not the guarded generation");
@@ -1472,6 +1756,42 @@ export async function materialiseRetained(
       files.push({ ...anchorOf(name), origin: "anchor" });
   }
   out.selection = { method, wal_generation: walGeneration, files };
+  if (method === "retired-into-database") {
+    // The corroboration: the logical content of the database alone and of the database with the anchored WAL replayed, each in its
+    // own exclusive copy (the anchors are never opened). Unequal content refuses the selection; the anchors stay raw.
+    const replay = `${dir}/replay`;
+    const corroboration = { database: null, with_wal: null, equal: null };
+    out.selection.corroboration = corroboration;
+    try {
+      deps.mkdir(replay);
+      deps.mkdir(`${replay}/database`);
+      deps.copyExclusive(
+        `${dir}/fixture.sqlite`,
+        `${replay}/database/fixture.sqlite`,
+      );
+      corroboration.database = await contentDigestOf(
+        deps,
+        `${replay}/database/fixture.sqlite`,
+      );
+      if (walAnchor !== null) {
+        deps.mkdir(`${replay}/with-wal`);
+        for (const name of ["fixture.sqlite", "fixture.sqlite-wal"])
+          deps.copyExclusive(`${dir}/${name}`, `${replay}/with-wal/${name}`);
+        corroboration.with_wal = await contentDigestOf(
+          deps,
+          `${replay}/with-wal/fixture.sqlite`,
+        );
+      }
+    } catch (error) {
+      return fail(`corroborating the retired WAL: ${codeOf(error)}`);
+    }
+    corroboration.equal =
+      walAnchor === null || corroboration.with_wal === corroboration.database;
+    if (!corroboration.equal)
+      return fail(
+        "the anchored WAL changes the database it was retired into: the anchors are not one proven SQLite state",
+      );
+  }
   const work = `${dir}/work`;
   const inspect = `${dir}/inspect.sqlite`;
   const pathOf = (f) =>
@@ -1599,6 +1919,9 @@ export function verifyRetained(deps, retention) {
  *        guard is held with no problem. Without a `guard` step, or when it throws, refuses or is not held, removal is never asked.
  *   3b'. `release(guard, finished)` — after the shutdown and the exit; its result (released, lost, after the exit) is the guard's proof.
  *   3c'. `materialise(preservation, finished, released)`.
+ *
+ * Revision 36 (R36-RET): `guard(latch)` and `preserve(guard, latch)` receive the latch read at the decision; both refuse an ownership-loss
+ * latch before touching the fixture (ownedSource), and neither runs SQLite on the fixture's path.
  */
 export async function concludeAttempt({
   stopTransports,
@@ -1630,8 +1953,9 @@ export async function concludeAttempt({
   const latch = latched();
   const eligible =
     transport.length === 0 && before.length === 0 && latch === null;
+  // Revision 36 (R36-RET): the guard and the anchor are given the latch, so a lost fixture is never opened or anchored.
   const holding = guard
-    ? await run(guard)
+    ? await run(guard, latch)
     : {
         value: null,
         problems: [
@@ -1646,7 +1970,7 @@ export async function concludeAttempt({
   if (!guarded && guardProblems.length === 0)
     guardProblems.push("the SQLite reader guard is not held");
   const kept = preserve
-    ? await run(preserve, holding.value)
+    ? await run(preserve, holding.value, latch)
     : {
         value: null,
         problems: [

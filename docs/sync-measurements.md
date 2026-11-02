@@ -329,6 +329,14 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   whole proof (held on the receipt's database, never lost, released after the exit, its WAL found by the executable's own removal); anything else is `failed`
   with the raw anchors kept. A guard-held removal therefore also lists the WAL and its index among the removed names (the executable's close cannot checkpoint).
   Whether the approved executable behaves so is for the independent exact-build review (Q6c); only stand-ins have run.
+  Revision 36 (R36-RET): revision 35's guard opened the fixture's pathname with SQLite before ownership was bound, creating `-wal`/`-shm` beside a replaced
+  database, directory or symlink target. Now one owned-source check (the ready receipt's directory/database paths and identities, its digest, the attempt,
+  no ownership-loss latch; `lstat` only) gates both the guard (before its child starts) and the anchor (before any directory or link), and the guard opens
+  only its OWN hard link of the receipt's inode in a private `guard-<attempt>` directory, so SQLite never touches a fixture name (it needs only the database
+  file's per-inode shared lock). A removed source whose WAL the executable's last close retired is retained as its database alone (`retired-into-database`,
+  retention `/3`), corroborated by replaying the anchored WAL over a copy and finding no change; a complete attempt still needs the guarded anchors.
+  The bounded completion of 2 November 2026 (hand-off `9160a197…d05d`, authority `e212d374…948e`) transfers universal failed-fixture reconstruction to
+  WEB-17 as deferred/unpassed; this correction is the safe-ownership route the remaining attempts use, pending independent verification.
   A refused anchor or guard keeps the source (`remove:false`); a complete attempt needs that retention verified; nothing removes the retained directory, on any outcome
   (it survives the outer driver only under the reviewed retention wrapper, whose TMPDIR is outside the shared driver's purge). A startup failure before
   `ready` is removed by the executable itself and is NOT covered (design assessment D2, owner decision open). **Status: the adapter and the five cases

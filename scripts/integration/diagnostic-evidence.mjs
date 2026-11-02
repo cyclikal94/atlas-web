@@ -27,6 +27,7 @@ import { createHash } from "node:crypto";
 import { before, bindingProblem, journalProblems } from "./causal-journal.mjs";
 import {
   continuationOf,
+  GUARD_METHOD,
   OWNED_FILES,
   parseLine,
   RETAINED_SCHEMA,
@@ -190,6 +191,12 @@ const sameId = (a, b) =>
  *     from the kept source after the exit.
  * A self-consistent record without that justification (a /1 record, a missing or unknown selection, an anchored WAL replayed for a
  * removed source without the guard's proof) is refused even when every hash matches.
+ *
+ * Revision 36 (R36-RET): /3. The guard's proof is bound to this attempt's authority (method /2, attempt, receipt digest) and to the
+ * identity it opened through its private name (the receipt's database). A third selection, `retired-into-database`: the source was
+ * removed and the executable's own removal found no WAL and no journal, so only the anchored database is selected, with a corroboration
+ * that replaying the anchored WAL over it changed no content. (An attempt's COMPLETENESS still needs the guarded anchors: see
+ * attemptProblems.)
  */
 export function retentionProblems(
   retention,
@@ -275,10 +282,19 @@ export function retentionProblems(
     const held = retention.guard?.acquired;
     const freed = retention.guard?.release;
     const wal = selected("fixture.sqlite-wal");
-    if (held?.held !== true || held?.method !== "sqlite-shared-reader/1")
+    if (held?.held !== true || held?.method !== GUARD_METHOD)
       bad("no reader guard was held before the anchor");
     if (!sameId(held?.database, receipt?.database))
       bad("the guard held another database than the receipt's");
+    if (held?.attempt !== attempt || held?.receipt_sha256 !== receiptSha256)
+      bad("the guard was bound to another attempt or receipt");
+    if (
+      held?.namespace !== "private" ||
+      !sameId(held?.opened, receipt?.database)
+    )
+      bad(
+        "the guard did not open the receipt's database through its private name",
+      );
     if (!wal || !asAnchored(wal) || !sameId(wal, held?.wal))
       bad("the selected WAL is not the anchored generation the guard held");
     if (selected("fixture.sqlite-journal") !== null)
@@ -293,6 +309,33 @@ export function retentionProblems(
       bad("the executable's removal did not find the guarded WAL");
     for (const f of files)
       if (!asAnchored(f)) bad(`the selected ${f.name} is not its anchor`);
+  } else if (selection?.method === "retired-into-database") {
+    const list = removed ? retention.quiescence.removed : [];
+    if (
+      !removed ||
+      !list.includes("fixture.sqlite") ||
+      list.includes("fixture.sqlite-wal") ||
+      list.includes("fixture.sqlite-journal")
+    )
+      bad(
+        "a retired WAL needs the executable's removal of the database without a WAL or journal",
+      );
+    if (files.length !== 1)
+      bad("a retired WAL's selection is the anchored database alone");
+    const c = selection.corroboration;
+    const walAnchored = anchors.some((a) => a.name === "fixture.sqlite-wal");
+    if (
+      !HEX64.test(String(c?.database)) ||
+      c?.equal !== true ||
+      (walAnchored
+        ? c?.with_wal !== c?.database
+        : c?.with_wal !== null && c?.with_wal !== undefined)
+    )
+      bad(
+        "the retired WAL is not corroborated: replaying the anchored WAL must change no content",
+      );
+    if (anchors.some((a) => a.name === "fixture.sqlite-journal"))
+      bad("a rollback journal was anchored beside a retired WAL");
   } else if (selection?.method === "final-named-after-exit") {
     if (removed)
       bad("the source was removed, so its final names cannot be the selection");

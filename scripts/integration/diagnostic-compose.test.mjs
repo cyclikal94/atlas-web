@@ -51,6 +51,7 @@ import {
   composeAttemptTransport,
   controlCall,
   finishAttempt,
+  GUARD_METHOD,
   launchAttempt,
   RETAINED_SCHEMA,
   RETENTION_SECONDS,
@@ -693,8 +694,18 @@ async function composed({ kind, journalNow, invert = false, corrupt = null }) {
         },
         guard: {
           acquired: {
-            method: "sqlite-shared-reader/1",
+            // Revision 36 (R36-RET): /2 guard method, bound to the attempt's authority, opened through its private name.
+            method: GUARD_METHOD,
             held: true,
+            attempt,
+            receipt_sha256: running.ready.receipt_sha256,
+            namespace: "private",
+            private_dir: {
+              path: `/retained/guard-${attempt}`,
+              dev: "1",
+              ino: "7",
+            },
+            opened: { name: "guard.sqlite", dev: "1", ino: "3" },
             journal_mode: "wal",
             database: { dev: "1", ino: "3" },
             wal: { dev: "1", ino: "6" },

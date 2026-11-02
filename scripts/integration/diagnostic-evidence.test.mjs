@@ -22,7 +22,7 @@ import {
   x0Problems,
   x2Problems,
 } from "./diagnostic-evidence.mjs";
-import { RETAINED_SCHEMA } from "./diagnostic-fixture.mjs";
+import { GUARD_METHOD, RETAINED_SCHEMA } from "./diagnostic-fixture.mjs";
 import { assembleInterval, CAUSAL_FIELDS } from "./pair-evidence.mjs";
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
@@ -207,8 +207,14 @@ function retainedRecord(attempt, receiptSha256) {
     },
     guard: {
       acquired: {
-        method: "sqlite-shared-reader/1",
+        // Revision 36 (R36-RET): /2 guard method, bound to the attempt's authority, opened through its private name.
+        method: GUARD_METHOD,
         held: true,
+        attempt,
+        receipt_sha256: receiptSha256,
+        namespace: "private",
+        private_dir: { path: `/retained/guard-${attempt}`, dev: "1", ino: "7" },
+        opened: { name: "guard.sqlite", dev: "1", ino: "3" },
         journal_mode: "wal",
         database: { dev: "1", ino: "3" },
         wal: { dev: "1", ino: "6" },
@@ -1641,6 +1647,169 @@ test("R35-RET: a kept source's final-named retention is internally valid (its at
       receiptSha256: r.anchors[1].sha256,
     }).includes(
       "the source was removed, so its final names cannot be the selection",
+    ),
+  );
+});
+// ---- revision 36 (R36-RET): the guard's proof bound to the attempt's authority; the `retired-into-database` selection -------------------
+for (const [name, edit, expected] of [
+  [
+    "a guard bound to another attempt",
+    (w) => (r35(w).guard.acquired.attempt = "another-attempt"),
+    /retention: the guard was bound to another attempt or receipt/,
+  ],
+  [
+    "a guard bound to another receipt digest",
+    (w) => (r35(w).guard.acquired.receipt_sha256 = "0".repeat(64)),
+    /retention: the guard was bound to another attempt or receipt/,
+  ],
+  [
+    "a guard that opened the fixture's own name (revision 35's namespace)",
+    (w) => (r35(w).guard.acquired.namespace = "fixture"),
+    /retention: the guard did not open the receipt's database through its private name/,
+  ],
+  [
+    "a guard whose opened file is not the receipt's database",
+    (w) =>
+      (r35(w).guard.acquired.opened = {
+        name: "guard.sqlite",
+        dev: "1",
+        ino: "99",
+      }),
+    /retention: the guard did not open the receipt's database through its private name/,
+  ],
+  [
+    "a revision-35 guard (method sqlite-shared-reader/1)",
+    (w) => (r35(w).guard.acquired.method = "sqlite-shared-reader/1"),
+    /retention: no reader guard was held before the anchor/,
+  ],
+  [
+    "a revision-35 retention (schema /2)",
+    (w) => (r35(w).schema = "web09c-diagnostic-retained/2"),
+    /retention: retention schema "web09c-diagnostic-retained\/2"/,
+  ],
+  [
+    "a removed source retained as its retired database (valid, but not the guarded anchors a complete attempt needs)",
+    (w) => {
+      const r = r35(w);
+      r.selection = {
+        method: "retired-into-database",
+        wal_generation: "retired",
+        files: [r.selection.files[0]],
+        corroboration: {
+          database: "d".repeat(64),
+          with_wal: "d".repeat(64),
+          equal: true,
+        },
+      };
+    },
+    /retention: a removed fixture is not retained as its guarded anchors/,
+  ],
+])
+  test(`R36-RET attempt refused: ${name}`, () => {
+    const w = x0World();
+    edit(w);
+    attemptRefused(w, expected);
+  });
+/** A `retired-into-database` retention (diagnostic-fixture.mjs): the removal found no WAL; the anchored database alone, corroborated. */
+function retiredRecord(w) {
+  const r = structuredClone(r35(w));
+  r.quiescence.removed = [
+    "fixture.sqlite",
+    "fixture.sqlite-shm",
+    "receipt.json",
+  ];
+  r.selection = {
+    method: "retired-into-database",
+    wal_generation: "retired",
+    files: [{ ...r.selection.files[0] }],
+    corroboration: {
+      database: "d".repeat(64),
+      with_wal: "d".repeat(64),
+      equal: true,
+    },
+  };
+  return r;
+}
+test("R36-RET: a retired-into-database retention is accepted by the reader only with its removal and corroboration", () => {
+  const w = x0World();
+  const judge = (r) =>
+    retentionProblems(r, {
+      attempt: w.envelope.attempt,
+      receipt: { database: { dev: "1", ino: "3" } },
+      receiptSha256: r35(w).anchors[1].sha256,
+    });
+  assert.deepEqual(judge(retiredRecord(w)), [], "positive control");
+  // No WAL anchored at all: the corroboration has nothing to replay (with_wal null).
+  const noWal = retiredRecord(w);
+  noWal.anchors = noWal.anchors.filter((a) => a.name !== "fixture.sqlite-wal");
+  noWal.selection.corroboration.with_wal = null;
+  assert.deepEqual(
+    judge(noWal),
+    [],
+    "positive control without an anchored WAL",
+  );
+  for (const [why, edit, want] of [
+    [
+      "a removal that found the WAL",
+      (r) => r.quiescence.removed.push("fixture.sqlite-wal"),
+      "a retired WAL needs the executable's removal of the database without a WAL or journal",
+    ],
+    [
+      "a removal that found a journal",
+      (r) => r.quiescence.removed.push("fixture.sqlite-journal"),
+      "a retired WAL needs the executable's removal of the database without a WAL or journal",
+    ],
+    [
+      "no removal",
+      (r) => (r.quiescence.removed = null),
+      "a retired WAL needs the executable's removal of the database without a WAL or journal",
+    ],
+    [
+      "a removal that did not find the database",
+      (r) => (r.quiescence.removed = ["receipt.json"]),
+      "a retired WAL needs the executable's removal of the database without a WAL or journal",
+    ],
+    [
+      "the anchored WAL selected too",
+      (r) => r.selection.files.push({ ...r35(w).selection.files[1] }),
+      "a retired WAL's selection is the anchored database alone",
+    ],
+    [
+      "an uncorroborated selection",
+      (r) => (r.selection.corroboration.equal = false),
+      "the retired WAL is not corroborated: replaying the anchored WAL must change no content",
+    ],
+    [
+      "a corroboration whose replayed content differs",
+      (r) => (r.selection.corroboration.with_wal = "e".repeat(64)),
+      "the retired WAL is not corroborated: replaying the anchored WAL must change no content",
+    ],
+    [
+      "a corroboration that never replayed the anchored WAL",
+      (r) => (r.selection.corroboration.with_wal = null),
+      "the retired WAL is not corroborated: replaying the anchored WAL must change no content",
+    ],
+    [
+      "no corroboration",
+      (r) => delete r.selection.corroboration,
+      "the retired WAL is not corroborated: replaying the anchored WAL must change no content",
+    ],
+  ]) {
+    const r = retiredRecord(w);
+    edit(r);
+    assert.ok(judge(r).includes(want), `${why}: ${JSON.stringify(judge(r))}`);
+  }
+  const journal = retiredRecord(w);
+  journal.anchors.push({
+    name: "fixture.sqlite-journal",
+    dev: "1",
+    ino: "8",
+    size: "1",
+    sha256: "9".repeat(64),
+  });
+  assert.ok(
+    judge(journal).includes(
+      "a rollback journal was anchored beside a retired WAL",
     ),
   );
 });

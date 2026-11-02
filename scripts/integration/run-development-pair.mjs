@@ -1293,18 +1293,27 @@ async function diagnosticStack(browser, caseId) {
       running ? running.control.latched() : { kind: "not_launched" },
     // Revision 35 (R35-RET): BEFORE the anchor, a separate read-only reader (an owned process) holds the database so SQLite cannot retire
     // the anchored WAL; it is released only after the shutdown and the exit. Removal needs it held.
-    guard: async () =>
+    // Revision 36 (R36-RET): the guard is bound to the ready receipt's authority (attempt, identities, digest) and the latch BEFORE its
+    // child starts, and opens only its private link of the receipt's inode (in the runner's own retained parent).
+    guard: async (latch) =>
       running
         ? acquireGuard(
             {
               spawn: (command, argv, options) =>
                 groups.spawn("diagnostic-guard", command, argv, options),
             },
-            { database: `${running.fixtureDir}/fixture.sqlite` },
+            {
+              attempt,
+              fixtureDir: running.fixtureDir,
+              receipt: running.ready?.receipt,
+              receiptSha256: running.ready?.receipt_sha256,
+              latch,
+              privateParent: retainedParent,
+            },
           )
         : null,
     // Revision 34 (R34-RET): every launched attempt's owned files are anchored before the shutdown; removal needs that anchor.
-    preserve: async (guard) =>
+    preserve: async (guard, latch) =>
       running
         ? preserveFixture(retentionDeps(), {
             fixtureDir: running.fixtureDir,
@@ -1313,6 +1322,7 @@ async function diagnosticStack(browser, caseId) {
             retainedParent,
             attempt,
             guard: guard?.record ?? null,
+            latch,
           })
         : null,
     finish: async (remove) => {
