@@ -35,6 +35,7 @@ import {
   type ChainModel,
   captureTrace,
   caseRow,
+  compatOf,
   DIAGNOSTIC_RECEIPT,
   diagnostic,
   drivePieces,
@@ -52,6 +53,7 @@ import {
   observeCommandPosts,
   observeRecoveryOf,
   oracle,
+  outboxOf,
   PAIR_BACKEND,
   type Probe,
   pairPage,
@@ -305,10 +307,118 @@ test("PAIR-P0: the backend is the one selected (its /health version; whether it 
     expect(bounded.status).toBe(400);
     expect(bounded.json?.code).toBe("malformed_request");
   }
-  // pairPage verifies what each page told its production leader.
+  if (PAIR_BACKEND === "diagnostic") await dispatchControls(context);
+  // pairPage verifies what each page told its production leader (and, against the diagnostic executable, its compatibility policy).
   await pairPage(context, 4);
   await pairPage(context, null);
 });
+
+/** One create_person of the signed-in reader, saved through the PRODUCTION outbox facade. */
+const createPersonSpec = (id: string, name: string) => ({
+  endpoint: "/commands",
+  targets: [
+    {
+      resourceId: id,
+      role: "primary",
+      basis: "resource",
+      versionChecked: false,
+      seedIfUntracked: 1,
+    },
+  ],
+  command: {
+    commands: [
+      {
+        kind: "create_person",
+        id,
+        name,
+        initial_policy: { grants: [], exclude_accounts: [] },
+      },
+    ],
+  },
+  displayPatch: { [id]: { label: name } },
+});
+/**
+ * R38-DIAG (design assessment C2/Q1/Q3), against the approved diagnostic executable before any clock step, in P0's own disposable attempt:
+ *   - UNSUPPORTED, no dispatch: a document WITHOUT the selection's policy (the released range) judges the executable's real `/health`
+ *     unsupported; a draft saved through the production outbox is kept `queued` with no attempt while the production dispatcher is paused
+ *     `compat_unsupported`, and the page sends no command;
+ *   - SUPPORTED dispatch: that page is closed and a document WITH the policy takes the account's leadership: it judges the same `/health`
+ *     supported and its production dispatcher sends the held draft and a new one, each ONCE with its local id as the key, and admits each
+ *     real receipt (W6) with its pending effect. No command is sent by setup HTTP and nothing is seeded.
+ */
+async function dispatchControls(context: BrowserContext) {
+  const reader = readerOf("PAIR-P0");
+  const account = reader.account_id;
+  const local = async (page: Page, ids: string[]) =>
+    (await stored(page, account, false, ids)) as Stored;
+  const without = await pairPage(context, 4, undefined, { policy: "omit" });
+  const sentWithout = observeCommandPosts(without);
+  await signInAs(without, reader);
+  await untilView(without, "displaying", undefined, 60_000);
+  const held = randomUUID();
+  const queued = await enqueueThroughProduction(
+    without,
+    createPersonSpec(held, "PAIR-P0 held while unsupported"),
+  );
+  expect(queued.kind, "the production outbox admits the draft").toBe("queued");
+  const heldId = queued.localId as string;
+  const deadline = Date.now() + 15_000;
+  let outbox = await outboxOf(without);
+  while (
+    !(outbox?.kind === "paused" && outbox.reason === "compat_unsupported") &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    outbox = await outboxOf(without);
+  }
+  expect(outbox, "the production dispatcher is paused, unsupported").toEqual({
+    kind: "paused",
+    reason: "compat_unsupported",
+  });
+  const kept = await local(without, [held]);
+  expect(
+    kept.local?.drafts.find((d) => d.local_id === heldId),
+    "the draft is kept, never attempted",
+  ).toMatchObject({ status: "queued", attempts: 0, receipt_revision: null });
+  expect(sentWithout, "no command is sent while unsupported").toHaveLength(0);
+  await without.close();
+
+  const page = await pairPage(context, 4);
+  const sent = observeCommandPosts(page);
+  await untilView(page, "displaying", undefined, 60_000);
+  expect(await compatOf(page)).toEqual({
+    status: "supported",
+    version: DIAGNOSTIC_RECEIPT?.api_version,
+  });
+  const fresh = randomUUID();
+  const second = await enqueueThroughProduction(
+    page,
+    createPersonSpec(fresh, "PAIR-P0 sent while supported"),
+  );
+  expect(second.kind, "the production outbox admits the draft").toBe("queued");
+  const freshId = second.localId as string;
+  const receipted = (s: Stored, id: string) =>
+    (s.local?.drafts ?? []).some(
+      (d) => d.local_id === id && Number.isInteger(d.receipt_revision),
+    ) &&
+    (s.local?.effects ?? []).some(
+      (e) => e.local_id === id && Number.isInteger(e.receipt_revision),
+    );
+  await until(
+    () => local(page, [held, fresh]),
+    (s) => receipted(s, heldId) && receipted(s, freshId),
+    "both drafts' real receipts are admitted",
+    60_000,
+  );
+  for (const id of [heldId, freshId])
+    expect(
+      sent.filter((x) => x.idempotency_key === id),
+      `${id} is sent once, with its local id as the key`,
+    ).toHaveLength(1);
+  expect(sent.map((x) => x.status)).toEqual(sent.map(() => 200));
+  expect(sentWithout, "the unsupported document sent nothing").toHaveLength(0);
+  await page.close();
+}
 
 // ---- W-real, whole and bounded -------------------------------------------------------------------------------------------------------
 test("PAIR-W1: W-real as ONE whole response (the page is told nothing, as production): the complete old state until one atomic activation", async ({
@@ -1547,6 +1657,19 @@ test("PAIR-XL0: REAL EXPIRY with named admitted LOCAL WORK and a RELOAD: one cre
             expiryControl(context, m, controls, probes, {
               // The local work, admitted while the continuation waits at the gate and BEFORE the durable baseline of the clock steps.
               beforeInspect: async () => {
+                // R38-DIAG (C2): the writer's own admission, asserted BEFORE the receipt wait and before any clock step: the page's verdict
+                // from the real /health under the selection's policy, and this page leads (its production dispatcher sends).
+                expect(
+                  await compatOf(o.page),
+                  "the production writer is admitted by the selection's policy",
+                ).toEqual({
+                  status: "supported",
+                  version: DIAGNOSTIC_RECEIPT?.api_version,
+                });
+                expect(
+                  (await leaderOf(o.page))?.attachment,
+                  "this page leads: its own dispatcher sends",
+                ).toBe("leader");
                 const saved = await enqueueThroughProduction(o.page, {
                   endpoint: "/commands",
                   targets: [

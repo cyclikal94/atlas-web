@@ -71,6 +71,64 @@ describe("the seam is diagnostic only", () => {
     expect(harness).toMatch(/harness\.pairing === null\s*\?\s*\{\}/);
     expect(harness).toMatch(/pairMaxChanges >= 4\s*&&\s*pairMaxChanges <= 800/);
   });
+
+  it("R38-DIAG: the exact-version compatibility policy is the harness's alone, from a named selection, only with the production leader; boot reads it once, for the session's range", () => {
+    expect(read("src/main.tsx")).not.toMatch(
+      /diagnosticCompatibility|exactVersionRange|pairApi|pairSelection/,
+    );
+    const boot = code("src/app/boot.tsx");
+    expect(boot.match(/options\.diagnosticCompatibility/g)).toHaveLength(1);
+    expect(boot).toMatch(
+      /supportedRange:\s*options\.diagnosticCompatibility\?\.supportedRange \?\?\s*rangeFromPin\(contractVersion\)/,
+    );
+    expect(boot).not.toMatch(/exactVersionRange/);
+    const harness = code("src/fixture/session-harness/main.tsx");
+    expect(harness.match(/diagnosticCompatibility:/g)).toHaveLength(1);
+    expect(harness).toMatch(/supportedRange: pairRange/);
+    expect(harness).toMatch(
+      /pairRange =\s*pairApiParam === null \? null : exactVersionRange\(pairApiParam\)/,
+    );
+    expect(harness).toMatch(
+      /\(pairApiParam === null\) !== \(pairSelectionParam === null\)/,
+    );
+    expect(harness).toMatch(/pairApiParam !== null && !productionLeader/);
+    expect(harness).toMatch(
+      /\/\^\[0-9a-f\]\{64\}\$\/\.test\(pairSelectionParam\)/,
+    );
+    // No other source composes a session with another range, and no source but the harness uses the exact-version policy.
+    const sources = execFileSync(
+      "git",
+      ["ls-files", "-co", "--exclude-standard", "src"],
+      { encoding: "utf8" },
+    )
+      .split("\n")
+      .filter((f) => f && existsSync(f) && !statSync(f).isDirectory());
+    for (const file of sources) {
+      const text = code(file);
+      if (
+        file !== "src/session/model/api-version.ts" &&
+        file !== "src/session/index.ts" &&
+        file !== "src/fixture/session-harness/main.tsx"
+      )
+        expect(text, file).not.toMatch(/exactVersionRange/);
+      if (
+        ![
+          "src/app/boot.tsx",
+          "src/session/session.ts",
+          "src/fixture/session-harness/main.tsx",
+        ].includes(file)
+      )
+        expect(text, file).not.toMatch(/supportedRange:/);
+    }
+    // The pair page names it only against the diagnostic executable, from the verified selection.
+    const support = code("tests/pair/support.ts");
+    expect(support).toMatch(
+      /if \(PAIR_BACKEND !== "diagnostic"\) return null;/,
+    );
+    expect(support).toMatch(
+      /const apiVersion = DIAGNOSTIC_SELECTION\.backend\.apiVersion;/,
+    );
+  });
 });
 
 describe("the released path is untouched", () => {

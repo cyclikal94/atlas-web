@@ -27,6 +27,7 @@ import {
   type Session,
   SessionProvider,
   type Trace,
+  type VersionRange,
 } from "../session";
 import { CompatibilityScreen } from "./CompatibilityScreen";
 import {
@@ -80,6 +81,19 @@ export interface BootOptions {
    * it (a static test asserts it); only the fixture session harness does, and only when the page asks (`?segmented=`).
    */
   dataLeaderDiagnostic?: DiagnosticSegmentation;
+  /**
+   * WEB-09c (R38-DIAG): DIAGNOSTIC ONLY. The session's supported API range for a development-pair page whose verified diagnostic selection
+   * names exactly one backend API version (`exactVersionRange`). It replaces the released pin's range for THIS document only; the session
+   * still asks the real `/health` and every reader (the dispatcher's gate, the screens) reads that one verdict. `main.tsx` never passes it (a
+   * static test asserts it); only the fixture session harness does, and only when the page names the selection and the production leader.
+   */
+  diagnosticCompatibility?: DiagnosticCompatibility;
+}
+/** The diagnostic compatibility policy of one development-pair document (R38-DIAG). */
+export interface DiagnosticCompatibility {
+  /** The verified diagnostic selection's identity (SHA-256), recorded by the page; it grants nothing by itself. */
+  selection: string;
+  supportedRange: VersionRange;
 }
 
 export async function boot(options: BootOptions): Promise<Booted | null> {
@@ -174,7 +188,9 @@ export async function boot(options: BootOptions): Promise<Booted | null> {
       deletion: createDataDeletionPorts(),
     }),
     {
-      supportedRange: rangeFromPin(contractVersion),
+      supportedRange:
+        options.diagnosticCompatibility?.supportedRange ??
+        rangeFromPin(contractVersion),
       onSignIn: () => signInRequest.request(),
       onReload: options.onReload ?? (() => location.reload()),
       onReviewDevice: () => lifecycle.reviewDevice(session),

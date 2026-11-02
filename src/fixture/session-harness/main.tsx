@@ -1,16 +1,23 @@
+// A named import, as boot's: only the version (the released pin's range is recorded beside a diagnostic policy, R38-DIAG).
+import { version as contractVersion } from "../../../contract-pin.json";
 import { type Booted, boot } from "../../app/boot";
 import { getPageDataHost } from "../../data";
+import type { DispatcherState } from "../../data/engine/outbox-dispatcher";
 // Static, not dynamic: the fixture shell already loads both in its initial chunks, and a dynamic import split them into new initial
 // chunks (WEB-08c revision 2, campaign 2026-10-13T21-37-54.392Z-04e93063: the fixture budget).
 import { createBroadcastSyncChannel } from "../../data/engine/sync-channel";
 import { createProductionQuota } from "../../data/ui/production-quota";
 import {
+  type ApiCompatibility,
   createBroadcastHints,
   createWebLocksPort,
+  exactVersionRange,
+  formatRange,
   type HintChannel,
   type LockPort,
   type OpenedAuthStore,
   openAuthStore,
+  rangeFromPin,
   runAuthCanary,
 } from "../../session";
 
@@ -92,6 +99,22 @@ export interface SessionHarness {
     segmentedCapable: true;
     segmentedMaxChanges: number | null;
   } | null;
+  /**
+   * FIXTURE / DIAGNOSTIC ONLY (WEB-09c, R38-DIAG): the compatibility policy this document was booted with when the development-pair page
+   * named its verified diagnostic selection (`?pairApi=<exact version>&pairSelection=<SHA-256>`, only with `?leader=production`), or null
+   * (the released pin's range, as production). `released` and `effective` are the two ranges, recorded separately; the policy admits the
+   * one named version only. It is re-established by every document from its own address: nothing is persisted or broadcast.
+   */
+  compatibility: {
+    selection: string;
+    apiVersion: string;
+    released: string;
+    effective: string;
+  } | null;
+  /** FIXTURE ONLY (R38-DIAG): the session's OWN compatibility verdict (the one the dispatcher's gate reads), or null before boot. */
+  compat(): ApiCompatibility | null;
+  /** FIXTURE ONLY (R38-DIAG): the production leader's outbox dispatcher state on this page, or null when this page does not lead. */
+  outboxState(): DispatcherState | null;
 }
 
 const params = new URLSearchParams(location.search);
@@ -120,6 +143,14 @@ const harness: SessionHarness = {
   canary: (store) => runAuthCanary(store),
   trace: [],
   pairing: null,
+  compatibility: null,
+  compat: () => harness.booted?.session.compat.get() ?? null,
+  outboxState() {
+    const attachment = getPageDataHost().leader.get();
+    return attachment.role === "leader"
+      ? (attachment.outbox?.state.get() ?? null)
+      : null;
+  },
   async seedAuthState(state) {
     const store: OpenedAuthStore =
       harness.booted?.store ?? (await openAuthStore());
@@ -331,6 +362,32 @@ harness.pairing =
   segmentedParam === "capable"
     ? { segmentedCapable: true, segmentedMaxChanges: pairMaxChanges }
     : null;
+// FIXTURE / DIAGNOSTIC ONLY (WEB-09c, R38-DIAG): the development-pair page against the approved DIAGNOSTIC executable names that selection's
+// identity and its one API version (tests/pair/support.ts `pairPage`, from the runner's verified selection and the executable's own receipt).
+// The session then supports EXACTLY that version instead of the released pin's range; the real `/health` is still asked and judged, and an
+// unsupported, missing or unconfirmed verdict still holds every write. Both are required together, only with the production leader, and a
+// malformed one is refused here, so a page never boots quietly with a policy other than the one it names (or with a wider one).
+const pairApiParam = params.get("pairApi");
+const pairSelectionParam = params.get("pairSelection");
+if ((pairApiParam === null) !== (pairSelectionParam === null))
+  throw new Error("?pairApi= and ?pairSelection= are given together");
+if (pairApiParam !== null && !productionLeader)
+  throw new Error("?pairApi= needs ?leader=production");
+if (pairSelectionParam !== null && !/^[0-9a-f]{64}$/.test(pairSelectionParam))
+  throw new Error(
+    "?pairSelection= must be a SHA-256 (64 lower-case hex digits)",
+  );
+const pairRange =
+  pairApiParam === null ? null : exactVersionRange(pairApiParam);
+harness.compatibility =
+  pairRange === null || pairApiParam === null || pairSelectionParam === null
+    ? null
+    : {
+        selection: pairSelectionParam,
+        apiVersion: pairApiParam,
+        released: formatRange(rangeFromPin(contractVersion)),
+        effective: formatRange(pairRange),
+      };
 let startedByTest: Promise<Booted | null> | null = null;
 const startBoot = (): Promise<Booted | null> => {
   harness.ready = boot({
@@ -339,6 +396,14 @@ const startBoot = (): Promise<Booted | null> => {
       : {}),
     neutralRoot,
     dataLeader: productionLeader,
+    ...(harness.compatibility === null || pairRange === null
+      ? {}
+      : {
+          diagnosticCompatibility: {
+            selection: harness.compatibility.selection,
+            supportedRange: pairRange,
+          },
+        }),
     ...(harness.pairing === null
       ? {}
       : {

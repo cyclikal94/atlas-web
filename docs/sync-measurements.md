@@ -345,6 +345,23 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   non-sync record is refused, and the saved collections must agree with the class and together be exactly the exchanges the reader is given. The
   target-consumption, collector, expiry and control-account checks are unchanged. The maintained X2/XR2 fixtures and the composed X2 now place the
   grant's GET and POST inside its bracket, asserted independently of the reader.
+  Revision 38 (R38-DIAG): XL0 saves its local work through the PRODUCTION outbox, whose dispatcher sends only under a `supported` session
+  compatibility verdict, but every diagnostic page was booted with the released pin's range (`>=0.29.0 <0.30.0`) while the approved executable
+  reports API 0.30.0; the independent review's Chromium XL0 attempt (2 November 2026) therefore timed out with the draft queued, never attempted, and
+  no command sent (that attempt stays failed). Segmented-read capability never implied write compatibility. Now every development-pair document
+  against the diagnostic executable names the verified selection's identity and its ONE API version in its own address
+  (`?pairApi=0.30.0&pairSelection=<SHA-256>`, only with `?leader=production`; `tests/pair/support.ts` `pairCompatibility`, which fails the set-up
+  unless the runner's health, its environment and the executable's receipt all report that version). The fixture session harness refuses a partial
+  or malformed descriptor before boot and passes boot a DIAGNOSTIC-only `diagnosticCompatibility` whose range admits exactly that version
+  (`exactVersionRange`: `>=0.30.0 <0.30.1`). The session still asks the real `/health` and every reader (the dispatcher's gate, the screens) reads
+  that one verdict; an unsupported, missing or unconfirmed verdict still holds every write. The page records the released and effective ranges
+  separately, and `pairPage` asserts the policy and the page's own verdict (annotated `pair-compatibility`) for every document, reloads and followers
+  included. P0 now also runs a no-dispatch control (a document without the policy is unsupported and keeps a draft queued, unsent) and a supported
+  dispatch control (the policy's document sends the held and a new draft once each and admits their real receipts), before any clock step; XL0 asserts
+  its writer's admission before its receipt wait. `main.tsx` never passes the option, the released pin, `segmentedMinApiVersion: null` and the
+  production range are unchanged, and the production build contains none of it. Qualified against the fixture DOM in three engines
+  (`tests/e2e/fixture.pair-compat.spec.ts`), not yet against the executable: it changes every diagnostic page's composition, so no earlier
+  diagnostic cell is carried forward without the reviewer's impact assessment.
   A refused anchor or guard keeps the source (`remove:false`); a complete attempt needs that retention verified; nothing removes the retained directory, on any outcome
   (it survives the outer driver only under the reviewed retention wrapper, whose TMPDIR is outside the shared driver's purge). A startup failure before
   `ready` is removed by the executable itself and is NOT covered (design assessment D2, owner decision open). **Status: the adapter and the five cases

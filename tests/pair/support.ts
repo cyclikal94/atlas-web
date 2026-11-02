@@ -38,6 +38,10 @@ import {
   type RecoveryReader,
 } from "../../scripts/integration/pair-recovery.mjs";
 import {
+  DIAGNOSTIC_SELECTION,
+  selectionIdentity,
+} from "../../scripts/integration/pair-selection.mjs";
+import {
   BACKEND,
   challengeFor,
   expect,
@@ -387,16 +391,94 @@ export async function writerFor(account: PairAccount) {
 }
 export type Writer = Awaited<ReturnType<typeof writerFor>>;
 
-/** The page: the session harness with the PRODUCTION leader, told (or not) that its server segments; its composition is verified. */
+/**
+ * R38-DIAG: the compatibility policy every development-pair document names. Against the approved DIAGNOSTIC executable it is the verified
+ * selection's identity and its ONE API version (pair-selection.mjs `DIAGNOSTIC_SELECTION`), which the runner's health check, its environment
+ * and the executable's own ready receipt must all report; any disagreement fails the set-up here, before a page boots. Null on every other
+ * backend: the released pin's range, as production (the normal-development pairing's selection is not decided here).
+ */
+export function pairCompatibility(): {
+  selection: string;
+  apiVersion: string;
+} | null {
+  if (PAIR_BACKEND !== "diagnostic") return null;
+  const apiVersion = DIAGNOSTIC_SELECTION.backend.apiVersion;
+  const problems: string[] = [];
+  if (!/^[0-9a-f]{64}$/.test(SELECTION_SHA256))
+    problems.push(`selection identity ${JSON.stringify(SELECTION_SHA256)}`);
+  if (SELECTION_SHA256 !== selectionIdentity())
+    problems.push("the runner's selection is not the approved diagnostic one");
+  if (API_VERSION !== apiVersion)
+    problems.push(
+      `the runner's health reported ${API_VERSION}, selected ${apiVersion}`,
+    );
+  if (DIAGNOSTIC_RECEIPT?.api_version !== apiVersion)
+    problems.push(
+      `the executable's receipt reports ${DIAGNOSTIC_RECEIPT?.api_version}, selected ${apiVersion}`,
+    );
+  if (problems.length > 0)
+    throw new Error(
+      `the diagnostic compatibility policy cannot be named: ${problems.join("; ")}`,
+    );
+  return { selection: SELECTION_SHA256, apiVersion };
+}
+/** `>=X.Y.0 <X.(Y+1).0` of a pin, and `>=X.Y.Z <X.Y.(Z+1)` of one version, computed here independently of the product's own functions. */
+const releasedRangeOf = (pin: string) => {
+  const [major, minor] = (pin.split(/[-+]/)[0] ?? "").split(".").map(Number);
+  return `>=${major}.${minor}.0 <${major}.${Number(minor) + 1}.0`;
+};
+const exactRangeOf = (version: string) => {
+  const [major, minor, patch] = version.split(".").map(Number);
+  return `>=${version} <${major}.${minor}.${Number(patch) + 1}`;
+};
+/** The page's own compatibility verdict (the session's store the dispatcher reads), once its real `/health` has been judged. */
+export async function compatOf(
+  page: Page,
+  timeoutMs = 15_000,
+): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const verdict = (await page.evaluate(
+      () => window.__atlasFixture?.session?.compat() ?? null,
+    )) as Record<string, unknown> | null;
+    if (
+      (verdict !== null && verdict.status !== "unknown") ||
+      Date.now() > deadline
+    )
+      return verdict;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+/** The production leader's outbox dispatcher state on this page (null when it does not lead). */
+export const outboxOf = (page: Page) =>
+  page.evaluate(
+    () => window.__atlasFixture?.session?.outboxState() ?? null,
+  ) as Promise<Record<string, unknown> | null>;
+
+/**
+ * The page: the session harness with the PRODUCTION leader, told (or not) that its server segments; its composition is verified. Against the
+ * diagnostic executable every document also names the selection's compatibility policy (R38-DIAG), in its own address, so a reload, a
+ * follower and a page taking the leadership each establish it before they boot; the page's recorded policy and its own verdict from the real
+ * `/health` are asserted (and annotated) before the page is used. `policy: "omit"` is the NEGATIVE control only: the released range, which
+ * must judge the diagnostic version unsupported.
+ */
 export async function pairPage(
   context: BrowserContext,
   maxChanges: number | null,
   existing?: Page,
+  options: { policy?: "selected" | "omit" } = {},
 ): Promise<Page> {
   const page = existing ?? (await context.newPage());
   const query =
     maxChanges === null ? "" : `&segmented=capable&maxChanges=${maxChanges}`;
-  await page.goto(`/__session?route=%2Ftoday&leader=production${query}`);
+  const policy = options.policy === "omit" ? null : pairCompatibility();
+  const named =
+    policy === null
+      ? ""
+      : `&pairApi=${encodeURIComponent(policy.apiVersion)}&pairSelection=${policy.selection}`;
+  await page.goto(
+    `/__session?route=%2Ftoday&leader=production${query}${named}`,
+  );
   await exposeSession(page);
   await page.waitForFunction(() => window.__atlasData !== undefined);
   const pairing = await page.evaluate(
@@ -407,6 +489,38 @@ export async function pairPage(
       ? null
       : { segmentedCapable: true, segmentedMaxChanges: maxChanges },
   );
+  const compatibility = await page.evaluate(
+    () => window.__atlasFixture?.session?.compatibility ?? null,
+  );
+  expect(compatibility, "the page's compatibility policy").toEqual(
+    policy === null
+      ? null
+      : {
+          selection: policy.selection,
+          apiVersion: policy.apiVersion,
+          released: releasedRangeOf(RELEASED_VERSION),
+          effective: exactRangeOf(policy.apiVersion),
+        },
+  );
+  if (PAIR_BACKEND === "diagnostic") {
+    const observed = await compatOf(page);
+    test.info().annotations.push({
+      type: "pair-compatibility",
+      description: JSON.stringify({ policy: compatibility, observed }),
+    });
+    expect(
+      observed,
+      "the page's own verdict from the real /health under its policy",
+    ).toEqual(
+      policy === null
+        ? {
+            status: "unsupported",
+            version: API_VERSION,
+            supported: releasedRangeOf(RELEASED_VERSION),
+          }
+        : { status: "supported", version: policy.apiVersion },
+    );
+  }
   return page;
 }
 
