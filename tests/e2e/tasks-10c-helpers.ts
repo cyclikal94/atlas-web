@@ -32,6 +32,9 @@ export interface Reads10c {
   }>;
 }
 
+/** Revision 15: no answer at all (the request is aborted: the page's fetch rejects with a network error). */
+export const ABORTED: Answer = { status: 0, body: null };
+
 export const refusal = (status: number, code: string): Answer => ({
   status,
   body: {
@@ -89,6 +92,8 @@ export async function serveTasks10c(
   };
   const fulfil = async (route: Route, answer: Answer | Promise<Answer>) => {
     const a = await answer;
+    // Revision 15: `ABORTED` (status 0) is no answer at all: the browser's fetch rejects (a network error).
+    if (a.status === 0) return route.abort("failed");
     return route.fulfill({
       status: a.status,
       contentType: "application/json",

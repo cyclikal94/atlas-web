@@ -47,6 +47,7 @@ import {
   withdrawn,
 } from "../model/retry";
 import { todayIn } from "../model/time";
+import type { PageLifecycle } from "./lifecycle";
 
 /**
  * The catch-up RUNNER of one page for one displayed identity (D-10c-1/3/5). It is an online feature service, not outbox drafts: both
@@ -177,7 +178,22 @@ import { todayIn } from "../model/time";
  *   of the outcome of a call it cancelled as the page closed, which revision 13 fenced at once, so the next page stopped for good where
  *   Chromium's (whose write never answers) recovered. An outcome not fenced at its receipt is now fenced across pages only once its
  *   repairs are spent with the page still running (persistence failing under a live page still stops every page); meanwhile this
- *   runner holds it. A stale write is still fenced at once; a received answer is fenced from its receipt.
+ *   runner holds it. A stale write is still fenced at once; a received answer is fenced from its receipt. SUPERSEDED by revision 15
+ *   (review 16's R36-I: that delay let another page transmit while the record could not be written).
+ *
+ * REVISION 15 (review 16's R36-H, R36-I and R39; design assessment C1 to C4). The current protocol for an observed outcome:
+ * - WHAT A PAGE OBSERVED IS KEPT FROM ITS RECEIPT (R36-H): every failure the server answered (as revision 14) and every transport
+ *   failure observed while the page was live (`observedFailure`) is fenced before its first write, with stops, server minima and a
+ *   command's known success. Its deadline was taken from when it was observed; lost, nothing could recover it, so the caller stops
+ *   (marker-only: shown, never cleared by a press) rather than being paced from its issue.
+ * - A FAILED WRITE FENCES AT ONCE (R36-I): any other outcome (a withdrawal, a read's success) whose write fails, or finds another record,
+ *   is fenced at that failure, before any repair wait, so no page transmits for the caller while its record cannot be written.
+ * - THE PAGE'S TEARDOWN (`CatchUpDeps.lifecycle`, `./lifecycle`): after the page's `pagehide` (closed, reloaded, navigated away from)
+ *   a transport failure is the browser cancelling the call (the order every engine gives, recorded natively by E-M12a): no page that
+ *   goes on observed an outcome, so it is not fenced at receipt and its failed write publishes nothing; the next page recovers the call
+ *   as lost from its admission (`unanswered`, E-M2, I-10C-M4a). A received answer is fenced however late. A page shown again (a
+ *   back-forward restore) publishes what it held unpublished. A hidden tab is not torn down.
+ * - A RECEIVED BODY THAT IS NOT JSON (R39, `../api.ts`) is an unrecognised answer, never transport.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -207,6 +223,11 @@ export interface CatchUpDeps {
    * absent: none (the fence is this runner's memory only).
    */
   markers?(): PageDataHost["markers"] | null;
+  /**
+   * Revision 15 (review 16's R36-H/I; design assessment C1): the page's lifecycle (`./lifecycle`), read per call: a call takes a `mark`
+   * when it is issued and was cancelled by the page's teardown when `tornSince(mark)`. Absent: never torn down (a runner alone in a test).
+   */
+  lifecycle?: PageLifecycle;
 }
 
 /** What this page knows that the durable records do not show: what it is working on, and a stop it could not record. */
@@ -356,6 +377,19 @@ export const receivedFailure = (answer: SendAnswer | ReadAnswer): boolean =>
   answer.kind === "uncertain" &&
   (answer.retry?.cause ?? "unrecognised") !== "transport";
 
+/**
+ * Revision 15 (review 16's R36-H; design assessment C1, invariants 1 and 3): a failure this page OBSERVED while it was live: every failure
+ * the server answered (`receivedFailure`), and a transport failure (no answer) of a call the page's teardown did not cancel. `torn`: the
+ * page began to be torn down after the call was issued (`PageLifecycle.tornSince`: a `beforeunload` or `pagehide` since its issue): its
+ * transport failure is the browser cancelling it as the page closes, reloads or navigates away; no outcome was observed by a page that
+ * goes on, so it stays recoverable as a call lost (E-M2, I-10C-M4a), from its admission. Taken in the step the answer is classified;
+ * never from the error's type, a delay or a later disposal.
+ */
+export const observedFailure = (
+  answer: SendAnswer | ReadAnswer,
+  torn: boolean,
+): boolean => answer.kind === "uncertain" && (!torn || receivedFailure(answer));
+
 function classifySend(result: TasksResult<unknown>): SendAnswer | Pause {
   if (result.ok) return { kind: "ok" };
   switch (result.kind) {
@@ -491,12 +525,20 @@ interface Protected {
   marker: string | null;
   memory: string | null;
   /**
-   * Revision 13 (C4): its fence is published (at its receipt when `early`, otherwise at its first unrecorded write or gap). Revision 14:
-   * a failed write of one that is not `early` publishes it only once its repairs are spent (see `settle`).
+   * Revision 13 (C4): its fence is published (at its receipt when `early`, otherwise at its first unrecorded write or gap). Revision 15
+   * (R36-I): revision 14's delay until its repairs were spent is removed; a call cancelled by the page's teardown publishes none.
    */
   published: boolean;
   /** Revision 13 (R36-F): observed (or left mid-write) while its binding was not displayed: written by the task's next work under it. */
   pending: boolean;
+  /**
+   * Revision 15 (review 16's R36-I): a write of it failed (or found another record). Such a record's fence is published at that failure,
+   * before any repair wait, unless the page's teardown began after its call was issued (`mark`); one held unpublished so is published
+   * when the page is shown again.
+   */
+  failed: boolean;
+  /** Revision 15: the page's lifecycle mark when its call was issued (or withdrawn). */
+  mark: number;
   /** Writes the same transition (persistence only, nothing is transmitted): the verdict and what the write answered. */
   attempt(): Promise<{ verdict: Verdict; out: unknown }>;
 }
@@ -800,6 +842,9 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const repairs = new Map<string, Protected>();
   const repairKey = (service: AccountService, op: string) =>
     `${service.incarnationId}|${op}`;
+  /** Revision 15 (R36-H/I): the page's lifecycle now (a call's mark), and whether its teardown began after `mark` (`CatchUpDeps.lifecycle`). */
+  const markNow = () => deps.lifecycle?.mark() ?? 0;
+  const torn = (mark: number) => deps.lifecycle?.tornSince(mark) === true;
   /**
    * An outcome of `op` that could not be recorded stands (a marker, this page's hold of one, or, revision 12, an outcome this runner
    * keeps); a marker that cannot be read stands.
@@ -862,8 +907,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
    * that write came to. `early` (C4): an outcome whose loss would let a later call break the protocol (`mustKeep`) has its fence published
    * at once, before the first write, so a write that never lands (the page closing, the runner disposed) leaves it standing; any other is
    * fenced by the first write that does not land, a stale write or a gap (a lost one reads as its call lost: the conservative count).
-   * Revision 14 (R36-G): every failure the server answered is `early` (`mustKeep`); a failed write of any other is fenced across pages
-   * once its repairs are spent (`settle`), a stale one at once.
+   * Revision 14 (R36-G): every failure the server answered is `early` (`mustKeep`). Revision 15 (R36-H/I): so is every transport
+   * failure a live page observed; a failed or stale write of any other is fenced at that write (`settle`), unless the page is torn down.
    */
   const protect = async <T>(
     at: Binding,
@@ -872,7 +917,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     write: () => Promise<T>,
     judge: (out: T) => Verdict,
     early: boolean,
-    day?: string,
+    day: string | undefined,
+    mark: number,
   ): Promise<Protection<T>> => {
     // An answer for a binding that ended, or was replaced, is dropped: nothing of it is written or published in another lifetime (R17).
     if (!entitled(at)) return ENDED_P;
@@ -889,6 +935,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       memory: published.memory,
       published: !("unpublished" in published),
       pending: false,
+      failed: false,
+      mark,
       attempt: async () => {
         const out = await write();
         return { verdict: judge(out), out };
@@ -914,12 +962,15 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
    * answer, the first and second of a read's streak included, a recognised 500/503, a 429 whatever its Retry-After): lost, it would read
    * as its call lost WHEN IT WAS ISSUED (`unanswered`), which counts no unrecognised answer (a fourth would be read) and paces from the
    * issue, not from the answer (a call sooner than its back-off after the failure observed). What remains unfenced until its first write
-   * does not land: no answer at all (a transport failure: the browser cancelling a call as its page closes reads so, and E-M2's reload
-   * must resend it), a withdrawal of a call known not to have been made, and a read's success that stops nothing. Each of those, lost,
+   * does not land (revision 15: until that write FAILS, or is stale): a call the browser cancelled as its page was torn down (a
+   * transport failure after the page's `pagehide`: E-M2's reload must resend it), a withdrawal of a call known not to have been made,
+   * and a read's success that stops nothing. Each of those, lost,
    * reads as its call lost: a withdrawal is then counted (more conservative than uncounted); a success is read again under its own
    * admission (a discovery's never settles a position; a position read's call is counted once, by the read that is recorded).
-   * RESIDUAL (disposition web10c-r36-no-answer-disposition-20261102, recorded, not resolved): a transport failure observed late after
-   * its issue whose first write is lost is recovered like any lost call, paced from its issue time; recovery timing is unchanged.
+   * Revision 15 (review 16's R36-H): the residual revision 14 recorded (disposition web10c-r36-no-answer-disposition-20261102: a transport
+   * failure observed late, its first write lost, paced from its issue) is closed: a transport failure observed while the page is live is
+   * kept from its receipt too (`observedFailure`); only one that arrives after the page's `pagehide` (the call cancelled by the teardown)
+   * is left to be recovered as a call lost. Recovery timing of a genuinely unanswered call is unchanged.
    */
   const mustKeep = (
     next: {
@@ -927,12 +978,15 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       stop?: unknown;
       schedule?: Schedule | null;
     } | null,
-    success = false,
-    answer?: SendAnswer | ReadAnswer,
+    success: boolean,
+    answer: SendAnswer | ReadAnswer | undefined,
+    mark: number,
   ): boolean => {
     if (success) return true;
-    // Revision 14 (R36-G; C1): a failure the server ANSWERED (any classified answer but no answer at all) is kept from its receipt too.
-    if (answer !== undefined && receivedFailure(answer)) return true;
+    // Revision 14 (R36-G; C1): a failure the server ANSWERED is kept from its receipt too. Revision 15 (R36-H): so is a transport failure
+    // this page observed while live (not torn down: `observedFailure`), whose deadline is taken from when it was observed.
+    if (answer !== undefined && observedFailure(answer, torn(mark)))
+      return true;
     if (next === null) return false;
     if (next.phase === "stopped" || (next.stop ?? null) !== null) return true;
     const server = next.schedule?.server ?? null;
@@ -950,7 +1004,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   ): Promise<Protection<unknown>> => {
     for (let i = 0; ; i += 1) {
       if (!owns(at)) {
-        if (!gap(at) || !fence(at, record)) return ENDED_P;
+        if (!gap(at) || (!torn(record.mark) && !fence(at, record)))
+          return ENDED_P;
         record.pending = true;
         return PENDING;
       }
@@ -960,16 +1015,21 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         reconcile(record);
         return { kind: "out", out, verdict };
       }
-      // Not recorded (another record stands, or the write failed): fenced now if it was not already, in its own lifetime only.
+      // Not recorded (another record stands, or the write failed): fenced NOW if it was not already, in its own lifetime only, before
+      // any repair wait (revision 15, review 16's R36-I: revision 14 waited until its repairs were spent, and meanwhile only this
+      // runner's memory held it, so another page transmitted for the caller while its record could not be written). Decision B: after a
+      // failed write of retry state, no page transmits for that caller automatically. The one exception is a page being torn down
+      // (`ending`: a `pagehide` seen, no `pageshow` since). Firefox fails the write of a call it cancelled as the page closed, which
+      // Chromium leaves unanswered; the outcome of a call no page that goes on observed is then left recoverable as a call lost (E-M2,
+      // I-10C-M4a), as when nothing was observed at all. Shown again (a back-forward restore), it is published then (`shown`). A stale
+      // write is fenced in every case.
+      record.failed = true;
       const wait = REPAIR_MS[i];
-      if (verdict === "stale" || wait === undefined)
-        return fence(at, record) ? FENCED : ENDED_P;
-      // Revision 14: a failed write is fenced across pages once its repairs are spent with the page still running. One fenced from its
-      // receipt (`mustKeep`) is published already; any other (no answer at all, a withdrawal, a read's success: its loss reads as its
-      // call lost) is held by this runner alone (`repairs` fences its caller here) while its repairs last. A page that closes while it
-      // writes (Firefox fails the write as the page is torn down; Chromium leaves it unanswered) then publishes nothing, so the next page
-      // recovers the call as lost (E-M2, I-10C-M4), as when nothing was observed at all; a store that keeps failing under a live page
-      // still fences every page.
+      if (verdict === "stale" || !torn(record.mark)) {
+        if (!fence(at, record)) return ENDED_P;
+        if (verdict === "stale") return FENCED;
+      }
+      if (wait === undefined) return entitled(at) ? FENCED : ENDED_P;
       await sleep(wait);
     }
   };
@@ -1191,6 +1251,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       const issued = row;
       const captured = service.capture(deps.epoch);
       const permit = transmits(at, issued.schedule as Schedule, plan.until, op);
+      // Revision 15 (R36-H/I): the page's lifecycle when the call is issued (its teardown after this mark cancelled it).
+      const mark = markNow();
       let next: Sequence | null;
       let read: PositionRead | null = null;
       let answered: SendAnswer | ReadAnswer | Pause;
@@ -1226,6 +1288,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           judgeRow(issued, unsent),
           false,
           key.through_date,
+          mark,
         );
         if (back.kind === "ended") return lost(at);
         // Revision 13 (R36-F): kept for this binding, which is not displayed at the moment: written first when it is again.
@@ -1257,8 +1320,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
           outcome,
           plan.kind === "send" && answered.kind === "ok",
           answered as SendAnswer | ReadAnswer,
+          mark,
         ),
         key.through_date,
+        mark,
       );
       if (settled.kind === "ended") return lost(at);
       if (settled.kind === "pending") return PAUSED;
@@ -1454,6 +1519,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
      * another (`stale`, the first write included) proves nothing and stays fenced. `failed`: not recorded, fenced; `pending`: kept for this
      * binding, not displayed at the moment.
      */
+    /** Revision 15 (R36-H/I): the page's lifecycle when this work's read was issued (taken again just before it is). */
+    let mark = markNow();
     const answered = async (
       captured: ReturnType<AccountService["capture"]>,
       next: MaterialiseDiscovery | null,
@@ -1479,7 +1546,9 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
               : same(out.value.stored, next)
                 ? "landed"
                 : "stale",
-        mustKeep(next, false, answer),
+        mustKeep(next, false, answer, mark),
+        undefined,
+        mark,
       );
       if (p.kind === "ended") return "lost" as const;
       if (p.kind === "pending") return "pending" as const;
@@ -1597,6 +1666,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       s?.since == null ? Number.POSITIVE_INFINITY : s.since + WINDOW_MS;
     const captured = at.service.capture(deps.epoch);
     const permit = transmits(at, issued.schedule as Schedule, until, op);
+    mark = markNow();
     const read: PositionRead = permit()
       ? await readPosition(item.taskId, permit)
       : { answer: UNSENT, zone: null };
@@ -2043,6 +2113,17 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     }
   };
 
+  /**
+   * Revision 15 (R36-I): a page shown again (a back-forward restore) after a `pagehide` publishes the fence of every outcome it holds
+   * whose write failed while it was being torn down, in that outcome's own lifetime only (`fence`).
+   */
+  const unshown = deps.lifecycle?.subscribe(() => {
+    if (disposed) return;
+    for (const record of repairs.values())
+      if (record.failed && !record.published && !torn(record.mark))
+        fence({ service: record.service }, record);
+  });
+
   return {
     identity: deps.identity,
     ensure(taskId, trigger, options = {}) {
@@ -2174,6 +2255,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     dispose() {
       if (disposed) return;
       disposed = true;
+      unshown?.();
       wakes += 1;
       queue.length = 0;
       parked.clear();

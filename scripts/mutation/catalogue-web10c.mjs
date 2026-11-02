@@ -15,6 +15,11 @@
 //    same day asked explicitly during the `clearSatisfied` await between the zone being found and the day being marked `attempted`; there
 //    the duplicate is ended by `attempted` after one more position read (no send). The IndexedDB double has no resumable hold for that
 //    transaction, so no deterministic test can observe it; the re-key stays as bookkeeping, and its control test passes before and after.
+//  - MU-3303 (revision 15, REAL ENGINE, E-M2: the page's `beforeunload` not marking its teardown): run once by the revision-15 driver
+//    (run 2026-11-02T10-10-26.198Z-89411876) and caught on Chromium only (E-M2's two cases fail by assertion); Firefox and WebKit pass,
+//    because there the rejected call's outcome is written before the page unloads and its receipt fence retired, so the fault has no
+//    consequence. The real-engine classifier requires the expected assertion on every engine, so it is not an engine mutant; the fault
+//    is MU-3301's (unit, the production lifecycle module), and Chromium's E-M2 is its native witness. Its result is kept, never counted.
 import { sub } from "./data-catalogue.mjs";
 
 const MODEL = "src/features/tasks/model/materialise.ts";
@@ -3574,17 +3579,21 @@ export const UNIT_10C = [
       "R36-B: WEB-10c A19 (review 13): a failed outcome write is fenced only after its repairs are spent (unfenced during the waits)",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
+    // Revision 15: an outcome kept from its receipt is published then, so the fault is observable for the others (a withdrawal, a read's
+    // success) and for a store that keeps failing.
     expect:
-      /WITNESS \(R36-B\)|Q2 (discovery|command|position): the first failed outcome write is fenced before/,
+      /WITNESS \(R36-B\)|Q2 (discovery|command|position): the first failed outcome write is fenced before|never recorded: fenced at the first failure|while the page is LIVE, a peer|every page is fenced from the first failure/,
     patch: (t) =>
       // Re-anchored (revision 13): publication is at receipt for an outcome that must be kept (`protect`), otherwise at the first
       // unrecorded write (`fence` in `settle`); the same fault (nothing published until the repairs are spent). Re-anchored again
       // (revision 14): a failed write of an outcome not fenced at receipt is published once its repairs are spent (the design), so the
-      // same fault is now the receipt publication withheld from every outcome.
+      // same fault was then the receipt publication withheld from every outcome. Re-anchored again (revision 15, review 16's R36-I):
+      // the first failed write is fenced at once under a live page, so this mutant is the original fault again (revision 14's delay);
+      // the receipt publication withheld is MU-3290.
       sub(
         t,
-        "    const published = early\n      ? publish(at, op)",
-        "    const published = false\n      ? publish(at, op)",
+        '      if (verdict === "stale" || !torn(record.mark)) {',
+        '      if (verdict === "stale" || (!torn(record.mark) && wait === undefined)) {',
       ),
   },
 
@@ -3684,8 +3693,9 @@ export const UNIT_10C = [
       sub(
         t,
         // Re-anchored (revision 13): verdicts no longer include `ended` (every unwritten verdict is repaired), so the same fault is the
-        // withdrawal written outside `protect`: nothing published, a failed write given up as a pause.
-        "        const back = await protect(\n          at,\n          key.task_id,\n          op,\n          () => commit(service, captured, key, issued, unsent),\n          judgeRow(issued, unsent),\n          false,\n          key.through_date,\n        );",
+        // withdrawal written outside `protect`: nothing published, a failed write given up as a pause. Revision 15: `protect` also takes
+        // the call's lifecycle mark (the same fault over the extended call).
+        "        const back = await protect(\n          at,\n          key.task_id,\n          op,\n          () => commit(service, captured, key, issued, unsent),\n          judgeRow(issued, unsent),\n          false,\n          key.through_date,\n          mark,\n        );",
         '        const plain = await commit(service, captured, key, issued, unsent);\n        const back = (plain === null ? { kind: "ended" } : { kind: "out", out: plain, verdict: "written" }) as { kind: string; out?: unknown };',
       ),
   },
@@ -3857,8 +3867,9 @@ export const UNIT_10C = [
       "R36/C4: WEB-10c A19 (revision 13): every outcome is fenced at its receipt (a call the browser cancels as its page closes stops the work for good)",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
+    // Revision 15: the case it names is the call cancelled AFTER the page's teardown (its old title modelled the close as a disposal).
     expect:
-      /a transport failure whose record never lands \(the runner disposed, as when the page closes\)/,
+      /a transport failure whose record never lands, arriving after the page's pagehide|AFTER THE PAGE'S PAGEHIDE whose first write is lost is not fenced/,
     patch: (t) =>
       sub(t, "    if (success) return true;\n", "    return true;\n"),
   },
@@ -3888,7 +3899,7 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "    if (answer !== undefined && receivedFailure(answer)) return true;\n",
+        "    if (answer !== undefined && observedFailure(answer, torn(mark)))\n      return true;\n",
         "",
       ),
   },
@@ -3898,8 +3909,9 @@ export const UNIT_10C = [
       "R36-G: WEB-10c A19 (review 15): an uncertain answer without retry facts is taken for no answer at all (transport), so an unrecognised one is not fenced at receipt",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
+    // Revision 15: a live page keeps every observed failure from its receipt (R36-H), so the fault is observable after a `pagehide` only.
     expect:
-      /Q2 (discovery|command|position), an unrecognised answer|REVIEW15 Q1 (discovery|position) (CONTROL|WITNESS)|the FIRST unrecognised answer/,
+      /Q2 (discovery|command|position), an unrecognised answer|REVIEW15 Q1 (discovery|position) (CONTROL|WITNESS)|the FIRST unrecognised answer|Q2 (discovery|command|position): an unrecognised answer without retry facts after the page's pagehide/,
     patch: (t) =>
       sub(
         t,
@@ -3910,11 +3922,11 @@ export const UNIT_10C = [
   {
     id: "MU-3285",
     title:
-      "R36-G/C1: WEB-10c A19 (review 15): no answer at all (transport) is fenced at receipt like a received one, so a call cancelled as its page closes stops the work for good (E-M2)",
+      "R36-G/C1: WEB-10c A19 (review 15; relabelled in revision 15): no answer at all (transport) is fenced at receipt like a received one EVEN AFTER the page's pagehide, so a call cancelled as its page closes stops the work for good (E-M2)",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
     expect:
-      /a transport failure \(no answer\) observed|no answer \(transport\): its first write FAILS|a transport failure whose record never lands/,
+      /a transport failure \(no answer\) arriving|no answer \(transport\): its first write FAILS after the page's pagehide|a transport failure whose record never lands, arriving after|the page's pagehide THEN a transport failure/,
     patch: (t) =>
       sub(
         t,
@@ -3953,30 +3965,216 @@ export const UNIT_10C = [
   {
     id: "MU-3288",
     title:
-      "R36/Firefox teardown: WEB-10c A19 (revision 14): an outcome not fenced at receipt is fenced across pages at its FIRST failed write (a page torn down mid-write stops the work for good)",
+      "R36/Firefox teardown: WEB-10c A19 (revision 14; re-anchored and relabelled in revision 15, R36-I): an outcome not fenced at receipt is fenced across pages at its first failed write EVEN AFTER the page's pagehide (a page torn down mid-write stops the work for good)",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
     expect:
-      /its first write FAILS while the page owns it and the page is torn down|never recorded: fenced at the first failure/,
+      /its first write FAILS after the page's pagehide|the page's pagehide THEN a transport failure/,
     patch: (t) =>
       sub(
         t,
-        "      // still fences every page.\n      await sleep(wait);",
-        "      // still fences every page.\n      if (!fence(at, record)) return ENDED_P;\n      await sleep(wait);",
+        '      if (verdict === "stale" || !torn(record.mark)) {',
+        '      if (verdict === "stale" || true) {',
       ),
   },
   {
     id: "MU-3289",
     title:
-      "R36/Decision B: WEB-10c A19 (revision 14): an outcome whose repairs are spent under a live page is never fenced across pages (another page transmits after a failed retry-state write)",
+      "R36/Decision B: WEB-10c A19 (revision 14; re-anchored in revision 15): an outcome whose write fails under a live page is never fenced across pages (another page transmits after a failed retry-state write)",
     file: "src/features/tasks/catchup/runner.ts",
     tests: RETRY_TESTS,
     expect: /a store that keeps failing under a LIVE page/,
     patch: (t) =>
       sub(
         t,
-        '      if (verdict === "stale" || wait === undefined)\n        return fence(at, record) ? FENCED : ENDED_P;',
-        '      if (wait === undefined) return FENCED;\n      if (verdict === "stale")\n        return fence(at, record) ? FENCED : ENDED_P;',
+        '      if (verdict === "stale" || !torn(record.mark)) {',
+        '      if (verdict === "stale") {',
+      ),
+  },
+  // ---- Revision 15 (review 16's R36-H, R36-I and R39; design assessment Q7) --------------------------------------------------------
+  {
+    id: "MU-3290",
+    title:
+      "R36-H: WEB-10c A19 (review 16): an outcome kept from its receipt (`mustKeep`) is not published then (a first write lost with its runner leaves no fence)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /lost-pending: the write lost across disposal|observed by a LIVE page whose runner is then disposed|observed while live THEN the page's pagehide|whose first write is lost: fenced at receipt|WITNESS lost: fenced at receipt/,
+    patch: (t) =>
+      sub(
+        t,
+        "    const published = early\n      ? publish(at, op)",
+        "    const published = false\n      ? publish(at, op)",
+      ),
+  },
+  {
+    id: "MU-3291",
+    title:
+      "R36-H: WEB-10c A19 (review 16): a transport failure a live page observed is not kept from its receipt (revision 14's received-only selection; a lost write is recovered from the issue)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [...RETRY_TESTS, "tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect:
+      /REVIEW16 Q1 (discovery|command|position) transport lost-pending|observed by a LIVE page whose runner is then disposed|observed while live THEN the page's pagehide|a live page: the transport failure is fenced from its receipt/,
+    patch: (t) =>
+      sub(
+        t,
+        '): boolean => answer.kind === "uncertain" && (!torn || receivedFailure(answer));',
+        '): boolean => answer.kind === "uncertain" && receivedFailure(answer);',
+      ),
+  },
+  {
+    id: "MU-3292",
+    title:
+      "R36-I: WEB-10c A19 (review 16): a page shown again (a back-forward restore) does not publish the fence of an outcome whose write failed while it was torn down",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: [...RETRY_TESTS, "tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect: /back-forward restore/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (record.failed && !record.published && !torn(record.mark))\n        fence({ service: record.service }, record);",
+        "      if (record.failed && !record.published && !torn(record.mark)) void record;",
+      ),
+  },
+  {
+    id: "MU-3293",
+    title:
+      "R36-F/R36-I: WEB-10c A19 (review 16): an outcome kept in a gap of its binding is fenced even after the page's pagehide (a call cancelled by the teardown stops the work for good)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /arriving in a GAP of its binding \(no service displayed\) after/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!gap(at) || (!torn(record.mark) && !fence(at, record)))\n          return ENDED_P;",
+        "        if (!gap(at) || !fence(at, record))\n          return ENDED_P;",
+      ),
+  },
+  {
+    id: "MU-3294",
+    title:
+      "R36-H/I: WEB-10c A19 (review 16): the production runner is not given the page's lifecycle (a call cancelled by the page's teardown is fenced for good)",
+    file: "src/features/tasks/catchup/useCatchUp.ts",
+    tests: ["tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect: /a pagehide first \(the call cancelled/,
+    patch: (t) => sub(t, "    lifecycle: pageLifecycle(),\n", ""),
+  },
+  {
+    id: "MU-3295",
+    title:
+      "R36-H/I: WEB-10c A19 (review 16): a hidden tab (visibilitychange) is taken for a page torn down",
+    file: "src/features/tasks/catchup/lifecycle.ts",
+    tests: ["tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect: /a hidden tab \(visibilitychange\) is not torn/,
+    patch: (t) =>
+      sub(
+        t,
+        '      window.addEventListener("pagehide", () => created.teardown());',
+        '      window.addEventListener("pagehide", () => created.teardown());\n      window.addEventListener("visibilitychange", () => created.teardown());',
+      ),
+  },
+  {
+    id: "MU-3296",
+    title:
+      "R36-H/I: WEB-10c A19 (review 16): a pageshow (a back-forward restore) does not end the teardown",
+    file: "src/features/tasks/catchup/lifecycle.ts",
+    tests: ["tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect: /until the next pageshow|publishes it/,
+    patch: (t) =>
+      sub(
+        t,
+        '      window.addEventListener("pageshow", () => created.show());\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3297",
+    title:
+      "R39: WEB-10c A19 (review 16): a task read's successful body is decoded by the client library as JSON again (a malformed 200 reads as no answer)",
+    file: "src/features/tasks/api.ts",
+    tests: [
+      "tests/features/tasks/api-decoding.test.ts",
+      "tests/features/tasks/catchup-retry.test.ts",
+    ],
+    expect: /R39/,
+    patch: (t) =>
+      sub(
+        t,
+        '                ).GET(path, { params, parseAs: "text" }),',
+        "                ).GET(path, { params }),",
+      ),
+  },
+  {
+    id: "MU-3298",
+    title:
+      "R39: WEB-10c A19 (review 16): the materialise command's successful body is decoded by the client library as JSON again",
+    file: "src/features/tasks/api.ts",
+    tests: [
+      "tests/features/tasks/api-decoding.test.ts",
+      "tests/features/tasks/catchup-retry.test.ts",
+    ],
+    expect: /POST \/task-commands \(materialise\)|R39 command/,
+    patch: (t) =>
+      sub(
+        t,
+        '                body: { command } as never,\n                parseAs: "text",\n',
+        "                body: { command } as never,\n",
+      ),
+  },
+  {
+    id: "MU-3299",
+    title:
+      "R39: WEB-10c A19 (review 16): an access command's successful body is decoded by the client library as JSON again",
+    file: "src/features/tasks/api.ts",
+    tests: ["tests/features/tasks/api-decoding.test.ts"],
+    expect: /POST \/task-access-commands \(access\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '          body: { command } as never,\n          parseAs: "text",\n',
+        "          body: { command } as never,\n",
+      ),
+  },
+  {
+    id: "MU-3300",
+    title:
+      "R39: WEB-10c A19 (review 16): a received body that is not JSON is taken for no answer at all (transport)",
+    file: "src/features/tasks/api.ts",
+    tests: [
+      "tests/features/tasks/api-decoding.test.ts",
+      "tests/features/tasks/catchup-retry.test.ts",
+    ],
+    expect: /R39/,
+    patch: (t) =>
+      sub(t, "    return NOT_JSON;", '    throw new TypeError("not JSON");'),
+  },
+  {
+    id: "MU-3301",
+    title:
+      "R36-H/I: WEB-10c A19 (review 16, the native order of revision 15): a beforeunload does not mark the page's teardown (a navigation's or reload's cancelled call, delivered before its pagehide in Firefox and WebKit, is fenced for good)",
+    file: "src/features/tasks/catchup/lifecycle.ts",
+    tests: ["tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect: /torn by a later beforeunload or pagehide/,
+    patch: (t) =>
+      sub(
+        t,
+        '      window.addEventListener("beforeunload", () => created.teardown());\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3302",
+    title:
+      "R36-H/I: WEB-10c A19 (review 16): the teardown is read for the page, not per call (a call issued after a navigation abandoned at its beforeunload is taken for one the teardown cancelled)",
+    file: "src/features/tasks/catchup/lifecycle.ts",
+    tests: [...RETRY_TESTS, "tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect:
+      /a teardown that began BEFORE the call was issued|torn by a later beforeunload or pagehide/,
+    patch: (t) =>
+      sub(
+        t,
+        "      tornSince: (mark) => teardown > mark && teardown > shown,",
+        "      tornSince: (mark) => mark >= 0 && teardown > 0 && teardown > shown,",
       ),
   },
 ];
@@ -4057,6 +4255,37 @@ export const ENGINE_10C = [
         t,
         '    return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";',
         "    return m.stops.has(scope, op) && false;",
+      ),
+  },
+  // ---- Revision 15 (review 16's R36-H/I; design assessment Q5/Q7): the native lifecycle and first-outcome-write cases ----------------
+  {
+    id: "MU-3304",
+    title:
+      "N-10C-R15b: WEB-10c A19 (review 16): (REAL ENGINE) a transport failure a live page observed is not fenced before its outcome is first written",
+    file: "src/features/tasks/catchup/runner.ts",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-M12b",
+    expect: /E-M12b/,
+    patch: (t) =>
+      sub(
+        t,
+        '): boolean => answer.kind === "uncertain" && (!torn || receivedFailure(answer));',
+        '): boolean => answer.kind === "uncertain" && receivedFailure(answer);',
+      ),
+  },
+  {
+    id: "MU-3305",
+    title:
+      "N-10C-R15c: WEB-10c A19 (review 16): (REAL ENGINE) a failed outcome write on a live page is fenced only once its repairs are spent (revision 14's delay)",
+    file: "src/features/tasks/catchup/runner.ts",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-M12c",
+    expect: /E-M12c/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (verdict === "stale" || !torn(record.mark)) {',
+        '      if (verdict === "stale" || (!torn(record.mark) && wait === undefined)) {',
       ),
   },
 ];

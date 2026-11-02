@@ -271,6 +271,24 @@ interface Answered {
   response: Response;
 }
 
+/**
+ * Revision 15 (review 16's R39; design assessment C3): a successful answer's body is asked for as TEXT (`parseAs: "text"`), so the client
+ * library's only asynchronous decode is reading it, which the session's final validation (`sealResult`) follows; it is decoded HERE,
+ * synchronously, after that validation and before anything acts on it. A body that is not JSON (`{`, empty, truncated) is then an answer
+ * the server GAVE that is not the contract's, `unrecognised` like a valid body of the wrong shape, never "no answer" (a library JSON decode
+ * rejected before `call` held the Response, which read as transport). A body with nothing to decode (a `204`, a `Content-Length: 0`) is
+ * `undefined` as before. A value already decoded (a double that ignores `parseAs`) is taken as it is.
+ */
+const NOT_JSON = Symbol("not JSON");
+function decodeBody(data: unknown): unknown {
+  if (typeof data !== "string") return data;
+  try {
+    return JSON.parse(data) as unknown;
+  } catch {
+    return NOT_JSON;
+  }
+}
+
 export async function call<T>(
   run: () => Promise<Answered>,
   parse: (body: unknown) => T | null,
@@ -279,7 +297,8 @@ export async function call<T>(
     const { data, error, response } = await run();
     const requestId = response.headers.get("x-request-id") ?? undefined;
     if (response.ok) {
-      const value = parse(data);
+      const body = decodeBody(data);
+      const value = body === NOT_JSON ? null : parse(body);
       return value === null
         ? {
             ok: false,
@@ -354,7 +373,7 @@ export function createTasksApi(
                   client(admitted) as unknown as {
                     GET(p: string, o: unknown): Promise<Answered>;
                   }
-                ).GET(path, { params }),
+                ).GET(path, { params, parseAs: "text" }),
               parse,
             ),
           admitted,
@@ -370,6 +389,7 @@ export function createTasksApi(
         client().POST("/task-access-commands", {
           params: { header: { "Idempotency-Key": key } },
           body: { command } as never,
+          parseAs: "text",
         }),
       parseTaskResult,
     );
@@ -417,6 +437,7 @@ export function createTasksApi(
               client(admitted).POST("/task-commands", {
                 params: { header: { "Idempotency-Key": key } },
                 body: { command } as never,
+                parseAs: "text",
               }),
             parseTaskResult,
           )),

@@ -22,6 +22,10 @@ import {
   type TasksResult,
 } from "../../../src/features/tasks/api";
 import {
+  createPageLifecycle,
+  type PageLifecycle,
+} from "../../../src/features/tasks/catchup/lifecycle";
+import {
   type CatchUpRunner,
   createCatchUpRunner,
   fenceOf,
@@ -45,6 +49,7 @@ import {
   dayEnd,
   todayIn,
 } from "../../../src/features/tasks/model/time";
+import { createApiClient } from "../../../src/lib/api-client";
 import { type Session, StampedRequestError } from "../../../src/session";
 import { ACCOUNT, DB, defaultsWorld } from "../../support/data/defaults-world";
 import { FakeMarkerStorage } from "../../support/data/marker-storage";
@@ -192,12 +197,15 @@ async function setup(
       markers?: WriteFailureMarkers;
       /** Revision 11: the API this runner uses instead of the scripted one (the production client over a session double). */
       api?: TasksApi;
+      /** Revision 15 (R36-H/I): the page's lifecycle (`pageLife`); none: never torn down. */
+      lifecycle?: PageLifecycle;
     } = {},
   ) =>
     createCatchUpRunner({
       ...(over.markers === undefined
         ? {}
         : { markers: () => over.markers as WriteFailureMarkers }),
+      ...(over.lifecycle === undefined ? {} : { lifecycle: over.lifecycle }),
       api: over.api ?? api,
       identity: `${ACCOUNT}:1`,
       accountId: ACCOUNT,
@@ -1536,6 +1544,15 @@ const transmissionsOf = (
     : caller === "position"
       ? w.reads().slice(1)
       : w.reads();
+/**
+ * Revision 15 (review 16's R36-H/I): a page's lifecycle as the runner reads it (`CatchUpDeps.lifecycle`): the PRODUCTION per-call model
+ * (`createPageLifecycle`) driven by the test. `hide` is the page beginning to be torn down (its `beforeunload` or `pagehide`: closed,
+ * reloaded, navigated away from; the browser cancels its calls after it); `show` its `pageshow` (a back-forward restore).
+ */
+const pageLife = () => {
+  const l = createPageLifecycle();
+  return { lifecycle: l.lifecycle, hide: l.teardown, show: l.show };
+};
 const markerWorld = () => {
   const storage = new FakeMarkerStorage();
   return {
@@ -3214,21 +3231,14 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
     ],
   ];
   /**
-   * ADAPTATION (revision 14, labelled): this case asserted the cross-page marker during the FIRST repair wait for every outcome. A read's
-   * success (whose loss reads as its call lost: it is read again under its own admission) is now fenced across pages only once its repairs
-   * are spent with the page still running, because a page torn down mid-write (Firefox fails that write) must leave its call recoverable
-   * (I-10C-M4a on Firefox, revision 14 evidence). Old intent kept: an outcome never recorded fences every later page and runner (asserted
-   * once the stop is shown, before any of them works), and during the wait this page holds it (`repairs`); every received answer and every
-   * stop is still marked at its receipt (asserted during the wait, as before).
+   * RESTORED (revision 15, review 16's R36-I): revision 14 adapted this case to leave a read's success unmarked during the first repair
+   * wait (fenced only once its repairs were spent), which let another page transmit for the caller while its record could not be
+   * written. That adaptation is withdrawn: every outcome whose first write fails under a live page is marked at that failure, before any
+   * repair wait, as revision 12 asserted. A page torn down (a `pagehide` before the failure) is the separate case `REVISION15 Q2`.
    */
-  const UNMARKED_UNTIL_SPENT = new Set([
-    "success (the entry's removal)",
-    "complete (the row's removal)",
-    "continue (still pending)",
-  ]);
   test.each(OUTCOMES)(
     "Q4 %s, %s, never recorded: fenced at the first failure; a recreated runner and another page transmit nothing for it",
-    async (caller, outcome, options) => {
+    async (caller, _outcome, options) => {
       const c = CALLER_WORLDS[caller];
       const m = markerWorld();
       const w = await setup(await options());
@@ -3247,9 +3257,7 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
         },
         "the first repair wait was entered",
       );
-      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe(
-        UNMARKED_UNTIL_SPENT.has(outcome) ? "unmarked" : "marked",
-      );
+      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
       h.release();
       await until(
         w,
@@ -4035,42 +4043,80 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
       sends: [OK],
     }),
   } as const;
+  /**
+   * ADAPTATION (revision 15, labelled; review 16's R36-H, design assessment C1/Q2): this case modelled "the page closes" as a transport
+   * failure and a disposal alone. A live page's runner can be disposed with the page still running (another identity), so a transport
+   * failure it OBSERVED is now protected from its receipt (the next case). The page closing is modelled as the browsers order it: the
+   * page's `pagehide` first, then the call cancelled (Firefox rejects it; the revision 15 native lifecycle probe records the order). Old
+   * intent kept: a call cancelled by the page's teardown is not fenced and the recreated runner makes it again (E-M2).
+   */
   for (const caller of CALLERS)
-    test(`Q5 ${caller}: a transport failure whose record never lands (the runner disposed, as when the page closes) is not fenced at its receipt: the recreated runner counts the call as lost and makes it again`, async () => {
-      const m = markerWorld();
-      const w = await setup(WORLD_TRANSPORT[caller]());
-      const h = holdOutcome(w, caller);
-      const first = w.make({ service: () => h.service, markers: m.page("p1") });
-      let second: CatchUpRunner | null = null;
-      try {
-        first.ensure(TASK, "daily");
-        await until(w, h.entered, "the first outcome write was entered");
-        const before = transmissionsOf(w, caller).length;
-        // No fence while the write of an outcome whose loss reads as its call lost is on its way.
-        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-          "unmarked",
-        );
-        first.dispose();
-        h.release(true);
-        await w.settle();
-        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-          "unmarked",
-        );
-        second = w.make({ markers: m.page("p2") });
-        second.ensure(TASK, "daily");
-        await w.idle(second);
-        const all = transmissionsOf(w, caller).slice(before);
-        const calls = caller === "position" ? all.slice(1) : all;
-        expect(
-          calls.length,
-          "the call is made again (its issue counted as lost), not stopped for good",
-        ).toBeGreaterThanOrEqual(1);
-        expect(second.get().unrecorded.has(TASK)).toBe(false);
-      } finally {
-        second?.dispose();
-        h.release(false);
-      }
-    });
+    for (const torn of [true, false])
+      test(`Q5 ${caller}: a transport failure whose record never lands, ${torn ? "arriving after the page's pagehide (the page closes: the browser cancels the call), is not fenced: the recreated runner counts the call as lost and makes it again" : "observed by a LIVE page whose runner is then disposed, is fenced from its receipt: the recreated runner stops (R36-H)"}`, async () => {
+        const m = markerWorld();
+        const life = pageLife();
+        const world = WORLD_TRANSPORT[caller]() as {
+          positions: Array<Answer<TaskDetail>>;
+          sends?: Array<Answer<{ revision: number }>>;
+        };
+        // The caller's transport failure, as the page delivers it: after its `pagehide` when it is torn down.
+        const cancelled = async () => {
+          if (torn) life.hide();
+          return TRANSPORT;
+        };
+        const w = await setup({
+          positions: world.positions.map((a) =>
+            a === TRANSPORT ? cancelled : a,
+          ),
+          ...(world.sends === undefined
+            ? {}
+            : {
+                sends: world.sends.map((a) =>
+                  a === TRANSPORT ? cancelled : a,
+                ),
+              }),
+        });
+        const h = holdOutcome(w, caller);
+        const first = w.make({
+          service: () => h.service,
+          markers: m.page("p1"),
+          lifecycle: life.lifecycle,
+        });
+        let second: CatchUpRunner | null = null;
+        try {
+          first.ensure(TASK, "daily");
+          await until(w, h.entered, "the first outcome write was entered");
+          const before = transmissionsOf(w, caller).length;
+          // Torn down: no fence while the write of a call no page that goes on observed is on its way. Live: fenced at its receipt.
+          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+            torn ? "unmarked" : "marked",
+          );
+          first.dispose();
+          h.release(true);
+          await w.settle();
+          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+            torn ? "unmarked" : "marked",
+          );
+          second = w.make({ markers: m.page("p2") });
+          second.ensure(TASK, "daily");
+          await w.idle(second);
+          const all = transmissionsOf(w, caller).slice(before);
+          const calls = caller === "position" ? all.slice(1) : all;
+          if (torn) {
+            expect(
+              calls.length,
+              "the call is made again (its issue counted as lost), not stopped for good",
+            ).toBeGreaterThanOrEqual(1);
+            expect(second.get().unrecorded.has(TASK)).toBe(false);
+          } else {
+            expect(calls, "an observed failure lost: no call").toHaveLength(0);
+            expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+          }
+        } finally {
+          second?.dispose();
+          h.release(false);
+        }
+      });
 
   // ---- Q4: a gap of the binding (no service displayed, the same service live) -------------------------------------------------------
   for (const caller of CALLERS)
@@ -4727,16 +4773,35 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
     caller: CallerName,
     first: Script,
     lands: boolean,
-    options: { delay?: number; later?: Script[]; received: boolean },
+    options: {
+      delay?: number;
+      later?: Script[];
+      /** Fenced from its receipt: the probe before the owner ends shows it. */
+      received: boolean;
+      /** Revision 15: the page's `pagehide` comes first, and the answer after it (the page is torn down: the browser cancels the call). */
+      torn?: boolean;
+    },
   ) => {
     const m = markerWorld();
     const w = await setup();
-    const s = scripted(w, caller, first, options);
+    const life = pageLife();
+    const s = scripted(
+      w,
+      caller,
+      options.torn === true
+        ? () => {
+            life.hide();
+            return first();
+          }
+        : first,
+      options,
+    );
     const h = holdOutcome(w, caller);
     const one = w.make({
       service: () => h.service,
       markers: m.page("origin"),
       api: s.api,
+      lifecycle: life.lifecycle,
     });
     const rec = recording(w);
     let two: CatchUpRunner | null = null;
@@ -5022,14 +5087,23 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
     });
 
   // ---- Q5: no answer at all, a withdrawal, a read's success: not fenced at receipt, their loss reads as their call lost --------------
+  // Revision 15 (review 16's R36-H): "no answer at all" is now the call the browser cancels as the page is torn down (its `pagehide`
+  // first). A transport failure a LIVE page observed is protected from its receipt (REVISION15 Q1 below).
   const TRANSPORT: Script = () =>
     ({ ok: false, kind: "uncertain", retry: { cause: "transport" } }) as never;
+  /**
+   * ADAPTATION (revision 15, labelled; R36-H, design assessment C1/Q2): revision 14 asserted this for a transport failure delivered to a
+   * live page and lost with its runner's disposal, with a RESIDUAL comment for the late one (paced from its issue). That residual is
+   * the defect review 16 demonstrated (R36-H). Old intent kept for the case it describes, E-M2's page closing: the answer arrives after
+   * the page's `pagehide`, is not fenced, and the next runner counts it lost when issued and makes it again. The live case is a witness.
+   */
   for (const caller of CALLERS)
     for (const delay of [0, DELAY])
-      test(`Q5 ${caller}: a transport failure (no answer) observed ${delay === 0 ? "at once" : "10 s after its issue"} whose first write is lost is not fenced: the next runner counts it lost when issued and makes the call again (E-M2)`, async () => {
+      test(`Q5 ${caller}: a transport failure (no answer) arriving ${delay === 0 ? "at once" : "10 s after its issue"} AFTER THE PAGE'S PAGEHIDE whose first write is lost is not fenced: the next runner counts it lost when issued and makes the call again (E-M2)`, async () => {
         const r = await lose(caller, TRANSPORT, false, {
           delay,
           received: false,
+          torn: true,
         });
         try {
           const calls = r.s.of(caller);
@@ -5050,8 +5124,6 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
             since: r.s.issuedAt(),
           });
           expect(calls[1]?.at).toBeGreaterThanOrEqual(r.s.issuedAt() + 1_000);
-          // RESIDUAL (disposition web10c-r36-no-answer-disposition-20261102, recorded and NOT resolved): observed 10 s after its issue,
-          // the call is made again sooner than 1 s after that observation, because no page holds when it was observed.
           expect(r.two.get().unrecorded.has(TASK)).toBe(false);
           r.fences();
         } finally {
@@ -5059,13 +5131,20 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
         }
       });
 
+  /**
+   * ADAPTATION (revision 15, labelled): the persisted control kept, its receipt expectation changed: a transport failure a live page
+   * observed is now marked at its receipt (R36-H) and that instance is retired when its record lands, so the control still proves the
+   * work goes on, paced from the observation.
+   */
   for (const caller of CALLERS)
-    test(`Q5 ${caller}: a transport failure observed 10 s after its issue and PERSISTED (control) is paced from its observation`, async () => {
-      const r = await lose(caller, TRANSPORT, true, { received: false });
+    test(`Q5 ${caller}: a transport failure observed by a live page 10 s after its issue and PERSISTED (control) is paced from its observation; its receipt fence retired`, async () => {
+      const r = await lose(caller, TRANSPORT, true, { received: true });
       try {
         const calls = r.s.of(caller);
         expect(calls.length).toBeGreaterThanOrEqual(2);
         expect(calls[1]?.at).toBeGreaterThanOrEqual(r.s.observedAt() + 1_000);
+        if (caller === "command") expect(calls[1]?.key).toBe(calls[0]?.key);
+        expect(r.two.get().unrecorded.has(TASK)).toBe(false);
         r.fences();
       } finally {
         r.two.dispose();
@@ -5156,70 +5235,113 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
       false,
     ],
   ];
-  for (const [caller, what, answer, received, later] of TEARDOWN) {
-    test(`Q5 ${caller}, ${what}: its first write FAILS while the page owns it and the page is torn down in the first repair wait (Firefox): ${received ? "fenced since its receipt, the next runner calls nothing" : "nothing is published, the next runner makes the call again"}`, async () => {
-      const m = markerWorld();
-      const w = await setup();
-      const s = scripted(w, caller, answer, {
-        delay: 0,
-        ...(later === undefined ? {} : { later }),
-      });
-      const f = failing(w, caller, 1);
-      let torn = false;
-      const one = w.make({
-        service: () => f.service,
-        markers: m.page("origin"),
-        api: s.api,
-        sleep: (ms) => {
-          if (ms === REPAIR_MS[0] && !torn) {
-            torn = true;
-            return new Promise<void>(() => undefined);
-          }
-          w.setNow(w.now() + ms);
-          return Promise.resolve();
-        },
-      });
-      let two: CatchUpRunner | null = null;
-      try {
-        one.ensure(TASK, "daily");
-        await until(
+  /**
+   * ADAPTATION (revision 15, labelled; review 16's R36-I, design assessment C2/Q1/Q2): revision 14 modelled Firefox's teardown as a write
+   * that fails while the page is live and the page closing during the first repair wait, and asserted that nothing was published for an
+   * outcome not fenced at its receipt. That interval is the one review 16 showed admits a peer (R36-I), so it is split by the order the
+   * browser gives: TORN, the page's `pagehide` comes before the answer (the call is cancelled as the page closes, then its write fails):
+   * nothing is published and the next runner makes the call again (the old intent: I-10C-M4a on Firefox); LIVE, the write fails while
+   * the page is live: the caller is fenced AT THE FAILURE, before the first repair wait, so a peer page (another facade over the same
+   * storage, no Web Locks) started during that wait transmits nothing; once the repair lands, its instance is retired and the work goes
+   * on (liveness). A received answer is fenced since its receipt in both.
+   */
+  for (const [caller, what, answer, received, later] of TEARDOWN)
+    for (const torn of [true, false])
+      test(`Q5 ${caller}, ${what}: its first write FAILS ${torn ? "after the page's pagehide (Firefox: the page torn down)" : "while the page is LIVE, a peer started in the first repair wait"}: ${received || !torn ? "fenced (since its receipt, or at the failure, before any repair wait); no other page calls" : "nothing is published, the next runner makes the call again"}`, async () => {
+        const m = markerWorld();
+        const w = await setup();
+        const life = pageLife();
+        const s = scripted(
           w,
-          () => torn,
-          "a failed first write entered its first repair wait",
+          caller,
+          torn
+            ? () => {
+                life.hide();
+                return answer();
+              }
+            : answer,
+          { delay: 0, ...(later === undefined ? {} : { later }) },
         );
-        expect(f.failed()).toBe(1);
-        expect(s.of(caller)).toHaveLength(1);
-        const atTeardown = m.page("observer").probe(scopeOf(w), OP(caller));
-        one.dispose();
-        await w.settle();
-        two = w.make({ markers: m.page("replacement"), api: s.api });
-        two.ensure(TASK, "daily");
-        await w.idle(two);
-        if (received) {
-          expect(
-            s.of(caller),
-            "the received answer's caller calls nothing",
-          ).toHaveLength(1);
-          expect(two.get().unrecorded.get(TASK)?.reason).toBe("storage");
-          expect(atTeardown).toBe("marked");
-        } else {
-          expect(
-            s.of(caller).length,
-            "the call is recovered as lost, never stopped for good",
-          ).toBeGreaterThanOrEqual(2);
-          expect(two.get().unrecorded.has(TASK)).toBe(false);
-          expect(
-            atTeardown,
-            "no fence published while the page is torn down",
-          ).toBe("unmarked");
+        const f = failing(w, caller, 1);
+        let held = false;
+        let resume: (() => void) | null = null;
+        const one = w.make({
+          service: () => f.service,
+          markers: m.page("origin"),
+          api: s.api,
+          lifecycle: life.lifecycle,
+          sleep: (ms) => {
+            if (ms === REPAIR_MS[0] && !held) {
+              held = true;
+              return new Promise<void>((r) => {
+                resume = r;
+              });
+            }
+            w.setNow(w.now() + ms);
+            return Promise.resolve();
+          },
+        });
+        let two: CatchUpRunner | null = null;
+        try {
+          one.ensure(TASK, "daily");
+          await until(
+            w,
+            () => held,
+            "a failed first write entered its first repair wait",
+          );
+          expect(f.failed()).toBe(1);
+          expect(s.of(caller)).toHaveLength(1);
+          const atWait = m.page("observer").probe(scopeOf(w), OP(caller));
+          if (torn) {
+            one.dispose();
+            await w.settle();
+          }
+          // The replacement (torn) or a peer of the live owner: another facade over the same storage, no Web Locks, its own runner.
+          two = w.make({ markers: m.page("replacement"), api: s.api });
+          two.ensure(TASK, "daily");
+          await w.idle(two);
+          if (received || !torn) {
+            expect(
+              s.of(caller),
+              "Decision B: no other page calls for the caller while its failed record is not repaired",
+            ).toHaveLength(1);
+            expect(two.get().unrecorded.get(TASK)?.reason).toBe("storage");
+            expect(atWait, "fenced before the first repair wait").toBe(
+              "marked",
+            );
+          } else {
+            expect(
+              s.of(caller).length,
+              "the call is recovered as lost, never stopped for good",
+            ).toBeGreaterThanOrEqual(2);
+            expect(two.get().unrecorded.has(TASK)).toBe(false);
+            expect(
+              atWait,
+              "no fence published while the page is torn down",
+            ).toBe("unmarked");
+          }
+          if (!torn) {
+            // Liveness: the owner's repair lands; it retires its own instance and the owner's work goes on.
+            two.dispose();
+            (resume as (() => void) | null)?.();
+            await w.idle(one);
+            expect(
+              m.page("observer").probe(scopeOf(w), OP(caller)),
+              "the repaired outcome's instance is retired",
+            ).toBe("unmarked");
+            expect(one.get().unrecorded.has(TASK)).toBe(false);
+          }
+        } finally {
+          (resume as (() => void) | null)?.();
+          one.dispose();
+          two?.dispose();
         }
-      } finally {
-        one.dispose();
-        two?.dispose();
-      }
-    });
+      });
 
-    test(`Q3 ${caller}, ${what}: a store that keeps failing under a LIVE page: this page is held at once, and once the repairs are spent every page is fenced (Decision B: no automatic transmission after a failed retry-state write)`, async () => {
+  for (const [caller, what, answer, , later] of TEARDOWN) {
+    // ADAPTATION (revision 15, labelled; R36-I): every page is fenced from the FIRST failure (each repair wait sees the marker), not only
+    // once the repairs are spent; the rest of the case is unchanged.
+    test(`Q3 ${caller}, ${what}: a store that keeps failing under a LIVE page: every page is fenced from the first failure, through every repair wait (Decision B: no automatic transmission after a failed retry-state write)`, async () => {
       const m = markerWorld();
       const w = await setup();
       const s = scripted(w, caller, answer, {
@@ -5227,16 +5349,26 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
         ...(later === undefined ? {} : { later }),
       });
       const f = failing(w, caller, 99);
+      const atWaits: string[] = [];
       const one = w.make({
         service: () => f.service,
         markers: m.page("origin"),
         api: s.api,
+        sleep: (ms) => {
+          if (REPAIR_MS.includes(ms))
+            atWaits.push(m.page("observer").probe(scopeOf(w), OP(caller)));
+          w.setNow(w.now() + ms);
+          return Promise.resolve();
+        },
       });
       let two: CatchUpRunner | null = null;
       try {
         one.ensure(TASK, "daily");
         await w.idle(one);
         expect(f.failed()).toBe(1 + REPAIR_MS.length);
+        expect(atWaits, "marked in every repair wait").toEqual(
+          REPAIR_MS.map(() => "marked"),
+        );
         expect(one.get().unrecorded.has(TASK)).toBe(true);
         expect(s.of(caller), "this page made no further call").toHaveLength(1);
         expect(m.page("observer").probe(scopeOf(w), OP(caller))).toBe("marked");
@@ -5379,4 +5511,534 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
       r.two.dispose();
     }
   });
+});
+
+/**
+ * Revision 15 (review 16's R36-H, R36-I and R39; design assessment C1–C3, Q1–Q3): review 16's eighteen transport-boundary schedules,
+ * maintained with their assertions tightened (no permissive branch), the lifecycle orderings of the design assessment's matrix, and the
+ * received-invalid body through the production client for each caller. FIXTURE evidence: the production runner, W27 plans, account service
+ * and marker facades over the IndexedDB double and fake marker storage; scripted time; no browser, no real teardown (the page's lifecycle
+ * is the double `pageLife`; the native order is recorded by the revision 15 lifecycle probe).
+ */
+describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its receipt; a failed write fences at once", () => {
+  type World = Awaited<ReturnType<typeof setup>>;
+  const scopeOf = (w: World) => ({
+    account: ACCOUNT,
+    incarnationId: (w.t.env.service() as AccountService).incarnationId,
+  });
+  const OP = (caller: CallerName) =>
+    caller === "discovery" ? fenceOf(TASK) : fenceOf(TASK, TODAY);
+  const TRANSPORT_FAILURE = () =>
+    call<never>(
+      async () => {
+        throw new TypeError("simulated connection loss");
+      },
+      () => null,
+    );
+
+  /**
+   * The caller's FIRST call answered `failure` 10 s after its issue (its observation), later ones healthily; the caller's first outcome
+   * write held (`lost-pending`: released failed after the owner's disposal), answered failed at once (`failed-live`: the owner kept live in
+   * its held first repair wait), or run (`persisted`). `hideBefore`: the page's `pagehide` just before the answer is delivered.
+   */
+  const schedule16 = async (
+    caller: CallerName,
+    failure: TasksResult<never>,
+    mode: "persisted" | "lost-pending" | "failed-live",
+    life = pageLife(),
+    hideBefore = false,
+  ) => {
+    const m = markerWorld();
+    const w = await setup();
+    let received = 0;
+    let observedAt = 0;
+    const calls: Array<{ caller: CallerName; at: number; key?: string }> = [];
+    const answer = async () => {
+      if (++received === 1) {
+        w.setNow(w.now() + 10_000);
+        observedAt = w.now();
+        if (hideBefore) life.hide();
+        return failure;
+      }
+      return caller === "command" ? OK : detail(TODAY, false);
+    };
+    const api = {
+      readTask: async () => {
+        const which: CallerName =
+          w.discovery()?.schedule?.issued != null ? "discovery" : "position";
+        calls.push({ caller: which, at: w.now() });
+        if (which === caller) return answer();
+        return which === "discovery"
+          ? detail("2026-10-01", true)
+          : detail(TODAY, false);
+      },
+      materialise: async (_c: MaterialiseCommand, key: string) => {
+        calls.push({ caller: "command", at: w.now(), key });
+        return caller === "command" ? answer() : OK;
+      },
+    } as unknown as TasksApi;
+    let entered = false;
+    let inRepair = false;
+    let release: ((fail: boolean) => void) | undefined;
+    let resume: (() => void) | undefined;
+    let classified: MaterialiseRetry | null = null;
+    const service = intercepted(w, async (name, input, run) => {
+      const s = (input.next as { schedule?: MaterialiseRetry } | null)
+        ?.schedule;
+      if (
+        !entered &&
+        name === PLAN_OF[caller] &&
+        s?.caller === caller &&
+        s.issued === null &&
+        s.cause ===
+          ((failure as { retry?: { cause?: string } }).retry?.cause ??
+            "unrecognised")
+      ) {
+        entered = true;
+        classified = structuredClone(s);
+        if (mode === "failed-live") return { kind: "failed" };
+        if (mode === "persisted") return run();
+        const fail = await new Promise<boolean>((r) => {
+          release = r;
+        });
+        return fail ? { kind: "failed" } : run();
+      }
+      return run();
+    });
+    const owner = w.make({
+      service: () => service,
+      markers: m.page("origin"),
+      api,
+      lifecycle: life.lifecycle,
+      sleep: async (ms) => {
+        if (mode === "failed-live" && ms === REPAIR_MS[0] && !inRepair) {
+          inRepair = true;
+          await new Promise<void>((r) => {
+            resume = r;
+          });
+        } else w.setNow(w.now() + ms);
+      },
+    });
+    return {
+      m,
+      w,
+      calls,
+      owner,
+      life,
+      of: (which: CallerName) => calls.filter((c) => c.caller === which),
+      observedAt: () => observedAt,
+      classified: () => classified,
+      entered: () => entered,
+      inRepair: () => inRepair,
+      release: (fail: boolean) => release?.(fail),
+      resume: () => resume?.(),
+      probe: () => m.page("observer").probe(scopeOf(w), OP(caller)),
+      peer: (id: string) => w.make({ markers: m.page(id), api }),
+    };
+  };
+  const until = async (w: World, ok: () => boolean, what: string) => {
+    for (let k = 0; k < 80 && !ok(); k += 1) await w.settle();
+    expect(ok(), `precondition: ${what}`).toBe(true);
+  };
+
+  // ---- Q1: review 16's eighteen schedules (6 witnesses: transport lost-pending and failed-live, each caller) -------------------------
+  for (const caller of CALLERS)
+    for (const mode of ["persisted", "lost-pending", "failed-live"] as const)
+      for (const cause of ["transport", "transient"] as const)
+        test(`REVIEW16 Q1 ${caller} ${cause} ${mode}: ${mode === "persisted" ? "CONTROL: the next call no sooner than the observation + 1 s" : mode === "lost-pending" ? "the write lost across disposal: fenced at receipt, the replacement calls nothing" : "the write failed under the live owner: a peer in the first repair wait calls nothing"}`, async () => {
+          const failure =
+            cause === "transient"
+              ? await http<never>(503, "temporarily_unavailable")
+              : await TRANSPORT_FAILURE();
+          expect(failure).toMatchObject({
+            ok: false,
+            kind: "uncertain",
+            retry: { cause },
+          });
+          const r = await schedule16(caller, failure, mode);
+          let second: CatchUpRunner | undefined;
+          try {
+            r.owner.ensure(TASK, "daily");
+            await until(
+              r.w,
+              mode === "failed-live" ? r.inRepair : r.entered,
+              mode === "failed-live"
+                ? "the first write failed and the owner waits in its first repair"
+                : "the failure was classified and its first outcome write reached",
+            );
+            expect(r.classified()).toMatchObject({
+              cause,
+              issued: null,
+              failures: 1,
+              next: r.observedAt() + 1_000,
+            });
+            const atBoundary = r.probe();
+            if (mode === "lost-pending") {
+              r.owner.dispose();
+              r.release(true);
+              await r.w.settle();
+            }
+            second = r.peer("replacement");
+            second.ensure(TASK, "daily");
+            await r.w.idle(second);
+            const selected = r.of(caller);
+            if (mode === "persisted") {
+              expect(selected.length).toBeGreaterThanOrEqual(2);
+              expect(selected[1]?.at).toBeGreaterThanOrEqual(
+                r.observedAt() + 1_000,
+              );
+              if (caller === "command")
+                expect(selected[1]?.key).toBe(selected[0]?.key);
+              expect(r.probe(), "the receipt fence is retired").toBe(
+                "unmarked",
+              );
+            } else {
+              expect(
+                selected,
+                "Decision B: no automatic transmission of the caller after its retry state could not be recorded",
+              ).toHaveLength(1);
+              expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+              expect(
+                atBoundary,
+                "fenced before the write was lost (at receipt) or before the first repair wait",
+              ).toBe("marked");
+            }
+          } finally {
+            r.owner.dispose();
+            second?.dispose();
+            r.release(false);
+            r.resume();
+          }
+        });
+
+  // ---- Q2: lifecycle orderings (design assessment matrix) ----------------------------------------------------------------------------
+  for (const caller of CALLERS) {
+    test(`Q2 ${caller}: a transport failure observed while live THEN the page's pagehide (its write lost): still fenced, the replacement calls nothing`, async () => {
+      const r = await schedule16(
+        caller,
+        await TRANSPORT_FAILURE(),
+        "lost-pending",
+      );
+      let second: CatchUpRunner | undefined;
+      try {
+        r.owner.ensure(TASK, "daily");
+        await until(r.w, r.entered, "the first outcome write reached");
+        r.life.hide();
+        r.owner.dispose();
+        r.release(true);
+        await r.w.settle();
+        expect(r.probe()).toBe("marked");
+        second = r.peer("replacement");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+        r.release(false);
+      }
+    });
+
+    test(`Q2 ${caller}: the page's pagehide THEN a transport failure 10 s after the issue (the call cancelled), its write failing: nothing published; the replacement recovers the call as lost from its issue`, async () => {
+      const life = pageLife();
+      const r = await schedule16(
+        caller,
+        await TRANSPORT_FAILURE(),
+        "failed-live",
+        life,
+        true,
+      );
+      let second: CatchUpRunner | undefined;
+      try {
+        r.owner.ensure(TASK, "daily");
+        await until(r.w, r.inRepair, "the first write failed");
+        expect(r.probe(), "a torn-down page publishes no fence").toBe(
+          "unmarked",
+        );
+        r.owner.dispose();
+        second = r.peer("replacement");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(r.of(caller).length).toBeGreaterThanOrEqual(2);
+        if (caller === "command")
+          expect(r.of(caller)[1]?.key).toBe(r.of(caller)[0]?.key);
+        expect(second.get().unrecorded.has(TASK)).toBe(false);
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+        r.resume();
+      }
+    });
+
+    for (const [what, received] of [
+      ["a received 503", () => http<never>(503, "temporarily_unavailable")],
+      [
+        "an unrecognised answer without retry facts",
+        async () => UNRECOGNISED as TasksResult<never>,
+      ],
+    ] as const)
+      test(`Q2 ${caller}: ${what} after the page's pagehide is still fenced from its receipt (a received answer is never a teardown)`, async () => {
+        const r = await schedule16(
+          caller,
+          await received(),
+          "lost-pending",
+          pageLife(),
+          true,
+        );
+        let second: CatchUpRunner | undefined;
+        try {
+          r.owner.ensure(TASK, "daily");
+          await until(r.w, r.entered, "the first outcome write reached");
+          expect(r.probe()).toBe("marked");
+          r.owner.dispose();
+          r.release(true);
+          await r.w.settle();
+          second = r.peer("replacement");
+          second.ensure(TASK, "daily");
+          await r.w.idle(second);
+          expect(r.of(caller)).toHaveLength(1);
+        } finally {
+          r.owner.dispose();
+          second?.dispose();
+          r.release(false);
+        }
+      });
+
+    test(`Q2 ${caller}: a back-forward restore (pagehide, a cancelled call whose write fails, then pageshow) publishes the held fence at once: a peer then calls nothing`, async () => {
+      const life = pageLife();
+      const r = await schedule16(
+        caller,
+        await TRANSPORT_FAILURE(),
+        "failed-live",
+        life,
+        true,
+      );
+      let second: CatchUpRunner | undefined;
+      try {
+        r.owner.ensure(TASK, "daily");
+        await until(r.w, r.inRepair, "the first write failed");
+        expect(r.probe()).toBe("unmarked");
+        life.show();
+        expect(r.probe(), "published when the page is shown again").toBe(
+          "marked",
+        );
+        second = r.peer("peer");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+        r.resume();
+      }
+    });
+  }
+
+  for (const caller of CALLERS)
+    test(`Q2 ${caller}: a teardown that began BEFORE the call was issued (a navigation abandoned after its beforeunload) does not cover it: its transport failure, observed live, is fenced from its receipt`, async () => {
+      const life = pageLife();
+      life.hide();
+      const r = await schedule16(
+        caller,
+        await TRANSPORT_FAILURE(),
+        "lost-pending",
+        life,
+      );
+      let second: CatchUpRunner | undefined;
+      try {
+        r.owner.ensure(TASK, "daily");
+        await until(r.w, r.entered, "the first outcome write reached");
+        expect(r.probe(), "fenced at its receipt").toBe("marked");
+        r.owner.dispose();
+        r.release(true);
+        await r.w.settle();
+        second = r.peer("replacement");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+        r.release(false);
+      }
+    });
+
+  test("Q2: a disposed runner publishes nothing on a later pageshow (its lifetime ended)", async () => {
+    const life = pageLife();
+    const r = await schedule16(
+      "discovery",
+      await TRANSPORT_FAILURE(),
+      "failed-live",
+      life,
+      true,
+    );
+    try {
+      r.owner.ensure(TASK, "daily");
+      await until(r.w, r.inRepair, "the first write failed");
+      r.owner.dispose();
+      life.show();
+      expect(r.probe()).toBe("unmarked");
+    } finally {
+      r.resume();
+    }
+  });
+
+  for (const torn of [true, false])
+    test(`Q2 discovery: a transport failure arriving in a GAP of its binding (no service displayed) ${torn ? "after the page's pagehide: kept for its binding, no fence published; the next runner makes the call again" : "while the page is live: kept for its binding and fenced (R36-F); the next runner calls nothing"}`, async () => {
+      const m = markerWorld();
+      const life = pageLife();
+      let shown: AccountService | null = null;
+      const w = await setup();
+      shown = w.t.env.service() as AccountService;
+      let reads = 0;
+      const api = {
+        readTask: async () => {
+          reads += 1;
+          if (reads > 1) return detail(TODAY, false);
+          if (torn) life.hide();
+          shown = null;
+          return TRANSPORT_FAILURE();
+        },
+        materialise: async () => OK,
+      } as unknown as TasksApi;
+      const one = w.make({
+        service: () => shown,
+        markers: m.page("origin"),
+        api,
+        lifecycle: life.lifecycle,
+      });
+      let two: CatchUpRunner | undefined;
+      try {
+        one.ensure(TASK, "daily");
+        for (let k = 0; k < 80 && reads === 0; k += 1) await w.settle();
+        await w.settle();
+        expect(reads, "precondition: the discovery read was made").toBe(1);
+        expect(
+          m.page("observer").probe(scopeOf(w), fenceOf(TASK)),
+          torn ? "no fence from a torn-down page" : "fenced in its gap",
+        ).toBe(torn ? "unmarked" : "marked");
+        one.dispose();
+        two = w.make({ markers: m.page("replacement"), api });
+        two.ensure(TASK, "daily");
+        await w.idle(two);
+        expect(reads).toBe(torn ? 2 : 1);
+      } finally {
+        one.dispose();
+        two?.dispose();
+      }
+    });
+
+  // ---- Q3: a received body that is not JSON, through the production client, for each caller ------------------------------------------
+  const client = (body: string, count: { n: number }) =>
+    createTasksApi(
+      {
+        api: {
+          client: () =>
+            createApiClient(async () => {
+              count.n += 1;
+              return new Response(body, {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              });
+            }, "http://127.0.0.1/api/experimental/v1"),
+        },
+      } as unknown as Session,
+      ACCOUNT,
+      1,
+    );
+  for (const body of ["{}", "{"] as const) {
+    const label =
+      body === "{}"
+        ? "CONTROL valid JSON of the wrong shape"
+        : "WITNESS malformed JSON";
+    test(`REVIEW16 R39 discovery, ${label}: three received unrecognised answers pause the caller`, async () => {
+      const w = await setup();
+      const count = { n: 0 };
+      const r = w.make({ api: client(body, count) });
+      try {
+        r.ensure(TASK, "daily");
+        await w.idle(r);
+        expect(count.n, "three unrecognised read answers").toBe(3);
+        expect(w.discovery()?.schedule).toMatchObject({
+          unknown: 3,
+          pause: "unrecognised",
+        });
+      } finally {
+        r.dispose();
+      }
+    });
+    for (const caller of ["position", "command"] as const)
+      test(`REVIEW16 R39 ${caller}, ${label}: ${caller === "position" ? "three received unrecognised answers pause the caller" : "fenced from its receipt, before its first outcome write"}`, async () => {
+        const w = await setup();
+        const count = { n: 0 };
+        const actual = client(body, count);
+        const api = {
+          readTask: (id: string, permit?: () => boolean) =>
+            w.discovery()?.schedule?.issued != null
+              ? Promise.resolve(detail("2026-10-01", true))
+              : caller === "position"
+                ? actual.readTask(id, permit)
+                : Promise.resolve(detail(TODAY, false)),
+          materialise:
+            caller === "command" ? actual.materialise : async () => OK,
+        } as unknown as TasksApi;
+        const m = markerWorld();
+        let reached = false;
+        let release: ((fail: boolean) => void) | undefined;
+        const service = intercepted(w, async (name, input, run) => {
+          const s = (input.next as { schedule?: MaterialiseRetry } | null)
+            ?.schedule;
+          if (
+            caller === "command" &&
+            !reached &&
+            name === PLAN_OF.command &&
+            s?.caller === "command" &&
+            s.issued === null &&
+            s.failures === 1
+          ) {
+            reached = true;
+            expect(s.cause).toBe("unrecognised");
+            const fail = await new Promise<boolean>((res) => {
+              release = res;
+            });
+            return fail ? { kind: "failed" } : run();
+          }
+          return run();
+        });
+        const r = w.make({
+          api,
+          markers: m.page("origin"),
+          service: () => service,
+        });
+        try {
+          r.ensure(TASK, "daily");
+          if (caller === "position") {
+            await w.idle(r);
+            expect(count.n).toBe(3);
+            expect(w.stored()?.schedule).toMatchObject({
+              unknown: 3,
+              pause: "unrecognised",
+            });
+          } else {
+            for (let i = 0; i < 80 && !reached; i += 1) await w.settle();
+            expect(reached).toBe(true);
+            expect(
+              m
+                .page("observer")
+                .probe(
+                  { account: ACCOUNT, incarnationId: service.incarnationId },
+                  fenceOf(TASK, TODAY),
+                ),
+            ).toBe("marked");
+          }
+        } finally {
+          r.dispose();
+          release?.(true);
+          await w.settle();
+        }
+      });
+  }
 });

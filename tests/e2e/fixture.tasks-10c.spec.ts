@@ -20,6 +20,7 @@ import {
 } from "./data-sync-helpers";
 import { runAxe } from "./helpers";
 import {
+  ABORTED,
   type Answer,
   detailOf,
   held,
@@ -2416,6 +2417,336 @@ test.describe("E-M11: a reconnection past the first page, and a fence across a r
     expect(after[0]?.phase).toBe("submitting");
     expect(after[0]?.attempt?.key).toBe(key);
     recordEvidence(info, "e-m11-fence", {
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+});
+
+/**
+ * Revision 15 (review 16's R36-H and R36-I; design assessment Q2/Q5): natively, in each engine.
+ * - E-M12a records the ORDER a browser gives a late `beforeunload`/`pagehide` listener and the rejection of a call it cancels as the
+ *   page is closed, navigated away from or reloaded: the runner tells a call cancelled by the teardown from a failure observed live by
+ *   that order alone (`./lifecycle`, per call).
+ * - E-M12b..e put an independent oracle on the page's REAL IndexedDB and localStorage (a trace of the writes of the task's discovery entry
+ *   and of its marker, in the order the page made them; a write of the entry can be failed, as `data-local-faults.ts` fails a write): the
+ *   fence of an outcome observed live is in localStorage BEFORE that outcome is first written (R36-H); a failed write is fenced BEFORE its
+ *   first repair is written (R36-I); a store that keeps failing fences the caller for another tab and a reload; a page closed while its
+ *   call is held publishes no fence and another tab recovers the call (E-M2, I-10C-M4a). FIXTURE evidence (the stub's answers).
+ */
+test.describe("E-M12: the page's lifecycle and the first outcome write, natively (revision 15: R36-H/I)", () => {
+  type Trace = { log: string[]; fail: number; prev: string };
+  /**
+   * Installs the trace in every page of the context BEFORE it boots (so the discovery's admission is its first write seen); each page's
+   * first `fail` writes of the discovery's outcome fail.
+   */
+  const trace = (context: BrowserContext, taskId: string, fail: number) =>
+    context.addInitScript(
+      ([id, failing]) => {
+        const w = window as unknown as { __r15?: Trace };
+        if (w.__r15) return;
+        const t: Trace = { log: [], fail: failing, prev: "" };
+        w.__r15 = t;
+        const proto = IDBObjectStore.prototype;
+        const put = proto.put;
+        proto.put = function (this: IDBObjectStore, ...args: unknown[]) {
+          if (this.name === "sync_state") {
+            const entry = (
+              args[0] as {
+                materialise_discovery?: Record<
+                  string,
+                  { schedule?: { issued?: number | null } | null }
+                >;
+              } | null
+            )?.materialise_discovery?.[id];
+            const sig = JSON.stringify(entry ?? null);
+            if (sig !== t.prev) {
+              const kind =
+                entry === undefined
+                  ? "outcome:removed"
+                  : entry.schedule?.issued != null
+                    ? "admission"
+                    : "outcome:failure";
+              if (
+                kind !== "admission" &&
+                t.prev !== "" &&
+                t.prev !== "null" &&
+                t.fail > 0
+              ) {
+                t.fail -= 1;
+                t.log.push(`${kind}:FAILED`);
+                throw new DOMException("injected fault", "DataError");
+              }
+              if ((t.prev !== "" && t.prev !== "null") || kind === "admission")
+                t.log.push(kind);
+              t.prev = sig;
+            }
+          }
+          return put.apply(this, args as [unknown, IDBValidKey?]);
+        };
+        const ours = (key: unknown) =>
+          typeof key === "string" &&
+          key.startsWith("atlas-write-failing:") &&
+          key.includes(`:materialise:${id}#`);
+        const storage = Storage.prototype;
+        const setItem = storage.setItem;
+        storage.setItem = function (this: Storage, key: string, value: string) {
+          if (ours(key)) t.log.push("marker:set");
+          return setItem.call(this, key, value);
+        };
+        const removeItem = storage.removeItem;
+        storage.removeItem = function (this: Storage, key: string) {
+          if (ours(key)) t.log.push("marker:removed");
+          return removeItem.call(this, key);
+        };
+      },
+      [taskId, fail] as const,
+    );
+  const traced = (page: Page) =>
+    page.evaluate(
+      () => (window as unknown as { __r15?: Trace }).__r15?.log ?? [],
+    );
+  /** The discovery's markers in the origin's REAL localStorage, read raw. */
+  const discoveryMarkers = (page: Page, taskId: string) =>
+    page.evaluate(
+      (id) =>
+        Object.keys(localStorage).filter(
+          (k) =>
+            k.startsWith("atlas-write-failing:") &&
+            k.includes(`:materialise:${id}#`),
+        ),
+      taskId,
+    );
+  const reads = (r: Reads10c, task: BuiltTask) => positionReads(r, task).length;
+  /** Today with the task listed pending; its FIRST read held until `first` is released, then `later` answers. */
+  const arrange =
+    (task: BuiltTask, first: Promise<Answer>, later: () => Answer) =>
+    (q: TaskReads, r: Reads10c) => {
+      q.respond = (d) =>
+        dailyPage(
+          [view(task)],
+          d.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+        );
+      let n = 0;
+      r.position = () => {
+        n += 1;
+        return n === 1 ? first : later();
+      };
+    };
+
+  /**
+   * ADAPTATION of this revision's first E-M12a (labelled; its first run's failures are kept in the revision-15 evidence): it asserted that
+   * a page's `pagehide` comes before the rejection of a call the page's teardown cancels. Firefox and WebKit deliver that rejection
+   * BEFORE `pagehide` on a navigation or a reload, and Chromium after the FIRST `pagehide` listener (a microtask checkpoint between
+   * listeners, the cancellation already queued), so `pagehide` alone cannot tell it apart. The runner's lifecycle listens to
+   * `beforeunload` and `pagehide`, added LATE (after the page's own listeners and its call), as here. This case asserts what it relies
+   * on: that late listener sees the teardown before the call's rejection is delivered, if the browser delivers one at all.
+   */
+  for (const action of ["close", "navigate", "reload"] as const)
+    test(`E-M12a: ${action}: a beforeunload or pagehide listener added after the page's own and after its call runs before the rejection of the call the teardown cancels (if the browser rejects it at all)`, async ({
+      context,
+      browserName,
+    }, info) => {
+      await context.route("**/__r15/blank*", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: "<!doctype html><title>r15</title>",
+        }),
+      );
+      // Never answered: the browser cancels it with the page.
+      await context.route("**/__r15/held", () => undefined);
+      const page = await context.newPage();
+      await page.goto("/__r15/blank");
+      await page.evaluate(() => {
+        localStorage.removeItem("__r15:order");
+        const note = (what: string) => {
+          const log = JSON.parse(
+            localStorage.getItem("__r15:order") ?? "[]",
+          ) as string[];
+          log.push(what);
+          localStorage.setItem("__r15:order", JSON.stringify(log));
+        };
+        // The page's own listeners first (as the session's), then the call, then the runner's lifecycle (late; not capturing, as it:
+        // a page Firefox closes does not invoke a capturing pagehide listener of window, this revision's second run).
+        addEventListener("beforeunload", () => note("early beforeunload"));
+        addEventListener("pagehide", () => note("early pagehide"));
+        void fetch("/__r15/held").then(
+          () => note("answered"),
+          (e: unknown) => note(`rejected:${(e as Error).name}`),
+        );
+        addEventListener("beforeunload", () => note("late beforeunload"));
+        addEventListener("pagehide", () => note("late pagehide"));
+      });
+      await page.waitForTimeout(300);
+      if (action === "close") await page.close();
+      else if (action === "navigate") await page.goto("/__r15/blank?next");
+      else await page.reload();
+      const reader = action === "close" ? await context.newPage() : page;
+      if (action === "close") await reader.goto("/__r15/blank?reader");
+      await reader.waitForTimeout(1_000);
+      const order = await reader.evaluate(
+        () =>
+          JSON.parse(localStorage.getItem("__r15:order") ?? "[]") as string[],
+      );
+      recordEvidence(info, `e-m12a-${action}-${browserName}`, { order });
+      expect(order).not.toContain("answered");
+      const late = order.findIndex((e) => e.startsWith("late "));
+      expect(late, "the late listener saw the teardown").not.toBe(-1);
+      const rejected = order.findIndex((e) => e.startsWith("rejected"));
+      if (rejected !== -1) expect(late).toBeLessThan(rejected);
+    });
+
+  test("E-M12b (R36-H): a discovery read with no answer on a LIVE page: its fence is in real localStorage BEFORE its outcome is first written; that write retires it and the read is made again", async ({
+    context,
+  }, info) => {
+    const task = repeating(421, "Water the ferns");
+    await trace(context, task.taskId, 0);
+    const first = held<Answer>();
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      arrange(task, first.promise, () =>
+        detailOf(task, { last_date: TODAY, pending: false }),
+      ),
+    );
+    await expect.poll(() => reads(r10c, task), { timeout: 15_000 }).toBe(1);
+    first.release(ABORTED);
+    await expect.poll(() => reads(r10c, task), { timeout: 15_000 }).toBe(2);
+    await expect
+      .poll(() => discoveryMarkers(page, task.taskId), { timeout: 10_000 })
+      .toEqual([]);
+    const log = await traced(page);
+    recordEvidence(info, "e-m12b", {
+      trace: log,
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+    const set = log.indexOf("marker:set");
+    const outcome = log.indexOf("outcome:failure");
+    expect(set, "fenced at its receipt").not.toBe(-1);
+    expect(outcome, "the outcome was written").not.toBe(-1);
+    expect(set, "the fence before the outcome's first write").toBeLessThan(
+      outcome,
+    );
+    expect(log.indexOf("marker:removed")).toBeGreaterThan(outcome);
+    await expect(page.locator("[data-catch-up-stopped]")).toHaveCount(0);
+  });
+
+  test("E-M12c (R36-I): a discovery success whose first write FAILS on a live page is fenced at that failure, BEFORE its first repair is written; the repair retires it and the work goes on", async ({
+    context,
+  }, info) => {
+    const task = repeating(422, "Water the palms");
+    await trace(context, task.taskId, 1);
+    const first = held<Answer>();
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      arrange(task, first.promise, () =>
+        detailOf(task, { last_date: TODAY, pending: false }),
+      ),
+    );
+    await expect.poll(() => reads(r10c, task), { timeout: 15_000 }).toBe(1);
+    first.release(detailOf(task, { last_date: yesterday(20), pending: true }));
+    await expect.poll(() => posts(r10c).length, { timeout: 15_000 }).toBe(1);
+    await expect
+      .poll(() => discoveryMarkers(page, task.taskId), { timeout: 10_000 })
+      .toEqual([]);
+    const log = await traced(page);
+    recordEvidence(info, "e-m12c", {
+      trace: log,
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+    const failed = log.indexOf("outcome:removed:FAILED");
+    const set = log.indexOf("marker:set");
+    const repair = log.indexOf("outcome:removed");
+    expect(failed, "the first write failed").not.toBe(-1);
+    expect(set, "fenced at the failure").toBeGreaterThan(failed);
+    expect(set, "before the first repair is written").toBeLessThan(repair);
+    expect(log.indexOf("marker:removed")).toBeGreaterThan(repair);
+  });
+
+  // A tab WITHOUT Web Locks is not a native case: the app's compatibility gate refuses such a browser ("Atlas can't open in this
+  // browser", this revision's second run), so the runner's no-lock path is the service tests' (REVIEW16 Q1, REVISION15).
+  test("E-M12d (R36-I): a store that keeps failing the discovery's success fences it in real localStorage: another tab and a reload read nothing for it and show the storage stop", async ({
+    context,
+  }, info) => {
+    const task = repeating(423, "Water the moss");
+    await trace(context, task.taskId, 99);
+    const first = held<Answer>();
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      arrange(task, first.promise, () =>
+        detailOf(task, { last_date: yesterday(20), pending: true }),
+      ),
+    );
+    await expect.poll(() => reads(r10c, task), { timeout: 15_000 }).toBe(1);
+    first.release(detailOf(task, { last_date: yesterday(20), pending: true }));
+    const notice = page.locator(`[data-catch-up-task="${task.taskId}"]`);
+    await expect(notice).toHaveAttribute("data-catch-up-stopped", "storage", {
+      timeout: 15_000,
+    });
+    const log = await traced(page);
+    expect(log.indexOf("marker:set")).toBeLessThan(
+      log.lastIndexOf("outcome:removed:FAILED"),
+    );
+    expect(await discoveryMarkers(page, task.taskId)).toHaveLength(1);
+    const other = await context.newPage();
+    await other.goto(
+      `/__session?route=${encodeURIComponent(`/today?day=${TODAY}&tz=UTC`)}`,
+    );
+    await other.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await expect(
+      other.locator(`[data-catch-up-task="${task.taskId}"]`),
+    ).toHaveAttribute("data-catch-up-stopped", "storage", {
+      timeout: 20_000,
+    });
+    await reboot(page);
+    await expect(notice).toHaveAttribute("data-catch-up-stopped", "storage", {
+      timeout: 15_000,
+    });
+    await page.waitForTimeout(2_000);
+    expect(reads(r10c, task), "no page read for the fenced caller").toBe(1);
+    expect(posts(r10c)).toHaveLength(0);
+    recordEvidence(info, "e-m12d", {
+      trace: log,
+      log: r10c.log.map(({ from: _from, ...e }) => e),
+    });
+  });
+
+  test("E-M12e (teardown): a page CLOSED while its discovery read is held publishes no fence; the other tab, waiting for the lock, recovers the call and the work goes on", async ({
+    context,
+  }, info) => {
+    const task = repeating(425, "Water the roses");
+    const never = new Promise<Answer>(() => undefined);
+    const { page, r10c } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      arrange(task, never, () =>
+        detailOf(task, { last_date: TODAY, pending: false }),
+      ),
+    );
+    await expect.poll(() => reads(r10c, task), { timeout: 15_000 }).toBe(1);
+    const other = await bootAt(context, `/today?day=${TODAY}&tz=UTC`);
+    await page.waitForTimeout(500);
+    expect(reads(r10c, task), "the other tab waits for the lock").toBe(1);
+    await page.close();
+    await expect
+      .poll(() => reads(r10c, task), { timeout: 20_000 })
+      .toBeGreaterThanOrEqual(2);
+    await other.waitForTimeout(1_500);
+    expect(await discoveryMarkers(other, task.taskId)).toEqual([]);
+    await expect(
+      other.locator(
+        `[data-catch-up-task="${task.taskId}"][data-catch-up-stopped]`,
+      ),
+    ).toHaveCount(0);
+    recordEvidence(info, "e-m12e", {
       log: r10c.log.map(({ from: _from, ...e }) => e),
     });
   });

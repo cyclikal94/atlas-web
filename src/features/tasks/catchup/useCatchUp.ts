@@ -17,6 +17,7 @@ import { commandOf, QUEUED_KINDS } from "../model/commands";
 import { parseOccurrenceData } from "../model/contract";
 import { isContractDate } from "../model/primitives";
 import { todayIn } from "../model/time";
+import { pageLifecycle } from "./lifecycle";
 import {
   type CatchUpRunner,
   createCatchUpRunner,
@@ -79,6 +80,8 @@ export function runnerOf(env: TasksEnv, data: DataEnv): CatchUpRunner {
     quota: () => mine()?.data.quota ?? null,
     // Revision 11 (review R36): the page's ONE write-failure markers fence a caller whose answer could not be recorded.
     markers: () => getPageDataHost().markers,
+    // Revision 15 (review 16's R36-H/I): the page's lifecycle tells a call cancelled by the page's teardown from a failure observed live.
+    lifecycle: pageLifecycle(),
     online: () => mine()?.online ?? false,
     writable: () => mine()?.writable ?? false,
     now: () => mine()?.env.now() ?? Date.now(),
