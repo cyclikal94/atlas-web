@@ -844,7 +844,10 @@ test.describe("E-R13: uncertain outcomes across a 403 remount (A8, A11)", () => 
     const remounted = page.getByRole("dialog");
     await expect(remounted.locator("[data-merge-comparison]")).toBeVisible();
     await expect(remounted).toContainText(copy.UNCERTAIN);
-    await remounted.getByRole("button", { name: copy.TRY_AGAIN }).click();
+    // The retained merge is offered again (an assertion, so a missing Try again is caught as such, never as a click timeout).
+    const again = remounted.getByRole("button", { name: copy.TRY_AGAIN });
+    await expect(again).toBeVisible();
+    await again.click();
     await expect.poll(() => served.peopleCommands.length).toBe(2);
     expect(served.peopleCommands[1]?.key).toBe(served.peopleCommands[0]?.key);
     expect(JSON.stringify(served.peopleCommands[1]?.body)).toBe(
