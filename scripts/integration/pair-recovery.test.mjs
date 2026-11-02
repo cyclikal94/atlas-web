@@ -13,11 +13,12 @@
 // because the stored status is invalid. The cache-valid negative stays a separate storage control.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { recoverySample, renderingOf } from "./pair-capture.mjs";
 import {
   admissibilityProblems,
   hiddenProblems,
   holdsComplete,
-  MAX_INCOHERENT_REREADS,
+  MAX_UNRESOLVED_REREADS,
   OBSERVATION_SCHEMA,
   observationProblems,
   observeRecovery,
@@ -145,6 +146,7 @@ function world({
         ? { reason: "resync_required" }
         : null,
     fenced: caller === "recovery" || fault === "ordinary-fenced",
+    incarnation: "incarnation-1",
     activated: false,
     readsAfter: 0,
   };
@@ -288,8 +290,18 @@ function world({
       rendering,
       notice: state.notice,
       fenced: fencesUnavailable === reader ? null : state.fenced,
-      coherent: true,
-      incoherence: null,
+      // Revision 30 (C1): the separate capture brackets and the database incarnation (pair-capture.mjs `recoverySample`'s shape).
+      incarnation: state.incarnation,
+      capture: {
+        auth:
+          fencesUnavailable === reader
+            ? {
+                status: "unavailable",
+                error: "the auth fences are not readable",
+              }
+            : { status: "stable" },
+        storage: { status: "stable" },
+      },
     };
   }
   return { io, releases, observations, records, reads, state };
@@ -631,7 +643,8 @@ test("Q2 rules (revision 28): hidden/shown are judged from the rendering alone, 
     account: ACCOUNT,
     cache_status: "invalid",
     fenced: false,
-    coherent: true,
+    incarnation: "incarnation-1",
+    capture: { auth: { status: "stable" }, storage: { status: "stable" } },
     rendering,
     ...extra,
   });
@@ -1059,75 +1072,870 @@ test("R29 Q5 refused (ordinary caller): a follower displaying behind the placeho
   );
 });
 
-// Revision 29 (C5): an INCOHERENT sample (fences or stored state changed during the bracketed capture) is re-read, bounded and counted —
-// never judged; every coherent sample is judged, so a forbidden coherent one is never re-read into success.
-test("R29 C5 control: incoherent samples are re-read and counted in the sample that ends them; nothing is judged on them", async () => {
-  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 6 });
+// ---- revision 30 (R30-DIAG; design assessment C1-C5, Q2-Q5): the COMPOSED capture → sample → observer chain --------------------------
+// Revision 29's own coherence tests (kept in its history, restated here) gave the observer already-merged samples: a storage-only change
+// was modelled as `fenced: null`, but the real adapter kept `fenced: true` and only merged the storage outcome into `coherent: false`. Each
+// layer passed while their composition discarded a stable fenced exposure or an unavailable rendering (the review's coherence probe). Below,
+// every read of the deterministic world goes through the MAINTAINED pair-capture.mjs `recoverySample` and `renderingOf`/`captureInPage`
+// (the in-page function runs against doubled `window`/`document`), and only the IO is doubled: the two raw stored reads, the auth records
+// the page reads before and after its capture, and the DOM. Injected faults are labelled test interventions; they demonstrate the
+// harness's sensitivity, never product exposure.
+const FENCE = [{ kind: "invalid_session", seq: 8 }];
+/** A doubled page: `evaluate(captureInPage, account)` runs the real page function with doubled globals built from `spec`. */
+function pageDouble(spec) {
+  return {
+    evaluate: async (fn, account) => {
+      if (spec.evaluateThrows) throw new Error(spec.evaluateThrows);
+      const g = spec.rendering;
+      let fenceReads = 0;
+      const saved = {
+        window: globalThis.window,
+        document: globalThis.document,
+      };
+      globalThis.window = {
+        __pairDocument: g.document,
+        __s: spec.noView
+          ? undefined
+          : { view: { get: () => structuredClone(g.view) } },
+        __atlasFixture: {
+          session: {
+            leader: () =>
+              spec.noAttachment
+                ? null
+                : { attachment: g.attachment, notice: spec.notice },
+            readRecords: async () => {
+              const fenced = spec.fences[Math.min(fenceReads, 1)];
+              fenceReads += 1;
+              if (fenced === "throw")
+                throw new Error("the auth store is closed");
+              return {
+                auth_state: { fences: { [account]: fenced ? FENCE : [] } },
+              };
+            },
+          },
+        },
+      };
+      globalThis.document = {
+        getElementById: (id) =>
+          id === "protected-root" && g.root.present
+            ? {
+                hasAttribute: (k) => k === "inert" && g.root.gated,
+                getAttribute: (k) =>
+                  k === "aria-hidden" && g.root.gated ? "true" : null,
+                childElementCount: g.root.mounted ? 1 : 0,
+                querySelectorAll: () =>
+                  Array.from({ length: g.placeholders.present }, (_, i) => ({
+                    getBoundingClientRect: () => ({ width: 100, height: 20 }),
+                    getAttribute: () => "refreshing",
+                    checkVisibility: () =>
+                      i < g.placeholders.refreshing_visible,
+                  })),
+              }
+            : null,
+      };
+      try {
+        return await fn(account);
+      } finally {
+        globalThis.window = saved.window;
+        globalThis.document = saved.document;
+      }
+    },
+  };
+}
+const STORED_KEYS = (s) => {
+  const {
+    reader: _r,
+    page: _p,
+    account: _a,
+    rendering: _g,
+    notice: _n,
+    fenced: _f,
+    capture: _c,
+    ...stored
+  } = s;
+  return stored;
+};
+/**
+ * Routes EVERY read of world `w` through the maintained composition. `plan(ctx)` may return a change for one capture: `rendering`
+ * (replaces what the page shows), `fences` ([before, after]: true/false/"throw"), `storageAfter` (fields of the second stored read),
+ * `storageThrows`, `storageGone`, `noView`, `noAttachment`, `evaluateThrows`. ctx: {n (the read number of this reader), who, barrier,
+ * after (the read number after the activation, as `afterActivation` numbers them, or 0), sample (the world's lawful sample)}.
+ * Returns the log of every capture: the composed sample and the change applied.
+ */
+function composed(w, plan = () => null) {
+  const read = w.io.read;
+  const log = [];
+  const perReader = { leader: 0, follower: 0 };
+  let afterN = 0;
+  w.io.read = async (who, o = {}) => {
+    const s = await read(who, o);
+    perReader[who] += 1;
+    if (w.state.activated) afterN += 1;
+    const ctx = {
+      n: perReader[who],
+      who,
+      barrier: w.reads.at(-1).barrier,
+      after: w.state.activated ? afterN : 0,
+      sample: s,
+    };
+    const change = plan(ctx) ?? {};
+    const before = {
+      ...STORED_KEYS(s),
+      composition_seq: 10,
+      ...(change.storageBefore ?? {}),
+    };
+    const after = {
+      ...STORED_KEYS(s),
+      composition_seq: 10,
+      ...(change.storageAfter ?? {}),
+    };
+    delete after.rows;
+    let storedReads = 0;
+    const spec = {
+      rendering: change.rendering ?? s.rendering,
+      fences: change.fences ?? [s.fenced, s.fenced],
+      notice: s.notice,
+      noView: change.noView,
+      noAttachment: change.noAttachment,
+      evaluateThrows: change.evaluateThrows,
+    };
+    const out = await recoverySample(
+      {
+        stored: async () => {
+          storedReads += 1;
+          if (storedReads === 1) return structuredClone(before);
+          if (change.storageThrows) throw new Error(change.storageThrows);
+          return change.storageGone ? null : structuredClone(after);
+        },
+        rendering: () => renderingOf(pageDouble(spec), s.account),
+      },
+      { reader: who, page: s.page, account: s.account, rows: Boolean(o.rows) },
+    );
+    log.push({
+      ...ctx,
+      change: Object.keys(change),
+      out: structuredClone(out),
+    });
+    return out;
+  };
+  const failures = [];
+  w.io.failed = (f) => failures.push(f);
+  return { log, failures };
+}
+const OPEN = (g) => ({ ...g, ...SHAPES.open(g) });
+const R30_VARIANTS = {
+  "healthy, stable storage": { change: () => ({}), refused: null },
+  "healthy, changed storage": {
+    change: () => ({ storageAfter: { composition_seq: 11 } }),
+    refused: null,
+  },
+  "fenced exposure, stable storage": {
+    change: (s) => ({ rendering: OPEN(s.rendering), fences: [true, true] }),
+    refused: /is shown while the recovery fence stands/,
+  },
+  "the same fenced exposure, changed storage": {
+    change: (s) => ({
+      rendering: OPEN(s.rendering),
+      fences: [true, true],
+      storageAfter: { composition_seq: 11 },
+    }),
+    refused: /is shown while the recovery fence stands/,
+  },
+  "unavailable rendering, stable storage": {
+    change: () => ({ noView: true }),
+    refused:
+      /rendering was not observed \(unavailable: the session view is not readable\)/,
+  },
+  "the same unavailable rendering, changed storage": {
+    change: () => ({ noView: true, storageAfter: { composition_seq: 11 } }),
+    refused:
+      /rendering was not observed \(unavailable: the session view is not readable\)/,
+  },
+};
+// Q2: the review's six variants for each page, at that page's FIRST read after the commit while its fence stands (the recovery caller's
+// complete-but-fenced activation): the leader's first complete poll (after = 1) and the follower's complete read (after = 2).
+for (const [who, at] of [
+  ["leader", 1],
+  ["follower", 2],
+])
+  for (const [name, v] of Object.entries(R30_VARIANTS))
+    test(`R30 Q2 composed (recovery caller, ${who}): ${name}`, async () => {
+      const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 9 });
+      const { log, failures } = composed(w, (c) =>
+        c.after === at ? v.change(c.sample) : null,
+      );
+      const r = await run(w, { caller: "recovery" });
+      const injected = log.find((x) => x.after === at);
+      assert.equal(injected.who, who);
+      assert.equal(
+        injected.sample.fenced,
+        true,
+        "the page's fence stands at the injected capture",
+      );
+      if (v.refused === null) {
+        assert.equal(r.error?.message, undefined);
+        assert.ok(w.observations.some((o) => o.kind === "recovery_rendered"));
+        const changed = name.includes("changed storage");
+        assert.equal(
+          injected.out.capture.storage.status,
+          changed ? "changed" : "stable",
+        );
+        // A changed capture is re-read, and the read that ends it counts it by cause; a stable one is used at once.
+        const next = log[log.indexOf(injected) + 1];
+        if (changed) {
+          assert.equal(next.who, who, "the same reader is read again");
+          assert.equal(next.out.capture.storage.status, "stable");
+        } else
+          assert.notEqual(next.who, who, "a stable capture is used at once");
+        if (who === "follower") {
+          const activated = w.observations.find(
+            (o) => o.kind === "recovery_activated",
+          );
+          assert.deepEqual(
+            activated.detail.follower.rereads,
+            changed
+              ? { total: 1, auth: 0, storage: 1 }
+              : { total: 0, auth: 0, storage: 0 },
+          );
+        }
+        return;
+      }
+      assert.match(String(r.error?.message), v.refused);
+      assert.equal(
+        log.at(-1),
+        injected,
+        "it fails AT the injected capture: the later healthy sample is never read",
+      );
+      assert.ok(
+        !w.observations.some((o) => o.kind === "recovery_activated"),
+        "no activation is published",
+      );
+      assert.ok(!w.observations.some((o) => o.kind === "recovery_rendered"));
+      // The first failure's facts (C3): this page, this phase, both bracket outcomes as captured.
+      assert.equal(failures.length, 1);
+      const f = failures[0].capture;
+      assert.equal(f.reader, who);
+      assert.equal(f.read, 1);
+      assert.equal(
+        f.capture.storage.status,
+        name.includes("changed storage") ? "changed" : "stable",
+      );
+      if (name.includes("changed storage"))
+        assert.deepEqual(f.capture.storage.fields, ["composition_seq"]);
+      // The rendering's unavailability leaves the auth bracket standing on its own (a separate outcome).
+      assert.equal(f.capture.auth.status, "stable");
+      assert.equal(
+        r.error.capture,
+        f,
+        "the thrown error carries the same facts",
+      );
+    });
+
+// Q3: every observer read site, both pages, both callers — inject ONE independently established fault at ONE capture (the IO is lawful
+// again at once), with the stored state stable or moving across that capture. Each must be refused AT that capture, before any later read
+// and with no later milestone. The sites: the held pages (the invalidation, the first staged, an intermediate and the last held page) for
+// each reader; then the leader's first complete activation poll (after 1), the follower's complete read (2), the leader's row-bearing read
+// (3) and the first settlement poll of each side (4 leader, 5 follower).
+const HELD_SITES = ["invalidated", "staged", "intermediate", "final"].flatMap(
+  (barrier) =>
+    ["leader", "follower"].map((who) => ({
+      who,
+      barrier,
+      name: `${who} at the ${barrier} page`,
+    })),
+);
+const AFTER_SITES = [
+  {
+    who: "leader",
+    after: 1,
+    name: "leader at the first complete activation poll",
+  },
+  { who: "follower", after: 2, name: "follower at its complete read" },
+  { who: "leader", after: 3, name: "leader at its row-bearing read" },
+  { who: "leader", after: 4, name: "leader at its first settlement poll" },
+  { who: "follower", after: 5, name: "follower at its first settlement poll" },
+];
+const lawfulAs = (g, shape) => ({
+  ...g,
+  ...shape,
+  document: g.document,
+  attachment: g.attachment,
+});
+const SITE_FAULTS = {
+  "stable fence, open surface": {
+    change: (s) => ({ rendering: OPEN(s.rendering), fences: [true, true] }),
+    refused: /page is not admissible/,
+  },
+  "stable fence, displaying behind the refreshing placeholder": {
+    change: (s) => ({
+      rendering: lawfulAs(s.rendering, REFRESHING),
+      fences: [true, true],
+    }),
+    refused: /page is not admissible/,
+  },
+  "stable fence, displaying over a gated tree": {
+    change: (s) => ({
+      rendering: lawfulAs(s.rendering, {
+        view: { kind: "displaying", account_id: ACCOUNT, state: null },
+        root: { present: true, gated: true, mounted: true },
+        placeholders: { present: 1, refreshing_visible: 1 },
+      }),
+      fences: [true, true],
+    }),
+    refused: /page is not admissible/,
+  },
+  "no session view (unavailable)": {
+    change: () => ({ noView: true }),
+    refused:
+      /rendering was not observed \(unavailable: the session view is not readable\)/,
+  },
+  "no data attachment (unavailable)": {
+    change: () => ({ noAttachment: true }),
+    refused:
+      /rendering was not observed \(unavailable: the page's data attachment is not readable\)/,
+  },
+  "the page cannot be evaluated (closed)": {
+    change: () => ({
+      evaluateThrows: "Target page, context or browser has been closed",
+    }),
+    refused:
+      /rendering was not observed \(unavailable: Target page, context or browser has been closed\)/,
+  },
+  "another account displayed": {
+    change: (s) => ({
+      rendering: lawfulAs(s.rendering, SHAPES["wrong-account"](s.rendering)),
+    }),
+    refused: /displays the account acct-other, not acct-reader/,
+  },
+  "the wrong role": {
+    change: (s) => ({ rendering: { ...s.rendering, attachment: "none" } }),
+    refused: /page is attached as none, not/,
+  },
+  "the document replaced": {
+    change: (s) => ({
+      rendering: {
+        ...s.rendering,
+        document: `${s.rendering.document}-reloaded`,
+      },
+    }),
+    refused: /document changed during the observation \(reloaded or replaced\)/,
+    skip: (_site, c) => c.n === 1,
+  },
+  "the peer's document": {
+    change: (s, who) => ({
+      rendering: {
+        ...s.rendering,
+        document: who === "leader" ? "follower-document" : "leader-document",
+      },
+    }),
+    // At a reader's first read the peer check refuses it; later, its own document's continuity is checked first (also an identity fault).
+    refused: (c) =>
+      c.n === 1
+        ? /the follower is the leading page's own document/
+        : /document changed during the observation \(reloaded or replaced\)/,
+    skip: (site) => site.who === "leader" && site.barrier === "invalidated",
+  },
+  "unreadable auth fences": {
+    change: () => ({ fences: ["throw", "throw"] }),
+    refused: /auth fences are not observed \(the auth store is closed\)/,
+  },
+  "the second stored read fails": {
+    change: () => ({ storageThrows: "the transaction was aborted" }),
+    refused:
+      /stored state was not read again \(the stored state could not be read again: the transaction was aborted\)/,
+    storage: false,
+  },
+  "the database is gone at the second read": {
+    change: () => ({ storageGone: true }),
+    refused:
+      /stored state was not read again \(the account database was not found at the second read\)/,
+    storage: false,
+  },
+  "another database incarnation at the second read": {
+    change: () => ({ storageAfter: { incarnation: "incarnation-2" } }),
+    refused: /account database was replaced during the sample/,
+    storage: false,
+  },
+};
+for (const caller of ["ordinary", "recovery"])
+  for (const site of [...HELD_SITES, ...AFTER_SITES])
+    for (const [fault, f] of Object.entries(SITE_FAULTS))
+      for (const moving of f.storage === false ? [false] : [false, true])
+        test(`R30 Q3 composed refused (${caller}): ${fault} — ${site.name}${moving ? ", the stored state moving across it" : ""}`, async () => {
+          const w = world({ caller, pages: 5, fencedReadsAfter: 3 });
+          let at = null;
+          let skipped = false;
+          const { log, failures } = composed(w, (c) => {
+            if (at !== null || c.who !== site.who) return null;
+            if (
+              site.after
+                ? c.after !== site.after
+                : c.after !== 0 || c.barrier !== site.barrier
+            )
+              return null;
+            if (f.skip?.(site, c)) {
+              skipped = true;
+              return null;
+            }
+            at = { ctx: c, observed: w.observations.length };
+            const change = f.change(c.sample, c.who);
+            return moving
+              ? {
+                  ...change,
+                  storageAfter: {
+                    composition_seq: 11,
+                    ...(change.storageAfter ?? {}),
+                  },
+                }
+              : change;
+          });
+          const r = await run(w, { caller });
+          if (skipped) {
+            assert.equal(
+              r.error?.message,
+              undefined,
+              "a site where the fault cannot exist stays a healthy run",
+            );
+            return;
+          }
+          assert.ok(at, "the site was read");
+          assert.match(
+            String(r.error?.message),
+            typeof f.refused === "function" ? f.refused(at.ctx) : f.refused,
+          );
+          assert.equal(log.at(-1).n, at.ctx.n, "refused AT that capture");
+          assert.equal(log.at(-1).who, site.who);
+          assert.equal(
+            w.observations.length,
+            at.observed,
+            "no milestone after the injected capture",
+          );
+          assert.equal(failures.length, 1, "one first failure, recorded once");
+          if (moving)
+            assert.equal(failures[0].capture.capture.storage.status, "changed");
+        });
+
+// Q4: LAWFUL transitions are re-read (bounded, counted by cause), never refused and never published mixed; identity lost during a re-read is
+// refused. `SHOWN_AS`/`NEUTRAL_AS` keep the reader's own document and attachment.
+const SHOWN_AS = (g) => lawfulAs(g, SHOWN);
+const NEUTRAL_AS = (g) => lawfulAs(g, NEUTRAL);
+const resolvedEverywhere = (w) =>
+  w.observations
+    .flatMap((o) => [
+      o.detail.leader,
+      o.detail.follower,
+      ...(o.detail.pages ?? []).flatMap((p) => [p.leader, p.follower]),
+    ])
+    .every(
+      (x) =>
+        x.capture.auth.status === "stable" &&
+        x.capture.storage.status === "stable",
+    );
+test("R30 Q4 control (recovery caller): the fence clears DURING one settlement capture (hidden) — re-read, counted as auth, then lawful", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 3 });
+  const { log } = composed(w, (c) =>
+    c.after === 4
+      ? { fences: [true, false], rendering: NEUTRAL_AS(c.sample.rendering) }
+      : null,
+  );
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  const changed = log.find((x) => x.after === 4);
+  assert.equal(changed.out.capture.auth.status, "changed");
+  assert.equal(
+    changed.out.fenced,
+    null,
+    "the indeterminate fence is never paired with the later DOM",
+  );
+  assert.equal(
+    log[log.indexOf(changed) + 1].who,
+    "leader",
+    "the same page is read again",
+  );
+  assert.ok(
+    resolvedEverywhere(w),
+    "no milestone records an unresolved capture",
+  );
+});
+test("R30 Q4 control (recovery caller): the fence clears DURING a capture that already SHOWS the page — admissible unfenced, re-read", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 3 });
+  composed(w, (c) =>
+    c.after === 5
+      ? { fences: [true, false], rendering: SHOWN_AS(c.sample.rendering) }
+      : null,
+  );
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  const rendered = w.observations.find((o) => o.kind === "recovery_rendered");
+  assert.equal(rendered.detail.follower.capture.auth.status, "stable");
+});
+// Restates revision 29's "incoherent samples are re-read … nothing is judged on them" (its forbidden shape under an unresolved capture).
+// Revision 30 judges what the capture ESTABLISHES: shown BEFORE the activation is forbidden whatever the fence did (the held barrier fixes
+// the phase), so it is refused at once rather than re-read; a lawful shape under the same uncertainty is re-read.
+test("R30 Q4 refused (restated R29 C5 control): shown before the activation with the fence changing — refused, never re-read", async () => {
+  const w = world({ caller: "recovery", pages: 4 });
+  const { log } = composed(w, (c) =>
+    c.who === "follower" && c.barrier === "staged"
+      ? { fences: [true, false], rendering: SHOWN_AS(c.sample.rendering) }
+      : null,
+  );
+  const r = await run(w, { caller: "recovery" });
+  assert.match(
+    String(r.error?.message),
+    /inadmissible under every interpretation its brackets allow \(auth changed, storage stable\)/,
+  );
+  assert.equal(log.at(-1).who, "follower");
+  assert.equal(log.at(-1).barrier, "staged");
+});
+test("R30 Q4 control: the stored state moves around a lawful hidden capture at a held page — re-read, counted as storage in the milestone", async () => {
+  const w = world({ pages: 4 });
+  composed(w, (c) =>
+    c.who === "follower" && c.barrier === "staged" && c.n === 2
+      ? { storageAfter: { composition_seq: 11 } }
+      : null,
+  );
+  const r = await run(w);
+  assert.equal(r.error?.message, undefined);
+  const staged = w.observations.find(
+    (o) => o.kind === "recovery_staged_hidden",
+  );
+  assert.deepEqual(staged.detail.follower.rereads, {
+    total: 1,
+    auth: 0,
+    storage: 1,
+  });
+  assert.deepEqual(staged.detail.leader.rereads, {
+    total: 0,
+    auth: 0,
+    storage: 0,
+  });
+  assert.ok(w.releases.every((x) => x.outcome === "delivered"));
+  assert.equal(
+    w.releases.length,
+    4,
+    "every held answer released once, by its owner",
+  );
+  assert.ok(resolvedEverywhere(w));
+});
+test("R30 Q4 control: both brackets change in one capture — one re-read counted under both causes", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 9 });
+  composed(w, (c) =>
+    c.after === 2
+      ? {
+          fences: [true, false],
+          rendering: NEUTRAL_AS(c.sample.rendering),
+          storageAfter: { composition_seq: 11 },
+        }
+      : null,
+  );
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  const activated = w.observations.find((o) => o.kind === "recovery_activated");
+  assert.deepEqual(activated.detail.follower.rereads, {
+    total: 1,
+    auth: 1,
+    storage: 1,
+  });
+});
+const STAGED_STORE = {
+  cache_status: "invalid",
+  cache_digest: OLD,
+  staging_rows: 6,
+  staging_generations: [6],
+  applied_revision: 8,
+};
+for (const [caller, fenced, rendering, refused] of [
+  ["recovery", true, NEUTRAL_AS, null],
+  ["ordinary", false, SHOWN_AS, null],
+  ["ordinary", true, SHOWN_AS, /is shown while the recovery fence stands/],
+])
+  test(`R30 Q4 ${refused ? "refused" : "control"} (${caller}): the activation COMMITS between the two stored reads of a poll, fence ${fenced ? "standing" : "clear"}, the page ${rendering === SHOWN_AS ? "shown" : "hidden"}`, async () => {
+    const w = world({ caller, pages: 3, fencedReadsAfter: 9 });
+    const { log } = composed(w, (c) =>
+      c.after === 1
+        ? {
+            storageBefore: STAGED_STORE,
+            fences: [fenced, fenced],
+            rendering: rendering(c.sample.rendering),
+          }
+        : null,
+    );
+    const r = await run(w, { caller });
+    const commit = log.find((x) => x.after === 1);
+    assert.equal(commit.out.capture.storage.status, "changed");
+    assert.ok(commit.out.capture.storage.fields.includes("cache_status"));
+    if (refused) {
+      assert.match(String(r.error?.message), refused);
+      assert.equal(log.at(-1), commit);
+      return;
+    }
+    // Lawful under one of the two phases the moving storage allows: re-read, and the complete state is then judged in full.
+    assert.equal(r.error?.message, undefined);
+    assert.equal(log[log.indexOf(commit) + 1].after, 2);
+    assert.equal(log[log.indexOf(commit) + 1].who, "leader");
+  });
+test("R30 Q4 refused: the activation poll's moving storage cannot excuse a shape no phase admits (the floor/signed-out page)", async () => {
+  const w = world({ pages: 3 });
+  composed(w, (c) =>
+    c.after === 1
+      ? {
+          storageBefore: STAGED_STORE,
+          rendering: SHAPES["signed-out"](c.sample.rendering),
+        }
+      : null,
+  );
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /inadmissible under every interpretation its brackets allow \(auth stable, storage changed\)/,
+  );
+  assert.match(String(r.error?.message), /signed_out/);
+});
+for (const reader of ["leader", "follower"])
+  test(`R30 Q4 control (recovery caller, composed): the ${reader} renders FIRST once its own fence cleared; the peer stays fenced and hidden`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 1e9 });
+    const clearAt = {
+      [reader]: 4,
+      [reader === "leader" ? "follower" : "leader"]: 10,
+    };
+    const { log } = composed(w, (c) =>
+      c.after >= clearAt[c.who]
+        ? { fences: [false, false], rendering: SHOWN_AS(c.sample.rendering) }
+        : null,
+    );
+    const r = await run(w, { caller: "recovery" });
+    assert.equal(r.error?.message, undefined);
+    const first = log.find((x) => x.out.rendering.view.kind === "displaying");
+    assert.equal(first.who, reader);
+    assert.ok(
+      log.some(
+        (x) =>
+          x.after > first.after && x.who !== reader && x.out.fenced === true,
+      ),
+    );
+  });
+test("R30 Q4 control: a reload BEFORE the observation (XL0's planned reload) is only a new baseline document", async () => {
+  const w = world({ pages: 3 });
+  composed(w, (c) => ({
+    rendering: {
+      ...c.sample.rendering,
+      document: `${c.sample.rendering.document}-after-planned-reload`,
+    },
+  }));
+  const r = await run(w);
+  assert.equal(r.error?.message, undefined);
+});
+for (const [name, next, refused] of [
+  [
+    "an unexpected reload",
+    (s) => ({
+      rendering: {
+        ...s.rendering,
+        document: `${s.rendering.document}-reloaded`,
+      },
+    }),
+    /leader's document changed during the observation/,
+  ],
+  [
+    "the account database recreated (another incarnation in both reads)",
+    () => ({
+      storageBefore: { incarnation: "incarnation-2" },
+      storageAfter: { incarnation: "incarnation-2" },
+    }),
+    /leader reads another account database incarnation \(incarnation-2, not incarnation-1\): replaced during the observation/,
+  ],
+  [
+    "a role change",
+    (s) => ({ rendering: { ...s.rendering, attachment: "follower" } }),
+    /attached as follower, not leader/,
+  ],
+  [
+    "the page closed",
+    () => ({ evaluateThrows: "page closed" }),
+    /rendering was not observed \(unavailable: page closed\)/,
+  ],
+])
+  test(`R30 Q4 refused: ${name} on the RE-READ after a lawful moving-storage capture`, async () => {
+    const w = world({ pages: 4 });
+    let first = null;
+    const { log } = composed(w, (c) => {
+      if (c.who !== "leader" || c.barrier !== "staged") return null;
+      if (first === null) {
+        first = c.n;
+        return { storageAfter: { composition_seq: 11 } };
+      }
+      return c.n === first + 1 ? next(c.sample) : null;
+    });
+    const r = await run(w);
+    assert.match(String(r.error?.message), refused);
+    assert.equal(log.at(-1).n, first + 1, "refused on the re-read itself");
+    assert.ok(!w.observations.some((o) => o.kind === "recovery_staged_hidden"));
+  });
+for (const [extra, ok] of [
+  [0, true],
+  [1, false],
+])
+  test(`R30 Q4 ${ok ? "control" : "refused"}: ${MAX_UNRESOLVED_REREADS + extra} consecutive unresolved captures of one read ${ok ? "then a resolved one (the bound itself)" : "(one beyond the bound)"}`, async () => {
+    const w = world({ pages: 3 });
+    let unresolved = 0;
+    let active = false;
+    // The follower's complete read starts at after = 2; each of its re-reads is the next world read, until one capture is resolved.
+    const { log } = composed(w, (c) => {
+      if (c.who === "follower" && c.after === 2) active = true;
+      if (!active || unresolved >= MAX_UNRESOLVED_REREADS + extra) {
+        active = false;
+        return null;
+      }
+      unresolved += 1;
+      return unresolved % 2
+        ? { storageAfter: { composition_seq: 11 } }
+        : { fences: [false, true], rendering: SHOWN_AS(c.sample.rendering) };
+    });
+    const r = await run(w);
+    if (ok) {
+      assert.equal(r.error?.message, undefined, String(r.error?.message));
+      const activated = w.observations.find(
+        (o) => o.kind === "recovery_activated",
+      );
+      assert.deepEqual(activated.detail.follower.rereads, {
+        total: MAX_UNRESOLVED_REREADS,
+        auth: MAX_UNRESOLVED_REREADS / 2,
+        storage: MAX_UNRESOLVED_REREADS / 2,
+      });
+    } else {
+      assert.match(
+        String(r.error?.message),
+        new RegExp(
+          `no resolved sample of the follower in ${MAX_UNRESOLVED_REREADS + 1} reads at after activation`,
+        ),
+      );
+      assert.equal(
+        log.filter((x) => x.who === "follower" && x.after >= 2).length,
+        MAX_UNRESOLVED_REREADS + 1,
+      );
+      assert.ok(!w.observations.some((o) => o.kind === "recovery_activated"));
+    }
+  });
+
+// C1/C3 envelope and failure propagation (restating revision 29's "a sample stating no coherence is incomplete"): the brackets the observer
+// receives are themselves checked; a malformed or missing one is an incomplete observation, refused on that capture, never re-read.
+const envelope = (change) => async () => {
+  const w = world({ pages: 3 });
   const read = w.io.read;
   let n = 0;
   w.io.read = async (who, o) => {
     const r = await read(who, o);
     n += 1;
-    // Incoherent, and showing what would be forbidden if it were judged.
-    if (n === 5 || n === 6)
-      return {
-        ...r,
-        ...asShown(r),
-        fenced: null,
-        coherent: false,
-        incoherence: "the stored state changed during the sample",
-      };
-    return r;
+    if (n !== 3) return r;
+    const altered = structuredClone(r);
+    change(altered);
+    return altered;
   };
-  const r = await run(w, { caller: "recovery" });
-  assert.equal(r.error?.message, undefined);
-  const counted = w.observations
-    .flatMap((o) => [o.detail.leader, o.detail.follower])
-    .map((x) => x.incoherent_rereads);
-  assert.ok(
-    counted.includes(2),
-    `the two re-reads are counted: ${JSON.stringify(counted)}`,
-  );
-});
-test("R29 C5 refused: a read that never yields a coherent sample fails (bounded), never hidden or shown", async () => {
-  const w = world({ pages: 3 });
-  const read = w.io.read;
-  w.io.read = async (who, o) => {
-    const r = await read(who, o);
-    return who === "follower" && w.state.activated
-      ? { ...r, coherent: false, incoherence: "x changed" }
-      : r;
-  };
-  const r = await run(w);
-  assert.match(
-    String(r.error?.message),
-    new RegExp(
-      `no coherent sample of the follower in ${MAX_INCOHERENT_REREADS + 1} reads at after activation \\(x changed\\)`,
-    ),
-  );
-});
-test("R29 C5 refused: a coherent forbidden sample is judged at once (not re-read)", async () => {
-  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 12 });
-  const seen = afterActivation(w, (i, _who, r) =>
-    i === 4 ? asShown(r) : undefined,
-  );
-  const r = await run(w, { caller: "recovery" });
-  assert.match(
-    String(r.error?.message),
-    /leader is shown while the recovery fence stands/,
-  );
-  assert.equal(seen.length, 4);
-});
-test("R29 C5 refused: a sample stating no coherence is incomplete", async () => {
-  const w = world({ pages: 3 });
-  const read = w.io.read;
-  w.io.read = async (who, o) => {
-    const { coherent: _c, ...r } = await read(who, o);
-    return r;
-  };
-  const r = await run(w);
-  assert.match(
-    String(r.error?.message),
-    /leader's sample is not stated coherent/,
-  );
+  return { w, r: await run(w) };
+};
+for (const [name, change, refused] of [
+  [
+    "no capture at all",
+    (r) => {
+      delete r.capture;
+    },
+    /leader's sample states no capture brackets/,
+  ],
+  [
+    "a /3 `coherent` flag instead of brackets",
+    (r) => {
+      delete r.capture;
+      r.coherent = true;
+    },
+    /states no capture brackets/,
+  ],
+  [
+    "an unknown auth outcome",
+    (r) => {
+      r.capture.auth = { status: "coherent" };
+    },
+    /auth bracket is malformed \("coherent"\)/,
+  ],
+  [
+    "an unknown storage outcome",
+    (r) => {
+      r.capture.storage = { status: "unchanged" };
+    },
+    /storage bracket is malformed \("unchanged"\)/,
+  ],
+  [
+    "a stable auth bracket with no fence",
+    (r) => {
+      r.fenced = null;
+    },
+    /auth fences are not observed \(a stable bracket, no fence\)/,
+  ],
+  [
+    "a changed auth bracket paired with a fence",
+    (r) => {
+      r.capture.auth = { status: "changed", reason: "x" };
+    },
+    /pairs a changed auth bracket with a fence/,
+  ],
+  [
+    "a changed storage bracket naming no field",
+    (r) => {
+      r.capture.storage = { status: "changed", fields: [] };
+    },
+    /changed storage bracket names no field/,
+  ],
+  [
+    "no database incarnation",
+    (r) => {
+      delete r.incarnation;
+    },
+    /account database names no incarnation/,
+  ],
+])
+  test(`R30 C1 refused: ${name} is an incomplete observation`, async () => {
+    const { w, r } = await envelope(change)();
+    assert.match(String(r.error?.message), refused);
+    assert.match(
+      String(r.error?.message),
+      /an incomplete observation of the leader \(at before activation, read 1\)/,
+    );
+    assert.ok(!w.observations.some((o) => o.kind === "recovery_staged_hidden"));
+  });
+test("R30 C3: the FIRST failure is handed to `failed` once, before the throw, and no milestone follows; a throwing `failed` does not mask it", async () => {
+  for (const throwing of [false, true]) {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 9 });
+    const order = [];
+    const observe = w.io.observe;
+    w.io.observe = (...a) => {
+      order.push(`observe:${a[0]}`);
+      return observe(...a);
+    };
+    composed(w, (c) =>
+      c.after === 2
+        ? {
+            rendering: OPEN(c.sample.rendering),
+            storageAfter: { composition_seq: 11 },
+          }
+        : null,
+    );
+    w.io.failed = (f) => {
+      order.push("failed");
+      assert.match(
+        f.reason,
+        /follower is shown while the recovery fence stands/,
+      );
+      assert.equal(f.capture.phase, "after_activation");
+      assert.equal(f.capture.document, "follower-document");
+      assert.equal(f.capture.incarnation, "incarnation-1");
+      assert.equal(f.capture.stored.cache_status, "valid");
+      if (throwing) throw new Error("recording failed");
+    };
+    const r = await run(w, { caller: "recovery" });
+    assert.match(
+      String(r.error?.message),
+      /follower is shown while the recovery fence stands/,
+    );
+    assert.equal(order.at(-1), "failed");
+    assert.equal(order.filter((x) => x === "failed").length, 1);
+  }
 });

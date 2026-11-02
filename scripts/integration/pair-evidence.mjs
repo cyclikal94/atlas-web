@@ -40,7 +40,7 @@
 // `recovery_exposed` (one atomic exposure of the complete cache, nothing staged), each made by the LEADER and an independent FOLLOWER page
 // reading its own connection. The caller and the local-work declaration are the matrix row's (`identityProblems`).
 // Revision 28 (R28-DIAG.b; design assessment C2-C5): the stored cache status is never evidence of what a page shows. Every recovery
-// observation must carry the observation contract `web09c-recovery-observation/2` (an earlier one, such as revision 27's, is INCOMPLETE and
+// observation must carry the observation contract `web09c-recovery-observation/2` (revision 30: `/4`; an earlier one, such as revision 27's, is INCOMPLETE and
 // refused, never upgraded): each reader's separate RENDERING (session view, protected root, visible refreshing placeholders, attachment, a
 // per-document identity) and its fences, complete, for the same account and documents throughout. Hidden and shown are judged here from
 // the rendering alone, written independently of the live observer (pair-recovery.mjs). `recovery_exposed` is renamed `recovery_activated`
@@ -908,7 +908,13 @@ export const RECOVERY_KINDS = Object.freeze([
   "recovery_rendered",
 ]);
 // Revision 29 (C5): /3 — each sample coherent (fences and stored state unchanged across its capture) with its counted re-reads.
-export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/3";
+// Revision 30 (R30-DIAG; design assessment C4, written independently of pair-recovery.mjs): /4 — each recorded sample states its SEPARATE
+// capture brackets, both stable (`capture.auth`, `capture.storage`), the database incarnation it read (one incarnation throughout the
+// observation), and its permitted re-reads by cause (`rereads: {total, auth, storage}`, every re-read with at least one cause). /2 and /3
+// records are incomplete for /4, never upgraded. Unrecorded re-read captures and settlement polls cannot be replayed from these records:
+// the live observer refuses them as they occur (its first failure is kept in the incomplete interval's `observation_failure`).
+export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/4";
+const isCount = (n) => Number.isInteger(n) && n >= 0;
 /** Why a reader's sample is not a complete observation of its page (the same account `account`); none: it is one. */
 function sampleProblems(r, account) {
   const g = r?.rendering;
@@ -937,10 +943,29 @@ function sampleProblems(r, account) {
     p.push(`${who}'s cache-gate placeholders are not observed`);
   if (typeof r.fenced !== "boolean")
     p.push(`${who}'s auth fences are not observed`);
-  // Revision 29 (C5): only a coherent capture is a sample; its re-reads are counted, never hidden.
-  if (r.coherent !== true) p.push(`${who}'s sample is not coherent`);
-  if (!(Number.isInteger(r.incoherent_rereads) && r.incoherent_rereads >= 0))
-    p.push(`${who}'s incoherent re-reads are not counted`);
+  // Revision 30 (C4): only a capture whose two brackets were both stable is a recorded sample; its re-reads are counted by cause.
+  if (r.capture?.auth?.status !== "stable")
+    p.push(
+      `${who}'s auth bracket is not stable (${JSON.stringify(r.capture?.auth?.status ?? null)})`,
+    );
+  if (r.capture?.storage?.status !== "stable")
+    p.push(
+      `${who}'s storage bracket is not stable (${JSON.stringify(r.capture?.storage?.status ?? null)})`,
+    );
+  if (!isText(r.incarnation))
+    p.push(`${who}'s account database incarnation is not recorded`);
+  const n = r.rereads;
+  if (
+    !(
+      isCount(n?.total) &&
+      isCount(n?.auth) &&
+      isCount(n?.storage) &&
+      n.auth <= n.total &&
+      n.storage <= n.total &&
+      n.total <= n.auth + n.storage
+    )
+  )
+    p.push(`${who}'s re-reads are not counted by cause`);
   return p;
 }
 /**
@@ -1034,6 +1059,11 @@ function recoveryObservationProblems(kind, o, ctx) {
     if (p.length > 0) return false;
     if (r.rendering.document !== documentOf(r.reader))
       bad(`${r.reader}'s document is not the one observed at the invalidation`);
+    // Revision 30 (C4): one database lifetime throughout (a replaced database is not this observation's).
+    if (r.incarnation !== invalidated?.detail?.leader?.incarnation)
+      bad(
+        `${r.reader} read another database incarnation than the one at the invalidation`,
+      );
     // Revision 29 (R29-DIAG): the fence implication, per sample (top-level and every held page), independent of the peer.
     if (fencedButUncovered(r))
       bad(

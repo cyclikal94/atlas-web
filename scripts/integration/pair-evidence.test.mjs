@@ -1619,8 +1619,10 @@ const readerState = (reader, extra = {}) => ({
   applied_revision: 6,
   notice: null,
   fenced: false,
-  coherent: true,
-  incoherent_rereads: 0,
+  // Revision 30 (C4): the separate capture brackets, the database incarnation and the re-reads by cause.
+  incarnation: "incarnation-1",
+  capture: { auth: { status: "stable" }, storage: { status: "stable" } },
+  rereads: { total: 0, auth: 0, storage: 0 },
   ...withoutRender(extra),
   rendering: RENDER[extra.render ?? "refreshing"](reader),
 });
@@ -1628,7 +1630,7 @@ const pair = (extra = {}, follower = {}) => ({
   leader: readerState("leader", extra),
   follower: readerState("follower", { ...extra, ...follower }),
 });
-const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/3" };
+const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/4" };
 /** X0's real 410 at 13 (the hand-off), then three snapshot pages 14, 15, 16, each held and released by a recorded release. */
 function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
   const w = world();
@@ -2267,37 +2269,128 @@ test("refused (revision 29, ordinary caller): shown while fenced at the rendered
   );
 });
 
-// Revision 29 (C5): the observation contract /3 — each saved sample coherent, its incoherent re-reads counted.
-test("refused (revision 29, C5): a saved sample that is not coherent, or whose re-reads are not counted", () => {
+// Revision 29 (C5): the observation contract /3 — each saved sample coherent, its incoherent re-reads counted. Revision 30 (R30-DIAG; design
+// assessment C4/Q5; labelled adaptation of the /3 tests): the merged `coherent` flag is gone; its intent — only a capture whose relation to
+// the stored state and the fence was established is a recorded sample, and its re-reads are counted — is restated on /4's separate brackets.
+for (const [name, change, expected] of [
+  [
+    "an auth bracket that changed",
+    (x) => {
+      x.capture = { ...x.capture, auth: { status: "changed", reason: "x" } };
+    },
+    /follower's auth bracket is not stable \("changed"\)/,
+  ],
+  [
+    "a storage bracket that changed",
+    (x) => {
+      x.capture = {
+        ...x.capture,
+        storage: { status: "changed", fields: ["composition_seq"] },
+      };
+    },
+    /follower's storage bracket is not stable \("changed"\)/,
+  ],
+  [
+    "a storage bracket of another incarnation",
+    (x) => {
+      x.capture = { ...x.capture, storage: { status: "replaced" } };
+    },
+    /follower's storage bracket is not stable \("replaced"\)/,
+  ],
+  [
+    "no capture brackets (a /3 sample)",
+    (x) => {
+      delete x.capture;
+      x.coherent = true;
+    },
+    /follower's (auth|storage) bracket is not stable \(null\)/,
+  ],
+  [
+    "no incarnation",
+    (x) => {
+      delete x.incarnation;
+    },
+    /follower's account database incarnation is not recorded/,
+  ],
+  [
+    "re-reads not counted",
+    (x) => {
+      delete x.rereads;
+      x.incoherent_rereads = 0;
+    },
+    /follower's re-reads are not counted by cause/,
+  ],
+  [
+    "a re-read with no cause",
+    (x) => {
+      x.rereads = { total: 2, auth: 1, storage: 0 };
+    },
+    /follower's re-reads are not counted by cause/,
+  ],
+  [
+    "more re-reads of one cause than in total",
+    (x) => {
+      x.rereads = { total: 1, auth: 2, storage: 0 };
+    },
+    /follower's re-reads are not counted by cause/,
+  ],
+])
+  test(`refused (revision 30, C4): a saved sample with ${name}`, () => {
+    const r = observedRecovery();
+    change(obs(r, "recovery_activated").detail.follower);
+    refuse(
+      r,
+      new RegExp(
+        `recovery_activated: an incomplete sample: ${expected.source}`,
+      ),
+      name,
+    );
+  });
+test("refused (revision 30, C4): an intermediate held page with an unstable bracket (every recorded sample, not only milestones)", () => {
   const r = observedRecovery();
-  obs(r, "recovery_activated").detail.follower.coherent = false;
+  obs(r, "recovery_final_held").detail.pages[0].leader.capture = {
+    auth: { status: "stable" },
+    storage: { status: "changed", fields: ["cache_status"] },
+  };
   refuse(
     r,
-    /recovery_activated: an incomplete sample: follower's sample is not coherent/,
-    "incoherent",
-  );
-  const q = observedRecovery();
-  delete obs(q, "recovery_staged_hidden").detail.leader.incoherent_rereads;
-  refuse(
-    q,
-    /recovery_staged_hidden: an incomplete sample: leader's incoherent re-reads are not counted/,
-    "uncounted",
+    /recovery_final_held: an incomplete sample: leader's storage bracket is not stable/,
+    "held page",
   );
 });
-test("accepted (revision 29, C5): a coherent sample after counted incoherent re-reads", () => {
+test("refused (revision 30, C4): a sample of another database incarnation than the invalidation's", () => {
   const r = observedRecovery();
-  obs(r, "recovery_activated").detail.leader.incoherent_rereads = 2;
+  obs(r, "recovery_rendered").detail.follower.incarnation = "incarnation-2";
+  refuse(
+    r,
+    /recovery_rendered: follower read another database incarnation than the one at the invalidation/,
+    "replaced",
+  );
+});
+test("accepted (revision 30, C4): a resolved sample after re-reads counted by cause (one capture with both brackets changed counts in both)", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_activated").detail.leader.rereads = {
+    total: 3,
+    auth: 1,
+    storage: 3,
+  };
   accept(r);
 });
-test("refused (revision 29, C5): an observation of the revision-28 contract /2 is incomplete, never upgraded", () => {
-  const r = observedRecovery();
-  obs(r, "recovery_rendered").detail.schema = "web09c-recovery-observation/2";
-  refuse(
-    r,
-    /recovery_rendered: made under the observation contract "web09c-recovery-observation\/2"/,
-    "old contract",
-  );
-});
+for (const old of [
+  "web09c-recovery-observation/2",
+  "web09c-recovery-observation/3",
+])
+  test(`refused (revision 29/30): an observation of the earlier contract ${old} is incomplete, never upgraded`, () => {
+    const r = observedRecovery();
+    obs(r, "recovery_rendered").detail.schema = old;
+    refuse(
+      r,
+      new RegExp(
+        `recovery_rendered: made under the observation contract "${old.replace("/", "\\/")}"`,
+      ),
+      "old contract",
+    );
+  });
 test("refused (revision 29): a fenced sample DISPLAYING over a gated tree is not the neutral state the fence requires", () => {
   const r = observedRecovery();
   Object.assign(obs(r, "recovery_final_held").detail.pages[0].follower, {

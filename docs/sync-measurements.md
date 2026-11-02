@@ -295,9 +295,14 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   are separate observations. Since revision 29 (R29-DIAG) each page's rendering is judged against its OWN auth fence at every sample, in the live observer
   and in the saved-evidence reader, independently of the other page: a page whose fence stands must show the neutral state over a covered protected tree,
   also at the data activation (complete data while fenced is legal only while hidden) and while its peer is still hidden; each page may show the recovered
-  cache once its own fence is clear. Each sample is bracketed (the fences and the stored state read before and after one synchronous capture of the page);
-  a sample in which either changed is incoherent, re-read (bounded, counted) and never judged. The observer's settlement polls are not persisted, so the
-  reader can judge only the recorded samples. The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
+  cache once its own fence is clear. Each sample is bracketed (the fences and the stored state read before and after one synchronous capture of the page).
+  Since revision 30 (R30-DIAG) the two brackets and the rendering's availability are SEPARATE outcomes of one maintained composition
+  (`pair-capture.mjs`, observation contract `/4`, with the database incarnation): a capture is first judged for what it establishes on its own — an
+  unavailable or malformed rendering, a wrong account, role, document or database incarnation, a failed second read, and a page that displays while a
+  stable fence stands or that no phase the moving storage allows would admit, all fail on that capture — and only a lawful capture whose fence or stored
+  state moved is re-read (at most 20 in a row, counted by cause), never published. A bracket detects some uncertainty; it neither serialises the product's
+  writers nor proves that every transient state was observed. The observer's re-read captures and settlement polls are not persisted, so the reader can
+  judge only the recorded samples; the live observer's first failure is kept in the incomplete interval (`observation_failure`). The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
   are qualified with stand-ins, and the rendering adapter against the fixture DOM, only; the approved executable has NOT been launched and no diagnostic case
   has run in a browser.** The approval requires an independent review of the exact client source, selection and
   recipe BEFORE any execution (design assessment Q6), then the three-engine qualification (Q7). Nothing here is expiry/pruning evidence yet.

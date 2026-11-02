@@ -21,11 +21,13 @@
 //      cache, the complete rows are judged by the caller's oracle, and `recovery_activated` (revision 27's `recovery_exposed`, renamed in
 //      revision 28: it is the DATA activation, not what a page shows) binds the activating page.
 //   5. (revision 28) `recovery_rendered`: both pages SHOW the recovered cache (see the rendering contract below). Revision 29: every sample
-//      on the way, of either page, is admissible for its own fence (`admissibilityProblems`).
+//      on the way, of either page, is admissible for its own fence (`admissibilityProblems`). Revision 30: every CAPTURE, including one
+//      whose auth or storage bracket changed and is re-read, is first checked for what it establishes (`establishedProblems`).
 // Network barriers show the state BETWEEN transactions; they cannot look inside one. Atomicity inside the W22/W23 transaction remains the
 // existing native transaction controls' (qualified separately); this observer requires the evidence a split would leave between them.
 import { createHash } from "node:crypto";
 import { pickHeld } from "./pair-attempts.mjs";
+import { AUTH_BRACKETS, STORAGE_BRACKETS } from "./pair-capture.mjs";
 
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 
@@ -50,20 +52,26 @@ const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 // (§3.7.3: the data commits before the auth release); the page is then required to SHOW it once the session completes.
 
 /** The contract of the recovery observations' readers (each observation's `detail.schema`); earlier observations are incomplete. */
-// Revision 29 (C5): /3 — every sample states its coherence (`coherent`, from the bracketed adapter) and how many incoherent samples of
-// that read were re-read before it (`incoherent_rereads`); /2 samples are incomplete, never upgraded.
-export const OBSERVATION_SCHEMA = "web09c-recovery-observation/3";
-/** The most consecutive INCOHERENT samples one read re-reads before it fails (each re-read is counted in the sample it ends with). */
-export const MAX_INCOHERENT_REREADS = 20;
+// Revision 29 (C5): /3 — every sample stated one `coherent` flag and its `incoherent_rereads`. Revision 30 (R30-DIAG; design assessment
+// C1/C4): /4 — every sample carries its separate capture brackets (`capture.auth`, `capture.storage`, pair-capture.mjs), the database
+// `incarnation` it read, and its permitted re-reads BY CAUSE (`rereads: {total, auth, storage}`); /2 and /3 samples are incomplete for /4,
+// never upgraded.
+export const OBSERVATION_SCHEMA = "web09c-recovery-observation/4";
+/**
+ * The most consecutive UNRESOLVED samples (a changed auth or storage bracket, nothing independently established against them) one read
+ * re-reads before it fails; each is counted by cause in the sample that ends them. A count, not a clock: a hung IO call is bounded only by
+ * the case's own deadline (the pair spec's test timeout), never by this.
+ */
+export const MAX_UNRESOLVED_REREADS = 20;
 export const RECOVERY_VIEW_KINDS = Object.freeze(["displaying", "neutral"]);
 const isText = (v) => typeof v === "string" && v.length > 0;
 
 /**
- * The problems that make a reader's sample INCOMPLETE (not an observation at all): the rendering unavailable or malformed, no document
- * identity, the wrong account, the reader's role not positively observed (the leader page attached as leader, the follower as follower),
- * the fences unavailable.
+ * The problems of a reader's RENDERING and its identity that hold whatever its brackets say (revision 30: checked on EVERY capture, before
+ * any re-read): the rendering unavailable or malformed, no document identity, the wrong account, the reader's role not positively observed
+ * (the leader page attached as leader, the follower as follower), another account displayed.
  */
-export function observationProblems(r, { account }) {
+export function renderingProblems(r, { account }) {
   const p = [];
   const who = r?.reader ?? "a reader";
   const g = r?.rendering;
@@ -98,11 +106,74 @@ export function observationProblems(r, { account }) {
     !Number.isInteger(g.placeholders.present)
   )
     p.push(`${who}'s cache-gate placeholders are not observed`);
-  if (typeof r.fenced !== "boolean")
-    p.push(`${who}'s auth fences are not observed`);
-  if (r.coherent !== true)
+  return p;
+}
+
+/**
+ * The problems of a sample's CAPTURE ENVELOPE (revision 30, C1): a missing or malformed bracket, an auth bracket that could not be read, a
+ * stable auth bracket without a boolean fence (or a non-stable one paired with a fence), a storage bracket that could not be read again or
+ * found another database incarnation, a changed storage bracket naming no field, and a sample naming no database incarnation. Failed IO is
+ * a failed observation, never the `changed` alternative.
+ */
+export function captureProblems(r) {
+  const who = r?.reader ?? "a reader";
+  const c = r?.capture;
+  if (!c || typeof c !== "object")
+    return [`${who}'s sample states no capture brackets`];
+  const p = [];
+  const auth = c.auth;
+  if (!AUTH_BRACKETS.includes(auth?.status))
     p.push(
-      `${who}'s sample is not stated coherent (${r.incoherence ?? "no coherence"})`,
+      `${who}'s auth bracket is malformed (${JSON.stringify(auth?.status ?? null)})`,
+    );
+  else if (auth.status === "unavailable")
+    p.push(
+      `${who}'s auth fences are not observed (${auth.error ?? "no error stated"})`,
+    );
+  else if (auth.status === "stable" && typeof r.fenced !== "boolean")
+    p.push(
+      `${who}'s auth fences are not observed (a stable bracket, no fence)`,
+    );
+  else if (auth.status === "changed" && r.fenced !== null)
+    p.push(`${who} pairs a changed auth bracket with a fence`);
+  const storage = c.storage;
+  if (!STORAGE_BRACKETS.includes(storage?.status))
+    p.push(
+      `${who}'s storage bracket is malformed (${JSON.stringify(storage?.status ?? null)})`,
+    );
+  else if (storage.status === "unavailable")
+    p.push(
+      `${who}'s stored state was not read again (${storage.reason ?? "no reason stated"})`,
+    );
+  else if (storage.status === "replaced")
+    p.push(
+      `${who}'s account database was replaced during the sample (${storage.reason ?? "no reason stated"})`,
+    );
+  else if (
+    storage.status === "changed" &&
+    !(Array.isArray(storage.fields) && storage.fields.length > 0)
+  )
+    p.push(`${who}'s changed storage bracket names no field`);
+  if (!isText(r.incarnation))
+    p.push(`${who}'s account database names no incarnation`);
+  return p;
+}
+
+/** Whether both brackets are stable: only then is the sample's stored state associated with its rendering and fence (a usable sample). */
+export const resolved = (r) =>
+  r?.capture?.auth?.status === "stable" &&
+  r?.capture?.storage?.status === "stable";
+
+/**
+ * The problems that make a reader's sample INCOMPLETE as a usable observation: its rendering/identity problems, its capture envelope's,
+ * and either bracket not stable.
+ */
+export function observationProblems(r, { account }) {
+  const p = [...renderingProblems(r, { account }), ...captureProblems(r)];
+  if (p.length > 0) return p;
+  if (!resolved(r))
+    p.push(
+      `${r.reader}'s sample is not resolved (auth ${r.capture.auth.status}, storage ${r.capture.storage.status})`,
     );
   return p;
 }
@@ -223,6 +294,52 @@ export function admissibilityProblems(r, { caller, phase, what }) {
   return [];
 }
 
+// Revision 30 (R30-DIAG; design assessment C2, invariants 1-3): what a capture ESTABLISHES even while one of its brackets is unresolved.
+// A changed auth bracket leaves the fence relation indeterminate — the fence in force at the capture was one of `true`/`false`; a changed
+// storage bracket at an activation poll leaves the data phase indeterminate — the replacement was complete or it was not. The capture is
+// judged under EVERY interpretation its brackets allow, and refused when no interpretation admits it: a stable fence with a displaying page
+// is forbidden whatever the stored state did, and a page shown before the activation (held at the network barrier, so not yet released)
+// is forbidden whatever the fence did. Only a capture some interpretation admits may be re-read. No interpretation is ever published.
+/** The (fence, phase) interpretations a capture's brackets allow. */
+export function interpretations(r, phase) {
+  const fences =
+    r?.capture?.auth?.status === "stable" ? [r.fenced] : [true, false];
+  let phases = [phase];
+  if (phase === "activation")
+    phases =
+      r?.capture?.storage?.status === "stable"
+        ? [holdsComplete(r) ? "after_activation" : "before_activation"]
+        : ["before_activation", "after_activation"];
+  return fences.flatMap((fenced) => phases.map((p) => ({ fenced, phase: p })));
+}
+/**
+ * The problems of a capture under every interpretation its brackets allow (none: some interpretation admits it). With both brackets stable
+ * this is exactly `admissibilityProblems`.
+ */
+export function establishedProblems(r, { caller, phase, what }) {
+  if (!ADMISSIBILITY_PHASES.includes(phase))
+    throw new Error(`unknown admissibility phase ${phase}`);
+  const all = interpretations(r, phase);
+  const refused = [];
+  for (const i of all) {
+    const p = admissibilityProblems(
+      { ...r, fenced: i.fenced },
+      { caller, phase: i.phase, what },
+    );
+    if (p.length === 0) return [];
+    refused.push({ ...i, p });
+  }
+  if (all.length === 1) return refused[0].p;
+  return [
+    `inadmissible under every interpretation its brackets allow (auth ${r.capture.auth.status}, storage ${r.capture.storage.status}): ${refused
+      .map(
+        (x) =>
+          `[fenced ${x.fenced}, ${x.phase.replace("_", " ")}] ${x.p.join("; ")}`,
+      )
+      .join(" | ")}`,
+  ];
+}
+
 /** The problems of a reader's state right after the refusal was processed (`recovery_invalidated`). */
 export function invalidatedProblems(
   r,
@@ -310,6 +427,9 @@ export function activatedProblems(r, { oldDigest }) {
  * the fence is cleared: shown while fenced fails). Every sample until then is hidden or shown, never another state.
  * Revision 29 (R29-DIAG): EVERY read — each held page, each activation poll, the complete follower, the row-bearing leader read and every
  * settlement poll — is judged by `admissibilityProblems` for that page against its own fence before it is used, irrespective of its peer.
+ * Revision 30 (R30-DIAG): each read's samples carry separate capture brackets (pair-capture.mjs); independently established failures are
+ * refused on the capture that establishes them, before any re-read of an unresolved bracket. `io.failed?({reason, capture})` receives the
+ * first failure's facts before the throw (the owner keeps them in the incomplete interval).
  * Resolves with {pages, final, rendered}; throws with a diagnosis on the first violation (the interval is then kept incomplete by its
  * owner). A read that throws is a failed observation, never a hidden one.
  */
@@ -328,54 +448,113 @@ export async function observeRecovery(io, o) {
   if (!["ordinary", "recovery"].includes(caller))
     throw new Error(`unknown caller ${caller}`);
   if (!isText(account)) throw new Error("no reader account to observe");
-  const fail = (what) => {
-    throw new Error(`recovery observation: ${what}`);
+  const fail = (what, capture = null) => {
+    const error = new Error(`recovery observation: ${what}`);
+    // Revision 30 (C3): the failing capture's own facts travel with the failure (and are recorded by the owner's `failed` hook BEFORE the
+    // throw, so the incomplete interval keeps them); no later read is needed to confirm it, and no milestone follows it.
+    if (capture) error.capture = capture;
+    try {
+      io.failed?.({ reason: error.message, capture });
+    } catch {
+      // The failure itself stands whatever its recording does.
+    }
+    throw error;
   };
-  const require = (problems, what) => {
-    if (problems.length > 0) fail(`${what}: ${problems.join("; ")}`);
+  const require = (problems, what, capture = null) => {
+    if (problems.length > 0) fail(`${what}: ${problems.join("; ")}`, capture);
   };
   const documents = {};
-  // Every read names its phase and is judged for admissibility (R29-DIAG) before its result is used or any milestone is published.
+  let incarnation;
+  /** What a failed capture reports: page, phase, read number, both brackets, its document and database identity, its stamp. */
+  const factsOf = (who, phase, n, r, rereads) => ({
+    reader: who,
+    page: r?.page ?? null,
+    phase,
+    read: n,
+    rereads: { ...rereads },
+    capture: r?.capture ?? null,
+    fenced: r?.fenced ?? null,
+    document: r?.rendering?.status === "observed" ? r.rendering.document : null,
+    rendering_status: r?.rendering?.status ?? null,
+    incarnation: r?.incarnation ?? null,
+    stored: r
+      ? {
+          cache_status: r.cache_status ?? null,
+          staging_rows: r.staging_rows ?? null,
+          recovery_generation: r.recovery_generation ?? null,
+          composition_seq: r.composition_seq ?? null,
+          cache_digest: r.cache_digest ?? null,
+        }
+      : null,
+  });
+  // Revision 30 (R30-DIAG; design assessment C2): every capture of a read — including each one later re-read — is checked IN THIS ORDER:
+  //   1. the IO (a read that throws fails), the reader's role, the capture envelope (malformed/missing brackets, unreadable fences, a
+  //      storage read that failed, found no database or another incarnation), the rendering and its identity (observed, complete, the
+  //      account, the positive attachment, the same document as before, not the peer's document, the same database incarnation);
+  //   2. what the capture ESTABLISHES under every interpretation its brackets allow (`establishedProblems`): the fence implication when the
+  //      auth bracket is stable, the hidden rules when the phase is fixed by the held barrier, both phase readings of an activation poll
+  //      whose storage moved;
+  //   3. only then, a capture with a changed bracket is re-read — bounded (MAX_UNRESOLVED_REREADS consecutive) and counted by cause;
+  //   4. a resolved capture (both brackets stable) is judged in full (`admissibilityProblems`, the same as 2 with one interpretation) and
+  //      returned with its counts.
+  // Revision 29 re-read on one merged `coherent: false` BEFORE any check, so a storage-only change discarded a stable fenced exposure or
+  // an unavailable rendering and a later lawful sample succeeded.
   const read = async (who, phase, opts) => {
     if (!ADMISSIBILITY_PHASES.includes(phase))
       throw new Error(`a read of the ${who} names no admissibility phase`);
-    let r;
-    // An INCOHERENT sample (its fences or stored state changed during the capture) is no observation: it is re-read, bounded and counted,
-    // never judged — while every coherent sample is judged, so a forbidden coherent one is never re-read into success.
-    let incoherent = 0;
-    for (;;) {
+    const what = `at ${phase.replace("_", " ")}`;
+    const rereads = { total: 0, auth: 0, storage: 0 };
+    for (let n = 1; ; n += 1) {
+      let r;
       try {
         r = await io.read(who, opts);
       } catch (error) {
-        fail(`the ${who}'s read failed: ${String(error?.message ?? error)}`);
-      }
-      if (r?.coherent !== false) break;
-      incoherent += 1;
-      if (incoherent > MAX_INCOHERENT_REREADS)
         fail(
-          `no coherent sample of the ${who} in ${incoherent} reads at ${phase.replace("_", " ")} (${r.incoherence ?? "incoherent"})`,
+          `the ${who}'s read failed: ${String(error?.message ?? error)}`,
+          factsOf(who, phase, n, null, rereads),
+        );
+      }
+      const facts = () => factsOf(who, phase, n, r, rereads);
+      if (r?.reader !== who)
+        fail(`a read of the ${who} returned ${r?.reader}`, facts());
+      require([
+        ...captureProblems(r),
+        ...renderingProblems(r, { account }),
+      ], `an incomplete observation of the ${who} (${what}, read ${n})`, facts());
+      const doc = r.rendering.document;
+      if (documents[who] === undefined) documents[who] = doc;
+      else if (documents[who] !== doc)
+        fail(
+          `the ${who}'s document changed during the observation (reloaded or replaced)`,
+          facts(),
+        );
+      const other = documents[who === "leader" ? "follower" : "leader"];
+      if (other !== undefined && other === doc)
+        fail("the follower is the leading page's own document", facts());
+      if (incarnation === undefined) incarnation = r.incarnation;
+      else if (incarnation !== r.incarnation)
+        fail(
+          `the ${who} reads another account database incarnation (${r.incarnation}, not ${incarnation}): replaced during the observation`,
+          facts(),
+        );
+      require(establishedProblems(r, {
+        caller,
+        phase,
+        what,
+      }), `the ${who}'s page is not admissible`, facts());
+      if (resolved(r)) {
+        r.rereads = { ...rereads };
+        return r;
+      }
+      rereads.total += 1;
+      if (r.capture.auth.status === "changed") rereads.auth += 1;
+      if (r.capture.storage.status === "changed") rereads.storage += 1;
+      if (rereads.total > MAX_UNRESOLVED_REREADS)
+        fail(
+          `no resolved sample of the ${who} in ${rereads.total} reads ${what} (auth ${r.capture.auth.status}${r.capture.auth.reason ? `: ${r.capture.auth.reason}` : ""}; storage ${r.capture.storage.status}${r.capture.storage.fields ? `: ${r.capture.storage.fields.join(", ")}` : ""})`,
+          facts(),
         );
     }
-    if (r?.reader !== who) fail(`a read of the ${who} returned ${r?.reader}`);
-    r.incoherent_rereads = incoherent;
-    require(observationProblems(r, {
-      account,
-    }), `an incomplete observation of the ${who}`);
-    const doc = r.rendering.document;
-    if (documents[who] === undefined) documents[who] = doc;
-    else if (documents[who] !== doc)
-      fail(
-        `the ${who}'s document changed during the observation (reloaded or replaced)`,
-      );
-    const other = documents[who === "leader" ? "follower" : "leader"];
-    if (other !== undefined && other === doc)
-      fail("the follower is the leading page's own document");
-    require(admissibilityProblems(r, {
-      caller,
-      phase,
-      what: `at ${phase.replace("_", " ")}`,
-    }), `the ${who}'s page is not admissible`);
-    return r;
   };
   const both = async (phase, opts) => [
     await read("leader", phase, opts),

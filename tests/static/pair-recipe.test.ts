@@ -82,7 +82,7 @@ describe("the released path is untouched", () => {
       "scripts/integration/schedule.mjs",
     ])
       expect(read(file)).not.toMatch(
-        /pair-(selection|matrix|tap|evidence|attempts|driver|recovery|schedule)|run-development-pair|diagnostic-(fixture|evidence|fake)|causal-journal/,
+        /pair-(selection|matrix|tap|evidence|attempts|driver|recovery|schedule|capture)|run-development-pair|diagnostic-(fixture|evidence|fake)|causal-journal/,
       );
   });
 
@@ -107,7 +107,7 @@ describe("the released path is untouched", () => {
     expect(sources.length).toBeGreaterThan(100);
     for (const file of sources)
       expect(read(file), file).not.toMatch(
-        /diagnostic-(fixture|evidence|fake)|ATLAS_PAIR_DIAGNOSTIC|atlas-sync-diagnostic|causal-journal|pair-recovery|pair-schedule|__pairDocument/,
+        /diagnostic-(fixture|evidence|fake)|ATLAS_PAIR_DIAGNOSTIC|atlas-sync-diagnostic|causal-journal|pair-recovery|pair-schedule|pair-capture|__pairDocument|__pairLatch/,
       );
   });
 
@@ -136,6 +136,44 @@ describe("the spec is exactly the explicit matrix", () => {
     const named = new Set(spec.match(/PAIR-[A-Z]+[0-9]+/g) ?? []);
     for (const id of named) expect(ids, id).toContain(id);
     for (const unrun of UNSUPPORTED) expect(spec).not.toContain(`"${unrun.id}`);
+  });
+
+  it("revision 30 (R30-DIAG): the pair readers use the MAINTAINED capture composition (pair-capture.mjs), never a copy or a merged flag", () => {
+    const support = code("tests/pair/support.ts");
+    const reader = support.slice(
+      support.indexOf("export async function recoveryReader("),
+      support.indexOf("export async function observeRecoveryOf("),
+    );
+    expect(reader).toMatch(/return \(await recoverySample\(/);
+    expect(reader).toMatch(/rendering: \(\) => renderingOf\(page, account\)/);
+    expect(reader).toMatch(/stored\(page, account, rows, local\)/);
+    expect(reader).not.toMatch(/coherent|incoherence|storedStamp/);
+    expect(support).toMatch(
+      /import \{ recoverySample \} from "\.\.\/\.\.\/scripts\/integration\/pair-capture\.mjs";/,
+    );
+    // The observer's owner keeps the first failure in the incomplete interval.
+    expect(support).toMatch(
+      /failed: \(f\) => \{\s*iv\.observationFailure \?\?= f;/,
+    );
+    expect(support).toMatch(
+      /observation_failure: iv\.observationFailure \?\? null,/,
+    );
+    const rendering = code("tests/pair/rendering.ts");
+    expect(rendering).toMatch(
+      /import \{ renderingOf as maintained \} from "\.\.\/\.\.\/scripts\/integration\/pair-capture\.mjs";/,
+    );
+    expect(rendering).not.toMatch(/page\.evaluate/);
+    // The capture module has no imports at all (no runner state, bridge or evidence), and no merged quality flag.
+    const capture = read("scripts/integration/pair-capture.mjs");
+    expect(capture).not.toMatch(/^import /m);
+    expect(code("scripts/integration/pair-capture.mjs")).not.toMatch(
+      /coherent/,
+    );
+    // The native qualification drives the same composition with the same raw read.
+    const native = code("tests/e2e/fixture.pair-rendering.spec.ts");
+    expect(native).toMatch(/recoverySample\(/);
+    expect(native).toMatch(/from "\.\.\/pair\/stored"/);
+    expect(read("tests/pair/stored.ts")).not.toMatch(/from "\.\.\/integration/);
   });
 
   it("revision 28 (R28-DIAG.a): the real-410 schedule is the maintained pair-schedule.mjs composition; no hook reads the outer token", () => {

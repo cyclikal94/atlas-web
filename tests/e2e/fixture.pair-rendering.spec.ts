@@ -1,12 +1,19 @@
 import type { BrowserContext, Page } from "@playwright/test";
+import { recoverySample } from "../../scripts/integration/pair-capture.mjs";
 import {
+  admissibilityProblems,
+  captureProblems,
+  establishedProblems,
   hiddenProblems,
-  observationProblems,
+  holdsComplete,
   type RecoveryReader,
+  renderingProblems,
+  resolved,
   shownProblems,
   surfaceOf,
 } from "../../scripts/integration/pair-recovery.mjs";
 import { renderingOf } from "../pair/rendering";
+import { stored } from "../pair/stored";
 import {
   ACCOUNT,
   arrange,
@@ -15,13 +22,15 @@ import {
   fencedWithCursor,
   fresh,
   held,
+  holdFinishWhileFlagged,
   type LeaderNet,
   leaderOf,
   leaderPage,
+  leaderPageAfter,
   snapshotPage,
   status,
 } from "./data-leader-helpers";
-import { atlasError } from "./data-sync-helpers";
+import { atlasError, upsert } from "./data-sync-helpers";
 import { expect, test } from "./helpers";
 
 /**
@@ -46,13 +55,18 @@ const expose = (page: Page) =>
         booted as { session: unknown }
       ).session;
   });
-/** A reader's sample with only what the rendering rules read (the stored state is not part of this qualification). */
+/** A reader's sample with only what the rendering rules read (the stored state is not part of these rendering-only cases). */
 async function sample(
   page: Page,
   reader: "leader" | "follower",
-): Promise<RecoveryReader> {
+): Promise<RecoveryReader & { auth: { status: string } }> {
   const seen = await renderingOf(page, ACCOUNT);
-  return { reader, page: reader, account: ACCOUNT, ...seen } as RecoveryReader;
+  return {
+    reader,
+    page: reader,
+    account: ACCOUNT,
+    ...seen,
+  } as unknown as RecoveryReader & { auth: { status: string } };
 }
 async function until(
   page: Page,
@@ -148,7 +162,7 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
         (observed(r)?.placeholders.refreshing_visible ?? 0) > 0,
       "the leader displays the account behind the refreshing placeholder",
     );
-    expect(observationProblems(hidden, { account: ACCOUNT })).toEqual([]);
+    expect(renderingProblems(hidden, { account: ACCOUNT })).toEqual([]);
     const g = observed(hidden);
     expect(g?.view?.account_id).toBe(ACCOUNT);
     expect(g?.root).toEqual({ present: true, gated: false, mounted: true });
@@ -188,7 +202,7 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
       (r) => shownProblems(r).length === 0,
       "the valid cache is shown",
     );
-    expect(observationProblems(shown, { account: ACCOUNT })).toEqual([]);
+    expect(renderingProblems(shown, { account: ACCOUNT })).toEqual([]);
     expect(
       hiddenProblems(shown, { caller: "ordinary", what: "x" }).join(),
     ).toMatch(/shows the account's cache content .*\(shown\)/);
@@ -216,7 +230,7 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
         observed(r)?.attachment === "leader",
       "the fenced page is neutral while its recovery waits",
     );
-    expect(observationProblems(fenced, { account: ACCOUNT })).toEqual([]);
+    expect(renderingProblems(fenced, { account: ACCOUNT })).toEqual([]);
     expect(fenced.fenced).toBe(true);
     const g = observed(fenced);
     expect(g && surfaceOf(g)).toBe("protected_hidden");
@@ -233,7 +247,7 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
       "the recovered account is shown with the fence cleared",
       60_000,
     );
-    expect(observationProblems(shown, { account: ACCOUNT })).toEqual([]);
+    expect(renderingProblems(shown, { account: ACCOUNT })).toEqual([]);
     expect(
       hiddenProblems(shown, { caller: "recovery", what: "x" }).join(),
     ).toMatch(/never displayed/);
@@ -263,11 +277,11 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
       (r) => observed(r)?.attachment === "follower",
       "the second page attaches as a follower",
     );
-    expect(observationProblems(f, { account: ACCOUNT })).toEqual([]);
+    expect(renderingProblems(f, { account: ACCOUNT })).toEqual([]);
     expect(observed(f)?.document).not.toBe(observed(first)?.document);
     // The follower sampled AS a leader is refused for its role.
     expect(
-      observationProblems({ ...f, reader: "leader" }, { account: ACCOUNT }),
+      renderingProblems({ ...f, reader: "leader" }, { account: ACCOUNT }),
     ).toEqual(["leader's page is attached as follower, not leader"]);
     const before = observed(await sample(leader, "leader"))?.document;
     expect(observed(await sample(leader, "leader"))?.document).toBe(before);
@@ -283,7 +297,7 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
     expect(observed(after)?.document).not.toBe(before);
   });
 
-  test("revision 29 (C5/Q8): the sample is BRACKETED — the capture is one turn between two fence reads; a fence changed across it is incoherent", async ({
+  test("revision 29 (C5/Q8), restated in revision 30: the capture is ONE turn between two fence reads; a fence changed across it is a CHANGED auth bracket", async ({
     context,
   }) => {
     const net = await fresh(context);
@@ -295,11 +309,11 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
       (r) => shownProblems(r).length === 0,
       "the fresh account is shown",
     );
-    expect(healthy.coherent).toBe(true);
+    expect(healthy.auth).toEqual({ status: "stable" });
     expect(healthy.fenced).toBe(false);
     // A deterministic pause at the auth-record reads: the FIRST read of a sample reports a fence and, as it returns, gates the protected
     // root; the SECOND reports none and, before it returns, lifts the root again. A capture made before the first read or after the
-    // second would see the root lifted; the bracketed capture sees it gated, and the changed fence makes the sample incoherent.
+    // second would see the root lifted; the bracketed capture sees it gated, and the changed fence makes the auth bracket `changed`.
     await page.evaluate((account) => {
       const session = window.__atlasFixture?.session as unknown as {
         readRecords: () => Promise<{
@@ -336,15 +350,16 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
     const mixed = await sample(page, "leader");
     const g = observed(mixed);
     expect(g?.root.gated).toBe(true);
-    expect(mixed.coherent).toBe(false);
+    expect(mixed.auth).toEqual({
+      status: "changed",
+      reason: "the account's auth fences changed during the capture",
+    });
     expect(mixed.fenced).toBeNull();
-    expect(mixed.incoherence).toMatch(/auth fences changed during the capture/);
-    expect(observationProblems(mixed, { account: ACCOUNT }).join()).toMatch(
-      /sample is not stated coherent/,
-    );
-    // After the probe's two reads, the page reads coherently again (the wrapper passes the records through), and is shown.
+    // The rendering itself is a complete observation; only its fence relation is indeterminate.
+    expect(renderingProblems(mixed, { account: ACCOUNT })).toEqual([]);
+    // After the probe's two reads, the auth bracket is stable again (the wrapper passes the records through), and the page is shown.
     const after = await sample(page, "leader");
-    expect(after.coherent).toBe(true);
+    expect(after.auth).toEqual({ status: "stable" });
     expect(after.fenced).toBe(false);
     expect(shownProblems(after)).toEqual([]);
   });
@@ -361,8 +376,9 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
     );
     const r = await sample(page, "leader");
     expect(r.rendering.status).toBe("unavailable");
-    expect(r.fenced).toBeNull();
-    expect(observationProblems(r, { account: ACCOUNT }).join()).toMatch(
+    // Revision 30: the rendering's unavailability is its own outcome; the auth bracket is whatever the fence reads gave, never a proxy.
+    expect(["stable", "unavailable"]).toContain(r.auth.status);
+    expect(renderingProblems(r, { account: ACCOUNT }).join()).toMatch(
       /rendering was not observed \(unavailable: .*session view is not readable/,
     );
     expect(hiddenProblems(r, { caller: "ordinary", what: "x" })).not.toEqual(
@@ -372,8 +388,366 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
     await page.close();
     const closed = await sample(page, "follower");
     expect(closed.rendering.status).toBe("unavailable");
+    expect(closed.auth.status).toBe("unavailable");
+    expect(closed.fenced).toBeNull();
     expect(
       hiddenProblems(closed, { caller: "recovery", what: "x" }),
     ).not.toEqual([]);
+  });
+});
+
+/**
+ * WEB-09c revision 30 (R30-DIAG; design assessment Q6b): the MAINTAINED composition (pair-capture.mjs `recoverySample`: the raw stored read,
+ * `renderingOf`, the stored read again — exactly as tests/pair/support.ts `recoveryReader` composes it) on REAL IndexedDB and the real DOM.
+ * A real ADMITTED product write on ANOTHER connection (the follower page's production outbox facade: W2 enqueue, which advances
+ * `composition_seq` in its own transaction) is committed INSIDE the capture's auth bracket, i.e. after the first stored read and before the
+ * second. The observation faults (a fence reported by the auth read while the page displays; the session hook hidden for one capture) are
+ * labelled TEST INTERVENTIONS: they show the harness keeps an independently established failure across a real storage change, never
+ * product exposure. FIXTURE evidence: the network is stubbed; no backend runs.
+ */
+const createPerson = (id: string, name: string) => ({
+  endpoint: "/commands",
+  targets: [
+    {
+      resourceId: id,
+      role: "primary" as const,
+      basis: "resource" as const,
+      versionChecked: false,
+      seedIfUntracked: 1,
+    },
+  ],
+  command: { commands: [{ kind: "create_person", id, name }] },
+  displayPatch: { [id]: { label: name } },
+});
+/**
+ * Installs ONE capture's schedule in `page`: its second auth read waits (`window.__pairLatch`) until released; `fence` makes BOTH auth
+ * reads report the account's fence (intervention); `hideView` removes the session hook for this capture only (intervention). Restored by
+ * the second read.
+ */
+const latchCapture = (page: Page, o: { fence?: boolean; hideView?: boolean }) =>
+  page.evaluate(
+    ({ account, fence, hideView }) => {
+      const w = window as unknown as {
+        __s?: unknown;
+        __pairLatch?: { reached: boolean; release?: () => void };
+        __atlasFixture: {
+          session: {
+            readRecords: () => Promise<{
+              auth_state?: { fences?: Record<string, unknown[]> };
+            }>;
+          };
+        };
+      };
+      const session = w.__atlasFixture.session;
+      const original = session.readRecords;
+      const view = w.__s;
+      const latch: { reached: boolean; release?: () => void } = {
+        reached: false,
+      };
+      const gate = new Promise<void>((resolve) => {
+        latch.release = resolve;
+      });
+      w.__pairLatch = latch;
+      let calls = 0;
+      const withFence = async () => {
+        const records = await original.call(session);
+        return fence
+          ? {
+              ...records,
+              auth_state: {
+                ...records.auth_state,
+                fences: {
+                  ...(records.auth_state?.fences ?? {}),
+                  [account]: [{ kind: "probe-intervention" }],
+                },
+              },
+            }
+          : records;
+      };
+      session.readRecords = async () => {
+        calls += 1;
+        if (calls === 1) {
+          const out = await withFence();
+          if (hideView) w.__s = undefined;
+          return out;
+        }
+        latch.reached = true;
+        await gate;
+        session.readRecords = original;
+        w.__s = view;
+        return withFence();
+      };
+    },
+    {
+      account: ACCOUNT,
+      fence: o.fence ?? false,
+      hideView: o.hideView ?? false,
+    },
+  );
+async function capturedAcrossWrite(
+  leader: Page,
+  follower: Page,
+  o: { fence?: boolean; hideView?: boolean },
+) {
+  await latchCapture(leader, o);
+  let reads = 0;
+  let first: Awaited<ReturnType<typeof stored>> = null;
+  const pending = recoverySample(
+    {
+      stored: async (rows: boolean, local: string[] | null) => {
+        reads += 1;
+        const s = await stored(leader, ACCOUNT, rows, local);
+        if (reads === 1) first = s;
+        return s;
+      },
+      rendering: () => renderingOf(leader, ACCOUNT),
+    },
+    { reader: "leader", page: "leader-page", account: ACCOUNT },
+  );
+  await expect
+    .poll(
+      () =>
+        leader.evaluate(
+          () =>
+            (window as unknown as { __pairLatch?: { reached: boolean } })
+              .__pairLatch?.reached ?? false,
+        ),
+      { timeout: 15_000, message: "the capture is latched inside its bracket" },
+    )
+    .toBe(true);
+  // The admitted write, on the FOLLOWER's own connection, committed while the leader's capture is open.
+  const id = crypto.randomUUID();
+  const queued = (await follower.evaluate(
+    (given) =>
+      (
+        window as unknown as {
+          __atlasFixture: {
+            session: { enqueue(spec: unknown): Promise<unknown> };
+          };
+        }
+      ).__atlasFixture.session.enqueue(given),
+    createPerson(id, "R30 Q6b"),
+  )) as { kind: string; localId?: string };
+  expect(queued.kind, JSON.stringify(queued)).toBe("queued");
+  const base = (first as unknown as { composition_seq: number })
+    .composition_seq;
+  await expect
+    .poll(
+      async () =>
+        ((await stored(leader, ACCOUNT)) as { composition_seq: number } | null)
+          ?.composition_seq ?? -1,
+      { timeout: 15_000, message: "the write committed natively" },
+    )
+    .toBeGreaterThan(base);
+  await leader.evaluate(() =>
+    (
+      window as unknown as { __pairLatch: { release: () => void } }
+    ).__pairLatch.release(),
+  );
+  const out = (await pending) as unknown as RecoveryReader & {
+    capture: {
+      auth: { status: string };
+      storage: {
+        status: string;
+        fields?: string[];
+        before?: { composition_seq?: number };
+        after?: { composition_seq?: number };
+      };
+    };
+  };
+  expect(reads).toBe(2);
+  // The native commit and the stamp change it caused, recorded by the bracket itself.
+  expect(out.capture.storage.status).toBe("changed");
+  expect(out.capture.storage.fields).toContain("composition_seq");
+  expect(out.capture.storage.after?.composition_seq ?? 0).toBeGreaterThan(
+    out.capture.storage.before?.composition_seq ?? Infinity,
+  );
+  expect(captureProblems(out)).toEqual([]);
+  expect(resolved(out)).toBe(false);
+  return out;
+}
+async function shownPair(context: BrowserContext) {
+  const net = await fresh(context);
+  const leader = await leaderPage(context, net, "leader");
+  await expose(leader);
+  await until(
+    leader,
+    "leader",
+    (r) => shownProblems(r).length === 0,
+    "the leader shows the account",
+  );
+  const follower = await leaderPage(context, net, "follower");
+  await expose(follower);
+  await until(
+    follower,
+    "follower",
+    (r) => observed(r)?.attachment === "follower",
+    "the second page follows",
+  );
+  return { leader, follower };
+}
+const AFTER = {
+  caller: "ordinary",
+  phase: "after_activation",
+  what: "x",
+} as const;
+
+test.describe("WEB-09c r30: the maintained capture composition across a REAL second-connection write (Q6b)", () => {
+  test("lawful: the shown, unfenced page with a real write committed inside its bracket is a CHANGED storage bracket, admissible — re-read, never refused", async ({
+    context,
+  }) => {
+    const { leader, follower } = await shownPair(context);
+    const out = await capturedAcrossWrite(leader, follower, {});
+    expect(out.capture.auth).toEqual({ status: "stable" });
+    expect(out.fenced).toBe(false);
+    expect(renderingProblems(out, { account: ACCOUNT })).toEqual([]);
+    expect(establishedProblems(out, AFTER)).toEqual([]);
+    expect(shownProblems(out)).toEqual([]);
+  });
+  test("refused: the SAME schedule with a stable fence reported while the page displays (intervention) — established despite the real storage change", async ({
+    context,
+  }) => {
+    const { leader, follower } = await shownPair(context);
+    const out = await capturedAcrossWrite(leader, follower, { fence: true });
+    expect(out.capture.auth).toEqual({ status: "stable" });
+    expect(out.fenced).toBe(true);
+    expect(out.rendering.status).toBe("observed");
+    expect(establishedProblems(out, AFTER).join()).toMatch(
+      /leader is shown while the recovery fence stands/,
+    );
+  });
+  test("refused: the SAME schedule with the session hook hidden for that capture (intervention) — an unavailable rendering, the stable auth bracket kept", async ({
+    context,
+  }) => {
+    const { leader, follower } = await shownPair(context);
+    const out = await capturedAcrossWrite(leader, follower, { hideView: true });
+    expect(out.capture.auth).toEqual({ status: "stable" });
+    expect(renderingProblems(out, { account: ACCOUNT }).join()).toMatch(
+      /rendering was not observed \(unavailable: the session view is not readable\)/,
+    );
+    // The page is shown again once the capture's schedule is restored.
+    expect(shownProblems(await sample(leader, "leader"))).toEqual([]);
+  });
+
+  /**
+   * Design assessment Q6b, second part: the REAL fenced recovery's final data commit with `finish` HELD (data-leader-helpers.ts
+   * `holdFinishWhileFlagged`, the named E-R7 hold: exclusive `atlas-auth` requests after the final `data.recovery_commit` are never granted
+   * while flagged). Both pages are sampled through the maintained composition: complete data under the standing fence is HIDDEN on each.
+   * Then the hold is lifted and every sample of each page until both show is judged on its own (asymmetric settlement permitted).
+   */
+  test("the fenced recovery's complete data with `finish` held: both pages hidden; then each page lawful on its own until both show", async ({
+    context,
+  }) => {
+    const net = await fencedWithCursor(context);
+    net.answer = async (call) =>
+      call.cursor === "delta-0"
+        ? deltaPage([upsert(8, { n: 8 })], "delta-1")
+        : deltaPage([], call.cursor ?? "x");
+    const one = await leaderPageAfter(
+      context,
+      net,
+      "one",
+      holdFinishWhileFlagged,
+    );
+    await expose(one);
+    await expect
+      .poll(
+        () =>
+          one.evaluate(
+            () =>
+              (window as unknown as { __finishHeldCount?: number })
+                .__finishHeldCount ?? 0,
+          ),
+        { timeout: 30_000, message: "finish is held after the final commit" },
+      )
+      .toBeGreaterThan(0);
+    const two = await leaderPage(context, net, "two");
+    await expose(two);
+    const composedSample = (page: Page, reader: "leader" | "follower") =>
+      recoverySample(
+        {
+          stored: (rows: boolean, local: string[] | null) =>
+            stored(page, ACCOUNT, rows, local),
+          rendering: () => renderingOf(page, ACCOUNT),
+        },
+        { reader, page: `${reader}-page`, account: ACCOUNT },
+      ) as unknown as Promise<RecoveryReader>;
+    /** A resolved sample, judging every capture on the way for what it establishes (as the observer's read does). */
+    const resolvedOf = async (page: Page, reader: "leader" | "follower") => {
+      for (let i = 0; i < 21; i += 1) {
+        const r = await composedSample(page, reader);
+        expect(captureProblems(r), JSON.stringify(r)).toEqual([]);
+        expect(
+          renderingProblems(r, { account: ACCOUNT }),
+          JSON.stringify(r),
+        ).toEqual([]);
+        expect(
+          establishedProblems(r, {
+            caller: "recovery",
+            phase: "after_activation",
+            what: "x",
+          }),
+          JSON.stringify(r),
+        ).toEqual([]);
+        if (resolved(r)) return r;
+      }
+      throw new Error(`no resolved sample of the ${reader} in 21 reads`);
+    };
+    for (const [page, reader] of [
+      [one, "leader"],
+      [two, "follower"],
+    ] as const) {
+      const r = await resolvedOf(page, reader);
+      expect(holdsComplete(r), "the complete data is committed").toBe(true);
+      expect(r.cursor).toBe("delta-1");
+      expect(r.fenced, `${reader}: the fence stands while finish is held`).toBe(
+        true,
+      );
+      expect(
+        admissibilityProblems(r, {
+          caller: "recovery",
+          phase: "after_activation",
+          what: "x",
+        }),
+      ).toEqual([]);
+      expect(r.rendering.status === "observed" && r.rendering.view?.kind).toBe(
+        "neutral",
+      );
+      expect(r.rendering.status === "observed" && surfaceOf(r.rendering)).toBe(
+        "protected_hidden",
+      );
+    }
+    await one.evaluate(() => {
+      (window as unknown as { __finishHold?: boolean }).__finishHold = false;
+    });
+    const shownAt: Record<string, number> = {};
+    for (
+      let poll = 0;
+      poll < 600 && Object.keys(shownAt).length < 2;
+      poll += 1
+    ) {
+      for (const [page, reader] of [
+        [one, "leader"],
+        [two, "follower"],
+      ] as const) {
+        if (shownAt[reader] !== undefined) continue;
+        const r = await resolvedOf(page, reader);
+        if (shownProblems(r).length === 0) {
+          expect(r.fenced, `${reader} is shown only with its fence clear`).toBe(
+            false,
+          );
+          shownAt[reader] = poll;
+        }
+      }
+      if (Object.keys(shownAt).length < 2) await one.waitForTimeout(50);
+    }
+    expect(Object.keys(shownAt).sort(), JSON.stringify(shownAt)).toEqual([
+      "follower",
+      "leader",
+    ]);
+    test.info().annotations.push({
+      type: "settlement",
+      description: JSON.stringify(shownAt),
+    });
   });
 });
