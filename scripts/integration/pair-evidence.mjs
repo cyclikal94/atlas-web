@@ -49,6 +49,14 @@
 // Revision 29 (R29-DIAG): every complete sample of every recovery observation (and every held page) satisfies the fence implication — a
 // standing fence means the neutral covered surface — and each `recovery_activated` sample is hidden while waiting or shown unfenced. The
 // observer's settlement polls are not persisted: this reader can judge every RECORDED sample, never the discarded polls between them.
+// Revision 33 (R33-DIAG; design assessment C1, additive to schema 3): a NON-SYNC exchange (`other_requests`) is a compact, ALLOW-LISTED
+// projection of its tap record — sequence, label, proxy correlation, method, pathname, status, upstream error, downstream outcome — and,
+// exactly as the tap recorded them, its causal-journal references (`CAUSAL_FIELDS`: `j_request`, and when present `j_gate_open`,
+// `j_upstream_end`, `j_delivered`, `gated`). The diagnostic proof reader binds every supplied exchange's arrival to its own journal event,
+// so a projection that dropped them made every non-sync exchange unbindable (review of revision 32: eleven missing arrivals in X0). The
+// references are copied when present and as they are (never defaulted, coerced or dropped when malformed: the reader judges them); absent
+// stays absent, so a run without a journal is unchanged. Nothing else of the tap record (its query, times, faults or any future field) is
+// persisted for a non-sync exchange.
 import { createHash } from "node:crypto";
 import {
   activates,
@@ -803,6 +811,26 @@ export function overheadOf(syncs, person, readBody) {
 }
 
 /**
+ * Revision 33 (R33-DIAG): the tap record's causal-journal references, the only fields of a non-sync exchange beyond its accounting that
+ * its compact projection keeps. Each is copied when the record HAS it, with its value unchanged (a malformed one stays malformed for the
+ * reader to refuse); a field the record does not have is not invented.
+ */
+export const CAUSAL_FIELDS = Object.freeze([
+  "j_request",
+  "j_gate_open",
+  "j_upstream_end",
+  "j_delivered",
+  "gated",
+]);
+export function causalOf(record) {
+  const out = {};
+  for (const key of CAUSAL_FIELDS)
+    if (Object.hasOwn(record, key) && record[key] !== undefined)
+      out[key] = record[key];
+  return out;
+}
+
+/**
  * The interval record (schema 3) from its parts: the interval's own observations (`iv`: barriers, attempts, target, drive mode, hand-off,
  * opening, hold releases, observations, traces), the joined exchanges of its window and their collection, and the case's details. The
  * terminal references are the driver's, or else the answers that reached the client (`terminalOf`). Pure: written and validated by the caller.
@@ -858,6 +886,7 @@ export function assembleInterval({
         status: r.status,
         ...(r.upstream_error ? { upstream_error: r.upstream_error } : {}),
         downstream: r.downstream,
+        ...causalOf(r),
       })),
     attempts: iv.attempts,
     unaltered:

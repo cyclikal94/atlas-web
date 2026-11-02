@@ -10,19 +10,37 @@
 // Controls: the correct order passes with the default (mixed-origin) clocks, with a journal whose raw clock never moves (equal ticks), and
 // with one that runs BACKWARDS; an inverted causal order (the gate opened before the clock reached E; before the collection was
 // acknowledged) fails. Nothing here launches the approved executable or any backend.
+//
+// Revision 33 (R33-DIAG; design assessment of 2 Nov 2026, token 9fbb8181ecf04530aa69c0b722f7454d, C2/Q1-Q3): the composition now also
+// carries the runner's SAVED route. The browser side goes through the maintained holding proxy (`createProxy`, correlation header) in front
+// of the tap, as the runner composes them, and sends NON-SYNC traffic as well (a GET of the browser session and of a resource, a POST of an
+// access command while the continuation waits at the gate, another GET after the refusal). The labelled window is then collected, joined to
+// the proxy's downstream outcomes (`joinExchanges`), assembled (`assembleInterval`), written, read back and judged as the runner judges it:
+// the generic reader (`validateInterval`, whose collection accounting must be complete) and the case's proof validator
+// (`PROOF_VALIDATORS`) on BOTH collections (`proofExchanges`). Revision 32's projection dropped every non-sync exchange's journal
+// references, so this route failed at each non-sync arrival while the raw sync-only route above passed.
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { createProxy } from "./delaying-proxy.mjs";
 import {
   ATTEMPT_SCHEMA,
   attemptProblems,
   PROOF_SCHEMA,
+  PROOF_VALIDATORS,
+  proofExchanges,
   attemptJournal as readJournal,
   readTranscript,
   x0Problems,
@@ -36,6 +54,13 @@ import {
   launchAttempt,
   RETENTION_SECONDS,
 } from "./diagnostic-fixture.mjs";
+import { CORRELATION_HEADER } from "./pair-attempts.mjs";
+import {
+  assembleInterval,
+  CAUSAL_FIELDS,
+  joinExchanges,
+  validateInterval,
+} from "./pair-evidence.mjs";
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const EXE_SHA = "e".repeat(64);
@@ -246,6 +271,18 @@ function standIn({ attempt, fixtureDir, origin, start }) {
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(JSON.stringify({ session_id: "s" }));
     }
+    // Revision 33: the browser's non-sync traffic (a resource read, an access command); the request body is read, never recorded.
+    if (url.pathname.includes("/people/")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ id: "p1" }));
+    }
+    if (req.method === "POST" && url.pathname.endsWith("/access-commands")) {
+      req.resume();
+      return req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ accepted: true }));
+      });
+    }
     const cursor = url.searchParams.get("cursor");
     const expired = world.now >= header.expiry;
     const pruned =
@@ -275,8 +312,12 @@ function standIn({ attempt, fixtureDir, origin, start }) {
   };
 }
 
+/** Revision 33: the generic reader's collection-accounting problems (pair-evidence.mjs `validateInterval`, "Collection"). */
+const ACCOUNTING =
+  /collection window|bounded log|body writes|still open when the interval ended|listed more than once|outside the interval|tap exchanges in the interval|other_requests\[/;
+
 /** The runner's composition, as `diagnosticStack` makes it, around the stand-in; then the spec's X0 or X2 schedule; then the readers. */
-async function composed({ kind, journalNow, invert = false }) {
+async function composed({ kind, journalNow, invert = false, corrupt = null }) {
   const dir = mkdtempSync(
     join(process.env.TMPDIR ?? tmpdir(), "atlas-compose-"),
   );
@@ -301,6 +342,7 @@ async function composed({ kind, journalNow, invert = false }) {
   let running = null;
   let tapUrls = null;
   let parts = null;
+  let proxy = null;
   try {
     running = await launchAttempt(
       {
@@ -363,11 +405,43 @@ async function composed({ kind, journalNow, invert = false }) {
       tap: {
         upstream: backendUrl,
         bodiesDir: join(evidence, "bodies"),
-        correlation: null,
+        correlation: CORRELATION_HEADER,
       },
     });
     await parts.bridge.listen();
     tapUrls = await parts.tap.start();
+    // Revision 33: the browser reaches the tap through the holding proxy, as in the runner (the correlation header joins each exchange to
+    // its downstream outcome), and the interval's window is the tap's label.
+    proxy = createProxy({
+      upstream: tapUrls.tapUrl,
+      correlation: CORRELATION_HEADER,
+    });
+    const proxyUrls = await proxy.start();
+    const IV = `PAIR-${kind.toUpperCase()}:node:iv`;
+    const tapControl = async (method, path, body) => {
+      const r = await fetch(`${tapUrls.controlUrl}${path}`, {
+        method,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      return r.json();
+    };
+    const { seq: since } = await tapControl("POST", "/label", { label: IV });
+    const browser = async (method, path, body) => {
+      const r = await fetch(
+        `${proxyUrls.proxyUrl}/api/experimental/v1${path}`,
+        {
+          method,
+          ...(body === undefined
+            ? {}
+            : {
+                body: JSON.stringify(body),
+                headers: { "content-type": "application/json" },
+              }),
+        },
+      );
+      await r.arrayBuffer();
+      assert.equal(r.status, 200, `${method} ${path}`);
+    };
     const at = { socketPath, token };
     const prefix = kind;
     const marks = {};
@@ -390,7 +464,7 @@ async function composed({ kind, journalNow, invert = false }) {
       });
     const viaTap = (cursor) =>
       fetch(
-        `${tapUrls.tapUrl}/api/experimental/v1/sync?cursor=${encodeURIComponent(cursor)}&max_changes=4`,
+        `${proxyUrls.proxyUrl}/api/experimental/v1/sync?cursor=${encodeURIComponent(cursor)}&max_changes=4`,
       );
     const direct = async (label, cursor) => {
       await mark(`${label}:begin`);
@@ -419,7 +493,7 @@ async function composed({ kind, journalNow, invert = false }) {
     const proof = {
       schema: PROOF_SCHEMA,
       attempt,
-      interval: "iv",
+      interval: IV,
       engine: "chromium",
       reader_account: "reader",
       caller: "ordinary",
@@ -450,6 +524,9 @@ async function composed({ kind, journalNow, invert = false }) {
       await gate(false);
       targetDone = { account: "reader", revision: 9, payload_sha256: "p" };
     }
+    // Revision 33: non-sync reads before the staged piece (GET), as a page makes them.
+    await browser("GET", "/browser-sessions/current");
+    await browser("GET", "/people/p1");
     // The staged piece, then the continuation queued at the closed gate.
     assert.equal((await viaTap("c-before")).status, 200);
     await gate(true);
@@ -460,6 +537,8 @@ async function composed({ kind, journalNow, invert = false }) {
       parts.tap.records.some((r) => r.gated),
       "the continuation waits at the gate",
     );
+    // Revision 33: a non-sync POST while the continuation waits (the gate holds /sync only).
+    await browser("POST", "/access-commands", { command: "noop" });
     const probes = {};
     if (kind === "x0") {
       const E = s.header.expiry;
@@ -489,6 +568,8 @@ async function composed({ kind, journalNow, invert = false }) {
     assert.equal(refusedAnswer.status, kind === "x0" && invert ? 200 : 410);
     await refusedAnswer.arrayBuffer();
     controls.inspect_at_refusal = (await op("inspect")).seq;
+    // Revision 33: the page's session check after the refusal (GET).
+    await browser("GET", "/browser-sessions/current");
     if (kind === "x0") {
       controls.advance_e_plus_1 = (
         await op("advance_clock", { time: s.header.expiry + 1 })
@@ -518,6 +599,11 @@ async function composed({ kind, journalNow, invert = false }) {
         },
       });
     }
+    // Revision 33: the interval's collection, as the spec makes it (tests/pair/support.ts `collect`): the label ends the window, the body
+    // writes are flushed, the proxy's log is read.
+    const { seq: until } = await tapControl("POST", "/label", { label: null });
+    const flushed = await tapControl("POST", "/flush");
+    const proxyLog = await (await fetch(`${proxyUrls.controlUrl}/log`)).json();
     await parts.tap.stop();
     await parts.bridge.close();
     const finished = await finishAttempt(running, { remove: true });
@@ -579,13 +665,85 @@ async function composed({ kind, journalNow, invert = false }) {
       requests: records,
       readFile: (f) => readFile(`bodies/${f}`),
     };
+    // Revision 33: the SAVED route. The window's exchanges joined, assembled, written and read back; judged by the generic reader and by
+    // the case's validator on both collections, as run-development-pair.mjs judges a saved interval.
+    const window = joinExchanges(
+      parts.tap.records.filter((r) => r.seq <= until && r.label === IV),
+      proxyLog,
+      [],
+    );
+    const bodies = (f) => readFileSync(join(evidence, "bodies", f));
+    const assembled = assembleInterval({
+      iv: {
+        id: IV,
+        caseId: proof.case,
+        engine: "node",
+        barriers: [],
+        piecesPersisted: 0,
+        attempts: [],
+        target: null,
+        handOff: { at_seq: refusedRec.seq, reason: "the server's real 410" },
+        readerAccount: "reader",
+        opening: null,
+        holdReleases: [],
+        observations: [],
+        terminal: null,
+        traces: [],
+      },
+      records: window,
+      collection: {
+        since,
+        until,
+        dropped_through: 0,
+        pending_writes: flushed.pending_writes,
+        write_errors: flushed.write_errors,
+        unsettled: [],
+      },
+      details: {
+        backend: "diagnostic",
+        selection: "sel",
+        apiVersion: "0.30.0",
+        workload: "W-real",
+        preGrantCursor: "c-before",
+        driven: "prefix",
+        requiredObservations: [],
+        caller: "ordinary",
+        localWork: false,
+        terminal: "recovered",
+        appliedRevision: null,
+        oracle: { verdict: "match", problems: [] },
+        person: "p1",
+      },
+      memory: { kind: null, reason: "the composed stand-in has no page" },
+      readBody: bodies,
+    });
+    const intervalFile = join(evidence, "interval.json");
+    writeFileSync(intervalFile, `${JSON.stringify(assembled, null, 2)}\n`);
+    const saved = JSON.parse(readFileSync(intervalFile, "utf8"));
+    const judged = corrupt ? corrupt(structuredClone(saved), ctx) : saved;
+    const validator = PROOF_VALIDATORS[judged.case];
     return {
       attempt: attemptProblems(envelope, { readFile, expected }),
       proof: (kind === "x0" ? x0Problems : x2Problems)(proof, ctx),
       records,
       transcript: ctx.entries,
+      window,
+      saved,
+      // The generic reader's collection accounting (its other checks need barriers, observations and a target this stand-in does not
+      // drive; pair-evidence.test.mjs and pair-driver.test.mjs qualify them).
+      accounting: validateInterval(judged, { readBody: bodies }).filter((p) =>
+        ACCOUNTING.test(p),
+      ),
+      savedProof: validator
+        ? validator(proof, {
+            ...ctx,
+            interval: judged,
+            requests: proofExchanges(judged),
+          })
+        : [`no validator for ${judged.case}`],
     };
   } finally {
+    await proxy?.stop().catch(() => undefined);
     await parts?.tap.stop().catch(() => undefined);
     await parts?.bridge.close().catch(() => undefined);
     s.backend.closeAllConnections?.();
@@ -629,4 +787,204 @@ test("Q1 negative: the gate opened BEFORE the clock reached E — the composed r
     ),
     JSON.stringify(r.proof),
   );
+});
+
+// ---- revision 33 (R33-DIAG): the saved route, mixed sync and non-sync traffic --------------------------------------------------------
+/** The fields a non-sync exchange may persist: its accounting and its causal references (pair-evidence.mjs `CAUSAL_FIELDS`). */
+const OTHER_FIELDS = new Set([
+  "seq",
+  "label",
+  "proxy_id",
+  "method",
+  "path",
+  "status",
+  "upstream_error",
+  "downstream",
+  ...CAUSAL_FIELDS,
+]);
+const nonSync = (saved) => saved.other_requests;
+const arrival = (seq) => `exchange ${seq}'s arrival`;
+
+for (const kind of ["x0", "x2"])
+  test(`R33 Q2 ${kind.toUpperCase()}: mixed sync/non-sync traffic through the proxy, tap, join, assembler and a JSON reload reaches the generic reader and the proof validator on both collections, and passes`, async () => {
+    const r = await composed({ kind });
+    assert.deepEqual(r.attempt, []);
+    assert.deepEqual(r.proof, [], "the raw sync-only route still passes");
+    const others = nonSync(r.saved);
+    assert.ok(
+      others.some((o) => o.method === "GET") &&
+        others.some((o) => o.method === "POST"),
+      `a GET and a POST came through the tap: ${JSON.stringify(others.map((o) => [o.method, o.path]))}`,
+    );
+    assert.equal(
+      others.length,
+      4,
+      "the four non-sync exchanges of the schedule",
+    );
+    // Each one's references are its tap record's own, exactly; the tap writes no gate or delivery reference for a non-sync exchange,
+    // and none is invented. Nothing else of the tap record is persisted.
+    const bySeq = new Map(r.window.map((w) => [w.seq, w]));
+    for (const o of others) {
+      const raw = bySeq.get(o.seq);
+      assert.ok(Number.isInteger(raw?.j_request), `exchange ${o.seq} raw`);
+      assert.equal(o.j_request, raw.j_request, `exchange ${o.seq} j_request`);
+      assert.equal(o.j_upstream_end, raw.j_upstream_end);
+      assert.deepEqual(
+        CAUSAL_FIELDS.filter((k) => k in o),
+        ["j_request", "j_upstream_end"],
+        `exchange ${o.seq}'s causal references`,
+      );
+      assert.deepEqual(
+        Object.keys(o).filter((k) => !OTHER_FIELDS.has(k)),
+        [],
+        `exchange ${o.seq} persists only allowed fields`,
+      );
+      assert.equal(o.proxy_id, raw.proxy_id);
+      assert.ok(Number.isInteger(o.proxy_id), "joined by its proxy id");
+      assert.equal(o.downstream?.outcome, "delivered");
+    }
+    // Every exchange of the window exactly once across both collections.
+    const seqs = proofExchanges(r.saved)
+      .map((x) => x.seq)
+      .sort((a, b) => a - b);
+    const { since, until } = r.saved.collection;
+    assert.deepEqual(
+      seqs,
+      Array.from({ length: until - since }, (_, i) => since + 1 + i),
+    );
+    assert.deepEqual(r.accounting, [], "the generic reader's accounting");
+    assert.deepEqual(
+      r.savedProof,
+      [],
+      "the proof validator on both collections",
+    );
+  });
+
+test("R33 Q2 control: revision 32's projection (every non-sync journal reference absent) is refused at each non-sync arrival", async () => {
+  const r = await composed({
+    kind: "x0",
+    corrupt: (saved) => {
+      for (const o of saved.other_requests)
+        for (const k of CAUSAL_FIELDS) delete o[k];
+      return saved;
+    },
+  });
+  assert.deepEqual(r.accounting, []);
+  const seqs = nonSync(r.saved).map((o) => o.seq);
+  for (const seq of seqs)
+    assert.ok(
+      r.savedProof.includes(`${arrival(seq)} names no journal position`),
+      `exchange ${seq}: ${JSON.stringify(r.savedProof)}`,
+    );
+  assert.equal(
+    r.savedProof.filter((p) => /arrival names no journal position/.test(p))
+      .length,
+    seqs.length,
+    "exactly the non-sync arrivals (the sync records keep theirs)",
+  );
+});
+
+/** One corrupted NON-SYNC exchange (the POST unless named), refused by the saved route with `expected` (a string the problem contains). */
+async function refusedNonSync(change, expected, { pick = "POST" } = {}) {
+  let target = null;
+  const r = await composed({
+    kind: "x0",
+    corrupt: (saved, ctx) => {
+      const others = saved.other_requests;
+      target = others.find((o) => o.method === pick);
+      change(target, { saved, others, ctx });
+      return saved;
+    },
+  });
+  assert.ok(target, "the corrupted exchange exists");
+  const want =
+    typeof expected === "function" ? expected(target, r.saved) : expected;
+  assert.ok(
+    r.savedProof.some((p) => p.includes(want)) ||
+      r.accounting.some((p) => p.includes(want)),
+    `${want}: ${JSON.stringify([...r.accounting, ...r.savedProof])}`,
+  );
+  return r;
+}
+const eventOf = (ctx, producer, kind) =>
+  [...ctx.journal.entries()].find(
+    ([, e]) => e.producer === producer && e.kind === kind,
+  )?.[0];
+
+test("R33 Q3 refused: a non-sync exchange without its arrival reference (the reader is given every collection)", async () => {
+  await refusedNonSync(
+    (o) => {
+      delete o.j_request;
+    },
+    (o) => `${arrival(o.seq)} names no journal position`,
+  );
+});
+test("R33 Q3 refused: a non-sync exchange naming ANOTHER exchange's arrival", async () => {
+  await refusedNonSync(
+    (o, { saved }) => {
+      o.j_request = saved.requests[0].j_request;
+    },
+    (o, saved) =>
+      `${arrival(o.seq)} names journal event ${saved.requests[0].j_request}, whose seq is ${saved.requests[0].seq}, not ${o.seq}`,
+  );
+});
+test("R33 Q3 refused: a non-sync arrival naming its own upstream end (the wrong event kind)", async () => {
+  await refusedNonSync((o) => {
+    o.j_request = o.j_upstream_end;
+  }, "a tap.upstream_end, not a tap.request");
+});
+test("R33 Q3 refused: a non-sync arrival naming a bridge marker (another producer)", async () => {
+  await refusedNonSync((o, { ctx }) => {
+    o.j_request = eventOf(ctx, "bridge", "mark");
+  }, "a bridge.mark, not a tap.request");
+});
+test("R33 Q3 refused: a non-sync arrival naming an event the journal does not hold", async () => {
+  await refusedNonSync((o) => {
+    o.j_request = 999_999;
+  }, "which the journal does not hold");
+});
+test("R33 Q3 refused: a malformed (non-integer) non-sync arrival is not accepted", async () => {
+  await refusedNonSync(
+    (o) => {
+      o.j_request = String(o.j_request);
+    },
+    (o) => `${arrival(o.seq)} names no journal position`,
+  );
+});
+test("R33 Q3 refused: a non-sync upstream end whose status is not the exchange's", async () => {
+  await refusedNonSync(
+    (o) => {
+      o.status = 500;
+    },
+    (o) => `exchange ${o.seq}'s upstream end names journal event`,
+    { pick: "GET" },
+  );
+});
+test("R33 Q3 refused: an omitted non-sync exchange (the window's accounting)", async () => {
+  await refusedNonSync((o, { others }) => {
+    others.splice(others.indexOf(o), 1);
+  }, "tap exchanges in the interval");
+});
+test("R33 Q3 refused: a duplicated non-sync exchange", async () => {
+  await refusedNonSync((o, { others }) => {
+    others.push(structuredClone(o));
+  }, "an exchange is listed more than once");
+});
+test("R33: the runner gives a saved interval's proof reader every collection (proofExchanges)", () => {
+  const runner = readFileSync(
+    new URL("./run-development-pair.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    runner.includes("requests: proofExchanges(interval),"),
+    "run-development-pair.mjs passes proofExchanges(interval) to the validator",
+  );
+  assert.deepEqual(
+    proofExchanges({
+      requests: [{ seq: 1 }],
+      other_requests: [{ seq: 2 }, { seq: 3 }],
+    }).map((x) => x.seq),
+    [1, 2, 3],
+  );
+  assert.deepEqual(proofExchanges({ requests: [{ seq: 1 }] }), [{ seq: 1 }]);
 });

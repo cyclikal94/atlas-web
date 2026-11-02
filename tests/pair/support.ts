@@ -161,7 +161,11 @@ export interface TapRecord {
   /** The request waited at the tap's closed gate (revision 25), forwarded at `t_gate_open`. */
   gated?: boolean;
   t_gate_open?: number;
-  /** Revision 27: the attempt's causal-journal positions of this exchange (diagnostic runs only). */
+  /**
+   * Revision 27: the attempt's causal-journal positions of this exchange (diagnostic runs only). Revision 33 (R33-DIAG): the interval
+   * keeps them for EVERY exchange — a sync record whole, a non-sync one in its compact `other_requests` projection (pair-evidence.mjs
+   * `CAUSAL_FIELDS`), copied when present and never invented — because the proof reader binds every exchange's arrival.
+   */
   j_request?: number;
   j_gate_open?: number;
   j_upstream_end?: number;

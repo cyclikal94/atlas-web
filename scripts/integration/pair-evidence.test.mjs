@@ -9,6 +9,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
+  assembleInterval,
+  CAUSAL_FIELDS,
+  causalOf,
   identityProblems,
   SCHEMA,
   validateInterval,
@@ -2679,3 +2682,221 @@ for (const [name, kind, edit, expected] of [
     edit(obs(r, kind).detail);
     refuse(r, expected, name);
   });
+
+// ---- revision 33 (R33-DIAG; design assessment C1, Q1/Q4): the non-sync projection keeps its causal references, and nothing else -------
+/** The assembler on one window of tap records (already joined), with the smallest interval parts it needs; the record JSON round-tripped. */
+function project(records) {
+  const record = assembleInterval({
+    iv: {
+      id: "PAIR-X0:node:iv",
+      caseId: "PAIR-X0",
+      engine: "node",
+      barriers: [],
+      piecesPersisted: 0,
+      attempts: [],
+      target: null,
+      handOff: null,
+      opening: null,
+      holdReleases: [],
+      observations: [],
+      terminal: null,
+      traces: [],
+    },
+    records,
+    collection: {
+      since: 0,
+      until: records.length,
+      dropped_through: 0,
+      pending_writes: 0,
+      write_errors: [],
+      unsettled: [],
+    },
+    details: {
+      backend: "diagnostic",
+      selection: "sel",
+      apiVersion: "x",
+      workload: "W-real",
+      preGrantCursor: "c0",
+      driven: "prefix",
+      requiredObservations: [],
+      terminal: "recovered",
+      appliedRevision: null,
+      oracle: { verdict: "match", problems: [] },
+      person: "p",
+    },
+    memory: { kind: null, reason: "none" },
+    readBody: () => Buffer.from("{}"),
+  });
+  return JSON.parse(JSON.stringify(record));
+}
+const DOWN = {
+  outcome: "delivered",
+  events: ["upstream_response", "delivered"],
+};
+const tapRecord = (seq, method, path, extra = {}) => ({
+  seq,
+  label: "PAIR-X0:node:iv",
+  proxy_id: 100 + seq,
+  method,
+  path,
+  status: 200,
+  t_request: 1.5,
+  t_upstream_end: 2.5,
+  t_delivered: null,
+  downstream: DOWN,
+  ...extra,
+});
+const ACCOUNTING_KEYS = [
+  "seq",
+  "label",
+  "proxy_id",
+  "method",
+  "path",
+  "status",
+  "downstream",
+];
+
+test("R33 Q1: the non-sync projection keeps each present causal reference exactly (mixed sync/non-sync, every method/path shape, JSON round trip)", () => {
+  const records = [
+    tapRecord(1, "GET", "/api/experimental/v1/sync", {
+      query: { cursor: "c0", limit: null, max_changes: "4" },
+      j_request: 10,
+      j_upstream_end: 12,
+      j_delivered: 13,
+    }),
+    tapRecord(2, "GET", "/api/experimental/v1/people/p1", {
+      j_request: 20,
+      j_upstream_end: 22,
+    }),
+    tapRecord(3, "POST", "/api/experimental/v1/access-commands", {
+      j_request: 30,
+      j_upstream_end: 31,
+    }),
+    tapRecord(4, "GET", "/api/experimental/v1/browser-sessions/current", {
+      j_request: 40,
+      j_upstream_end: 41,
+    }),
+    tapRecord(5, "POST", "/api/experimental/v1/sessions", {
+      j_request: 50,
+      j_upstream_end: 51,
+    }),
+    tapRecord(6, "GET", "/health", { j_request: 60, j_upstream_end: 61 }),
+    // A non-sync exchange carrying every causal reference (the tap writes none of the last three today; kept when present).
+    tapRecord(7, "GET", "/api/experimental/v1/me", {
+      j_request: 70,
+      gated: true,
+      j_gate_open: 71,
+      j_upstream_end: 72,
+      j_delivered: 73,
+    }),
+  ];
+  const saved = project(records);
+  assert.equal(saved.requests.length, 1);
+  assert.equal(
+    saved.requests[0].j_delivered,
+    13,
+    "a sync record is kept whole",
+  );
+  assert.equal(saved.other_requests.length, 6);
+  for (const o of saved.other_requests) {
+    const raw = records.find((r) => r.seq === o.seq);
+    assert.deepEqual(
+      Object.fromEntries(
+        CAUSAL_FIELDS.filter((k) => k in o).map((k) => [k, o[k]]),
+      ),
+      Object.fromEntries(
+        CAUSAL_FIELDS.filter((k) => k in raw).map((k) => [k, raw[k]]),
+      ),
+      `exchange ${o.seq} (${o.method} ${o.path}): its references, exactly`,
+    );
+  }
+  assert.deepEqual(
+    saved.other_requests.find((o) => o.seq === 7),
+    {
+      seq: 7,
+      label: "PAIR-X0:node:iv",
+      proxy_id: 107,
+      method: "GET",
+      path: "/api/experimental/v1/me",
+      status: 200,
+      downstream: DOWN,
+      j_request: 70,
+      gated: true,
+      j_gate_open: 71,
+      j_upstream_end: 72,
+      j_delivered: 73,
+    },
+  );
+});
+
+test("R33 Q1: without a journal (released/development runs) the non-sync projection is exactly revision 32's — no reference is invented", () => {
+  const saved = project([
+    tapRecord(1, "GET", "/api/experimental/v1/people/p1"),
+    tapRecord(2, "POST", "/api/experimental/v1/access-commands", {
+      status: null,
+      upstream_error: "socket hang up",
+    }),
+  ]);
+  assert.deepEqual(Object.keys(saved.other_requests[0]), ACCOUNTING_KEYS);
+  assert.deepEqual(Object.keys(saved.other_requests[1]), [
+    "seq",
+    "label",
+    "proxy_id",
+    "method",
+    "path",
+    "status",
+    "upstream_error",
+    "downstream",
+  ]);
+  assert.deepEqual(causalOf({ seq: 1, j_request: undefined }), {});
+});
+
+test("R33 Q1: malformed supplied references are kept as they are (never coerced or dropped: the proof reader refuses them)", () => {
+  const odd = {
+    j_request: "1143",
+    j_gate_open: null,
+    j_upstream_end: -1,
+    j_delivered: 1.5,
+    gated: "yes",
+  };
+  const saved = project([tapRecord(1, "GET", "/api/experimental/v1/me", odd)]);
+  const o = saved.other_requests[0];
+  assert.deepEqual(
+    Object.fromEntries(CAUSAL_FIELDS.map((k) => [k, o[k]])),
+    odd,
+    "every malformed value survives the projection unchanged",
+  );
+});
+
+test("R33 Q4: the non-sync projection is an allow-list — sentinel headers, cookies, tokens, bodies, queries, times and unknown fields never persist", () => {
+  const SENTINEL = "SENTINEL-c0ffee";
+  const saved = project([
+    tapRecord(1, "POST", "/api/experimental/v1/access-commands", {
+      j_request: 5,
+      j_upstream_end: 6,
+      headers: {
+        cookie: `atlas_session=${SENTINEL}`,
+        "x-csrf-token": SENTINEL,
+      },
+      authorization: `Bearer ${SENTINEL}`,
+      body: SENTINEL,
+      body_file: `${SENTINEL}.json`,
+      query: { token: SENTINEL },
+      client_gone: true,
+      t_gate_open: 9.5,
+      future_field: SENTINEL,
+    }),
+  ]);
+  const o = saved.other_requests[0];
+  assert.deepEqual(Object.keys(o), [
+    ...ACCOUNTING_KEYS,
+    "j_request",
+    "j_upstream_end",
+  ]);
+  assert.ok(
+    !JSON.stringify(saved.other_requests).includes(SENTINEL),
+    "no sentinel value persisted",
+  );
+  for (const k of ["t_request", "t_upstream_end", "t_delivered", "client_gone"])
+    assert.ok(!(k in o), `${k} is not persisted`);
+});

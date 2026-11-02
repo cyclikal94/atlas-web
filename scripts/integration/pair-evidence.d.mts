@@ -71,6 +71,33 @@ export interface IntervalParts {
   terminal: { final_seq: number; activated_by_seq: number } | null;
   traces: unknown[];
 }
+/** Revision 33 (R33-DIAG): the causal-journal references a non-sync exchange keeps, copied when present and unchanged. */
+export const CAUSAL_FIELDS: readonly [
+  "j_request",
+  "j_gate_open",
+  "j_upstream_end",
+  "j_delivered",
+  "gated",
+];
+export interface CausalReferences {
+  j_request?: unknown;
+  j_gate_open?: unknown;
+  j_upstream_end?: unknown;
+  j_delivered?: unknown;
+  gated?: unknown;
+}
+export function causalOf(record: object): CausalReferences;
+/** A non-sync exchange of the interval: its accounting and (revision 33) its causal references; nothing else of the tap record. */
+export interface OtherRequest extends CausalReferences {
+  seq: number;
+  label: unknown;
+  proxy_id: number | null;
+  method: string;
+  path: string;
+  status: number | null;
+  upstream_error?: string;
+  downstream: unknown;
+}
 export const RECOVERY_KINDS: readonly string[];
 export const RECOVERY_OBSERVATION_SCHEMA: string;
 export function assembleInterval<
@@ -102,6 +129,7 @@ export function assembleInterval<
 }): {
   schema: string;
   requests: R[];
+  other_requests: OtherRequest[];
   overhead: Array<{ seq: number; changes: number; person_upserts: number }>;
   [key: string]: unknown;
 };

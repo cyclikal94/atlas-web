@@ -286,7 +286,11 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   (the same causes reaching the FENCED RECOVERY caller's catch-up, so the refusal is W24's server restart, not the ordinary W18) and **XL0** (X0 with one
   named create_person of the reader admitted through the production outbox and receipted before the clock steps, and a reload after E). Every order a case
   claims is between positions of the attempt's causal journal (the runner's tap, control and bridge events and the spec's acknowledged markers), never
-  between clocks (revision 27, R27-DIAG.a). After the server's real 410 the hold stays armed and the recovery is observed at held snapshot pages by the leader
+  between clocks (revision 27, R27-DIAG.a). The saved proof reader binds EVERY exchange of the interval to its own journal arrival, sync or not: since
+  revision 33 (R33-DIAG) the interval's compact non-sync projection (`other_requests`) keeps each exchange's causal references exactly as the tap
+  recorded them (`j_request`, and when present `j_gate_open`, `j_upstream_end`, `j_delivered`, `gated`; never invented, coerced or dropped) and
+  nothing else of the tap record; revision 32's projection dropped them, and the first diagnostic X0 attempt (2 November 2026) failed its saved-evidence
+  validation with eleven missing arrivals. That attempt stays failed. After the server's real 410 the hold stays armed and the recovery is observed at held snapshot pages by the leader
   and an independent follower page: invalidated, staged hidden, the last page held, and one atomic exposure (R27-DIAG.b). Since revision 28 (R28-DIAG.a/b)
   the shared schedule is one maintained module (`pair-schedule.mjs`: the continuation is handed to the expiry control and to XL0's reload hook before they
   run), and what each page SHOWS is observed separately from its stored cache status (session view, protected root, visible cache-gate placeholder,

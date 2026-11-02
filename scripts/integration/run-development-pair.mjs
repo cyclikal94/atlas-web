@@ -63,6 +63,7 @@ import {
   ATTEMPT_SCHEMA,
   attemptProblems,
   PROOF_VALIDATORS,
+  proofExchanges,
   attemptJournal as readAttemptJournal,
   readTranscript,
 } from "./diagnostic-evidence.mjs";
@@ -1193,10 +1194,7 @@ async function diagnosticStack(browser, caseId) {
                 entries,
                 journal: events,
                 interval,
-                requests: [
-                  ...(interval.requests ?? []),
-                  ...(interval.other_requests ?? []),
-                ],
+                requests: proofExchanges(interval),
                 readFile: (f) => readFileSync(join(out, "bodies", f)),
               }),
             );

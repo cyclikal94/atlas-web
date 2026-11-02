@@ -16,9 +16,12 @@ import {
   attemptJournal,
   attemptProblems,
   PROOF_SCHEMA,
+  PROOF_VALIDATORS,
+  proofExchanges,
   x0Problems,
   x2Problems,
 } from "./diagnostic-evidence.mjs";
+import { assembleInterval, CAUSAL_FIELDS } from "./pair-evidence.mjs";
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
 const START = 1_800_000_000;
@@ -2013,3 +2016,149 @@ test("R28-DIAG.b: the proof's reader account is the interval's observed reader a
       JSON.stringify(interval),
     );
 });
+
+// ---- revision 33 (R33-DIAG; design assessment C2/Q2): every causal case through the SAVED route --------------------------------------
+// The five cases' healthy worlds (X0, X2, XR0, XR2, XL0) with two NON-SYNC exchanges of the window (a GET and a POST, journalled by
+// `finalise` like every tap record), assembled by the maintained assembleInterval, JSON round-tripped, and judged by the case's validator
+// (PROOF_VALIDATORS) on both saved collections (proofExchanges), as run-development-pair.mjs judges them. The caller and local-work
+// predicates of XR0/XR2/XL0 are judged on the same saved records. Revision 32's projection is the control: refused at each non-sync arrival.
+function xr2World() {
+  const w = x2World();
+  Object.assign(w.proof, {
+    case: "PAIR-XR2",
+    mark_prefix: "xr2",
+    caller: "recovery",
+    caller_evidence: {
+      sign_in: "settled",
+      trace_window: [
+        { event: "request.issued", data: { klass: "recovery" } },
+        { event: "data.recovery_finish", data: { result: "cleared" } },
+      ],
+    },
+  });
+  w.markTimes = { fence_recorded: 300, hold_rearmed: 310, sign_in_begin: 800 };
+  return w;
+}
+const SAVED_CASES = {
+  "PAIR-X0": x0World,
+  "PAIR-X2": x2World,
+  "PAIR-XR0": xr0World,
+  "PAIR-XR2": xr2World,
+  "PAIR-XL0": xl0World,
+};
+const SYNC_PATH = "/api/experimental/v1/sync";
+/** The world with its non-sync exchanges, finalised, assembled and reloaded. `strip`: revision 32's projection (no causal references). */
+function savedOf(make, { strip = false } = {}) {
+  const w = make();
+  const first = Math.min(...w.requests.map((r) => r.t_request));
+  const others = [
+    {
+      seq: 90,
+      method: "GET",
+      path: "/api/experimental/v1/people/P1",
+      status: 200,
+      t_request: first - 2,
+      t_upstream_end: first - 1.5,
+    },
+    {
+      seq: 91,
+      method: "POST",
+      path: "/api/experimental/v1/access-commands",
+      status: 200,
+      t_request: first - 1,
+      t_upstream_end: first - 0.5,
+    },
+  ];
+  w.requests.push(...others);
+  finalise(w);
+  const label = `${w.proof.case}:node:iv`;
+  const records = w.requests
+    .map((r) => ({
+      method: "GET",
+      path: SYNC_PATH,
+      ...r,
+      label,
+      proxy_id: 500 + r.seq,
+      downstream: { outcome: "delivered", events: [] },
+    }))
+    .sort((a, b) => a.seq - b.seq);
+  const assembled = assembleInterval({
+    iv: {
+      id: label,
+      caseId: w.proof.case,
+      engine: "node",
+      barriers: [],
+      piecesPersisted: 0,
+      attempts: [],
+      target: null,
+      handOff: null,
+      readerAccount: w.proof.reader_account,
+      opening: null,
+      holdReleases: [],
+      observations: [],
+      terminal: { final_seq: null, activated_by_seq: null },
+      traces: [],
+    },
+    records,
+    collection: null,
+    details: {
+      backend: "diagnostic",
+      selection: "sel",
+      apiVersion: "x",
+      workload: "W-real",
+      preGrantCursor: "c0",
+      driven: "rearmed_prefix",
+      requiredObservations: [],
+      terminal: "recovered",
+      appliedRevision: null,
+      oracle: { verdict: "match", problems: [] },
+      person: "P1",
+    },
+    memory: { kind: null, reason: "none" },
+    readBody: (f) => w.readFile(`bodies/${f}`),
+  });
+  const saved = JSON.parse(JSON.stringify(assembled));
+  if (strip)
+    for (const o of saved.other_requests)
+      for (const k of CAUSAL_FIELDS) delete o[k];
+  saved.interval = label;
+  const problems = PROOF_VALIDATORS[w.proof.case](w.proof, {
+    ...ctxOf(w),
+    interval: saved,
+    requests: proofExchanges(saved),
+  });
+  return { w, saved, problems };
+}
+for (const [id, make] of Object.entries(SAVED_CASES)) {
+  test(`R33 Q2 ${id}: the saved route (non-sync GET and POST, assembler, JSON reload, both collections) is accepted by the case's validator`, () => {
+    const r = savedOf(make);
+    assert.deepEqual(
+      r.saved.other_requests.map((o) => [o.seq, o.method]),
+      [
+        [90, "GET"],
+        [91, "POST"],
+      ],
+    );
+    for (const o of r.saved.other_requests) {
+      assert.ok(
+        Number.isInteger(o.j_request),
+        `exchange ${o.seq}'s arrival kept`,
+      );
+      assert.ok(
+        Number.isInteger(o.j_upstream_end),
+        `exchange ${o.seq}'s end kept`,
+      );
+    }
+    assert.deepEqual(r.problems, []);
+  });
+  test(`R33 Q2 ${id} control: revision 32's projection is refused at each non-sync arrival`, () => {
+    const r = savedOf(make, { strip: true });
+    assert.deepEqual(
+      r.problems.filter((p) => /arrival/.test(p)),
+      [
+        "exchange 90's arrival names no journal position",
+        "exchange 91's arrival names no journal position",
+      ],
+    );
+  });
+}

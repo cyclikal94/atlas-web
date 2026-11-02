@@ -1176,6 +1176,15 @@ function localWorkProblems(proof, ctx, j) {
   return problems;
 }
 
+/**
+ * Revision 33 (R33-DIAG): the exchanges a SAVED interval gives its causal proof's reader — every exchange of its window, the sync answers
+ * (`requests`) and every other exchange (`other_requests`, whose compact projection keeps its journal references), exactly as the runner
+ * reads the record back. The reader binds each one's arrival to its own journal event, so none may be left out.
+ */
+export function proofExchanges(interval) {
+  return [...(interval?.requests ?? []), ...(interval?.other_requests ?? [])];
+}
+
 export const PROOF_VALIDATORS = Object.freeze({
   "PAIR-X0": x0Problems,
   "PAIR-XR0": x0Problems,
