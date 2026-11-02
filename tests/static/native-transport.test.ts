@@ -1,4 +1,6 @@
 // @vitest-environment node
+
+import { EventEmitter } from "node:events";
 import {
   createServer,
   type IncomingMessage,
@@ -17,15 +19,18 @@ import {
   createScriptedOrigin,
   globRegExp,
   type Interpose,
+  installedPlaywrightCore,
   type Journal,
   LaneCancelled,
   LaneSeamMisuse,
   type OpenStage,
   type OriginRoute,
+  observeNavigations,
   openTransportLanes,
   type Problem,
   type RecordedRequest,
   type RequestRecord,
+  readNavigated,
   recordPage,
   runCleanup,
   runTransportLaneFixture,
@@ -2419,6 +2424,29 @@ const S503 =
   "Failed to load resource: the server responded with a status of 503 (Service Unavailable)";
 const N = `${FRONT}/api/__guard/status/503`;
 
+/**
+ * Revision 27 (F32-1, C3): `r`'s commit of `document`, WITH the provenance the recorder writes for it: a `new-document` navigation event
+ * naming `r`, at the commit's sequence. A test that sets `r.commit` alone models a commit without provenance (admitted by nothing).
+ */
+function commitOf(
+  b: ReturnType<typeof journal>,
+  r: RequestRecord,
+  document: number,
+) {
+  const seq = nextSeq(b);
+  r.commit = { seq, document };
+  b.j.navigations ??= [];
+  b.j.navigations.push({
+    seq,
+    page: r.page,
+    url: r.url,
+    kind: "new-document",
+    from: r.document,
+    document,
+    request: r.seq,
+    reason: `committed by navigation #${r.seq}`,
+  });
+}
 /** A navigation of `page` from `document`, answered `status` through the front, committing `commit` (or nothing when null). */
 function navigated(
   b: ReturnType<typeof journal>,
@@ -2430,16 +2458,18 @@ function navigated(
 ) {
   const r = b.answered(page, document, url, status);
   r.navigation = true;
-  r.commit = commit === null ? null : { seq: nextSeq(b), document: commit };
+  if (commit === null) r.commit = null;
+  else commitOf(b, r, commit);
   return r;
 }
-/** The next journal sequence of `b` (a commit takes one, as the recorder's framenavigated does). */
+/** The next journal sequence of `b` (a commit takes one, as the recorder's navigation event does). */
 const nextSeq = (b: ReturnType<typeof journal>) => {
   const all = [
     ...b.j.problems.map((p) => p.seq),
     ...b.j.requests.flatMap((r) => [r.seq, r.terminal?.seq ?? 0]),
     ...b.j.attempts.map((a) => a.seq),
     ...b.j.expectations.map((e) => e.seq),
+    ...(b.j.navigations ?? []).map((n) => n.seq),
   ];
   // The builder's own counter is private: a commit is stamped just after the latest event, and every later call is later still.
   return Math.max(0, ...all) + 0.5;
@@ -2476,7 +2506,7 @@ describe("F31-1 classifyJournal: a navigation's own HTTP-status message and the 
     const nav = b.answered(0, 1, N, 503);
     nav.navigation = true;
     b.problem(0, 1, "error", S503, N);
-    nav.commit = { seq: nextSeq(b), document: 2 };
+    commitOf(b, nav, 2);
     const v = classifyJournal(b.j);
     expect(v.unexpected).toEqual([]);
     expect(v.expected[0]?.evidence?.relation).toBe("same-document");
@@ -2516,7 +2546,7 @@ describe("F31-1 classifyJournal: a navigation's own HTTP-status message and the 
     const nav = b.answered(0, 1, N, 503);
     nav.navigation = true;
     b.problem(0, 1, "error", S503, N);
-    nav.commit = { seq: nextSeq(b), document: 2 };
+    commitOf(b, nav, 2);
     b.problem(0, 2, "error", S503, N);
     expect(
       classifyJournal(b.j).problems.map((p) => [p.document, p.verdict]),
@@ -2539,7 +2569,7 @@ describe("F31-1 classifyJournal: a navigation's own HTTP-status message and the 
     b.j.engine = "chromium";
     const nav = b.lost(0, 1, N);
     nav.navigation = true;
-    nav.commit = { seq: nextSeq(b), document: 2 };
+    commitOf(b, nav, 2);
     b.problem(0, 2, "error", CHROMIUM, N);
     expect(classifyJournal(b.j).unexpected[0]?.reason).toMatch(
       /no failed request of this page's document/,
@@ -2560,7 +2590,7 @@ describe("F31-1 classifyJournal: a navigation's own HTTP-status message and the 
     const nav = c.answered(0, 1, N, 503);
     nav.navigation = true;
     c.problem(0, 2, "error", S503, N);
-    nav.commit = { seq: nextSeq(c), document: 2 };
+    commitOf(c, nav, 2);
     expect(
       classifyJournal(c.j).unexpected[0]?.reason,
       "the commit must precede its message",
@@ -2573,19 +2603,86 @@ describe("F31-1 classifyJournal: a navigation's own HTTP-status message and the 
       b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
       const r = b.answered(0, 1, N, 503);
       r.navigation = shape === "no-commit";
-      r.commit =
-        shape === "no-commit" ? null : { seq: nextSeq(b), document: 2 };
+      if (shape === "no-commit") r.commit = null;
+      else commitOf(b, r, 2);
       b.problem(0, 2, "error", S503, N);
       expect(classifyJournal(b.j).unexpected, shape).toHaveLength(1);
     }
   });
 });
 
-/** A page double emitting exactly the event sequence an engine was observed to emit (revision-26 diagnostics, diag/order-1). */
+describe("F32-1 classifyJournal C3: a commit admits a message only with its own new-document provenance", () => {
+  const build = (
+    shape:
+      | "evidenced"
+      | "no-event"
+      | "aborted"
+      | "same-document"
+      | "other-request"
+      | "other-sequence"
+      | "other-page",
+  ) => {
+    const b = journal();
+    b.j.engine = "chromium";
+    b.expectHttp("/api/__guard/status/503", 503, 1, "GET");
+    const nav = b.answered(0, 1, N, 503);
+    nav.navigation = true;
+    commitOf(b, nav, 2);
+    const event = b.j.navigations?.[0];
+    if (event === undefined) throw new Error("no event");
+    if (shape === "no-event") b.j.navigations = [];
+    if (shape === "aborted")
+      Object.assign(event, { kind: "aborted", document: 1 });
+    if (shape === "same-document")
+      Object.assign(event, { kind: "same-document", document: 1 });
+    if (shape === "other-request") event.request = nav.seq + 1000;
+    if (shape === "other-sequence") event.seq += 0.25;
+    if (shape === "other-page") event.page = 1;
+    b.problem(0, 2, "error", S503, N);
+    return classifyJournal(b.j);
+  };
+  it("positive control: a recorded new-document event naming the navigation, at its commit, admits its own message", () => {
+    const v = build("evidenced");
+    expect(v.unexpected).toEqual([]);
+    expect(v.expected[0]?.evidence?.relation).toBe("committed-by-navigation");
+  });
+  for (const shape of [
+    "no-event",
+    "aborted",
+    "same-document",
+    "other-request",
+    "other-sequence",
+    "other-page",
+  ] as const)
+    it(`negative: a commit field with ${shape} provenance admits nothing (the message is unexpected)`, () => {
+      expect(build(shape).unexpected[0]?.reason).toMatch(
+        /no 503 response of this page's document for this URL/,
+      );
+    });
+  it("a provenance failure the recorder named is a violation of the lane", () => {
+    const b = journal();
+    b.j.provenanceFailures = [
+      "page 0: navigation event #4 unreadable (not an object)",
+    ];
+    expect(classifyJournal(b.j).violations).toEqual([
+      "navigation provenance: page 0: navigation event #4 unreadable (not an object)",
+    ]);
+  });
+});
+
+/**
+ * A page double emitting exactly the event sequence an engine was observed to emit (revision-26 diag/order-1; revision-27 diag/order-2
+ * and order-3, which also record Playwright's internal frame events). Its main frame carries a Playwright-shaped client emitter
+ * (`_eventEmitter`) on which each navigation is delivered as Playwright's own `navigated` event (`FrameNavigatedEvent`: `newDocument`
+ * with the linked request's CHANNEL, whose `_object` is the public request; `error` for an abort); a commit or a same-document change is
+ * followed, as in Playwright's client, by the public `framenavigated` (an abort has none). `publicOnly` emits a public `framenavigated`
+ * WITHOUT the internal event (the recorder must not move on it).
+ */
 function recorderPage() {
   const listeners = new Map<string, Array<(value: unknown) => void>>();
   let mainUrl = "about:blank";
-  const main = { url: () => mainUrl };
+  const internal = new EventEmitter();
+  const main = { url: () => mainUrl, _eventEmitter: internal };
   const page = {
     mainFrame: () => main,
     on(event: string, listener: (value: never) => void) {
@@ -2598,6 +2695,8 @@ function recorderPage() {
   const emit = (event: string, value: unknown) => {
     for (const l of listeners.get(event) ?? []) l(value);
   };
+  const channel = (r: RecordedRequest | undefined) =>
+    r === undefined ? undefined : { _object: r };
   const request = (
     url: string,
     options: { nav?: boolean; from?: RecordedRequest; failure?: string } = {},
@@ -2615,6 +2714,7 @@ function recorderPage() {
   };
   return {
     page,
+    internal,
     request,
     respond: (r: RecordedRequest, status: number) =>
       emit("response", { request: () => r, status: () => status }),
@@ -2623,13 +2723,47 @@ function recorderPage() {
       emit("requestfailed", r);
     },
     finish: (r: RecordedRequest) => emit("requestfinished", r),
-    /** The MAIN frame's framenavigated (the same frame object, as Playwright's). */
-    commit: (url: string) => {
+    /** Playwright's `frameCommittedNewDocumentNavigation`: a new document, linked to `request` when Playwright linked one. */
+    newDocument: (url: string, request?: RecordedRequest) => {
+      mainUrl = url;
+      internal.emit("navigated", {
+        url,
+        name: "",
+        newDocument: { request: channel(request) },
+      });
+      emit("framenavigated", main);
+    },
+    /** Playwright's `frameCommittedSameDocumentNavigation`: a fragment or history-API change. */
+    sameDocument: (url: string) => {
+      mainUrl = url;
+      internal.emit("navigated", { url, name: "" });
+      emit("framenavigated", main);
+    },
+    /** Playwright's `frameAbortedNavigation`: the pending document (its request) with the error, at the frame's CURRENT url; no public event. */
+    aborted: (request: RecordedRequest | undefined, error: string) =>
+      internal.emit("navigated", {
+        url: mainUrl,
+        name: "",
+        newDocument: { request: channel(request) },
+        error,
+      }),
+    /** A public framenavigated alone (no provenance event). */
+    publicOnly: (url: string) => {
       mainUrl = url;
       emit("framenavigated", main);
     },
-    /** Another frame's framenavigated: ignored by the recorder. */
-    subframe: (url: string) => emit("framenavigated", { url: () => url }),
+    /** A raw internal event (shape negatives). */
+    raw: (value: unknown) => internal.emit("navigated", value),
+    /** Another frame's navigation: its own emitter (never the main frame's) and its public framenavigated. */
+    subframe: (url: string) => {
+      const frame = { url: () => url, _eventEmitter: new EventEmitter() };
+      frame._eventEmitter.emit("navigated", {
+        url,
+        name: "",
+        newDocument: {},
+      });
+      emit("framenavigated", frame);
+    },
     console: (type: string, text: string, url: string) =>
       emit("console", {
         type: () => type,
@@ -2649,7 +2783,7 @@ function recorded(engine: string, hold?: (p: Readonly<Problem>) => boolean) {
   };
   const held: Array<Readonly<Problem>> = [];
   const d = recorderPage();
-  recordPage(d.page, 0, {
+  const recorder = recordPage(d.page, 0, {
     journal: j,
     next: () => {
       seq += 1;
@@ -2688,7 +2822,7 @@ function recorded(engine: string, hold?: (p: Readonly<Problem>) => boolean) {
       reason: "test",
     });
   };
-  return { j, d, held, forwarded, declare };
+  return { j, d, held, forwarded, declare, recorder };
 }
 const docs = (j: Journal) =>
   j.requests.map((r) => [
@@ -2700,26 +2834,41 @@ const docs = (j: Journal) =>
         ? r.commitReason
         : r.commit.document,
   ]);
+const kinds = (j: Journal) =>
+  (j.navigations ?? []).map((n) => [
+    n.kind,
+    n.document,
+    n.request === null ? null : "request",
+  ]);
 
-describe("F31-1 recordPage: the document moves on at the main frame's commit of its pending navigation", () => {
+describe("F32-1 recordPage: the document moves on only at a new-document event of the main frame's navigation provenance", () => {
   const P = `${FRONT}/api/__guard/page`;
   it("NAV1 Chromium's order (request, response, commit, status message): the request keeps document 1, commits 2, and its message is expected", () => {
     const { j, d, forwarded, declare } = recorded("chromium");
     const first = d.request(P);
     forwarded(P, 200);
     d.respond(first, 200);
-    d.commit(P);
+    d.newDocument(P, first);
     declare("/api/__guard/status/503", 503);
     const nav = d.request(N);
     forwarded(N, 503);
     d.respond(nav, 503);
-    d.commit(N);
+    d.newDocument(N, nav);
     d.console("error", S503, N);
     expect(docs(j)).toEqual([
       ["/api/__guard/page", 0, 1],
       ["/api/__guard/status/503", 1, 2],
     ]);
     expect(j.problems.map((p) => p.document)).toEqual([2]);
+    expect(j.provenanceFailures).toEqual([]);
+    expect(j.navigationProvenance).toEqual([
+      {
+        page: 0,
+        source: "playwright-frame-navigated",
+        version: "1.63.0",
+        bundleSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    ]);
     const v = classifyJournal(j);
     expect(v.unexpected).toEqual([]);
     expect(v.violations).toEqual([]);
@@ -2729,52 +2878,55 @@ describe("F31-1 recordPage: the document moves on at the main frame's commit of 
     const { j, d, forwarded, declare } = recorded("webkit");
     const first = d.request(P);
     d.respond(first, 200);
-    d.commit(P);
+    d.newDocument(P, first);
     declare("/api/__guard/status/503", 503);
     const nav = d.request(N);
     forwarded(N, 503);
     d.respond(nav, 503);
     d.console("error", S503, N);
-    d.commit(N);
+    d.newDocument(N, nav);
     expect(j.problems.map((p) => p.document)).toEqual([1]);
     const v = classifyJournal(j);
     expect(v.unexpected).toEqual([]);
+    expect(v.violations).toEqual([]);
     expect(v.expected[0]?.evidence?.relation).toBe("same-document");
   });
   it("NAV2 a redirect chain commits ONE document, by its final hop; the hop is redirected and the final hop names it", () => {
     const { j, d } = recorded("chromium");
     const first = d.request(P);
     d.respond(first, 200);
-    d.commit(P);
+    d.newDocument(P, first);
     const hop = d.request(`${FRONT}/api/__guard/redirect/502`);
     d.respond(hop, 302);
     const last = d.request(`${FRONT}/api/__guard/status/502`, { from: hop });
     d.respond(last, 502);
-    d.commit(`${FRONT}/api/__guard/status/502`);
+    d.newDocument(`${FRONT}/api/__guard/status/502`, last);
     expect(docs(j)).toEqual([
       ["/api/__guard/page", 0, 1],
       ["/api/__guard/redirect/502", 1, `redirected to #${j.requests[2]?.seq}`],
       ["/api/__guard/status/502", 1, 2],
     ]);
     expect(j.requests[2]?.redirectedFrom).toBe(j.requests[1]?.seq);
-    expect(j.navigations?.map((n) => [n.kind, n.document])).toEqual([
-      ["new-document", 1],
-      ["new-document", 2],
+    expect(kinds(j)).toEqual([
+      ["new-document", 1, "request"],
+      ["new-document", 2, "request"],
     ]);
   });
-  it("NAV2 a 204 and a download (WebKit: two responses) end without a commit; a later same-document change to that URL is not a commit", () => {
+  it("NAV2 a 204 (response, abort, failure) and WebKit's download (abort first, then two responses and a failure) commit nothing; a later same-document change to that URL is not a commit", () => {
     const { j, d } = recorded("webkit");
     const first = d.request(P);
     d.respond(first, 200);
-    d.commit(P);
+    d.newDocument(P, first);
     const empty = d.request(`${FRONT}/api/__guard/nocontent`);
     d.respond(empty, 204);
+    d.aborted(empty, "Aborted: 204 No Content");
     d.fail(empty, "Aborted: 204 No Content");
     const file = d.request(`${FRONT}/api/__guard/download`);
+    d.aborted(file, "Download is starting");
     d.respond(file, 200);
     d.respond(file, 200);
     d.fail(file, "Frame load interrupted");
-    d.commit(`${FRONT}/api/__guard/download`);
+    d.sameDocument(`${FRONT}/api/__guard/download`);
     const fetchAfter = d.request(`${FRONT}/api/__guard/status/500`, {
       nav: false,
     });
@@ -2783,12 +2935,12 @@ describe("F31-1 recordPage: the document moves on at the main frame's commit of 
       [
         "/api/__guard/nocontent",
         1,
-        "ended after its response without committing a document",
+        "aborted without committing a document: Aborted: 204 No Content",
       ],
       [
         "/api/__guard/download",
         1,
-        "ended after its response without committing a document",
+        "aborted without committing a document: Download is starting",
       ],
       ["/api/__guard/status/500", 1, "pending"],
     ]);
@@ -2799,86 +2951,249 @@ describe("F31-1 recordPage: the document moves on at the main frame's commit of 
     expect(j.requests[2]?.failedAfterResponse?.errorText).toBe(
       "Frame load interrupted",
     );
-    expect(j.navigations?.at(-1)).toMatchObject({
-      kind: "same-document",
-      document: 1,
-    });
+    expect(kinds(j)).toEqual([
+      ["new-document", 1, "request"],
+      ["aborted", 1, "request"],
+      ["aborted", 1, "request"],
+      ["same-document", 1, null],
+    ]);
     expect(fetchAfter.url()).toMatch(/500$/);
+    expect(j.provenanceFailures).toEqual([]);
   });
-  it("NAV2 reloads commit a new document each; fragments and history changes do not; a subframe's navigation is ignored", () => {
+  it("NAV2 reloads commit a new document each; fragments and history changes do not; a subframe's navigation and a public framenavigated alone are ignored", () => {
     const { j, d } = recorded("chromium");
     for (let i = 0; i < 3; i += 1) {
       const r = d.request(N);
       d.respond(r, 503);
-      d.commit(N);
+      d.newDocument(N, r);
     }
-    d.commit(`${N}#frag`);
-    d.commit(`${FRONT}/api/__guard/pushed`);
+    d.sameDocument(`${N}#frag`);
+    d.sameDocument(`${FRONT}/api/__guard/pushed`);
     d.subframe(`${FRONT}/api/__guard/frame`);
+    d.publicOnly(`${FRONT}/api/__guard/elsewhere`);
     expect(docs(j).map((x) => x[2])).toEqual([1, 2, 3]);
-    expect(j.navigations?.map((n) => [n.kind, n.document])).toEqual([
-      ["new-document", 1],
-      ["new-document", 2],
-      ["new-document", 3],
-      ["same-document", 3],
-      ["same-document", 3],
+    expect(kinds(j)).toEqual([
+      ["new-document", 1, "request"],
+      ["new-document", 2, "request"],
+      ["new-document", 3, "request"],
+      ["same-document", 3, null],
+      ["same-document", 3, null],
     ]);
   });
-  it("NAV2 a failed navigation: Chromium's error page is a new unattributed document; Firefox's error page at the URL is that navigation's commit", () => {
+  it("NAV2 a failed navigation: Chromium's and Firefox's error pages are new UNATTRIBUTED documents (Playwright links no request); WebKit commits none", () => {
+    for (const [engine, errorPage] of [
+      ["chromium", "chrome-error://chromewebdata/"],
+      ["firefox", `${FRONT}/api/__guard/reset/x`],
+      ["webkit", null],
+    ] as const) {
+      const { j, d } = recorded(engine);
+      const a = d.request(P);
+      d.respond(a, 200);
+      d.newDocument(P, a);
+      const lostNav = d.request(`${FRONT}/api/__guard/reset/x`);
+      d.aborted(lostNav, "net::ERR_EMPTY_RESPONSE");
+      d.fail(lostNav, "net::ERR_EMPTY_RESPONSE");
+      if (errorPage !== null) d.newDocument(errorPage);
+      expect(kinds(j), engine).toEqual([
+        ["new-document", 1, "request"],
+        ["aborted", 1, "request"],
+        ...(errorPage === null ? [] : [["new-document", 2, null]]),
+      ]);
+      expect(j.requests[1]?.commit, engine).toBeNull();
+      expect(j.requests[1]?.terminal, engine).toMatchObject({
+        kind: "failed",
+      });
+      expect(j.provenanceFailures, engine).toEqual([]);
+    }
+  });
+  it("NAV-C9 supersession: Chromium aborts the held navigation before the next request; Firefox and WebKit supersede it; a later navigation of the SAME URL commits only itself", () => {
     const chromium = recorded("chromium");
-    const a = chromium.d.request(P);
-    chromium.d.respond(a, 200);
-    chromium.d.commit(P);
-    const lostNav = chromium.d.request(`${FRONT}/api/__guard/reset/x`);
-    chromium.d.fail(lostNav, "net::ERR_EMPTY_RESPONSE");
-    chromium.d.commit("chrome-error://chromewebdata/");
-    expect(chromium.j.navigations?.at(-1)).toMatchObject({
-      kind: "new-document",
-      document: 2,
-      request: null,
-    });
-    expect(
-      chromium.j.requests[1]?.commit,
-      "unattributed: no commit is invented for it",
-    ).toBeUndefined();
-    const firefox = recorded("firefox");
-    const b = firefox.d.request(P);
-    firefox.d.respond(b, 200);
-    firefox.d.commit(P);
-    const failed = firefox.d.request(`${FRONT}/api/__guard/reset/x`);
-    firefox.d.fail(failed, "NS_ERROR_NET_RESET");
-    firefox.d.commit(`${FRONT}/api/__guard/reset/x`);
-    expect(firefox.j.requests[1]?.commit).toMatchObject({ document: 2 });
+    {
+      const { j, d } = chromium;
+      const first = d.request(P);
+      d.respond(first, 200);
+      d.newDocument(P, first);
+      const a = d.request(`${FRONT}/api/__guard/held`);
+      d.aborted(a, "net::ERR_ABORTED; maybe frame was detached?");
+      d.fail(a, "net::ERR_ABORTED");
+      const b = d.request(N);
+      d.respond(b, 503);
+      d.newDocument(N, b);
+      expect(docs(j)).toEqual([
+        ["/api/__guard/page", 0, 1],
+        [
+          "/api/__guard/held",
+          1,
+          "aborted without committing a document: net::ERR_ABORTED; maybe frame was detached?",
+        ],
+        ["/api/__guard/status/503", 1, 2],
+      ]);
+    }
+    for (const engine of ["firefox", "webkit"]) {
+      const { j, d } = recorded(engine);
+      const first = d.request(P);
+      d.respond(first, 200);
+      d.newDocument(P, first);
+      const a = d.request(`${FRONT}/api/__guard/held`);
+      const a2 = d.request(`${FRONT}/api/__guard/held`);
+      d.fail(a, "NS_BINDING_ABORTED");
+      d.respond(a2, 200);
+      d.newDocument(`${FRONT}/api/__guard/held`, a2);
+      expect(docs(j), engine).toEqual([
+        ["/api/__guard/page", 0, 1],
+        [
+          "/api/__guard/held",
+          1,
+          `superseded by navigation #${a2 && j.requests[2]?.seq}`,
+        ],
+        ["/api/__guard/held", 1, 2],
+      ]);
+      expect(j.provenanceFailures, engine).toEqual([]);
+    }
   });
-  it("NAV2 a superseded navigation never commits: a commit of its URL after a later navigation began is not its commit", () => {
+  it("NAV2 a navigation of a new page (no request linked) is a new unattributed document", () => {
     const { j, d } = recorded("chromium");
-    const first = d.request(P);
-    d.respond(first, 200);
-    d.commit(P);
-    d.request(N);
-    const second = d.request(`${FRONT}/api/__guard/status/504`);
-    d.commit(N);
-    expect(j.requests[1]).toMatchObject({
-      commit: null,
-      commitReason: `superseded by navigation #${second ? j.requests[2]?.seq : 0}`,
-    });
-    expect(j.navigations?.at(-1)).toMatchObject({
-      kind: "same-document",
-      document: 1,
-    });
-  });
-  it("NAV2 a navigation of a new page (no request seen) is a new unattributed document", () => {
-    const { j, d } = recorded("chromium");
-    d.commit(P);
+    d.newDocument(P);
     expect(j.navigations).toMatchObject([
       { kind: "new-document", document: 1, request: null },
     ]);
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  // Review 32's exact schedules (evidence/review-32/cancelled-navigation.spec.ts and cancelled-control.spec.ts), in Chromium's order
+  // observed with the browser's Stop (diag/order-2: the abort event, then the request failure).
+  for (const history of ["same-url", "different-url"] as const)
+    it(`NAV-C1/C2 (Review 32, history to the ${history === "same-url" ? "cancelled navigation's URL" : "a different URL: the review's control"}): a stopped navigation commits nothing, and a declared delayed fetch 500 stays the surviving document's and is expected`, () => {
+      const { j, d, forwarded, declare } = recorded("chromium");
+      const held = `${FRONT}/api/__r32/held`;
+      const first = d.request(`${FRONT}/api/__r32/page`);
+      d.respond(first, 200);
+      d.newDocument(`${FRONT}/api/__r32/page`, first);
+      d.sameDocument(`${FRONT}/api/__r32/ordinary-history`);
+      const stopped = d.request(held);
+      d.aborted(stopped, "net::ERR_ABORTED; maybe frame was detached?");
+      d.fail(stopped, "net::ERR_ABORTED");
+      declare("/api/__r32/delayed500", 500);
+      const late = d.request(`${FRONT}/api/__r32/delayed500`, { nav: false });
+      d.sameDocument(
+        history === "same-url" ? held : `${FRONT}/api/__r32/elsewhere`,
+      );
+      forwarded(`${FRONT}/api/__r32/delayed500`, 500);
+      d.respond(late, 500);
+      d.console(
+        "error",
+        "Failed to load resource: the server responded with a status of 500 (Internal Server Error)",
+        `${FRONT}/api/__r32/delayed500`,
+      );
+      expect(kinds(j), "the stopped navigation committed nothing").toEqual([
+        ["new-document", 1, "request"],
+        ["same-document", 1, null],
+        ["aborted", 1, "request"],
+        ["same-document", 1, null],
+      ]);
+      expect(j.requests[1]).toMatchObject({
+        document: 1,
+        commit: null,
+        commitReason: expect.stringMatching(
+          /^aborted without committing a document/,
+        ),
+      });
+      expect(j.problems.map((p) => [p.document, p.status])).toEqual([[1, 500]]);
+      const v = classifyJournal(j);
+      expect(v.violations).toEqual([]);
+      expect(
+        v.unexpected,
+        "the declared fetch is in the surviving document",
+      ).toEqual([]);
+      expect(v.expected[0]?.evidence?.relation).toBe("same-document");
+    });
+  it("NAV-C3 history to a STILL PENDING navigation's URL (all three engines' order, diag/order-3 E1): no commit; the real commit then advances exactly once and its own message is credited", () => {
+    const { j, d, forwarded, declare } = recorded("chromium");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.newDocument(P, first);
+    declare("/api/__guard/status/503", 503);
+    const nav = d.request(N);
+    d.sameDocument(N);
+    expect(
+      j.requests[1]?.commit,
+      "still undecided while pending",
+    ).toBeUndefined();
+    forwarded(N, 503);
+    d.respond(nav, 503);
+    d.newDocument(N, nav);
+    d.console("error", S503, N);
+    expect(kinds(j)).toEqual([
+      ["new-document", 1, "request"],
+      ["same-document", 1, null],
+      ["new-document", 2, "request"],
+    ]);
+    expect(j.requests[1]?.commit).toMatchObject({ document: 2 });
+    const v = classifyJournal(j);
+    expect(v.unexpected).toEqual([]);
+    expect(v.violations).toEqual([]);
+    expect(v.expected[0]?.evidence?.relation).toBe("committed-by-navigation");
+  });
+  it("NAV-C8 two pages: page A's abort and history leave page B's documents and attribution alone", () => {
+    let seq = 0;
+    const j: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+      engine: "chromium",
+    };
+    const sink = {
+      journal: j,
+      next: () => {
+        seq += 1;
+        return seq;
+      },
+      stamp,
+      ingest: (p: Readonly<Problem>) => void j.problems.push(p),
+    };
+    const a = recorderPage();
+    const b = recorderPage();
+    recordPage(a.page, 0, sink);
+    recordPage(b.page, 1, sink);
+    const ra = a.request(P);
+    a.respond(ra, 200);
+    a.newDocument(P, ra);
+    const rb = b.request(P);
+    b.respond(rb, 200);
+    b.newDocument(P, rb);
+    const held = a.request(N);
+    const other = b.request(N);
+    a.aborted(held, "net::ERR_ABORTED");
+    a.sameDocument(N);
+    b.respond(other, 503);
+    b.newDocument(N, other);
+    expect(
+      (j.navigations ?? []).map((n) => [n.page, n.kind, n.document]),
+    ).toEqual([
+      [0, "new-document", 1],
+      [1, "new-document", 1],
+      [0, "aborted", 1],
+      [0, "same-document", 1],
+      [1, "new-document", 2],
+    ]);
+    expect(
+      j.requests.map((r) => [
+        r.page,
+        r.commit === null ? "ended" : r.commit?.document,
+      ]),
+    ).toEqual([
+      [0, 1],
+      [1, 1],
+      [0, "ended"],
+      [1, 2],
+    ]);
+    expect(j.provenanceFailures).toEqual([]);
   });
   it("revision 19's schedule (the review's): a fetch control, then the declared navigation; nothing is unexpected", () => {
     const { j, d, forwarded, declare } = recorded("chromium");
     const first = d.request(P);
     d.respond(first, 200);
-    d.commit(P);
+    d.newDocument(P, first);
     declare("/api/__guard/status/500", 500);
     const f = d.request(`${FRONT}/api/__guard/status/500`, { nav: false });
     forwarded(`${FRONT}/api/__guard/status/500`, 500);
@@ -2892,7 +3207,7 @@ describe("F31-1 recordPage: the document moves on at the main frame's commit of 
     const nav = d.request(N);
     forwarded(N, 503);
     d.respond(nav, 503);
-    d.commit(N);
+    d.newDocument(N, nav);
     d.console("error", S503, N);
     const v = classifyJournal(j);
     expect(
@@ -2908,11 +3223,11 @@ describe("F31-1 recordPage: the document moves on at the main frame's commit of 
     const { j, d, held } = recorded("chromium", () => true);
     const first = d.request(P);
     d.respond(first, 200);
-    d.commit(P);
+    d.newDocument(P, first);
     d.console("error", CHROMIUM, `${FRONT}/x`);
     const next = d.request(N);
     d.respond(next, 200);
-    d.commit(N);
+    d.newDocument(N, next);
     expect(held).toHaveLength(1);
     expect(Object.isFrozen(held[0])).toBe(true);
     expect(Object.isFrozen(held[0]?.observed)).toBe(true);
@@ -2924,6 +3239,225 @@ describe("F31-1 recordPage: the document moves on at the main frame's commit of 
   });
 });
 
+describe("F32-1 navigation provenance: unavailable, unreadable or contradicting evidence fails by name, and the document is never guessed", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  it("a page whose main frame has no Playwright client emitter: provenance unavailable, a lane violation; its documents never move", () => {
+    let seq = 0;
+    const j: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+    };
+    const listeners = new Map<string, (v: unknown) => void>();
+    const main = { url: () => P };
+    recordPage(
+      {
+        mainFrame: () => main,
+        on: (event: string, listener: (value: never) => void) => {
+          listeners.set(event, listener as (v: unknown) => void);
+        },
+      },
+      0,
+      {
+        journal: j,
+        next: () => {
+          seq += 1;
+          return seq;
+        },
+        stamp,
+        ingest: (p) => void j.problems.push(p),
+      },
+    );
+    listeners.get("framenavigated")?.(main);
+    expect(j.navigationProvenance).toEqual([
+      {
+        page: 0,
+        unavailable: expect.stringMatching(
+          /no Playwright client navigation emitter/,
+        ),
+      },
+    ]);
+    expect(classifyJournal(j).violations).toEqual([
+      expect.stringMatching(
+        /^navigation provenance: page 0: navigation provenance unavailable/,
+      ),
+    ]);
+    expect(j.navigations).toEqual([]);
+  });
+  it("observeNavigations refuses another installed Playwright version, and its disposer detaches exactly its own listener", () => {
+    const emitter = new EventEmitter();
+    const refused = observeNavigations(
+      { _eventEmitter: emitter },
+      () => undefined,
+      {
+        version: "1.62.0",
+        bundleSha256: null,
+        error: null,
+      },
+    );
+    expect(refused).toEqual({
+      ok: false,
+      reason: expect.stringMatching(
+        /qualified for playwright-core 1\.63\.0 only; installed: 1\.62\.0/,
+      ),
+    });
+    expect(emitter.listenerCount("navigated")).toBe(0);
+    const other = () => undefined;
+    emitter.on("navigated", other);
+    const seen: unknown[] = [];
+    const sub = observeNavigations(
+      { _eventEmitter: emitter },
+      (e) => void seen.push(e),
+    );
+    expect(sub.ok).toBe(true);
+    expect(emitter.listenerCount("navigated")).toBe(2);
+    emitter.emit("navigated", { url: P, name: "" });
+    if (sub.ok) {
+      sub.dispose();
+      sub.dispose();
+    }
+    emitter.emit("navigated", { url: P, name: "" });
+    expect(seen).toHaveLength(1);
+    expect(emitter.listeners("navigated")).toEqual([other]);
+    expect(installedPlaywrightCore()).toMatchObject({
+      version: "1.63.0",
+      error: null,
+    });
+  });
+  it("readNavigated reads Playwright's three kinds and refuses other shapes", () => {
+    const r = { url: () => P };
+    expect(
+      readNavigated({
+        url: P,
+        name: "",
+        newDocument: { request: { _object: r } },
+      }),
+    ).toEqual({
+      ok: true,
+      kind: "new-document",
+      url: P,
+      request: r,
+    });
+    expect(readNavigated({ url: P, name: "", newDocument: {} })).toMatchObject({
+      kind: "new-document",
+      request: null,
+    });
+    expect(readNavigated({ url: P, name: "" })).toMatchObject({
+      kind: "same-document",
+      request: null,
+    });
+    expect(
+      readNavigated({
+        url: P,
+        name: "",
+        newDocument: { request: { _object: r } },
+        error: "x",
+      }),
+    ).toMatchObject({ kind: "aborted", request: r, error: "x" });
+    for (const bad of [
+      null,
+      "x",
+      { name: "" },
+      { url: P, error: 3 },
+      { url: P, newDocument: 1 },
+      { url: P, newDocument: { request: r } },
+    ])
+      expect(readNavigated(bad), JSON.stringify(bad)).toMatchObject({
+        ok: false,
+      });
+  });
+  it("an unreadable event, a request never recorded, a commit of an ended request and an abort of a committed one are each named; nothing is attributed through them", () => {
+    const { j, d } = recorded("chromium");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.newDocument(P, first);
+    d.raw({ url: 7 });
+    const stranger = {
+      method: () => "GET",
+      url: () => N,
+      isNavigationRequest: () => true,
+      frame: () => d.page.mainFrame(),
+      failure: () => null,
+      redirectedFrom: () => null,
+    };
+    d.newDocument(N, stranger);
+    const stopped = d.request(N);
+    d.aborted(stopped, "net::ERR_ABORTED");
+    d.newDocument(N, stopped);
+    d.aborted(first, "late");
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /navigation event #\d+ unreadable \(no string url\)/,
+      ),
+      expect.stringMatching(
+        /navigation event #\d+ \(new-document\) names a request this page's recorder never saw/,
+      ),
+      expect.stringMatching(
+        /commits a new document for request #\d+, which had already ended \(aborted without committing a document: net::ERR_ABORTED\)/,
+      ),
+      expect.stringMatching(
+        /aborts request #\d+, which had committed document 1/,
+      ),
+    ]);
+    expect(kinds(j)).toEqual([
+      ["new-document", 1, "request"],
+      ["unreadable", 1, null],
+      ["new-document", 2, null],
+      ["aborted", 2, "request"],
+      ["new-document", 3, null],
+      ["aborted", 3, "request"],
+    ]);
+    expect(j.requests[1]?.commit, "never re-attributed").toBeNull();
+    expect(classifyJournal(j).violations).toHaveLength(4);
+  });
+  it("NAV-C2 a new document Playwright links to no request, while a navigation is pending, is unattributed; the pending navigation commits only at its own event", () => {
+    const { j, d } = recorded("chromium");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.newDocument(P, first);
+    const pending = d.request(N);
+    d.newDocument(`${FRONT}/api/__guard/requestless`);
+    expect(
+      j.requests[1]?.commit,
+      "not backfilled from the pending navigation",
+    ).toBeUndefined();
+    d.respond(pending, 503);
+    d.newDocument(N, pending);
+    expect(kinds(j)).toEqual([
+      ["new-document", 1, "request"],
+      ["new-document", 2, null],
+      ["new-document", 3, "request"],
+    ]);
+    expect(j.requests[1]?.commit).toMatchObject({ document: 3 });
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("the request link is by IDENTITY, never by URL: an event naming the superseded earlier request of a URL is a named failure, and the later request of that URL stays undecided", () => {
+    const { j, d } = recorded("firefox");
+    const first = d.request(P);
+    d.respond(first, 200);
+    d.newDocument(P, first);
+    const a = d.request(N);
+    d.request(N);
+    d.newDocument(N, a);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /commits a new document for request #\d+, which had already ended \(superseded by navigation #\d+\)/,
+      ),
+    ]);
+    expect(
+      j.requests[2]?.commit,
+      "the later request of the URL is not credited",
+    ).toBeUndefined();
+    expect(kinds(j).at(-1)).toEqual(["new-document", 2, null]);
+  });
+  it("the recorder's disposer detaches its provenance listener", () => {
+    const { d, recorder } = recorded("chromium");
+    expect(d.internal.listenerCount("navigated")).toBe(1);
+    recorder.dispose();
+    expect(d.internal.listenerCount("navigated")).toBe(0);
+  });
+});
 describe("F31-1 the ingestion seam and the seal (C4)", () => {
   /** A browser double whose context reports its engine and gives the lane one page double (driven by the case). */
   function seamBrowser() {
@@ -2960,21 +3494,26 @@ describe("F31-1 the ingestion seam and the seal (C4)", () => {
     const d = page();
     const r = d.request(P);
     d.respond(r, 200);
-    d.commit(P);
+    d.newDocument(P, r);
     d.console("warning", "held warning", P);
-    d.commit(`${FRONT}/elsewhere`);
+    d.newDocument(`${FRONT}/elsewhere`);
     expect(lane.heldProblems()).toHaveLength(1);
     expect(lane.journal.problems).toEqual([]);
     for (const deliver of holds.splice(0)) deliver();
     expect(lane.journal.problems.map((p) => [p.document, p.type])).toEqual([
       [1, "warning"],
     ]);
+    expect(d.internal.listenerCount("navigated")).toBe(1);
     const report = await lanes.settle();
     expect(report.failures).toEqual([
       expect.stringMatching(
         /^lane 0 page 0 document 1 warning \[warning\]: held warning \(a warning always fails\)$/,
       ),
     ]);
+    expect(
+      d.internal.listenerCount("navigated"),
+      "revision 27: the seal detached the page's navigation provenance",
+    ).toBe(0);
   });
   it("held through settlement: the report fails by name; a delivery after the seal is late and never classified; a second delivery is misuse", async () => {
     const { browser, page } = seamBrowser();

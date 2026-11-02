@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import {
   createServer,
   request as httpRequest,
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
+import { createRequire } from "node:module";
 import type { Socket } from "node:net";
 import type {
   Browser,
@@ -84,6 +86,14 @@ import {
  * exclusion is unchanged: page, initiating document, URL, request before message, its own terminal and front record, the declaration
  * and its exact count, one message per request. Each problem is a frozen envelope taken in the native listener; an optional
  * qualification seam (`Ingest`) can hold its delivery to the journal, and settlement seals the journal before classifying it.
+ *
+ * Revision 27 (Review 32 F32-1, same family, harness incomplete_fix; design assessment token f0a2dd0e6c…, C1–C5, invariants 1–10):
+ * revision 26 took a public `framenavigated` of a pending navigation's URL as its commit, so a history change to a STOPPED navigation's
+ * URL (which left that navigation pending in the recorder) invented its commit, and a declared delayed fetch of the surviving document
+ * was then judged in the wrong document. Now the only navigation authority is Playwright's own per-frame `navigated` event
+ * (`observeNavigations`, pinned to playwright-core 1.63.0 and shape-checked): `new-document` (with the request it links, by identity),
+ * `same-document`, or `aborted`. No URL, response, failure or public event moves a document; the classifier's commit relation also
+ * requires that recorded new-document event; any unavailable, unreadable or contradicting provenance is a named lane violation.
  */
 
 export interface TransportLaneOptions {
@@ -704,29 +714,32 @@ export interface RequestRecord {
   /** Revision 26: the journal sequence of the redirect hop this request continues (Playwright's `redirectedFrom`). */
   redirectedFrom?: number;
   /**
-   * Revision 26 (F31-1), a main-frame navigation only: the document its response COMMITTED (the main frame's commit of this request's
-   * URL, observed while it was the page's pending navigation), or null once it can no longer commit one (`commitReason`: redirected,
-   * superseded by a later navigation, or ended after its response without a commit, as a 204 or a download does). Absent while pending.
+   * Revision 26 (F31-1), a main-frame navigation only: the document it COMMITTED. Revision 27 (F32-1): set only by a `new-document`
+   * navigation event that names this very request (`DocumentTransition.request`), never from a URL; null once it can no longer commit one
+   * (`commitReason`: redirected, superseded by a later navigation, or aborted with its error, as a stop, a 204 or a download is). Absent
+   * while no event has decided it.
    */
   commit?: { seq: number; document: number } | null;
   commitReason?: string;
 }
 
 /**
- * Revision 26 (F31-1): each main-frame `framenavigated` of a lane page, as the recorder judged it. `new-document`: a committed document
- * (`request`: the pending navigation of that URL that committed it, or null, unattributed, for a commit to another origin or a non-HTTP
- * document, such as an engine's error page, with no navigation of its URL pending). `same-document`: a URL change within the document
- * (a fragment or the history API), with no navigation of its URL pending; the document does not change.
+ * Revision 27 (F32-1): each navigation event of a lane page's main frame, from its navigation provenance (`observeNavigations`), as the
+ * recorder read it. `new-document`: a committed new document (`request`: the navigation request the event names, or null, unattributed:
+ * an engine's error page or a requestless commit). `same-document`: a fragment or history-API change; the document does not change.
+ * `aborted`: a navigation that did not commit (`error`); the document does not change. `unreadable`: an event of an unexpected shape (a
+ * named failure; the document is unknown from there).
  */
 export interface DocumentTransition {
   seq: number;
   page: number;
   url: string;
-  kind: "new-document" | "same-document";
+  kind: "new-document" | "same-document" | "aborted" | "unreadable";
   /** The page's document before and after. */
   from: number;
   document: number;
   request: number | null;
+  error?: string;
   reason: string;
 }
 
@@ -756,6 +769,12 @@ export interface Journal {
   expectations: HttpExpectation[];
   /** Revision 26: every main-frame document transition (audit; each problem and request already carries its document). */
   navigations?: DocumentTransition[];
+  /** Revision 27: each page's navigation provenance source (its pinned Playwright version and bundle hash), or why it is unavailable. */
+  navigationProvenance?: Array<
+    { page: number } & (NavigationProvenance | { unavailable: string })
+  >;
+  /** Revision 27: named navigation-provenance failures (unavailable source, unreadable or contradicting events); each fails the lane. */
+  provenanceFailures?: string[];
   /**
    * Revision 26: the lane's engine (`chromium`, `firefox`, `webkit`), when known. Only an engine observed to log a navigation's HTTP
    * status (`ENGINES_LOGGING_HTTP`) can have that message attributed through the navigation's commit; unknown is not one.
@@ -1003,12 +1022,27 @@ export function classifyJournal(journal: Journal): LaneVerdict {
       );
     expectations.push(out);
   }
+  // Revision 27 (F32-1): a page whose navigation provenance failed has unknown documents; the lane fails by name.
+  for (const f of journal.provenanceFailures ?? [])
+    violations.push(`navigation provenance: ${f}`);
 
   // 4. Every problem, once, in journal order. A message can only be its own page and document's, for a request that started before it
   //    and ended after that page/document/URL's previous message of the same category; at most one message per request.
   //    Revision 26 (F31-1): "its own document" is the request's INITIATING document, or, for an HTTP-status message only, the document
   //    that the request (a main-frame navigation answered with that status) itself committed, observed after that commit, in an engine
   //    that logs such a status (`ENGINES_LOGGING_HTTP`). No other request becomes eligible in either document.
+  //    Revision 27 (F32-1, C3): that commit must be a recorded `new-document` navigation event naming this very request, at the commit's
+  //    sequence and document; a commit field without that provenance (or with any other kind of event) admits nothing.
+  const evidencedCommit = (r: RequestRecord) =>
+    r.commit != null &&
+    (journal.navigations ?? []).some(
+      (t) =>
+        t.kind === "new-document" &&
+        t.page === r.page &&
+        t.request === r.seq &&
+        t.seq === r.commit?.seq &&
+        t.document === r.commit?.document,
+    );
   const committedBy = (r: RequestRecord, p: Problem) =>
     p.category === "http" &&
     r.navigation &&
@@ -1016,6 +1050,7 @@ export function classifyJournal(journal: Journal): LaneVerdict {
     r.commit != null &&
     r.commit.document === p.document &&
     r.commit.seq < p.seq &&
+    evidencedCommit(r) &&
     journal.engine !== undefined &&
     ENGINES_LOGGING_HTTP.has(journal.engine);
   const relationOf = (r: RequestRecord, p: Problem): Relation | null =>
@@ -1141,7 +1176,10 @@ export interface RecordedRequest {
   failure(): { errorText: string } | null;
   redirectedFrom(): RecordedRequest | null;
 }
-/** The parts of a Playwright page the recorder reads (a static test drives it with an event sequence an engine was observed to emit). */
+/**
+ * The parts of a Playwright page the recorder reads (a static test drives it with an event sequence an engine was observed to emit):
+ * `mainFrame()` is a Playwright client frame, whose `navigated` events (`observeNavigations`) are the navigation provenance.
+ */
 export interface RecordedPage {
   mainFrame(): unknown;
   on(event: string, listener: (value: never) => void): unknown;
@@ -1155,52 +1193,221 @@ export interface RecorderSink {
   ingest: (problem: Readonly<Problem>) => void;
 }
 
-const withoutFragment = (url: string) => url.replace(/#.*$/, "");
-/** Both HTTP(S) and of one origin: only then can a URL change be the same document's (fragment or history API). */
-const sameHttpOrigin = (a: string, b: string) => {
-  try {
-    const x = new URL(a);
-    const y = new URL(b);
-    return /^https?:$/.test(x.protocol) && x.origin === y.origin;
-  } catch {
-    return false;
-  }
-};
+// ---- Revision 27: navigation provenance (Review 32 F32-1) ---------------------------------------------------------------------------
 
 /**
- * Records one lane page's requests, document transitions and problems in the journal (revision 26, Review 31 F31-1, family
- * native-transport-console-attribution; design assessment token 37c3b6402c…, C2–C4, invariants 1–7).
+ * Revision 27 (Review 32 F32-1, family native-transport-console-attribution, harness incomplete_fix; design assessment token
+ * f0a2dd0e6c…, C1–C4, invariants 1–8): the ONE source of navigation authority for a lane page. Revision 26 inferred a commit from the
+ * public `framenavigated` event (which Playwright also emits for a same-document history change) plus a pending request of that URL, so a
+ * history update to a cancelled navigation's URL invented that navigation's commit (Review 32's Chromium Stop schedule).
  *
- * The page's DOCUMENT moves on only when its main frame commits one (`framenavigated` of the main frame), never at a response: a redirect
- * hop, a 204 and a download each have a navigation response but commit nothing (revision 19 counted each of them as a new document). The
- * page has at most one PENDING navigation: its latest main-frame navigation request. A later navigation request supersedes it (a redirect
- * hop is "redirected"); its failure after its response (a 204, a download) ends it without a commit. A main-frame commit of the pending
- * navigation's URL (fragment aside) is THAT navigation's commit: the request keeps its initiating `document` and records the document it
- * committed (`commit`). A commit with no pending navigation of its URL is a new, unattributed document when it leaves the HTTP origin (an
- * engine's error page, `about:blank`, `data:`), and otherwise a same-document URL change (a fragment or the history API: the document
- * does not change). Observed orders (revision-26 diagnostics, all three engines): request, response, then the commit; Chromium logs a
- * navigation's HTTP status after the commit, WebKit between the response and the commit, Firefox not at all.
+ * The installed Playwright client keeps, on each frame, the protocol's own `navigated` event (`FrameNavigatedEvent`), which its public
+ * API reduces to the frame: `newDocument` present for a committed NEW document (with the navigation request, when Playwright's server
+ * linked one), absent for a SAME-DOCUMENT change, and `error` for an ABORTED navigation (which also carries `newDocument`: the pending
+ * document that did not commit; Playwright emits no public event for it). Playwright's own `waitForNavigation` reads exactly this event.
+ * It is a private interface of one pinned version: the adapter checks the installed `playwright-core` version and the event's shape, and
+ * an unavailable or unreadable source is a NAMED failure of the case, never a fallback to URL matching.
+ */
+export const NAVIGATION_PROVENANCE_PIN = {
+  package: "playwright-core",
+  version: "1.63.0",
+  event: "navigated",
+} as const;
+
+/** Where a lane page's navigation authority came from (in the ledger: the package version and its bundle's hash). */
+export interface NavigationProvenance {
+  source: "playwright-frame-navigated";
+  version: string;
+  bundleSha256: string | null;
+}
+
+/** The installed `playwright-core` the lane's Playwright client runs (resolved through `@playwright/test`, as the runner loads it). */
+export interface InstalledPlaywrightCore {
+  version: string | null;
+  bundleSha256: string | null;
+  error: string | null;
+}
+
+let installedCore: InstalledPlaywrightCore | undefined;
+export function installedPlaywrightCore(): InstalledPlaywrightCore {
+  if (installedCore !== undefined) return installedCore;
+  try {
+    const test = createRequire(import.meta.url).resolve(
+      "@playwright/test/package.json",
+    );
+    const playwright = createRequire(test).resolve("playwright/package.json");
+    const fromPlaywright = createRequire(playwright);
+    const core = fromPlaywright.resolve("playwright-core/package.json");
+    const version = (
+      JSON.parse(readFileSync(core, "utf8")) as { version?: unknown }
+    ).version;
+    let bundleSha256: string | null = null;
+    try {
+      bundleSha256 = createHash("sha256")
+        .update(
+          readFileSync(
+            fromPlaywright.resolve("playwright-core/lib/coreBundle"),
+          ),
+        )
+        .digest("hex");
+    } catch {
+      bundleSha256 = null;
+    }
+    installedCore = {
+      version: typeof version === "string" ? version : null,
+      bundleSha256,
+      error:
+        typeof version === "string" ? null : "no version in its package.json",
+    };
+  } catch (error) {
+    installedCore = { version: null, bundleSha256: null, error: String(error) };
+  }
+  return installedCore;
+}
+
+export type NavigationSubscription =
+  | { ok: true; provenance: NavigationProvenance; dispose: () => void }
+  | { ok: false; reason: string };
+
+/**
+ * Subscribes `listener` to a Playwright client frame's `navigated` events (the frame's own emitter, so a subframe's never arrive). A
+ * different installed version, or a frame without the emitter, is refused by name (`ok: false`); nothing is subscribed then.
+ */
+export function observeNavigations(
+  frame: unknown,
+  listener: (event: unknown) => void,
+  installed: InstalledPlaywrightCore = installedPlaywrightCore(),
+): NavigationSubscription {
+  if (installed.version !== NAVIGATION_PROVENANCE_PIN.version)
+    return {
+      ok: false,
+      reason: `navigation provenance is qualified for ${NAVIGATION_PROVENANCE_PIN.package} ${NAVIGATION_PROVENANCE_PIN.version} only; installed: ${installed.version ?? `unknown (${installed.error})`}`,
+    };
+  const emitter = (frame as { _eventEmitter?: unknown } | null)
+    ?._eventEmitter as
+    | {
+        on?: (event: string, listener: (event: unknown) => void) => unknown;
+        off?: (event: string, listener: (event: unknown) => void) => unknown;
+      }
+    | undefined;
+  if (typeof emitter?.on !== "function" || typeof emitter.off !== "function")
+    return {
+      ok: false,
+      reason:
+        "the main frame has no Playwright client navigation emitter (`_eventEmitter` with on/off)",
+    };
+  emitter.on(NAVIGATION_PROVENANCE_PIN.event, listener);
+  let attached = true;
+  return {
+    ok: true,
+    provenance: {
+      source: "playwright-frame-navigated",
+      version: installed.version,
+      bundleSha256: installed.bundleSha256,
+    },
+    dispose: () => {
+      if (!attached) return;
+      attached = false;
+      emitter.off?.(NAVIGATION_PROVENANCE_PIN.event, listener);
+    },
+  };
+}
+
+/** One `navigated` event, read: its kind, the request it names (the PUBLIC request object, or null: none named) and its error. */
+export type ReadNavigation =
+  | {
+      ok: true;
+      kind: "new-document" | "same-document" | "aborted";
+      url: string;
+      request: unknown;
+      error?: string;
+    }
+  | { ok: false; reason: string };
+
+/**
+ * Reads a client `navigated` event (`FrameNavigatedEvent`: `url`, `name`, optional `newDocument: {request?}`, optional `error`). The
+ * client delivers a named request as its CHANNEL; the public `Request` (the object the page's `request` event gave) is the channel's
+ * `_object`, as Playwright's own `Request.from` reads it. Anything else is unreadable.
+ */
+export function readNavigated(value: unknown): ReadNavigation {
+  if (typeof value !== "object" || value === null)
+    return { ok: false, reason: "not an object" };
+  const event = value as Record<string, unknown>;
+  if (typeof event.url !== "string")
+    return { ok: false, reason: "no string url" };
+  if (event.error !== undefined && typeof event.error !== "string")
+    return { ok: false, reason: "a non-string error" };
+  const doc = event.newDocument;
+  if (doc !== undefined && (typeof doc !== "object" || doc === null))
+    return { ok: false, reason: "a newDocument that is not an object" };
+  let request: unknown = null;
+  const channel = (doc as { request?: unknown } | undefined)?.request;
+  if (channel !== undefined && channel !== null) {
+    const object = (channel as { _object?: unknown })._object;
+    if (
+      typeof channel !== "object" ||
+      typeof object !== "object" ||
+      object === null
+    )
+      return {
+        ok: false,
+        reason:
+          "a newDocument request that is not a client channel (no `_object`)",
+      };
+    request = object;
+  }
+  if (event.error !== undefined)
+    return {
+      ok: true,
+      kind: "aborted",
+      url: event.url,
+      request,
+      error: event.error as string,
+    };
+  return {
+    ok: true,
+    kind: doc === undefined ? "same-document" : "new-document",
+    url: event.url,
+    request,
+  };
+}
+
+/**
+ * Records one lane page's requests, document transitions and problems in the journal (revision 26, Review 31 F31-1; revision 27, Review
+ * 32 F32-1, design assessment token f0a2dd0e6c…, C1–C4).
+ *
+ * The page's DOCUMENT moves on only at a `new-document` event of its main frame's navigation provenance (`observeNavigations`), never at a
+ * response, a failure, a request's end, a public `framenavigated` or a URL: a redirect hop, a 204 and a download have a navigation
+ * response but commit nothing; a history change (even to a pending or cancelled navigation's URL) is a `same-document` event; a stopped,
+ * failed or refused navigation is an `aborted` event and leaves the old document. A `new-document` event that names a navigation request
+ * the recorder holds is THAT request's commit (the request keeps its initiating `document` and records `commit`); one naming no request
+ * (an engine's error page, a requestless commit) is a new, unattributed document. Request lifecycle facts stay separate: a later
+ * navigation request supersedes the latest (Playwright then links no commit to it), a redirect hop is "redirected", an abort names its
+ * error. A `new-document` or abort naming a request the recorder never saw or had already ended, an unreadable event, and an unavailable
+ * provenance source are each a named failure (`journal.provenanceFailures`), with the document never guessed.
  *
  * Each problem is an immutable ENVELOPE taken synchronously in the native listener (sequence, page, document and transport stamp of that
  * moment) and only then handed to `ingest`. A hold downstream of the listener (the qualification seam) therefore cannot change its
  * provenance; an event the engine delivers to the listener only after a later commit is that later document's, and can only be
  * attributed as such (an unknown is never guessed into the earlier document).
  *
- * Known limit (recorded, not handled): a document restored without a request (a back/forward-cache restore of the same origin) looks like
- * a same-document change; a history-API change to exactly the pending navigation's URL before it commits would be taken as its commit.
+ * Returns the subscription's disposer: the lane detaches it when it seals the journal (after its context closed, so a final event of the
+ * close is still recorded).
  */
 export function recordPage(
   page: RecordedPage,
   index: number,
   sink: RecorderSink,
-): void {
+): { dispose: () => void } {
   const { journal, next, stamp } = sink;
   journal.navigations ??= [];
+  journal.navigationProvenance ??= [];
+  journal.provenanceFailures ??= [];
   const navigations = journal.navigations;
+  const failures = journal.provenanceFailures;
   let documentNo = 0;
-  let lastUrl = "about:blank";
-  let pending: RequestRecord | null = null;
-  const records = new Map<RecordedRequest, RequestRecord>();
+  let latest: RequestRecord | null = null;
+  const records = new Map<unknown, RequestRecord>();
   const on = page.on.bind(page) as (
     event: string,
     listener: (value: never) => void,
@@ -1219,8 +1426,105 @@ export function recordPage(
       record.commit = null;
       record.commitReason = reason;
     }
-    if (pending === record) pending = null;
+    if (latest === record) latest = null;
   };
+  const onNavigated = (value: unknown) => {
+    const seq = next();
+    const from = documentNo;
+    const read = readNavigated(value);
+    if (!read.ok) {
+      failures.push(
+        `page ${index}: navigation event #${seq} unreadable (${read.reason}); the page's document is unknown from here`,
+      );
+      navigations.push({
+        seq,
+        page: index,
+        url: "",
+        kind: "unreadable",
+        from,
+        document: documentNo,
+        request: null,
+        reason: read.reason,
+      });
+      return;
+    }
+    const record =
+      read.request === null ? undefined : records.get(read.request);
+    if (read.request !== null && record === undefined)
+      failures.push(
+        `page ${index}: navigation event #${seq} (${read.kind}) names a request this page's recorder never saw`,
+      );
+    const base = { seq, page: index, url: read.url, from };
+    if (read.kind === "same-document") {
+      navigations.push({
+        ...base,
+        kind: "same-document",
+        document: documentNo,
+        request: null,
+        reason:
+          "a same-document change (fragment or history API): no new document",
+      });
+      return;
+    }
+    if (read.kind === "aborted") {
+      if (record !== undefined) {
+        if (record.commit != null)
+          failures.push(
+            `page ${index}: navigation event #${seq} aborts request #${record.seq}, which had committed document ${record.commit.document}`,
+          );
+        end(record, `aborted without committing a document: ${read.error}`);
+      }
+      navigations.push({
+        ...base,
+        kind: "aborted",
+        document: documentNo,
+        request: record?.seq ?? null,
+        error: read.error,
+        reason: `a navigation aborted (${read.error}): the document stays`,
+      });
+      return;
+    }
+    documentNo += 1;
+    let request: number | null = null;
+    let reason =
+      "a new document no navigation request is linked to (unattributed)";
+    if (record !== undefined) {
+      if (record.commit === undefined) {
+        record.commit = { seq, document: documentNo };
+        if (latest === record) latest = null;
+        request = record.seq;
+        reason = `committed by navigation #${record.seq}`;
+      } else {
+        failures.push(
+          `page ${index}: navigation event #${seq} commits a new document for request #${record.seq}, which had already ${record.commit === null ? `ended (${record.commitReason})` : `committed document ${record.commit.document}`}`,
+        );
+        reason = `a new document naming request #${record.seq}, which could no longer commit one (unattributed)`;
+      }
+    }
+    navigations.push({
+      ...base,
+      kind: "new-document",
+      document: documentNo,
+      request,
+      reason,
+    });
+  };
+  // Subscribed BEFORE the page's other listeners, at the page's first delivery to the lane (no navigation of it is unobserved).
+  const subscription = observeNavigations(page.mainFrame(), onNavigated);
+  if (subscription.ok)
+    journal.navigationProvenance.push({
+      page: index,
+      ...subscription.provenance,
+    });
+  else {
+    journal.navigationProvenance.push({
+      page: index,
+      unavailable: subscription.reason,
+    });
+    failures.push(
+      `page ${index}: navigation provenance unavailable (${subscription.reason}); its documents cannot be attributed`,
+    );
+  }
   on("request", (request: RecordedRequest) => {
     const record: RequestRecord = {
       seq: next(),
@@ -1239,18 +1543,18 @@ export function recordPage(
     } catch {
       hop = undefined;
     }
-    if (hop !== undefined) record.redirectedFrom = hop.seq;
+    if (hop !== undefined) {
+      record.redirectedFrom = hop.seq;
+      if (hop.navigation) end(hop, `redirected to #${record.seq}`);
+    }
     records.set(request, record);
     journal.requests.push(record);
     if (record.navigation) {
-      if (pending !== null)
-        end(
-          pending,
-          pending === hop
-            ? `redirected to #${record.seq}`
-            : `superseded by navigation #${record.seq}`,
-        );
-      pending = record;
+      // Playwright links a commit only to the frame's latest navigation request (its pending document's), so an earlier one that has not
+      // committed cannot any more; a commit naming it is a named failure above, never re-attributed.
+      if (latest !== null)
+        end(latest, `superseded by navigation #${record.seq}`);
+      latest = record;
     }
   });
   on(
@@ -1259,7 +1563,7 @@ export function recordPage(
       const seq = next();
       const record = records.get(response.request());
       if (record === undefined) return;
-      // A response is not a commit: the document changes only at the main frame's commit (below).
+      // A response is not a commit: the document changes only at a new-document event (above).
       if (record.terminal === null)
         record.terminal = { seq, kind: "response", status: response.status() };
     },
@@ -1269,69 +1573,15 @@ export function recordPage(
     const record = records.get(request);
     if (record === undefined) return;
     const errorText = request.failure()?.errorText ?? "";
+    // A failure is not a document fact either: an abort (or an engine's error document) arrives as its own navigation event.
     if (record.terminal === null)
       record.terminal = { seq, kind: "failed", errorText };
-    else {
-      record.failedAfterResponse = { seq, errorText };
-      if (record === pending)
-        end(record, "ended after its response without committing a document");
-    }
+    else record.failedAfterResponse = { seq, errorText };
   });
   on("requestfinished", (request: RecordedRequest) => {
     const seq = next();
     const record = records.get(request);
     if (record !== undefined) record.finishedSeq = seq;
-  });
-  on("framenavigated", (frame: { url(): string }) => {
-    if (frame !== page.mainFrame()) return;
-    const seq = next();
-    const url = frame.url();
-    const from = documentNo;
-    let transition: DocumentTransition;
-    if (
-      pending !== null &&
-      withoutFragment(pending.url) === withoutFragment(url)
-    ) {
-      documentNo += 1;
-      pending.commit = { seq, document: documentNo };
-      transition = {
-        seq,
-        page: index,
-        url,
-        kind: "new-document",
-        from,
-        document: documentNo,
-        request: pending.seq,
-        reason: `committed by navigation #${pending.seq}`,
-      };
-      pending = null;
-    } else if (!sameHttpOrigin(lastUrl, url)) {
-      documentNo += 1;
-      transition = {
-        seq,
-        page: index,
-        url,
-        kind: "new-document",
-        from,
-        document: documentNo,
-        request: null,
-        reason:
-          "a commit leaving the HTTP origin with no navigation of its URL pending (unattributed)",
-      };
-    } else
-      transition = {
-        seq,
-        page: index,
-        url,
-        kind: "same-document",
-        from,
-        document: documentNo,
-        request: null,
-        reason:
-          "a URL change within the document (fragment or history API): no navigation of its URL pending",
-      };
-    lastUrl = url;
-    navigations.push(transition);
   });
   const problem = (type: string, text: string, location: string) => {
     const { category, url, status } = categorise(type, text, location);
@@ -1355,6 +1605,7 @@ export function recordPage(
       problem(message.type(), message.text(), message.location().url ?? "");
   });
   on("pageerror", (error: Error) => problem("pageerror", error.message, ""));
+  return { dispose: subscription.ok ? subscription.dispose : () => undefined };
 }
 
 export interface TransportLane {
@@ -2030,16 +2281,20 @@ async function openLane(
     "context.setOffline (WebKit's emulation fails File reads)",
   );
   let pageIndex = 0;
+  // Revision 27 (F32-1, C4): each page's navigation-provenance subscription, owned by the lane and detached when it seals the journal.
+  const recorders: Array<{ dispose: () => void }> = [];
   context.on("page", (page) => {
     const own = page as unknown as Record<string, unknown>;
     own.route = refuse("page.route");
     own.routeFromHAR = refuse("page.routeFromHAR");
-    recordPage(page as unknown as RecordedPage, pageIndex++, {
-      journal,
-      next,
-      stamp,
-      ingest,
-    });
+    recorders.push(
+      recordPage(page as unknown as RecordedPage, pageIndex++, {
+        journal,
+        next,
+        stamp,
+        ingest,
+      }),
+    );
   });
   const routeHost =
     origin === null
@@ -2220,7 +2475,17 @@ async function openLane(
     heldProblems: () => [...held],
     seal: () => {
       sealed = true;
+      const detached: string[] = [];
+      for (const [i, recorder] of recorders.splice(0).entries())
+        try {
+          recorder.dispose();
+        } catch (error) {
+          detached.push(
+            `page ${i}: detaching its navigation provenance failed: ${String(error)}`,
+          );
+        }
       return [
+        ...detached,
         ...[...held].map(
           (p) =>
             `a console problem captured at journal #${p.seq} (page ${p.page} document ${p.document} ${p.type}) was still held by the ingestion seam when the journal was classified: ${p.text}`,
@@ -2253,6 +2518,8 @@ async function openLane(
       })),
       problems: journal.problems,
       navigations: journal.navigations ?? [],
+      navigationProvenance: journal.navigationProvenance ?? [],
+      provenanceFailures: journal.provenanceFailures ?? [],
       engine: journal.engine ?? null,
       late: journal.late ?? [],
       held: [...held],

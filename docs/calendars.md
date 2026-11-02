@@ -365,6 +365,15 @@ logs the status after the commit and WebKit before it; Firefox logs none, so no 
 is captured, with its page and document, at the moment the browser delivers it to the lane. A message the browser delivers only after a
 later commit belongs to that later document.
 
+Revision 27 takes that commit from Playwright's own navigation event for the main frame (the client's `navigated` event, which
+distinguishes a new document, a same-document change and an aborted navigation, and names the navigation request it links), not from a
+URL. A history change to a stopped or still-pending navigation's URL therefore keeps the document, and a stopped navigation commits
+nothing. Chromium's and Firefox's error pages are new documents linked to no request. The event is a private interface of the pinned
+Playwright version (1.63.0): the lane checks the installed version and the event's shape, and an unavailable source, an unreadable event
+or an event naming a request the lane did not record (or had already ended) fails the case by name. The lane detaches its listener when
+it seals the journal. Qualified on macOS in Chromium, Firefox and WebKit: stops by the page's `window.stop()` in all three engines and by
+the browser's Stop in Chromium, history while a navigation is still pending, same-URL supersession and two pages.
+
 The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
 origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
 once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins

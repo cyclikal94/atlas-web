@@ -30,6 +30,12 @@ import {
  * 204s, downloads, failed navigations and same-document changes, and a REAL native message held downstream of the lane's native listener
  * (the `ingest` qualification seam) until after a restoration, a navigation, a page close or settlement. A delay BEFORE the listener (in
  * the engine or Playwright) is still not controllable here: such a message is attributed to the document current when it arrives.
+ *
+ * Revision 27 (Review 32 F32-1; design assessment token f0a2dd0e6c…, NAV-C1–C9): the document moves on only at Playwright's own
+ * new-document navigation event. NAV6 is Review 32's schedule (a navigation held at the origin, stopped, then history to its URL, with a
+ * declared delayed fetch 500 of the surviving document), stopped by the page's native window.stop() in every engine and by the browser's
+ * Stop in Chromium; NAV7 history to a still-pending navigation's URL before its genuine commit; NAV8 two pages; NAV9 same-URL
+ * supersession. Each native action waits on the origin-arrival barrier (`heldRoute`, `armOnCookie`), never on elapsed time.
  */
 
 const GUARD = "/api/__guard";
@@ -506,7 +512,7 @@ test.describe("native transport navigation attribution (revision 26 qualificatio
     }
   });
 
-  test("NAV2 the document moves on only at a commit: a redirect chain commits once, a reload commits, a 204 and a download do not, fragments and history changes do not; a lost navigation's own message is its initiating document's", async ({
+  test("NAV2 the document moves on only at a commit (revision 27: Playwright's new-document event): a redirect chain commits once, a reload commits, a 204 and a download do not, fragments and history changes do not; a lost navigation's own message is its initiating document's", async ({
     browser,
     browserName,
   }) => {
@@ -571,16 +577,18 @@ test.describe("native transport navigation attribution (revision 26 qualificatio
           {
             document: 3,
             commit: null,
+            // Revision 27 (F32-1): Playwright's own abort event decides it, in every engine (diag/order-2).
             commitReason: expect.stringMatching(
-              /^(ended after its response without committing a document|superseded by navigation #\d+)$/,
+              /^aborted without committing a document: /,
             ),
           },
         ]);
       expect(req(`${GUARD}/status/500`).map((r) => r.document)).toEqual([3]);
       const lost = req(`${GUARD}/reset/navigation`);
       expect(lost.every((r) => r.document === 3)).toBe(true);
-      // Chromium and Firefox commit an error document for the lost navigation (Chromium's off the HTTP origin, unattributed; Firefox's at
-      // its URL, that navigation's commit); WebKit commits none.
+      expect(lost.every((r) => r.commit === null)).toBe(true);
+      // Chromium and Firefox commit an error document for the lost navigation, each a new document Playwright links to NO request
+      // (revision 27: revision 26 attributed Firefox's, at the failed URL, by that URL); WebKit commits none. The abort comes first.
       const errorDocument = browserName !== "webkit";
       expect(req(`${GUARD}/page?after`).map((r) => r.document)).toEqual([
         errorDocument ? 4 : 3,
@@ -595,13 +603,12 @@ test.describe("native transport navigation attribution (revision 26 qualificatio
         ["new-document", 1, "request"],
         ["new-document", 2, "request"],
         ["new-document", 3, "request"],
+        ["aborted", 3, "request"],
+        ["aborted", 3, "request"],
         ["same-document", 3, null],
         ["same-document", 3, null],
-        ...(browserName === "chromium"
-          ? [["new-document", 4, null]]
-          : browserName === "firefox"
-            ? [["new-document", 4, "request"]]
-            : []),
+        ["aborted", 3, "request"],
+        ...(errorDocument ? [["new-document", 4, null]] : []),
         ["new-document", errorDocument ? 5 : 4, "request"],
       ]);
       expect(
@@ -792,6 +799,477 @@ test.describe("native transport navigation attribution (revision 26 qualificatio
       expect(lateLines).toEqual([expect.stringMatching(/not classified/)]);
     } finally {
       for (const deliver of holds.splice(0)) deliver();
+      await lanes.settle();
+    }
+  });
+});
+
+// ---- Revision 27 (Review 32 F32-1, family native-transport-console-attribution; design assessment token f0a2dd0e6c…, NAV-C1–C9) -------
+
+/**
+ * A route of the lane's scripted origin that HOLDS each arrival (a real request, its connection open) until `release`, then answers it,
+ * unless the browser cancelled it first (then it writes nothing). `arrivals` counts arrivals; `arrived(n)` resolves at the n-th.
+ * `holdFirst` holds only the first arrival and answers later ones at once.
+ */
+async function heldRoute(
+  lane: TransportLane,
+  glob: string,
+  answer:
+    | { status: number; contentType: string; body: string }
+    | ((arrival: number) => {
+        status: number;
+        contentType: string;
+        body: string;
+      }),
+  options: { holdFirst?: boolean } = {},
+) {
+  const gates: Array<() => void> = [];
+  const waiters: Array<{ n: number; resolve: () => void }> = [];
+  let arrivals = 0;
+  const cancelled: number[] = [];
+  await lane.routes.route(glob, async (route) => {
+    const r = route as unknown as OriginRoute;
+    arrivals += 1;
+    const mine = arrivals;
+    for (const w of waiters.filter((x) => x.n <= mine)) w.resolve();
+    if (!(options.holdFirst === true && mine > 1))
+      await new Promise<void>((resolve) => {
+        gates.push(resolve);
+        if (r.signal.aborted) resolve();
+        else
+          r.signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    if (r.signal.aborted) {
+      cancelled.push(mine);
+      return;
+    }
+    const a = typeof answer === "function" ? answer(mine) : answer;
+    await r.fulfill({
+      status: a.status,
+      contentType: a.contentType,
+      headers: { "cache-control": "no-store" },
+      body: a.body,
+    });
+  });
+  return {
+    arrived: (n = 1) =>
+      new Promise<void>((resolve) => {
+        if (arrivals >= n) resolve();
+        else waiters.push({ n, resolve });
+      }),
+    release: () => {
+      for (const g of gates.splice(0)) g();
+    },
+    cancelled,
+  };
+}
+const SENTINEL = (name: string) =>
+  `<!doctype html><title>${name}</title><body>${name}<script>window.documentIdentity = ${JSON.stringify(name)};</script></body>`;
+const identityOf = (page: Page) =>
+  page.evaluate(
+    () =>
+      (window as unknown as { documentIdentity?: string }).documentIdentity ??
+      null,
+  );
+/**
+ * Arms, in the page's CURRENT document, a native action run when the cookie `name` appears (polled by the page itself). The test sets
+ * the cookie only after the origin-arrival barrier, so the action runs while the navigation is genuinely held, without evaluating in the
+ * page then (Chromium does not run an evaluation while a browser-initiated navigation is pending: diag/order-3 E4).
+ */
+const armOnCookie = (
+  page: Page,
+  name: string,
+  action: "stop" | "history",
+  url: string,
+) =>
+  page.evaluate(
+    ({ n, a, u }) => {
+      const timer = setInterval(() => {
+        if (!document.cookie.split("; ").includes(`${n}=1`)) return;
+        clearInterval(timer);
+        if (a === "stop") window.stop();
+        else history.pushState({}, "", u);
+      }, 10);
+    },
+    { n: name, a: action, u: url },
+  );
+const setCookie = (page: Page, name: string) =>
+  page
+    .context()
+    .addCookies([{ name, value: "1", url: new URL(page.url()).origin }]);
+const transitionsOf = (lane: TransportLane, page = 0) =>
+  (lane.journal.navigations ?? [])
+    .filter((n) => n.page === page)
+    .map((n) => [n.kind, n.document, n.request === null ? null : "request"]);
+
+test.describe("native transport navigation provenance (revision 27 qualification in real engines)", () => {
+  for (const initiator of ["page", "browser"] as const)
+    test(`NAV6 Review 32's schedule, ${initiator === "page" ? "a page-initiated navigation stopped by the page's native window.stop()" : "a browser-initiated navigation (page.goto) stopped by the browser's Stop in Chromium (CDP Page.stopLoading, the review's stimulus) and by the page's native window.stop() in Firefox and WebKit"}: held at the origin, stopped, then history to a different URL and to the stopped URL; the original document survives, nothing is committed, and a declared delayed fetch 500 stays that document's and is expected`, async ({
+      browser,
+      browserName,
+    }) => {
+      // Chromium's window.stop() does not stop a browser-initiated navigation (diag/order-3 E2), so Chromium uses the browser's Stop;
+      // Firefox and WebKit stop it natively from the page. No engine is skipped.
+      const browserStop = initiator === "browser" && browserName === "chromium";
+      const lanes = openTransportLanes(browser, test.info());
+      const holds: Array<{ release: () => void }> = [];
+      try {
+        const lane = await guardLane(lanes);
+        const base = `${GUARD}/nav6`;
+        await lane.routes.route(`**${base}/page`, (route) =>
+          (route as unknown as OriginRoute).fulfill({
+            status: 200,
+            contentType: "text/html",
+            headers: { "cache-control": "no-store" },
+            body: SENTINEL("original"),
+          }),
+        );
+        const navigation = await heldRoute(lane, `**${base}/held`, {
+          status: 200,
+          contentType: "text/html",
+          body: SENTINEL("replacement"),
+        });
+        holds.push(navigation);
+        const delayed = await heldRoute(lane, `**${base}/delayed500`, {
+          status: 500,
+          contentType: "text/plain",
+          body: "declared response",
+        });
+        holds.push(delayed);
+        const page = await lane.context.newPage();
+        await page.goto(`${base}/page`);
+        expect(await identityOf(page)).toBe("original");
+        // The review's positive control first: an ordinary history change is a same-document event.
+        await page.evaluate(() =>
+          history.pushState({}, "", "/api/__guard/nav6/ordinary-history"),
+        );
+        let goto: Promise<string> | null = null;
+        if (!browserStop) await armOnCookie(page, "nav6-stop", "stop", "");
+        if (initiator === "page")
+          await page.evaluate(() => {
+            location.assign("/api/__guard/nav6/held");
+          });
+        else
+          goto = page.goto(`${base}/held`).then(
+            () => "committed",
+            (e) => `refused: ${String(e)}`,
+          );
+        await navigation.arrived();
+        if (browserStop) {
+          const cdp = await page.context().newCDPSession(page);
+          await cdp.send("Page.stopLoading");
+          await cdp.detach();
+        } else await setCookie(page, "nav6-stop");
+        const held = () =>
+          lane.journal.requests.find((r) => r.url.endsWith(`${base}/held`));
+        await expect
+          .poll(
+            () =>
+              (lane.journal.navigations ?? []).some(
+                (n) => n.kind === "aborted" && n.request === held()?.seq,
+              ),
+            { message: "Playwright's abort event for the stopped navigation" },
+          )
+          .toBe(true);
+        if (goto !== null) expect(await goto).toMatch(/^refused/);
+        expect(await identityOf(page), "the original document survives").toBe(
+          "original",
+        );
+        lane.expectHttp({
+          method: "GET",
+          path: `${base}/delayed500`,
+          status: 500,
+          count: 1,
+          reason: "NAV6 a delayed fetch of the surviving document",
+        });
+        await page.evaluate(() => {
+          (window as unknown as { status500?: Promise<number> }).status500 =
+            fetch("/api/__guard/nav6/delayed500", { cache: "no-store" }).then(
+              (r) => r.status,
+            );
+        });
+        await delayed.arrived();
+        await page.evaluate(() =>
+          history.pushState({}, "", "/api/__guard/nav6/held"),
+        );
+        expect(await identityOf(page)).toBe("original");
+        delayed.release();
+        expect(
+          await page.evaluate(
+            () =>
+              (window as unknown as { status500: Promise<number> }).status500,
+          ),
+        ).toBe(500);
+        await quiet(lane);
+        const { report, verdict } = await settle(lanes, lane);
+        expect(
+          transitionsOf(lane),
+          "the stopped navigation committed nothing",
+        ).toEqual([
+          ["new-document", 1, "request"],
+          ["same-document", 1, null],
+          ["aborted", 1, "request"],
+          ["same-document", 1, null],
+        ]);
+        expect(
+          held(),
+          "the stopped navigation ended without a commit",
+        ).toMatchObject({
+          navigation: true,
+          document: 1,
+          commit: null,
+          commitReason: expect.stringMatching(
+            /^aborted without committing a document: /,
+          ),
+          terminal: { kind: "failed" },
+        });
+        expect(
+          navigation.cancelled,
+          "the origin saw the browser cancel it",
+        ).toEqual([1]);
+        expect(lane.journal.provenanceFailures).toEqual([]);
+        expect(verdict.violations).toEqual([]);
+        expect(
+          verdict.unexpected,
+          "the declared fetch is the surviving document's",
+        ).toEqual([]);
+        expect(report.failures).toEqual([]);
+        expect(
+          verdict.expected.map((p) => [
+            p.document,
+            p.status,
+            p.evidence?.relation,
+          ]),
+        ).toEqual(logsHttp(browserName) ? [[1, 500, "same-document"]] : []);
+        expect(verdict.expectations.map((e) => e.matched.length)).toEqual([1]);
+      } finally {
+        for (const h of holds) h.release();
+        await lanes.settle();
+      }
+    });
+
+  test("NAV7 history to a STILL PENDING navigation's own URL: no commit while it is held; its genuine commit then advances the document exactly once, and its own declared 503 is credited through that commit", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    const holds: Array<{ release: () => void }> = [];
+    try {
+      const lane = await guardLane(lanes);
+      const base = `${GUARD}/nav7`;
+      const navigation = await heldRoute(lane, `**${base}/held`, {
+        status: 503,
+        contentType: "text/html",
+        body: SENTINEL("committed"),
+      });
+      holds.push(navigation);
+      const page = await open(lane);
+      lane.expectHttp({
+        method: "GET",
+        path: `${base}/held`,
+        status: 503,
+        count: 1,
+        reason: "NAV7 the held navigation itself",
+      });
+      await armOnCookie(page, "nav7-history", "history", `${base}/held`);
+      const goto = page.goto(`${base}/held`);
+      await navigation.arrived();
+      await setCookie(page, "nav7-history");
+      const nav = () =>
+        lane.journal.requests.find((r) => r.url.endsWith(`${base}/held`));
+      await expect
+        .poll(
+          () =>
+            (lane.journal.navigations ?? []).some(
+              (n) =>
+                n.kind === "same-document" &&
+                n.url.endsWith(`${base}/held`) &&
+                n.seq > (nav()?.seq ?? Infinity),
+            ),
+          { message: "the history change while the navigation is held" },
+        )
+        .toBe(true);
+      expect(nav()?.commit, "no commit while held").toBeUndefined();
+      expect(transitionsOf(lane)).toEqual([
+        ["new-document", 1, "request"],
+        ["same-document", 1, null],
+      ]);
+      navigation.release();
+      expect((await goto)?.status()).toBe(503);
+      expect(await identityOf(page)).toBe("committed");
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(transitionsOf(lane)).toEqual([
+        ["new-document", 1, "request"],
+        ["same-document", 1, null],
+        ["new-document", 2, "request"],
+      ]);
+      expect(nav()).toMatchObject({ document: 1, commit: { document: 2 } });
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(verdict.expected.map((p) => [p.category, p.status])).toEqual(
+        logsHttp(browserName) ? [["http", 503]] : [],
+      );
+      expect(relationAgrees(verdict, lane)).toBe(true);
+    } finally {
+      for (const h of holds) h.release();
+      await lanes.settle();
+    }
+  });
+
+  test("NAV8 two pages of one lane: page A's stopped navigation and history to its URL change nothing of page B, whose declared delayed fetch 500 (held across A's stop, history and close) stays B's and is expected", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    const holds: Array<{ release: () => void }> = [];
+    try {
+      const lane = await guardLane(lanes);
+      const base = `${GUARD}/nav8`;
+      const navigation = await heldRoute(lane, `**${base}/held`, {
+        status: 200,
+        contentType: "text/html",
+        body: SENTINEL("replacement"),
+      });
+      holds.push(navigation);
+      const delayed = await heldRoute(lane, `**${base}/delayed500`, {
+        status: 500,
+        contentType: "text/plain",
+        body: "declared response",
+      });
+      holds.push(delayed);
+      const a = await open(lane, 1);
+      const b = await open(lane, 2);
+      lane.expectHttp({
+        method: "GET",
+        path: `${base}/delayed500`,
+        status: 500,
+        count: 1,
+        reason: "NAV8 page B's delayed fetch",
+      });
+      await b.evaluate(() => {
+        (window as unknown as { status500?: Promise<number> }).status500 =
+          fetch("/api/__guard/nav8/delayed500", { cache: "no-store" }).then(
+            (r) => r.status,
+          );
+      });
+      await delayed.arrived();
+      await armOnCookie(a, "nav8-stop", "stop", "");
+      await a.evaluate(() => {
+        location.assign("/api/__guard/nav8/held");
+      });
+      await navigation.arrived();
+      await setCookie(a, "nav8-stop");
+      await expect
+        .poll(() =>
+          (lane.journal.navigations ?? []).some(
+            (n) => n.page === 0 && n.kind === "aborted",
+          ),
+        )
+        .toBe(true);
+      await a.evaluate(() =>
+        history.pushState({}, "", "/api/__guard/nav8/held"),
+      );
+      await a.close();
+      delayed.release();
+      expect(
+        await b.evaluate(
+          () => (window as unknown as { status500: Promise<number> }).status500,
+        ),
+      ).toBe(500);
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(transitionsOf(lane, 0)).toEqual([
+        ["new-document", 1, "request"],
+        ["aborted", 1, "request"],
+        ["same-document", 1, null],
+      ]);
+      expect(transitionsOf(lane, 1)).toEqual([["new-document", 1, "request"]]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(
+        verdict.expected.map((p) => [p.page, p.document, p.status]),
+      ).toEqual(logsHttp(browserName) ? [[1, 1, 500]] : []);
+    } finally {
+      for (const h of holds) h.release();
+      await lanes.settle();
+    }
+  });
+
+  test("NAV9 a second navigation of the SAME URL while the first is held: exactly one commit, linked to the request whose document actually loaded (Chromium refuses the second and commits the first; Firefox and WebKit supersede the first and commit the second)", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    const holds: Array<{ release: () => void }> = [];
+    try {
+      const lane = await guardLane(lanes);
+      const base = `${GUARD}/nav9`;
+      // Each arrival's document names its arrival: the sentinel shows which request's document committed.
+      const navigation = await heldRoute(
+        lane,
+        `**${base}/same`,
+        (n) => ({
+          status: 200,
+          contentType: "text/html",
+          body: SENTINEL(`arrival-${n}`),
+        }),
+        { holdFirst: true },
+      );
+      holds.push(navigation);
+      const page = await open(lane);
+      const outcome = (p: Promise<unknown>) =>
+        p.then(
+          () => "committed",
+          () => "refused",
+        );
+      const first = outcome(page.goto(`${base}/same`));
+      await navigation.arrived();
+      const second = outcome(page.goto(`${base}/same`));
+      // Diag/order-2 and this case's first run (focused/nav-1): Chromium refuses a browser-initiated navigation of the URL its pending
+      // navigation is loading (no second request); Firefox and WebKit start it and cancel the first.
+      const chromium = browserName === "chromium";
+      expect(await (chromium ? second : first)).toBe("refused");
+      navigation.release();
+      expect(await (chromium ? first : second)).toBe("committed");
+      const loaded = await identityOf(page);
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      const same = lane.journal.requests.filter((r) =>
+        r.url.endsWith(`${base}/same`),
+      );
+      expect(same, "one request in Chromium, two elsewhere").toHaveLength(
+        chromium ? 1 : 2,
+      );
+      const committed = same.at(-1);
+      expect(loaded).toBe(chromium ? "arrival-1" : "arrival-2");
+      expect(committed).toMatchObject({ document: 1, commit: { document: 2 } });
+      if (!chromium)
+        expect(same[0]).toMatchObject({
+          document: 1,
+          commit: null,
+          commitReason: expect.stringMatching(
+            /^(aborted without committing a document: |superseded by navigation #\d+$)/,
+          ),
+        });
+      expect(
+        (lane.journal.navigations ?? [])
+          .filter((n) => n.kind === "new-document")
+          .map((n) => [n.document, n.request]),
+      ).toEqual([
+        [1, lane.journal.requests[0]?.seq],
+        [2, committed?.seq],
+      ]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(report.failures).toEqual([]);
+    } finally {
+      for (const h of holds) h.release();
       await lanes.settle();
     }
   });
