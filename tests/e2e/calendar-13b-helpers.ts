@@ -205,6 +205,12 @@ export interface BootOptions {
   heading?: string;
   viewport?: { width: number; height: number };
   colorScheme?: "light" | "dark";
+  /**
+   * WEB-13b revision 18: where the network stubs register their handlers. Default: `context` itself (`context.route`, answered inside
+   * the browser). A native transport lane passes its `routes` (tests/e2e/native-transport.ts): the SAME handlers then answer from a real
+   * loopback origin through the lane's front origin, so a transport loss stops them too. Everything else (seeding, pages) uses `context`.
+   */
+  routes?: BrowserContext;
 }
 
 export async function bootAt(
@@ -212,9 +218,10 @@ export async function bootAt(
   route: string,
   options: BootOptions = {},
 ): Promise<Booted> {
-  const net = await stubNetwork(context);
-  await serveIdentityReads(context);
-  const cal = await stubCalendars(context);
+  const routes = options.routes ?? context;
+  const net = await stubNetwork(routes);
+  await serveIdentityReads(routes);
+  const cal = await stubCalendars(routes);
   await seedSettled(context);
   const setup = await dataPage(context);
   await setup.evaluate(async (a) => {

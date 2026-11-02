@@ -318,3 +318,12 @@ WEB-13b: `tests/features/calendars/{import-model,anchor-model}.test.ts`, `{impor
 E-REV1–3; helpers in `calendar-13b-helpers.ts`); released backend I-CAL-IMP1–4, I-CAL-ANC1 and I-CAL-REV1 in the calendar integration spec; mutants
 MU-2437..MU-2469 (`scripts/mutation/catalogue-web13b.mjs`; revisions 1–3 in `catalogue-web13b-r{1,2,3}.mjs`, revision 3's owner alone in
 `tests/features/tasks/anchor-kept.test.ts`).
+
+Offline composition with a native file (WEB-13b revision 18): E-IMP1, the E-IMP3 dependency case and I-CAL-IMP1 lose HTTP on the opt-in
+native transport lane (`tests/e2e/native-transport.ts`; its controller `scripts/integration/http-transport-loss.mjs`). The case's context
+talks to a loopback front origin that carries all of the page's HTTP and, while the transport is lost, drops every request before any
+origin receives it. Each loss is witnessed by a failing uncached probe that no origin records. The UI connectivity stimulus
+(`navigator.onLine`) is separate and recorded beside the engine's own value. File reads stay native: WebKit's `context.setOffline`
+fails every File read, and Playwright's WebKit cannot load the application through an HTTP forward proxy. E-IMP11 covers Browse, drop, a
+row's dialog and a replacement on two pages, online, lost and restored, plus the lane's own negatives. It is browser transport loss for the
+application's origin, not OS connectivity, a real device or a loss-time offline reload (the fixture build has no service worker).

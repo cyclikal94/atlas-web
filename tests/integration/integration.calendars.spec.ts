@@ -1,6 +1,10 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import type { BrowserContext, Page } from "@playwright/test";
 import {
+  type OpenTransportLane,
+  transportLaneFixture,
+} from "../e2e/native-transport";
+import {
   bootHarness,
   expect,
   exposeSession,
@@ -1099,49 +1103,90 @@ const cachedEvents = async (page: Page, sourceId: string) => {
   );
 };
 
+/**
+ * Revision 18 (Review 22, family webkit-offline-emulation-file-read): I-CAL-IMP1's offline composition runs on the native transport lane
+ * (tests/e2e/native-transport.ts): its context's origin is a loopback front carrying all of the page's HTTP to the preview (and through it
+ * the delaying proxy and the released backend). While the transport is lost, every request fails before the preview receives it and the
+ * native File is read as chosen: `context.setOffline`, which this case used, fails every File read in WebKit. The UI connectivity stimulus
+ * is offline as `setOffline` made it, recorded beside the native navigator. The loss is witnessed by a failing probe no origin receives and
+ * by the delaying proxy's own log (entries recorded on ARRIVAL): no request of the page reached it during the loss.
+ */
+const native = test.extend<{ transportLane: OpenTransportLane }>({
+  transportLane: transportLaneFixture,
+});
+
 test.describe("I-CAL-IMP1: an import into a pending source (cases 1 and 2)", () => {
-  test("composed offline behind its create; online: the create, then the import at its address; a lost answer resent byte-identically; the events arrive by a real delta page", async ({
-    context,
-  }) => {
-    const { page, wire } = await ready(context, { begin: false });
-    await context.setOffline(true);
-    const id = await addSource(page, "I-IMP1 Chores");
-    const text = calendar([
-      [`imp1-a-${crypto.randomUUID()}`, day(3), "Bins"],
-      [`imp1-b-${crypto.randomUUID()}`, day(10), "Recycling"],
-    ]);
-    await importFile(page, "I-IMP1 Chores", text);
-    expect(wire).toEqual([]);
-    await context.setOffline(false);
-    await proxy.addRule({
-      method: "POST",
-      path: `${API}/calendar-sources/${id}/import`,
-      ordinal: 1,
-      action: "drop_after_forward",
-    });
-    await page.evaluate(() => window.__atlasData?.beginOutbox());
-    await expect
-      .poll(() => imports(wire, id).length, { timeout: 60_000 })
-      .toBe(2);
-    expect(wire[0]?.path).toBe("/calendar-commands");
-    const [first, second] = imports(wire, id);
-    expect(second?.key).toBe(first?.key);
-    expect(second?.body).toBe(first?.body);
-    expect(JSON.parse(first?.body ?? "")).toEqual({
-      ics: text,
-      from: day(0),
-      through: day(60),
-    });
-    expect(await importStatuses(id)).toEqual([200, 200]);
-    await expect
-      .poll(async () => (await events(page, id)).length, { timeout: 30_000 })
-      .toBe(2);
-    await expect
-      .poll(async () => (await cachedEvents(page, id)).length, {
-        timeout: 30_000,
-      })
-      .toBe(2);
-  });
+  native(
+    "composed while the HTTP transport is lost behind its create; online: the create, then the import at its address; a lost answer resent byte-identically; the events arrive by a real delta page",
+    async ({ transportLane }) => {
+      // The first import's answer is dropped after forwarding (the proxy rule below): the preview answers that request 502, provoked here.
+      const lane = await transportLane({
+        mode: "integration",
+        provokes: [502],
+      });
+      const { page, wire } = await ready(lane.context, { begin: false });
+      expect(lane.judge(await lane.probe(page), "online")).toEqual([]);
+      await lane.lose();
+      // At loss entry nothing forwarded is outstanding (the lane waits for that), so every later arrival at the delaying proxy is a leak.
+      const arrivedBefore = Math.max(
+        0,
+        ...(await proxy.log()).map((e) => e.id),
+      );
+      expect(lane.judge(await lane.probe(page), "loss")).toEqual([]);
+      expect(await lane.ui.set(page, false)).toMatchObject({
+        native: true,
+        ui: false,
+      });
+      const id = await addSource(page, "I-IMP1 Chores");
+      const text = calendar([
+        [`imp1-a-${crypto.randomUUID()}`, day(3), "Bins"],
+        [`imp1-b-${crypto.randomUUID()}`, day(10), "Recycling"],
+      ]);
+      await importFile(page, "I-IMP1 Chores", text);
+      expect(wire).toEqual([]);
+      expect(lane.judge(await lane.probe(page), "loss")).toEqual([]);
+      // The delaying proxy (in front of the released backend) received nothing of this page during the loss.
+      expect(
+        (await proxy.log())
+          .filter((e) => e.id > arrivedBefore)
+          .map((e) => `${e.method} ${e.path}`),
+      ).toEqual([]);
+      expect(
+        await lane.restore(),
+        "nothing reached an origin during the loss",
+      ).toEqual([]);
+      await lane.ui.set(page, true);
+      expect(lane.judge(await lane.probe(page), "online")).toEqual([]);
+      await proxy.addRule({
+        method: "POST",
+        path: `${API}/calendar-sources/${id}/import`,
+        ordinal: 1,
+        action: "drop_after_forward",
+      });
+      await page.evaluate(() => window.__atlasData?.beginOutbox());
+      await expect
+        .poll(() => imports(wire, id).length, { timeout: 60_000 })
+        .toBe(2);
+      expect(wire[0]?.path).toBe("/calendar-commands");
+      const [first, second] = imports(wire, id);
+      expect(second?.key).toBe(first?.key);
+      expect(second?.body).toBe(first?.body);
+      expect(JSON.parse(first?.body ?? "")).toEqual({
+        ics: text,
+        from: day(0),
+        through: day(60),
+      });
+      expect(await importStatuses(id)).toEqual([200, 200]);
+      await expect
+        .poll(async () => (await events(page, id)).length, { timeout: 30_000 })
+        .toBe(2);
+      await expect
+        .poll(async () => (await cachedEvents(page, id)).length, {
+          timeout: 30_000,
+        })
+        .toBe(2);
+    },
+  );
 });
 
 test.describe("I-CAL-IMP2: refused imports (cases 4 and 7(e))", () => {

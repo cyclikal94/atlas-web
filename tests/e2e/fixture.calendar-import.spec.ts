@@ -24,7 +24,39 @@ import {
 } from "./data-leader-helpers";
 import { startOutbox, untilTreeSettled } from "./data-sync-helpers";
 import { expect, runAxe, test } from "./helpers";
-import { goOfflineAtBoundary, goOnlineAtBoundary } from "./tasks-helpers";
+import {
+  type OpenTransportLane,
+  type TransportLane,
+  transportLaneFixture,
+} from "./native-transport";
+
+/**
+ * WEB-13b revision 18 (Review 22, family webkit-offline-emulation-file-read): cases that need the HTTP transport LOST while native File
+ * reads stay native run in their own context through a loopback front origin (tests/e2e/native-transport.ts). They used `goOfflineAtBoundary`,
+ * which only sets `navigator.onLine` and leaves HTTP available, and `context.route` stubs, which answer without the network: neither is
+ * evidence of a lost transport. Their answers now come from the same handlers on a real loopback origin, and every loss is witnessed by
+ * a failing uncached probe that no origin receives, beside the UI connectivity stimulus (recorded separately, with the native value).
+ */
+const native = test.extend<{ transportLane: OpenTransportLane }>({
+  transportLane: transportLaneFixture,
+});
+
+/** Enters a loss on `lane` and witnesses it from every page: the probe fails, no origin receives it, the front dropped it. */
+async function loseOn(lane: TransportLane, ...pages: Page[]) {
+  const loss = await lane.lose();
+  for (const page of pages)
+    expect(lane.judge(await lane.probe(page), "loss")).toEqual([]);
+  return loss;
+}
+/** Ends the loss: nothing reached any origin during it, and every page reaches the witness origin again. */
+async function restoreOn(lane: TransportLane, ...pages: Page[]) {
+  expect(
+    await lane.restore(),
+    "nothing reached an origin during the loss",
+  ).toEqual([]);
+  for (const page of pages)
+    expect(lane.judge(await lane.probe(page), "online")).toEqual([]);
+}
 
 /**
  * E-IMP1 to E-IMP5 (WEB-13b; Q22 "file imports"; delivery-slices "Acceptance cases for calendar command queuing" 1, 2, 4, 6(b) and 7): the
@@ -79,66 +111,92 @@ const draftOf = async (page: Page, endpoint: string) =>
 const IMPORT_ENDPOINT = "/calendar-sources/{id}/import";
 
 test.describe("E-IMP1: an import into a pending source (case 2)", () => {
-  test("composed offline against this device's pending create; sent only after the create's receipt, to the source's address, byte-identical", async ({
-    context,
-  }) => {
-    test.setTimeout(90_000);
-    const { page, cal } = await calendarsPage(context);
-    // Offline at the app's boundary (WebKit's emulated offline fails every File read, even of a File made in the page: evidence in
-    // .agtx/evidence/WEB-13b/findings/webkit-offline-file).
-    await goOfflineAtBoundary(page);
-    await page.getByRole("button", { name: "Add source" }).click();
-    const add = page.getByRole("dialog", { name: "Add source" });
-    await add.getByLabel("Label").fill("Weekend chores");
-    await add.getByLabel("Timezone").fill("Europe/London");
-    await add.getByRole("button", { name: "Create source" }).click();
-    await expect(add).toBeHidden();
-    const text = calendarText(2);
-    await importInto(page, "Weekend chores", text);
-    const create = await draftOf(page, "/calendar-commands");
-    const imported = await draftOf(page, IMPORT_ENDPOINT);
-    expect(imported?.depends_on).toEqual([create?.local_id]);
-    await expect(page.locator("[data-import-status]")).toHaveAttribute(
-      "data-import-status",
-      "queued",
-    );
-    expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
+  // Revision 18: composed while the HTTP transport is LOST (the loopback lane), with the UI connectivity stimulus offline as the original
+  // case had it, and again with the UI still online (navigator native): the composition cannot depend on either signal alone.
+  for (const ui of ["offline", "online"] as const)
+    native(
+      // The title keeps "composed offline against this device's pending create": MU-2466 selects this case by it.
+      `composed offline against this device's pending create (HTTP transport lost, UI ${ui}); sent only after the create's receipt, to the source's address, byte-identical`,
+      async ({ transportLane }) => {
+        test.setTimeout(90_000);
+        const lane = await transportLane({ mode: "fixture" });
+        const { page, cal } = await calendarsPage(lane.context, {
+          routes: lane.routes,
+        });
+        expect(lane.judge(await lane.probe(page), "online")).toEqual([]);
+        await loseOn(lane, page);
+        // The transport loss alone leaves the engine's navigator online; the UI stimulus is separate and recorded beside it.
+        expect(await lane.ui.read(page)).toMatchObject({
+          native: true,
+          ui: true,
+          stimulus: null,
+        });
+        if (ui === "offline")
+          expect(await lane.ui.set(page, false)).toMatchObject({
+            native: true,
+            ui: false,
+            stimulus: false,
+          });
+        await page.getByRole("button", { name: "Add source" }).click();
+        const add = page.getByRole("dialog", { name: "Add source" });
+        await add.getByLabel("Label").fill("Weekend chores");
+        await add.getByLabel("Timezone").fill("Europe/London");
+        await add.getByRole("button", { name: "Create source" }).click();
+        await expect(add).toBeHidden();
+        const text = calendarText(2).replace("Bin day 0", "Réunion £ 0");
+        await importInto(page, "Weekend chores", text);
+        const create = await draftOf(page, "/calendar-commands");
+        const imported = await draftOf(page, IMPORT_ENDPOINT);
+        expect(imported?.depends_on).toEqual([create?.local_id]);
+        await expect(page.locator("[data-import-status]")).toHaveAttribute(
+          "data-import-status",
+          "queued",
+        );
+        expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
+        // Still lost after the composition (the native File read did not need, or restore, the transport).
+        expect(lane.judge(await lane.probe(page), "loss")).toEqual([]);
 
-    // Online, the create's answer is held: nothing else is sent until it is receipted.
-    let release: (v: { status: number; body: unknown }) => void = () =>
-      undefined;
-    cal.answers.set("/calendar-commands", [
-      {
-        wait: new Promise((resolve) => {
-          release = resolve;
-        }),
+        // Online, the create's answer is held: nothing else is sent until it is receipted.
+        let release: (v: { status: number; body: unknown }) => void = () =>
+          undefined;
+        cal.answers.set("/calendar-commands", [
+          {
+            wait: new Promise((resolve) => {
+              release = resolve;
+            }),
+          },
+        ]);
+        await restoreOn(lane, page);
+        if (ui === "offline") await lane.ui.set(page, true);
+        await send(page);
+        await expect
+          .poll(() => posts(cal, "/calendar-commands").length)
+          .toBe(1);
+        await page.waitForTimeout(1_500);
+        expect(posts(cal, IMPORT_PATH)).toEqual([]);
+        release({ status: 200, body: { revision: 301 } });
+        await expect
+          .poll(() => posts(cal, IMPORT_PATH).length, { timeout: 30_000 })
+          .toBe(1);
+        const [sent] = posts(cal, IMPORT_PATH);
+        expect(sent?.path).toBe(
+          `/calendar-sources/${imported?.target_id}/import`,
+        );
+        expect(sent?.key).toBe(imported?.local_id);
+        expect(JSON.parse(sent?.body ?? "")).toEqual({
+          ics: text,
+          from: "2026-01-01",
+          through: "2026-12-31",
+        });
+        await expect(page.locator("[data-import-status]")).toHaveAttribute(
+          "data-import-status",
+          "accepted",
+        );
+        await expect(page.locator("[data-import-draft]")).toContainText(
+          "Import accepted.",
+        );
       },
-    ]);
-    await goOnlineAtBoundary(page);
-    await send(page);
-    await expect.poll(() => posts(cal, "/calendar-commands").length).toBe(1);
-    await page.waitForTimeout(1_500);
-    expect(posts(cal, IMPORT_PATH)).toEqual([]);
-    release({ status: 200, body: { revision: 301 } });
-    await expect
-      .poll(() => posts(cal, IMPORT_PATH).length, { timeout: 30_000 })
-      .toBe(1);
-    const [sent] = posts(cal, IMPORT_PATH);
-    expect(sent?.path).toBe(`/calendar-sources/${imported?.target_id}/import`);
-    expect(sent?.key).toBe(imported?.local_id);
-    expect(JSON.parse(sent?.body ?? "")).toEqual({
-      ics: text,
-      from: "2026-01-01",
-      through: "2026-12-31",
-    });
-    await expect(page.locator("[data-import-status]")).toHaveAttribute(
-      "data-import-status",
-      "accepted",
     );
-    await expect(page.locator("[data-import-draft]")).toContainText(
-      "Import accepted.",
-    );
-  });
 
   test("control: an import into a cached, editable, enabled source is sent at once", async ({
     context,
@@ -330,43 +388,53 @@ test.describe("E-IMP3: terminal answers (cases 4 and 7)", () => {
     expect(posts(cal, IMPORT_PATH)).toHaveLength(2);
   });
 
-  test("a settings change queued after an import that is refused is refused with it (dependency), and says so", async ({
-    context,
-  }) => {
-    test.setTimeout(90_000);
-    const { page, cal } = await calendarsPage(context, {
-      cache: [sourceProjection(SOURCE)],
-    });
-    // Offline at the app's boundary (WebKit's emulated offline fails every File read, even of a File made in the page: evidence in
-    // .agtx/evidence/WEB-13b/findings/webkit-offline-file).
-    await goOfflineAtBoundary(page);
-    await importInto(page, "Work rota", calendarText(1));
-    await page.getByRole("button", { name: "Manage Work rota" }).click();
-    const manage = page.getByRole("dialog", { name: "Manage — Work rota" });
-    await manage.getByLabel("Timezone").fill("Europe/Vienna");
-    await manage.getByRole("button", { name: "Save" }).click();
-    await expect(manage).toBeHidden();
-    cal.answers.set(IMPORT_PATH, [
-      { status: 422, body: atlasBody("invalid_ics") },
-    ]);
-    await goOnlineAtBoundary(page);
-    await send(page);
-    await expect
-      .poll(
-        async () =>
-          (
-            (await rows(page, "drafts")) as Array<{
-              endpoint: string;
-              status: string;
-            }>
-          )
-            .map((d) => d.status)
-            .sort(),
-        { timeout: 30_000 },
-      )
-      .toEqual(["rejected", "rejected"]);
-    expect(posts(cal, "/calendar-commands")).toEqual([]);
-  });
+  // Revision 18: composed while the HTTP transport is LOST (the loopback lane) with the UI stimulus offline, as the original case had it.
+  native(
+    "a settings change queued after an import that is refused is refused with it (dependency), and says so",
+    async ({ transportLane }) => {
+      test.setTimeout(90_000);
+      // The import's 422 is provoked on purpose (Chromium names its status in a console error); every lane page is guarded.
+      const lane = await transportLane({ mode: "fixture", provokes: [422] });
+      const { page, cal } = await calendarsPage(lane.context, {
+        routes: lane.routes,
+        cache: [sourceProjection(SOURCE)],
+      });
+      await loseOn(lane, page);
+      expect(await lane.ui.set(page, false)).toMatchObject({
+        native: true,
+        ui: false,
+      });
+      await importInto(page, "Work rota", calendarText(1));
+      await page.getByRole("button", { name: "Manage Work rota" }).click();
+      const manage = page.getByRole("dialog", { name: "Manage — Work rota" });
+      await manage.getByLabel("Timezone").fill("Europe/Vienna");
+      await manage.getByRole("button", { name: "Save" }).click();
+      await expect(manage).toBeHidden();
+      expect(cal.wire.filter((w) => w.method === "POST")).toEqual([]);
+      cal.answers.set(IMPORT_PATH, [
+        { status: 422, body: atlasBody("invalid_ics") },
+      ]);
+      await restoreOn(lane, page);
+      await lane.ui.set(page, true);
+      await send(page);
+      await expect
+        .poll(
+          async () =>
+            (
+              (await rows(page, "drafts")) as Array<{
+                endpoint: string;
+                status: string;
+              }>
+            )
+              .map((d) => d.status)
+              .sort(),
+          { timeout: 30_000 },
+        )
+        .toEqual(["rejected", "rejected"]);
+      expect(posts(cal, IMPORT_PATH)).toHaveLength(1);
+      expect(posts(cal, "/calendar-commands")).toEqual([]);
+    },
+  );
 });
 
 test.describe("E-IMP4: the client bounds (case 4)", () => {
@@ -1767,4 +1835,353 @@ test.describe("E-IMP8: the kept import across a protected-tree remount and a cac
           through: "2026-12-31",
         });
     });
+});
+
+test.describe("E-IMP11: native File entry while the HTTP transport is lost (revision 18, Review 22; design assessment C01-C04, C11)", () => {
+  /**
+   * The mounted production composition on the native transport lane: Browse (the real file chooser), a drop on the zone, a row's dialog
+   * and a replacement inside it, on an existing page and a second page opened before the loss, online, lost and restored, and a new
+   * document after restoration. Every File is a native one (Playwright's chooser/input, or a File made in the page for the drop); nothing
+   * patches a File API. Each phase is witnessed from both pages by its probe; page A keeps the native navigator through the loss and page
+   * B has the UI stimulus offline, so neither signal alone carries the result. Before Import nothing is stored, sent or written to
+   * storage, history or a request. A loss-time reload is NOT exercised: the fixture build has no service worker (execute.md).
+   */
+  const MARK = "E-IMP11-NATIVE-MARK";
+  const valid = (n: number) =>
+    calendarText(2).replace("Bin day 0", `Réunion £ ${MARK} ${n}`);
+  const latin1 = Buffer.concat([
+    Buffer.from("BEGIN:VCALENDAR\r\nSUMMARY:"),
+    Buffer.from([0xe9, 0xff]),
+    Buffer.from("\r\nEND:VCALENDAR\r\n"),
+  ]);
+  const DROP = "[data-import-drop]";
+  const dialogOf = (page: Page) =>
+    page.getByRole("dialog", { name: "Import events" });
+  /** The native bytes the dialog's (or the zone's) file control holds now. */
+  const heldBytes = (page: Page, selector: string) =>
+    page.evaluate(async (sel) => {
+      const input = document.querySelector<HTMLInputElement>(sel);
+      const file = input?.files?.[0];
+      return file ? [...new Uint8Array(await file.arrayBuffer())] : null;
+    }, selector);
+  const leaks = (page: Page) =>
+    page.evaluate((mark) => {
+      const found: string[] = [];
+      for (const store of [localStorage, sessionStorage])
+        for (let i = 0; i < store.length; i += 1) {
+          const key = store.key(i) ?? "";
+          if (`${key}${store.getItem(key)}`.includes(mark)) found.push(key);
+        }
+      if (JSON.stringify(history.state ?? null).includes(mark))
+        found.push("history.state");
+      if (location.href.includes(mark)) found.push("location");
+      return found;
+    }, MARK);
+  const cancel = async (page: Page) => {
+    const dialog = dialogOf(page);
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+  };
+  const shows = async (page: Page, name: string, text: string) => {
+    const file = dialogOf(page).locator("[data-import-file]");
+    await expect(file).toContainText(name);
+    await expect(file).toContainText("2 events");
+    expect(text.includes(MARK)).toBe(true);
+  };
+  const entries = {
+    async browse(page: Page, n: number) {
+      const name = `browse-${n}.ics`;
+      const text = valid(n);
+      const chooser = page.waitForEvent("filechooser");
+      await page.locator(DROP).getByRole("button", { name: "browse" }).click();
+      await (await chooser).setFiles({
+        name,
+        mimeType: "text/calendar",
+        buffer: Buffer.from(text, "utf8"),
+      });
+      await shows(page, name, text);
+      expect(await heldBytes(page, `${DROP} input[type="file"]`)).toEqual([
+        ...Buffer.from(text, "utf8"),
+      ]);
+      await cancel(page);
+    },
+    async drop(page: Page, n: number) {
+      const name = `drop-${n}.ics`;
+      const text = valid(n);
+      const transfer = await page.evaluateHandle(
+        ({ file, bytes }) => {
+          const t = new DataTransfer();
+          t.items.add(
+            new File([new Uint8Array(bytes)], file, { type: "text/calendar" }),
+          );
+          return t;
+        },
+        { file: name, bytes: [...Buffer.from(text, "utf8")] },
+      );
+      await page
+        .locator(DROP)
+        .dispatchEvent("dragover", { dataTransfer: transfer });
+      await page
+        .locator(DROP)
+        .dispatchEvent("drop", { dataTransfer: transfer });
+      await shows(page, name, text);
+      await transfer.dispose();
+      await cancel(page);
+    },
+    async row(page: Page, n: number) {
+      const name = `row-${n}.ics`;
+      const text = valid(n);
+      await page
+        .getByRole("button", { name: "Import events into Work rota" })
+        .click();
+      await chooseFile(page, text, name);
+      await shows(page, name, text);
+      expect(
+        await heldBytes(page, '[role="dialog"] input[type="file"]'),
+      ).toEqual([...Buffer.from(text, "utf8")]);
+      await cancel(page);
+    },
+    async replacement(page: Page, n: number) {
+      // A valid file, then one that is not UTF-8 (refused: Import unavailable, the earlier file NOT kept), then another valid file.
+      const first = valid(n);
+      const last = valid(n + 1000);
+      await page
+        .getByRole("button", { name: "Import events into Work rota" })
+        .click();
+      const dialog = await chooseFile(page, first, `first-${n}.ics`);
+      await dialog.locator('input[type="file"]').setInputFiles({
+        name: `latin1-${n}.ics`,
+        mimeType: "text/calendar",
+        buffer: latin1,
+      });
+      await expect(dialog).toContainText("it isn't UTF-8");
+      await expect(dialog.locator("[data-import-file]")).not.toContainText(
+        `first-${n}.ics`,
+      );
+      await dialog.getByRole("button", { name: "Import", exact: true }).click();
+      await expect(dialog).toBeVisible();
+      await chooseFile(page, last, `last-${n}.ics`);
+      await shows(page, `last-${n}.ics`, last);
+      expect(
+        await heldBytes(page, '[role="dialog"] input[type="file"]'),
+      ).toEqual([...Buffer.from(last, "utf8")]);
+      await cancel(page);
+    },
+  };
+  const openCalendars = async (page: Page) => {
+    await page.goto(ROUTE);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Calendar sources" }),
+    ).toBeVisible();
+    await expect(page.locator(`[data-source-row="${SOURCE}"]`)).toBeVisible();
+  };
+
+  native(
+    "Browse, drop, a row's dialog and a replacement on two pages, online, lost and restored, then a new document: native bytes read, nothing stored, sent or leaked before Import",
+    async ({ transportLane }) => {
+      test.setTimeout(240_000);
+      const lane = await transportLane({ mode: "fixture" });
+      const { page: a, cal } = await calendarsPage(lane.context, {
+        routes: lane.routes,
+        cache: [sourceProjection(SOURCE)],
+      });
+      const b = await lane.context.newPage();
+      await openCalendars(b);
+      const seen: Array<Record<string, unknown>> = [];
+      let n = 0;
+      for (const phase of ["online", "loss", "restored"] as const) {
+        if (phase === "loss") {
+          await loseOn(lane, a, b);
+          expect(await lane.ui.set(b, false)).toMatchObject({
+            native: true,
+            ui: false,
+          });
+        }
+        if (phase === "restored") {
+          await restoreOn(lane, a, b);
+          await lane.ui.set(b, true);
+        }
+        for (const [label, page] of [
+          ["A", a],
+          ["B", b],
+        ] as const) {
+          for (const [entry, run] of Object.entries(entries)) {
+            n += 1;
+            await run(page, n);
+            seen.push({
+              phase,
+              page: label,
+              entry,
+              ui: await lane.ui.read(page),
+            });
+          }
+          expect(await rows(page, "drafts")).toEqual([]);
+          expect(await leaks(page)).toEqual([]);
+        }
+        expect(
+          lane.judge(await lane.probe(a), phase === "loss" ? "loss" : "online"),
+        ).toEqual([]);
+      }
+      // Page A's new document (restored): its own document, no stimulus, the native navigator; the row's import still reads natively.
+      const before = await lane.ui.read(a);
+      await openCalendars(a);
+      const after = await lane.ui.read(a);
+      expect(after.document).not.toBe(before.document);
+      expect(after).toMatchObject({ native: true, ui: true, stimulus: null });
+      expect((await lane.ui.read(b)).stimulus).toBe(true);
+      await entries.row(a, ++n);
+      seen.push({ phase: "new document", page: "A", entry: "row", ui: after });
+      // Nothing of any file left this device or was stored: no write was sent or received, no request named the marker.
+      expect(cal.wire.filter((w) => w.method !== "GET")).toEqual([]);
+      expect(
+        (lane.origin?.receipts ?? []).filter((r) => r.method !== "GET"),
+      ).toEqual([]);
+      expect(
+        lane.transport.attempts.filter((t) => (t.url ?? "").includes(MARK)),
+      ).toEqual([]);
+      expect(await rows(a, "drafts")).toEqual([]);
+      expect(await leaks(a)).toEqual([]);
+      expect(seen).toHaveLength(4 * 2 * 3 + 1);
+      await test.info().attach("native-entry-matrix", {
+        body: JSON.stringify(seen, null, 1),
+        contentType: "application/json",
+      });
+    },
+  );
+
+  native(
+    "apparatus negatives: each oracle fails its named broken witness (navigator-only, unenforced loss, never sent, cached answer, origin leak, wrong body or status, a fixture route)",
+    async ({ transportLane }) => {
+      test.setTimeout(120_000);
+      const lane = await transportLane({ mode: "fixture" });
+      const { page } = await calendarsPage(lane.context, {
+        routes: lane.routes,
+      });
+      const fails = (v: string[], named: string) =>
+        expect(
+          v.some((x) => x.includes(named)),
+          `the oracle should name "${named}"; it found ${JSON.stringify(v)}`,
+        ).toBe(true);
+
+      // Navigator-only: the UI stimulus offline while the transport is online. The request reaches the origin, so as a loss it fails.
+      await lane.ui.set(page, false);
+      const navigatorOnly = await lane.probe(page);
+      expect(navigatorOnly.ui).toMatchObject({ native: true, ui: false });
+      expect(lane.judge(navigatorOnly, "online")).toEqual([]);
+      fails(lane.judge(navigatorOnly, "loss"), "did not fail");
+      fails(lane.judge(navigatorOnly, "loss"), "the transport is not lost");
+      await lane.ui.set(page, true);
+
+      // A cacheable answer, read online, then from the cache during the loss: the browser succeeds and the front saw nothing.
+      const cachedNonce = (await lane.probe(page, { kind: "cacheable" })).nonce;
+
+      // Wrong body, then a wrong (non-error) status: the online oracle names each.
+      lane.witness.options.answer = () => ({
+        status: 200,
+        body: "witness-wrong",
+      });
+      fails(lane.judge(await lane.probe(page), "online"), "body");
+      lane.witness.options.answer = () => ({ status: 203, body: "witness-x" });
+      fails(lane.judge(await lane.probe(page), "online"), "status 203");
+      lane.witness.options.answer = null;
+
+      // An unenforced "loss" (the controller's negative switch): forwarded and received, so both loss oracles fail.
+      const unenforced = await lane.transport.lose({ enforce: false });
+      const leaked = await lane.probe(page);
+      fails(lane.judge(leaked, "loss"), "did not fail");
+      fails(lane.judge(leaked, "loss"), "in the loss not all dropped");
+      fails(lane.intervalViolations(unenforced), "witness origin received");
+      await lane.transport.restore();
+
+      // A real loss: a fetch aborted before it is sent fails in the page but never reached the front; the cached answer succeeds.
+      const loss = await lane.lose();
+      fails(
+        lane.judge(await lane.probe(page, { abortBeforeSend: true }), "loss"),
+        "no front attempt",
+      );
+      const cached = await lane.probe(page, {
+        kind: "cacheable",
+        nonce: cachedNonce,
+      });
+      // Whether the engine answers from its cache is the engine's choice (WebKit's ephemeral context went to the network and was
+      // dropped: then there is no cached answer to judge). Either way the earlier receipt of the nonce is named; a cache hit is also
+      // named as a request that did not fail and never reached the front.
+      const servedFromCache = cached.status === 200;
+      await test.info().attach("cache-negative", {
+        body: JSON.stringify({ servedFromCache, cached }),
+        contentType: "application/json",
+      });
+      fails(lane.judge(cached, "loss"), "earlier witness receipts");
+      if (servedFromCache) {
+        expect(cached.body).toBe(`witness-${cachedNonce}`);
+        fails(lane.judge(cached, "loss"), "did not fail");
+        fails(lane.judge(cached, "loss"), "no front attempt in this loss");
+      } else expect(cached.error).not.toBeNull();
+      // A correctly failed probe, then the same nonce delivered to the origin outside the browser: the loss oracles see the leak.
+      const dropped = await lane.probe(page);
+      expect(lane.judge(dropped, "loss")).toEqual([]);
+      await fetch(`${lane.witness.url}/__transport/probe/${dropped.nonce}`);
+      fails(lane.judge(dropped, "loss"), "1 witness receipts during the loss");
+      fails(lane.intervalViolations(loss), "witness origin received");
+      await lane.transport.restore();
+
+      // A request of a lane page to another origin (the witness's own port, outside the front) is recorded: the loss would not cover
+      // it. Declared here, so only this exact request is excused at teardown.
+      const outside = `${lane.witness.url}/__transport/probe/${crypto.randomUUID()}`;
+      lane.declareForeign(`GET ${outside}`);
+      await page.evaluate(
+        (u) =>
+          fetch(u, { mode: "no-cors" }).then(
+            () => true,
+            () => false,
+          ),
+        outside,
+      );
+      expect(lane.foreign).toContain(`GET ${outside}`);
+      expect(lane.undeclaredForeign()).toEqual([]);
+
+      // A fixture route on the lane is refused; in a disposable context of the same browser a route answers the probe with no origin.
+      expect(() =>
+        lane.context.route("**/__transport/**", (r) => r.fulfill({})),
+      ).toThrow(/would answer without the network/);
+      const routed = await lane.browser.newContext({
+        baseURL: lane.transport.url ?? undefined,
+      });
+      try {
+        await routed.route("**/*", (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: route.request().url().includes("/__transport/")
+              ? `witness-${route.request().url().split("/").pop()}`
+              : "<!doctype html><title>routed</title>",
+          }),
+        );
+        const other = await routed.newPage();
+        await other.goto("/routed");
+        const nonce = crypto.randomUUID();
+        const answer = await other.evaluate(async (n) => {
+          const r = await fetch(`/__transport/probe/${n}`, {
+            cache: "no-store",
+          });
+          return { ok: r.ok, status: r.status, body: await r.text() };
+        }, nonce);
+        const masquerade = {
+          kind: "probe" as const,
+          nonce,
+          ...answer,
+          error: null,
+          ui: { document: "routed", native: true, ui: true, stimulus: null },
+        };
+        fails(lane.judge(masquerade, "online"), "0 witness receipts");
+        fails(lane.judge(masquerade, "online"), "not one forwarded");
+      } finally {
+        await routed.close();
+      }
+    },
+  );
 });
