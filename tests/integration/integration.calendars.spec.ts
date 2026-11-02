@@ -1119,11 +1119,8 @@ test.describe("I-CAL-IMP1: an import into a pending source (cases 1 and 2)", () 
   native(
     "composed while the HTTP transport is lost behind its create; online: the create, then the import at its address; a lost answer resent byte-identically; the events arrive by a real delta page",
     async ({ transportLane }) => {
-      // The first import's answer is dropped after forwarding (the proxy rule below): the preview answers that request 502, provoked here.
-      const lane = await transportLane({
-        mode: "integration",
-        provokes: [502],
-      });
+      // Revision 19: the 502 of the first import (the proxy rule below) is declared for that request, where the rule is added.
+      const lane = await transportLane({ mode: "integration" });
       const { page, wire } = await ready(lane.context, { begin: false });
       expect(lane.judge(await lane.probe(page), "online")).toEqual([]);
       await lane.lose();
@@ -1162,6 +1159,15 @@ test.describe("I-CAL-IMP1: an import into a pending source (cases 1 and 2)", () 
         path: `${API}/calendar-sources/${id}/import`,
         ordinal: 1,
         action: "drop_after_forward",
+      });
+      // The first import's answer is dropped after forwarding: the preview answers that ONE request 502, provoked here on purpose.
+      lane.expectHttp({
+        method: "POST",
+        path: `${API}/calendar-sources/${id}/import`,
+        status: 502,
+        count: 1,
+        reason:
+          "the delaying proxy drops the first import's answer after the backend applied it",
       });
       await page.evaluate(() => window.__atlasData?.beginOutbox());
       await expect

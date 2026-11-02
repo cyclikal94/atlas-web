@@ -23,7 +23,8 @@ export interface TransportAttempt extends TransportStamp {
     | "lost"
     | "refused"
     | "forwarded"
-    | "connect_refused";
+    | "connect_refused"
+    | "closed";
   route?: string;
   status?: number;
   completed?: boolean;
@@ -48,6 +49,8 @@ export interface RestoreRecord {
 export interface Transport {
   start(): Promise<string>;
   readonly url: string | null;
+  /** What the front still owns (revision 19): client sockets, forwarded requests not yet closed with their sockets, listening. */
+  owned(): { clientSockets: number; upstreams: number; listening: boolean };
   stamp(): TransportStamp;
   readonly phase: "online" | "loss";
   readonly generation: number;
@@ -61,7 +64,30 @@ export interface Transport {
 }
 export function createTransport(options: {
   routes: TransportRoute[];
+  /** Called synchronously as each attempt is recorded (the lane's journal ordering); never changes an outcome. */
+  observe?: (attempt: TransportAttempt) => void;
+  /** Harness bound on joining owned sockets/requests at a loss entry or close (default 10,000 ms). */
+  joinBoundMs?: number;
 }): Transport;
+
+/** An outgoing request this process owns, tracked until the request and its socket have closed (revision 19). */
+export interface OwnedUpstream {
+  request: import("node:http").ClientRequest;
+  socket: import("node:net").Socket | null;
+  requestClosed: boolean;
+  socketClosed: boolean;
+  requestDone: Promise<void>;
+  socketDone: Promise<void> | null;
+  done(): Promise<unknown>;
+  readonly open: boolean;
+}
+export function ownUpstream(
+  request: import("node:http").ClientRequest,
+): OwnedUpstream;
+export function settlesWithin(
+  promise: Promise<unknown>,
+  ms: number,
+): Promise<boolean>;
 
 export interface WitnessReceipt extends Partial<TransportStamp> {
   method: string | undefined;

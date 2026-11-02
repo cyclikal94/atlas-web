@@ -2,6 +2,7 @@ import type { Page } from "@playwright/test";
 import { corpusText, parserEvents } from "../support/ics-corpus";
 import {
   ACCOUNT,
+  API,
   atlasBody,
   calendarsPage,
   calendarText,
@@ -393,8 +394,8 @@ test.describe("E-IMP3: terminal answers (cases 4 and 7)", () => {
     "a settings change queued after an import that is refused is refused with it (dependency), and says so",
     async ({ transportLane }) => {
       test.setTimeout(90_000);
-      // The import's 422 is provoked on purpose (Chromium names its status in a console error); every lane page is guarded.
-      const lane = await transportLane({ mode: "fixture", provokes: [422] });
+      // Every lane page is guarded. Revision 19: the import's 422 is DECLARED below, for that one request (not a test-wide status).
+      const lane = await transportLane({ mode: "fixture" });
       const { page, cal } = await calendarsPage(lane.context, {
         routes: lane.routes,
         cache: [sourceProjection(SOURCE)],
@@ -414,6 +415,14 @@ test.describe("E-IMP3: terminal answers (cases 4 and 7)", () => {
       cal.answers.set(IMPORT_PATH, [
         { status: 422, body: atlasBody("invalid_ics") },
       ]);
+      // The import's 422 is provoked on purpose (Chromium and WebKit name its status in a console error): exactly that one request.
+      lane.expectHttp({
+        method: "POST",
+        path: `${API}/calendar-sources/${SOURCE}/import`,
+        status: 422,
+        count: 1,
+        reason: "the scripted refusal of the queued import",
+      });
       await restoreOn(lane, page);
       await lane.ui.set(page, true);
       await send(page);

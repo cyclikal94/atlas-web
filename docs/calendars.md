@@ -327,3 +327,12 @@ origin receives it. Each loss is witnessed by a failing uncached probe that no o
 fails every File read, and Playwright's WebKit cannot load the application through an HTTP forward proxy. E-IMP11 covers Browse, drop, a
 row's dialog and a replacement on two pages, online, lost and restored, plus the lane's own negatives. It is browser transport loss for the
 application's origin, not OS connectivity, a real device or a loss-time offline reload (the fixture build has no service worker).
+
+The lane's console guard (revision 19) judges a journal of what each lane page did: every console error, warning and page error with its
+page and document, every browser request with its own response or failure, and every front attempt. A page error or warning always fails.
+An engine's network-failure message is excused only for its own page and document's request whose every attempt the front dropped in a
+loss, once. An HTTP-status message is excused only for a request the case declared beforehand (`lane.expectHttp`: method, path, status,
+exact count), which the front saw answered with that status. Anything ambiguous fails. The scripted origin owns what it dispatches and
+forwards: a closed downstream cancels its request, and the origin's close cancels, joins and reports anything it could not end. Its own
+qualification is `tests/static/native-transport.test.ts`, `scripts/integration/http-transport-loss.test.mjs` and
+`tests/e2e/fixture.native-transport-guard.spec.ts` (real engines).

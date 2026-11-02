@@ -85,7 +85,27 @@ export async function stubCalendars(
     const queue = stub.answers.get(pathKey(path)) ?? [];
     let next = queue.shift();
     if (typeof next === "function") next = next(wire);
-    if (next !== undefined && "wait" in next) next = await next.wait;
+    if (next !== undefined && "wait" in next) {
+      // Revision 19 (Review 23 F23-2): on a native transport lane's scripted origin the route carries a `signal` that aborts when the
+      // request's downstream closes or the origin closes; the hold is then released and nothing is answered (a later release of the
+      // test's promise answers nobody). A Playwright route has no signal: its hold is unchanged.
+      const signal = (route as unknown as { signal?: AbortSignal }).signal;
+      const held = next.wait;
+      const answer =
+        signal === undefined
+          ? await held
+          : await new Promise<Awaited<typeof held> | null>(
+              (resolve, reject) => {
+                if (signal.aborted) return resolve(null);
+                signal.addEventListener("abort", () => resolve(null), {
+                  once: true,
+                });
+                held.then(resolve, reject);
+              },
+            );
+      if (answer === null) return;
+      next = answer;
+    }
     if (next === undefined) {
       if (path === "/notification-capabilities")
         next = {

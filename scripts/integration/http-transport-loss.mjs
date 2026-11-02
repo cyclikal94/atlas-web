@@ -41,6 +41,67 @@ const closeServer = (server) =>
     server.close((error) => resolve(error ?? null));
   });
 
+/** Resolves true when `promise` settles within `ms`, false otherwise (a harness bound on joining owned work, not a duration under test). */
+export const settlesWithin = (promise, ms) =>
+  new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), ms);
+    timer.unref?.();
+    promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+      () => {
+        clearTimeout(timer);
+        resolve(true);
+      },
+    );
+  });
+
+/**
+ * WEB-13b revision 19 (Review 23 F23-2, design assessment correction 5): an OUTGOING request this process owns, tracked until both the
+ * request and the socket it was given have closed. `done()` is the join: a destroyed request whose socket is still open is not done.
+ */
+export function ownUpstream(request) {
+  const owned = {
+    request,
+    socket: null,
+    requestClosed: false,
+    socketClosed: false,
+    requestDone: new Promise((resolve) =>
+      request.once("close", () => {
+        owned.requestClosed = true;
+        resolve();
+      }),
+    ),
+    socketDone: null,
+    done: () =>
+      Promise.all([owned.requestDone, owned.socketDone ?? Promise.resolve()]),
+    get open() {
+      return (
+        !owned.requestClosed || (owned.socket !== null && !owned.socketClosed)
+      );
+    },
+  };
+  request.once("socket", (socket) => {
+    owned.socket = socket;
+    owned.socketDone = new Promise((resolve) => {
+      if (socket.closed) {
+        owned.socketClosed = true;
+        return resolve();
+      }
+      socket.once("close", () => {
+        owned.socketClosed = true;
+        resolve();
+      });
+    });
+  });
+  return owned;
+}
+
+/** How long close() and a loss entry wait for owned sockets and requests to close before reporting a cleanup failure (a harness bound). */
+const JOIN_BOUND_MS = 10_000;
+
 const LOOPBACK = /^http:\/\/127\.0\.0\.1:\d+$/;
 
 /**
@@ -50,7 +111,11 @@ const LOOPBACK = /^http:\/\/127\.0\.0\.1:\d+$/;
  * `Origin: <presentOrigin>`, the public origin the backend was configured with (ATLAS_PUBLIC_ORIGIN), as a reverse proxy serving that
  * origin would present it; any other Origin is forwarded unchanged (and refused by the backend, as before). Each rewrite is recorded.
  */
-export function createTransport({ routes }) {
+export function createTransport({
+  routes,
+  observe = () => undefined,
+  joinBoundMs = JOIN_BOUND_MS,
+}) {
   if (!Array.isArray(routes) || routes.length === 0)
     throw new Error("createTransport: at least one route");
   for (const route of routes) {
@@ -81,9 +146,18 @@ export function createTransport({ routes }) {
   const interrupted = [];
   const sockets = new Set();
   const inFlight = new Map();
+  // Revision 19 (F23-2 audit of the second owner): every forwarded request and its socket, until both have closed.
+  const upstreams = new Set();
   const agent = new Agent({ keepAlive: false });
   let seq = 0;
   let url = null;
+  let starting = null;
+  let closing = null;
+  const noteAttempt = (attempt) => {
+    attempts.push(attempt);
+    // The lane's journal orders each attempt among the browser's own events (tests/e2e/native-transport.ts); never an outcome.
+    observe(attempt);
+  };
 
   const stamp = () => ({
     generation: state.generation,
@@ -100,7 +174,13 @@ export function createTransport({ routes }) {
       at: Date.now(),
       outcome: "pending",
     };
-    attempts.push(attempt);
+    noteAttempt(attempt);
+    if (closing !== null) {
+      // Arrived while the front closes: nothing is forwarded.
+      attempt.outcome = "closed";
+      req.socket.destroy();
+      return;
+    }
     if (state.phase === "loss" && state.enforce) {
       // Before anything is forwarded: the browser sees a failed request, no target sees anything.
       attempt.outcome = "lost";
@@ -150,7 +230,14 @@ export function createTransport({ routes }) {
         });
       },
     );
-    inFlight.set(attempt.seq, { attempt, upstream });
+    const owned = ownUpstream(upstream);
+    upstreams.add(owned);
+    owned.requestDone.then(() =>
+      (owned.socketDone ?? Promise.resolve()).then(() =>
+        upstreams.delete(owned),
+      ),
+    );
+    inFlight.set(attempt.seq, { attempt, upstream, owned });
     upstream.on("error", (error) => {
       attempt.upstreamError = String(error.code ?? error.message);
       inFlight.delete(attempt.seq);
@@ -167,11 +254,15 @@ export function createTransport({ routes }) {
     req.pipe(upstream);
   });
   server.on("connection", (socket) => {
+    if (closing !== null) {
+      socket.destroy();
+      return;
+    }
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
   });
   server.on("connect", (req, socket) => {
-    attempts.push({
+    noteAttempt({
       seq: ++seq,
       ...stamp(),
       method: "CONNECT",
@@ -182,34 +273,57 @@ export function createTransport({ routes }) {
     socket.destroy();
   });
 
-  /** Destroys every client socket (and the upstream request of anything in flight) and resolves when they are closed. */
+  /**
+   * Destroys every client socket and the upstream request of anything in flight, and resolves when they are closed: the client sockets
+   * AND each interrupted upstream request with its socket (revision 19: an explicit outgoing join, not only incoming closes). Resolves
+   * with an Error naming what did not close within the harness bound.
+   */
   const dropAll = async () => {
-    const closing = [...sockets].map(
+    const clients = [...sockets].map(
       (socket) =>
+        // Every socket still in the set has not emitted "close" (its listener removes it): wait for that event itself. (`closed` is
+        // already true between destroy() and the event's next-tick emission, so it cannot stand for the join.)
         new Promise((resolve) => {
-          if (socket.destroyed) return resolve();
           socket.once("close", resolve);
           socket.destroy();
         }),
     );
-    for (const { attempt, upstream } of inFlight.values()) {
+    const outgoing = [];
+    for (const { attempt, upstream, owned } of inFlight.values()) {
       attempt.interruptedAtLoss = state.generation;
       interrupted.push({ ...attempt });
       upstream.destroy();
+      outgoing.push(owned);
     }
     inFlight.clear();
-    await Promise.all(closing);
+    const joined = await settlesWithin(
+      Promise.all([...clients, ...outgoing.map((o) => o.done())]),
+      joinBoundMs,
+    );
+    if (joined) return null;
+    return new Error(
+      `transport: ${sockets.size} client socket(s) and ${outgoing.filter((o) => o.open).length} interrupted upstream(s) still open after ${joinBoundMs} ms`,
+    );
   };
 
   return {
     /** Starts listening; returns the front origin to use as the browser context's base URL. */
     async start() {
-      url = await listen(server);
+      if (starting !== null || closing !== null)
+        throw new Error("transport: start() once, before close()");
+      starting = listen(server);
+      url = await starting;
       return url;
     },
     get url() {
       return url;
     },
+    /** What this front still owns (client sockets, forwarded requests not yet closed, listening): for the cleanup controls. */
+    owned: () => ({
+      clientSockets: sockets.size,
+      upstreams: [...upstreams].filter((o) => o.open).length,
+      listening: server.listening,
+    }),
     stamp,
     get phase() {
       return state.phase;
@@ -233,7 +347,8 @@ export function createTransport({ routes }) {
       state.nonce = randomUUID();
       state.enforce = options.enforce ?? true;
       const before = interrupted.length;
-      await dropAll();
+      const unjoined = await dropAll();
+      if (unjoined !== null) throw unjoined;
       const record = {
         to: "loss",
         generation: state.generation,
@@ -253,7 +368,8 @@ export function createTransport({ routes }) {
       state.nonce = null;
       state.enforce = true;
       // Sockets the browser opened during the loss were destroyed; none is carried over.
-      await dropAll();
+      const unjoined = await dropAll();
+      if (unjoined !== null) throw unjoined;
       const record = {
         to: "online",
         generation: state.generation,
@@ -262,11 +378,33 @@ export function createTransport({ routes }) {
       transitions.push(record);
       return record;
     },
-    /** Stops listening and destroys every socket; resolves with the close error, if any. */
-    async close() {
-      await dropAll();
-      agent.destroy();
-      return closeServer(server);
+    /**
+     * Stops listening and destroys every socket and every forwarded request, and resolves when all of them have CLOSED (revision 19), with
+     * the first failure, if any (null otherwise). Idempotent: repeated or concurrent calls share one close. A start still in progress is
+     * joined first, so no listener outlives the close.
+     */
+    close() {
+      closing ??= (async () => {
+        if (starting !== null) await starting.catch(() => undefined);
+        const dropped = await dropAll();
+        for (const owned of upstreams) owned.request.destroy();
+        agent.destroy();
+        const joined = await settlesWithin(
+          Promise.all([...upstreams].map((o) => o.done())),
+          joinBoundMs,
+        );
+        const closed = await closeServer(server);
+        return (
+          dropped ??
+          (joined
+            ? null
+            : new Error(
+                `transport: ${[...upstreams].filter((o) => o.open).length} forwarded request(s) still open after ${joinBoundMs} ms`,
+              )) ??
+          closed
+        );
+      })();
+      return closing;
     },
   };
 }

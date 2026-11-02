@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createTransport,
   createWitnessOrigin,
+  ownUpstream,
 } from "./http-transport-loss.mjs";
 
 const listening = (port) =>
@@ -337,6 +338,105 @@ test("C20 an unreachable target fails the request (no hang) and is recorded; clo
   assert.equal(await listening(port), true);
   assert.equal(await transport.close(), null);
   assert.equal(await listening(port), false);
+});
+
+// Revision 19 (Review 23 F23-2, design assessment correction 5 / D11): the front's OUTGOING requests are joined, not only its incoming
+// sockets. A named observation bound turns a missing close into an assertion, never a timeout.
+const closedWithin = (socket, ms = 2_000) =>
+  Promise.race([
+    new Promise((resolve) =>
+      socket.closed
+        ? resolve("closed")
+        : socket.once("close", () => resolve("closed")),
+    ),
+    new Promise((resolve) =>
+      setTimeout(() => resolve("still open"), ms).unref(),
+    ),
+  ]);
+
+test("C20 outgoing join at close: a held forwarded request's upstream is closed when close() resolves, and the target sees it close", async () => {
+  const s = await setup();
+  try {
+    const held = through(s.front, "/app/hold");
+    while (s.app.held.length === 0)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    const targetSide = s.app.held[0].socket;
+    assert.equal(s.transport.owned().upstreams, 1);
+    assert.equal(await s.transport.close(), null);
+    assert.deepEqual(s.transport.owned(), {
+      clientSockets: 0,
+      upstreams: 0,
+      listening: false,
+    });
+    assert.equal(await closedWithin(targetSide), "closed");
+    assert.ok((await held).error);
+  } finally {
+    await s.close();
+  }
+});
+
+test("C20 outgoing join at a loss: the interrupted upstream is closed when lose() resolves", async () => {
+  const s = await setup();
+  try {
+    const held = through(s.front, "/app/hold");
+    while (s.app.held.length === 0)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    const targetSide = s.app.held[0].socket;
+    const loss = await s.transport.lose();
+    assert.equal(loss.interrupted.length, 1);
+    assert.equal(s.transport.owned().upstreams, 0);
+    assert.equal(await closedWithin(targetSide), "closed");
+    assert.ok((await held).error);
+  } finally {
+    await s.close();
+  }
+});
+
+test("C20 close is idempotent, joins a start in progress, and a closed front never starts again", async () => {
+  const app = await target();
+  try {
+    const transport = createTransport({
+      routes: [{ name: "app", prefix: "/", target: app.url }],
+    });
+    const starting = transport.start();
+    const first = transport.close();
+    assert.equal(transport.close(), first);
+    assert.equal(await first, null);
+    const front = await starting;
+    assert.equal(transport.owned().listening, false);
+    assert.equal(await listening(Number(new URL(front).port)), false);
+    await assert.rejects(transport.start(), /start\(\) once, before close\(\)/);
+    assert.deepEqual(app.receipts, []);
+  } finally {
+    await app.close();
+  }
+});
+
+test("C20 ownUpstream: done() resolves only once the request AND its socket have closed, not at destroy()", async () => {
+  const app = await target();
+  try {
+    const req = request(`${app.url}/app/hold`, { agent: false });
+    req.on("error", () => undefined);
+    const owned = ownUpstream(req);
+    req.end();
+    while (app.held.length === 0)
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(owned.open, true);
+    req.destroy();
+    let done = false;
+    const joined = owned.done().then(() => {
+      done = true;
+    });
+    await Promise.resolve();
+    assert.equal(done, false, "destroy() alone is not the join");
+    assert.equal(owned.open, true);
+    await joined;
+    assert.equal(owned.requestClosed, true);
+    assert.equal(owned.socketClosed, true);
+    assert.equal(owned.open, false);
+  } finally {
+    await app.close();
+  }
 });
 
 test("C20 configuration: non-loopback targets or prefix-less routes are refused at creation; double lose/restore throw", async () => {
