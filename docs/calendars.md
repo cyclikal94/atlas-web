@@ -343,3 +343,10 @@ once: no open or stage is admitted after that, a result that arrives is closed r
 every pending acquisition within a harness bound and closes each lane's context before its network. If the bound expires, settlement fails
 by name and the late result is still closed when it arrives. Opens that never finished are reported with their stage, and each lane's
 report checks run whatever the others did.
+
+Revision 21 corrects whose outcome confers ownership. A qualification wrapper may hold or fail a stage, but the scope owns what the stage
+genuinely acquired the moment it arrives, before the wrapper sees it. So a wrapper that fails after the acquisition, or is still held when
+settlement begins, never leaves that resource open: it is closed at once, exactly once, and the open fails with the wrapper's own error.
+The acquisition, the wrapper's outcome and the disposal are recorded separately, and a join bound names whichever of them is still
+pending. A failed open admits nothing more and unwinds immediately, without waiting for settlement. The acquisition handed to a wrapper is
+single-use, and the wrapper must deliver exactly what it acquired. Application cases never use the wrapper.

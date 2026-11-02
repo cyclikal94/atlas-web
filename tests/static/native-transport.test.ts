@@ -19,6 +19,7 @@ import {
   type Interpose,
   type Journal,
   LaneCancelled,
+  LaneSeamMisuse,
   type OpenStage,
   type OriginRoute,
   openTransportLanes,
@@ -1153,7 +1154,15 @@ function fakeBrowser() {
   };
   const live = new Set<FakeContext>();
   const made: FakeContext[] = [];
-  const hooks: { onClose?: () => Promise<void> } = {};
+  /**
+   * `onClose` runs inside each close. `deliver` (revision 21) holds `newContext`'s DELIVERY of a context it has already made (Review 24's
+   * F24-1 schedule: a genuine acquisition still pending for its caller); resolving it "reject" makes `newContext` unwind its own context
+   * and reject, as a foreign API that fails owns its unwinding. Each hook applies to the next `newContext` only.
+   */
+  const hooks: {
+    onClose?: () => Promise<void>;
+    deliver?: Promise<"deliver" | "reject">;
+  } = {};
   return {
     live,
     made,
@@ -1172,6 +1181,12 @@ function fakeBrowser() {
       };
       made.push(c);
       live.add(c);
+      const deliver = hooks.deliver;
+      hooks.deliver = undefined;
+      if (deliver !== undefined && (await deliver) === "reject") {
+        live.delete(c);
+        throw new Error("newContext failed");
+      }
       return c;
     }) as unknown as Browser["newContext"],
   };
@@ -1205,19 +1220,45 @@ const STAGES: OpenStage[] = [
   "publication",
 ];
 const LISTENERS: OpenStage[] = ["witness", "scripted origin", "front"];
-type Step = "pass" | "hold-after" | "hold-before" | "reject";
+type Step =
+  | "pass"
+  | "hold-after"
+  | "hold-before"
+  | "reject"
+  | "acquire-reject"
+  | "start-reject"
+  | "retain-reject"
+  | "twice"
+  | "substitute"
+  | "invent";
 /**
  * The qualification seam: `plan(stage, nth)` decides each stage's n-th call (from 1). `hold-after` performs the REAL acquisition, then
- * holds its delivery; `hold-before` holds, then asks for the acquisition (which settlement may refuse); `reject` fails without acquiring.
- * Every acquired handle (a listener's URL, a context) is kept for the independent oracles.
+ * holds its delivery (released "deliver", or "reject": the wrapper then fails AFTER its genuine acquisition); `hold-before` holds, then
+ * asks for the acquisition (which settlement may refuse); `reject` fails without acquiring.
+ *
+ * Revision 21 (Review 25 F25-1): `acquire-reject` performs the REAL acquisition and then fails (the review's schedule); `start-reject`
+ * starts it and fails before it answers (the started acquisition is kept in `starts`); `retain-reject` fails without acquiring but keeps
+ * the acquisition to call later (`retained`). The seam-contract negatives: `twice` asks for its acquisition twice, `substitute` delivers
+ * another value than the acquired one, `invent` delivers a value without acquiring. Every acquired handle (a listener's URL, a context)
+ * is kept for the independent oracles, and every error the seam throws is kept (`thrown`) so the open's rejection can be compared by
+ * identity.
  */
 function seam(plan: (stage: OpenStage, nth: number) => Step) {
   const seen: OpenStage[] = [];
   const handles: Array<{ stage: OpenStage; handle: unknown }> = [];
+  const starts: Array<{ stage: OpenStage; started: Promise<unknown> }> = [];
+  const retained: Array<{ stage: OpenStage; acquire: () => Promise<unknown> }> =
+    [];
+  const thrown: Error[] = [];
   const counts = new Map<OpenStage, number>();
   const reached = deferred();
   const release = deferred<"deliver" | "reject">();
   const askedLate: string[] = [];
+  const fail = (message: string) => {
+    const error = new Error(message);
+    thrown.push(error);
+    return error;
+  };
   const interpose = (async (
     stage: OpenStage,
     acquire: () => Promise<unknown>,
@@ -1228,7 +1269,20 @@ function seam(plan: (stage: OpenStage, nth: number) => Step) {
     const step = plan(stage, nth);
     if (step === "reject") {
       reached.resolve();
-      throw new Error(`injected ${stage} failure`);
+      throw fail(`injected ${stage} failure`);
+    }
+    if (step === "retain-reject") {
+      retained.push({ stage, acquire });
+      reached.resolve();
+      throw fail(`injected ${stage} failure`);
+    }
+    if (step === "invent") return { invented: stage };
+    if (step === "start-reject") {
+      const started = acquire();
+      started.catch(() => undefined);
+      starts.push({ stage, started });
+      reached.resolve();
+      throw fail(`injected ${stage} failure while acquiring`);
     }
     if (step === "hold-before") {
       reached.resolve();
@@ -1245,13 +1299,36 @@ function seam(plan: (stage: OpenStage, nth: number) => Step) {
     }
     const handle = await acquire();
     handles.push({ stage, handle });
+    if (step === "acquire-reject") {
+      reached.resolve();
+      throw fail(`injected ${stage} failure after acquisition`);
+    }
+    if (step === "twice") {
+      try {
+        await acquire();
+      } catch (error) {
+        askedLate.push(String(error));
+      }
+    }
+    if (step === "substitute") return { substitute: stage };
     if (step === "hold-after") {
       reached.resolve();
-      await release.promise;
+      if ((await release.promise) === "reject")
+        throw fail(`late ${stage} rejection after acquisition`);
     }
     return handle;
   }) as Interpose;
-  return { interpose, seen, handles, reached, release, askedLate };
+  return {
+    interpose,
+    seen,
+    handles,
+    starts,
+    retained,
+    thrown,
+    reached,
+    release,
+    askedLate,
+  };
 }
 const listenerUrls = (s: ReturnType<typeof seam>) =>
   s.handles.filter((h) => LISTENERS.includes(h.stage)).map((h) => h.handle);
@@ -1357,6 +1434,25 @@ describe("L02–L06: settlement overlapping each stage of an open", () => {
         settledAt,
         "settlement cannot report while an acquisition it owns is held",
       ).toBeNull();
+      // Revision 21 (Review 25 F25-1, Q03 with delivery): ownership follows the acquisition, so what the held stage acquired, and
+      // everything before it, is closed while its wrapper is still held; the wrapper's outcome is what settlement still waits for.
+      for (const url of listenerUrls(s))
+        expect(await refusedSoon(url), "closed while its wrapper is held").toBe(
+          true,
+        );
+      expect(
+        await until(() => browser.live.size === 0, "context closed while held"),
+      ).toBe("done");
+      expect(lanes.snapshot()[0]?.holdings[index]).toEqual({
+        stage,
+        acquisition: "acquired",
+        wrapper: "pending",
+        disposal:
+          LISTENERS.includes(stage) || stage === "context"
+            ? "disposed"
+            : "none",
+      });
+      expect(settledAt, "still waiting for the held wrapper").toBeNull();
       released = true;
       s.release.resolve("deliver");
       const report = await settling;
@@ -1475,6 +1571,12 @@ async function refusedSoon(url: unknown) {
 }
 
 describe("L05: an acquisition that does not answer within settlement's join bound", () => {
+  // Revision 21 (Review 25 F25-1; design assessment "L05 held-after control"): an EXPLAINED ORACLE CORRECTION, not a deletion. Revision
+  // 20 owned a context only when the wrapper delivered it, so this schedule (the context genuinely acquired, its WRAPPER held past the
+  // bound) left the context "honestly still open at the report" under the message "context acquisition still pending". The acquisition
+  // is not pending: it succeeded and is owned, so it is now closed during settlement, and the bound names the WRAPPER. The bound's named
+  // failure, the unfinished open, the late record and the never-success re-settlement are kept. Revision 20's message and its
+  // still-open-at-the-report oracle now belong to a GENUINELY pending acquisition: "L05 a context whose delivery by newContext" below.
   it("L05 a held context: settlement fails by name at the bound; the context arriving later is closed and recorded", async () => {
     const browser = fakeBrowser();
     const { info } = fakeInfo();
@@ -1498,22 +1600,26 @@ describe("L05: an acquisition that does not answer within settlement's join boun
     ).toBe("done");
     const report = await settling;
     expect(report.closeErrors).toEqual([
-      "open 1: context acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)",
+      "open 1: context wrapper still pending when settlement's join bound ended (its acquired resource was disposed; its outcome will be recorded when it arrives)",
       "open 1: unfinished at context when settlement's join bound ended",
     ]);
     expect(report.openErrors).toEqual([]);
-    expect(browser.live.size, "honestly still open at the report").toBe(1);
+    expect(
+      browser.live.size,
+      "the acquired context is closed at the report, its wrapper still held",
+    ).toBe(0);
+    expect(browser.made[0]?.closes).toBe(1);
     for (const url of listenerUrls(s)) expect(await refused(url)).toBe(true);
     s.release.resolve("deliver");
     await lateSeen.promise;
-    // Two independent late facts (the open's end, and the context's disposal, which completes after its close): order not asserted.
+    // Two independent late facts (the open's end, and the wrapper's delivery): order not asserted.
     expect([...lateLines].sort()).toEqual([
       "open 1: ended cancelled after settlement (LaneCancelled: open 1 cancelled after context: settlement began while it was opening)",
-      "open 1: late context arrived after settlement; disposed",
+      "open 1: late context wrapper delivered after settlement",
     ]);
     expect(lanes.late).toEqual(lateLines);
     expect(browser.live.size).toBe(0);
-    expect(browser.made[0]?.closes).toBe(1);
+    expect(browser.made[0]?.closes, "closed exactly once").toBe(1);
     expect(lanes.lanes).toEqual([]);
     expect(
       await lanes.settle(),
@@ -1543,15 +1649,17 @@ describe("L05: an acquisition that does not answer within settlement's join boun
       "settlement returns at its join bound, not when the acquisition answers",
     ).toBe("done");
     const report = await settling;
+    // Revision 21 (F25-1): RELABELLED, same schedule and oracle. The front's acquisition never began (its wrapper holds before asking),
+    // so the bound now names the WRAPPER, not an acquisition, and the late rejection is the wrapper's.
     expect(report.closeErrors).toEqual([
-      "open 1: front acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)",
+      "open 1: front wrapper still pending when settlement's join bound ended (its acquisition never began and is now refused; its outcome will be recorded when it arrives)",
       "open 1: unfinished at front when settlement's join bound ended",
     ]);
     s.release.resolve("reject");
     await lateSeen.promise;
     expect([...lateLines].sort()).toEqual([
       "open 1: ended failed after settlement (Error: late front rejection)",
-      "open 1: late front rejected after settlement: Error: late front rejection",
+      "open 1: late front wrapper rejected after settlement: Error: late front rejection",
     ]);
     expect(s.seen).toEqual(["witness", "scripted origin", "front"]);
     expect(browser.made).toEqual([]);
@@ -1670,12 +1778,48 @@ describe("L08: failed use, failed or hanging cleanup, failed reporting", () => {
         },
       },
     );
+    // Revision 21 (F25-1): the held stage is the context's WRAPPER (its acquisition succeeded), so the bound names the wrapper and the
+    // context is already closed when the fixture fails; the genuinely pending acquisition keeps revision 20's message (next case).
     await expect(failed).rejects.toThrow(
-      /transport lane fixture: Error: the case failed; teardown .*open 1: context acquisition still pending when settlement's join bound ended/,
+      /transport lane fixture: Error: the case failed; teardown .*open 1: context wrapper still pending when settlement's join bound ended/,
     );
+    expect(browser.live.size, "closed before the wrapper is released").toBe(0);
     s.release.resolve("deliver");
     await lateSeen.promise;
     expect(browser.live.size).toBe(0);
+    expect(browser.made.map((c) => c.closes)).toEqual([1]);
+  });
+  it("L08 the fixture's use fails while a context's delivery is genuinely pending: the original failure and revision 20's named acquisition failure", async () => {
+    const browser = fakeBrowser();
+    const { info } = fakeInfo();
+    const s = seam(() => "pass");
+    const deliver = deferred<"deliver" | "reject">();
+    browser.hooks.deliver = deliver.promise;
+    const lateSeen = deferred();
+    const failed = runTransportLaneFixture(
+      browser,
+      async (open) => {
+        void open({ mode: "fixture" });
+        await until(() => browser.made.length === 1, "context made");
+        throw new Error("the case failed");
+      },
+      info,
+      {
+        interpose: s.interpose,
+        joinBoundMs: 200,
+        onLate: (line) => {
+          if (line.includes("late context")) lateSeen.resolve();
+        },
+      },
+    );
+    await expect(failed).rejects.toThrow(
+      /transport lane fixture: Error: the case failed; teardown .*open 1: context acquisition still pending when settlement's join bound ended/,
+    );
+    expect(browser.live.size, "undelivered, so honestly still open").toBe(1);
+    deliver.resolve("deliver");
+    await lateSeen.promise;
+    expect(browser.live.size).toBe(0);
+    expect(browser.made.map((c) => c.closes)).toEqual([1]);
   });
   it("L08 the fixture without a use failure fails on an open that was cancelled by its settlement", async () => {
     const { info } = fakeInfo();
@@ -1765,5 +1909,503 @@ describe("L08: failed use, failed or hanging cleanup, failed reporting", () => {
         "lane 1 scripted origin handler: handler failed",
       ],
     });
+  });
+});
+
+// ---- Revision 21 (Review 25 F25-1; design assessment token 8179e31e…, Q01–Q08): ownership follows the REAL acquisition ----------------
+
+/** What each stage's own disposer closes (init script and publication have none: their context and listeners are earlier holdings). */
+const DISPOSED = (stage: OpenStage) =>
+  LISTENERS.includes(stage) || stage === "context" ? "disposed" : "none";
+
+describe("L05 (revision 21): a genuinely pending acquisition, distinct from a held wrapper", () => {
+  it("L05 a context whose delivery by newContext outlives the join bound: named as a pending acquisition, honestly open at the report, closed when it arrives", async () => {
+    const browser = fakeBrowser();
+    const sentinel = await browser.newContext();
+    const { info } = fakeInfo();
+    const deliver = deferred<"deliver" | "reject">();
+    browser.hooks.deliver = deliver.promise;
+    const lateLines: string[] = [];
+    const lateSeen = deferred();
+    const lanes = openTransportLanes(browser, info, {
+      joinBoundMs: 200,
+      onLate: (line) => {
+        lateLines.push(line);
+        if (lateLines.length === 2) lateSeen.resolve();
+      },
+    });
+    const outcome = lanes.open({ mode: "fixture" }).catch((e: unknown) => e);
+    expect(await until(() => browser.made.length === 2, "context made")).toBe(
+      "done",
+    );
+    const report = await lanes.settle();
+    expect(report.closeErrors).toEqual([
+      "open 1: context acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)",
+      "open 1: unfinished at context when settlement's join bound ended",
+    ]);
+    expect(
+      browser.live.size,
+      "undelivered: honestly still open at the report",
+    ).toBe(2);
+    expect(lanes.snapshot()[0]?.holdings[3]).toEqual({
+      stage: "context",
+      acquisition: "pending",
+      wrapper: "pending",
+      disposal: "none",
+      late: true,
+    });
+    deliver.resolve("deliver");
+    await lateSeen.promise;
+    expect([...lateLines].sort()).toEqual([
+      "open 1: ended cancelled after settlement (LaneCancelled: open 1 cancelled after context: settlement began while it was opening)",
+      "open 1: late context arrived after settlement; disposed",
+    ]);
+    expect(browser.live, "only the sentinel").toEqual(new Set([sentinel]));
+    expect(browser.made[1]?.closes).toBe(1);
+    expect(await lanes.settle(), "never turns into success").toBe(report);
+    expect(String(await outcome)).toContain("cancelled after context");
+  });
+  it("L05 the same pending acquisition rejected after the bound: its rejection is recorded as the acquisition's; nothing is fabricated to close", async () => {
+    const browser = fakeBrowser();
+    const { info } = fakeInfo();
+    const deliver = deferred<"deliver" | "reject">();
+    browser.hooks.deliver = deliver.promise;
+    const lateLines: string[] = [];
+    const lateSeen = deferred();
+    const lanes = openTransportLanes(browser, info, {
+      joinBoundMs: 200,
+      onLate: (line) => {
+        lateLines.push(line);
+        if (lateLines.length === 2) lateSeen.resolve();
+      },
+    });
+    void lanes.open({ mode: "fixture" });
+    expect(await until(() => browser.made.length === 1, "context made")).toBe(
+      "done",
+    );
+    const report = await lanes.settle();
+    expect(report.closeErrors[0]).toBe(
+      "open 1: context acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)",
+    );
+    deliver.resolve("reject");
+    await lateSeen.promise;
+    expect([...lateLines].sort()).toEqual([
+      "open 1: ended failed after settlement (Error: newContext failed)",
+      "open 1: late context acquisition rejected after settlement: Error: newContext failed",
+    ]);
+    expect(browser.made[0]?.closes, "the API unwound its own context").toBe(0);
+    expect(browser.live.size).toBe(0);
+  });
+  it("L05 a context's wrapper held past the bound, then rejecting: the context was already closed; the wrapper's rejection is recorded late", async () => {
+    const browser = fakeBrowser();
+    const { info } = fakeInfo();
+    const lateLines: string[] = [];
+    const lateSeen = deferred();
+    const s = seam((st) => (st === "context" ? "hold-after" : "pass"));
+    const lanes = openTransportLanes(browser, info, {
+      interpose: s.interpose,
+      joinBoundMs: 200,
+      onLate: (line) => {
+        lateLines.push(line);
+        if (lateLines.length === 2) lateSeen.resolve();
+      },
+    });
+    void lanes.open({ mode: "fixture" });
+    await s.reached.promise;
+    const report = await lanes.settle();
+    expect(report.closeErrors).toEqual([
+      "open 1: context wrapper still pending when settlement's join bound ended (its acquired resource was disposed; its outcome will be recorded when it arrives)",
+      "open 1: unfinished at context when settlement's join bound ended",
+    ]);
+    expect(browser.live.size).toBe(0);
+    s.release.resolve("reject");
+    await lateSeen.promise;
+    expect([...lateLines].sort()).toEqual([
+      "open 1: ended failed after settlement (Error: late context rejection after acquisition)",
+      "open 1: late context wrapper rejected after settlement: Error: late context rejection after acquisition",
+    ]);
+    expect(
+      browser.made.map((c) => c.closes),
+      "closed exactly once",
+    ).toEqual([1]);
+    expect(await lanes.settle()).toBe(report);
+  });
+});
+
+describe("F25-1 Q02: a wrapper rejecting AFTER its stage's genuine acquisition, before settlement", () => {
+  for (const [index, stage] of STAGES.entries())
+    it(`Q02 ${stage}: the open fails with the original error, what it acquired is closed at once (no settlement needed), exactly once; the sentinel survives`, async () => {
+      const browser = fakeBrowser();
+      const sentinel = await browser.newContext();
+      const { info, attached } = fakeInfo();
+      const s = seam((st) => (st === stage ? "acquire-reject" : "pass"));
+      const lanes = openTransportLanes(browser, info, {
+        interpose: s.interpose,
+      });
+      const failure = await lanes.open({ mode: "fixture" }).catch((e) => e);
+      expect(failure, "the original thrown value, not a wrapper of it").toBe(
+        s.thrown[0],
+      );
+      expect(s.handles.map((h) => h.stage)).toEqual(STAGES.slice(0, index + 1));
+      expect(lanes.state, "no settlement asked for").toBe("open");
+      for (const url of listenerUrls(s))
+        expect(await refusedSoon(url), "unwound before any settlement").toBe(
+          true,
+        );
+      expect(
+        await until(
+          () => browser.live.size === 1,
+          "contexts back to the sentinel",
+        ),
+      ).toBe("done");
+      expect(browser.live).toEqual(new Set([sentinel]));
+      expect(
+        await until(
+          () =>
+            lanes.snapshot()[0]?.holdings[index]?.disposal === DISPOSED(stage),
+          "the failed stage's own disposal recorded",
+        ),
+      ).toBe("done");
+      expect(lanes.snapshot()[0]?.holdings[index]).toEqual({
+        stage,
+        acquisition: "acquired",
+        wrapper: "failed",
+        disposal: DISPOSED(stage),
+        wrapperError: `Error: injected ${stage} failure after acquisition`,
+      });
+      const report = await lanes.settle();
+      expect(report).toEqual({
+        closeErrors: [],
+        reportErrors: [],
+        failures: [],
+        openErrors: [
+          `open 1 failed at ${stage}: Error: injected ${stage} failure after acquisition`,
+        ],
+      });
+      expect(
+        browser.made.slice(1).map((c) => c.closes),
+        "each context closed exactly once (unwinding and settlement share one disposal)",
+      ).toEqual(index >= STAGES.indexOf("context") ? [1] : []);
+      expect(lanes.lanes, "nothing published").toEqual([]);
+      expect(attached.has("transport-ledger-0")).toBe(false);
+      expect(await lanes.settle()).toBe(report);
+      expect(browser.live).toEqual(new Set([sentinel]));
+    });
+});
+
+describe("F25-1 Q03: settlement overlapping a genuine acquisition whose held wrapper then rejects", () => {
+  for (const [index, stage] of STAGES.entries())
+    it(`Q03 ${stage}: owned before release and closed while held; the late rejection fails the open; once each; repeated settlement shares the report`, async () => {
+      const browser = fakeBrowser();
+      const sentinel = await browser.newContext();
+      const { info } = fakeInfo();
+      const s = seam((st) => (st === stage ? "hold-after" : "pass"));
+      const lanes = openTransportLanes(browser, info, {
+        interpose: s.interpose,
+      });
+      const outcome = lanes.open({ mode: "fixture" }).catch((e: unknown) => e);
+      await s.reached.promise;
+      expect(
+        lanes.snapshot()[0]?.holdings[index],
+        "owned before the wrapper is released",
+      ).toMatchObject({ stage, acquisition: "acquired", wrapper: "pending" });
+      let reported = false;
+      const settling = lanes.settle();
+      void settling.then(() => {
+        reported = true;
+      });
+      for (const url of listenerUrls(s))
+        expect(await refusedSoon(url), "closed while held").toBe(true);
+      expect(
+        await until(() => browser.live.size === 1, "context closed while held"),
+      ).toBe("done");
+      expect(reported, "the held wrapper is still joined").toBe(false);
+      s.release.resolve("reject");
+      const report = await settling;
+      expect(await outcome).toBe(s.thrown[0]);
+      expect(report).toEqual({
+        closeErrors: [],
+        reportErrors: [],
+        failures: [],
+        openErrors: [
+          `open 1 failed at ${stage}: Error: late ${stage} rejection after acquisition`,
+        ],
+      });
+      expect(s.seen, "no later stage began").toEqual(
+        STAGES.slice(0, index + 1),
+      );
+      expect(lanes.lanes).toEqual([]);
+      expect(browser.live).toEqual(new Set([sentinel]));
+      expect(
+        browser.made.slice(1).map((c) => c.closes),
+        "each context closed exactly once",
+      ).toEqual(index >= STAGES.indexOf("context") ? [1] : []);
+      expect(lanes.snapshot()[0]?.holdings[index]).toEqual({
+        stage,
+        acquisition: "acquired",
+        wrapper: "failed",
+        disposal: DISPOSED(stage),
+        wrapperError: `Error: late ${stage} rejection after acquisition`,
+      });
+      expect(await lanes.settle(), "repeated settlement: the same report").toBe(
+        report,
+      );
+    });
+});
+
+describe("F25-1 Q05: a failed open while its manager stays open; the seam's contract", () => {
+  it("Q05 a wrapper failing while its context's acquisition is still pending: the open fails at once; the context is closed when it arrives, without settlement; a sibling open still works", async () => {
+    const browser = fakeBrowser();
+    const sentinel = await browser.newContext();
+    const { info } = fakeInfo();
+    const deliver = deferred<"deliver" | "reject">();
+    browser.hooks.deliver = deliver.promise;
+    const s = seam((st, nth) =>
+      st === "context" && nth === 1 ? "start-reject" : "pass",
+    );
+    const lanes = openTransportLanes(browser, info, {
+      interpose: s.interpose,
+    });
+    const failure = await lanes.open({ mode: "fixture" }).catch((e) => e);
+    expect(failure).toBe(s.thrown[0]);
+    expect(lanes.snapshot()[0]?.holdings[3]).toMatchObject({
+      stage: "context",
+      acquisition: "pending",
+      wrapper: "failed",
+    });
+    expect(browser.live.size, "made, not yet delivered").toBe(2);
+    deliver.resolve("deliver");
+    expect(
+      await until(() => browser.live.size === 1, "closed when it arrived"),
+    ).toBe("done");
+    expect(lanes.state).toBe("open");
+    expect(browser.made[1]?.closes).toBe(1);
+    for (const url of listenerUrls(s))
+      expect(await refusedSoon(url)).toBe(true);
+    const sibling = await lanes.open({ mode: "fixture" });
+    expect(lanes.lanes).toEqual([sibling]);
+    const report = await lanes.settle();
+    expect(report).toEqual({
+      closeErrors: [],
+      reportErrors: [],
+      failures: [],
+      openErrors: [
+        "open 1 failed at context: Error: injected context failure while acquiring",
+      ],
+    });
+    expect(browser.live).toEqual(new Set([sentinel]));
+    expect(browser.made.slice(1).map((c) => c.closes)).toEqual([1, 1]);
+    expect(lanes.late).toEqual([]);
+  });
+  it("Q05 the same, the pending acquisition then rejecting: recorded, observed (no unhandled rejection), nothing fabricated to close", async () => {
+    const browser = fakeBrowser();
+    const { info } = fakeInfo();
+    const deliver = deferred<"deliver" | "reject">();
+    browser.hooks.deliver = deliver.promise;
+    const s = seam((st) => (st === "context" ? "start-reject" : "pass"));
+    const lanes = openTransportLanes(browser, info, {
+      interpose: s.interpose,
+    });
+    const failure = await lanes.open({ mode: "fixture" }).catch((e) => e);
+    expect(failure, "the original thrown value").toBe(s.thrown[0]);
+    deliver.resolve("reject");
+    expect(
+      await until(
+        () => lanes.snapshot()[0]?.holdings[3]?.acquisition === "rejected",
+        "the acquisition's rejection recorded",
+      ),
+    ).toBe("done");
+    expect(lanes.snapshot()[0]?.holdings[3]).toEqual({
+      stage: "context",
+      acquisition: "rejected",
+      wrapper: "failed",
+      disposal: "none",
+      acquisitionError: "Error: newContext failed",
+      wrapperError: "Error: injected context failure while acquiring",
+    });
+    const report = await lanes.settle();
+    expect(report.closeErrors).toEqual([]);
+    expect(browser.made[0]?.closes).toBe(0);
+    expect(browser.live.size).toBe(0);
+  });
+  it("Q05 a wrapper failing while a listener's start is in progress: the partial start is closed by the open's own unwinding (the object disposer is armed at start)", async () => {
+    const browser = fakeBrowser();
+    const { info } = fakeInfo();
+    const s = seam((st) => (st === "witness" ? "start-reject" : "pass"));
+    const lanes = openTransportLanes(browser, info, {
+      interpose: s.interpose,
+    });
+    const failure = await lanes.open({ mode: "fixture" }).catch((e) => e);
+    expect(failure, "the original thrown value").toBe(s.thrown[0]);
+    const url = await s.starts[0]?.started;
+    expect(await refusedSoon(url), "the started witness was closed").toBe(true);
+    expect(
+      await until(
+        () => lanes.snapshot()[0]?.holdings[0]?.disposal === "disposed",
+        "witness disposed",
+      ),
+    ).toBe("done");
+    expect(lanes.state).toBe("open");
+    expect((await lanes.settle()).closeErrors).toEqual([]);
+  });
+  it("Q05 a wrapper failing before acquiring but keeping its acquisition: calling it later is refused (the open failed); nothing more is acquired; a sibling open still works", async () => {
+    const browser = fakeBrowser();
+    const { info } = fakeInfo();
+    const s = seam((st, nth) =>
+      st === "front" && nth === 1 ? "retain-reject" : "pass",
+    );
+    const lanes = openTransportLanes(browser, info, {
+      interpose: s.interpose,
+    });
+    const failure = await lanes.open({ mode: "fixture" }).catch((e) => e);
+    expect(failure, "the original thrown value").toBe(s.thrown[0]);
+    const late = await (s.retained[0]?.acquire() ?? Promise.resolve()).catch(
+      (e: unknown) => e,
+    );
+    expect(late).toBeInstanceOf(LaneSeamMisuse);
+    expect(String(late)).toBe(
+      "LaneSeamMisuse: open 1 refused before front: the open has already failed",
+    );
+    expect(lanes.snapshot()[0]?.holdings[2]).toMatchObject({
+      stage: "front",
+      acquisition: "not_begun",
+      wrapper: "failed",
+      disposal: "none",
+    });
+    expect(s.handles.map((h) => h.stage)).toEqual([
+      "witness",
+      "scripted origin",
+    ]);
+    for (const url of listenerUrls(s))
+      expect(await refusedSoon(url)).toBe(true);
+    const sibling = await lanes.open({ mode: "fixture" });
+    expect(lanes.lanes).toEqual([sibling]);
+    const report = await lanes.settle();
+    expect(report.openErrors).toEqual([
+      "open 1 failed at front: Error: injected front failure",
+    ]);
+    expect(report.closeErrors).toEqual([]);
+    expect(browser.made.map((c) => c.closes)).toEqual([1]);
+    expect(browser.live.size).toBe(0);
+  });
+  for (const [step, message, made] of [
+    [
+      "twice",
+      "LaneSeamMisuse: open 1: the context wrapper asked for its acquisition more than once (it is single-use)",
+      1,
+    ],
+    [
+      "substitute",
+      "LaneSeamMisuse: open 1: the context wrapper delivered a value other than its acquisition's",
+      1,
+    ],
+    [
+      "invent",
+      "LaneSeamMisuse: open 1: the context wrapper delivered without a successful acquisition (not_begun)",
+      0,
+    ],
+  ] as const)
+    it(`Q05 seam-contract negative (${step}): the stage fails by name; only the REAL acquisition is owned, and it is closed once`, async () => {
+      const browser = fakeBrowser();
+      const { info } = fakeInfo();
+      const s = seam((st) => (st === "context" ? step : "pass"));
+      const lanes = openTransportLanes(browser, info, {
+        interpose: s.interpose,
+      });
+      const failure = await lanes.open({ mode: "fixture" }).catch((e) => e);
+      expect(failure).toBeInstanceOf(LaneSeamMisuse);
+      expect(String(failure)).toBe(message);
+      if (step === "twice") expect(s.askedLate).toEqual([message]);
+      expect(browser.made.length, "no second or invented context").toBe(made);
+      expect(await until(() => browser.live.size === 0, "unwound")).toBe(
+        "done",
+      );
+      expect(browser.made.map((c) => c.closes)).toEqual(made === 1 ? [1] : []);
+      const report = await lanes.settle();
+      expect(report.openErrors).toEqual([
+        `open 1 failed at context: ${message}`,
+      ]);
+      expect(report.closeErrors).toEqual([]);
+      expect(browser.made.map((c) => c.closes)).toEqual(made === 1 ? [1] : []);
+    });
+});
+
+describe("F25-1 Q07–Q08: concurrent opens and managers; the fixture", () => {
+  it("Q07 a published lane, a held front rejecting during settlement and a context rejected after acquisition, beside another manager: each closed once; only its own manager's; distinct teardown records", async () => {
+    const browser = fakeBrowser();
+    const { info, attached } = fakeInfo();
+    const s = seam((st, nth) =>
+      st === "front" && nth === 2
+        ? "hold-after"
+        : st === "context" && nth === 2
+          ? "acquire-reject"
+          : "pass",
+    );
+    const a = openTransportLanes(browser, info, { interpose: s.interpose });
+    const first = await a.open({ mode: "fixture" });
+    const held = a.open({ mode: "fixture" }).catch((e: unknown) => e);
+    await s.reached.promise;
+    await expect(a.open({ mode: "fixture" })).rejects.toThrow(
+      "injected context failure after acquisition",
+    );
+    const other = fakeInfo();
+    const b = openTransportLanes(browser, other.info);
+    const kept = await b.open({ mode: "fixture" });
+    expect(
+      await until(() => browser.live.size === 2, "open 3's context unwound"),
+    ).toBe("done");
+    const settling = a.settle();
+    await turns();
+    s.release.resolve("reject");
+    const report = await settling;
+    expect(report).toEqual({
+      closeErrors: [],
+      reportErrors: [],
+      failures: [],
+      openErrors: [
+        "open 2 failed at front: Error: late front rejection after acquisition",
+        "open 3 failed at context: Error: injected context failure after acquisition",
+      ],
+    });
+    expect(String(await held)).toContain(
+      "late front rejection after acquisition",
+    );
+    expect(a.lanes).toEqual([first]);
+    for (const url of listenerUrls(s)) expect(await refused(url)).toBe(true);
+    expect(browser.live, "only the other manager's context remains").toEqual(
+      new Set([kept.context]),
+    );
+    expect(await refused(kept.transport.url)).toBe(false);
+    expect((await b.settle()).openErrors).toEqual([]);
+    expect(browser.live.size).toBe(0);
+    expect(browser.made.map((c) => c.closes)).toEqual([1, 1, 1]);
+    const mine = attached.get("transport-teardown") as { manager: number };
+    const theirs = other.attached.get("transport-teardown") as {
+      manager: number;
+    };
+    expect(typeof mine.manager).toBe("number");
+    expect(mine.manager, "each teardown record names its manager").not.toBe(
+      theirs.manager,
+    );
+  });
+  it("Q08 the fixture's use fails because its open failed after acquiring: the original error is the cause; the teardown names the failed open; nothing stays open", async () => {
+    const browser = fakeBrowser();
+    const { info } = fakeInfo();
+    const s = seam((st) => (st === "context" ? "acquire-reject" : "pass"));
+    const failed = runTransportLaneFixture(
+      browser,
+      async (open) => {
+        await open({ mode: "fixture" });
+      },
+      info,
+      { interpose: s.interpose },
+    ).catch((e: unknown) => e as Error);
+    const error = await failed;
+    expect(String(error)).toMatch(
+      /transport lane fixture: Error: injected context failure after acquisition; teardown .*open 1 failed at context: Error: injected context failure after acquisition/,
+    );
+    expect((error as Error).cause).toBe(s.thrown[0]);
+    expect(browser.live.size).toBe(0);
+    expect(browser.made.map((c) => c.closes)).toEqual([1]);
   });
 });

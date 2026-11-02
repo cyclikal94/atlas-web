@@ -1129,6 +1129,11 @@ export type OpenStage =
 /**
  * A QUALIFICATION seam only (default: none): wraps each stage. `acquire` performs the stage's real acquisition, and refuses to begin once
  * settlement has begun; a control can hold before or after it, release, or reject. Never used by an application case.
+ *
+ * Revision 21 (Review 25 F25-1): the scope owns what `acquire` acquired the moment it arrives, BEFORE the wrapper sees it, so a wrapper
+ * that rejects (or is held) after a successful acquisition never takes that resource out of ownership. `acquire` is single-use; once the
+ * wrapper has ended, the open has failed or settlement has begun, it refuses. A wrapper must deliver exactly what `acquire` gave it: a
+ * second acquisition, a substituted value or a value delivered without a successful acquisition fails the stage (`LaneSeamMisuse`).
  */
 export type Interpose = <T>(
   stage: OpenStage,
@@ -1148,6 +1153,11 @@ export interface TransportLanesOptions {
 /** A stage refused because settlement began (the open is cancelled, never published). */
 export class LaneCancelled extends Error {
   override name = "LaneCancelled";
+}
+
+/** A qualification wrapper broke the seam's contract (revision 21): the stage fails by name; nothing it did not acquire is owned. */
+export class LaneSeamMisuse extends Error {
+  override name = "LaneSeamMisuse";
 }
 
 type Outcome<T> =
@@ -1200,18 +1210,58 @@ async function runStep(
   return `${step.label}: still running ${boundMs} ms after it began`;
 }
 
-/** One stage's holding: owned from admission, before its acquisition starts. */
+/**
+ * One stage's holding: owned from admission, before its acquisition starts.
+ *
+ * Revision 21 (Review 25 F25-1, family native-transport-upstream-cleanup; design assessment token 8179e31e…, invariants 1–6): three
+ * separately observable facts. `acquisition` is the REAL acquisition (the operation `acquire` starts), `wrapper` is the qualification
+ * wrapper's outcome (the stage's outcome for its open), and `disposal` is the one close of what was acquired. Ownership follows the
+ * acquisition, never the wrapper: a failed wrapper does not mean nothing was acquired, and a held wrapper does not mean the acquisition
+ * is pending. A successful acquisition's value may be `undefined` (an init script's); its state, not its truthiness, says it was acquired.
+ */
 interface Holding {
   stage: OpenStage;
-  state: "acquiring" | "acquired" | "failed" | "disposed" | "dispose_failed";
-  arrived: Promise<void>;
+  acquisition: "not_begun" | "pending" | "acquired" | "rejected";
+  wrapper: "pending" | "delivered" | "failed";
+  disposal: "none" | "disposing" | "disposed" | "dispose_failed";
+  /** Settles (never rejects) once the acquisition has settled and its result is recorded here; already settled if it never began. */
+  acquired: Promise<void>;
+  /** Settles (never rejects) once the wrapper's outcome is recorded here. */
+  delivered: Promise<void>;
+  /** The acquired value, recorded BEFORE the wrapper receives it (meaningful only once `acquisition` is "acquired"). */
   handle?: unknown;
-  error?: string;
+  acquisitionError?: string;
+  wrapperError?: string;
+  /** How the wrapper broke the seam's contract, if it did (the stage then fails with `LaneSeamMisuse`). */
+  misuse?: string;
+  /** A join bound ended before the acquisition settled: its result is disposed, or its rejection recorded, when it arrives. */
   late?: boolean;
+  /** A join bound ended with the wrapper still pending: its outcome is recorded when it arrives. */
+  wrapperLate?: boolean;
+  /**
+   * `object`: the disposer closes a pre-built object (a listener) whatever its start did, so it is ARMED when the acquisition begins (a
+   * partial or failed start is still closed; each listener's close joins a start in progress). `handle`: the disposer needs the acquired
+   * value, so only a successful acquisition arms it (a foreign API that rejects, such as `newContext`, owns its own unwinding).
+   */
+  arms: "object" | "handle";
   dispose: ((handle: unknown) => Promise<unknown>) | null;
-  /** The ONE disposal of this holding (shared by every caller: an open's own unwinding and settlement). */
-  disposal?: Promise<string | null>;
+  /** The ONE disposal of this holding (shared by every caller: an open's own unwinding, settlement and a late arrival). */
+  disposalRun?: Promise<string | null>;
 }
+
+/** Who is disposing (for the bound's named failure and the late lines). */
+interface Disposer {
+  bound: string;
+  after: string;
+}
+const BY_SETTLEMENT: Disposer = {
+  bound: "settlement's join bound",
+  after: "settlement",
+};
+const BY_UNWINDING: Disposer = {
+  bound: "its failed open's unwinding bound",
+  after: "its failed open's unwinding",
+};
 
 /** One admitted open: registered synchronously at admission, whether or not it ever produces a lane. */
 interface OpenRecord {
@@ -1228,8 +1278,14 @@ interface OpenRecord {
  * The scope of one open (design assessment correction 2): every stage is ADMITTED only while the manager is open, OWNED (with its
  * disposer) before its acquisition starts, and its result is owned the moment it arrives; after each stage, the open stops if settlement
  * has begun (no further listener, context set-up, stage or publication). Disposal is in reverse order of admission.
+ *
+ * Revision 21 (F25-1): the result is adopted INSIDE the acquisition `acquire` hands the wrapper, before the wrapper's continuation can
+ * run, so the wrapper's outcome can neither erase nor replace it. Once any stage of the open has failed the scope admits nothing more.
  */
 class OpenScope {
+  /** Set when a stage of this open fails (its wrapper failed) or the open failed: no stage or acquisition is admitted after it. */
+  private failed = false;
+
   constructor(
     readonly record: OpenRecord,
     private readonly closing: () => boolean,
@@ -1241,58 +1297,130 @@ class OpenScope {
       throw new LaneCancelled(
         `open ${this.record.id} cancelled ${when} ${stage}: settlement began while it was opening`,
       );
+    if (this.failed)
+      throw new LaneSeamMisuse(
+        `open ${this.record.id} refused ${when} ${stage}: the open has already failed`,
+      );
+  }
+
+  /** The open failed: nothing more is admitted (its unwinding follows). */
+  fail(): void {
+    this.failed = true;
   }
 
   acquire<T>(
     stage: OpenStage,
     start: () => Promise<T>,
     dispose: ((handle: T) => Promise<unknown>) | null,
-    gateAfter = true,
+    {
+      gateAfter = true,
+      arms = "handle",
+    }: { gateAfter?: boolean; arms?: Holding["arms"] } = {},
   ): Promise<T> {
     this.gate(stage, "before");
     this.record.stage = stage;
     this.record.stages.push({ stage, at: Date.now() });
+    const id = this.record.id;
     const holding: Holding = {
       stage,
-      state: "acquiring",
-      arrived: Promise.resolve(),
+      acquisition: "not_begun",
+      wrapper: "pending",
+      disposal: "none",
+      acquired: Promise.resolve(),
+      delivered: Promise.resolve(),
+      arms,
       dispose: dispose as Holding["dispose"],
     };
     this.record.holdings.push(holding);
-    const begun = new Promise<T>((resolve) =>
-      resolve(
-        this.interpose(stage, () => {
-          this.gate(stage, "before");
-          return start();
-        }),
-      ),
+    let calls = 0;
+    // The REAL acquisition, single-use. Its result is recorded on the holding (owned) in the first reaction to it, and only THEN is it
+    // handed to the wrapper: whatever the wrapper later does (reject, hold, or never deliver), the resource is already owned.
+    const acquireOnce = (): Promise<T> => {
+      calls += 1;
+      if (calls > 1) {
+        holding.misuse ??= `the ${stage} wrapper asked for its acquisition more than once (it is single-use)`;
+        return Promise.reject(
+          new LaneSeamMisuse(`open ${id}: ${holding.misuse}`),
+        );
+      }
+      try {
+        this.gate(stage, "before");
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      holding.acquisition = "pending";
+      let inner: Promise<T>;
+      try {
+        inner = Promise.resolve(start());
+      } catch (error) {
+        inner = Promise.reject(error);
+      }
+      let failure: unknown;
+      holding.acquired = inner.then(
+        (handle) => {
+          holding.acquisition = "acquired";
+          holding.handle = handle;
+        },
+        (error) => {
+          holding.acquisition = "rejected";
+          holding.acquisitionError = String(error);
+          failure = error;
+        },
+      );
+      return holding.acquired.then(() => {
+        if (holding.acquisition !== "acquired") throw failure;
+        return holding.handle as T;
+      });
+    };
+    const wrapped = new Promise<T>((resolve) =>
+      resolve(this.interpose(stage, acquireOnce)),
     );
-    // Observed at once: the result is owned when it arrives, and a rejection is recorded, whoever (if anyone) awaits the open.
-    holding.arrived = begun.then(
-      (handle) => {
-        holding.state = "acquired";
-        holding.handle = handle;
+    // The wrapper must deliver exactly what was acquired: otherwise the stage fails by name (and the scope owns only the real result).
+    const outcome = wrapped.then((value) => {
+      if (holding.misuse !== undefined)
+        throw new LaneSeamMisuse(`open ${id}: ${holding.misuse}`);
+      if (holding.acquisition !== "acquired")
+        throw new LaneSeamMisuse(
+          `open ${id}: the ${stage} wrapper delivered without a successful acquisition (${holding.acquisition})`,
+        );
+      if (!Object.is(value, holding.handle))
+        throw new LaneSeamMisuse(
+          `open ${id}: the ${stage} wrapper delivered a value other than its acquisition's`,
+        );
+      return value;
+    });
+    // Observed at once: the wrapper's outcome is recorded (and a failure closes the scope's admission), whoever awaits the open.
+    holding.delivered = outcome.then(
+      () => {
+        holding.wrapper = "delivered";
       },
       (error) => {
-        holding.state = "failed";
-        holding.error = String(error);
+        holding.wrapper = "failed";
+        holding.wrapperError = String(error);
+        this.failed = true;
       },
     );
-    return begun.then((handle) => {
+    return outcome.then((handle) => {
       if (gateAfter) this.gate(stage, "after");
       return handle;
     });
   }
 
-  private async disposeHolding(
+  /** The holding's ONE disposal, started at most once (synchronously: failure, settlement and a late arrival cannot both start one). */
+  private disposeHolding(
     holding: Holding,
     boundMs: number,
     late: (line: string) => void,
   ): Promise<string | null> {
-    if (holding.disposal !== undefined) return holding.disposal;
-    if (holding.state !== "acquired" || holding.dispose === null) return null;
+    if (holding.disposalRun !== undefined) return holding.disposalRun;
+    const armed =
+      holding.arms === "object"
+        ? holding.acquisition !== "not_begun"
+        : holding.acquisition === "acquired";
+    if (!armed || holding.dispose === null) return Promise.resolve(null);
     const dispose = holding.dispose;
-    holding.disposal = runStep(
+    holding.disposal = "disposing";
+    holding.disposalRun = runStep(
       {
         label: `open ${this.record.id} ${holding.stage}`,
         run: () => dispose(holding.handle),
@@ -1300,48 +1428,104 @@ class OpenScope {
       boundMs,
       late,
     ).then((failure) => {
-      holding.state = failure === null ? "disposed" : "dispose_failed";
+      holding.disposal = failure === null ? "disposed" : "dispose_failed";
       return failure;
     });
-    return holding.disposal;
+    return holding.disposalRun;
   }
 
-  /** Disposes every holding, newest first, attempting each whatever the others did; a pending acquisition is joined within `deadline`. */
+  /** A handle-armed acquisition that outlived a join bound: its result is disposed (or its rejection recorded) when it arrives, once. */
+  private observeLateAcquisition(
+    holding: Holding,
+    by: Disposer,
+    boundMs: number,
+    late: (line: string) => void,
+  ): void {
+    if (holding.late) return;
+    holding.late = true;
+    const id = this.record.id;
+    void holding.acquired.then(async () => {
+      if (holding.acquisition === "rejected")
+        late(
+          `open ${id}: late ${holding.stage} acquisition rejected after ${by.after}: ${holding.acquisitionError}`,
+        );
+      else {
+        const failure = await this.disposeHolding(holding, boundMs, late);
+        late(
+          `open ${id}: late ${holding.stage} arrived after ${by.after}; ${failure === null ? "disposed" : `dispose failed: ${failure}`}`,
+        );
+      }
+    });
+  }
+
+  /** A wrapper that outlived a join bound: its outcome is recorded when it arrives, once. */
+  private observeLateWrapper(
+    holding: Holding,
+    by: Disposer,
+    late: (line: string) => void,
+  ): void {
+    if (holding.wrapperLate) return;
+    holding.wrapperLate = true;
+    const id = this.record.id;
+    void holding.delivered.then(() =>
+      late(
+        `open ${id}: late ${holding.stage} wrapper ${holding.wrapper === "failed" ? `rejected after ${by.after}: ${holding.wrapperError}` : `delivered after ${by.after}`}`,
+      ),
+    );
+  }
+
+  /**
+   * Disposes every holding, newest first, attempting each whatever the others did. A handle-armed acquisition still pending is joined
+   * within `deadline` first (what it acquires depends on the older holdings); an object-armed one is closed at once (its close joins
+   * its start). Only then are wrappers still pending joined: a held wrapper never keeps an acquired resource open.
+   */
   async dispose(
     deadline: number,
     boundMs: number,
     late: (line: string) => void,
+    by: Disposer = BY_SETTLEMENT,
   ): Promise<string[]> {
+    const id = this.record.id;
     const errors: string[] = [];
-    for (const holding of [...this.record.holdings].reverse()) {
-      if (holding.state === "acquiring") {
+    const newestFirst = [...this.record.holdings].reverse();
+    for (const holding of newestFirst) {
+      if (holding.arms === "handle" && holding.acquisition === "pending") {
         const arrived = await settlesWithin(
-          holding.arrived,
+          holding.acquired,
           Math.max(0, deadline - Date.now()),
         );
         if (!arrived) {
           // Not cancelled by the bound: still owned. Its result is disposed (or its rejection recorded) when it arrives.
-          holding.late = true;
           errors.push(
-            `open ${this.record.id}: ${holding.stage} acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)`,
+            `open ${id}: ${holding.stage} acquisition still pending when ${by.bound} ended (its result will be disposed when it arrives)`,
           );
-          void holding.arrived.then(async () => {
-            if (holding.state === "failed")
-              late(
-                `open ${this.record.id}: late ${holding.stage} rejected after settlement: ${holding.error}`,
-              );
-            else {
-              const failure = await this.disposeHolding(holding, boundMs, late);
-              late(
-                `open ${this.record.id}: late ${holding.stage} arrived after settlement; ${failure === null ? "disposed" : `dispose failed: ${failure}`}`,
-              );
-            }
-          });
+          this.observeLateAcquisition(holding, by, boundMs, late);
           continue;
         }
       }
       const failure = await this.disposeHolding(holding, boundMs, late);
       if (failure !== null) errors.push(failure);
+    }
+    for (const holding of newestFirst) {
+      // A wrapper waiting on its own pending acquisition is already named by that acquisition's failure above.
+      if (holding.wrapper !== "pending" || holding.acquisition === "pending")
+        continue;
+      const ended = await settlesWithin(
+        holding.delivered,
+        Math.max(0, deadline - Date.now()),
+      );
+      if (!ended) {
+        const what =
+          holding.acquisition === "acquired"
+            ? "its acquired resource was disposed"
+            : holding.acquisition === "rejected"
+              ? "its acquisition was rejected"
+              : "its acquisition never began and is now refused";
+        errors.push(
+          `open ${id}: ${holding.stage} wrapper still pending when ${by.bound} ended (${what}; its outcome will be recorded when it arrives)`,
+        );
+        this.observeLateWrapper(holding, by, late);
+      }
     }
     return errors;
   }
@@ -1380,6 +1564,7 @@ async function openLane(
     "witness",
     () => witness.start(),
     () => witness.close(),
+    { arms: "object" },
   );
   let origin: ScriptedOrigin | null = null;
   const routes = [
@@ -1392,6 +1577,7 @@ async function openLane(
       "scripted origin",
       () => scripted.start(),
       () => scripted.close(),
+      { arms: "object" },
     );
     routes.push(
       { name: "api", prefix: "/api/", target: originUrl },
@@ -1415,6 +1601,7 @@ async function openLane(
     "front",
     () => owned.start(),
     () => owned.close(),
+    { arms: "object" },
   );
   const contextOptions: BrowserContextOptions = {};
   for (const key of CONTEXT_KEYS)
@@ -1422,7 +1609,8 @@ async function openLane(
       (contextOptions as Record<string, unknown>)[key] = use[key];
   // The lane's context talks to the FRONT origin directly (no browser proxy setting): the front carries all of the application's HTTP.
   contextOptions.baseURL = front;
-  // Owned BEFORE `newContext` is called: a context that arrives after settlement began is closed, never published (F24-1).
+  // Owned BEFORE `newContext` is called: a context that arrives after settlement began is closed, never published (F24-1); owned when it
+  // arrives, before the qualification wrapper sees it, so a wrapper failing after it arrived cannot leave it open (revision 21, F25-1).
   const context = await scope.acquire(
     "context",
     () => browser.newContext(contextOptions),
@@ -1817,6 +2005,9 @@ export async function settleLanes(
   return { closeErrors, reportErrors, failures };
 }
 
+/** Managers created in this worker (each teardown record names its manager: revision 21). */
+let managerCount = 0;
+
 /**
  * Lanes for one test: `open` as many as it needs; `settle` (once; repeated and concurrent calls share it) ends them all and reports.
  *
@@ -1828,6 +2019,11 @@ export async function settleLanes(
  * harness bound. A result arriving later is still disposed and a late rejection still recorded (`late`), but the report has already
  * failed by name: a timeout is never success. Opens that were not published are reported with their stage (`openErrors`). The borrowed
  * worker browser and any context the manager did not create are never closed.
+ *
+ * Revision 21 (Review 25 F25-1; design assessment token 8179e31e…): ownership follows each stage's REAL acquisition, adopted before a
+ * qualification wrapper sees it. A known resource is disposed even while its wrapper is held or after its wrapper rejected; a still
+ * pending acquisition is joined, or disposed late; a wrapper still pending at the bound fails the report by its own name. A failed open
+ * closes its scope's admission and unwinds at once without waiting for settlement. Each teardown record names its manager.
  */
 export function openTransportLanes(
   browser: Pick<Browser, "newContext">,
@@ -1843,6 +2039,9 @@ export function openTransportLanes(
   const records: OpenRecord[] = [];
   const scopes: OpenScope[] = [];
   const late: string[] = [];
+  // Revision 21 (design assessment invariant 8): which manager a teardown record is, so two managers' same-named records stay distinct.
+  managerCount += 1;
+  const manager = managerCount;
   let state: "open" | "closing" | "settled" = "open";
   let settling: Promise<LaneReport> | null = null;
   const noteLate = (line: string) => {
@@ -1861,11 +2060,21 @@ export function openTransportLanes(
       outcome: r.outcome,
       error: r.error,
       stages: r.stages,
-      holdings: r.holdings.map(({ stage, state: s, error, late: l }) => ({
-        stage,
-        state: s,
-        ...(error !== undefined ? { error } : {}),
-        ...(l ? { late: true } : {}),
+      // Revision 21 (F25-1): the acquisition, the wrapper and the disposal separately (revision 20's single `state` is retired).
+      holdings: r.holdings.map((h) => ({
+        stage: h.stage,
+        acquisition: h.acquisition,
+        wrapper: h.wrapper,
+        disposal: h.disposal,
+        ...(h.acquisitionError !== undefined
+          ? { acquisitionError: h.acquisitionError }
+          : {}),
+        ...(h.wrapperError !== undefined
+          ? { wrapperError: h.wrapperError }
+          : {}),
+        ...(h.misuse !== undefined ? { misuse: h.misuse } : {}),
+        ...(h.late ? { late: true } : {}),
+        ...(h.wrapperLate ? { wrapperLate: true } : {}),
       })),
     }));
 
@@ -1896,7 +2105,9 @@ export function openTransportLanes(
         testInfo as TestInfo,
         scope,
       );
-      await scope.acquire("publication", async () => lane, null, false);
+      await scope.acquire("publication", async () => lane, null, {
+        gateAfter: false,
+      });
       // The final gate and the publication in ONE turn: a lane is published only while the manager is open.
       scope.gate("publication", "at");
       record.outcome = "published";
@@ -1911,14 +2122,17 @@ export function openTransportLanes(
         record.outcome =
           error instanceof LaneCancelled ? "cancelled" : "failed";
         record.error = String(error);
-        // A FAILED open unwinds what it had acquired at once (settlement shares the same disposals and reports their failures); a
-        // cancelled one is being disposed by the settlement that cancelled it.
-        if (record.outcome === "failed")
+        // A FAILED open admits nothing more and unwinds what it had acquired at once, with no settlement needed (settlement shares the
+        // same disposals and reports their failures); a cancelled one is being disposed by the settlement that cancelled it.
+        if (record.outcome === "failed") {
+          scope.fail();
           void scope.dispose(
             Date.now() + joinBoundMs,
             disposeBoundMs,
             noteLate,
+            BY_UNWINDING,
           );
+        }
       },
     );
     return run;
@@ -1933,7 +2147,7 @@ export function openTransportLanes(
         const errors = (
           await Promise.all(
             scopes.map((scope) =>
-              scope.dispose(deadline, disposeBoundMs, noteLate),
+              scope.dispose(deadline, disposeBoundMs, noteLate, BY_SETTLEMENT),
             ),
           )
         ).flat();
@@ -1963,7 +2177,11 @@ export function openTransportLanes(
     const report: LaneReport = { ...reported, openErrors };
     try {
       await testInfo.attach("transport-teardown", {
-        body: JSON.stringify({ report, opens: snapshot(), late }, null, 1),
+        body: JSON.stringify(
+          { manager, report, opens: snapshot(), late },
+          null,
+          1,
+        ),
         contentType: "application/json",
       });
     } catch (error) {

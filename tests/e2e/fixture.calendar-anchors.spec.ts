@@ -98,6 +98,11 @@ async function taskPage(
   tasks: BuiltTask[],
   extra: unknown[] = [source, event(true)],
   arm: (cal: CalendarStub) => void = () => undefined,
+  /**
+   * Revision 21 (the E-ANC2 failing-order control only; the default keeps every other case unchanged): `awaitIdle: false` returns once
+   * the leader was started, without waiting for the harness's leader to be idle.
+   */
+  options: { awaitIdle?: boolean } = {},
 ): Promise<{ page: Page; net: SyncStub; cal: CalendarStub }> {
   const net = await stubNetwork(context);
   await serveIdentityReads(context);
@@ -121,10 +126,30 @@ async function taskPage(
     ),
   }));
   await startLeader(page);
+  if (options.awaitIdle === false) return { page, net, cal };
   await waitForState(page, "idle");
   cal.phase = "test";
   return { page, net, cal };
 }
+
+/** A promise and its resolver (revision 21). */
+const held = <T>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+};
+
+/** The harness's data gate closures so far (`[ms, account, reason, stack]`; WEB-09a R43) and its leader's state (revision 21). */
+const gateFacts = (page: Page) =>
+  page.evaluate(() => {
+    const data = window.__atlasData;
+    return {
+      closes: (data?.gateDiagnostics().closes ?? []).map((c) => String(c[2])),
+      engine: data?.engineState() ?? null,
+    };
+  });
 
 /** Leaves the task's screen and comes back (a new visit), as an in-app navigation does. */
 async function revisit(page: Page, taskId: string): Promise<void> {
@@ -285,6 +310,12 @@ test.describe("E-ANC2: the binding read (case 3)", () => {
   }) => {
     test.setTimeout(90_000);
     const a = buildTask({ n: 42, title: "Put the bins out" });
+    // Revision 21 (managed run 8d7e22bd, pool request-07b6cd6f2458428dbd01, m4-air Chromium: set-up timed out at waitForState "idle"):
+    // the read is issued at boot while the harness starts its leader. Answered before set-up had seen that leader idle, its session
+    // re-check disposed the BOUND tree (`closeAll(closed_for_deletion)` at 162 ms, WEB-09a R43) and the harness's leader with it, so
+    // set-up waited for an idle that could never come. The FIRST 403 is therefore held until set-up has seen the leader idle (the order
+    // of every earlier pass); the case's 403s, its assertions and its timers are unchanged. The failing order itself is the control below.
+    const forbidden = held<{ status: number; body: unknown }>();
     const { page, cal } = await taskPage(
       context,
       `/tasks/${a.taskId}`,
@@ -292,11 +323,12 @@ test.describe("E-ANC2: the binding read (case 3)", () => {
       [source],
       (c) => {
         c.answers.set("/tasks/*/anchor", [
-          { status: 403, body: atlasBody("forbidden") },
+          { wait: forbidden.promise },
           { status: 403, body: atlasBody("forbidden") },
         ]);
       },
     );
+    forbidden.resolve({ status: 403, body: atlasBody("forbidden") });
     await expect(section(page)).toHaveAttribute(
       "data-anchor-section",
       "failed",
@@ -305,6 +337,60 @@ test.describe("E-ANC2: the binding read (case 3)", () => {
       },
     );
     await page.waitForTimeout(4_000);
+    expect(anchorReads(cal)).toHaveLength(1);
+    await expect(section(page)).toContainText("Couldn't load the anchor");
+  });
+
+  test("control (revision 21): the 403 answered before set-up has seen the harness's leader idle: its re-check ends that leader for good, so set-up's wait for idle cannot succeed; the section still fails once and asks nothing more", async ({
+    context,
+    browserName,
+  }) => {
+    test.setTimeout(90_000);
+    const a = buildTask({ n: 45, title: "Put the bins out" });
+    // The failing run's order: the read (issued once the delta has delivered the task) is answered 403 with no wait for the harness's
+    // leader to be idle. The answer is held only until the read has arrived, then released at once.
+    const forbidden = held<{ status: number; body: unknown }>();
+    const { page, cal } = await taskPage(
+      context,
+      `/tasks/${a.taskId}`,
+      [a],
+      [source],
+      (c) => {
+        c.answers.set("/tasks/*/anchor", [
+          { wait: forbidden.promise },
+          { status: 403, body: atlasBody("forbidden") },
+        ]);
+      },
+      { awaitIdle: false },
+    );
+    await expect
+      .poll(() => anchorReads(cal).length, { timeout: 20_000 })
+      .toBe(1);
+    forbidden.resolve({ status: 403, body: atlasBody("forbidden") });
+    // The re-check's closure of the bound tree (Chromium and Firefox; WebKit's tree may bind without a remount, WEB-09a R43, so there
+    // only the implication is asserted: a closure leaves no harness leader).
+    if (browserName !== "webkit")
+      await expect
+        .poll(async () => (await gateFacts(page)).closes, { timeout: 20_000 })
+        .toContain("closed_for_deletion");
+    await expect(section(page)).toHaveAttribute(
+      "data-anchor-section",
+      "failed",
+      { timeout: 20_000 },
+    );
+    await page.waitForTimeout(4_000);
+    const facts = await gateFacts(page);
+    test.info().annotations.push({
+      type: "gate facts",
+      description: JSON.stringify(facts),
+    });
+    // Observed in all three engines (revision 21 probe anc2-3): after the closure the harness's leader waits on a cache that is no longer
+    // valid, so it is not idle and set-up's wait for idle (the failing run's 60 s timeout) cannot be met in this order.
+    if (facts.closes.includes("closed_for_deletion"))
+      expect(
+        facts.engine,
+        "the closure leaves the harness's leader waiting, never idle: set-up's wait for idle could not have succeeded",
+      ).toEqual({ kind: "waiting", reason: "cache_not_valid" });
     expect(anchorReads(cal)).toHaveLength(1);
     await expect(section(page)).toContainText("Couldn't load the anchor");
   });
