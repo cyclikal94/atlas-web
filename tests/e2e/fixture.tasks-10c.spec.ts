@@ -2540,9 +2540,16 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
    * listeners, the cancellation already queued), so `pagehide` alone cannot tell it apart. The runner's lifecycle listens to
    * `beforeunload` and `pagehide`, added LATE (after the page's own listeners and its call), as here. This case asserts what it relies
    * on: that late listener sees the teardown before the call's rejection is delivered, if the browser delivers one at all.
+   *
+   * ADAPTATION again (revision 16, labelled; review 17's R36-J, Kieran's D1 decision approval/web10c-d1-preserve-rule-20261102.json): a
+   * `beforeunload` is no departure any more (a navigation answered with 204, a download or one cancelled leaves the page running), so
+   * the late `beforeunload` listener seeing the teardown first is no longer what the runner relies on. It relies on this instead, which
+   * the case now asserts: the rejection is delivered EITHER during the page's `pagehide` dispatch (`window.event` is that `pagehide`: a
+   * departure, the call left recoverable, E-M2) OR before any `pagehide` (a failure that cannot be told from a genuine one: protected as
+   * observed; its first write, which lands before the page unloads, is what the next page recovers, E-M2). The order seen is recorded.
    */
   for (const action of ["close", "navigate", "reload"] as const)
-    test(`E-M12a: ${action}: a beforeunload or pagehide listener added after the page's own and after its call runs before the rejection of the call the teardown cancels (if the browser rejects it at all)`, async ({
+    test(`E-M12a: ${action}: the rejection of the call the page's departure cancels (if the browser rejects it at all) is delivered during the page's pagehide dispatch or before any pagehide`, async ({
       context,
       browserName,
     }, info) => {
@@ -2572,7 +2579,10 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
         addEventListener("pagehide", () => note("early pagehide"));
         void fetch("/__r15/held").then(
           () => note("answered"),
-          (e: unknown) => note(`rejected:${(e as Error).name}`),
+          (e: unknown) =>
+            note(
+              `rejected:${(e as Error).name} event=${(window as { event?: Event }).event?.type ?? "none"}`,
+            ),
         );
         addEventListener("beforeunload", () => note("late beforeunload"));
         addEventListener("pagehide", () => note("late pagehide"));
@@ -2590,10 +2600,17 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
       );
       recordEvidence(info, `e-m12a-${action}-${browserName}`, { order });
       expect(order).not.toContain("answered");
-      const late = order.findIndex((e) => e.startsWith("late "));
-      expect(late, "the late listener saw the teardown").not.toBe(-1);
+      const late = order.findIndex((e) => e === "late pagehide");
+      expect(late, "the late pagehide listener saw the departure").not.toBe(-1);
       const rejected = order.findIndex((e) => e.startsWith("rejected"));
-      if (rejected !== -1) expect(late).toBeLessThan(rejected);
+      if (rejected !== -1) {
+        const during = order[rejected]?.endsWith(" event=pagehide") === true;
+        const hide = order.findIndex((e) => e.endsWith(" pagehide"));
+        expect(
+          during || rejected < hide,
+          `delivered during the pagehide dispatch or before any pagehide: ${JSON.stringify(order)}`,
+        ).toBe(true);
+      }
     });
 
   test("E-M12b (R36-H): a discovery read with no answer on a LIVE page: its fence is in real localStorage BEFORE its outcome is first written; that write retires it and the read is made again", async ({
@@ -2750,4 +2767,495 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
       log: r10c.log.map(({ from: _from, ...e }) => e),
     });
   });
+
+  /**
+   * Revision 16 (review 17's R36-J; design assessment Q1/Q4): an ATTEMPTED departure the page outlives. Review 17's native witness,
+   * maintained (its source is kept unchanged in the review's evidence): the caller's call is held; the page attempts to leave by a
+   * navigation answered with 204, a download, or one the person cancels at the page's `beforeunload` prompt, and the page goes on with
+   * exactly one `beforeunload` (no `pagehide`, no `pageshow`); the call then fails at the network (`ABORTED`), and EVERY write of its
+   * outcome fails in the page's real IndexedDB. The failure the page observed fences the caller in real localStorage, so another tab,
+   * booted after, reads (or sends) nothing for it (Decision B). `none` is review 17's control (no navigation); `lands` the liveness
+   * control (204, the outcome write not failed: the fence retired by its record and the caller's call made again). FIXTURE evidence.
+   */
+  type Caller16 = "discovery" | "command" | "position";
+  type Leave16 = "204" | "download" | "cancelled" | "none";
+  const r16 = (
+    context: BrowserContext,
+    taskId: string,
+    caller: Caller16,
+    fail: boolean,
+  ) =>
+    context.addInitScript(
+      ([id, which, failing]) => {
+        const w = window as unknown as {
+          __r16?: {
+            fault: boolean;
+            failures: number;
+            events: string[];
+            markSets: number;
+            sequenceAdmissions: number;
+          };
+        };
+        if (w.__r16) return;
+        // `sequenceAdmissions`: this page's admissions of the task's command or position read (each written before it is sent).
+        const t = {
+          fault: false,
+          failures: 0,
+          events: [] as string[],
+          markSets: 0,
+          sequenceAdmissions: 0,
+        };
+        w.__r16 = t;
+        for (const e of ["beforeunload", "pagehide", "pageshow"])
+          addEventListener(e, () => t.events.push(e));
+        const put = IDBObjectStore.prototype.put;
+        IDBObjectStore.prototype.put = function (
+          this: IDBObjectStore,
+          ...args: unknown[]
+        ) {
+          const value = args[0] as {
+            task_id?: string;
+            schedule?: { issued?: number | null; cause?: string } | null;
+            materialise_discovery?: Record<
+              string,
+              { schedule?: { issued?: number | null; cause?: string } | null }
+            >;
+          } | null;
+          if (
+            this.name === "materialise_sequences" &&
+            value?.task_id === id &&
+            value.schedule?.issued != null
+          )
+            t.sequenceAdmissions += 1;
+          const schedule =
+            which === "discovery"
+              ? this.name === "sync_state"
+                ? value?.materialise_discovery?.[id]?.schedule
+                : undefined
+              : this.name === "materialise_sequences" && value?.task_id === id
+                ? value?.schedule
+                : undefined;
+          if (
+            failing &&
+            t.fault &&
+            schedule != null &&
+            schedule.issued === null &&
+            schedule.cause === "transport"
+          ) {
+            t.failures += 1;
+            throw new DOMException("injected fault (revision 16)", "DataError");
+          }
+          return put.apply(this, args as [unknown, IDBValidKey?]);
+        };
+        const set = Storage.prototype.setItem;
+        Storage.prototype.setItem = function (
+          this: Storage,
+          key: string,
+          v: string,
+        ) {
+          if (
+            key.startsWith("atlas-write-failing:") &&
+            key.includes(`:materialise:${id}`)
+          )
+            t.markSets += 1;
+          return set.call(this, key, v);
+        };
+      },
+      [taskId, caller, fail] as const,
+    );
+  const markersOf = (page: Page, taskId: string) =>
+    page.evaluate(
+      (id) =>
+        Object.keys(localStorage).filter(
+          (k) =>
+            k.startsWith("atlas-write-failing:") &&
+            k.includes(`:materialise:${id}`),
+        ),
+      taskId,
+    );
+  /** The page attempts to leave and goes on: exactly one `beforeunload`, and nothing else, before the held call fails. */
+  const attemptToLeave = async (
+    context: BrowserContext,
+    page: Page,
+    leave: Leave16,
+  ) => {
+    if (leave === "none") return;
+    if (leave === "cancelled") {
+      // Sticky activation (a prompt needs it), then a beforeunload that asks, which the person cancels.
+      await page.mouse.click(2, 2);
+      await page.evaluate(() =>
+        addEventListener("beforeunload", (event) => {
+          event.preventDefault();
+          event.returnValue = "";
+        }),
+      );
+      page.once("dialog", (dialog) => void dialog.dismiss());
+      await context.route("**/__r16/next", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: "<!doctype html><title>r16</title>",
+        }),
+      );
+      await page
+        .evaluate(() => {
+          location.href = "/__r16/next";
+        })
+        .catch(() => undefined);
+    } else {
+      let served!: () => void;
+      const done = new Promise<void>((resolve) => {
+        served = resolve;
+      });
+      await context.route(`**/__r16/${leave}`, async (route) => {
+        if (leave === "204") await route.fulfill({ status: 204 });
+        else
+          await route.fulfill({
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-disposition": 'attachment; filename="r16.txt"',
+            },
+            body: "revision 16",
+          });
+        served();
+      });
+      await page.evaluate((target) => {
+        location.href = target;
+      }, `/__r16/${leave}`);
+      await done;
+    }
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as unknown as { __r16: { events: string[] } }).__r16.events,
+        ),
+      )
+      .toEqual(["beforeunload"]);
+    // The page goes on (a short observation of the native lifecycle; no product timer is changed).
+    await page.waitForTimeout(300);
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __r16: { events: string[] } }).__r16.events,
+      ),
+      "no pagehide: the page went on",
+    ).toEqual(["beforeunload"]);
+  };
+  const cases16: Array<{ caller: Caller16; leave: Leave16; lands: boolean }> = [
+    { caller: "discovery", leave: "204", lands: false },
+    { caller: "discovery", leave: "download", lands: false },
+    { caller: "discovery", leave: "cancelled", lands: false },
+    { caller: "discovery", leave: "none", lands: false },
+    { caller: "discovery", leave: "204", lands: true },
+    { caller: "command", leave: "204", lands: false },
+    { caller: "command", leave: "none", lands: false },
+    { caller: "command", leave: "204", lands: true },
+    { caller: "position", leave: "204", lands: false },
+    { caller: "position", leave: "none", lands: false },
+    { caller: "position", leave: "204", lands: true },
+  ];
+  for (const { caller, leave, lands } of cases16)
+    test(`${caller === "discovery" ? "E-M12f" : "E-M12g"} (R36-J) ${caller}, ${leave === "none" ? "CONTROL no navigation" : `a navigation ${leave === "204" ? "answered with 204" : leave === "download" ? "that downloads" : "the person cancels"}`}: ${lands ? "LIVENESS CONTROL the outcome written: its fence retired and the call made again" : "every write of the failure the page observed fails: fenced in real localStorage, another tab sends nothing for it"}`, async ({
+      context,
+    }, info) => {
+      const task = repeating(
+        450 +
+          cases16.findIndex(
+            (c) =>
+              c.caller === caller && c.leave === leave && c.lands === lands,
+          ),
+        `Water the ${caller} ${leave}`,
+      );
+      await r16(context, task.taskId, caller, !lands);
+      const first = held<Answer>();
+      let reads16 = 0;
+      let commands = 0;
+      const { page, r10c } = await setup(
+        context,
+        `/today?day=${TODAY}&tz=UTC`,
+        [task],
+        (q, r) => {
+          q.respond = (d) =>
+            dailyPage(
+              [view(task)],
+              d.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+            );
+          r.position = () => {
+            reads16 += 1;
+            if (caller === "discovery")
+              return reads16 === 1
+                ? first.promise
+                : detailOf(task, { last_date: TODAY, pending: false });
+            if (reads16 === 1)
+              return detailOf(task, {
+                last_date: yesterday(20),
+                pending: true,
+              });
+            if (caller === "position" && reads16 === 2) return first.promise;
+            return detailOf(task, { last_date: TODAY, pending: false });
+          };
+          r.materialise = () => {
+            commands += 1;
+            return caller === "command" && commands === 1
+              ? first.promise
+              : { status: 200, body: { revision: 8 } };
+          };
+        },
+      );
+      const held16 = () =>
+        caller === "command"
+          ? commands === 1
+          : reads16 === (caller === "discovery" ? 1 : 2);
+      await expect.poll(held16, { timeout: 15_000 }).toBe(true);
+      const before = { reads: reads16, commands };
+      await page.evaluate(() => {
+        const t = (
+          window as unknown as { __r16: { fault: boolean; events: string[] } }
+        ).__r16;
+        t.fault = true;
+        t.events = [];
+      });
+      await attemptToLeave(context, page, leave);
+      first.release(ABORTED);
+      if (lands) {
+        // The outcome is recorded: the fence retired and the caller's call made again (paced from the observation, 1 s).
+        await expect
+          .poll(
+            () => (caller === "command" ? commands : reads16 - before.reads),
+            { timeout: 15_000 },
+          )
+          .toBeGreaterThanOrEqual(caller === "command" ? 2 : 1);
+        await expect
+          .poll(() => markersOf(page, task.taskId), { timeout: 10_000 })
+          .toEqual([]);
+        if (caller === "command")
+          expect(posts(r10c)[1]?.key).toBe(posts(r10c)[0]?.key);
+        recordEvidence(info, `e-m12-r16-${caller}-${leave}-lands`, {
+          trace: await page.evaluate(
+            () => (window as unknown as { __r16: unknown }).__r16,
+          ),
+          log: r10c.log.map(({ from: _from, ...e }) => e),
+        });
+        return;
+      }
+      await expect(
+        page.locator(
+          `[data-catch-up-task="${task.taskId}"][data-catch-up-stopped]`,
+        ),
+      ).toHaveCount(1, { timeout: 15_000 });
+      const trace16 = await page.evaluate(
+        () =>
+          (
+            window as unknown as {
+              __r16: { failures: number; markSets: number };
+            }
+          ).__r16,
+      );
+      const markers = await markersOf(page, task.taskId);
+      expect(
+        trace16.failures,
+        "real IndexedDB outcome writes failed",
+      ).toBeGreaterThan(0);
+      expect(
+        { reads: reads16, commands },
+        "the owner made only the held call",
+      ).toEqual(before);
+      expect(
+        markers,
+        "the shared stop stands in real localStorage",
+      ).toHaveLength(1);
+      const other = await bootAt(context, `/today?day=${TODAY}&tz=UTC`);
+      await expect(
+        other.getByRole("heading", { name: "Today", exact: true }),
+      ).toBeVisible({ timeout: 15_000 });
+      await other.waitForTimeout(2_000);
+      const peerTrace = await other.evaluate(
+        () =>
+          (window as unknown as { __r16: { sequenceAdmissions: number } })
+            .__r16,
+      );
+      recordEvidence(info, `e-m12-r16-${caller}-${leave}`, {
+        trace: trace16,
+        peerTrace,
+        markers,
+        peerStop: await other
+          .locator(`[data-catch-up-task="${task.taskId}"]`)
+          .getAttribute("data-catch-up-stopped")
+          .catch(() => null),
+        log: r10c.log.map(({ from, ...e }) => ({
+          ...e,
+          owner: from === page ? "first" : "peer",
+        })),
+      });
+      // The caller's own transmissions: a discovery read (the peer's discovery of the task is another caller with its own fence, and
+      // is made in the control too), a command, a position read (admitted in the sequence's row before it is sent).
+      if (caller === "discovery")
+        expect(
+          reads16,
+          "Decision B: no page reads for the caller after the failure it observed could not be recorded",
+        ).toBe(before.reads);
+      else {
+        expect(
+          commands,
+          "Decision B: no page sends the command again after the failure it observed could not be recorded",
+        ).toBe(before.commands);
+        expect(
+          peerTrace.sequenceAdmissions,
+          "Decision B: the other tab admits no call of the task's sequence (command or position read)",
+        ).toBe(0);
+      }
+    });
+
+  /**
+   * Revision 16 (review 17's R36-J; Kieran's D1 decision): NO TASK BETWEEN A FAILURE'S DELIVERY AND ITS JUDGEMENT, natively, for each
+   * caller. The rule ("a failure delivered before the page's pagehide began is protected, however soon the page leaves") is exact only
+   * if the runner judges a failure in the task it is delivered in. Here a genuine network failure (`ABORTED`: the stub's `route.abort`,
+   * delivered in a task of its own) is answered to the held call, and AS IT IS DELIVERED a `pagehide` of the page is queued for the next
+   * task (`setTimeout`, from a reaction to the very fetch the production transport made; every outcome write fails). Had anything between
+   * the session's fetch and the runner's classification waited for a task, the failure would be judged after that `pagehide` (a
+   * departure) and left unfenced; it is fenced first. The synthetic `pagehide` does not unload the page. FIXTURE evidence.
+   */
+  for (const caller of ["discovery", "command", "position"] as const)
+    test(`E-M12h (R36-J) ${caller}: a genuine failure with the page's pagehide queued for the next task as it is delivered: fenced before that pagehide (judged in the task it was delivered in)`, async ({
+      context,
+    }, info) => {
+      const task = repeating(
+        470 + ["discovery", "command", "position"].indexOf(caller),
+        `Water the ${caller} hedge`,
+      );
+      await r16(context, task.taskId, caller, true);
+      await context.addInitScript(
+        ([id, which]) => {
+          const w = window as unknown as {
+            __r16h?: { armed: boolean; log: string[] };
+          };
+          if (w.__r16h) return;
+          const t = { armed: false, log: [] as string[] };
+          w.__r16h = t;
+          const set = Storage.prototype.setItem;
+          Storage.prototype.setItem = function (
+            this: Storage,
+            key: string,
+            v: string,
+          ) {
+            if (
+              key.startsWith("atlas-write-failing:") &&
+              key.includes(`:materialise:${id}`)
+            )
+              t.log.push("marker:set");
+            return set.call(this, key, v);
+          };
+          const real = window.fetch;
+          window.fetch = function (
+            this: unknown,
+            ...args: Parameters<typeof fetch>
+          ) {
+            const pending = real.apply(this, args);
+            const url =
+              args[0] instanceof Request ? args[0].url : String(args[0]);
+            const ours =
+              which === "command"
+                ? url.includes("/task-commands")
+                : url.includes(`/tasks/${id}`);
+            if (ours)
+              pending.then(undefined, () => {
+                if (!t.armed) return;
+                t.armed = false;
+                t.log.push("delivered");
+                setTimeout(() => {
+                  t.log.push("pagehide (next task)");
+                  dispatchEvent(new Event("pagehide"));
+                }, 0);
+              });
+            return pending;
+          } as typeof fetch;
+        },
+        [task.taskId, caller] as const,
+      );
+      const first = held<Answer>();
+      let reads16 = 0;
+      let commands = 0;
+      const { page, r10c } = await setup(
+        context,
+        `/today?day=${TODAY}&tz=UTC`,
+        [task],
+        (q, r) => {
+          q.respond = (d) =>
+            dailyPage(
+              [view(task)],
+              d.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+            );
+          r.position = () => {
+            reads16 += 1;
+            if (caller === "discovery")
+              return reads16 === 1
+                ? first.promise
+                : detailOf(task, { last_date: TODAY, pending: false });
+            if (reads16 === 1)
+              return detailOf(task, {
+                last_date: yesterday(20),
+                pending: true,
+              });
+            if (caller === "position" && reads16 === 2) return first.promise;
+            return detailOf(task, { last_date: TODAY, pending: false });
+          };
+          r.materialise = () => {
+            commands += 1;
+            return caller === "command" && commands === 1
+              ? first.promise
+              : { status: 200, body: { revision: 8 } };
+          };
+        },
+      );
+      await expect
+        .poll(
+          () =>
+            caller === "command"
+              ? commands === 1
+              : reads16 === (caller === "discovery" ? 1 : 2),
+          { timeout: 15_000 },
+        )
+        .toBe(true);
+      await page.evaluate(() => {
+        (window as unknown as { __r16: { fault: boolean } }).__r16.fault = true;
+        (window as unknown as { __r16h: { armed: boolean } }).__r16h.armed =
+          true;
+      });
+      first.release(ABORTED);
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              () =>
+                (window as unknown as { __r16h: { log: string[] } }).__r16h.log,
+            ),
+          { timeout: 15_000 },
+        )
+        .toContain("pagehide (next task)");
+      await page.waitForTimeout(500);
+      const log = await page.evaluate(
+        () => (window as unknown as { __r16h: { log: string[] } }).__r16h.log,
+      );
+      recordEvidence(info, `e-m12h-${caller}`, {
+        log,
+        markers: await markersOf(page, task.taskId),
+        requests: r10c.log.map(({ from: _from, ...e }) => e),
+      });
+      const delivered = log.indexOf("delivered");
+      // The fence of THIS failure (a position read's caller was fenced once before, by the command's known success, then retired).
+      const set = log.indexOf("marker:set", delivered + 1);
+      const hide = log.indexOf("pagehide (next task)");
+      expect(
+        delivered,
+        "precondition: the genuine failure was delivered",
+      ).not.toBe(-1);
+      expect(set, "fenced").not.toBe(-1);
+      expect(
+        set,
+        "fenced BEFORE the pagehide queued as the failure was delivered: no task between delivery and judgement",
+      ).toBeLessThan(hide);
+      expect(await markersOf(page, task.taskId)).toHaveLength(1);
+    });
 });

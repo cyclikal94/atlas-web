@@ -1,8 +1,8 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2130;
-export const EXPECTED_ENGINE = 267;
+export const EXPECTED_UNIT = 2134;
+export const EXPECTED_ENGINE = 269;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
 // WEB-10b revision 2 (review 2 R1/R2): +10 unit (MU-2551..MU-2559, MU-2562) and +2 real-engine (MU-2560, MU-2561 over E-LS11); MU-2534 re-anchored.
@@ -33,4 +33,8 @@ export const EXPECTED_ENGINE = 267;
 // WEB-10c revision 15 (review 16 R36-H, R36-I, R39): +13 unit (MU-3290..MU-3302); MU-3262, MU-3269, MU-3283, MU-3288 and MU-3289 re-anchored (MU-3288
 // relabelled: the fault is now a fence at the first failed write AFTER the page's pagehide); MU-3284 and MU-3285 given the cases where
 // their faults are observable now (after a pagehide). +2 real-engine (MU-3304 over E-M12b, MU-3305 over E-M12c; MU-3303 over E-M2 retired: Chromium-only, see the catalogue).
+// WEB-10c revision 16 (review 17 R36-J; Kieran's D1 decision): +5 unit (MU-3306, MU-3307, MU-3308, MU-3310, MU-3314); MU-3301 retired (see the
+// catalogue; MU-3309, MU-3311, MU-3312 of this revision's first design retired with it, never counted); MU-3262, MU-3269, MU-3282, MU-3283,
+// MU-3288, MU-3289, MU-3291, MU-3292, MU-3293, MU-3295, MU-3296 and MU-3302 re-anchored (the same faults over the departure code).
+// +2 real-engine (MU-3313 over E-M12f, MU-3315 over E-M12h); MU-3304 and MU-3305 re-anchored.
 // Combined inventory: accepted WEB-10b (1737 unit, 255 engine), WEB-08d (105 unit, 5 engine), and WEB-10c (214 unit, 3 engine).

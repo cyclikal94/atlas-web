@@ -20,6 +20,15 @@
 //    because there the rejected call's outcome is written before the page unloads and its receipt fence retired, so the fault has no
 //    consequence. The real-engine classifier requires the expected assertion on every engine, so it is not an engine mutant; the fault
 //    is MU-3301's (unit, the production lifecycle module), and Chromium's E-M2 is its native witness. Its result is kept, never counted.
+//  - MU-3301 (revision 15: the page's `beforeunload` not observed), retired in revision 16 (review 17's R36-J; Kieran's D1 decision
+//    approval/web10c-d1-preserve-rule-20261102.json): the lifecycle observes no `beforeunload` at all (an attempted departure proves
+//    nothing), so the fault has no subject. Its revision-15 and revision-16 results are kept, never counted. Its intent (a call Chromium
+//    cancels during the page's pagehide dispatch stays recoverable) is MU-3307's and MU-3314's.
+//  - MU-3309, MU-3311 and MU-3312 (revision 16's first design: an attempted departure judged at the page's next task, with its disposal
+//    and failed-write judgements), retired with that design: Kieran's D1 decision rejected the next-task boundary (a genuine failure
+//    delivered just before the page's pagehide must stay protected), so the departure is now judged synchronously and those faults
+//    have no subject. Their first-design run (data-mutants-focused-1: MU-3309 and MU-3312 caught, MU-3311 SURVIVED) is kept in the
+//    revision-16 evidence, never counted.
 import { sub } from "./data-catalogue.mjs";
 
 const MODEL = "src/features/tasks/model/materialise.ts";
@@ -3589,11 +3598,11 @@ export const UNIT_10C = [
       // (revision 14): a failed write of an outcome not fenced at receipt is published once its repairs are spent (the design), so the
       // same fault was then the receipt publication withheld from every outcome. Re-anchored again (revision 15, review 16's R36-I):
       // the first failed write is fenced at once under a live page, so this mutant is the original fault again (revision 14's delay);
-      // the receipt publication withheld is MU-3290.
+      // the receipt publication withheld is MU-3290. Revision 16 (R36-J): the departure is judged by `left` (`gone`); the same fault.
       sub(
         t,
-        '      if (verdict === "stale" || !torn(record.mark)) {',
-        '      if (verdict === "stale" || (!torn(record.mark) && wait === undefined)) {',
+        '      if (verdict === "stale" || !left(record)) {',
+        '      if (verdict === "stale" || (!left(record) && wait === undefined)) {',
       ),
   },
 
@@ -3694,8 +3703,8 @@ export const UNIT_10C = [
         t,
         // Re-anchored (revision 13): verdicts no longer include `ended` (every unwritten verdict is repaired), so the same fault is the
         // withdrawal written outside `protect`: nothing published, a failed write given up as a pause. Revision 15: `protect` also takes
-        // the call's lifecycle mark (the same fault over the extended call).
-        "        const back = await protect(\n          at,\n          key.task_id,\n          op,\n          () => commit(service, captured, key, issued, unsent),\n          judgeRow(issued, unsent),\n          false,\n          key.through_date,\n          mark,\n        );",
+        // the call's lifecycle mark (the same fault over the extended call). Revision 16: its `keep` is named (`"never"`).
+        '        const back = await protect(\n          at,\n          key.task_id,\n          op,\n          () => commit(service, captured, key, issued, unsent),\n          judgeRow(issued, unsent),\n          "never",\n          key.through_date,\n          mark,\n        );',
         '        const plain = await commit(service, captured, key, issued, unsent);\n        const back = (plain === null ? { kind: "ended" } : { kind: "out", out: plain, verdict: "written" }) as { kind: string; out?: unknown };',
       ),
   },
@@ -3871,7 +3880,8 @@ export const UNIT_10C = [
     expect:
       /a transport failure whose record never lands, arriving after the page's pagehide|AFTER THE PAGE'S PAGEHIDE whose first write is lost is not fenced/,
     patch: (t) =>
-      sub(t, "    if (success) return true;\n", "    return true;\n"),
+      // Revision 16: `mustKeep` names its decision (`Keep`); the same fault (every outcome kept at its receipt).
+      sub(t, '    if (success) return "always";\n', '    return "always";\n'),
   },
   {
     id: "MU-3281",
@@ -3897,10 +3907,16 @@ export const UNIT_10C = [
     expect:
       /REVIEW15 Q1|Q2 (discovery|command|position), (an unrecognised answer|a 500|a 503|a 429)/,
     patch: (t) =>
+      // Revision 16: a received failure is `always`; without that line it would be `observed` (kept on a live page), so the same fault
+      // also leaves it out of `observed`: kept only by a stop or a server minimum (revision 13's selection).
       sub(
-        t,
-        "    if (answer !== undefined && observedFailure(answer, torn(mark)))\n      return true;\n",
-        "",
+        sub(
+          t,
+          '    if (answer !== undefined && observedFailure(answer, true)) return "always";\n',
+          "",
+        ),
+        "    return answer !== undefined && observedFailure(answer, false)\n",
+        "    return answer !== undefined && observedFailure(answer, false) && !receivedFailure(answer)\n",
       ),
   },
   {
@@ -3971,9 +3987,10 @@ export const UNIT_10C = [
     expect:
       /its first write FAILS after the page's pagehide|the page's pagehide THEN a transport failure/,
     patch: (t) =>
+      // Revision 16: re-anchored on `left` (the page's departure since the call), the same fault.
       sub(
         t,
-        '      if (verdict === "stale" || !torn(record.mark)) {',
+        '      if (verdict === "stale" || !left(record)) {',
         '      if (verdict === "stale" || true) {',
       ),
   },
@@ -3985,9 +4002,10 @@ export const UNIT_10C = [
     tests: RETRY_TESTS,
     expect: /a store that keeps failing under a LIVE page/,
     patch: (t) =>
+      // Revision 16: re-anchored on `left` (the page's departure since the call), the same fault.
       sub(
         t,
-        '      if (verdict === "stale" || !torn(record.mark)) {',
+        '      if (verdict === "stale" || !left(record)) {',
         '      if (verdict === "stale") {',
       ),
   },
@@ -4016,10 +4034,11 @@ export const UNIT_10C = [
     expect:
       /REVIEW16 Q1 (discovery|command|position) transport lost-pending|observed by a LIVE page whose runner is then disposed|observed while live THEN the page's pagehide|a live page: the transport failure is fenced from its receipt/,
     patch: (t) =>
+      // Revision 16: the parameter is `departed` (a `pagehide`, never a `beforeunload` alone); the same fault.
       sub(
         t,
-        '): boolean => answer.kind === "uncertain" && (!torn || receivedFailure(answer));',
-        '): boolean => answer.kind === "uncertain" && receivedFailure(answer);',
+        '  answer.kind === "uncertain" && (!departed || receivedFailure(answer));',
+        '  answer.kind === "uncertain" && receivedFailure(answer);',
       ),
   },
   {
@@ -4030,10 +4049,11 @@ export const UNIT_10C = [
     tests: [...RETRY_TESTS, "tests/features/tasks/catchup-lifecycle.test.ts"],
     expect: /back-forward restore/,
     patch: (t) =>
+      // Revision 16: the restore publishes every outcome the departure left unpublished; the same fault (none published).
       sub(
         t,
-        "      if (record.failed && !record.published && !torn(record.mark))\n        fence({ service: record.service }, record);",
-        "      if (record.failed && !record.published && !torn(record.mark)) void record;",
+        "        fence({ service: record.service }, record);\n  });",
+        "        void record;\n  });",
       ),
   },
   {
@@ -4044,10 +4064,11 @@ export const UNIT_10C = [
     tests: RETRY_TESTS,
     expect: /arriving in a GAP of its binding \(no service displayed\) after/,
     patch: (t) =>
+      // Revision 16: re-anchored on `left` (the page's departure since the call), the same fault.
       sub(
         t,
-        "        if (!gap(at) || (!torn(record.mark) && !fence(at, record)))\n          return ENDED_P;",
-        "        if (!gap(at) || !fence(at, record))\n          return ENDED_P;",
+        "        if (!left(record) && !fence(at, record)) return ENDED_P;",
+        "        if (!fence(at, record)) return ENDED_P;",
       ),
   },
   {
@@ -4065,12 +4086,13 @@ export const UNIT_10C = [
       "R36-H/I: WEB-10c A19 (review 16): a hidden tab (visibilitychange) is taken for a page torn down",
     file: "src/features/tasks/catchup/lifecycle.ts",
     tests: ["tests/features/tasks/catchup-lifecycle.test.ts"],
-    expect: /a hidden tab \(visibilitychange\) is not torn/,
+    // Revision 16: the test's title names a departure, not a teardown (R36-J).
+    expect: /a hidden tab is no departure/,
     patch: (t) =>
       sub(
         t,
-        '      window.addEventListener("pagehide", () => created.teardown());',
-        '      window.addEventListener("pagehide", () => created.teardown());\n      window.addEventListener("visibilitychange", () => created.teardown());',
+        '      window.addEventListener("pagehide", () => created.pagehide());',
+        '      window.addEventListener("pagehide", () => created.pagehide());\n      window.addEventListener("visibilitychange", () => created.pagehide());',
       ),
   },
   {
@@ -4083,7 +4105,7 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '      window.addEventListener("pageshow", () => created.show());\n',
+        '      window.addEventListener("pageshow", () => created.pageshow());\n',
         "",
       ),
   },
@@ -4149,32 +4171,92 @@ export const UNIT_10C = [
       sub(t, "    return NOT_JSON;", '    throw new TypeError("not JSON");'),
   },
   {
-    id: "MU-3301",
+    id: "MU-3302",
     title:
-      "R36-H/I: WEB-10c A19 (review 16, the native order of revision 15): a beforeunload does not mark the page's teardown (a navigation's or reload's cancelled call, delivered before its pagehide in Firefox and WebKit, is fenced for good)",
+      "R36-H/I: WEB-10c A19 (review 16; re-anchored in revision 16): the departure is read for the page, not per call (a call issued after a departure the page came back from, or after its pagehide, is taken for one that departure cancelled)",
     file: "src/features/tasks/catchup/lifecycle.ts",
-    tests: ["tests/features/tasks/catchup-lifecycle.test.ts"],
-    expect: /torn by a later beforeunload or pagehide/,
+    tests: [...RETRY_TESTS, "tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect: /a hidden tab is no departure/,
     patch: (t) =>
       sub(
         t,
-        '      window.addEventListener("beforeunload", () => created.teardown());\n',
-        "",
+        "        (hidden > mark && hidden > shown) || dispatching(),",
+        "        (mark >= 0 && hidden > 0 && hidden > shown) || dispatching(),",
       ),
   },
+  // ---- Revision 16 (review 17's R36-J; design assessment Q7) -----------------------------------------------------------------------
   {
-    id: "MU-3302",
+    id: "MU-3306",
     title:
-      "R36-H/I: WEB-10c A19 (review 16): the teardown is read for the page, not per call (a call issued after a navigation abandoned at its beforeunload is taken for one the teardown cancelled)",
+      "R36-J: WEB-10c A19 (review 17): a beforeunload is taken for the page's departure (revision 15's teardown: a page that goes on after a navigation answered with 204, a download or one cancelled leaves the failure it observed unprotected)",
     file: "src/features/tasks/catchup/lifecycle.ts",
     tests: [...RETRY_TESTS, "tests/features/tasks/catchup-lifecycle.test.ts"],
     expect:
-      /a teardown that began BEFORE the call was issued|torn by a later beforeunload or pagehide/,
+      /R36-J (discovery|command|position) (lost-pending|failed-live): a beforeunload while the call is on its way|a beforeunload alone \(an abandoned navigation\): the page goes on|a beforeunload alone is none/,
     patch: (t) =>
       sub(
         t,
-        "      tornSince: (mark) => teardown > mark && teardown > shown,",
-        "      tornSince: (mark) => mark >= 0 && teardown > 0 && teardown > shown,",
+        "  const beforeunload = () => undefined;",
+        "  const beforeunload = () => {\n    seq += 1;\n    hidden = seq;\n  };",
+      ),
+  },
+  {
+    id: "MU-3307",
+    title:
+      "R36-J: WEB-10c A19 (review 17; revision 16's native order): a judgement made during the page's pagehide dispatch is not a departure (a call Chromium cancels between the page's pagehide listeners, before the lifecycle's own runs, is taken for a failure observed live and stops the work for good)",
+    file: "src/features/tasks/catchup/lifecycle.ts",
+    tests: [...RETRY_TESTS, "tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect:
+      /R36-J (discovery|command|position) order in-dispatch|a pagehide is a departure from its dispatch/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (hidden > mark && hidden > shown) || dispatching(),",
+        "        hidden > mark && hidden > shown,",
+      ),
+  },
+  {
+    id: "MU-3308",
+    title:
+      "R36-J/D1: WEB-10c A19 (review 17; Kieran's D1 decision): a transport failure the page observed is fenced only at its failed write, and only if the page has not departed by then (a page that leaves while its write is on its way, or whose runner ends first, leaves no stop)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /R36-J (discovery|command|position) (lost-pending: a beforeunload|order left-in-write|order after-a-task|order twice)/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const early = keep === "always" || (keep === "observed" && !left);',
+        '    const early = keep === "always";',
+      ),
+  },
+  {
+    id: "MU-3310",
+    title:
+      "R36-J: WEB-10c A19 (review 17; design assessment C4, invariant 6): a back-forward restore publishes only an outcome whose write failed (one withheld at its departure, its write on its way, is left unfenced)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /then a back-forward restore: fenced at the restore; the write fails/,
+    patch: (t) =>
+      sub(
+        t,
+        "        (record.failed || record.withheld || record.pending) &&",
+        "        record.failed &&",
+      ),
+  },
+  {
+    id: "MU-3314",
+    title:
+      "R36-J: WEB-10c A19 (review 17; revision 16's native order): the production lifecycle never sees a pagehide being dispatched (its `window.event` reader always answers no)",
+    file: "src/features/tasks/catchup/lifecycle.ts",
+    tests: ["tests/features/tasks/catchup-lifecycle.test.ts"],
+    expect: /a pagehide is a departure from its dispatch/,
+    patch: (t) =>
+      sub(
+        t,
+        '  return (window as { event?: Event }).event?.type === "pagehide";',
+        "  return false;",
       ),
   },
 ];
@@ -4267,10 +4349,11 @@ export const ENGINE_10C = [
     grep: "E-M12b",
     expect: /E-M12b/,
     patch: (t) =>
+      // Revision 16: the parameter is `departed` (a `pagehide`, never a `beforeunload` alone); the same fault.
       sub(
         t,
-        '): boolean => answer.kind === "uncertain" && (!torn || receivedFailure(answer));',
-        '): boolean => answer.kind === "uncertain" && receivedFailure(answer);',
+        '  answer.kind === "uncertain" && (!departed || receivedFailure(answer));',
+        '  answer.kind === "uncertain" && receivedFailure(answer);',
       ),
   },
   {
@@ -4282,10 +4365,44 @@ export const ENGINE_10C = [
     grep: "E-M12c",
     expect: /E-M12c/,
     patch: (t) =>
+      // Revision 16: re-anchored on `left` (the page's departure since the call), the same fault.
       sub(
         t,
-        '      if (verdict === "stale" || !torn(record.mark)) {',
-        '      if (verdict === "stale" || (!torn(record.mark) && wait === undefined)) {',
+        '      if (verdict === "stale" || !left(record)) {',
+        '      if (verdict === "stale" || (!left(record) && wait === undefined)) {',
+      ),
+  },
+  {
+    id: "MU-3313",
+    title:
+      "N-10C-R16a: WEB-10c A19 (review 17's R36-J): (REAL ENGINE) the page's beforeunload is taken for its departure (revision 15's listener: a navigation answered with 204 leaves a live page's failed outcome write unfenced, and another tab reads again)",
+    file: "src/features/tasks/catchup/lifecycle.ts",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-M12f",
+    expect: /E-M12f/,
+    // Re-anchored in revision 16 after driver run 2026-11-02T15-53-47.777Z-77b6acb5 (kept: not caught, all three engines passed): its
+    // first patch changed the lifecycle double's `beforeunload` input, which the production page never calls (it observes no
+    // `beforeunload`), so it was equivalent in the composed app. The production fault is revision 15's listener.
+    patch: (t) =>
+      sub(
+        t,
+        '      window.addEventListener("pagehide", () => created.pagehide());',
+        '      window.addEventListener("beforeunload", () => created.pagehide());\n      window.addEventListener("pagehide", () => created.pagehide());',
+      ),
+  },
+  {
+    id: "MU-3315",
+    title:
+      "N-10C-R16b: WEB-10c A19 (review 17's R36-J; Kieran's D1 decision): (REAL ENGINE) a discovery's answer is judged a task after it is delivered (a genuine failure the page observed just before its pagehide is taken for a departure and left unfenced)",
+    file: "src/features/tasks/catchup/runner.ts",
+    spec: "tests/e2e/fixture.tasks-10c.spec.ts",
+    grep: "E-M12h",
+    expect: /E-M12h \(R36-J\) discovery/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? await readPosition(item.taskId, permit)\n      : { answer: UNSENT, zone: null };\n",
+        "      ? await readPosition(item.taskId, permit)\n      : { answer: UNSENT, zone: null };\n    await new Promise<void>((r) => setTimeout(r, 0));\n",
       ),
   },
 ];

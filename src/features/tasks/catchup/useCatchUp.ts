@@ -81,6 +81,7 @@ export function runnerOf(env: TasksEnv, data: DataEnv): CatchUpRunner {
     // Revision 11 (review R36): the page's ONE write-failure markers fence a caller whose answer could not be recorded.
     markers: () => getPageDataHost().markers,
     // Revision 15 (review 16's R36-H/I): the page's lifecycle tells a call cancelled by the page's teardown from a failure observed live.
+    // Revision 16 (review 17's R36-J): its departure (`pagehide`), never an attempted one (`beforeunload`) alone.
     lifecycle: pageLifecycle(),
     online: () => mine()?.online ?? false,
     writable: () => mine()?.writable ?? false,

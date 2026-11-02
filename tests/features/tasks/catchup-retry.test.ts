@@ -1546,13 +1546,29 @@ const transmissionsOf = (
       : w.reads();
 /**
  * Revision 15 (review 16's R36-H/I): a page's lifecycle as the runner reads it (`CatchUpDeps.lifecycle`): the PRODUCTION per-call model
- * (`createPageLifecycle`) driven by the test. `hide` is the page beginning to be torn down (its `beforeunload` or `pagehide`: closed,
- * reloaded, navigated away from; the browser cancels its calls after it); `show` its `pageshow` (a back-forward restore).
+ * (`createPageLifecycle`) driven by the test. `hide` is the page's departure (its `pagehide`: closed, reloaded, navigated away from; the
+ * browser cancels its calls); `show` its `pageshow` (a back-forward restore). Revision 16 (review 17's R36-J; design assessment Q2): `hide`
+ * was revision 15's single `teardown` (a `beforeunload` or a `pagehide`); it is now the `pagehide` only, and `leave` the `beforeunload`
+ * (an attempted departure, which a page that goes on outlives). The cases that meant a departure keep their meaning.
  */
 const pageLife = () => {
-  const l = createPageLifecycle();
-  return { lifecycle: l.lifecycle, hide: l.teardown, show: l.show };
+  let dispatching = false;
+  const l = createPageLifecycle({ dispatching: () => dispatching });
+  return {
+    lifecycle: l.lifecycle,
+    hide: l.pagehide,
+    leave: l.beforeunload,
+    show: l.pageshow,
+    /**
+     * Revision 16 (review 17's R36-J; Kieran's D1 decision): a `pagehide` being dispatched (`true`) or over (`false`): what the page's
+     * `window.event` tells the production lifecycle, as when Chromium delivers its cancellation between the page's `pagehide` listeners.
+     */
+    dispatch: (on: boolean) => {
+      dispatching = on;
+    },
+  };
 };
+type Life = ReturnType<typeof pageLife>;
 const markerWorld = () => {
   const storage = new FakeMarkerStorage();
   return {
@@ -5545,8 +5561,16 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
     caller: CallerName,
     failure: TasksResult<never>,
     mode: "persisted" | "lost-pending" | "failed-live",
-    life = pageLife(),
+    life: Life = pageLife(),
     hideBefore = false,
+    /**
+     * Revision 16 (review 17's R36-J; design assessment Q2): the page's events around the failure: as it is delivered (`atReceipt`), and
+     * as its first outcome write is entered (`atFirstWrite`: in the task the failure was delivered in).
+     */
+    hooks: {
+      atReceipt?: (l: Life) => void;
+      atFirstWrite?: (l: Life) => void;
+    } = {},
   ) => {
     const m = markerWorld();
     const w = await setup();
@@ -5558,6 +5582,7 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
         w.setNow(w.now() + 10_000);
         observedAt = w.now();
         if (hideBefore) life.hide();
+        hooks.atReceipt?.(life);
         return failure;
       }
       return caller === "command" ? OK : detail(TODAY, false);
@@ -5596,6 +5621,7 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
       ) {
         entered = true;
         classified = structuredClone(s);
+        hooks.atFirstWrite?.(life);
         if (mode === "failed-live") return { kind: "failed" };
         if (mode === "persisted") return run();
         const fail = await new Promise<boolean>((r) => {
@@ -5838,8 +5864,9 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
 
   for (const caller of CALLERS)
     test(`Q2 ${caller}: a teardown that began BEFORE the call was issued (a navigation abandoned after its beforeunload) does not cover it: its transport failure, observed live, is fenced from its receipt`, async () => {
+      // Revision 16 (R36-J): that navigation's event is its `beforeunload` (`leave`); revision 15 drove it with its single `teardown`.
       const life = pageLife();
-      life.hide();
+      life.leave();
       const r = await schedule16(
         caller,
         await TRANSPORT_FAILURE(),
@@ -5930,6 +5957,314 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
         two?.dispose();
       }
     });
+
+  // ---- Revision 16 (review 17's R36-J; design assessment Q1/Q2/Q3/Q5): an ATTEMPTED departure is not a departure -------------------
+  /**
+   * A `beforeunload` while the call is on its way, and no `pagehide` after it: a navigation answered with 204, a download, one the person
+   * cancelled (review 17's native evidence: the page goes on). Maintained from review 17's 54-case probe (its source is kept unchanged in
+   * the review's evidence and replayed separately): the failure the page observed is kept, so its first write lost or failed stops the
+   * caller for every page (Decision B), and a persisted one is paced from its observation (control).
+   */
+  for (const caller of CALLERS)
+    for (const mode of ["persisted", "lost-pending", "failed-live"] as const)
+      test(`R36-J ${caller} ${mode}: a beforeunload while the call is on its way and no pagehide (an abandoned navigation): ${mode === "persisted" ? "CONTROL: paced from the observation, its fence retired" : mode === "lost-pending" ? "the failure the page observed is fenced; its write lost with the runner, the replacement calls nothing" : "its write failed under the live owner: fenced, a peer in the first repair wait calls nothing"}`, async () => {
+        const r = await schedule16(
+          caller,
+          await TRANSPORT_FAILURE(),
+          mode,
+          pageLife(),
+          false,
+          { atReceipt: (l) => l.leave() },
+        );
+        let second: CatchUpRunner | undefined;
+        try {
+          r.owner.ensure(TASK, "daily");
+          await until(
+            r.w,
+            mode === "failed-live" ? r.inRepair : r.entered,
+            mode === "failed-live"
+              ? "the first write failed and the owner waits in its first repair"
+              : "the failure was classified and its first outcome write reached",
+          );
+          expect(r.classified()).toMatchObject({
+            cause: "transport",
+            issued: null,
+            failures: 1,
+            next: r.observedAt() + 1_000,
+          });
+          if (mode === "failed-live")
+            expect(r.probe(), "fenced before the first repair wait").toBe(
+              "marked",
+            );
+          if (mode === "lost-pending") {
+            r.owner.dispose();
+            expect(r.probe(), "fenced once the owner ended").toBe("marked");
+            r.release(true);
+            await r.w.settle();
+          }
+          second = r.peer("replacement");
+          second.ensure(TASK, "daily");
+          await r.w.idle(second);
+          const selected = r.of(caller);
+          if (mode === "persisted") {
+            expect(selected.length).toBeGreaterThanOrEqual(2);
+            expect(selected[1]?.at).toBeGreaterThanOrEqual(
+              r.observedAt() + 1_000,
+            );
+            if (caller === "command")
+              expect(selected[1]?.key).toBe(selected[0]?.key);
+            expect(r.probe(), "the receipt fence is retired").toBe("unmarked");
+          } else {
+            expect(
+              selected,
+              "Decision B: no automatic transmission after the observed failure's retry state could not be recorded",
+            ).toHaveLength(1);
+            expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+            expect(r.probe()).toBe("marked");
+          }
+        } finally {
+          r.owner.dispose();
+          second?.dispose();
+          r.release(false);
+          r.resume();
+        }
+      });
+
+  /**
+   * The orders of the page's events around one failure (its write lost with the runner): `in-dispatch` a `beforeunload`, then the
+   * failure delivered DURING the page's `pagehide` dispatch, before the lifecycle's own listener runs (Chromium's order, natively
+   * revision 16's diagnostic: `window.event` is that `pagehide`): the call was cancelled by the departure, nothing is published, the next
+   * page recovers it as lost from its issue (E-M2). `left-in-write` (Kieran's D1 decision): a `beforeunload`, the failure, then the page's
+   * `pagehide` in that same task while its first write is on its way: observed before the departure began, so fenced. `after-a-task`:
+   * a `beforeunload`, the failure, a task the page runs, then its `pagehide` (as Firefox and WebKit deliver a navigation's cancellation):
+   * fenced, and the later `pagehide` withdraws nothing. `twice`: one navigation abandoned before the call, another while it is on its
+   * way: fenced. `observed-first`: the failure observed with no departure attempted, then a `beforeunload` and a `pagehide` while its
+   * write is on its way: fenced at receipt; a later event revokes nothing.
+   */
+  for (const caller of CALLERS)
+    for (const order of [
+      "in-dispatch",
+      "left-in-write",
+      "after-a-task",
+      "twice",
+      "observed-first",
+    ] as const)
+      test(`R36-J ${caller} order ${order}: ${order === "in-dispatch" ? "delivered during the page's pagehide dispatch: cancelled by the departure, nothing published, the replacement makes the call again from its issue (E-M2)" : "observed before the page's departure began: fenced, its write lost, the replacement calls nothing"}`, async () => {
+        const life = pageLife();
+        if (order === "twice") life.leave();
+        const r = await schedule16(
+          caller,
+          await TRANSPORT_FAILURE(),
+          "lost-pending",
+          life,
+          false,
+          {
+            atReceipt: (l) => {
+              if (order !== "observed-first") l.leave();
+              if (order === "in-dispatch") l.dispatch(true);
+            },
+            atFirstWrite: (l) => {
+              // The dispatch goes on: the lifecycle's own listener runs (in-dispatch); or the page leaves as its write is on its way.
+              if (order === "in-dispatch" || order === "left-in-write")
+                l.hide();
+              if (order === "in-dispatch") l.dispatch(false);
+            },
+          },
+        );
+        let second: CatchUpRunner | undefined;
+        try {
+          r.owner.ensure(TASK, "daily");
+          await until(r.w, r.entered, "the first outcome write reached");
+          if (order === "observed-first")
+            expect(r.probe(), "fenced at its receipt").toBe("marked");
+          // The page's next task (its departure judged when it was attempted and not confirmed).
+          await r.w.settle();
+          if (order === "after-a-task" || order === "observed-first") {
+            if (order === "observed-first") life.leave();
+            life.hide();
+          }
+          r.owner.dispose();
+          r.release(true);
+          await r.w.settle();
+          second = r.peer("replacement");
+          second.ensure(TASK, "daily");
+          await r.w.idle(second);
+          const selected = r.of(caller);
+          if (order === "in-dispatch") {
+            expect(r.probe(), "nothing published").toBe("unmarked");
+            expect(
+              selected.length,
+              "the call is made again",
+            ).toBeGreaterThanOrEqual(2);
+            if (caller === "command")
+              expect(selected[1]?.key).toBe(selected[0]?.key);
+            expect(second.get().unrecorded.has(TASK)).toBe(false);
+          } else {
+            expect(r.probe(), "fenced").toBe("marked");
+            expect(selected).toHaveLength(1);
+            expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+          }
+        } finally {
+          r.owner.dispose();
+          second?.dispose();
+          r.release(false);
+        }
+      });
+
+  /**
+   * A back-forward restore (`pagehide` then `pageshow`) while the first write of a failure the departure left unpublished is still on its
+   * way: the page goes on, so its fence is published at the restore (not only for a failed write); its write then fails (the peer calls
+   * nothing) or lands (control: the fence retired, the work goes on).
+   */
+  for (const caller of CALLERS)
+    for (const lands of [false, true])
+      test(`R36-J ${caller}: a failure cancelled by the page's departure, its first write on its way, then a back-forward restore: fenced at the restore; ${lands ? "CONTROL: the write lands, the fence retired and the work goes on" : "the write fails, a peer calls nothing"}`, async () => {
+        const r = await schedule16(
+          caller,
+          await TRANSPORT_FAILURE(),
+          "lost-pending",
+          pageLife(),
+          false,
+          { atReceipt: (l) => l.hide() },
+        );
+        let second: CatchUpRunner | undefined;
+        try {
+          r.owner.ensure(TASK, "daily");
+          await until(r.w, r.entered, "the first outcome write reached");
+          expect(r.probe(), "nothing published by the departed page").toBe(
+            "unmarked",
+          );
+          r.life.show();
+          expect(r.probe(), "published at the restore").toBe("marked");
+          // Lost: the owner ends while its first write is on its way, and that write fails.
+          if (!lands) r.owner.dispose();
+          r.release(!lands);
+          await r.w.settle();
+          if (!lands) {
+            second = r.peer("peer");
+            second.ensure(TASK, "daily");
+            await r.w.idle(second);
+            expect(r.of(caller)).toHaveLength(1);
+            expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+            expect(r.probe()).toBe("marked");
+          } else {
+            expect(r.probe(), "retired by its own record").toBe("unmarked");
+            await r.w.idle(r.owner);
+            const selected = r.of(caller);
+            expect(selected.length).toBeGreaterThanOrEqual(2);
+            expect(
+              selected[1]?.at,
+              "paced from the observation",
+            ).toBeGreaterThanOrEqual(r.observedAt() + 1_000);
+            if (caller === "command")
+              expect(selected[1]?.key).toBe(selected[0]?.key);
+          }
+        } finally {
+          r.owner.dispose();
+          second?.dispose();
+          r.release(false);
+        }
+      });
+
+  /**
+   * Not kept at receipt (a read's success, a withdrawal), its first write FAILS after a `beforeunload`: judged by the page's next task.
+   * `pagehide` in that task (the departure): nothing published, the next runner reads again; none (an abandoned navigation): fenced.
+   */
+  for (const departs of [true, false])
+    test(`R36-J discovery: a success whose first write fails after a beforeunload, ${departs ? "the pagehide in the same task: nothing published, the next runner reads again" : "no pagehide (an abandoned navigation): fenced, the next runner reads nothing"}`, async () => {
+      const m = markerWorld();
+      const life = pageLife();
+      const w = await setup();
+      let reads = 0;
+      const api = {
+        readTask: async () => {
+          reads += 1;
+          if (reads === 1) life.leave();
+          return detail(TODAY, false);
+        },
+        materialise: async () => OK,
+      } as unknown as TasksApi;
+      let failed = 0;
+      const service = intercepted(w, async (name, input, run) => {
+        if (name === PLAN_OF.discovery && input.next === null && failed === 0) {
+          failed += 1;
+          if (departs) life.hide();
+          return { kind: "failed" };
+        }
+        return run();
+      });
+      const one = w.make({
+        service: () => service,
+        markers: m.page("origin"),
+        api,
+        lifecycle: life.lifecycle,
+        sleep: () => new Promise<void>(() => undefined),
+      });
+      let two: CatchUpRunner | undefined;
+      try {
+        one.ensure(TASK, "daily");
+        for (let k = 0; k < 80 && failed === 0; k += 1) await w.settle();
+        await w.settle();
+        expect(failed, "precondition: the success's first write failed").toBe(
+          1,
+        );
+        expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+          departs ? "unmarked" : "marked",
+        );
+        one.dispose();
+        two = w.make({ markers: m.page("replacement"), api });
+        two.ensure(TASK, "daily");
+        await w.idle(two);
+        expect(reads).toBe(departs ? 2 : 1);
+      } finally {
+        one.dispose();
+        two?.dispose();
+      }
+    });
+
+  /** A gap of its binding (no service displayed) after a `beforeunload` and no `pagehide`: kept for its binding and fenced. */
+  test("R36-J discovery: a transport failure in a GAP of its binding after a beforeunload and no pagehide (an abandoned navigation): kept for its binding and fenced; the next runner calls nothing", async () => {
+    const m = markerWorld();
+    const life = pageLife();
+    let shown: AccountService | null = null;
+    const w = await setup();
+    shown = w.t.env.service() as AccountService;
+    let reads = 0;
+    const api = {
+      readTask: async () => {
+        reads += 1;
+        if (reads > 1) return detail(TODAY, false);
+        life.leave();
+        shown = null;
+        return TRANSPORT_FAILURE();
+      },
+      materialise: async () => OK,
+    } as unknown as TasksApi;
+    const one = w.make({
+      service: () => shown,
+      markers: m.page("origin"),
+      api,
+      lifecycle: life.lifecycle,
+    });
+    let two: CatchUpRunner | undefined;
+    try {
+      one.ensure(TASK, "daily");
+      for (let k = 0; k < 80 && reads === 0; k += 1) await w.settle();
+      await w.settle();
+      expect(reads, "precondition: the discovery read was made").toBe(1);
+      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+        "marked",
+      );
+      one.dispose();
+      two = w.make({ markers: m.page("replacement"), api });
+      two.ensure(TASK, "daily");
+      await w.idle(two);
+      expect(reads).toBe(1);
+    } finally {
+      one.dispose();
+      two?.dispose();
+    }
+  });
 
   // ---- Q3: a received body that is not JSON, through the production client, for each caller ------------------------------------------
   const client = (body: string, count: { n: number }) =>
