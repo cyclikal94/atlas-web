@@ -11,7 +11,12 @@ import {
   progressId,
   slotKey,
 } from "../../src/features/tasks/model/ids";
-import { addDays, slotOn, todayIn } from "../../src/features/tasks/model/time";
+import {
+  addDays,
+  dayEnd,
+  slotOn,
+  todayIn,
+} from "../../src/features/tasks/model/time";
 import {
   bootHarness,
   expect,
@@ -591,8 +596,78 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
    * `ATLAS_I10C_M4_QUALIFY` (qualification runs only, execute.md; never set in a validation plan): `old-page-settles` lets the old page's
    * read through (the retained-row precondition must then fail); `helper-get` adds an untagged GET of the task from the new page after
    * its discovery (under a mutant that disables the recovery, the oracle must still fail).
+   *
+   * Revision 14 (review 15's R38; design assessment C4/C5): ONE scenario owns each case's time and target (`scenario`), made before the
+   * task: its zone, its day D, the browser's task clock (installed on the context before the first page, so the old page and the new one
+   * share one clock that ADVANCES with real time: retry pacing still runs), and the task's cadence. Every route, the arranger's command and
+   * every record selection use D (never a fresh `today()`), each command's `through_date` is read from its body, and a retained row is
+   * selected by its day and checked by its generation, phase, read and admission at every barrier. The browser starts at real time, or at
+   * 23:00 of D in the zone when real time is later than that (an hour back at most, never ahead: the session's expiries stay valid), so the
+   * task's day cannot change during a case. The released backend's own calendar is not controlled (the recipe has no backend clock): the
+   * M4 cadence is every OTHER day, ending at D (start D − 2 × backlog: the same number of slots as before), so a backend that passes
+   * midnight during a case has no new slot at D + 1 to make pending. The new page checks that its task clock still names D before any
+   * oracle is read; I-10C-M4c is the separate positive control of a real task-day change.
+   *
+   * More qualification modes (revision 14): `rollover-at-recovery` moves the task clock to D + 1 after the old page closes, and
+   * `rollover-at-discovery` while the new page's discovery read is held: M4a and M4b must then FAIL at their task-day identity check, never
+   * reach (or pass) an oracle of another day's traffic.
    */
   const QUALIFY = process.env.ATLAS_I10C_M4_QUALIFY ?? "";
+  interface Scenario {
+    zone: string;
+    /** The day the case works for (its task-today), fixed before the task exists. */
+    day: string;
+    /** The browser's task clock at installation (ms). */
+    start: number;
+    backlog: number;
+    definition: TaskDefinition;
+  }
+  /** Every other day, ending at `day`: `backlog` + 1 slots, and no slot on `day` + 1. */
+  const everyOtherDay = (day: string, backlog: number): TaskDefinition =>
+    def(
+      { carry: "retain_one" },
+      {
+        start_date: addDays(day, -2 * backlog),
+        repeat: { frequency: "daily", interval: 2 },
+      },
+    );
+  /**
+   * The case's scenario, its clock installed on `context` before any page of it. `nearMidnight`: D is the previous day in the zone and the
+   * task clock starts ten minutes before D ends (behind real time, never ahead), for a case that moves it across D's midnight itself
+   * (I-10C-M4c, and the `rollover-*` qualification modes: their move to D + 1 then stays behind real time too).
+   */
+  async function scenario(
+    context: BrowserContext,
+    backlog: number,
+    nearMidnight = false,
+  ): Promise<Scenario> {
+    const real = Date.now();
+    const today = todayIn(ZONE, real);
+    const day = nearMidnight ? addDays(today, -1) : today;
+    const start = nearMidnight
+      ? dayEnd(day, ZONE) * 1000 - 10 * 60_000
+      : Math.min(real, dayEnd(day, ZONE) * 1000 - 60 * 60_000);
+    expect(
+      start,
+      "the task clock never runs ahead of real time",
+    ).toBeLessThanOrEqual(real);
+    await context.clock.install({ time: start });
+    return {
+      zone: ZONE,
+      day,
+      start,
+      backlog,
+      definition: everyOtherDay(day, backlog),
+    };
+  }
+  /** The day the page's task clock names now (the runner's implicit Today day for a task of the scenario's zone). */
+  const taskDayOf = async (page: Page, s: Scenario) =>
+    todayIn(s.zone, await page.evaluate(() => Date.now()));
+  /** Moves the scenario's task clock (every page of the context) to just after D's midnight: D + 1 begins. */
+  const nextDay = (context: BrowserContext, s: Scenario) =>
+    context.clock.setSystemTime(dayEnd(s.day, s.zone) * 1000 + 5_000);
+  const todayRoute = (s: Scenario, day = s.day) =>
+    `/today?day=${day}&tz=${encodeURIComponent(s.zone)}`;
   type Retained = {
     rows: Array<{
       task_id: string;
@@ -633,13 +708,20 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
       { a: account, t: taskId },
     ) as Promise<Retained>;
 
-  /** The old page: its first `materialise` succeeds and its position read is held until the page is closed. */
-  async function closedWhileHeld(context: BrowserContext, backlog: number) {
+  /** The scenario's row of the task (selected by its day, never by its place in the list). */
+  const dayRow = (x: Retained, day: string) =>
+    x.rows.find((row) => row.through_date === day);
+
+  /**
+   * The old page: its first `materialise` succeeds and its position read is held until the page is closed. Revision 14 (R38): the task is
+   * the scenario's, the route its day, and the command is checked to be for that day (its body's `through_date`).
+   */
+  async function closedWhileHeld(context: BrowserContext, s: Scenario) {
     const { page, id } = await bootAs(context, main);
-    const made = await makeTask(page, id, backdated(backlog), {
+    const made = await makeTask(page, id, s.definition, {
       title: "I-10C-M4",
     });
-    const keys: string[] = [];
+    const keys: Array<{ key: string; through: string | undefined }> = [];
     let held = false;
     await page.route(`**${API}/tasks/${made.taskId}`, async (route) => {
       if (route.request().headers()[HELPER] !== undefined)
@@ -656,18 +738,27 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
       if (request.headers()[HELPER] !== undefined) return;
       const body =
         request.method() === "POST"
-          ? (request.postDataJSON() as { command?: { kind?: string } } | null)
+          ? (request.postDataJSON() as {
+              command?: { kind?: string; through_date?: string };
+            } | null)
           : null;
       if (body?.command?.kind === "materialise")
-        keys.push(request.headers()["idempotency-key"] ?? "");
+        keys.push({
+          key: request.headers()["idempotency-key"] ?? "",
+          through: body.command.through_date,
+        });
     });
-    await go(page, `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`);
+    expect(
+      await taskDayOf(page, s),
+      "the old page's task clock names the scenario's day",
+    ).toBe(s.day);
+    await go(page, todayRoute(s));
     await expect.poll(() => held, { timeout: 60_000 }).toBe(true);
     // PRECONDITION: the retained continuation, before the page closes, and still so a moment later (an answered read would move it).
     const awaiting = async () => {
-      const { rows } = await retained(page, id.account_id, made.taskId);
-      const row = rows[0];
-      return rows.length === 1 &&
+      const found = await retained(page, id.account_id, made.taskId);
+      const row = dayRow(found, s.day);
+      return found.rows.length === 1 &&
         row?.phase === "awaiting_position_read" &&
         row.attempt === null &&
         row.read_seq === 1 &&
@@ -687,13 +778,17 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
       before,
     );
     expect(keys).toHaveLength(1);
+    expect(
+      keys[0]?.through,
+      "the old page's command is for the scenario's day",
+    ).toBe(s.day);
     await page.close();
-    return { id, made, before, oldKey: keys[0] as string };
+    return { id, made, before, oldKey: keys[0]?.key as string };
   }
 
   /**
-   * The new page of the same browser: its product traffic logged from creation (helpers excluded), and its first `hold` reads of the
-   * task held at barriers the test releases (`release`).
+   * The new page of the same browser: its product traffic logged from creation (helpers excluded; a command with its day), and its first
+   * `hold` reads of the task held at barriers the test releases (`release`).
    */
   async function recovering(
     context: BrowserContext,
@@ -702,8 +797,11 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
     hold: number,
   ) {
     const page = await context.newPage();
-    const product: Array<{ kind: "materialise" | "position"; key?: string }> =
-      [];
+    const product: Array<{
+      kind: "materialise" | "position";
+      key?: string;
+      through?: string;
+    }> = [];
     page.on("request", (request) => {
       const url = new URL(request.url());
       if (!url.pathname.startsWith(API)) return;
@@ -713,7 +811,7 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
         product.push({ kind: "position" });
       if (request.method() === "POST" && path === "/task-commands") {
         const body = request.postDataJSON() as {
-          command?: { kind?: string; task_id?: string };
+          command?: { kind?: string; task_id?: string; through_date?: string };
         } | null;
         if (
           body?.command?.kind === "materialise" &&
@@ -722,6 +820,9 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
           product.push({
             kind: "materialise",
             key: request.headers()["idempotency-key"],
+            ...(body.command.through_date === undefined
+              ? {}
+              : { through: body.command.through_date }),
           });
       }
     });
@@ -745,20 +846,27 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
     context,
     browser,
   }) => {
-    const { id, made, before } = await closedWhileHeld(context, 30);
+    const s = await scenario(context, 30, QUALIFY.startsWith("rollover-"));
+    const { id, made, before } = await closedWhileHeld(context, s);
+    if (QUALIFY === "rollover-at-recovery") await nextDay(context, s);
     const r = await recovering(context, id.account_id, made.taskId, 2);
     // Before any trigger: the retained row is there, as the old page left it, and the new page has asked nothing.
     expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
       before,
     ]);
     expect(r.product).toEqual([]);
-    await go(r.page, `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`);
+    expect(
+      await taskDayOf(r.page, s),
+      "the new page's task clock still names the scenario's day",
+    ).toBe(s.day);
+    await go(r.page, todayRoute(s));
     // BARRIER 1 = the discovery read: its claim is durable, and the row is untouched.
     await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(1);
     const atDiscovery = await retained(r.page, id.account_id, made.taskId);
     expect(atDiscovery.discovery?.attempt ?? null).not.toBeNull();
     expect(atDiscovery.discovery?.schedule?.issued ?? null).not.toBeNull();
     expect(atDiscovery.rows).toEqual([before]);
+    if (QUALIFY === "rollover-at-discovery") await nextDay(context, s);
     // Another client (its own browser context and session) finishes the backlog meanwhile: its traffic is never the page's.
     const other = await browser.newContext({
       baseURL: test.info().project.use.baseURL,
@@ -766,7 +874,7 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
     try {
       const arranger = await apiAs(other, main);
       expect(
-        (await materialise(arranger.page, arranger.id, made.taskId, today()))
+        (await materialise(arranger.page, arranger.id, made.taskId, s.day))
           .status,
       ).toBe(200);
       expect(
@@ -791,14 +899,23 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
           },
           { a: id.account_id, e: id.epoch, t: made.taskId },
         );
+      expect(
+        await taskDayOf(r.page, s),
+        "the task clock still names the scenario's day after its discovery",
+      ).toBe(s.day);
       // BARRIER 2 = the row's own position read: the discovery is over (its entry gone) and the row's read is admitted anew, its old
-      // unanswered read counted as lost; still the same generation and read, and no command.
+      // unanswered read counted as lost; still the same day, generation and read, and no command.
       await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(2);
+      expect(
+        await taskDayOf(r.page, s),
+        "the task clock still names the scenario's day at the row's read",
+      ).toBe(s.day);
       const atRecovery = await retained(r.page, id.account_id, made.taskId);
       expect(atRecovery.discovery).toBeNull();
       expect(atRecovery.rows).toHaveLength(1);
-      const row = atRecovery.rows[0];
+      const row = dayRow(atRecovery, s.day);
       expect(row).toMatchObject({
+        through_date: s.day,
         sequence_generation: before.sequence_generation,
         phase: "awaiting_position_read",
         read_seq: 1,
@@ -831,21 +948,37 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
   test("I-10C-M4b: with backlog left, the recovered first action is the row's own read; only then a materialise with a NEW key, until the day is covered", async ({
     context,
   }) => {
-    const { id, made, before, oldKey } = await closedWhileHeld(context, 40);
+    const s = await scenario(context, 40, QUALIFY.startsWith("rollover-"));
+    const { id, made, before, oldKey } = await closedWhileHeld(context, s);
+    if (QUALIFY === "rollover-at-recovery") await nextDay(context, s);
     const r = await recovering(context, id.account_id, made.taskId, 2);
     expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
       before,
     ]);
-    await go(r.page, `/today?day=${today()}&tz=${encodeURIComponent(ZONE)}`);
+    expect(
+      await taskDayOf(r.page, s),
+      "the new page's task clock still names the scenario's day",
+    ).toBe(s.day);
+    await go(r.page, todayRoute(s));
     await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(1);
     expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
       before,
     ]);
+    if (QUALIFY === "rollover-at-discovery") await nextDay(context, s);
     await r.held[0]?.release();
+    expect(
+      await taskDayOf(r.page, s),
+      "the task clock still names the scenario's day after its discovery",
+    ).toBe(s.day);
     await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(2);
-    const atRecovery = (await retained(r.page, id.account_id, made.taskId))
-      .rows[0];
-    expect(atRecovery).toMatchObject({
+    expect(
+      await taskDayOf(r.page, s),
+      "the task clock still names the scenario's day at the row's read",
+    ).toBe(s.day);
+    const recovered = await retained(r.page, id.account_id, made.taskId);
+    expect(recovered.rows).toHaveLength(1);
+    expect(dayRow(recovered, s.day)).toMatchObject({
+      through_date: s.day,
       sequence_generation: before.sequence_generation,
       phase: "awaiting_position_read",
       read_seq: 1,
@@ -866,10 +999,81 @@ test.describe("I-10C-M4: a reload while the position read is held (A3; CM-440)",
       "position",
       "materialise",
     ]);
-    const keys = r.product
-      .filter((e) => e.kind === "materialise")
-      .map((e) => e.key);
+    const commands = r.product.filter((e) => e.kind === "materialise");
+    expect(
+      commands.map((e) => e.through),
+      "every continuation command is for the scenario's day",
+    ).toEqual(commands.map(() => s.day));
+    const keys = commands.map((e) => e.key);
     expect(keys.length).toBeGreaterThan(0);
+    expect(keys).not.toContain(oldKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect((await position(r.page, id, made.taskId))?.pending).toBe(false);
+  });
+
+  /**
+   * Revision 14 (review 15's R38; design assessment C5): the POSITIVE control of a real change of the task's own day. The old page works
+   * for D and closes with its read held; the scenario's task clock then passes D's midnight. The new page's implicit Today trigger
+   * legitimately works for D + 1: its own row (another generation), its own commands (through D + 1, new keys). Its reads are never D's
+   * recovery: D's retained row stays exactly as the old page left it until the new day's read covers D too (its `last_date` is D: the
+   * cadence has no slot on D + 1), when it is removed as satisfied.
+   */
+  test("I-10C-M4c: the task's own day changes after the old page closes: the new page works for the NEW day (its own row and keys), and never counts its reads as the old day's recovery", async ({
+    context,
+  }) => {
+    const s = await scenario(context, 40, true);
+    const next = addDays(s.day, 1);
+    const { id, made, before, oldKey } = await closedWhileHeld(context, s);
+    await nextDay(context, s);
+    const r = await recovering(context, id.account_id, made.taskId, 2);
+    expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
+      before,
+    ]);
+    expect(await taskDayOf(r.page, s), "the task clock names D + 1").toBe(next);
+    await go(r.page, todayRoute(s, next));
+    // BARRIER 1 = the discovery read.
+    await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(1);
+    expect((await retained(r.page, id.account_id, made.taskId)).rows).toEqual([
+      before,
+    ]);
+    await r.held[0]?.release();
+    // BARRIER 2 = the NEW day's position read, after its own first command.
+    await expect.poll(() => r.held.length, { timeout: 60_000 }).toBe(2);
+    const atRead = await retained(r.page, id.account_id, made.taskId);
+    expect(
+      dayRow(atRead, s.day),
+      "D's retained row is untouched: the new day's read is not its recovery",
+    ).toEqual(before);
+    const fresh = dayRow(atRead, next);
+    expect(fresh).toMatchObject({
+      through_date: next,
+      phase: "awaiting_position_read",
+      read_seq: 1,
+      attempt: null,
+      schedule: { caller: "position" },
+    });
+    expect(fresh?.sequence_generation).not.toBe(before.sequence_generation);
+    expect(atRead.rows).toHaveLength(2);
+    expect(r.product.map((e) => e.kind)).toEqual([
+      "position",
+      "materialise",
+      "position",
+    ]);
+    expect(r.product[1]?.through).toBe(next);
+    expect(r.product[1]?.key).not.toBe(oldKey);
+    await r.held[1]?.release();
+    // The new day is covered; D's row goes with it (the read covers D too), and nothing else is sent.
+    await expect
+      .poll(
+        async () =>
+          (await retained(r.page, id.account_id, made.taskId)).rows.length,
+        { timeout: 120_000 },
+      )
+      .toBe(0);
+    await r.page.waitForTimeout(3_000);
+    const commands = r.product.filter((e) => e.kind === "materialise");
+    expect(commands.map((e) => e.through)).toEqual(commands.map(() => next));
+    const keys = commands.map((e) => e.key);
     expect(keys).not.toContain(oldKey);
     expect(new Set(keys).size).toBe(keys.length);
     expect((await position(r.page, id, made.taskId))?.pending).toBe(false);

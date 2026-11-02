@@ -40,7 +40,11 @@ import {
 } from "../../../src/features/tasks/model/contract";
 import { attemptBody } from "../../../src/features/tasks/model/materialise";
 import { WINDOW_MS } from "../../../src/features/tasks/model/retry";
-import { todayIn } from "../../../src/features/tasks/model/time";
+import {
+  addDays,
+  dayEnd,
+  todayIn,
+} from "../../../src/features/tasks/model/time";
 import { type Session, StampedRequestError } from "../../../src/session";
 import { ACCOUNT, DB, defaultsWorld } from "../../support/data/defaults-world";
 import { FakeMarkerStorage } from "../../support/data/marker-storage";
@@ -3209,9 +3213,22 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
       }),
     ],
   ];
+  /**
+   * ADAPTATION (revision 14, labelled): this case asserted the cross-page marker during the FIRST repair wait for every outcome. A read's
+   * success (whose loss reads as its call lost: it is read again under its own admission) is now fenced across pages only once its repairs
+   * are spent with the page still running, because a page torn down mid-write (Firefox fails that write) must leave its call recoverable
+   * (I-10C-M4a on Firefox, revision 14 evidence). Old intent kept: an outcome never recorded fences every later page and runner (asserted
+   * once the stop is shown, before any of them works), and during the wait this page holds it (`repairs`); every received answer and every
+   * stop is still marked at its receipt (asserted during the wait, as before).
+   */
+  const UNMARKED_UNTIL_SPENT = new Set([
+    "success (the entry's removal)",
+    "complete (the row's removal)",
+    "continue (still pending)",
+  ]);
   test.each(OUTCOMES)(
     "Q4 %s, %s, never recorded: fenced at the first failure; a recreated runner and another page transmit nothing for it",
-    async (caller, _, options) => {
+    async (caller, outcome, options) => {
       const c = CALLER_WORLDS[caller];
       const m = markerWorld();
       const w = await setup(await options());
@@ -3230,7 +3247,9 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
         },
         "the first repair wait was entered",
       );
-      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe(
+        UNMARKED_UNTIL_SPENT.has(outcome) ? "unmarked" : "marked",
+      );
       h.release();
       await until(
         w,
@@ -3239,6 +3258,7 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
         "the stop is shown",
       );
       expect(f.failed()).toBe(1 + REPAIR_MS.length);
+      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
       first.dispose();
       const reads = w.reads().length;
       const sends = w.sent().length;
@@ -4577,6 +4597,786 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
     } finally {
       r.dispose();
       h.release(false);
+    }
+  });
+});
+
+/**
+ * REVISION 14 (review 15's R36-G; design assessment Q1 to Q5). Every failure the SERVER ANSWERED is fenced from its receipt, before its
+ * first write; no answer at all (transport), a withdrawal and a read's success are not (their loss reads as their call lost). Each case
+ * first proves the actual runner classified the answer and entered its first outcome write (the barrier), then disposes it while that
+ * write waits and releases the write as landed (CONTROL) or failed (WITNESS), and lets a recreated runner over the same database and
+ * another marker facade take the work up. FIXTURE evidence (service level: no browser teardown, no real reload).
+ */
+describe("REVISION14 R36-G: every failure the server answered is protected from its receipt", () => {
+  type World = Awaited<ReturnType<typeof setup>>;
+  const scopeOf = (w: World) => ({
+    account: ACCOUNT,
+    incarnationId: (w.t.env.service() as AccountService).incarnationId,
+  });
+  const until = async (w: World, ok: () => boolean, what: string) => {
+    for (let k = 0; k < 80 && !ok(); k += 1) await w.settle();
+    expect(ok(), `precondition: ${what}`).toBe(true);
+  };
+  const OP = (caller: CallerName) =>
+    caller === "discovery" ? fenceOf(TASK) : fenceOf(TASK, TODAY);
+  const DELAY = 10_000;
+  type Script = () => TasksResult<unknown> | Promise<TasksResult<unknown>>;
+  /**
+   * A scripted API routed by caller (a read while the task's discovery entry holds an issue is the discovery's, any other read the
+   * position's): the caller's FIRST call is answered by `first` after the clock moved `delay` (its observation), each later one
+   * healthily (`later`, or: the command OK, a discovery read the caught-up task, a position read the caught-up task). Other callers are
+   * healthy: a discovery read finds the task behind, a command succeeds, a position read finds it caught up.
+   */
+  const scripted = (
+    w: World,
+    caller: CallerName,
+    first: Script,
+    options: { delay?: number; later?: Script[] } = {},
+  ) => {
+    const calls: Array<{ caller: CallerName; at: number; key?: string }> = [];
+    const later = [...(options.later ?? [])];
+    let answered = false;
+    let issuedAt = Number.NaN;
+    let observedAt = Number.NaN;
+    const target = async (): Promise<TasksResult<unknown>> => {
+      if (!answered) {
+        answered = true;
+        issuedAt = w.now();
+        w.setNow(w.now() + (options.delay ?? DELAY));
+        observedAt = w.now();
+        return first();
+      }
+      const next = later.shift();
+      if (next !== undefined) return next();
+      return caller === "command" ? OK : detail(TODAY, false);
+    };
+    const api = {
+      readTask: async () => {
+        const which: CallerName =
+          w.discovery()?.schedule?.issued != null ? "discovery" : "position";
+        calls.push({ caller: which, at: w.now() });
+        if (which === caller) return target();
+        return which === "discovery"
+          ? detail("2026-10-01", true)
+          : detail(TODAY, false);
+      },
+      materialise: async (_command: MaterialiseCommand, key: string) => {
+        calls.push({ caller: "command", at: w.now(), key });
+        return caller === "command" ? target() : OK;
+      },
+    } as unknown as TasksApi;
+    return {
+      api,
+      calls,
+      of: (which: CallerName) => calls.filter((c) => c.caller === which),
+      issuedAt: () => issuedAt,
+      observedAt: () => observedAt,
+    };
+  };
+  /** Holds the caller's FIRST outcome write (never an admission), keeping what it writes; `fail` answers it failed, else it runs. */
+  const holdOutcome = (w: World, caller: CallerName) => {
+    let entered = false;
+    let written: unknown;
+    let release: ((fail: boolean) => void) | null = null;
+    const service = intercepted(w, async (name, input, run) => {
+      const expected = input.expected as {
+        phase?: string;
+        attempt?: string | null;
+      } | null;
+      const outcome =
+        name === PLAN_OF[caller] &&
+        !admitting(input) &&
+        (caller === "discovery"
+          ? expected?.attempt != null
+          : expected?.phase ===
+            (caller === "command" ? "submitting" : "awaiting_position_read"));
+      if (!outcome || entered) return run();
+      entered = true;
+      written = structuredClone(input.next ?? null);
+      const fail = await new Promise<boolean>((r) => {
+        release = r;
+      });
+      return fail ? { kind: "failed" } : run();
+    });
+    return {
+      service,
+      entered: () => entered,
+      written: () => written,
+      release: (fail: boolean) =>
+        (release as ((fail: boolean) => void) | null)?.(fail),
+    };
+  };
+  /** The production service, every commit's `next` kept (in order) with its plan's name. */
+  const recording = (w: World) => {
+    const writes: Array<{ name: string; next: unknown }> = [];
+    const service = intercepted(w, async (name, input, run) => {
+      writes.push({ name, next: structuredClone(input.next ?? null) });
+      return run();
+    });
+    return { service, writes };
+  };
+  const scheduleOf = (written: unknown) =>
+    (written as { schedule?: MaterialiseRetry | null } | null)?.schedule ??
+    null;
+  /**
+   * Up to the barrier, through disposal while it waits, to a recreated runner idle: `received` checks the receipt fence before release.
+   * Returns what the second runner did.
+   */
+  const lose = async (
+    caller: CallerName,
+    first: Script,
+    lands: boolean,
+    options: { delay?: number; later?: Script[]; received: boolean },
+  ) => {
+    const m = markerWorld();
+    const w = await setup();
+    const s = scripted(w, caller, first, options);
+    const h = holdOutcome(w, caller);
+    const one = w.make({
+      service: () => h.service,
+      markers: m.page("origin"),
+      api: s.api,
+    });
+    const rec = recording(w);
+    let two: CatchUpRunner | null = null;
+    try {
+      one.ensure(TASK, "daily");
+      await until(
+        w,
+        h.entered,
+        "the answer was classified and its first outcome write entered",
+      );
+      // The receipt fence, seen by another facade BEFORE the owner ends and before its write is released (asserted by `fences`, after
+      // each case's protocol assertions, so a runner without it fails at the protocol first).
+      const atReceipt = m.page("observer").probe(scopeOf(w), OP(caller));
+      const before = s.of(caller).length;
+      expect(before, "precondition: one call of the caller made").toBe(1);
+      one.dispose();
+      h.release(!lands);
+      await w.settle();
+      const afterRelease = m.page("observer").probe(scopeOf(w), OP(caller));
+      two = w.make({
+        service: () => rec.service,
+        markers: m.page("replacement"),
+        api: s.api,
+      });
+      two.ensure(TASK, "daily");
+      await w.idle(two);
+      const r = { m, w, s, h, rec, two, before };
+      return {
+        ...r,
+        /** The fence as another facade saw it at the receipt and once the write was released. */
+        fences: () => {
+          expect(atReceipt, "the receipt fence before the owner ends").toBe(
+            options.received ? "marked" : "unmarked",
+          );
+          expect(afterRelease, "the fence once the first write ended").toBe(
+            lands || !options.received ? "unmarked" : "marked",
+          );
+        },
+      };
+    } catch (error) {
+      two?.dispose();
+      throw error;
+    } finally {
+      one.dispose();
+      h.release(false);
+    }
+  };
+  /** A fenced caller stays stopped for every automatic and manual way on (time, kick, reconnection, the person's press). */
+  const staysStopped = async (
+    r: Awaited<ReturnType<typeof lose>>,
+    caller: CallerName,
+  ) => {
+    const { w, s, two, m } = r;
+    expect(s.of(caller), "no further call of the caller").toHaveLength(1);
+    const stop = two.get().unrecorded.get(TASK);
+    expect(stop?.reason).toBe("storage");
+    w.setNow(w.now() + WINDOW_MS + 60_000);
+    two.kick();
+    await w.idle(two);
+    two.reconnected();
+    await w.idle(two);
+    const shown = two.get().unrecorded.get(TASK);
+    two.tryAgain(TASK, caller === "discovery" ? undefined : TODAY, {
+      kind: "memory",
+      id: shown?.id ?? "",
+    });
+    await w.idle(two);
+    expect(
+      s.of(caller),
+      "a fence whose outcome no page holds is never cleared by time, a kick, a reconnection or a press",
+    ).toHaveLength(1);
+    expect(m.page("observer").probe(scopeOf(w), OP(caller))).toBe("marked");
+  };
+
+  /** Every failure the server answered, as the production transport classifies it. */
+  const RECEIVED: ReadonlyArray<[string, Script, MaterialiseRetry["cause"]]> = [
+    ["an unrecognised answer", () => UNRECOGNISED, "unrecognised"],
+    ["a 500 internal_error", () => http(500, "internal_error"), "transient"],
+    [
+      "a 503 temporarily_unavailable",
+      () => http(503, "temporarily_unavailable"),
+      "transient",
+    ],
+    [
+      "a 429 without Retry-After",
+      () => http(429, "rate_limited"),
+      "rate_limited",
+    ],
+    [
+      "a 429 with Retry-After 0",
+      () => http(429, "rate_limited", "0"),
+      "rate_limited",
+    ],
+    [
+      "a 429 with an invalid Retry-After",
+      () => http(429, "rate_limited", "soon"),
+      "rate_limited",
+    ],
+  ];
+
+  // ---- Q1: review 15's five witnesses and their controls, maintained ---------------------------------------------------------------
+  for (const caller of ["discovery", "position"] as const)
+    for (const lands of [true, false])
+      test(`REVIEW15 Q1 ${caller} ${lands ? "CONTROL persisted" : "WITNESS lost"}: after three received unrecognised answers no fourth read is admitted`, async () => {
+        const m = markerWorld();
+        const w = await setup();
+        let unknownAnswers = 0;
+        const api = {
+          readTask: async () => {
+            const which =
+              w.discovery()?.schedule?.issued != null
+                ? "discovery"
+                : "position";
+            if (which === caller) {
+              unknownAnswers += 1;
+              return UNRECOGNISED;
+            }
+            return detail("2026-10-01", true);
+          },
+          materialise: async () => OK,
+        } as unknown as TasksApi;
+        let entered = false;
+        let release: ((fail: boolean) => void) | undefined;
+        let classified: MaterialiseRetry | null = null;
+        const service = intercepted(w, async (name, input, run) => {
+          const s = scheduleOf(input.next);
+          if (
+            !entered &&
+            name === PLAN_OF[caller] &&
+            s?.caller === caller &&
+            s.issued === null &&
+            s.unknown === 2
+          ) {
+            entered = true;
+            classified = structuredClone(s);
+            const fail = await new Promise<boolean>((r) => {
+              release = r;
+            });
+            return fail ? { kind: "failed" } : run();
+          }
+          return run();
+        });
+        const first = w.make({
+          service: () => service,
+          markers: m.page("origin"),
+          api,
+        });
+        let second: CatchUpRunner | undefined;
+        try {
+          first.ensure(TASK, "daily");
+          await until(
+            w,
+            () => entered,
+            "the second received answer reached its first outcome write",
+          );
+          expect(unknownAnswers).toBe(2);
+          expect(classified).toMatchObject({
+            caller,
+            unknown: 2,
+            issued: null,
+            pause: null,
+          });
+          const stateBefore =
+            caller === "discovery"
+              ? w.discovery()?.schedule
+              : w.stored()?.schedule;
+          expect(stateBefore).toMatchObject({ caller, unknown: 1 });
+          expect(stateBefore?.issued).not.toBeNull();
+          // Revision 14: the received answer is fenced before its first write is released (asserted after the protocol's assertions).
+          const atReceipt = m.page("observer").probe(scopeOf(w), OP(caller));
+          first.dispose();
+          release?.(!lands);
+          await w.settle();
+          second = w.make({ markers: m.page("replacement"), api });
+          second.ensure(TASK, "daily");
+          await w.idle(second);
+          expect(
+            unknownAnswers,
+            "a received second unknown answer survives teardown or fences the caller; never a fourth read",
+          ).toBeLessThanOrEqual(3);
+          const after =
+            caller === "discovery"
+              ? w.discovery()?.schedule
+              : w.stored()?.schedule;
+          if (lands) {
+            expect(unknownAnswers).toBe(3);
+            expect(after).toMatchObject({ unknown: 3, pause: "unrecognised" });
+          } else {
+            expect(unknownAnswers).toBe(2);
+            expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+          }
+          expect(atReceipt, "the receipt fence before the owner ends").toBe(
+            "marked",
+          );
+        } finally {
+          first.dispose();
+          second?.dispose();
+          release?.(false);
+        }
+      });
+
+  /**
+   * ADAPTATION (revision 14, labelled; design assessment Q1): review 15's pacing probe asserted, in both branches, at least two calls of
+   * the caller before comparing the second call's time with observedAt + 1 s. The CONTROL is kept unchanged. The correction takes the
+   * review's permitted conservative branch for the WITNESS (the received answer is fenced at receipt and no page holds it), so there is
+   * no second call to time: the witness now proves the receipt fence before the owner ends, the replacement's stop, and that no further
+   * call of the caller is made through the window, a kick, a reconnection and a press. The original source and its failed results are
+   * preserved in review 15's evidence; this does not make that original failure pass.
+   */
+  for (const caller of CALLERS)
+    for (const lands of [true, false])
+      test(`REVIEW15 Q1 ${caller} ${lands ? "CONTROL persisted: the next call is no sooner than the observed 503 plus 1 s" : "WITNESS lost: fenced at receipt, the replacement stops and calls nothing"}`, async () => {
+        const r = await lose(
+          caller,
+          () => http(503, "temporarily_unavailable"),
+          lands,
+          { received: true },
+        );
+        try {
+          expect(scheduleOf(r.h.written())).toMatchObject({
+            cause: "transient",
+            failures: 1,
+            issued: null,
+            next: r.s.observedAt() + 1_000,
+          });
+          if (lands) {
+            const calls = r.s.of(caller);
+            expect(calls.length).toBeGreaterThanOrEqual(2);
+            expect(calls[1]?.at).toBeGreaterThanOrEqual(
+              r.s.observedAt() + 1_000,
+            );
+            if (caller === "command") expect(calls[1]?.key).toBe(calls[0]?.key);
+          } else await staysStopped(r, caller);
+          r.fences();
+        } finally {
+          r.two.dispose();
+        }
+      });
+
+  // ---- Q2: each received failure, each caller -----------------------------------------------------------------------------------
+  for (const caller of CALLERS)
+    for (const [what, answer, cause] of RECEIVED)
+      for (const lands of [true, false])
+        test(`Q2 ${caller}, ${what} ${lands ? "persisted (control): paced from its observation" : "whose first write is lost: fenced at receipt, nothing more is called"}`, async () => {
+          const r = await lose(caller, answer, lands, { received: true });
+          try {
+            expect(scheduleOf(r.h.written())).toMatchObject({
+              cause,
+              failures: 1,
+              issued: null,
+              unknown: caller !== "command" && cause === "unrecognised" ? 1 : 0,
+              next: r.s.observedAt() + 1_000,
+            });
+            if (lands) {
+              const calls = r.s.of(caller);
+              expect(calls.length).toBeGreaterThanOrEqual(2);
+              expect(calls[1]?.at).toBeGreaterThanOrEqual(
+                r.s.observedAt() + 1_000,
+              );
+              if (caller === "command")
+                expect(calls[1]?.key).toBe(calls[0]?.key);
+              expect(r.two.get().unrecorded.has(TASK)).toBe(false);
+            } else await staysStopped(r, caller);
+            r.fences();
+          } finally {
+            r.two.dispose();
+          }
+        });
+
+  for (const caller of ["discovery", "position"] as const)
+    test(`Q2 ${caller}: the FIRST unrecognised answer of a read is fenced at receipt too (its count is kept or the caller stops)`, async () => {
+      const r = await lose(caller, () => UNRECOGNISED, false, {
+        delay: 0,
+        received: true,
+      });
+      try {
+        expect(scheduleOf(r.h.written())).toMatchObject({ unknown: 1 });
+        await staysStopped(r, caller);
+        r.fences();
+      } finally {
+        r.two.dispose();
+      }
+    });
+
+  // ---- Q5: no answer at all, a withdrawal, a read's success: not fenced at receipt, their loss reads as their call lost --------------
+  const TRANSPORT: Script = () =>
+    ({ ok: false, kind: "uncertain", retry: { cause: "transport" } }) as never;
+  for (const caller of CALLERS)
+    for (const delay of [0, DELAY])
+      test(`Q5 ${caller}: a transport failure (no answer) observed ${delay === 0 ? "at once" : "10 s after its issue"} whose first write is lost is not fenced: the next runner counts it lost when issued and makes the call again (E-M2)`, async () => {
+        const r = await lose(caller, TRANSPORT, false, {
+          delay,
+          received: false,
+        });
+        try {
+          const calls = r.s.of(caller);
+          expect(calls.length, "the call is made again").toBeGreaterThanOrEqual(
+            2,
+          );
+          if (caller === "command") expect(calls[1]?.key).toBe(calls[0]?.key);
+          // The lost-response recovery is unchanged: counted as lost WHEN IT WAS ISSUED (failures 1, transport, no unknown count).
+          const lost = r.rec.writes.find(
+            (e) =>
+              e.name === PLAN_OF[caller] &&
+              scheduleOf(e.next)?.cause === "transport",
+          );
+          expect(scheduleOf(lost?.next)).toMatchObject({
+            failures: 1,
+            cause: "transport",
+            unknown: 0,
+            since: r.s.issuedAt(),
+          });
+          expect(calls[1]?.at).toBeGreaterThanOrEqual(r.s.issuedAt() + 1_000);
+          // RESIDUAL (disposition web10c-r36-no-answer-disposition-20261102, recorded and NOT resolved): observed 10 s after its issue,
+          // the call is made again sooner than 1 s after that observation, because no page holds when it was observed.
+          expect(r.two.get().unrecorded.has(TASK)).toBe(false);
+          r.fences();
+        } finally {
+          r.two.dispose();
+        }
+      });
+
+  for (const caller of CALLERS)
+    test(`Q5 ${caller}: a transport failure observed 10 s after its issue and PERSISTED (control) is paced from its observation`, async () => {
+      const r = await lose(caller, TRANSPORT, true, { received: false });
+      try {
+        const calls = r.s.of(caller);
+        expect(calls.length).toBeGreaterThanOrEqual(2);
+        expect(calls[1]?.at).toBeGreaterThanOrEqual(r.s.observedAt() + 1_000);
+        r.fences();
+      } finally {
+        r.two.dispose();
+      }
+    });
+
+  for (const caller of CALLERS)
+    test(`Q5 ${caller}: a withdrawal (not sent) whose first write is lost is not fenced: the next runner counts the call as lost (more conservative than uncounted) and makes it`, async () => {
+      const r = await lose(
+        caller,
+        () => ({ ok: false, kind: "not_sent" }) as never,
+        false,
+        { delay: 0, received: false },
+      );
+      try {
+        const calls = r.s.of(caller);
+        expect(calls.length).toBeGreaterThanOrEqual(2);
+        if (caller === "command") expect(calls[1]?.key).toBe(calls[0]?.key);
+        const lost = r.rec.writes.find(
+          (e) =>
+            e.name === PLAN_OF[caller] &&
+            scheduleOf(e.next)?.cause === "transport",
+        );
+        expect(scheduleOf(lost?.next)).toMatchObject({
+          failures: 1,
+          unknown: 0,
+        });
+        expect(r.two.get().unrecorded.has(TASK)).toBe(false);
+        r.fences();
+      } finally {
+        r.two.dispose();
+      }
+    });
+
+  // ---- Q3/Q5: a write that FAILS as the page is torn down (Firefox), against a store that keeps failing under a live page -------------
+  /** The caller's first `n` outcome writes (never an admission) answer `failed`, at once. */
+  const failing = (w: World, caller: CallerName, n: number) => {
+    let failed = 0;
+    const service = intercepted(w, async (name, input, run) => {
+      const expected = input.expected as {
+        phase?: string;
+        attempt?: string | null;
+      } | null;
+      const outcome =
+        name === PLAN_OF[caller] &&
+        !admitting(input) &&
+        (caller === "discovery"
+          ? expected?.attempt != null
+          : expected?.phase ===
+            (caller === "command" ? "submitting" : "awaiting_position_read"));
+      if (!outcome || failed >= n) return run();
+      failed += 1;
+      return { kind: "failed" };
+    });
+    return { service, failed: () => failed };
+  };
+  const TEARDOWN: ReadonlyArray<
+    [CallerName, string, Script, boolean, Script[]?]
+  > = [
+    ...CALLERS.flatMap(
+      (caller): Array<[CallerName, string, Script, boolean]> => [
+        [caller, "no answer (transport)", TRANSPORT, false],
+        [
+          caller,
+          "a withdrawal (not sent)",
+          () => ({ ok: false, kind: "not_sent" }) as never,
+          false,
+        ],
+        [
+          caller,
+          "a received 503",
+          () => http(503, "temporarily_unavailable"),
+          true,
+        ],
+      ],
+    ),
+    [
+      "discovery",
+      "a success",
+      () => detail("2026-10-01", true),
+      false,
+      [() => detail("2026-10-01", true)],
+    ],
+    [
+      "position",
+      "a success (moved, not terminal)",
+      () => detail("2026-10-05", true),
+      false,
+    ],
+  ];
+  for (const [caller, what, answer, received, later] of TEARDOWN) {
+    test(`Q5 ${caller}, ${what}: its first write FAILS while the page owns it and the page is torn down in the first repair wait (Firefox): ${received ? "fenced since its receipt, the next runner calls nothing" : "nothing is published, the next runner makes the call again"}`, async () => {
+      const m = markerWorld();
+      const w = await setup();
+      const s = scripted(w, caller, answer, {
+        delay: 0,
+        ...(later === undefined ? {} : { later }),
+      });
+      const f = failing(w, caller, 1);
+      let torn = false;
+      const one = w.make({
+        service: () => f.service,
+        markers: m.page("origin"),
+        api: s.api,
+        sleep: (ms) => {
+          if (ms === REPAIR_MS[0] && !torn) {
+            torn = true;
+            return new Promise<void>(() => undefined);
+          }
+          w.setNow(w.now() + ms);
+          return Promise.resolve();
+        },
+      });
+      let two: CatchUpRunner | null = null;
+      try {
+        one.ensure(TASK, "daily");
+        await until(
+          w,
+          () => torn,
+          "a failed first write entered its first repair wait",
+        );
+        expect(f.failed()).toBe(1);
+        expect(s.of(caller)).toHaveLength(1);
+        const atTeardown = m.page("observer").probe(scopeOf(w), OP(caller));
+        one.dispose();
+        await w.settle();
+        two = w.make({ markers: m.page("replacement"), api: s.api });
+        two.ensure(TASK, "daily");
+        await w.idle(two);
+        if (received) {
+          expect(
+            s.of(caller),
+            "the received answer's caller calls nothing",
+          ).toHaveLength(1);
+          expect(two.get().unrecorded.get(TASK)?.reason).toBe("storage");
+          expect(atTeardown).toBe("marked");
+        } else {
+          expect(
+            s.of(caller).length,
+            "the call is recovered as lost, never stopped for good",
+          ).toBeGreaterThanOrEqual(2);
+          expect(two.get().unrecorded.has(TASK)).toBe(false);
+          expect(
+            atTeardown,
+            "no fence published while the page is torn down",
+          ).toBe("unmarked");
+        }
+      } finally {
+        one.dispose();
+        two?.dispose();
+      }
+    });
+
+    test(`Q3 ${caller}, ${what}: a store that keeps failing under a LIVE page: this page is held at once, and once the repairs are spent every page is fenced (Decision B: no automatic transmission after a failed retry-state write)`, async () => {
+      const m = markerWorld();
+      const w = await setup();
+      const s = scripted(w, caller, answer, {
+        delay: 0,
+        ...(later === undefined ? {} : { later }),
+      });
+      const f = failing(w, caller, 99);
+      const one = w.make({
+        service: () => f.service,
+        markers: m.page("origin"),
+        api: s.api,
+      });
+      let two: CatchUpRunner | null = null;
+      try {
+        one.ensure(TASK, "daily");
+        await w.idle(one);
+        expect(f.failed()).toBe(1 + REPAIR_MS.length);
+        expect(one.get().unrecorded.has(TASK)).toBe(true);
+        expect(s.of(caller), "this page made no further call").toHaveLength(1);
+        expect(m.page("observer").probe(scopeOf(w), OP(caller))).toBe("marked");
+        one.dispose();
+        two = w.make({ markers: m.page("replacement"), api: s.api });
+        two.ensure(TASK, "daily");
+        two.kick();
+        two.reconnected();
+        await w.idle(two);
+        expect(s.of(caller), "no page calls automatically").toHaveLength(1);
+        expect(two.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      } finally {
+        one.dispose();
+        two?.dispose();
+      }
+    });
+  }
+
+  // ---- C5 (R38): explicit old-day work after a real change of the task's day ---------------------------------------------------------
+  test("C5: after the task's day changed, the explicit day entry (a command's day) recovers the OLD day's retained row with that row's own read: same generation, no command, and no row of the new day", async () => {
+    // Issued 30 s before the zone's midnight; recovered 5 s after it (inside the lost call's 180 s window).
+    const midnight = dayEnd(TODAY, ZONE) * 1000;
+    const issuedAt = midnight - 30_000;
+    const w = await setup({
+      seed: [
+        row({
+          phase: "awaiting_position_read",
+          read_seq: 1,
+          successful_calls: 0,
+          schedule: schedule({
+            caller: "position",
+            issued: issuedAt,
+            seen: issuedAt,
+          }),
+        }),
+      ],
+      positions: [detail("2026-10-01", true), detail(TODAY, false)],
+    });
+    // The task's own day is now TODAY + 1 (the device clock passed the zone's midnight).
+    w.setNow(midnight + 5_000);
+    const rec = recording(w);
+    const r = w.make({ service: () => rec.service });
+    try {
+      expect(todayIn(ZONE, w.now())).toBe(addDays(TODAY, 1));
+      r.ensure(TASK, "daily", { throughDate: TODAY });
+      await w.idle(r);
+      expect(
+        w.sent(),
+        "no command: the old day's row continues with its read",
+      ).toHaveLength(0);
+      expect(w.reads()).toHaveLength(2);
+      const own = rec.writes.find(
+        (e) =>
+          e.name === PLAN_OF.position &&
+          (e.next as MaterialiseSequenceRow | null)?.through_date === TODAY &&
+          scheduleOf(e.next)?.issued != null,
+      );
+      expect(own?.next).toMatchObject({
+        through_date: TODAY,
+        sequence_generation: "g-r36",
+        phase: "awaiting_position_read",
+        read_seq: 1,
+        schedule: { caller: "position", failures: 1 },
+      });
+      expect(
+        rec.writes.some(
+          (e) =>
+            (e.next as MaterialiseSequenceRow | null)?.through_date ===
+            addDays(TODAY, 1),
+        ),
+        "no row of the new day",
+      ).toBe(false);
+      expect(
+        w.stored(),
+        "the old day is covered by its own read",
+      ).toBeUndefined();
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("Q5 discovery: a success whose first write is lost is not fenced; the next runner reads again and sends nothing before its own discovery and position reads", async () => {
+    const r = await lose("discovery", () => detail("2026-10-01", true), false, {
+      delay: 0,
+      later: [() => detail("2026-10-01", true)],
+      received: false,
+    });
+    try {
+      const discoveries = r.s.of("discovery");
+      expect(discoveries).toHaveLength(2);
+      const sends = r.s.of("command");
+      expect(
+        sends,
+        "the first runner sent nothing on the lost success",
+      ).toHaveLength(1);
+      const order = r.s.calls.map((c) => c.caller);
+      expect(order.indexOf("command")).toBeGreaterThan(
+        order.lastIndexOf("discovery"),
+      );
+      expect(r.two.get().unrecorded.has(TASK)).toBe(false);
+      r.fences();
+    } finally {
+      r.two.dispose();
+    }
+  });
+
+  test("Q5 position: a success (the position moved, not terminal) whose first write is lost is not fenced; the next runner reads again, GET only, and counts the call once", async () => {
+    const r = await lose("position", () => detail("2026-10-05", true), false, {
+      delay: 0,
+      later: [() => detail("2026-10-09", true)],
+      received: false,
+    });
+    try {
+      expect(scheduleOf(r.h.written())).toBeNull();
+      expect((r.h.written() as MaterialiseSequenceRow).successful_calls).toBe(
+        1,
+      );
+      const order = r.s.calls.map((c) => c.caller);
+      const firstSend = order.indexOf("command");
+      const replacementRead = order.indexOf(
+        "position",
+        order.indexOf("position") + 1,
+      );
+      expect(replacementRead).toBeGreaterThan(firstSend);
+      expect(
+        order.slice(firstSend + 1, replacementRead),
+        "no command between the success and the replacement's own position read",
+      ).not.toContain("command");
+      const ready = r.rec.writes.find(
+        (e) =>
+          e.name === PLAN_OF.position &&
+          (e.next as MaterialiseSequenceRow | null)?.phase === "ready",
+      );
+      expect(
+        (ready?.next as MaterialiseSequenceRow | undefined)?.successful_calls,
+        "the call is counted once, by the read that is recorded",
+      ).toBe(1);
+      r.fences();
+    } finally {
+      r.two.dispose();
     }
   });
 });

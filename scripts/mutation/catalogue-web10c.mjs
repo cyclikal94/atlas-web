@@ -3578,15 +3578,13 @@ export const UNIT_10C = [
       /WITNESS \(R36-B\)|Q2 (discovery|command|position): the first failed outcome write is fenced before/,
     patch: (t) =>
       // Re-anchored (revision 13): publication is at receipt for an outcome that must be kept (`protect`), otherwise at the first
-      // unrecorded write (`fence` in `settle`); the same fault (nothing published until the repairs are spent).
+      // unrecorded write (`fence` in `settle`); the same fault (nothing published until the repairs are spent). Re-anchored again
+      // (revision 14): a failed write of an outcome not fenced at receipt is published once its repairs are spent (the design), so the
+      // same fault is now the receipt publication withheld from every outcome.
       sub(
-        sub(
-          t,
-          '      if (!fence(at, record)) return ENDED_P;\n      if (verdict === "stale") return FENCED;',
-          '      if (verdict === "stale") return fence(at, record) ? FENCED : ENDED_P;',
-        ),
-        "      if (wait === undefined) return FENCED;",
-        "      if (wait === undefined) return fence(at, record) ? FENCED : ENDED_P;",
+        t,
+        "    const published = early\n      ? publish(at, op)",
+        "    const published = false\n      ? publish(at, op)",
       ),
   },
 
@@ -3717,10 +3715,11 @@ export const UNIT_10C = [
     expect:
       /STALE-OUTCOME WITNESS \(R36-E\)|Q3 (discovery|command|position) (429|ok): the first write of a's answer finds b's admission/,
     patch: (t) =>
+      // Re-anchored (revision 14): the stale and spent verdicts share one return.
       sub(
         t,
-        '      if (verdict === "stale") return FENCED;',
-        '      if (verdict === "stale" && i === 0) {\n        reconcile(record);\n        return { kind: "out", out, verdict: "written" };\n      }\n      if (verdict === "stale") return FENCED;',
+        "      const wait = REPAIR_MS[i];\n",
+        '      if (verdict === "stale" && i === 0) {\n        reconcile(record);\n        return { kind: "out", out, verdict: "written" };\n      }\n      const wait = REPAIR_MS[i];\n',
       ),
   },
   {
@@ -3763,8 +3762,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '        () => commit(service, captured, key, issued, outcome),\n        judgeRow(issued, outcome),\n        mustKeep(outcome, plan.kind === "send" && answered.kind === "ok"),\n        key.through_date,',
-        '        () => commit(service, captured, key, issued, plan.kind === "send" ? onSent(issued, answered as SendAnswer, deps.now()) : outcome),\n        judgeRow(issued, outcome),\n        mustKeep(outcome, plan.kind === \"send\" && answered.kind === \"ok\"),\n        key.through_date,',
+        // Re-anchored (revision 14): `mustKeep` also takes the answer (R36-G).
+        "        () => commit(service, captured, key, issued, outcome),\n        judgeRow(issued, outcome),\n        mustKeep(\n",
+        '        () => commit(service, captured, key, issued, plan.kind === "send" ? onSent(issued, answered as SendAnswer, deps.now()) : outcome),\n        judgeRow(issued, outcome),\n        mustKeep(\n',
       ),
   },
   {
@@ -3875,6 +3875,108 @@ export const UNIT_10C = [
         t,
         "            (operation) => outboxOperation(operation) && covers(operation),",
         "            (operation) => covers(operation),",
+      ),
+  },
+  {
+    id: "MU-3283",
+    title:
+      "R36-G: WEB-10c A19 (review 15): a failure the server answered is fenced only if it stops the caller or holds a server minimum (revision 13's selection)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /REVIEW15 Q1|Q2 (discovery|command|position), (an unrecognised answer|a 500|a 503|a 429)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (answer !== undefined && receivedFailure(answer)) return true;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3284",
+    title:
+      "R36-G: WEB-10c A19 (review 15): an uncertain answer without retry facts is taken for no answer at all (transport), so an unrecognised one is not fenced at receipt",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /Q2 (discovery|command|position), an unrecognised answer|REVIEW15 Q1 (discovery|position) (CONTROL|WITNESS)|the FIRST unrecognised answer/,
+    patch: (t) =>
+      sub(
+        t,
+        '  (answer.retry?.cause ?? "unrecognised") !== "transport";',
+        '  (answer.retry?.cause ?? "transport") !== "transport";',
+      ),
+  },
+  {
+    id: "MU-3285",
+    title:
+      "R36-G/C1: WEB-10c A19 (review 15): no answer at all (transport) is fenced at receipt like a received one, so a call cancelled as its page closes stops the work for good (E-M2)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /a transport failure \(no answer\) observed|no answer \(transport\): its first write FAILS|a transport failure whose record never lands/,
+    patch: (t) =>
+      sub(
+        t,
+        '  (answer.retry?.cause ?? "unrecognised") !== "transport";',
+        '  (answer.retry?.cause ?? "unrecognised") !== "never";',
+      ),
+  },
+  {
+    id: "MU-3286",
+    title:
+      "R36-G: WEB-10c A19 (review 15): a discovery read's received failure is not given to its receipt protection",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /Q2 discovery, |REVIEW15 Q1 discovery/,
+    patch: (t) =>
+      sub(
+        t,
+        "      scheduled(issued, after),\n      read.answer,\n    );",
+        "      scheduled(issued, after),\n    );",
+      ),
+  },
+  {
+    id: "MU-3287",
+    title:
+      "R36-G: WEB-10c A19 (review 15): a command's or position read's received failure is not given to its receipt protection",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /Q2 (command|position), |REVIEW15 Q1 (command|position)/,
+    patch: (t) =>
+      sub(
+        t,
+        "          answered as SendAnswer | ReadAnswer,\n",
+        "          undefined,\n",
+      ),
+  },
+  {
+    id: "MU-3288",
+    title:
+      "R36/Firefox teardown: WEB-10c A19 (revision 14): an outcome not fenced at receipt is fenced across pages at its FIRST failed write (a page torn down mid-write stops the work for good)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /its first write FAILS while the page owns it and the page is torn down|never recorded: fenced at the first failure/,
+    patch: (t) =>
+      sub(
+        t,
+        "      // still fences every page.\n      await sleep(wait);",
+        "      // still fences every page.\n      if (!fence(at, record)) return ENDED_P;\n      await sleep(wait);",
+      ),
+  },
+  {
+    id: "MU-3289",
+    title:
+      "R36/Decision B: WEB-10c A19 (revision 14): an outcome whose repairs are spent under a live page is never fenced across pages (another page transmits after a failed retry-state write)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a store that keeps failing under a LIVE page/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (verdict === "stale" || wait === undefined)\n        return fence(at, record) ? FENCED : ENDED_P;',
+        '      if (wait === undefined) return FENCED;\n      if (verdict === "stale")\n        return fence(at, record) ? FENCED : ENDED_P;',
       ),
   },
 ];
