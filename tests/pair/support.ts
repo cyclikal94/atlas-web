@@ -1686,14 +1686,38 @@ export async function recoveryReader(
   const s = await stored(page, account, o.rows ?? false, o.local ?? null);
   if (!s) throw new Error(`the ${reader} has no account database`);
   const seen = await renderingOf(page, account);
+  // Revision 29 (R29-DIAG; design assessment C5/Q8): the stored state is read again AFTER the rendering's bracketed capture. Unchanged,
+  // the capture is judged against the stored state in force throughout it; changed (a commit between the reads), the sample is
+  // INCOHERENT — never judged, re-read by the observer (bounded and counted), never hidden or shown.
+  const again = await stored(page, account, false, null);
+  const unchanged = again !== null && storedStamp(again) === storedStamp(s);
   return {
     ...s,
     reader,
     page: pageId,
     account,
     ...seen,
+    coherent: seen.coherent && unchanged,
+    incoherence: !unchanged
+      ? "the stored state changed during the sample"
+      : seen.incoherence,
   } as RecoveryReader & { local?: LocalWork };
 }
+/** What a recovery sample is judged on from storage, as one comparable stamp (composition_seq advances with every cache/draft/effect write). */
+const storedStamp = (s: Stored) =>
+  JSON.stringify([
+    s.composition_seq,
+    s.cache_status,
+    s.cache_digest,
+    s.applied_revision,
+    s.cursor,
+    s.phase,
+    s.delta_stage,
+    s.staged,
+    s.recovery_generation,
+    s.staging_rows,
+    s.staging_generations,
+  ]);
 
 /**
  * Observes the recovery after the real 410 (pair-recovery.mjs `observeRecovery`) with the interval's hold still armed: every snapshot

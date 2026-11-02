@@ -20,7 +20,8 @@
 //      with rows still staged, a changed cache before validity) is a SPLIT activation and fails. Then the follower reads the same complete
 //      cache, the complete rows are judged by the caller's oracle, and `recovery_activated` (revision 27's `recovery_exposed`, renamed in
 //      revision 28: it is the DATA activation, not what a page shows) binds the activating page.
-//   5. (revision 28) `recovery_rendered`: both pages SHOW the recovered cache (see the rendering contract below).
+//   5. (revision 28) `recovery_rendered`: both pages SHOW the recovered cache (see the rendering contract below). Revision 29: every sample
+//      on the way, of either page, is admissible for its own fence (`admissibilityProblems`).
 // Network barriers show the state BETWEEN transactions; they cannot look inside one. Atomicity inside the W22/W23 transaction remains the
 // existing native transaction controls' (qualified separately); this observer requires the evidence a split would leave between them.
 import { createHash } from "node:crypto";
@@ -49,7 +50,11 @@ const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 // (§3.7.3: the data commits before the auth release); the page is then required to SHOW it once the session completes.
 
 /** The contract of the recovery observations' readers (each observation's `detail.schema`); earlier observations are incomplete. */
-export const OBSERVATION_SCHEMA = "web09c-recovery-observation/2";
+// Revision 29 (C5): /3 — every sample states its coherence (`coherent`, from the bracketed adapter) and how many incoherent samples of
+// that read were re-read before it (`incoherent_rereads`); /2 samples are incomplete, never upgraded.
+export const OBSERVATION_SCHEMA = "web09c-recovery-observation/3";
+/** The most consecutive INCOHERENT samples one read re-reads before it fails (each re-read is counted in the sample it ends with). */
+export const MAX_INCOHERENT_REREADS = 20;
 export const RECOVERY_VIEW_KINDS = Object.freeze(["displaying", "neutral"]);
 const isText = (v) => typeof v === "string" && v.length > 0;
 
@@ -95,6 +100,10 @@ export function observationProblems(r, { account }) {
     p.push(`${who}'s cache-gate placeholders are not observed`);
   if (typeof r.fenced !== "boolean")
     p.push(`${who}'s auth fences are not observed`);
+  if (r.coherent !== true)
+    p.push(
+      `${who}'s sample is not stated coherent (${r.incoherence ?? "no coherence"})`,
+    );
   return p;
 }
 
@@ -156,6 +165,62 @@ export function shownProblems(r) {
   return surface === "shown"
     ? []
     : [`${r.reader} does not show the recovered cache (${surface})`];
+}
+
+// Revision 29 (R29-DIAG, family `segmented-sync-development-pairing`, incomplete_fix of R28-DIAG.b; design assessment C1/C2, invariants
+// 2-5): revision 28 published `recovery_activated` from STORED completeness alone and checked the fence only once BOTH pages were shown, so
+// a page displayed while its own fence stood was accepted when it was hidden again before the settlement, or while its peer was still
+// hidden. The safety condition is now PER PAGE and PER SAMPLE, checked inside the read itself (no sample reaches a caller unjudged), before
+// any pair-level progress is tested:
+//   - the fence implication: a sample whose auth fence stands must be the recovery-hidden shape — the neutral session over a gated or
+//     unmounted protected tree. A displaying session (refreshing placeholder or not) is never that shape. It holds for either page, either
+//     caller and every phase, independently of the peer.
+//   - before the complete replacement: the caller's hidden rules (`hiddenProblems`), as before.
+//   - after the complete replacement: each page is either HIDDEN AND WAITING (fenced: the shape above; unfenced: the ordinary hidden forms)
+//     or SHOWN for the bound account with no fence. Complete data under a standing fence while hidden is LEGAL (§3.7.3/T24: the data
+//     commits before the auth release); either page may show first once its own fence is clear; both shown is only the liveness end.
+// A violation fails at once: a later lawful sample cannot repair an earlier forbidden one.
+/** The phases a sample is judged in (`activation`: the leader's reads while the commit is awaited, judged by the stored state they hold). */
+export const ADMISSIBILITY_PHASES = Object.freeze([
+  "before_activation",
+  "activation",
+  "after_activation",
+]);
+/** Whether a reader holds the complete replacement in storage (the activation committed for it). */
+export const holdsComplete = (r) =>
+  r?.cache_status === "valid" && r?.staging_rows === 0;
+
+/**
+ * The problems of a sample's RENDERING against its own auth fence and the phase (R29-DIAG). `phase`: "before_activation" (the caller's
+ * hidden rules), "after_activation" (hidden and waiting, or shown unfenced) or "activation" (whichever of the two the sample's stored state
+ * is). An incomplete rendering is never admissible.
+ */
+export function admissibilityProblems(r, { caller, phase, what }) {
+  if (!ADMISSIBILITY_PHASES.includes(phase))
+    throw new Error(`unknown admissibility phase ${phase}`);
+  if (!complete(r))
+    return [`${r?.reader}'s rendering ${what} was not observed`];
+  if (typeof r.fenced !== "boolean")
+    return [`${r.reader}'s auth fences ${what} were not observed`];
+  const after =
+    phase === "after_activation" ||
+    (phase === "activation" && holdsComplete(r));
+  // After the replacement a FENCED sample has exactly one admissible shape, judged by the fence implication below; an unfenced one is
+  // shown, or hidden in an ordinary form while it waits.
+  let p = [];
+  if (!after) p = hiddenProblems(r, { caller, what });
+  else if (!r.fenced && shownProblems(r).length > 0)
+    p = hiddenProblems(r, { caller: "ordinary", what });
+  if (p.length > 0) return p;
+  if (r.fenced) {
+    const g = r.rendering;
+    const surface = surfaceOf(g);
+    if (g.view.kind !== "neutral" || surface !== "protected_hidden")
+      return [
+        `${r.reader} is ${surface === "shown" ? "shown" : `${g.view.kind} (${surface})`} while the recovery fence stands (${what})`,
+      ];
+  }
+  return [];
 }
 
 /** The problems of a reader's state right after the refusal was processed (`recovery_invalidated`). */
@@ -243,6 +308,8 @@ export function activatedProblems(r, { oldDigest }) {
  * must be a complete rendering of its own unchanged document, positively attached in its role, for the account; `recovery_activated` is
  * the atomic DATA activation; `recovery_rendered` is the later moment BOTH pages show the recovered cache (for the recovery caller, once
  * the fence is cleared: shown while fenced fails). Every sample until then is hidden or shown, never another state.
+ * Revision 29 (R29-DIAG): EVERY read — each held page, each activation poll, the complete follower, the row-bearing leader read and every
+ * settlement poll — is judged by `admissibilityProblems` for that page against its own fence before it is used, irrespective of its peer.
  * Resolves with {pages, final, rendered}; throws with a diagnosis on the first violation (the interval is then kept incomplete by its
  * owner). A read that throws is a failed observation, never a hidden one.
  */
@@ -268,14 +335,29 @@ export async function observeRecovery(io, o) {
     if (problems.length > 0) fail(`${what}: ${problems.join("; ")}`);
   };
   const documents = {};
-  const read = async (who, opts) => {
+  // Every read names its phase and is judged for admissibility (R29-DIAG) before its result is used or any milestone is published.
+  const read = async (who, phase, opts) => {
+    if (!ADMISSIBILITY_PHASES.includes(phase))
+      throw new Error(`a read of the ${who} names no admissibility phase`);
     let r;
-    try {
-      r = await io.read(who, opts);
-    } catch (error) {
-      fail(`the ${who}'s read failed: ${String(error?.message ?? error)}`);
+    // An INCOHERENT sample (its fences or stored state changed during the capture) is no observation: it is re-read, bounded and counted,
+    // never judged — while every coherent sample is judged, so a forbidden coherent one is never re-read into success.
+    let incoherent = 0;
+    for (;;) {
+      try {
+        r = await io.read(who, opts);
+      } catch (error) {
+        fail(`the ${who}'s read failed: ${String(error?.message ?? error)}`);
+      }
+      if (r?.coherent !== false) break;
+      incoherent += 1;
+      if (incoherent > MAX_INCOHERENT_REREADS)
+        fail(
+          `no coherent sample of the ${who} in ${incoherent} reads at ${phase.replace("_", " ")} (${r.incoherence ?? "incoherent"})`,
+        );
     }
     if (r?.reader !== who) fail(`a read of the ${who} returned ${r?.reader}`);
+    r.incoherent_rereads = incoherent;
     require(observationProblems(r, {
       account,
     }), `an incomplete observation of the ${who}`);
@@ -288,11 +370,16 @@ export async function observeRecovery(io, o) {
     const other = documents[who === "leader" ? "follower" : "leader"];
     if (other !== undefined && other === doc)
       fail("the follower is the leading page's own document");
+    require(admissibilityProblems(r, {
+      caller,
+      phase,
+      what: `at ${phase.replace("_", " ")}`,
+    }), `the ${who}'s page is not admissible`);
     return r;
   };
-  const both = async (opts) => [
-    await read("leader", opts),
-    await read("follower", opts),
+  const both = async (phase, opts) => [
+    await read("leader", phase, opts),
+    await read("follower", phase, opts),
   ];
   const handled = new Set();
   const pages = [];
@@ -335,7 +422,7 @@ export async function observeRecovery(io, o) {
     if (pages.length > maxPages) fail(`more than ${maxPages} snapshot pages`);
     const last = record.has_more === false;
     if (pages.length === 1) {
-      const [leader, follower] = await both();
+      const [leader, follower] = await both("before_activation");
       for (const r of [leader, follower])
         require(invalidatedProblems(r, {
           caller,
@@ -362,7 +449,7 @@ export async function observeRecovery(io, o) {
         );
     } else {
       // Both pages at EVERY held page (C4): an intermediate follower fault is never unobserved.
-      const [leader, follower] = await both();
+      const [leader, follower] = await both("before_activation");
       require(stagedProblems(leader, {
         caller,
         oldDigest,
@@ -409,9 +496,9 @@ export async function observeRecovery(io, o) {
     const deadline = io.now() + settleTimeoutMs;
     let final = null;
     for (;;) {
-      const r = await read("leader");
-      const complete = r.cache_status === "valid" && r.staging_rows === 0;
-      if (complete) {
+      // Each poll is judged for what the page shows against its own fence (R29-DIAG): complete data while fenced must stay hidden.
+      const r = await read("leader", "activation");
+      if (holdsComplete(r)) {
         require(activatedProblems(r, {
           oldDigest,
         }), "after the last snapshot page");
@@ -432,13 +519,17 @@ export async function observeRecovery(io, o) {
         fail(`the activation did not commit within ${settleTimeoutMs} ms`);
       await io.sleep(25);
     }
-    const follower = await read("follower");
+    const follower = await read("follower", "after_activation");
     require(activatedProblems(follower, {
       oldDigest,
     }), "the follower after the activation");
     if (follower.cache_digest !== final.cache_digest)
       fail("the follower does not read the activated cache");
-    const withRows = await read("leader", { rows: true });
+    // The row-bearing read is the sample `recovery_activated` publishes: it is judged in full itself (R29-DIAG, invariant 6).
+    const withRows = await read("leader", "after_activation", { rows: true });
+    require(activatedProblems(withRows, {
+      oldDigest,
+    }), "the leader's row-bearing read after the activation");
     if (withRows.cache_digest !== final.cache_digest)
       fail("the cache changed between the activation and its rows");
     const verdict = expectFinal(withRows.rows ?? []);
@@ -455,11 +546,12 @@ export async function observeRecovery(io, o) {
       }),
     );
     await io.onPage?.("recovery_activated", record, leader);
-    // The RENDERED settlement (C5): both pages show the recovered cache. Until then each is hidden (ordinary rules: a displaying page behind
-    // the refreshing placeholder, or the neutral state over a gated/unmounted tree) — never another state; the data stays the activated cache.
+    // The RENDERED settlement (C5): both pages show the recovered cache. Until then each page is judged ON ITS OWN in the read (R29-DIAG):
+    // hidden and waiting (fenced: the neutral state over a gated/unmounted tree; unfenced: also a displaying page behind the refreshing
+    // placeholder) or shown with its fence clear — never shown while fenced, whatever its peer shows; the data stays the activated cache.
     const shownBy = io.now() + settleTimeoutMs;
     for (;;) {
-      const [l, f] = await both();
+      const [l, f] = await both("after_activation");
       for (const r of [l, f]) {
         require(activatedProblems(r, {
           oldDigest,
@@ -469,7 +561,8 @@ export async function observeRecovery(io, o) {
       }
       const waiting = [...shownProblems(l), ...shownProblems(f)];
       if (waiting.length === 0) {
-        if (caller === "recovery" && (l.fenced || f.fenced))
+        // Already refused per page in the read; kept as the explicit end condition (both shown, neither fenced, either caller).
+        if (l.fenced || f.fenced)
           fail("the recovered cache is shown while the recovery fence stands");
         await io.observe(
           "recovery_rendered",
@@ -480,12 +573,6 @@ export async function observeRecovery(io, o) {
         await io.onPage?.("recovery_rendered", record, l);
         return { pages, final: withRows, rendered: { leader: l, follower: f } };
       }
-      for (const r of [l, f])
-        if (shownProblems(r).length > 0)
-          require(hiddenProblems(r, {
-            caller: "ordinary",
-            what: "before the recovered cache is shown",
-          }), "after the activation");
       if (io.now() > shownBy)
         fail(
           `the recovered cache was not shown within ${settleTimeoutMs} ms (${waiting.join("; ")})`,

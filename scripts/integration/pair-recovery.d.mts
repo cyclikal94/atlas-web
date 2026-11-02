@@ -38,10 +38,16 @@ export interface RecoveryReader {
   notice: { reason?: string } | null;
   /** The account's auth fences; null when they could not be read (incomplete). */
   fenced: boolean | null;
+  /** Revision 29 (C5): the fences and stored state were unchanged across the bracketed capture; false: re-read, never judged. */
+  coherent?: boolean;
+  incoherence?: string | null;
+  /** Revision 29: the incoherent samples of this read re-read before this one. */
+  incoherent_rereads?: number;
   rows?: unknown[];
   [key: string]: unknown;
 }
 export const OBSERVATION_SCHEMA: string;
+export const MAX_INCOHERENT_REREADS: number;
 export const RECOVERY_VIEW_KINDS: readonly string[];
 export function observationProblems(
   r: RecoveryReader,
@@ -55,6 +61,21 @@ export function hiddenProblems(
   o: { caller: string; what: string },
 ): string[];
 export function shownProblems(r: RecoveryReader): string[];
+// Revision 29 (R29-DIAG): per-page, per-sample fence/render admissibility.
+export const ADMISSIBILITY_PHASES: readonly [
+  "before_activation",
+  "activation",
+  "after_activation",
+];
+export function holdsComplete(r: RecoveryReader): boolean;
+export function admissibilityProblems(
+  r: RecoveryReader,
+  o: {
+    caller: string;
+    phase: "before_activation" | "activation" | "after_activation";
+    what: string;
+  },
+): string[];
 export function invalidatedProblems(
   r: RecoveryReader,
   o: { caller: string; oldDigest: string; refusalGeneration: number },

@@ -1619,6 +1619,8 @@ const readerState = (reader, extra = {}) => ({
   applied_revision: 6,
   notice: null,
   fenced: false,
+  coherent: true,
+  incoherent_rereads: 0,
   ...withoutRender(extra),
   rendering: RENDER[extra.render ?? "refreshing"](reader),
 });
@@ -1626,7 +1628,7 @@ const pair = (extra = {}, follower = {}) => ({
   leader: readerState("leader", extra),
   follower: readerState("follower", { ...extra, ...follower }),
 });
-const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/2" };
+const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/3" };
 /** X0's real 410 at 13 (the hand-off), then three snapshot pages 14, 15, 16, each held and released by a recorded release. */
 function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
   const w = world();
@@ -2166,4 +2168,148 @@ test("refused (revision 28, C5): the rendered settlement before any data activat
     (o) => o.kind !== "recovery_activated",
   );
   refuse(r, /no data activation was observed before it/, "no activation");
+});
+
+// ---- revision 29 (R29-DIAG; design assessment Q4): the saved activation sample against its page's OWN fence ---------------------------
+// Revision 28's reader checked the fence only in `recovery_rendered`: a saved `recovery_activated` sample displaying while fenced was
+// accepted (the review's settlement probe). Each case changes ONE sample's rendering (or its fence observation) and keeps every stored
+// field, hash, revision and identity correct, and the final rendered record lawful.
+const shownFenced = (who) => ({ rendering: RENDER.shown(who), fenced: true });
+const refreshingFenced = (who) => ({
+  rendering: RENDER.refreshing(who),
+  fenced: true,
+});
+for (const caller of ["ordinary", "recovery"])
+  for (const who of ["leader", "follower"])
+    for (const [shape, change] of [
+      ["shown", shownFenced],
+      ["displaying-refreshing", refreshingFenced],
+    ]) {
+      test(`refused (revision 29, ${caller}): the ${who} ${shape} while fenced in the saved data activation, the final record lawful`, () => {
+        const r = observedRecovery({ caller, rearmed: caller === "recovery" });
+        accept(r);
+        Object.assign(obs(r, "recovery_activated").detail[who], change(who));
+        refuse(
+          r,
+          new RegExp(
+            `recovery_activated: ${who}'s page is neither hidden while waiting nor shown unfenced at the data activation`,
+          ),
+          `${caller} ${who} ${shape}`,
+        );
+        refuse(
+          r,
+          new RegExp(
+            `recovery_activated: ${who}'s page is not the neutral covered surface while its recovery fence stands`,
+          ),
+          `${caller} ${who} ${shape} fence implication`,
+        );
+      });
+      test(`refused (revision 29, ${caller}): the ${who} ${shape} while fenced at a held page`, () => {
+        const r = observedRecovery({ caller, rearmed: caller === "recovery" });
+        Object.assign(
+          obs(r, "recovery_final_held").detail.pages[0][who],
+          change(who),
+        );
+        refuse(
+          r,
+          new RegExp(
+            `recovery_final_held: ${who}'s page is not the neutral covered surface while its recovery fence stands`,
+          ),
+          `${caller} ${who} ${shape} held`,
+        );
+      });
+    }
+test("accepted (revision 29, recovery caller): lawful ASYMMETRIC activation samples — the leader shown with its fence clear, the follower fenced and hidden", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  Object.assign(obs(r, "recovery_activated").detail.leader, {
+    rendering: RENDER.shown("leader"),
+    fenced: false,
+  });
+  accept(r);
+});
+test("accepted (revision 29, recovery caller): the follower first, the leader unfenced but still behind the refreshing placeholder", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  Object.assign(obs(r, "recovery_activated").detail.follower, {
+    rendering: RENDER.shown("follower"),
+    fenced: false,
+  });
+  Object.assign(obs(r, "recovery_activated").detail.leader, {
+    rendering: RENDER.refreshing("leader"),
+    fenced: false,
+  });
+  accept(r);
+});
+test("accepted (revision 29, ordinary caller): an activation sample still behind the refreshing placeholder (unfenced, waiting)", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_activated").detail.follower.rendering =
+    RENDER.refreshing("follower");
+  accept(r);
+});
+test("refused (revision 29): an activation sample with an invisible placeholder is neither hidden nor shown", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_activated").detail.leader.rendering = {
+    ...RENDER.shown("leader"),
+    placeholders: { present: 1, refreshing_visible: 0 },
+  };
+  refuse(
+    r,
+    /recovery_activated: leader's page is neither hidden while waiting nor shown unfenced/,
+    "invisible placeholder",
+  );
+});
+test("refused (revision 29, ordinary caller): shown while fenced at the rendered settlement (either caller)", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_rendered").detail.leader.fenced = true;
+  refuse(
+    r,
+    /recovery_rendered: leader shows the recovered cache while fenced/,
+    "ordinary fenced shown",
+  );
+});
+
+// Revision 29 (C5): the observation contract /3 — each saved sample coherent, its incoherent re-reads counted.
+test("refused (revision 29, C5): a saved sample that is not coherent, or whose re-reads are not counted", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_activated").detail.follower.coherent = false;
+  refuse(
+    r,
+    /recovery_activated: an incomplete sample: follower's sample is not coherent/,
+    "incoherent",
+  );
+  const q = observedRecovery();
+  delete obs(q, "recovery_staged_hidden").detail.leader.incoherent_rereads;
+  refuse(
+    q,
+    /recovery_staged_hidden: an incomplete sample: leader's incoherent re-reads are not counted/,
+    "uncounted",
+  );
+});
+test("accepted (revision 29, C5): a coherent sample after counted incoherent re-reads", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_activated").detail.leader.incoherent_rereads = 2;
+  accept(r);
+});
+test("refused (revision 29, C5): an observation of the revision-28 contract /2 is incomplete, never upgraded", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_rendered").detail.schema = "web09c-recovery-observation/2";
+  refuse(
+    r,
+    /recovery_rendered: made under the observation contract "web09c-recovery-observation\/2"/,
+    "old contract",
+  );
+});
+test("refused (revision 29): a fenced sample DISPLAYING over a gated tree is not the neutral state the fence requires", () => {
+  const r = observedRecovery();
+  Object.assign(obs(r, "recovery_final_held").detail.pages[0].follower, {
+    fenced: true,
+    rendering: {
+      ...RENDER.refreshing("follower"),
+      root: { present: true, gated: true, mounted: true },
+    },
+  });
+  refuse(
+    r,
+    /recovery_final_held: follower's page is not the neutral covered surface while its recovery fence stands/,
+    "displaying covered fenced",
+  );
 });

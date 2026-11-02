@@ -292,7 +292,12 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   run), and what each page SHOWS is observed separately from its stored cache status (session view, protected root, visible cache-gate placeholder,
   attachment and document identity; an unavailable observation is incomplete, never hidden), at every held page by both pages; the atomic data activation
   (`recovery_activated`) and the later moment both pages show the recovered cache (`recovery_rendered`; for the fenced caller only once its fence is cleared)
-  are separate observations. The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
+  are separate observations. Since revision 29 (R29-DIAG) each page's rendering is judged against its OWN auth fence at every sample, in the live observer
+  and in the saved-evidence reader, independently of the other page: a page whose fence stands must show the neutral state over a covered protected tree,
+  also at the data activation (complete data while fenced is legal only while hidden) and while its peer is still hidden; each page may show the recovered
+  cache once its own fence is clear. Each sample is bracketed (the fences and the stored state read before and after one synchronous capture of the page);
+  a sample in which either changed is incoherent, re-read (bounded, counted) and never judged. The observer's settlement polls are not persisted, so the
+  reader can judge only the recorded samples. The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
   are qualified with stand-ins, and the rendering adapter against the fixture DOM, only; the approved executable has NOT been launched and no diagnostic case
   has run in a browser.** The approval requires an independent review of the exact client source, selection and
   recipe BEFORE any execution (design assessment Q6), then the three-engine qualification (Q7). Nothing here is expiry/pruning evidence yet.

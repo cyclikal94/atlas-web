@@ -14,7 +14,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  admissibilityProblems,
   hiddenProblems,
+  holdsComplete,
+  MAX_INCOHERENT_REREADS,
   OBSERVATION_SCHEMA,
   observationProblems,
   observeRecovery,
@@ -253,7 +256,9 @@ function world({
     const barrier = barrierOf();
     const phase = state.activated ? "after" : "before";
     let rendering = healthyRendering(reader, {
-      caller,
+      // Revision 29 (R29-DIAG; labelled adaptation): the stored "ordinary caller fenced" fault renders the fence's lawful hidden shape, so
+      // the STORED check stays the one refusing it; displayed while fenced, the per-page fence implication refuses it first (tested below).
+      caller: fault === "ordinary-fenced" ? "recovery" : caller,
       phase,
       fenced: state.fenced && !shownWhileFenced,
     });
@@ -283,6 +288,8 @@ function world({
       rendering,
       notice: state.notice,
       fenced: fencesUnavailable === reader ? null : state.fenced,
+      coherent: true,
+      incoherence: null,
     };
   }
   return { io, releases, observations, records, reads, state };
@@ -624,6 +631,7 @@ test("Q2 rules (revision 28): hidden/shown are judged from the rendering alone, 
     account: ACCOUNT,
     cache_status: "invalid",
     fenced: false,
+    coherent: true,
     rendering,
     ...extra,
   });
@@ -682,5 +690,444 @@ test("Q2 rules (revision 28): hidden/shown are judged from the rendering alone, 
   assert.equal(
     shownProblems(sample({ status: "unavailable", error: "e" })).length,
     1,
+  );
+});
+
+// ---- revision 29 (R29-DIAG; design assessment Q1-Q5): each page's rendering against its OWN fence, at EVERY read -----------------------
+// Revision 28 published `recovery_activated` from stored completeness alone and checked the fence only when BOTH pages were shown; a page
+// displayed while fenced was accepted when it was hidden again before the settlement, or while its peer was still hidden (the review's
+// settlement probe). Every case below keeps the stored state correct and injects ONE page's forbidden rendering at ONE read, restoring the
+// lawful shape at once (a fault left standing until the end could be caught later for the wrong reason).
+const NEUTRAL = healthyRendering("x", { caller: "recovery", phase: "before" });
+const REFRESHING = healthyRendering("x", {
+  caller: "ordinary",
+  phase: "before",
+});
+const SHOWN = healthyRendering("x", { caller: "ordinary", phase: "after" });
+const R29_SHAPES = {
+  "neutral-hidden": NEUTRAL,
+  shown: SHOWN,
+  "displaying-refreshing": REFRESHING,
+  "placeholder-not-visible": SHAPES["placeholder-not-visible"](SHOWN),
+  unavailable: SHAPES.unavailable(),
+};
+// [shape, fenced] → admissible before (ordinary caller), before (recovery caller), after (either caller)
+const TRUTH = [
+  ["neutral-hidden", false, true, true, true],
+  ["neutral-hidden", true, true, true, true],
+  ["shown", false, false, false, true],
+  ["shown", true, false, false, false],
+  ["displaying-refreshing", false, true, false, true],
+  ["displaying-refreshing", true, false, false, false],
+  ["placeholder-not-visible", false, false, false, false],
+  ["placeholder-not-visible", true, false, false, false],
+  ["unavailable", false, false, false, false],
+  ["unavailable", true, false, false, false],
+];
+test("R29 Q1: the per-page admissibility truth table (both readers, both callers, fenced or not, before/after the complete replacement)", () => {
+  for (const reader of ["leader", "follower"])
+    for (const [
+      shape,
+      fenced,
+      ordinaryBefore,
+      recoveryBefore,
+      after,
+    ] of TRUTH) {
+      const base = {
+        reader,
+        account: ACCOUNT,
+        fenced,
+        rendering: { ...R29_SHAPES[shape], document: `${reader}-document` },
+      };
+      const before = { ...base, cache_status: "invalid", staging_rows: 3 };
+      const done = { ...base, cache_status: "valid", staging_rows: 0 };
+      const ok = (r, caller, phase) =>
+        admissibilityProblems(r, { caller, phase, what: "x" }).length === 0;
+      const name = `${reader} ${shape} fenced=${fenced}`;
+      assert.equal(
+        ok(before, "ordinary", "before_activation"),
+        ordinaryBefore,
+        `${name} before, ordinary`,
+      );
+      assert.equal(
+        ok(before, "recovery", "before_activation"),
+        recoveryBefore,
+        `${name} before, recovery`,
+      );
+      for (const caller of ["ordinary", "recovery"]) {
+        assert.equal(
+          ok(done, caller, "after_activation"),
+          after,
+          `${name} after, ${caller}`,
+        );
+        // `activation` judges each poll by the stored state it holds.
+        assert.equal(
+          ok(done, caller, "activation"),
+          after,
+          `${name} activation complete, ${caller}`,
+        );
+        assert.equal(
+          ok(before, caller, "activation"),
+          caller === "ordinary" ? ordinaryBefore : recoveryBefore,
+          `${name} activation staged, ${caller}`,
+        );
+      }
+    }
+  // A shown page while fenced names the fence; unreadable fences are never unfenced; an unknown phase is a harness error.
+  const fencedShown = {
+    reader: "follower",
+    account: ACCOUNT,
+    fenced: true,
+    cache_status: "valid",
+    staging_rows: 0,
+    rendering: { ...SHOWN, document: "d" },
+  };
+  assert.match(
+    admissibilityProblems(fencedShown, {
+      caller: "ordinary",
+      phase: "after_activation",
+      what: "x",
+    }).join(),
+    /follower is shown while the recovery fence stands/,
+  );
+  assert.match(
+    admissibilityProblems(
+      { ...fencedShown, fenced: null },
+      { caller: "ordinary", phase: "after_activation", what: "x" },
+    ).join(),
+    /auth fences x were not observed/,
+  );
+  assert.throws(
+    () =>
+      admissibilityProblems(fencedShown, {
+        caller: "ordinary",
+        phase: "later",
+        what: "x",
+      }),
+    /unknown admissibility phase/,
+  );
+  assert.equal(holdsComplete({ cache_status: "valid", staging_rows: 0 }), true);
+  assert.equal(
+    holdsComplete({ cache_status: "valid", staging_rows: 1 }),
+    false,
+  );
+});
+
+/**
+ * Wraps a world's reads after the activation: `at(n, reader, sample)` sees the n-th read after the commit (1: the first complete leader
+ * poll, 2: the complete follower, 3: the leader's row-bearing read, 4…: the settlement polls, leader then follower) and may change it.
+ */
+function afterActivation(w, at) {
+  const read = w.io.read;
+  const seen = [];
+  let n = 0;
+  w.io.read = async (who, o) => {
+    const r = await read(who, o);
+    if (!w.state.activated) return r;
+    n += 1;
+    const changed = at(n, who, r, o) ?? r;
+    seen.push({
+      n,
+      reader: who,
+      rows: Boolean(o?.rows),
+      fenced: changed.fenced,
+      shape: changed.rendering?.view?.kind,
+    });
+    return changed;
+  };
+  return seen;
+}
+const asShown = (r) => ({
+  ...r,
+  rendering: {
+    ...r.rendering,
+    ...SHOWN,
+    document: r.rendering.document,
+    attachment: r.rendering.attachment,
+  },
+});
+const asRefreshing = (r) => ({
+  ...r,
+  rendering: {
+    ...r.rendering,
+    ...REFRESHING,
+    document: r.rendering.document,
+    attachment: r.rendering.attachment,
+  },
+});
+const FORBIDDEN = { shown: asShown, "displaying-refreshing": asRefreshing };
+const ACTIVATION_READS = [
+  [1, "leader", "the first complete leader poll"],
+  [2, "follower", "the complete follower read"],
+  [3, "leader", "the leader's row-bearing read"],
+];
+for (const caller of ["recovery", "ordinary"])
+  for (const [n, reader, where] of ACTIVATION_READS)
+    for (const [shape, change] of Object.entries(FORBIDDEN))
+      test(`R29 Q2 refused (${caller}): the ${reader} ${shape} while fenced at ${where} only, lawful again at once`, async () => {
+        const w = world({ caller, pages: 3, fencedReadsAfter: 30 });
+        const seen = afterActivation(w, (i, _who, r) =>
+          // The ordinary caller is never fenced; the injected fence is the auth observation alone (storage untouched).
+          i === n ? change({ ...r, fenced: true }) : undefined,
+        );
+        assert.equal(seen.length, 0);
+        const r = await run(w, { caller });
+        assert.match(
+          String(r.error?.message),
+          new RegExp(
+            `the ${reader}'s page is not admissible: ${reader} is (shown|displaying \\(refreshing\\)) while the recovery fence stands`,
+          ),
+        );
+        assert.equal(
+          seen.at(-1).n,
+          n,
+          "it fails AT that read, before any later one",
+        );
+        assert.equal(seen.at(-1).reader, reader);
+        assert.ok(
+          !w.observations.some((o) => o.kind === "recovery_activated"),
+          "no activation is published",
+        );
+        assert.ok(!w.observations.some((o) => o.kind === "recovery_rendered"));
+      });
+test("R29 Q2 refused: the row-bearing read holding staged rows again (digest unchanged) is judged in full itself", async () => {
+  const w = world({ pages: 3 });
+  afterActivation(w, (i, _who, r) =>
+    i === 3 ? { ...r, staging_rows: 1 } : undefined,
+  );
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /the leader's row-bearing read after the activation: leader still holds staged rows/,
+  );
+  assert.ok(!w.observations.some((o) => o.kind === "recovery_activated"));
+});
+test("R29 Q2 control (recovery caller): complete data while fenced and HIDDEN at every activation read is legal", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 6 });
+  const seen = afterActivation(w, () => undefined);
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  assert.deepEqual(
+    seen.slice(0, 3).map((x) => [x.reader, x.fenced, x.shape]),
+    [
+      ["leader", true, "neutral"],
+      ["follower", true, "neutral"],
+      ["leader", true, "neutral"],
+    ],
+  );
+  const activated = w.observations.find((o) => o.kind === "recovery_activated");
+  assert.equal(activated.detail.leader.fenced, true);
+  assert.ok(w.observations.some((o) => o.kind === "recovery_rendered"));
+});
+
+// Q3: asymmetric settlement. The settlement reads begin at n = 4 (leader 4, follower 5, leader 6 …).
+const SETTLEMENT = { leader: 4, follower: 5 };
+for (const reader of ["leader", "follower"]) {
+  test(`R29 Q3 refused (recovery caller): the ${reader} shown while fenced for ONE settlement sample, its peer hidden, then lawful`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 12 });
+    const seen = afterActivation(w, (i, who, r) =>
+      i === SETTLEMENT[reader] + 2 && who === reader ? asShown(r) : undefined,
+    );
+    const r = await run(w, { caller: "recovery" });
+    assert.match(
+      String(r.error?.message),
+      new RegExp(
+        `the ${reader}'s page is not admissible: ${reader} is shown while the recovery fence stands`,
+      ),
+    );
+    assert.equal(
+      seen.at(-1).n,
+      SETTLEMENT[reader] + 2,
+      "the FIRST bad sample fails; nothing later is read",
+    );
+    const peer = seen.find((x) => x.reader !== reader && x.n > 3);
+    assert.equal(peer.shape, "neutral", "its peer was hidden");
+    assert.ok(!w.observations.some((o) => o.kind === "recovery_rendered"));
+  });
+  test(`R29 Q3 refused (recovery caller): the ${reader} shown while fenced for several samples while its peer stays hidden`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 12 });
+    const seen = afterActivation(w, (i, who, r) =>
+      i > 3 && who === reader ? asShown(r) : undefined,
+    );
+    const r = await run(w, { caller: "recovery" });
+    assert.match(
+      String(r.error?.message),
+      /is shown while the recovery fence stands/,
+    );
+    assert.equal(
+      seen.at(-1).n,
+      SETTLEMENT[reader],
+      "refused at the first settlement sample",
+    );
+  });
+  test(`R29 Q3 refused (recovery caller): the ${reader} displaying behind the placeholder while fenced (not the recovery-hidden shape)`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 12 });
+    afterActivation(w, (i, who, r) =>
+      i === SETTLEMENT[reader] && who === reader ? asRefreshing(r) : undefined,
+    );
+    const r = await run(w, { caller: "recovery" });
+    assert.match(
+      String(r.error?.message),
+      new RegExp(
+        `${reader}'s page is not admissible: ${reader} is displaying \\(refreshing\\) while the recovery fence stands`,
+      ),
+    );
+  });
+  test(`R29 Q3 control (recovery caller): the ${reader} renders FIRST, only after its own fence cleared; the peer stays fenced and hidden`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 1e9 });
+    const clearAt = {
+      [reader]: SETTLEMENT[reader],
+      [reader === "leader" ? "follower" : "leader"]: SETTLEMENT[reader] + 6,
+    };
+    const seen = afterActivation(w, (i, who, r) =>
+      i >= clearAt[who] ? asShown({ ...r, fenced: false }) : undefined,
+    );
+    const r = await run(w, { caller: "recovery" });
+    assert.equal(r.error?.message, undefined);
+    const first = seen.find((x) => x.shape === "displaying");
+    assert.equal(first.reader, reader);
+    assert.ok(
+      seen.some(
+        (x) =>
+          x.n > first.n &&
+          x.reader !== reader &&
+          x.fenced === true &&
+          x.shape === "neutral",
+      ),
+      "the peer was still fenced and hidden afterwards",
+    );
+    const rendered = w.observations.find((o) => o.kind === "recovery_rendered");
+    assert.equal(rendered.detail.leader.fenced, false);
+    assert.equal(rendered.detail.follower.fenced, false);
+  });
+  test(`R29 Q3 control (recovery caller): the ${reader} unfenced but still behind the refreshing placeholder while it waits`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 1e9 });
+    afterActivation(w, (i, who, r) => {
+      if (who !== reader)
+        return i >= 9 ? asShown({ ...r, fenced: false }) : undefined;
+      if (i >= 9) return asShown({ ...r, fenced: false });
+      return i >= 4 ? asRefreshing({ ...r, fenced: false }) : undefined;
+    });
+    const r = await run(w, { caller: "recovery" });
+    assert.equal(r.error?.message, undefined);
+  });
+  test(`R29 Q5 refused: the ${reader}'s document replaced after the activation (a reload is a new observation, never this one)`, async () => {
+    const w = world({ pages: 3 });
+    afterActivation(w, (i, who, r) =>
+      i >= SETTLEMENT[reader] && who === reader
+        ? {
+            ...r,
+            rendering: {
+              ...r.rendering,
+              document: `${r.rendering.document}-reloaded`,
+            },
+          }
+        : undefined,
+    );
+    const r = await run(w);
+    assert.match(
+      String(r.error?.message),
+      new RegExp(`the ${reader}'s document changed during the observation`),
+    );
+    assert.ok(!w.observations.some((o) => o.kind === "recovery_rendered"));
+  });
+}
+test("R29 Q3 refused (ordinary caller): a page shown while an (unexpected) fence stands is refused whatever its peer shows", async () => {
+  const w = world({ pages: 3 });
+  afterActivation(w, (i, who, r) =>
+    i === 5 && who === "follower" ? { ...r, fenced: true } : undefined,
+  );
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /follower is shown while the recovery fence stands/,
+  );
+});
+test("R29 Q5 refused (ordinary caller): a follower displaying behind the placeholder while fenced BEFORE the activation", async () => {
+  const w = world({ pages: 4 });
+  const read = w.io.read;
+  let n = 0;
+  w.io.read = async (who, o) => {
+    const r = await read(who, o);
+    if (who === "follower" && ++n === 2) return { ...r, fenced: true };
+    return r;
+  };
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /follower is displaying \(refreshing\) while the recovery fence stands/,
+  );
+});
+
+// Revision 29 (C5): an INCOHERENT sample (fences or stored state changed during the bracketed capture) is re-read, bounded and counted —
+// never judged; every coherent sample is judged, so a forbidden coherent one is never re-read into success.
+test("R29 C5 control: incoherent samples are re-read and counted in the sample that ends them; nothing is judged on them", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 6 });
+  const read = w.io.read;
+  let n = 0;
+  w.io.read = async (who, o) => {
+    const r = await read(who, o);
+    n += 1;
+    // Incoherent, and showing what would be forbidden if it were judged.
+    if (n === 5 || n === 6)
+      return {
+        ...r,
+        ...asShown(r),
+        fenced: null,
+        coherent: false,
+        incoherence: "the stored state changed during the sample",
+      };
+    return r;
+  };
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  const counted = w.observations
+    .flatMap((o) => [o.detail.leader, o.detail.follower])
+    .map((x) => x.incoherent_rereads);
+  assert.ok(
+    counted.includes(2),
+    `the two re-reads are counted: ${JSON.stringify(counted)}`,
+  );
+});
+test("R29 C5 refused: a read that never yields a coherent sample fails (bounded), never hidden or shown", async () => {
+  const w = world({ pages: 3 });
+  const read = w.io.read;
+  w.io.read = async (who, o) => {
+    const r = await read(who, o);
+    return who === "follower" && w.state.activated
+      ? { ...r, coherent: false, incoherence: "x changed" }
+      : r;
+  };
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    new RegExp(
+      `no coherent sample of the follower in ${MAX_INCOHERENT_REREADS + 1} reads at after activation \\(x changed\\)`,
+    ),
+  );
+});
+test("R29 C5 refused: a coherent forbidden sample is judged at once (not re-read)", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 12 });
+  const seen = afterActivation(w, (i, _who, r) =>
+    i === 4 ? asShown(r) : undefined,
+  );
+  const r = await run(w, { caller: "recovery" });
+  assert.match(
+    String(r.error?.message),
+    /leader is shown while the recovery fence stands/,
+  );
+  assert.equal(seen.length, 4);
+});
+test("R29 C5 refused: a sample stating no coherence is incomplete", async () => {
+  const w = world({ pages: 3 });
+  const read = w.io.read;
+  w.io.read = async (who, o) => {
+    const { coherent: _c, ...r } = await read(who, o);
+    return r;
+  };
+  const r = await run(w);
+  assert.match(
+    String(r.error?.message),
+    /leader's sample is not stated coherent/,
   );
 });

@@ -46,6 +46,9 @@
 // the rendering alone, written independently of the live observer (pair-recovery.mjs). `recovery_exposed` is renamed `recovery_activated`
 // (the DATA activation), `recovery_final_held` carries BOTH readers at every held snapshot page, and `recovery_rendered` binds the moment
 // both pages show the recovered cache (for the recovery caller, with the fence cleared).
+// Revision 29 (R29-DIAG): every complete sample of every recovery observation (and every held page) satisfies the fence implication — a
+// standing fence means the neutral covered surface — and each `recovery_activated` sample is hidden while waiting or shown unfenced. The
+// observer's settlement polls are not persisted: this reader can judge every RECORDED sample, never the discarded polls between them.
 import { createHash } from "node:crypto";
 import {
   activates,
@@ -904,7 +907,8 @@ export const RECOVERY_KINDS = Object.freeze([
   "recovery_activated",
   "recovery_rendered",
 ]);
-export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/2";
+// Revision 29 (C5): /3 — each sample coherent (fences and stored state unchanged across its capture) with its counted re-reads.
+export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/3";
 /** Why a reader's sample is not a complete observation of its page (the same account `account`); none: it is one. */
 function sampleProblems(r, account) {
   const g = r?.rendering;
@@ -933,6 +937,10 @@ function sampleProblems(r, account) {
     p.push(`${who}'s cache-gate placeholders are not observed`);
   if (typeof r.fenced !== "boolean")
     p.push(`${who}'s auth fences are not observed`);
+  // Revision 29 (C5): only a coherent capture is a sample; its re-reads are counted, never hidden.
+  if (r.coherent !== true) p.push(`${who}'s sample is not coherent`);
+  if (!(Number.isInteger(r.incoherent_rereads) && r.incoherent_rereads >= 0))
+    p.push(`${who}'s incoherent re-reads are not counted`);
   return p;
 }
 /**
@@ -954,6 +962,27 @@ const renderedShown = (r) =>
   r.rendering.root.gated === false &&
   r.rendering.root.mounted === true &&
   r.rendering.placeholders.present === 0;
+/**
+ * Revision 29 (R29-DIAG; design assessment C3, written independently of pair-recovery.mjs's `admissibilityProblems`): a complete sample
+ * whose auth fence stands shows the neutral state over a covered (gated or unmounted) protected tree — on either page, for either caller,
+ * in EVERY recovery observation, whatever its peer shows. Revision 28 checked the fence only in the final `recovery_rendered` record, so a
+ * saved `recovery_activated` sample displaying while fenced was accepted.
+ */
+function fencedButUncovered(r) {
+  if (r.fenced !== true) return false;
+  const g = r.rendering;
+  const covered = g.root.gated === true || g.root.mounted === false;
+  return !(g.view.kind === "neutral" && covered);
+}
+/**
+ * After the complete replacement, a complete sample is either SHOWN with no fence, or HIDDEN while it waits: under a standing fence the
+ * neutral covered tree, without one also the ordinary hidden forms (the displaying account behind a visible refreshing placeholder). Either
+ * page may show first; complete data while fenced and hidden is legal (§3.7.3: the data commits before the auth release).
+ */
+const admissibleAfterActivation = (r) =>
+  renderedShown(r)
+    ? r.fenced === false
+    : renderedHidden(r, r.fenced === true ? "recovery" : "ordinary");
 /**
  * One recovery observation's problems. Each is made at a HELD snapshot answer after the hand-off (so the client has committed everything
  * before that request and nothing after it), released by a recorded release of the hold, by two readers: `leader` (the leading page) and
@@ -1005,6 +1034,11 @@ function recoveryObservationProblems(kind, o, ctx) {
     if (p.length > 0) return false;
     if (r.rendering.document !== documentOf(r.reader))
       bad(`${r.reader}'s document is not the one observed at the invalidation`);
+    // Revision 29 (R29-DIAG): the fence implication, per sample (top-level and every held page), independent of the peer.
+    if (fencedButUncovered(r))
+      bad(
+        `${r.reader}'s page is not the neutral covered surface while its recovery fence stands`,
+      );
     return true;
   };
   const complete = [leader, follower].filter(Boolean).filter(sampled);
@@ -1167,6 +1201,12 @@ function recoveryObservationProblems(kind, o, ctx) {
           `${r.reader} applied ${r.applied_revision}, the terminal ${terminal?.applied_revision}`,
         );
       if (r.split === true) bad(`${r.reader} observed a split activation`);
+      // Revision 29 (R29-DIAG): the DATA activation's samples are judged for what each page shows too — hidden while it waits, or shown
+      // with its fence clear; never shown (or displayed behind a placeholder) while fenced.
+      if (complete.includes(r) && !admissibleAfterActivation(r))
+        bad(
+          `${r.reader}'s page is neither hidden while waiting nor shown unfenced at the data activation`,
+        );
     }
     if (leader && follower && leader.cache_digest !== follower.cache_digest)
       bad("the follower does not read the activated cache");
@@ -1195,7 +1235,8 @@ function recoveryObservationProblems(kind, o, ctx) {
         bad(`${r.reader} does not hold the complete activated cache`);
       if (r.cache_digest !== activated?.cache_digest)
         bad(`${r.reader} shows another cache than the activated one`);
-      if (record.caller === "recovery" && r.fenced !== false)
+      // Revision 29: for either caller (an ordinary caller's page shown while fenced is no settlement either).
+      if (r.fenced !== false)
         bad(`${r.reader} shows the recovered cache while fenced`);
     }
     if (o.cache_digest !== activated?.cache_digest)

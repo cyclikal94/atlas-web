@@ -283,6 +283,72 @@ test.describe("WEB-09c r28: the recovery observer's rendering adapter on the rea
     expect(observed(after)?.document).not.toBe(before);
   });
 
+  test("revision 29 (C5/Q8): the sample is BRACKETED — the capture is one turn between two fence reads; a fence changed across it is incoherent", async ({
+    context,
+  }) => {
+    const net = await fresh(context);
+    const page = await leaderPage(context, net, "bracket");
+    await expose(page);
+    const healthy = await until(
+      page,
+      "leader",
+      (r) => shownProblems(r).length === 0,
+      "the fresh account is shown",
+    );
+    expect(healthy.coherent).toBe(true);
+    expect(healthy.fenced).toBe(false);
+    // A deterministic pause at the auth-record reads: the FIRST read of a sample reports a fence and, as it returns, gates the protected
+    // root; the SECOND reports none and, before it returns, lifts the root again. A capture made before the first read or after the
+    // second would see the root lifted; the bracketed capture sees it gated, and the changed fence makes the sample incoherent.
+    await page.evaluate((account) => {
+      const session = window.__atlasFixture?.session as unknown as {
+        readRecords: () => Promise<{
+          auth_state?: { fences?: Record<string, unknown[]> };
+        }>;
+      };
+      const original = session.readRecords.bind(session);
+      let calls = 0;
+      session.readRecords = async () => {
+        const records = await original();
+        calls += 1;
+        const root = document.getElementById("protected-root");
+        if (calls === 1) {
+          root?.setAttribute("inert", "");
+          root?.setAttribute("aria-hidden", "true");
+          return {
+            ...records,
+            auth_state: {
+              ...records.auth_state,
+              fences: {
+                ...(records.auth_state?.fences ?? {}),
+                [account]: [{ kind: "probe" }],
+              },
+            },
+          };
+        }
+        if (calls === 2) {
+          root?.removeAttribute("inert");
+          root?.removeAttribute("aria-hidden");
+        }
+        return records;
+      };
+    }, ACCOUNT);
+    const mixed = await sample(page, "leader");
+    const g = observed(mixed);
+    expect(g?.root.gated).toBe(true);
+    expect(mixed.coherent).toBe(false);
+    expect(mixed.fenced).toBeNull();
+    expect(mixed.incoherence).toMatch(/auth fences changed during the capture/);
+    expect(observationProblems(mixed, { account: ACCOUNT }).join()).toMatch(
+      /sample is not stated coherent/,
+    );
+    // After the probe's two reads, the page reads coherently again (the wrapper passes the records through), and is shown.
+    const after = await sample(page, "leader");
+    expect(after.coherent).toBe(true);
+    expect(after.fenced).toBe(false);
+    expect(shownProblems(after)).toEqual([]);
+  });
+
   test("without the session hook, or on a closed page, the observation is UNAVAILABLE — never hidden, never shown", async ({
     context,
   }: {
