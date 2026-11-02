@@ -79,15 +79,18 @@ const SET_ANCHOR = "set_anchor";
 const KINDS = [SET_ANCHOR] as const;
 const VIEW_KINDS = { settings: SET_ANCHOR };
 
-/** The reason a refused `set_anchor` is shown with (the server's `422` does not say which rule failed; the task's own facts can). */
-export function anchorRefusal(
-  draft: Pick<DraftRow, "last_error">,
-  facts: { repeats: boolean; seconds: boolean },
-): string {
+/**
+ * The reason a refused `set_anchor` is shown with: ONLY what the refusal recorded for that change says (revision 22, review 26 F26-1).
+ * The recorded outcome is a status and an Atlas code; a `422 invalid_value` does not say which rule failed, and nothing the page knows
+ * now can say it either. The binding read separately (the anchor the server kept, which a refused change does not replace), the task's
+ * current definition, the reference's current value and the refused body itself describe the task as it is or what was asked, not why
+ * the server refused it, and they differ between reads, tabs and reloads while the refusal does not. So every `422` (and every other
+ * refusal) gets the generic reason. A `403`/`404` says only that something this change needs is not available: the task to its editor
+ * or the reference to the task's readers (the pinned backend's `set_anchor` checks the task first, so a refused REMOVAL can be one too).
+ */
+export function anchorRefusal(draft: Pick<DraftRow, "last_error">): string {
   const status = draft.last_error?.status;
   if (status === 403 || status === 404) return ANCHOR_REASONS.unavailable ?? "";
-  if (status === 422 && facts.repeats) return ANCHOR_REASONS.recurrence ?? "";
-  if (status === 422 && facts.seconds) return ANCHOR_REASONS.untimed ?? "";
   return ANCHOR_REASONS.other ?? "";
 }
 
@@ -442,14 +445,7 @@ export function AnchorSection({
           data-anchor-rejected={rejected.local_id}
           className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-1"
         >
-          <span>
-            {anchorRejected(
-              anchorRefusal(rejected, {
-                repeats,
-                seconds: anchor?.offset.kind === "elapsed_seconds",
-              }),
-            )}
-          </span>
+          <span>{anchorRejected(anchorRefusal(rejected))}</span>
           <Button
             variant="quiet"
             onClick={() =>

@@ -489,8 +489,9 @@ test.describe("E-ANC3: set_anchor (queued; case 1)", () => {
     await review.getByRole("button", { name: "Save anchor" }).click();
     await expect(review).toBeHidden();
     await send(page);
+    // Revision 22 (review 26 F26-1): the WHOLE message, not only its prefix: a 422 names no rule, so the reason is the generic one.
     await expect(section(page).locator("[data-anchor-rejected]")).toContainText(
-      "Couldn't anchor this task",
+      "Couldn't anchor this task — the server turned it down",
       { timeout: 30_000 },
     );
     const statuses = (
@@ -500,6 +501,101 @@ test.describe("E-ANC3: set_anchor (queued; case 1)", () => {
       .map((d) => d.status);
     expect(statuses).toEqual(["rejected"]);
     expect(posts(cal, "/calendar-commands")).toHaveLength(2);
+  });
+
+  test("revision 22 (review 26 F26-1): a refused change is explained by its refusal alone — an old timed seconds binding, a later visit's null binding and offline give the same generic reason; Dismiss removes it and nothing is resent", async ({
+    context,
+  }) => {
+    test.setTimeout(120_000);
+    const a = buildTask({ n: 47, title: "Put the bins out" });
+    // The binding the server keeps (a refused change does not replace it): a timed event series with a SECONDS offset.
+    const seconds = {
+      reference: ANCHOR.reference,
+      offset: { kind: "elapsed_seconds", seconds: -3600 },
+      weekdays: [],
+    };
+    const { page, cal } = await taskPage(
+      context,
+      `/tasks/${a.taskId}`,
+      [a],
+      [source, event(true)],
+      (c) => {
+        c.binding = { binding: { anchor: seconds, version: 1, active: true } };
+      },
+    );
+    await expect(section(page)).toHaveAttribute(
+      "data-anchor-section",
+      "anchored",
+      { timeout: 20_000 },
+    );
+    const firstReads = anchorReads(cal).length;
+    cal.answers.set("/calendar-commands", [
+      { status: 422, body: atlasBody("invalid_value") },
+    ]);
+    // A change to a calendar-days offset (no seconds in it at all), refused with a generic 422.
+    await section(page).getByRole("button", { name: "Change anchor…" }).click();
+    const dialog = page.getByRole("dialog", { name: "Anchor to a calendar" });
+    await dialog.getByRole("radio", { name: "calendar day(s), at" }).check();
+    await dialog.getByLabel("Days before (−) or after (+)").fill("-1");
+    await dialog.getByRole("button", { name: "Save anchor" }).click();
+    await expect(dialog).toBeHidden();
+    await send(page);
+    const refusal = section(page).locator("[data-anchor-rejected] > span");
+    const GENERIC = "Couldn't anchor this task — the server turned it down";
+    await expect(refusal).toHaveText(GENERIC, { timeout: 30_000 });
+    const sent = posts(cal, "/calendar-commands");
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0]?.body ?? "")).toMatchObject({
+      command: {
+        kind: "set_anchor",
+        id: a.taskId,
+        anchor: { offset: { kind: "calendar_days", days: -1 } },
+      },
+    });
+    const refused = (
+      (await rows(page, "drafts")) as Array<{
+        kind: string;
+        status: string;
+        local_id: string;
+        last_error: unknown;
+      }>
+    ).filter((d) => d.kind === "set_anchor");
+    expect(refused).toMatchObject([
+      {
+        status: "rejected",
+        last_error: { status: 422, code: "invalid_value" },
+      },
+    ]);
+    // A later visit reads a different binding (none): the refusal's reason does not change.
+    cal.binding = { binding: null };
+    await revisit(page, a.taskId);
+    await expect(section(page)).toHaveAttribute("data-anchor-section", "none", {
+      timeout: 20_000,
+    });
+    await expect(refusal).toHaveText(GENERIC);
+    expect(anchorReads(cal).length).toBe(firstReads + 1);
+    // Offline, a new visit reads nothing: the same reason, from the durable refusal alone.
+    await goOfflineAtBoundary(page);
+    await revisit(page, a.taskId);
+    await expect(section(page)).toHaveAttribute(
+      "data-anchor-section",
+      "offline",
+    );
+    await expect(refusal).toHaveText(GENERIC);
+    expect(anchorReads(cal).length).toBe(firstReads + 1);
+    // Dismiss removes that refused change only when asked; nothing is resent.
+    await section(page).getByRole("button", { name: "Dismiss" }).click();
+    await expect(section(page).locator("[data-anchor-rejected]")).toHaveCount(
+      0,
+    );
+    await expect
+      .poll(async () =>
+        ((await rows(page, "drafts")) as Array<{ local_id: string }>).map(
+          (d) => d.local_id,
+        ),
+      )
+      .not.toContain(refused[0]?.local_id);
+    expect(posts(cal, "/calendar-commands")).toHaveLength(1);
   });
 
   test("the panel: axe with contrast, 44 px targets and no horizontal scroll at phone and desktop widths; seconds need a timed event", async ({

@@ -116,11 +116,15 @@ export const ANCHOR_CONFLICT =
   "This task changed elsewhere — check the anchor before saving again.";
 export const anchorRejected = (reason: string): string =>
   `Couldn't anchor this task — ${reason}`;
+/**
+ * Provisional. The reason a refused anchor change is shown with, from what its refusal recorded alone (revision 22, review 26 F26-1):
+ * `403`/`404` (the task, or the calendar or date field the change names, is not available to someone who needs it), anything else
+ * generic. A `422` names no rule, so there is no recurrence or seconds reason here: those rules are explained in the panel BEFORE saving,
+ * where the person's own input shows them (`AnchorDialog`).
+ */
 export const ANCHOR_REASONS: Readonly<Record<string, string>> = {
-  recurrence: "it repeats on its own schedule",
-  untimed: "seconds offsets need a timed event",
   unavailable:
-    "the calendar or date field is no longer available to everyone who can see this task",
+    "access to this task, or to the calendar or date field it uses, has changed",
   other: "the server turned it down",
 };
 export const REVIEW_ANCHOR = "Review";

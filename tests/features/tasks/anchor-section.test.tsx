@@ -3186,3 +3186,394 @@ describe("revision 13: an anchor change is written only against a read of the ta
     expect(queuedAnchors(t)).toMatchObject([{ status: "queued", expected: 1 }]);
   });
 });
+
+describe("revision 22: a refused change is explained only by what its refusal recorded (review 26 F26-1)", () => {
+  // The rejected change (`set_anchor`) is a durable draft with the server's status and Atlas code. A `422 invalid_value` names no rule
+  // (the pinned backend's `set_task_anchor` rejects, among others, a person-date field that is no longer a date, keeping the OLD
+  // binding). So the binding read separately, the refused body and the task as it is now are not evidence of the cause: every `422` is
+  // explained generically, the same whatever else the page has read, and a `403`/`404` says only that something the change needs is not
+  // available. Each test checks the WHOLE message, the draft kept as it was (body, key, status, error) and that rendering reads nothing.
+  const FIELD = "00000000-0000-4000-8000-0000000000f1";
+  const EVENT_DAYS: CalendarAnchor = ANCHOR;
+  const EVENT_SECONDS: CalendarAnchor = {
+    reference: ANCHOR.reference,
+    offset: { kind: "elapsed_seconds", seconds: -3600 },
+    weekdays: [],
+  };
+  const PERSON_DAYS: CalendarAnchor = {
+    reference: { kind: "person_date", field_id: FIELD, annual: true },
+    offset: { kind: "calendar_days", days: 0 },
+    weekdays: [],
+  };
+  const dateField = cacheRow({
+    id: FIELD,
+    kind: "field",
+    label: "Birthday",
+    value: { kind: "date", month: 3, day: 14 },
+  });
+  const GENERIC = words.anchorRejected(words.ANCHOR_REASONS.other as string);
+  const UNAVAILABLE = words.anchorRejected(
+    words.ANCHOR_REASONS.unavailable as string,
+  );
+  const UNPROVEN = [
+    "seconds offsets need a timed event",
+    "it repeats on its own schedule",
+  ];
+  const REFUSED = "00000000-0000-4000-8000-00000000c2f1";
+  const refusedDraft = (
+    task: SeededTask,
+    anchor: CalendarAnchor | null,
+    lastError: { status?: number; code?: string; stage: string } | null,
+    over: Record<string, unknown> = {},
+  ) =>
+    draftRow({
+      local_id: REFUSED,
+      endpoint: "/calendar-commands",
+      status: "rejected",
+      command: {
+        command: {
+          kind: "set_anchor",
+          id: task.taskId,
+          expected_version: 1,
+          anchor,
+        },
+      } as never,
+      target_resource_ids: [task.taskId],
+      index_targets: [task.taskId],
+      last_error: lastError,
+      ...over,
+    });
+  const bindingOf = (anchor: CalendarAnchor | null) => async () =>
+    ({
+      ok: true,
+      value: {
+        binding: anchor === null ? null : { anchor, version: 1, active: true },
+      },
+    }) as const;
+  /** The refusal's own line (the message, without its Dismiss button), or null when none is shown. */
+  const refusal = () =>
+    section()?.querySelector("[data-anchor-rejected] > span")?.textContent ??
+    null;
+  /** The refused draft exactly as seeded: nothing about showing it resends, replaces, re-keys or dismisses it. */
+  const keptAsSeeded = (
+    t: Mounted,
+    seeded: ReturnType<typeof refusedDraft>,
+  ) => {
+    const now = anchorDrafts(t).find((d) => d.local_id === seeded.local_id);
+    expect(now?.status).toBe("rejected");
+    expect(now?.last_error).toEqual(seeded.last_error);
+    expect(now?.attempts).toBe(seeded.attempts);
+    expect(bodyOf(t, seeded.local_id)).toEqual(
+      (seeded.command as { command: object }).command,
+    );
+  };
+  const rows = [sourceRow, eventRow(), dateField];
+
+  for (const [name, old] of [
+    ["calendar days", EVENT_DAYS],
+    ["seconds on a timed event", EVENT_SECONDS],
+  ] as const) {
+    test(`F26-1 old binding (${name}): the same refused person-date change and the same 422 give the same generic reason`, async () => {
+      const task = await seededTask();
+      const seeded = refusedDraft(task, PERSON_DAYS, {
+        status: 422,
+        code: "invalid_value",
+        stage: "rejected",
+      });
+      const t = await mounted(task, {
+        binding: bindingOf(old),
+        rows: [
+          sourceRow,
+          eventRow(),
+          cacheRow({
+            id: FIELD,
+            kind: "field",
+            value: { kind: "text", text: "changed from a date" },
+          }),
+        ],
+        drafts: [seeded],
+      });
+      await t.until(
+        () => section()?.getAttribute("data-anchor-section") === "anchored",
+      );
+      expect(section()?.getAttribute("data-anchor-section")).toBe("anchored");
+      expect(refusal()).toBe(GENERIC);
+      for (const phrase of UNPROVEN) expect(refusal()).not.toContain(phrase);
+      expect(anchorDrafts(t)).toHaveLength(1);
+      keptAsSeeded(t, seeded);
+      expect(t.api.calls.readAnchor).toBe(1);
+    });
+  }
+
+  // Reference and offset kinds changed (or not) between the old binding and the refused change, and 422 codes other than invalid_value:
+  // none of them, the refused change's own seconds offset included, establishes a cause.
+  const transitions: Array<
+    [string, CalendarAnchor | null, CalendarAnchor | null, string]
+  > = [
+    ["event series → person date", EVENT_SECONDS, PERSON_DAYS, "invalid_value"],
+    [
+      "person date → event series in seconds",
+      PERSON_DAYS,
+      EVENT_SECONDS,
+      "invalid_value",
+    ],
+    ["days → seconds, same event", EVENT_DAYS, EVENT_SECONDS, "invalid_value"],
+    ["seconds → days, same event", EVENT_SECONDS, EVENT_DAYS, "invalid_value"],
+    [
+      "seconds → other seconds (calendar_limit)",
+      EVENT_SECONDS,
+      { ...EVENT_SECONDS, offset: { kind: "elapsed_seconds", seconds: 60 } },
+      "calendar_limit",
+    ],
+    ["removal (anchor: null)", EVENT_SECONDS, null, "invalid_value"],
+    ["no binding → event in seconds", null, EVENT_SECONDS, "invalid_value"],
+  ];
+  for (const [name, old, submitted, code] of transitions) {
+    test(`F26-1 transitions: ${name}, 422 ${code} → the generic reason`, async () => {
+      const task = await seededTask();
+      const seeded = refusedDraft(task, submitted, {
+        status: 422,
+        code,
+        stage: "rejected",
+      });
+      const t = await mounted(task, {
+        binding: bindingOf(old),
+        rows,
+        drafts: [seeded],
+      });
+      const shown = old === null ? "none" : "anchored";
+      await t.until(
+        () => section()?.getAttribute("data-anchor-section") === shown,
+      );
+      expect(section()?.getAttribute("data-anchor-section")).toBe(shown);
+      expect(refusal()).toBe(GENERIC);
+      keptAsSeeded(t, seeded);
+      expect(t.api.calls.readAnchor).toBe(1);
+    });
+  }
+
+  test("F26-1 binding states: offline, refused, uncertain and pending reads give the same reason as a read one, and a late answer changes nothing", async () => {
+    const seen: Array<string | null> = [];
+    for (const how of ["offline", "refused", "uncertain"] as const) {
+      const task = await seededTask();
+      const seeded = refusedDraft(task, EVENT_SECONDS, {
+        status: 422,
+        code: "invalid_value",
+        stage: "rejected",
+      });
+      const t = await mounted(task, {
+        online: how !== "offline",
+        binding: async () =>
+          how === "refused"
+            ? { ok: false, kind: "forbidden" }
+            : { ok: false, kind: "uncertain" },
+        rows,
+        drafts: [seeded],
+      });
+      await t.settle();
+      expect(section()?.getAttribute("data-anchor-section")).toBe(
+        how === "offline" ? "offline" : "failed",
+      );
+      seen.push(refusal());
+      keptAsSeeded(t, seeded);
+      expect(t.api.calls.readAnchor ?? 0).toBe(how === "offline" ? 0 : 1);
+      cleanup();
+      forgetBindings();
+      forgetTaskMemory();
+    }
+    // Pending, then answered with an old timed seconds binding while the refusal is shown.
+    const task = await seededTask();
+    const seeded = refusedDraft(task, EVENT_SECONDS, {
+      status: 422,
+      code: "invalid_value",
+      stage: "rejected",
+    });
+    let answer: (
+      value: Awaited<ReturnType<ReturnType<typeof bindingOf>>>,
+    ) => void = () => undefined;
+    const t = await mounted(task, {
+      binding: () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      rows,
+      drafts: [seeded],
+    });
+    expect(section()?.getAttribute("data-anchor-section")).toBe("reading");
+    seen.push(refusal());
+    await act(async () => answer(await bindingOf(EVENT_SECONDS)()));
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    expect(section()?.getAttribute("data-anchor-section")).toBe("anchored");
+    seen.push(refusal());
+    expect(seen).toEqual([GENERIC, GENERIC, GENERIC, GENERIC, GENERIC]);
+    keptAsSeeded(t, seeded);
+    expect(t.api.calls.readAnchor).toBe(1);
+  });
+
+  test("F26-1 reload and remount: the reason is the durable refusal's, the same after a tree remount and on a new page whose binding is never read", async () => {
+    const task = await seededTask();
+    const seeded = refusedDraft(task, EVENT_DAYS, {
+      status: 422,
+      code: "invalid_value",
+      stage: "rejected",
+    });
+    const t = await mounted(task, {
+      binding: bindingOf(EVENT_SECONDS),
+      rows,
+      drafts: [seeded],
+    });
+    await t.until(
+      () => section()?.getAttribute("data-anchor-section") === "anchored",
+    );
+    expect(refusal()).toBe(GENERIC);
+    act(() => t.remount());
+    await t.until(() => refusal() !== null);
+    await t.settle();
+    expect(refusal()).toBe(GENERIC);
+    expect(t.api.calls.readAnchor).toBe(1);
+    // A new page (page memory and its binding reads gone; the outbox's rows are what is durable): offline, nothing is read.
+    t.unmount();
+    cleanup();
+    forgetBindings();
+    forgetTaskMemory();
+    forgetKeptPanels();
+    const again = await mounted(task, {
+      online: false,
+      rows,
+      drafts: [seeded],
+    });
+    expect(section()?.getAttribute("data-anchor-section")).toBe("offline");
+    expect(refusal()).toBe(GENERIC);
+    keptAsSeeded(again, seeded);
+    expect(again.api.calls.readAnchor ?? 0).toBe(0);
+  });
+
+  test("F26-1 several changes: the reason is the refused change's; a later queued change is untouched and Dismiss removes only the refused one", async () => {
+    const task = await seededTask();
+    const seeded = refusedDraft(task, EVENT_SECONDS, {
+      status: 422,
+      code: "invalid_value",
+      stage: "rejected",
+    });
+    const later = draftRow({
+      local_id: "00000000-0000-4000-8000-00000000c2f2",
+      endpoint: "/calendar-commands",
+      status: "queued",
+      command: {
+        command: {
+          kind: "set_anchor",
+          id: task.taskId,
+          expected_version: 1,
+          anchor: PERSON_DAYS,
+        },
+      } as never,
+      target_resource_ids: [task.taskId],
+      index_targets: [task.taskId],
+    });
+    const t = await mounted(task, {
+      online: false,
+      rows,
+      drafts: [seeded, later],
+    });
+    expect(
+      section()
+        ?.querySelector("[data-anchor-rejected]")
+        ?.getAttribute("data-anchor-rejected"),
+    ).toBe(REFUSED);
+    expect(section()?.querySelectorAll("[data-anchor-rejected]")).toHaveLength(
+      1,
+    );
+    expect(refusal()).toBe(GENERIC);
+    keptAsSeeded(t, seeded);
+    expect(section()).toHaveTextContent(words.ANCHOR_QUEUED);
+    fireEvent.click(
+      present(
+        within(section() as HTMLElement).queryByRole("button", {
+          name: words.DISMISS_ANCHOR,
+        }),
+      ),
+    );
+    await t.settle();
+    expect(refusal()).toBeNull();
+    expect(anchorDrafts(t).map((d) => [d.local_id, d.status])).toEqual([
+      [later.local_id, "queued"],
+    ]);
+    expect(bodyOf(t, later.local_id)).toEqual({
+      kind: "set_anchor",
+      id: task.taskId,
+      expected_version: 1,
+      anchor: PERSON_DAYS,
+    });
+  });
+
+  for (const [name, lastError, over] of [
+    [
+      "a dependency's refusal (no status of its own)",
+      { stage: "dependency_rejected" },
+      {},
+    ],
+    ["no recorded error", null, {}],
+  ] as const) {
+    test(`F26-1 ${name}: the generic reason`, async () => {
+      const task = await seededTask();
+      const seeded = refusedDraft(task, EVENT_SECONDS, lastError, over);
+      const t = await mounted(task, {
+        binding: bindingOf(EVENT_SECONDS),
+        rows,
+        drafts: [seeded],
+      });
+      await t.until(
+        () => section()?.getAttribute("data-anchor-section") === "anchored",
+      );
+      expect(refusal()).toBe(GENERIC);
+      keptAsSeeded(t, seeded);
+    });
+  }
+
+  // `403`/`404`: something the change needs is not available, which may be the task itself (the backend checks the task before the
+  // reference), so a refused REMOVAL says the same. The same whatever the binding read.
+  for (const [status, code] of [
+    [403, "forbidden"],
+    [404, "not_found"],
+  ] as const) {
+    for (const submitted of [EVENT_SECONDS, null]) {
+      test(`F26-1 supported reason: ${status} on ${submitted === null ? "a removal" : "a change"} → unavailable, with any binding`, async () => {
+        const shown: Array<string | null> = [];
+        for (const old of [EVENT_SECONDS, null]) {
+          const task = await seededTask();
+          const seeded = refusedDraft(task, submitted, {
+            status,
+            code,
+            stage: "rejected",
+          });
+          const t = await mounted(task, {
+            binding: bindingOf(old),
+            rows,
+            drafts: [seeded],
+          });
+          const state = old === null ? "none" : "anchored";
+          await t.until(
+            () => section()?.getAttribute("data-anchor-section") === state,
+          );
+          shown.push(refusal());
+          keptAsSeeded(t, seeded);
+          cleanup();
+          forgetBindings();
+          forgetTaskMemory();
+        }
+        expect(shown).toEqual([UNAVAILABLE, UNAVAILABLE]);
+      });
+    }
+  }
+
+  test("F26-1 the refusal reasons are only those a recorded refusal can support (no recurrence or seconds diagnosis)", () => {
+    expect(Object.keys(words.ANCHOR_REASONS).sort()).toEqual([
+      "other",
+      "unavailable",
+    ]);
+    for (const reason of Object.values(words.ANCHOR_REASONS))
+      for (const unproven of UNPROVEN) expect(reason).not.toContain(unproven);
+  });
+});
