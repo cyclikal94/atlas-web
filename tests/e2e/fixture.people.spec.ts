@@ -1,4 +1,10 @@
-import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import {
+  type BrowserContext,
+  expect,
+  type Locator,
+  type Page,
+  test,
+} from "@playwright/test";
 import { recordEvidence } from "./data-evidence";
 import {
   deltaPage,
@@ -76,6 +82,10 @@ import {
  * Review 29 (2 November 2026): E-P31 also holds the FIRST answer of a new field-page watch (a fixture delivery barrier on the real store
  * watch) after the ledger's other contributors answered: no "Nothing archived" while it is withheld, with the absent-parent, Try again,
  * left-route/reload and unmatched-barrier controls (R29.1, A12; MU-2742 bound to it).
+ * Review 30 (2 November 2026): E-P37 also makes each delivery order of the publishing commit certain (a fixture controller holds LATER
+ * answers of the real store watches): the cache's answer first, where the SAME editor turns to the published field and nothing is bound,
+ * admitted, stored or sent before the person's choice, and the queue's answer first, where the editor is withdrawn without an invented
+ * absence and reopens with the kept input (R30.1, A4, A5; MU-2750 bound to the first).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -4189,6 +4199,558 @@ test.describe("E-P36: the field editor's target and its failed reads (review 9, 
   });
 });
 
+// ---- E-P37's held LATER answers (WEB-11a revision 29, review 30, R30.1) ----------------------------------------------------------
+/**
+ * A FIXTURE DELIVERY CONTROLLER for the LATER answers of real watches (design assessment P2), separate from E-P31's first-answer barrier
+ * (whose semantics are unchanged). It wraps the production adapter's `watch` on its prototype, reached as E-P31 reaches it, and is
+ * installed before the People tree's reads are built (the test leaves People first). Every watch passes through, and every real answer a
+ * subscriber listens to is recorded with its fingerprint. `hold` takes the watches of ONE plan that subscribers listen to NOW (narrowed by
+ * input) and keeps giving each subscriber the very answer it already has (real and ready); every later real answer is still read by the
+ * real live query and recorded (`captured`), but not delivered. `release` delivers the real answer as it stands then. Nothing is written
+ * to IndexedDB, and no plan input, row, React state, session gate or timer is touched: only WHEN a real answer reaches its subscriber.
+ * The controller is per document (a reload has none).
+ *
+ * `watchOwner` adds the editor's OWNER WITNESS: the original dialog and Value input elements, and a MutationObserver that reads the
+ * mutation RECORDS themselves (so a review added and withdrawn within one task is still seen). DOM and delivery events share ONE sequence.
+ * Setup failures THROW plain errors (never an `expect`), so a mutant stopped by setup is never counted as caught.
+ */
+interface AnswerHoldSnapshot {
+  token: string;
+  installed: boolean;
+  events: Array<{
+    seq: number;
+    at: number;
+    event: string;
+    id: number;
+    fp?: unknown;
+    inOwner?: boolean;
+    inDialog?: boolean;
+  }>;
+  watches: Array<{
+    id: number;
+    name: string;
+    input: Record<string, unknown>;
+    mine: boolean;
+    held: boolean;
+    subscribed: number;
+    unsubscribed: number;
+    listening: number;
+    shown: AnswerFingerprint;
+    real: AnswerFingerprint;
+  }>;
+}
+
+/** What a watch's answer says, for the plans E-P37 holds (other plans: the status alone). */
+interface AnswerFingerprint {
+  status: string;
+  /** data.readOutstandingCreates: [local_id, kind, status] of each draft in the window. */
+  drafts?: Array<[string, string, string]>;
+  /** data.readMergedUnder: the cached resource's base. */
+  base?: { id: string; version: number; policy_version: number | null } | null;
+}
+
+async function installAnswerHold(page: Page): Promise<string> {
+  const token = `ep37-${Math.random().toString(36).slice(2)}`;
+  await page.evaluate(
+    async ({ token, account }) => {
+      type Loadable = { status: string; value?: unknown };
+      type Watchable = {
+        get(): Loadable;
+        subscribe(listener: () => void): () => void;
+      };
+      type Store = { account: string; incarnationId: string };
+      type Watch = (
+        this: Store,
+        plan: { name: string },
+        input: Record<string, unknown>,
+      ) => Watchable;
+      type Opened = { kind: string; store?: Store & { close(): void } };
+      type Fingerprint = {
+        status: string;
+        drafts?: Array<[string, string, string]>;
+        base?: {
+          id: string;
+          version: number;
+          policy_version: number | null;
+        } | null;
+      };
+      const w = window as unknown as {
+        __atlasData?: {
+          stores: Map<string, Store>;
+          opener: {
+            open(
+              account: string,
+              options: { create: boolean; incarnation: string },
+            ): Promise<Opened>;
+          };
+        };
+        __ep37?: unknown;
+      };
+      if (w.__ep37 !== undefined)
+        throw new Error(
+          "E-P37 setup: a controller is already in this document",
+        );
+      let handle: Store | undefined = w.__atlasData?.stores.get(account);
+      if (handle === undefined) {
+        const opened = await w.__atlasData?.opener.open(account, {
+          create: false,
+          incarnation: crypto.randomUUID(),
+        });
+        if (opened?.kind !== "opened" || opened.store === undefined)
+          throw new Error(
+            `E-P37 setup: the account's store did not open (${opened?.kind})`,
+          );
+        handle = opened.store;
+        opened.store.close();
+      }
+      const incarnation = handle.incarnationId;
+      const proto = Object.getPrototypeOf(handle) as { watch: Watch };
+      const original = proto.watch;
+      if (
+        typeof original !== "function" ||
+        original.name === "ep37AnswerHold" ||
+        original.name === "ep31HeldWatch"
+      )
+        throw new Error("E-P37 setup: the adapter's watch is not the original");
+      const start = performance.now();
+      let seq = 0;
+      let installed = true;
+      const events: Array<{
+        seq: number;
+        at: number;
+        event: string;
+        id: number;
+        fp?: unknown;
+        inOwner?: boolean;
+        inDialog?: boolean;
+      }> = [];
+      const note = (
+        event: string,
+        id: number,
+        extra: { fp?: unknown; inOwner?: boolean; inDialog?: boolean } = {},
+      ) => {
+        seq += 1;
+        events.push({
+          seq,
+          at: performance.now() - start,
+          event,
+          id,
+          ...extra,
+        });
+        return seq;
+      };
+      const fingerprint = (name: string, v: Loadable): Fingerprint => {
+        if (v.status !== "ready") return { status: v.status };
+        if (name === "data.readOutstandingCreates") {
+          const drafts = (
+            v.value as {
+              drafts: Array<{ local_id: string; kind: string; status: string }>;
+            }
+          ).drafts;
+          return {
+            status: v.status,
+            drafts: drafts.map((d) => [d.local_id, d.kind, d.status]),
+          };
+        }
+        if (name === "data.readMergedUnder") {
+          const base = (
+            v.value as {
+              resource: {
+                base: {
+                  id: string;
+                  version: number;
+                  policy_version: number | null;
+                } | null;
+              };
+            }
+          ).resource.base;
+          return {
+            status: v.status,
+            base:
+              base === null
+                ? null
+                : {
+                    id: base.id,
+                    version: base.version,
+                    policy_version: base.policy_version,
+                  },
+          };
+        }
+        return { status: v.status };
+      };
+      type Rec = {
+        id: number;
+        name: string;
+        input: Record<string, unknown>;
+        mine: boolean;
+        held: boolean;
+        frozen: Loadable | null;
+        last: Loadable | null;
+        subscribed: number;
+        unsubscribed: number;
+      };
+      const kept: Array<{
+        rec: Rec;
+        real: Watchable;
+        listeners: Set<() => void>;
+        shown: () => Loadable;
+      }> = [];
+      const same = (a: unknown, b: unknown) =>
+        JSON.stringify(a) === JSON.stringify(b);
+      const wrapped: Watch = function ep37AnswerHold(this, p, i) {
+        const real = original.call(this, p, i);
+        const rec: Rec = {
+          id: kept.length + 1,
+          name: p.name,
+          input: JSON.parse(JSON.stringify(i)) as Record<string, unknown>,
+          mine:
+            this.account === account &&
+            this.incarnationId === incarnation &&
+            i.incarnationId === incarnation,
+          held: false,
+          frozen: null,
+          last: null,
+          subscribed: 0,
+          unsubscribed: 0,
+        };
+        const listeners = new Set<() => void>();
+        const shown = () =>
+          rec.held && rec.frozen !== null ? rec.frozen : real.get();
+        kept.push({ rec, real, listeners, shown });
+        // A real answer the live query gives: recorded once (whichever subscriber hears it first), delivered unless held.
+        const observe = () => {
+          const value = real.get();
+          if (value === rec.last) return;
+          rec.last = value;
+          note(rec.held ? "captured" : "delivered", rec.id, {
+            fp: fingerprint(rec.name, value),
+          });
+        };
+        return {
+          get: shown,
+          subscribe(listener) {
+            rec.subscribed += 1;
+            listeners.add(listener);
+            const stop = real.subscribe(() => {
+              observe();
+              if (!rec.held) listener();
+            });
+            observe();
+            return () => {
+              rec.unsubscribed += 1;
+              listeners.delete(listener);
+              stop();
+            };
+          },
+        };
+      };
+      proto.watch = wrapped;
+      const mine = (t: string) => {
+        if (t !== token)
+          throw new Error("E-P37 setup: another controller's token");
+      };
+      // ---- the owner witness ----
+      let owner: Element | null = null;
+      let input: Element | null = null;
+      let ownerLeft = false;
+      let inputLeft = false;
+      const has = (node: Node, selector: string) =>
+        node instanceof Element &&
+        (node.matches(selector) || node.querySelector(selector) !== null);
+      const within = (target: Node) =>
+        owner !== null && (owner === target || owner.contains(target));
+      const observer = new MutationObserver((records) => {
+        for (const r of records) {
+          if (r.type === "childList") {
+            for (const n of r.addedNodes) {
+              const inOwner = within(r.target);
+              if (has(n, "[data-review-published]"))
+                note("review-shown", 0, { inOwner });
+              if (has(n, '[data-people-action="archive-field-editor"]'))
+                note("published-shown", 0, { inOwner });
+              if (has(n, '[data-people-state="editor-not-on-device"]'))
+                note("absence-said", 0, { inOwner });
+              if (has(n, '[role="dialog"]')) note("dialog-added", 0);
+            }
+            for (const n of r.removedNodes)
+              if (has(n, "[data-review-published]"))
+                note("review-withdrawn", 0, { inOwner: within(r.target) });
+          } else if (
+            r.type === "attributes" &&
+            r.target instanceof HTMLFieldSetElement &&
+            r.target.disabled
+          )
+            // The editor's fieldset is disabled while its session's save is admitted (`saving`).
+            note("saving", 0, {
+              inOwner: within(r.target),
+              inDialog: r.target.closest('[role="dialog"]') !== null,
+            });
+        }
+        if (owner !== null && !ownerLeft && !owner.isConnected) {
+          ownerLeft = true;
+          note("owner-left", 0);
+        }
+        if (input !== null && !inputLeft && !input.isConnected) {
+          inputLeft = true;
+          note("input-left", 0);
+        }
+      });
+      w.__ep37 = {
+        hold(t: string, plan: string, match: Record<string, unknown>) {
+          mine(t);
+          const targets = kept.filter(
+            (k) =>
+              k.rec.mine &&
+              k.rec.name === plan &&
+              k.rec.subscribed > k.rec.unsubscribed &&
+              Object.entries(match).every(([key, value]) =>
+                same(k.rec.input[key], value),
+              ),
+          );
+          if (targets.length === 0)
+            throw new Error(`E-P37 setup: no subscribed ${plan} watch to hold`);
+          for (const k of targets) {
+            // The answer the subscriber already has stays its answer (the very object the adapter gave it).
+            k.rec.frozen = k.real.get();
+            k.rec.held = true;
+            note("held", k.rec.id, { fp: fingerprint(plan, k.rec.frozen) });
+          }
+          return targets.map((k) => k.rec.id);
+        },
+        release(t: string, plan: string) {
+          mine(t);
+          const targets = kept.filter((k) => k.rec.held && k.rec.name === plan);
+          if (targets.length === 0)
+            throw new Error(`E-P37 setup: no held ${plan} watch to release`);
+          for (const k of targets) {
+            k.rec.held = false;
+            k.rec.frozen = null;
+            note(
+              k.listeners.size > 0 ? "released" : "released-unsubscribed",
+              k.rec.id,
+              { fp: fingerprint(plan, k.real.get()) },
+            );
+            for (const listener of [...k.listeners]) listener();
+          }
+        },
+        watchOwner(t: string, dialog: Element, value: Element) {
+          mine(t);
+          if (owner !== null)
+            throw new Error("E-P37 setup: the owner is already watched");
+          if (
+            !dialog.isConnected ||
+            !value.isConnected ||
+            !dialog.contains(value)
+          )
+            throw new Error("E-P37 setup: the editor's dialog is not shown");
+          owner = dialog;
+          input = value;
+          observer.observe(document.body, {
+            subtree: true,
+            childList: true,
+            attributes: true,
+            attributeFilter: ["disabled"],
+          });
+          note("owner-watched", 0);
+        },
+        mark(t: string, event: string) {
+          mine(t);
+          note(event, 0);
+        },
+        uninstall(t: string) {
+          mine(t);
+          for (const k of kept)
+            if (k.rec.held) {
+              k.rec.held = false;
+              k.rec.frozen = null;
+            }
+          if (proto.watch === wrapped) proto.watch = original;
+          observer.disconnect();
+          installed = false;
+          note("uninstalled", 0);
+        },
+        snapshot: () => ({
+          token,
+          installed,
+          events,
+          watches: kept.map((k) => ({
+            id: k.rec.id,
+            name: k.rec.name,
+            input: k.rec.input,
+            mine: k.rec.mine,
+            held: k.rec.held,
+            subscribed: k.rec.subscribed,
+            unsubscribed: k.rec.unsubscribed,
+            listening: k.listeners.size,
+            shown: fingerprint(k.rec.name, k.shown()),
+            real: fingerprint(k.rec.name, k.real.get()),
+          })),
+        }),
+      };
+      note("installed", 0);
+    },
+    { token, account: ME },
+  );
+  return token;
+}
+
+type AnswerHoldHandle = {
+  hold(token: string, plan: string, match: Record<string, unknown>): number[];
+  release(token: string, plan: string): void;
+  watchOwner(token: string, dialog: Element, value: Element): void;
+  mark(token: string, event: string): void;
+  uninstall(token: string): void;
+  snapshot(): AnswerHoldSnapshot;
+};
+
+const answerSnapshot = (page: Page): Promise<AnswerHoldSnapshot> =>
+  page.evaluate(() =>
+    (window as unknown as { __ep37: AnswerHoldHandle }).__ep37.snapshot(),
+  );
+
+async function answerCall(
+  page: Page,
+  call: "hold" | "release" | "mark" | "uninstall",
+  token: string,
+  plan = "",
+  match: Record<string, unknown> = {},
+): Promise<number[]> {
+  return page.evaluate(
+    ({ call, token, plan, match }) => {
+      const c = (window as unknown as { __ep37: AnswerHoldHandle }).__ep37;
+      if (call === "hold") return c.hold(token, plan, match);
+      if (call === "release") c.release(token, plan);
+      else if (call === "mark") c.mark(token, plan);
+      else c.uninstall(token);
+      return [];
+    },
+    { call, token, plan, match },
+  );
+}
+
+/** The editor's dialog and its Value input, as they are now: the owner witness. Throws (setup). */
+async function watchOwner(page: Page, token: string, dialog: Locator) {
+  const element = await dialog.elementHandle();
+  const value = await dialog
+    .getByRole("textbox", { name: "Value", exact: true })
+    .elementHandle();
+  if (element === null || value === null)
+    throw new Error("E-P37 setup: the editor is not shown");
+  await page.evaluate(
+    ({ token, element, value }) =>
+      (window as unknown as { __ep37: AnswerHoldHandle }).__ep37.watchOwner(
+        token,
+        element,
+        value,
+      ),
+    { token, element, value },
+  );
+}
+
+/** Polls the controller until `ready` holds (one frame between looks), or throws `what` with the snapshot (setup, never `expect`). */
+async function untilAnswers<T>(
+  page: Page,
+  what: string,
+  ready: (s: AnswerHoldSnapshot) => T | undefined,
+  timeout = 10_000,
+): Promise<T> {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const snapshot = await answerSnapshot(page);
+    const found = ready(snapshot);
+    if (found !== undefined) return found;
+    if (Date.now() > deadline)
+      throw new Error(`E-P37 setup: ${what}: ${JSON.stringify(snapshot)}`);
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+  }
+}
+
+/** The controller refuses what it was not asked for (M24): a hold no subscribed watch matches, a release of nothing held. Throws (setup). */
+async function untilRefused(
+  page: Page,
+  token: string,
+  call: "hold" | "release",
+  plan: string,
+  match: Record<string, unknown> = {},
+): Promise<void> {
+  const refused = await answerCall(page, call, token, plan, match).then(
+    () => false,
+    () => true,
+  );
+  if (!refused)
+    throw new Error(
+      `E-P37 setup: the controller did not refuse ${call} ${plan} ${JSON.stringify(match)}`,
+    );
+}
+
+/** Render turns after a delivery (two frames and a task, three times), as E-P31's `untilOthersAnswered` gives them. */
+const renderTurns = (page: Page) =>
+  page.evaluate(async () => {
+    for (let turn = 0; turn < 3; turn += 1)
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => setTimeout(resolve, 0)),
+        ),
+      );
+  });
+
+const listening = (w: AnswerHoldSnapshot["watches"][number]) =>
+  w.mine && w.subscribed > w.unsubscribed;
+const holdsCreate = (fp: AnswerFingerprint, createId: string) =>
+  fp.drafts?.some(([local]) => local === createId) ?? false;
+/** The outstanding readers whose window can hold the field's create (their kinds include `put_field`). */
+const fieldQueueReaders = (s: AnswerHoldSnapshot) =>
+  s.watches.filter(
+    (w) =>
+      listening(w) &&
+      w.name === "data.readOutstandingCreates" &&
+      Array.isArray(w.input.kinds) &&
+      (w.input.kinds as string[]).includes("put_field"),
+  );
+
+/** P3's precondition: every outstanding reader that can show the create shows it acknowledged, and the editor's own chain is one. */
+const untilAcknowledgedShown = (page: Page, createId: string) =>
+  untilAnswers(
+    page,
+    "the acknowledged create is not what every queue reader shows",
+    (s) => {
+      const readers = fieldQueueReaders(s);
+      const editors = readers.filter(
+        (w) => (w.input.witness as { id?: string } | undefined)?.id === P,
+      );
+      return editors.length > 0 &&
+        readers.every((w) =>
+          w.shown.drafts?.some(
+            ([local, , status]) =>
+              local === createId && status === "acknowledged",
+          ),
+        )
+        ? readers.map((w) => w.id)
+        : undefined;
+    },
+  );
+
+/** The editor showed what the commit delivered to it: Archive on the published field, or its own withdrawal. Throws (setup). */
+const untilEditorAnswered = (page: Page, after: number) =>
+  untilAnswers(page, "the editor did not answer the publication", (s) =>
+    s.events.find(
+      (e) =>
+        e.seq > after &&
+        (e.event === "published-shown" || e.event === "owner-left"),
+    ),
+  );
+
+/** The owner witness's DOM events (and the marks), in order. */
+const ownerEvents = async (page: Page) =>
+  (await answerSnapshot(page)).events.filter((e) => e.id === 0);
+const beforeChoice = (events: AnswerHoldSnapshot["events"]) => {
+  const choice = events.find((e) => e.event === "choice")?.seq ?? Infinity;
+  return events.filter((e) => e.seq < choice);
+};
+
 test.describe("E-P37: an edit of an unsent create after the create is published (review 10, finding 1)", () => {
   /** The account's draft bodies in real IndexedDB, by local id. */
   const bodiesOf = async (page: Page) =>
@@ -4204,6 +4766,7 @@ test.describe("E-P37: an edit of an unsent create after the create is published 
     page: Page;
     net: Awaited<ReturnType<typeof setup>>["net"];
     id: string;
+    served: Awaited<ReturnType<typeof setup>>["served"];
   }> {
     const { page, net, served } = await setup(
       context,
@@ -4226,7 +4789,7 @@ test.describe("E-P37: an edit of an unsent create after the create is published 
       draft?.target_resource_ids as string[] | undefined
     )?.[0] as string;
     served.policies.set(id, { version: 1, policy: PRIVATE });
-    return { page, net, id };
+    return { page, net, id, served };
   }
   /** Opens the queued field's editor and types the second value (the editor of an unsent create: no Archive). */
   async function typed(page: Page, id: string) {
@@ -4356,6 +4919,478 @@ test.describe("E-P37: an edit of an unsent create after the create is published 
     await expect(d).toBeHidden();
     const draft = await expectUpdate(page, id);
     recordEvidence(info, "e-p37-control", { id, draft });
+  });
+
+  // ---- revision 29 (review 30, R30.1): the two delivery orders of the publishing commit, each made certain by the controller -------
+  // The commit that publishes the field also releases its create, and the editor's two reads of it (its merged field read and the queue
+  // readers) are separate live queries with no order between them. The case above leaves the order to the engines (all three withdraw the
+  // editor: Review 30's diagnostic), so the SAME editor never turned from the create to the published field there.
+  const PUBLISHED_REVIEW =
+    "Your change isn't saved yet. Check the field as it is now, then save yours on it or discard it.";
+  /** The first half of `sendAndPublish`: the create is sent and its acknowledgement is in real IndexedDB (nothing is published yet). */
+  async function sendUntilAcknowledged(
+    context: Parameters<typeof setup>[0],
+    page: Page,
+    net: Awaited<ReturnType<typeof setup>>["net"],
+  ) {
+    await connectivity(context, page, true);
+    await page.evaluate(() => window.__atlasData?.retryOutbox());
+    await expect.poll(() => net.commands.length).toBe(1);
+    await expect
+      .poll(async () => (await draftsOf(page)).map((d) => d.status))
+      .toEqual(["acknowledged"]);
+  }
+  /** Nothing of the edit is stored or sent: no draft but the create, no body with its input, no other command, no People/Sharing write. */
+  const untouched = async (
+    page: Page,
+    net: Awaited<ReturnType<typeof setup>>["net"],
+    served: Awaited<ReturnType<typeof setup>>["served"],
+    createId: string,
+    since: number,
+  ) => ({
+    drafts: (await draftsOf(page))
+      .filter((d) => d.local_id !== createId)
+      .map((d) => [d.local_id, d.kind, d.status]),
+    bodies: (await bodiesOf(page))
+      .filter((b) => JSON.stringify(b.command).includes("Second value"))
+      .map((b) => b.local_id),
+    commands: net.commands.length,
+    writes: served.log.slice(since).filter((line) => line.startsWith("POST ")),
+  });
+  const NOTHING_OF_THE_EDIT = {
+    drafts: [],
+    bodies: [],
+    commands: 1,
+    writes: [],
+  };
+  /** Leaves People, so that every People read is built again after the controller is installed. Throws (setup). */
+  async function leavePeople(page: Page) {
+    await navigateInApp(page, "/settings");
+    await page
+      .waitForFunction(
+        () =>
+          document.querySelector("[data-person-detail]") === null &&
+          document.querySelector('[role="dialog"]') === null,
+      )
+      .catch((error) => {
+        throw new Error(
+          `E-P37 setup: People was not left (${String(error).split("\n")[0]})`,
+        );
+      });
+  }
+  /**
+   * The edited, acknowledged create just before its publication, as the controller holds it (setup, throws): the owner never left and
+   * showed no published field, every queue reader that can hold the create shows it acknowledged, and the editor's own chain is one.
+   */
+  async function armedBeforePublication(page: Page, createId: string) {
+    const s = await answerSnapshot(page);
+    const early = s.events.filter(
+      (e) =>
+        e.id === 0 &&
+        [
+          "owner-left",
+          "input-left",
+          "published-shown",
+          "review-shown",
+          "saving",
+        ].includes(e.event),
+    );
+    const readers = fieldQueueReaders(s);
+    if (
+      early.length > 0 ||
+      readers.length === 0 ||
+      !readers.every((w) =>
+        w.shown.drafts?.some(
+          ([local, , status]) =>
+            local === createId && status === "acknowledged",
+        ),
+      )
+    )
+      throw new Error(
+        `E-P37 setup: not the edited, acknowledged create before its publication: ${JSON.stringify(s)}`,
+      );
+    return s.events.at(-1)?.seq ?? 0;
+  }
+  const witnessOf = (w: AnswerHoldSnapshot["watches"][number]) =>
+    (w.input.witness as { id?: string } | undefined)?.id;
+
+  test("while open, the cache's answer first: the same editor reviews the published field, and nothing is bound, admitted, stored or sent before the person's choice (review 30, R30.1)", async ({
+    context,
+  }, info) => {
+    const { page, net, id, served } = await queued(context);
+    const createId = (await draftsOf(page))[0]?.local_id as string;
+    await leavePeople(page);
+    const token = await installAnswerHold(page);
+    let audience: () => void = () => undefined;
+    try {
+      const d = await typed(page, id);
+      await watchOwner(page, token, d);
+      await sendUntilAcknowledged(context, page, net);
+      await untilAcknowledgedShown(page, createId);
+      await renderTurns(page);
+      // The field's current audience is read once it is published (M13): that read is held, so the review first stands without it.
+      const policy = new Promise<void>((resolve) => {
+        audience = resolve;
+      });
+      served.policyScript.push(() => ({
+        status: 200,
+        body: { version: 1, policy: PRIVATE },
+        after: policy,
+      }));
+      const since = served.log.length;
+      // Every queue reader (the editor's chain, the detail's, the list's) keeps the answer it has: the acknowledged create.
+      const queueHeld = await answerCall(
+        page,
+        "hold",
+        token,
+        "data.readOutstandingCreates",
+      );
+      // The controller's specificity (M24): another field's read matches nothing, and nothing of the merged read is held to release.
+      await untilRefused(page, token, "hold", "data.readMergedUnder", {
+        id: "00000000-0000-4000-8000-000000000000",
+      });
+      await untilRefused(page, token, "release", "data.readMergedUnder");
+      const armed = await armedBeforePublication(page, createId);
+      await publish(
+        page,
+        net,
+        [fieldP(id, P, "Queued", { kind: "text", text: "First value" })],
+        { start: false },
+      );
+      // The order (setup): the editor's merged read DELIVERED the published field while every queue reader was held, each of which
+      // captured the commit's own answer (without the create), and no new queue reader escaped the hold.
+      const order = await untilAnswers(
+        page,
+        "the cache's answer was not delivered first",
+        (s) => {
+          const merged = s.events.find(
+            (e) =>
+              e.seq > armed &&
+              e.event === "delivered" &&
+              s.watches.some(
+                (w) =>
+                  w.id === e.id &&
+                  w.name === "data.readMergedUnder" &&
+                  w.input.id === id,
+              ) &&
+              (e.fp as AnswerFingerprint).base?.id === id,
+          );
+          const readers = fieldQueueReaders(s);
+          const captured = readers.map((w) =>
+            s.events.find(
+              (e) =>
+                e.seq > armed &&
+                e.id === w.id &&
+                e.event === "captured" &&
+                !holdsCreate(e.fp as AnswerFingerprint, createId),
+            ),
+          );
+          return merged !== undefined &&
+            readers.length > 0 &&
+            readers.every((w) => w.held) &&
+            readers.some((w) => witnessOf(w) === P) &&
+            captured.every((e) => e !== undefined)
+            ? {
+                merged: merged.seq,
+                base: (merged.fp as AnswerFingerprint).base,
+                captured: captured.map((e) => e?.seq),
+              }
+            : undefined;
+        },
+      );
+      const answered = await untilEditorAnswered(page, armed);
+      await renderTurns(page);
+      // ---- R30.1 (MU-2750): the publication binds nothing by itself. Until the person's choice the review this editor shows is never
+      // withdrawn (the edit stays unbound), no save of its session is admitted, and nothing of the edit is stored or sent.
+      const atReview = beforeChoice(await ownerEvents(page));
+      expect(
+        atReview
+          .filter((e) => e.event === "review-withdrawn" || e.event === "saving")
+          .map((e) => e.event),
+        "the published create's edit was bound, or its save admitted, before the person chose",
+      ).toEqual([]);
+      expect(await untouched(page, net, served, createId, since)).toEqual(
+        NOTHING_OF_THE_EDIT,
+      );
+      // The SAME editor turned to the published field (P3), positively: its dialog and input never left, and it showed the published
+      // field and the review itself, after the cache's answer was delivered.
+      expect(
+        atReview
+          .filter((e) => e.event === "owner-left" || e.event === "input-left")
+          .map((e) => e.event),
+      ).toEqual([]);
+      expect({
+        published: atReview.some(
+          (e) =>
+            e.event === "published-shown" &&
+            e.inOwner === true &&
+            e.seq > order.merged,
+        ),
+        review: atReview.some(
+          (e) =>
+            e.event === "review-shown" &&
+            e.inOwner === true &&
+            e.seq > order.merged,
+        ),
+      }).toEqual({ published: true, review: true });
+      await expect(d.locator("[data-review-published]")).toHaveText(
+        PUBLISHED_REVIEW,
+      );
+      await expect(
+        d.getByRole("textbox", { name: "Value", exact: true }),
+      ).toHaveValue("Second value");
+      await expect(
+        d.getByRole("button", { name: "Save", exact: true }),
+      ).toBeDisabled();
+      // "Save mine" waits for the field's current audience, read on the published field (M13), then offers the choice.
+      await expect
+        .poll(
+          () =>
+            served.log
+              .slice(since)
+              .filter((line) => line === `GET /policies/${id}`).length,
+        )
+        .toBe(1);
+      await expect(d.locator('[data-people-action="save-mine"]')).toHaveCount(
+        0,
+      );
+      audience();
+      await expect(d.locator("[data-review-audience]")).toContainText(
+        "Only you",
+      );
+      await expect(d.locator('[data-people-action="save-mine"]')).toBeEnabled();
+      // The queue readers' latest real answer (the create released) reaches them: the same editor keeps its review and the input.
+      await answerCall(page, "release", token, "data.readOutstandingCreates");
+      await untilAnswers(
+        page,
+        "the queue's answer did not reach its readers",
+        (s) => {
+          const readers = fieldQueueReaders(s);
+          return readers.length > 0 &&
+            readers.every((w) => !w.held && !holdsCreate(w.shown, createId))
+            ? true
+            : undefined;
+        },
+      );
+      await renderTurns(page);
+      expect(
+        beforeChoice(await ownerEvents(page))
+          .filter((e) =>
+            ["review-withdrawn", "saving", "owner-left", "input-left"].includes(
+              e.event,
+            ),
+          )
+          .map((e) => e.event),
+      ).toEqual([]);
+      expect(await untouched(page, net, served, createId, since)).toEqual(
+        NOTHING_OF_THE_EDIT,
+      );
+      await expect(d.locator("[data-review-published]")).toHaveText(
+        PUBLISHED_REVIEW,
+      );
+      // The person's choice, then exactly the update of the same field on the reviewed versions.
+      await answerCall(page, "mark", token, "choice");
+      await d
+        .getByRole("button", {
+          name: "Save mine on the current version",
+          exact: true,
+        })
+        .click();
+      await expect(d).toBeHidden();
+      const draft = await expectUpdate(page, id);
+      const trace = await answerSnapshot(page);
+      recordEvidence(info, "e-p37-cache-first", {
+        id,
+        createId,
+        queueHeld,
+        armed,
+        order,
+        answered,
+        events: trace.events,
+        watches: trace.watches.filter(
+          (w) =>
+            w.name === "data.readOutstandingCreates" ||
+            w.name === "data.readMergedUnder",
+        ),
+        draft,
+        commands: net.commands.length,
+        log: served.log.slice(since),
+      });
+      expect(net.commands).toHaveLength(1);
+    } finally {
+      audience();
+      await answerCall(page, "uninstall", token).catch(() => undefined);
+    }
+  });
+
+  test("while open, the queue's answer first: the editor is withdrawn without saying the field is gone, reopens on the published field with the kept input and its review, and nothing is bound, admitted, stored or sent before the person's choice (review 30, R30.1, design assessment M08)", async ({
+    context,
+  }, info) => {
+    const { page, net, id, served } = await queued(context);
+    const createId = (await draftsOf(page))[0]?.local_id as string;
+    await leavePeople(page);
+    const token = await installAnswerHold(page);
+    try {
+      const first = await typed(page, id);
+      await watchOwner(page, token, first);
+      await sendUntilAcknowledged(context, page, net);
+      await untilAcknowledgedShown(page, createId);
+      await renderTurns(page);
+      const since = served.log.length;
+      // The editor's merged read of the field keeps the answer it has (no cached field yet).
+      const cacheHeld = await answerCall(
+        page,
+        "hold",
+        token,
+        "data.readMergedUnder",
+        { id },
+      );
+      const armed = await armedBeforePublication(page, createId);
+      await publish(
+        page,
+        net,
+        [fieldP(id, P, "Queued", { kind: "text", text: "First value" })],
+        { start: false },
+      );
+      // The order (setup): the editor's chain DELIVERED the commit's answer without the create while its merged read was held, which
+      // captured the commit's own answer (the cached field).
+      const order = await untilAnswers(
+        page,
+        "the queue's answer was not delivered first",
+        (s) => {
+          const merged = s.watches.filter(
+            (w) =>
+              listening(w) &&
+              w.name === "data.readMergedUnder" &&
+              w.input.id === id,
+          );
+          const captured = cacheHeld.map((held) =>
+            s.events.find(
+              (e) =>
+                e.seq > armed &&
+                e.id === held &&
+                e.event === "captured" &&
+                (e.fp as AnswerFingerprint).base?.id === id,
+            ),
+          );
+          const queue = s.events.find(
+            (e) =>
+              e.seq > armed &&
+              e.event === "delivered" &&
+              s.watches.some(
+                (w) =>
+                  w.id === e.id &&
+                  w.name === "data.readOutstandingCreates" &&
+                  witnessOf(w) === P,
+              ) &&
+              (e.fp as AnswerFingerprint).status === "ready" &&
+              !holdsCreate(e.fp as AnswerFingerprint, createId),
+          );
+          return queue !== undefined &&
+            merged.length > 0 &&
+            merged.every((w) => w.held) &&
+            captured.every((e) => e !== undefined)
+            ? { queue: queue.seq, captured: captured.map((e) => e?.seq) }
+            : undefined;
+        },
+      );
+      const answered = await untilEditorAnswered(page, armed);
+      await renderTurns(page);
+      // The gap is truthful (M08): nothing says the field is gone, the edit is not bound or saved, nothing of it is stored or sent.
+      const gap = beforeChoice(await ownerEvents(page));
+      expect(
+        gap
+          .filter((e) =>
+            ["absence-said", "review-withdrawn", "saving"].includes(e.event),
+          )
+          .map((e) => e.event),
+        "the field was said to be gone, or the edit bound or saved, while its field was not read",
+      ).toEqual([]);
+      expect(await untouched(page, net, served, createId, since)).toEqual(
+        NOTHING_OF_THE_EDIT,
+      );
+      // What this order does: the editor that showed the create is withdrawn until its field is read (it never showed a published one).
+      expect({
+        left: gap.some((e) => e.event === "owner-left"),
+        published: gap.some((e) => e.event === "published-shown"),
+      }).toEqual({ left: true, published: false });
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+      // The merged read's latest real answer (the published field) reaches it: a NEW editor of the same session, with the kept input.
+      await answerCall(page, "release", token, "data.readMergedUnder");
+      await untilAnswers(
+        page,
+        "the cache's answer did not reach the editor",
+        (s) => {
+          const merged = s.watches.filter(
+            (w) =>
+              listening(w) &&
+              w.name === "data.readMergedUnder" &&
+              w.input.id === id,
+          );
+          return merged.length > 0 &&
+            merged.every((w) => !w.held && w.shown.base?.id === id)
+            ? true
+            : undefined;
+        },
+      );
+      const d = page.getByRole("dialog", { name: "Edit Queued" });
+      await expect(
+        d.getByRole("button", { name: "Archive", exact: true }),
+      ).toBeVisible();
+      await expect(
+        d.getByRole("textbox", { name: "Value", exact: true }),
+      ).toHaveValue("Second value");
+      await expect(d.locator("[data-review-published]")).toHaveText(
+        PUBLISHED_REVIEW,
+      );
+      await expect(
+        d.getByRole("button", { name: "Save", exact: true }),
+      ).toBeDisabled();
+      await expect(d.locator("[data-review-audience]")).toContainText(
+        "Only you",
+      );
+      await renderTurns(page);
+      expect(
+        beforeChoice(await ownerEvents(page))
+          .filter((e) =>
+            ["absence-said", "review-withdrawn", "saving"].includes(e.event),
+          )
+          .map((e) => e.event),
+      ).toEqual([]);
+      expect(await untouched(page, net, served, createId, since)).toEqual(
+        NOTHING_OF_THE_EDIT,
+      );
+      await answerCall(page, "mark", token, "choice");
+      await d
+        .getByRole("button", {
+          name: "Save mine on the current version",
+          exact: true,
+        })
+        .click();
+      await expect(d).toBeHidden();
+      const draft = await expectUpdate(page, id);
+      const trace = await answerSnapshot(page);
+      recordEvidence(info, "e-p37-queue-first", {
+        id,
+        createId,
+        cacheHeld,
+        armed,
+        order,
+        answered,
+        events: trace.events,
+        watches: trace.watches.filter(
+          (w) =>
+            w.name === "data.readOutstandingCreates" ||
+            w.name === "data.readMergedUnder",
+        ),
+        draft,
+        commands: net.commands.length,
+        log: served.log.slice(since),
+      });
+      expect(net.commands).toHaveLength(1);
+    } finally {
+      await answerCall(page, "uninstall", token).catch(() => undefined);
+    }
   });
 });
 

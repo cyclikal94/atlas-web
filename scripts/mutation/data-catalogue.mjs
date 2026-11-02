@@ -31527,8 +31527,12 @@ export const ENGINE = [
     file: "src/features/people/field/FieldEditorDialog.tsx",
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P37:",
+    // Revision 29 (review 30, R30.1): the patched branch runs only when the SAME editor turns from the create to the published field.
+    // The original "while open" case leaves the commit's delivery order to the engines, and all three withdraw the editor there (a new
+    // editor starts with its review already said, so the branch never ran: Review 30's survivor). The case that holds the queue readers'
+    // answer while the cache's is delivered keeps the same editor, and is the expect. Patch, file, spec and grep are unchanged.
     expect:
-      /E-P37: .*while open: the kept input is reviewed on the published field/,
+      /E-P37: .*while open, the cache's answer first: the same editor reviews the published field/,
     patch: (t) =>
       sub(
         t,
