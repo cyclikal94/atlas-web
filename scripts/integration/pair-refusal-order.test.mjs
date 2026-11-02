@@ -1064,7 +1064,18 @@ describe("Q5: the real tap → holding proxy hop, each completion order resolved
       const liveClient = ask();
       const all = await gatedRecords(2);
       assert.equal(all.length, 2);
-      const L0 = reloadedRequest(all, { label: LABEL, token: TOKEN, begin });
+      // The reloaded request, found by the maintained rule and checked against the one request that is not the departed one (an assertion,
+      // so a broken rule fails this test by assertion, never by its own throw).
+      const expected = all.find((r) => r.seq !== D0.seq);
+      let L0 = null;
+      assert.doesNotThrow(() => {
+        L0 = reloadedRequest(all, { label: LABEL, token: TOKEN, begin });
+      }, "the reloaded request is found unambiguously");
+      assert.equal(
+        L0?.seq,
+        expected.seq,
+        "the reloaded request is the new one",
+      );
       pair.reloaded(L0, { begin, ctx });
       await control(tapUrls.controlUrl, "POST", "/gate", { closed: false });
       for (let i = 0; i < 400 && arrivals.length < 2; i += 1) await sleep(5);
