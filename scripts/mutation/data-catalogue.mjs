@@ -31381,12 +31381,16 @@ export const ENGINE = [
   {
     id: "MU-2742",
     title:
-      "WEB-11a R5 F2: (REAL ENGINE) a parent read on its way counts as 'not visible': 'Nothing archived' is shown with the field",
+      "WEB-11a R5 F2 with R29.1: (REAL ENGINE) an atomic field-page read on its way counts as complete: 'Nothing archived' is claimed while a new ledger's field-page answer is withheld",
     // Re-expressed in revision 17 (WEB-11a review 16, R16.1): the parent is read with the field page; a page read on its way counts as complete (as MU-2587).
+    // Re-bound in revision 28 (WEB-11a review 29, R29.1): the reparent case observes one live watch from answer to answer, which never
+    // passes through `loading`, so it could not see this patch. Same patch and `E-P31:` controls; the expected case now holds the FIRST
+    // answer of a new field-page watch after the other contributors answered, and asserts no empty claim while it is withheld.
     file: "src/features/people/archived/ArchivedItems.tsx",
     spec: "tests/e2e/fixture.people.spec.ts",
     grep: "E-P31:",
-    expect: /E-P31: .*moves the field to a visible person/,
+    expect:
+      /E-P31: .*a new ledger's field-page read held before its first answer/,
     patch: (t) =>
       sub(
         t,

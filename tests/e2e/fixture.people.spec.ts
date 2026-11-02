@@ -73,6 +73,9 @@ import {
  * read back or synced, and stays reachable after its confirmation closed (R26.1/R26.2, A10, A17; the reviewer's native probes, maintained).
  * Review 28 (2 November 2026): E-P51 an uncertain Rename across a reload is forgotten, read afresh and never sent by itself (the
  * nonpersisted companion of E-P50, a real persisted Back in `bfcache.people-restore.spec.ts`; R28.1, A17).
+ * Review 29 (2 November 2026): E-P31 also holds the FIRST answer of a new field-page watch (a fixture delivery barrier on the real store
+ * watch) after the ledger's other contributors answered: no "Nothing archived" while it is withheld, with the absent-parent, Try again,
+ * left-route/reload and unmatched-barrier controls (R29.1, A12; MU-2742 bound to it).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -2629,6 +2632,455 @@ test.describe("E-P30: a run that stops lets the next authorised hold run (review
     });
 });
 
+// ---- E-P31's held field-page read (WEB-11a revision 28, review 29, R29.1) ------------------------------------------------------------
+/**
+ * A FIXTURE DELIVERY BARRIER on the first answer of a NEW real `data.readChildPage` watch (design assessment P2–P3). The production
+ * adapter's `watch` is wrapped on its prototype (reached through the harness's own handle for the account: the protected tree's store is
+ * another instance of the same class, and `untilHeldReached` proves the tree's watch is the one intercepted). A watch whose plan, store
+ * account, incarnation and input match the arm (`kind`, `parentKind`, `after`, no `parentId`) is HELD: the real watch is subscribed and
+ * reads real IndexedDB as always, but its subscriber sees `loading` (what a new watch shows before its first answer) until `release`, and
+ * then the real answer as it stands. Every other watch passes through unchanged. Nothing about the rows is invented, and no DOM is edited.
+ *
+ * `outcome: "failed"` is a NAMED FAILURE INJECTION (not a native IndexedDB error): released, the held watch shows `unavailable`/`error`,
+ * the exact state the adapter publishes when its live query fails, and keeps it (a failed live query is not resumed; the ledger's
+ * Try again reads afresh). The barrier is per document: a reload starts without it. Setup and reach failures THROW plain errors (never an
+ * `expect`), so a mutant that a setup failure stops is never counted as caught.
+ */
+interface HeldWatchSnapshot {
+  token: string;
+  armed: boolean;
+  installed: boolean;
+  events: Array<{ at: number; event: string; id: number }>;
+  watches: Array<{
+    id: number;
+    name: string;
+    input: Record<string, unknown>;
+    held: boolean;
+    outcome: "answer" | "failed" | null;
+    subscribed: number;
+    unsubscribed: number;
+    answered: boolean;
+    delivered: boolean;
+    shown: string;
+    status: string;
+  }>;
+}
+
+const FIELD_PAGE_HOLD = {
+  plan: "data.readChildPage",
+  input: { kind: "field", parentKind: "person", after: null },
+  absent: ["parentId"],
+} as const;
+
+async function armHeldWatch(
+  page: Page,
+  options: {
+    plan: string;
+    input: Record<string, unknown>;
+    absent: readonly string[];
+    outcome: "answer" | "failed";
+  },
+): Promise<string> {
+  const token = `ep31-${Math.random().toString(36).slice(2)}`;
+  await page.evaluate(
+    async ({ token, account, plan, input, absent, outcome }) => {
+      type Loadable = { status: string };
+      type Watchable = {
+        get(): Loadable;
+        subscribe(listener: () => void): () => void;
+      };
+      type Store = { account: string; incarnationId: string };
+      type Watch = (
+        this: Store,
+        plan: { name: string },
+        input: Record<string, unknown>,
+      ) => Watchable;
+      type Opened = { kind: string; store?: Store & { close(): void } };
+      const w = window as unknown as {
+        __atlasData?: {
+          stores: Map<string, Store>;
+          opener: {
+            open(
+              account: string,
+              options: { create: boolean; incarnation: string },
+            ): Promise<Opened>;
+          };
+        };
+        __ep31Hold?: unknown;
+      };
+      if (w.__ep31Hold !== undefined)
+        throw new Error("E-P31 setup: a barrier is already in this document");
+      // The adapter's class, from the harness's own handle or (when the harness holds none) a handle of its opener closed at once: an
+      // ordinary close of this connection only. The incarnation is the database's own (`sync_state`), the same for every handle.
+      let handle: Store | undefined = w.__atlasData?.stores.get(account);
+      if (handle === undefined) {
+        const opened = await w.__atlasData?.opener.open(account, {
+          create: false,
+          incarnation: crypto.randomUUID(),
+        });
+        if (opened?.kind !== "opened" || opened.store === undefined)
+          throw new Error(
+            `E-P31 setup: the account's store did not open (${opened?.kind})`,
+          );
+        handle = opened.store;
+        opened.store.close();
+      }
+      const incarnation = handle.incarnationId;
+      const proto = Object.getPrototypeOf(handle) as { watch: Watch };
+      const original = proto.watch;
+      if (typeof original !== "function" || original.name === "ep31HeldWatch")
+        throw new Error("E-P31 setup: the adapter's watch is not the original");
+      const LOADING: Loadable = { status: "loading" };
+      const FAILED = { status: "unavailable", reason: "error" } as Loadable;
+      const start = performance.now();
+      const state = {
+        armed: true,
+        outcome,
+        installed: true,
+        events: [] as Array<{ at: number; event: string; id: number }>,
+      };
+      type Kept = HeldWatchSnapshot["watches"][number];
+      const kept: Array<{
+        record: Kept;
+        real: Watchable;
+        release?: () => void;
+        shown: () => Loadable;
+        active: () => boolean;
+      }> = [];
+      const note = (event: string, id: number) =>
+        state.events.push({ at: performance.now() - start, event, id });
+      const same = (a: unknown, b: unknown) =>
+        JSON.stringify(a) === JSON.stringify(b);
+      const wrapped: Watch = function ep31HeldWatch(this, p, i) {
+        const real = original.call(this, p, i);
+        const record: Kept = {
+          id: kept.length + 1,
+          name: p.name,
+          input: JSON.parse(JSON.stringify(i)) as Record<string, unknown>,
+          held: false,
+          outcome: null,
+          subscribed: 0,
+          unsubscribed: 0,
+          answered: false,
+          delivered: false,
+          shown: "",
+          status: "",
+        };
+        const matches =
+          state.armed &&
+          p.name === plan &&
+          this.account === account &&
+          this.incarnationId === incarnation &&
+          i.incarnationId === incarnation &&
+          Object.entries(input).every(([key, value]) => same(i[key], value)) &&
+          absent.every((key) => !(key in i));
+        if (!matches) {
+          kept.push({
+            record,
+            real,
+            shown: () => real.get(),
+            active: () => record.subscribed > record.unsubscribed,
+          });
+          return {
+            get: () => real.get(),
+            subscribe(listener) {
+              record.subscribed += 1;
+              const stop = real.subscribe(listener);
+              return () => {
+                record.unsubscribed += 1;
+                stop();
+              };
+            },
+          };
+        }
+        record.held = true;
+        record.outcome = state.outcome;
+        const fails = state.outcome === "failed";
+        const listeners = new Set<() => void>();
+        note("created", record.id);
+        const shown = () =>
+          !record.delivered ? LOADING : fails ? FAILED : real.get();
+        kept.push({
+          record,
+          real,
+          shown,
+          active: () => listeners.size > 0,
+          release: () => {
+            if (record.delivered) {
+              note("released-again", record.id);
+              return;
+            }
+            record.delivered = true;
+            note(
+              listeners.size > 0 ? "released" : "released-unsubscribed",
+              record.id,
+            );
+            for (const listener of [...listeners]) listener();
+          },
+        });
+        return {
+          get: shown,
+          subscribe(listener) {
+            record.subscribed += 1;
+            listeners.add(listener);
+            note("reached", record.id);
+            const answered = () => {
+              if (!record.answered && real.get().status !== "loading") {
+                record.answered = true;
+                note("answered", record.id);
+              }
+            };
+            const stop = real.subscribe(() => {
+              answered();
+              if (record.delivered && listeners.has(listener)) listener();
+            });
+            answered();
+            return () => {
+              record.unsubscribed += 1;
+              listeners.delete(listener);
+              note("unsubscribed", record.id);
+              stop();
+            };
+          },
+        };
+      };
+      proto.watch = wrapped;
+      const mine = (t: string) => {
+        if (t !== token)
+          throw new Error("E-P31 setup: another barrier's token");
+      };
+      w.__ep31Hold = {
+        token,
+        // A held watch's answer is withheld from a subscriber that is still listening.
+        withheld: () =>
+          kept.some((k) => k.record.held && !k.record.delivered && k.active()),
+        release(t: string, id: number) {
+          mine(t);
+          const target = kept.find((k) => k.record.id === id && k.release);
+          if (target?.release === undefined)
+            throw new Error(`E-P31 setup: no held watch ${id}`);
+          target.release();
+        },
+        arm(t: string, next: "answer" | "failed") {
+          mine(t);
+          state.armed = true;
+          state.outcome = next;
+          note(`armed-${next}`, 0);
+        },
+        disarm(t: string) {
+          mine(t);
+          state.armed = false;
+          note("disarmed", 0);
+        },
+        uninstall(t: string) {
+          mine(t);
+          state.armed = false;
+          if (proto.watch === wrapped) proto.watch = original;
+          state.installed = false;
+          note("uninstalled", 0);
+        },
+        snapshot: (): HeldWatchSnapshot => ({
+          token,
+          armed: state.armed,
+          installed: state.installed,
+          events: state.events,
+          watches: kept.map((k) => ({
+            ...k.record,
+            shown: k.shown().status,
+            status: k.real.get().status,
+          })),
+        }),
+      };
+    },
+    { token, account: ME, ...options },
+  );
+  return token;
+}
+
+type HeldWatchHandle = {
+  withheld(): boolean;
+  release(token: string, id: number): void;
+  arm(token: string, outcome: "answer" | "failed"): void;
+  disarm(token: string): void;
+  uninstall(token: string): void;
+  snapshot(): HeldWatchSnapshot;
+};
+
+const heldSnapshot = (page: Page): Promise<HeldWatchSnapshot> =>
+  page.evaluate(() =>
+    (
+      window as unknown as { __ep31Hold: HeldWatchHandle }
+    ).__ep31Hold.snapshot(),
+  );
+
+async function heldCall(
+  page: Page,
+  call: "release" | "disarm" | "uninstall" | "arm",
+  token: string,
+  argument?: number | "answer" | "failed",
+): Promise<void> {
+  await page.evaluate(
+    ({ call, token, argument }) => {
+      const hold = (window as unknown as { __ep31Hold: HeldWatchHandle })
+        .__ep31Hold;
+      if (call === "release") hold.release(token, argument as number);
+      else if (call === "arm") hold.arm(token, argument as "answer");
+      else hold[call](token);
+    },
+    { call, token, argument },
+  );
+}
+
+/**
+ * The precondition of every held-state assertion (P3, P4): the `index`th held watch that a subscriber took (1-based, in creation order;
+ * React StrictMode builds a watchable it then discards, never subscribed) is the ONLY held watch a
+ * subscriber listens to, the protected tree reached it, and its real IndexedDB answer is in (so only its delivery waits). Throws (setup).
+ */
+async function untilHeldReached(
+  page: Page,
+  index: number,
+  timeout = 10_000,
+): Promise<HeldWatchSnapshot["watches"][number]> {
+  try {
+    await page.waitForFunction(
+      (n) => {
+        const s = (
+          window as unknown as { __ep31Hold?: HeldWatchHandle }
+        ).__ep31Hold?.snapshot();
+        const held = s?.watches.filter((w) => w.held && w.subscribed > 0) ?? [];
+        const target = held[n - 1];
+        return (
+          target !== undefined &&
+          target.subscribed > target.unsubscribed &&
+          target.answered &&
+          !target.delivered &&
+          held.filter((w) => w.subscribed > w.unsubscribed).length === 1
+        );
+      },
+      index,
+      { timeout },
+    );
+  } catch (error) {
+    const snapshot = await heldSnapshot(page).catch(() => null);
+    throw new Error(
+      `E-P31 setup: held field-page watch ${index} not reached (${String(error).split("\n")[0]}): ${JSON.stringify(snapshot)}`,
+    );
+  }
+  const snapshot = await heldSnapshot(page);
+  return snapshot.watches.filter((w) => w.held && w.subscribed > 0)[
+    index - 1
+  ] as NonNullable<HeldWatchSnapshot["watches"][number]>;
+}
+
+/**
+ * P4: every OTHER contributor of the ledger has its answer while the field page is held (the person scan's page and the outstanding
+ * creates, each read by a watch a subscriber listens to), after which the page is given render turns (two frames and a task, three times)
+ * so their reports have reached the ledger. Throws (setup): a contributor still loading would hide a false "Nothing archived".
+ */
+async function untilOthersAnswered(page: Page): Promise<void> {
+  try {
+    await page.waitForFunction(
+      () => {
+        const s = (
+          window as unknown as { __ep31Hold?: HeldWatchHandle }
+        ).__ep31Hold?.snapshot();
+        const listening = (s?.watches ?? []).filter(
+          (w) => !w.held && w.subscribed > w.unsubscribed,
+        );
+        const people = listening.filter(
+          (w) =>
+            w.name === "data.readResourceList" && w.input.kind === "person",
+        );
+        const creates = listening.filter(
+          (w) => w.name === "data.readOutstandingCreates",
+        );
+        return (
+          people.length > 0 &&
+          creates.length > 0 &&
+          [...people, ...creates].every((w) => w.status === "ready")
+        );
+      },
+      undefined,
+      { timeout: 10_000 },
+    );
+  } catch (error) {
+    const snapshot = await heldSnapshot(page).catch(() => null);
+    throw new Error(
+      `E-P31 setup: the ledger's other contributors did not answer (${String(error).split("\n")[0]}): ${JSON.stringify(snapshot)}`,
+    );
+  }
+  await page.evaluate(async () => {
+    for (let turn = 0; turn < 3; turn += 1)
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => setTimeout(resolve, 0)),
+        ),
+      );
+  });
+}
+
+/** Every DOM change of the ledger from now on, each with whether a held answer was being withheld at that moment (MutationObserver). */
+async function recordLedger(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const seen: Array<{
+      at: number;
+      empty: boolean;
+      row: boolean;
+      failed: boolean;
+      withheld: boolean;
+    }> = [];
+    const w = window as unknown as {
+      __ep31Ledger: typeof seen;
+      __ep31Hold?: HeldWatchHandle;
+    };
+    w.__ep31Ledger = seen;
+    new MutationObserver(() => {
+      seen.push({
+        at: performance.now(),
+        empty: document.querySelector('[data-archived-state="empty"]') !== null,
+        row: document.querySelector("[data-archived-row]") !== null,
+        failed:
+          document.querySelector('[data-archived-state="failed"]') !== null,
+        withheld: w.__ep31Hold?.withheld() ?? false,
+      });
+    }).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      attributes: true,
+    });
+  });
+}
+
+const ledgerSeen = (page: Page) =>
+  page.evaluate(
+    () =>
+      (
+        window as unknown as {
+          __ep31Ledger: Array<{
+            at: number;
+            empty: boolean;
+            row: boolean;
+            failed: boolean;
+            withheld: boolean;
+          }>;
+        }
+      ).__ep31Ledger,
+  );
+
+/** The ledger's DOM now, with the barrier's withheld state (no observer involved). */
+const ledgerNow = (page: Page) =>
+  page.evaluate(() => ({
+    mounted: document.querySelector("[data-archived-items]") !== null,
+    empty: document.querySelector('[data-archived-state="empty"]') !== null,
+    row: document.querySelector("[data-archived-row]") !== null,
+    failed: document.querySelector('[data-archived-state="failed"]') !== null,
+    withheld:
+      (
+        window as unknown as { __ep31Hold?: HeldWatchHandle }
+      ).__ep31Hold?.withheld() ?? false,
+  }));
+
 test.describe("E-P31: an archived field's new parent is not complete until it is read (review 5, finding 2)", () => {
   const X = "12121212-1212-4121-8121-121212121212";
   for (const reparent of [true, false])
@@ -2723,6 +3175,299 @@ test.describe("E-P31: an archived field's new parent is not complete until it is
         await expect(empty).toBeVisible();
       }
     });
+
+  // Revision 28 (review 29, R29.1; design assessment P1–P6, M01–M04, Q1–Q4). The two cases above observe ONE live watch going from
+  // one atomic answer to the next, which never passes through `loading` (I2). These hold the FIRST answer of a NEW field-page watch (the
+  // ledger entered from another route, Try again, a return to the route) with the barrier above, after the ledger's other contributors
+  // answered with nothing archived, so a field page on its way is the only thing between the ledger and "Nothing archived" (I1, I12).
+  for (const parent of ["visible", "absent"] as const)
+    test(`${parent === "visible" ? "a new ledger's field-page read held before its first answer (FIXTURE delivery barrier): 'Nothing archived' is never claimed while the answer is withheld; delivered, the field is listed under its visible person" : "control: the same held field-page read whose answer has the field's person absent: nothing is claimed while it is withheld, then 'Nothing archived' once it is delivered"}`, async ({
+      context,
+    }, info) => {
+      const { page } = await setup(context, "/settings", [
+        // Not archived: the person contributor reads it and lists nothing.
+        personP(Q, "Bea"),
+        fieldP(
+          F,
+          parent === "visible" ? Q : X,
+          "Old phone",
+          { kind: "text", text: "07700 900461" },
+          { archived: true },
+        ),
+      ]);
+      await recordLedger(page);
+      const token = await armHeldWatch(page, {
+        ...FIELD_PAGE_HOLD,
+        outcome: "answer",
+      });
+      try {
+        await navigateInApp(page, "/settings/archived");
+        const held = await untilHeldReached(page, 1);
+        await heldCall(page, "disarm", token);
+        await untilOthersAnswered(page);
+        const during = await ledgerNow(page);
+        const beforeRelease = await ledgerSeen(page);
+        const snapshot = await heldSnapshot(page);
+        if (!during.mounted || !during.withheld)
+          throw new Error(
+            `E-P31 setup: the ledger is not mounted with the answer withheld: ${JSON.stringify(during)}`,
+          );
+        await heldCall(page, "release", token, held.id);
+        if (parent === "visible")
+          await expect(
+            page.locator(`[data-archived-row="${F}"]`),
+          ).toContainText("Old phone · Bea");
+        else
+          await expect(
+            page.locator('[data-archived-state="empty"]'),
+          ).toBeVisible();
+        const seen = await ledgerSeen(page);
+        const after = await heldSnapshot(page);
+        recordEvidence(info, "e-p31-held", {
+          parent,
+          held,
+          during,
+          beforeRelease,
+          seen,
+          snapshot,
+          after,
+        });
+        // The required assertion: no "Nothing archived" (nor a row or a failure) while the field page's answer is withheld.
+        expect(seen.filter((s) => s.withheld && s.empty)).toEqual([]);
+        expect(during.empty).toBe(false);
+        expect(seen.filter((s) => s.withheld && (s.row || s.failed))).toEqual(
+          [],
+        );
+        // Delivered once, to the subscriber that waited for it, and the settled result is the real one.
+        expect(
+          after.events.filter((e) => e.id === held.id).map((e) => e.event),
+        ).toEqual(["created", "reached", "answered", "released"]);
+        expect(seen.filter((s) => s.empty && s.row)).toEqual([]);
+        if (parent === "visible")
+          await expect(
+            page.locator('[data-archived-state="empty"]'),
+          ).toHaveCount(0);
+        else await expect(page.locator("[data-archived-row]")).toHaveCount(0);
+      } finally {
+        await heldCall(page, "uninstall", token).catch(() => undefined);
+      }
+    });
+
+  test("a failed field-page answer (FIXTURE failure injection: the watch's own 'unavailable' state), then Try again: the new read is held, nothing is claimed while it is withheld, and delivered the field is listed", async ({
+    context,
+  }, info) => {
+    const { page } = await setup(context, "/settings", [
+      personP(Q, "Bea"),
+      fieldP(
+        F,
+        Q,
+        "Old phone",
+        { kind: "text", text: "07700 900461" },
+        { archived: true },
+      ),
+    ]);
+    await recordLedger(page);
+    const token = await armHeldWatch(page, {
+      ...FIELD_PAGE_HOLD,
+      outcome: "failed",
+    });
+    try {
+      await navigateInApp(page, "/settings/archived");
+      const first = await untilHeldReached(page, 1);
+      await heldCall(page, "disarm", token);
+      await heldCall(page, "release", token, first.id);
+      const failed = page.locator('[data-archived-state="failed"]');
+      await expect(failed).toBeVisible();
+      // The retry's read is a new watch: hold its first answer too.
+      await heldCall(page, "arm", token, "answer");
+      await failed.getByRole("button", { name: "Try again" }).click();
+      const second = await untilHeldReached(page, 2);
+      await heldCall(page, "disarm", token);
+      await untilOthersAnswered(page);
+      const during = await ledgerNow(page);
+      const snapshot = await heldSnapshot(page);
+      if (
+        !during.withheld ||
+        second.id === first.id ||
+        (snapshot.watches.find((w) => w.id === first.id)?.unsubscribed ?? 0) < 1
+      )
+        throw new Error(
+          `E-P31 setup: Try again did not leave the failed read for a new held one: ${JSON.stringify({ during, snapshot })}`,
+        );
+      await heldCall(page, "release", token, second.id);
+      await expect(page.locator(`[data-archived-row="${F}"]`)).toContainText(
+        "Old phone · Bea",
+      );
+      const seen = await ledgerSeen(page);
+      const after = await heldSnapshot(page);
+      recordEvidence(info, "e-p31-retry", {
+        first,
+        second,
+        during,
+        seen,
+        snapshot,
+        after,
+      });
+      expect(seen.filter((s) => s.withheld && s.empty)).toEqual([]);
+      // The failure is withdrawn by Try again, before the new answer arrives.
+      expect(during).toMatchObject({ empty: false, failed: false });
+      expect(seen.some((s) => s.failed)).toBe(true);
+      expect(seen.filter((s) => s.empty && s.row)).toEqual([]);
+      await expect(page.locator('[data-archived-state="empty"]')).toHaveCount(
+        0,
+      );
+      await expect(failed).toHaveCount(0);
+    } finally {
+      await heldCall(page, "uninstall", token).catch(() => undefined);
+    }
+  });
+
+  test("control: a held read whose route is left is never delivered into its replacement; the returning ledger's new read answers, and a reload starts with no barrier", async ({
+    context,
+  }, info) => {
+    const { page } = await setup(context, "/settings", [
+      personP(Q, "Bea"),
+      fieldP(
+        F,
+        Q,
+        "Old phone",
+        { kind: "text", text: "07700 900461" },
+        { archived: true },
+      ),
+    ]);
+    await recordLedger(page);
+    const token = await armHeldWatch(page, {
+      ...FIELD_PAGE_HOLD,
+      outcome: "answer",
+    });
+    const row = page.locator(`[data-archived-row="${F}"]`);
+    let after!: HeldWatchSnapshot;
+    let held!: HeldWatchSnapshot["watches"][number];
+    try {
+      await navigateInApp(page, "/settings/archived");
+      held = await untilHeldReached(page, 1);
+      await heldCall(page, "disarm", token);
+      await untilOthersAnswered(page);
+      const during = await ledgerNow(page);
+      if (!during.withheld)
+        throw new Error(`E-P31 setup: not withheld: ${JSON.stringify(during)}`);
+      await navigateInApp(page, "/settings");
+      await page
+        .waitForFunction(
+          (id) =>
+            (window as unknown as { __ep31Hold: HeldWatchHandle }).__ep31Hold
+              .snapshot()
+              .watches.some((w) => w.id === id && w.unsubscribed > 0),
+          held.id,
+          { timeout: 10_000 },
+        )
+        .catch((error) => {
+          throw new Error(
+            `E-P31 setup: leaving the route did not unsubscribe the held read: ${String(error)}`,
+          );
+        });
+      // The stale release reaches no subscriber, and the returning ledger's read is a new, unheld watch.
+      await heldCall(page, "release", token, held.id);
+      await navigateInApp(page, "/settings/archived");
+      await expect(row).toContainText("Old phone · Bea");
+      after = await heldSnapshot(page);
+      recordEvidence(info, "e-p31-left", {
+        held,
+        during,
+        after,
+        seen: await ledgerSeen(page),
+      });
+      expect(during.empty).toBe(false);
+    } finally {
+      await heldCall(page, "uninstall", token).catch(() => undefined);
+    }
+    const events = after.events
+      .filter((e) => e.id === held.id)
+      .map((e) => e.event);
+    expect(events).toEqual([
+      "created",
+      "reached",
+      "answered",
+      "unsubscribed",
+      "released-unsubscribed",
+    ]);
+    const returned = after.watches.filter(
+      (w) =>
+        w.name === FIELD_PAGE_HOLD.plan &&
+        w.id > held.id &&
+        w.input.kind === "field" &&
+        w.input.after === null &&
+        !("parentId" in w.input),
+    );
+    expect(returned.length).toBeGreaterThan(0);
+    expect(returned.every((w) => !w.held && w.status === "ready")).toBe(true);
+    // A new document: the barrier was per document, and the ledger reads the real answer directly.
+    await page.goto(
+      `/__session?route=${encodeURIComponent("/settings/archived")}`,
+    );
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(row).toContainText("Old phone · Bea");
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __ep31Hold?: unknown }).__ep31Hold ===
+          undefined,
+      ),
+    ).toBe(true);
+  });
+
+  test("control: a barrier armed for another cursor is never reached; the ledger's field-page read passes through unchanged and lists the field", async ({
+    context,
+  }, info) => {
+    const { page } = await setup(context, "/settings", [
+      personP(Q, "Bea"),
+      fieldP(
+        F,
+        Q,
+        "Old phone",
+        { kind: "text", text: "07700 900461" },
+        { archived: true },
+      ),
+    ]);
+    const token = await armHeldWatch(page, {
+      ...FIELD_PAGE_HOLD,
+      input: { ...FIELD_PAGE_HOLD.input, after: "not-a-cursor" },
+      outcome: "answer",
+    });
+    try {
+      await navigateInApp(page, "/settings/archived");
+      await expect(page.locator(`[data-archived-row="${F}"]`)).toContainText(
+        "Old phone · Bea",
+      );
+      // A barrier that matches nothing is reported as a setup failure, never as a held state.
+      const missed = await untilHeldReached(page, 1, 1000).then(
+        () => "reached",
+        (error: unknown) => String(error),
+      );
+      const snapshot = await heldSnapshot(page);
+      recordEvidence(info, "e-p31-unmatched", { missed, snapshot });
+      expect(missed).toMatch(
+        /E-P31 setup: held field-page watch 1 not reached/,
+      );
+      expect(snapshot.watches.filter((w) => w.held)).toEqual([]);
+      const pages = snapshot.watches.filter(
+        (w) =>
+          w.name === FIELD_PAGE_HOLD.plan &&
+          w.input.kind === "field" &&
+          !("parentId" in w.input),
+      );
+      // The ledger's own read went through the wrapper (so the barrier sees the tree's watches) and answered.
+      expect(pages.length).toBeGreaterThan(0);
+      expect(pages.some((w) => w.status === "ready" && w.subscribed > 0)).toBe(
+        true,
+      );
+    } finally {
+      await heldCall(page, "uninstall", token).catch(() => undefined);
+    }
+  });
 });
 
 test.describe("E-P32: a save's completion ends only the editor session it was made in (review 6, finding 1)", () => {
