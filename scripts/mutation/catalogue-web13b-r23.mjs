@@ -12,6 +12,10 @@
 // - remembering across account services (`byService` keyed by one constant): the panel sits under `WhileCacheOpen` inside the protected
 //   tree, so in the component world every service change also unmounts it (a new panel remembers nothing either way); no reachable schedule
 //   distinguishes the patch. The per-service key stays as defence in depth.
+//
+// Revision 24 (review 28 F28-1) re-anchored MU-2763, MU-2765, MU-2766, MU-2767, MU-2768 and MU-2769 at the corrected code: `remember`,
+// `forget`, `drawn` and `settled` became `memory.remember`/`retire`, `drawnAt`/`settledAt`, and the per-service history became
+// `seen.byPage`. Each restores the SAME defect as before and keeps its title and oracle (`expect`).
 import { sub } from "./data-catalogue.mjs";
 
 const PANEL = "src/features/calendars/ReviewPanel.tsx";
@@ -42,7 +46,7 @@ export const UNIT_13B_R23 = [
       sub(
         t,
         '    if (page.status !== "ready") return;\n',
-        '    if (page.status !== "ready") return;\n    for (const row of unresolved) remember(row.base.id);\n',
+        '    if (page.status !== "ready") return;\n    for (const row of unresolved) memory.remember(row.base.id, row.base.version);\n',
       ),
   },
   {
@@ -67,7 +71,11 @@ export const UNIT_13B_R23 = [
     tests: [T_PANEL],
     expect: /F27-1 shown, moved off the page, then published resolved/,
     patch: (t) =>
-      sub(t, "    if (resolved) forget(id);\n", "    if (resolved) return;\n"),
+      sub(
+        t,
+        "    if (resolvedAt !== null) retire(id, resolvedAt);\n",
+        "    if (resolvedAt !== null) return;\n",
+      ),
   },
   {
     id: "MU-2766",
@@ -79,8 +87,8 @@ export const UNIT_13B_R23 = [
     patch: (t) =>
       sub(
         t,
-        "    parseReview(known.base.value)?.resolved === true;\n",
-        "    parseReview(known.merged.value)?.resolved === true;\n",
+        "    parseReview(known.base.value)?.resolved === true\n",
+        "    parseReview(known.merged.value)?.resolved === true\n",
       ),
   },
   {
@@ -93,8 +101,8 @@ export const UNIT_13B_R23 = [
     patch: (t) =>
       sub(
         t,
-        '  const drawn =\n    view.status === "ready" &&\n',
-        "  const drawn =\n    true ||\n",
+        '  const drawnAt =\n    view.status === "ready" &&\n    shownRow !== null &&\n    view.value.merged !== null &&\n    base?.resolved !== true &&\n    !superseded\n      ? shownRow.version\n      : null;\n',
+        "  const drawnAt = superseded ? null : row.base.version;\n",
       ),
   },
   {
@@ -105,7 +113,11 @@ export const UNIT_13B_R23 = [
     tests: [T_PANEL],
     expect: /F27-1 published resolved then deleted while the LIST is held/,
     patch: (t) =>
-      sub(t, "    if (settled) forget(id);\n", "    if (settled) return;\n"),
+      sub(
+        t,
+        "    if (settledAt !== null) retire(id, settledAt);\n",
+        "    if (settledAt !== null) return;\n",
+      ),
   },
   {
     id: "MU-2769",
@@ -117,8 +129,8 @@ export const UNIT_13B_R23 = [
     patch: (t) =>
       sub(
         t,
-        "  let shownHere = byPage?.get(after) ?? null;\n",
-        "  let shownHere = byPage?.get(null) ?? null;\n",
+        "  let shownHere = seen?.byPage.get(after) ?? null;\n",
+        "  let shownHere = seen?.byPage.get(null) ?? null;\n",
       ),
   },
 ];

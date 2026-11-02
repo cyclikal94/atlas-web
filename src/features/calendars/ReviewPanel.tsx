@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { List } from "../../components/ui/list";
@@ -91,10 +91,26 @@ function occurrenceFacts(
     : null;
 }
 
-/** The ids of the reviews one page of the panel actually showed, by the page's cursor. Ids only: no copy of a review is kept. */
-type ShownByPage = Map<string | null, Set<string>>;
-/** Remembers that a card was shown on the current page, or forgets it (published resolved). */
-type Memory = (id: string) => void;
+/**
+ * What one panel saw of the reviews under one account service. Ids and versions only: no copy of a review is kept.
+ * - `byPage`: the ids of the reviews each page actually showed, by the page's cursor. One review can have been shown on several pages
+ *   (an earlier review inserted ahead of it moves it on), so it can be in several of these sets at once.
+ * - `latest`: the newest version of each review this panel saw published by any of its readings, and whether it was resolved then.
+ */
+interface Seen {
+  byPage: Map<string | null, Set<string>>;
+  latest: Map<string, { version: number; resolved: boolean }>;
+}
+
+/** The panel's memory as its cards and departed slots use it (revision 24, review 28 F28-1). */
+interface Memory {
+  /** A card drew its own reading of this unresolved (or unreadable) review, at this version, on the current page. */
+  remember(id: string, version: number): void;
+  /** A PUBLISHED base said this review is resolved, at this version: it leaves the history of EVERY page that showed it. */
+  retire(id: string, version: number): void;
+  /** Whether this panel saw the review published resolved at this version or a later one (at any version when `version` is null). */
+  settled(id: string, version: number | null): boolean;
+}
 
 /**
  * "Anchor review needed" (WEB-13b §4.5; the wireframe's review panel): this account's UNRESOLVED anchor reviews from the cache (they are
@@ -114,6 +130,13 @@ type Memory = (id: string) => void;
  *   makes it "no longer available"; a review still cached elsewhere shows nothing here (it is on its page), one published resolved is
  *   forgotten, and while the answer is not known nothing is claimed;
  * - what is remembered belongs to this panel and the account service it was shown under; another service starts with nothing.
+ *
+ * Revision 24 (review 28 F28-1): a review can have been shown on more than one page (shown on page one, then moved onto page two and
+ * shown there). A published resolution seen by any of this panel's readings (a page's list, a card's own reading, a departed review's id
+ * read) retires the review from EVERY page that showed it, so a later deletion is not "no longer available" on any of them. The panel
+ * also keeps the version it saw resolved: an older reading of that review still arriving (a slower list or card reading) neither shows it
+ * again nor remembers it, and a card whose reading then finds no row says nothing. A NEWER unresolved version (reopened) is shown and
+ * remembered as before. A local acknowledgement waiting to be sent or confirmed is still not a resolution.
  */
 export function ReviewPanel() {
   const env = useOptionalDataEnv();
@@ -121,8 +144,59 @@ export function ReviewPanel() {
   const after = cursors[cursors.length - 1] ?? null;
   const page = useResourceList({ kind: "review", after, limit: PAGE });
   const [shownCount, setShownCount] = useState(STEP);
-  const [, forgotten] = useState(0);
+  const [, changed] = useState(0);
   const rows: ListedResource[] = page.status === "ready" ? page.value.rows : [];
+  // What this panel saw, per account service (a new service, account or database incarnation remembers nothing of the old one's).
+  const [byService] = useState(() => new WeakMap<object, Seen>());
+  const service = env?.service() ?? null;
+  let seen: Seen | null = null;
+  if (service !== null) {
+    seen = byService.get(service) ?? null;
+    if (seen === null) {
+      seen = { byPage: new Map(), latest: new Map() };
+      byService.set(service, seen);
+    }
+  }
+  let shownHere = seen?.byPage.get(after) ?? null;
+  if (seen !== null && shownHere === null) {
+    shownHere = new Set();
+    seen.byPage.set(after, shownHere);
+  }
+  const memory = useMemo<Memory>(
+    () => ({
+      // Called only for a drawn card, which an older reading than a resolution this panel saw never is (`superseded`).
+      remember(id, version) {
+        if (seen === null || shownHere === null) return;
+        const known = seen.latest.get(id);
+        if (known === undefined || version > known.version)
+          seen.latest.set(id, { version, resolved: false });
+        shownHere.add(id);
+      },
+      retire(id, version) {
+        if (seen === null) return;
+        const known = seen.latest.get(id);
+        // Older than a reading this panel already saw (one reopened since, say): it settles nothing.
+        if (known !== undefined && version < known.version) return;
+        let retired = false;
+        if (known?.resolved !== true || version > known.version) {
+          seen.latest.set(id, { version, resolved: true });
+          retired = true;
+        }
+        // Every page that showed it, each one asked (no stopping at the first that held it).
+        for (const members of seen.byPage.values())
+          if (members.delete(id)) retired = true;
+        if (retired) changed((n) => n + 1);
+      },
+      settled(id, version) {
+        const known = seen?.latest.get(id);
+        return (
+          known?.resolved === true &&
+          (version === null || version <= known.version)
+        );
+      },
+    }),
+    [seen, shownHere],
+  );
   const unresolved = useMemo(
     () =>
       rows.filter((row) => {
@@ -132,34 +206,6 @@ export function ReviewPanel() {
       }),
     [rows],
   );
-  // What this panel showed, per account service (a new service, account or database incarnation remembers nothing of the old one's).
-  const [byService] = useState(() => new WeakMap<object, ShownByPage>());
-  const service = env?.service() ?? null;
-  let byPage: ShownByPage | null = null;
-  if (service !== null) {
-    byPage = byService.get(service) ?? null;
-    if (byPage === null) {
-      byPage = new Map();
-      byService.set(service, byPage);
-    }
-  }
-  let shownHere = byPage?.get(after) ?? null;
-  if (byPage !== null && shownHere === null) {
-    shownHere = new Set();
-    byPage.set(after, shownHere);
-  }
-  const remember = useCallback<Memory>(
-    (id) => {
-      shownHere?.add(id);
-    },
-    [shownHere],
-  );
-  const forget = useCallback<Memory>(
-    (id) => {
-      if (shownHere?.delete(id) === true) forgotten((n) => n + 1);
-    },
-    [shownHere],
-  );
   const present = new Set(rows.map((row) => row.base.id));
   // Shown here earlier, not on this page now: asked for by id before anything is said about them.
   const departed =
@@ -168,9 +214,11 @@ export function ReviewPanel() {
       : [];
   useEffect(() => {
     if (page.status !== "ready") return;
-    // A review still in the cache but resolved now was settled (by this device or another): it is not "gone".
-    for (const row of rows) if (!unresolved.includes(row)) forget(row.base.id);
-  }, [rows, unresolved, page.status, forget]);
+    // A review still in the cache but resolved now was settled (by this device or another): it is not "gone", on any page.
+    for (const row of rows)
+      if (parseReview(row.base.value)?.resolved === true)
+        memory.retire(row.base.id, row.base.version);
+  }, [rows, page.status, memory]);
   const shown = unresolved.slice(0, shownCount);
   const next = page.status === "ready" ? page.value.next : null;
   // A later page is kept on screen even with nothing to show on it, so the way back is never lost.
@@ -188,15 +236,10 @@ export function ReviewPanel() {
       </h2>
       <List className="flex flex-col gap-2">
         {shown.map((row) => (
-          <ReviewCard
-            key={row.base.id}
-            row={row}
-            remember={remember}
-            forget={forget}
-          />
+          <ReviewCard key={row.base.id} row={row} memory={memory} />
         ))}
         {departed.map((id) => (
-          <Departed key={`gone:${id}`} id={id} forget={forget} />
+          <Departed key={`gone:${id}`} id={id} memory={memory} />
         ))}
       </List>
       {unresolved.length > shownCount || next !== null || cursors.length > 1 ? (
@@ -257,24 +300,28 @@ function GoneItem({ id }: { id: string }) {
 /**
  * A review this page showed that the page no longer lists (revision 23, review 27 F27-1). Leaving a bounded page is not leaving the
  * cache, so the review is asked for by its id: the cache's answer that it holds no such row (deleted, or access lost) makes it "no longer
- * available"; a review it still holds is on another page and shows nothing here; one published resolved is forgotten. Until that answer
- * (loading, no open database, a closed service, an id the answer does not cover) nothing is claimed either way. The answer is only
- * membership: nothing is shown from it and nothing is saved from it (a card's acknowledgement comes from the card's own reading).
+ * available"; a review it still holds is on another page and shows nothing here; one published resolved is retired from every page that
+ * showed it (revision 24). Until that answer (loading, no open database, a closed service, an id the answer does not cover) nothing is
+ * claimed either way. The answer is only membership: nothing is shown from it and nothing is saved from it (a card's acknowledgement
+ * comes from the card's own reading).
  */
-function Departed({ id, forget }: { id: string; forget: Memory }) {
+function Departed({ id, memory }: { id: string; memory: Memory }) {
   const read = useCachedResources([id]);
   const known =
     read.status === "ready" && Object.hasOwn(read.value, id)
       ? read.value[id]
       : undefined;
   // Published resolved: the base the server sent, not a local acknowledgement waiting to be sent or confirmed.
-  const resolved =
+  const resolvedAt =
     known !== undefined &&
     known !== null &&
-    parseReview(known.base.value)?.resolved === true;
+    parseReview(known.base.value)?.resolved === true
+      ? known.base.version
+      : null;
+  const { retire } = memory;
   useEffect(() => {
-    if (resolved) forget(id);
-  }, [resolved, id, forget]);
+    if (resolvedAt !== null) retire(id, resolvedAt);
+  }, [resolvedAt, id, retire]);
   return known === null ? <GoneItem id={id} /> : null;
 }
 
@@ -284,15 +331,7 @@ function Departed({ id, forget }: { id: string; forget: Memory }) {
  * replaces) come from the card's own ONE read of it (`useResourceView`). The list and that read are published separately, so a card
  * drawn from the list could show an older review than the one its acknowledgement resolves (WEB-13b review 13, R8).
  */
-function ReviewCard({
-  row,
-  remember,
-  forget,
-}: {
-  row: ListedResource;
-  remember: Memory;
-  forget: Memory;
-}) {
+function ReviewCard({ row, memory }: { row: ListedResource; memory: Memory }) {
   const env = useOptionalDataEnv();
   const actions = useDataActions();
   const announcer = useAnnouncer();
@@ -362,20 +401,33 @@ function ReviewCard({
       ? outstanding.latest.local_id
       : null;
 
+  // This panel already saw the review published resolved, at this reading's version or later (by this card, the list or another page):
+  // an older reading still arriving shows nothing, and a reading that finds no row is not "no longer available" (revision 24).
+  const superseded =
+    view.status === "ready" &&
+    memory.settled(id, shownRow === null ? null : shownRow.version);
   // Shown: the card drew its own reading of an unresolved (or unreadable) review. Only that is remembered (review 27 F27-1), so a
   // review the page fetched but never showed, or showed only as loading, is never later said to be gone.
-  const drawn =
+  const drawnAt =
     view.status === "ready" &&
     shownRow !== null &&
     view.value.merged !== null &&
-    base?.resolved !== true;
-  const settled = view.status === "ready" && base?.resolved === true;
+    base?.resolved !== true &&
+    !superseded
+      ? shownRow.version
+      : null;
+  // Published resolved, as the card's own reading of the BASE says (never the overlay of a local acknowledgement).
+  const settledAt =
+    view.status === "ready" && shownRow !== null && base?.resolved === true
+      ? shownRow.version
+      : null;
+  const { remember, retire } = memory;
   useEffect(() => {
-    if (drawn) remember(id);
-  }, [drawn, id, remember]);
+    if (drawnAt !== null) remember(id, drawnAt);
+  }, [drawnAt, id, remember]);
   useEffect(() => {
-    if (settled) forget(id);
-  }, [settled, id, forget]);
+    if (settledAt !== null) retire(id, settledAt);
+  }, [settledAt, id, retire]);
 
   const acknowledge = async (supersede: string | null) => {
     if (acting.current) return;
@@ -433,6 +485,8 @@ function ReviewCard({
         </p>
       </li>
     );
+  // Seen published resolved by this panel: it goes, even once it has also left the cache or while an older reading of it arrives.
+  if (superseded) return null;
   // The review left the cache (deleted, or access lost) before the list said so: the panel's "gone" treatment, never the older copy.
   if (shownRow === null || view.value.merged === null)
     return <GoneItem id={id} />;

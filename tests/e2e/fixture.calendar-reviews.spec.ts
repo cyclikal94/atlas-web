@@ -421,3 +421,90 @@ test.describe("revision 23 (review 27 F27-1): leaving a bounded page is not leav
     await expect(all).toHaveCount(101);
   });
 });
+
+test.describe("revision 24 (review 28 F28-1): a published resolution retires the review from every page that showed it", () => {
+  test("a review shown on page one and again on page two is published resolved there, then deleted: page one says nothing of it; a review deleted unresolved in the same sync page is 'no longer available'", async ({
+    context,
+  }) => {
+    test.setTimeout(120_000);
+    const task = buildTask({
+      n: 58,
+      title: "Put the bins out",
+      slotKey: `anchor:${EVENT}`,
+    });
+    const rid = (n: number) =>
+      `00000000-0000-4000-8000-0000000d${String(n).padStart(4, "0")}`;
+    const generic = (n: number, resolved = false, version = 1) =>
+      resource({
+        id: rid(n),
+        kind: "review",
+        parent_id: task.occurrenceId,
+        label: "Review task",
+        version,
+        value: { reason: "context_unavailable", resolved, slot: null },
+      });
+    const { page, net } = await reviewsPage(
+      context,
+      task,
+      Array.from({ length: 100 }, (_, i) => generic(1000 + i)),
+    );
+    const at = (n: number) => page.locator(`[data-review="${rid(n)}"]`);
+    const all = page.locator("[data-review]");
+    const gone = page.locator('[data-review-state="gone"]');
+    const cached = async (n: number) =>
+      (
+        (await rows(page, "cache")) as Array<{
+          id: string;
+          version: number;
+          value: { resolved?: boolean } | null;
+        }>
+      ).find((row) => row.id === rid(n));
+    await expect(all).toHaveCount(20, { timeout: 30_000 });
+    for (let n = 0; n < 4; n += 1)
+      await page.getByRole("button", { name: "Show more reviews" }).click();
+    await expect(all).toHaveCount(100);
+    await expect(at(1099)).toHaveAttribute("data-review-state", "open");
+    // An earlier review moves the 100th to page two, where it is shown too: two pages showed it.
+    await publish(page, net, [generic(999)], "cursor-2");
+    await expect(at(999)).toHaveAttribute("data-review-state", "open", {
+      timeout: 30_000,
+    });
+    await expect(at(1099)).toHaveCount(0);
+    await page.getByRole("button", { name: "Show more reviews" }).click();
+    await expect(at(1099)).toHaveAttribute("data-review-state", "open");
+    await expect(all).toHaveCount(1);
+    // Published resolved (version 2) while page two is shown: its card goes.
+    await publish(page, net, [generic(1099, true, 2)], "cursor-3");
+    await expect(at(1099)).toHaveCount(0, { timeout: 30_000 });
+    expect(await cached(1099)).toMatchObject({
+      version: 2,
+      value: { resolved: true },
+    });
+    // One sync page deletes it and 1000 (shown on page one, never resolved).
+    await publish(
+      page,
+      net,
+      [
+        { kind: "remove", id: rid(1099) },
+        { kind: "remove", id: rid(1000) },
+      ],
+      "cursor-4",
+    );
+    await expect
+      .poll(async () => (await cached(1099)) === undefined, { timeout: 30_000 })
+      .toBe(true);
+    expect(await cached(1000)).toBeUndefined();
+    await expect(gone).toHaveCount(0);
+    await page.getByRole("button", { name: "Show previous reviews" }).click();
+    // Page one: 1000 is said to be gone (the control); 1099, seen resolved on page two, is not.
+    await expect(at(1000)).toHaveAttribute("data-review-state", "gone", {
+      timeout: 30_000,
+    });
+    await expect(at(1000)).toContainText(
+      "This review is no longer available to you.",
+    );
+    await expect(gone).toHaveCount(1);
+    await expect(at(1099)).toHaveCount(0);
+    await expect(all).toHaveCount(100);
+  });
+});

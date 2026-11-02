@@ -296,6 +296,14 @@ makes it "no longer available"; a review it still holds shows nothing there (it 
 PUBLISHED base is resolved is forgotten (a local acknowledgement waiting to be sent or confirmed is not a resolution); while the answer is
 not known nothing is claimed. A new panel (a remount, or the cache gate closing and reopening) remembers nothing. Evidence:
 `review-panel.test.tsx` "revision 23", the revision-23 case of `fixture.calendar-reviews.spec.ts`, MU-2762 to MU-2770.
+**Revision 24 (review 28 F28-1):** one review can have been shown on several pages (shown on page one, moved on to page two and shown
+there). A published resolution seen by any of the panel's readings (a page's list, a card's own read, a departed review's id read) retires
+it from EVERY page that showed it, so no page later says it is "no longer available". The panel keeps, per account service, the newest
+version of each review it saw and whether it was resolved then: an OLDER reading still arriving (a slower list or card read) is neither
+drawn nor remembered, and a card whose read then finds no row says nothing; a NEWER unresolved version (the server allows reopening) is
+shown and remembered again; an older resolved reading does not retire a review seen reopened since. A local acknowledgement is still not
+a resolution. Ids and versions only; nothing persists beyond the panel. Evidence: `review-panel.test.tsx` "revision 24", the revision-24
+case of `fixture.calendar-reviews.spec.ts`, MU-2771 to MU-2782.
 
 **Historical finding (F-13b-1; as recorded on 25 October 2026 at the first Running checkpoint `bfe4118`, pre-existing at `b9fd602`, not
 fixed in that checkpoint; kept as it was written):** an ordinary `403` to ANY queued command sent by the production

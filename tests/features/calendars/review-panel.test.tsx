@@ -1462,3 +1462,471 @@ describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving t
     expect(states()).toEqual([`${rid(1002)}:open`]);
   });
 });
+
+describe("revision 24 (review 28 F28-1): a published resolution retires the review from every page that showed it", () => {
+  /** Reviews whose ids sort by `n` (the page's order), private and generic, under one occurrence (as a private review's cache row is). */
+  const rid = (n: number) =>
+    `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const many = (n: number, resolved = false, version = 1) =>
+    review(
+      { reason: "context_unavailable", resolved, slot: null },
+      { id: rid(n), label: `Review ${n}`, version },
+    );
+  const range = (from: number, count: number, step = 1) =>
+    Array.from({ length: count }, (_, i) => many(from + i * step));
+  const item = (n: number) =>
+    document.querySelector(`[data-review="${rid(n)}"]`) as HTMLElement | null;
+  const elements = (n: number) =>
+    document.querySelectorAll(`[data-review="${rid(n)}"]`).length;
+  const states = () =>
+    [...document.querySelectorAll("[data-review]")].map(
+      (el) =>
+        `${el.getAttribute("data-review")}:${el.getAttribute("data-review-state")}`,
+    );
+  const gone = () =>
+    [...document.querySelectorAll('[data-review-state="gone"]')].map((el) =>
+      el.getAttribute("data-review"),
+    );
+  const click = async (w: World, name: string) => {
+    await act(async () => {
+      fireEvent.click(present(screen.queryByRole("button", { name })));
+    });
+    await w.settle();
+  };
+  /** Shows the whole of the current page (Show more until it holds no more), as a person reading every card does. */
+  const showAll = async (w: World) => {
+    for (let n = 0; n < 4; n += 1) await click(w, words.SHOW_MORE_REVIEWS);
+  };
+  const next = (w: World) => click(w, words.SHOW_MORE_REVIEWS);
+  const back = (w: World) => click(w, words.SHOW_PREVIOUS_REVIEWS);
+  const start = async (rows: CacheRow[], extra = {}) => {
+    const w = await calendarWorld({ cache: [sourceRow(), ...rows], ...extra });
+    await screen.findByText(words.REVIEWS_HEADING);
+    await w.settle();
+    return w;
+  };
+  const cached = (w: World, n: number) =>
+    (w.rows("cache") as CacheRow[]).find((row) => row.id === rid(n));
+  /** Publishes a review's new version (as a sync page does) and asserts the cache holds exactly that published value. */
+  const publish = async (
+    w: World,
+    n: number,
+    resolved: boolean,
+    version: number,
+  ) => {
+    await w.commit({
+      put: { store: "cache", rows: [many(n, resolved, version)] },
+    });
+    expect(cached(w, n)).toMatchObject({
+      version,
+      value: { reason: "context_unavailable", resolved, slot: null },
+    });
+  };
+  const remove = async (w: World, ...ns: number[]) => {
+    await w.commit({ remove: ns.map(rid) });
+    for (const n of ns) expect(cached(w, n)).toBeUndefined();
+  };
+  /**
+   * The panel's readings of the mounted controller's store, each one able to be HELD or REPLAYED. Installed on that store before the
+   * readings it controls are made (the real watches and plans underneath):
+   * - `view:<id>` a card's `readResourceView`, `list:<cursor>` (or `list:*` for every page) the page's `readResourceList`, `id:<id>` a
+   *   departed review's one-id `readResourcesById`;
+   * - HOLD: the store commits and the watch reads on, but `get` keeps its last snapshot and every publication waits until `release`;
+   * - REPLAY: a watch made while armed answers `get` with a snapshot captured earlier, the last one a SUBSCRIBED watch of that key served
+   *   (what the screen was given; an OLDER publication
+   *   delivered after a newer one; stronger than an ordinary delay) until `release`, which publishes the live reading to it.
+   * `made` counts the watches made per key and `waited` the publications held, so a test asserts its control was reached.
+   */
+  const control = (w: World) => {
+    const store = w.env.service()?.store;
+    if (store === undefined) throw new Error("no service");
+    const watch = store.watch.bind(store);
+    const held = new Set<string>();
+    const replays = new Map<string, unknown>();
+    const served = new Map<string, unknown>();
+    const releases = new Map<string, Set<() => void>>();
+    const made = new Map<string, number>();
+    const waited = new Map<string, number>();
+    const keyOf = (
+      plan: string,
+      input: {
+        id?: string;
+        kind?: string;
+        after?: string | null;
+        ids?: readonly string[];
+      },
+    ): string | null => {
+      if (plan === "data.readResourceView") return `view:${input.id}`;
+      if (plan === "data.readResourceList" && input.kind === "review")
+        return `list:${input.after ?? "first"}`;
+      if (plan === "data.readResourcesById" && input.ids?.length === 1)
+        return `id:${input.ids[0]}`;
+      return null;
+    };
+    vi.spyOn(store, "watch").mockImplementation(((
+      plan: { name: string },
+      input: never,
+    ) => {
+      const source = watch(plan as never, input);
+      const key = keyOf(plan.name, input);
+      if (key === null) return source;
+      made.set(key, (made.get(key) ?? 0) + 1);
+      let frozen = replays.has(key);
+      let snapshot = frozen ? replays.get(key) : source.get();
+      let listening = 0;
+      const stopped = () =>
+        frozen ||
+        held.has(key) ||
+        (key.startsWith("list:") && held.has("list:*"));
+      return {
+        get: () => {
+          if (!stopped()) snapshot = source.get();
+          if (listening > 0) served.set(key, snapshot);
+          return snapshot;
+        },
+        subscribe: (listener: () => void) => {
+          const publish = () => {
+            snapshot = source.get();
+            listener();
+          };
+          const resume = () => {
+            frozen = false;
+            publish();
+          };
+          listening += 1;
+          const set = releases.get(key) ?? new Set();
+          set.add(resume);
+          releases.set(key, set);
+          const off = source.subscribe(() => {
+            if (!stopped()) return publish();
+            waited.set(key, (waited.get(key) ?? 0) + 1);
+          });
+          return () => {
+            listening -= 1;
+            set.delete(resume);
+            off();
+          };
+        },
+      };
+    }) as never);
+    return {
+      made: (key: string) => made.get(key) ?? 0,
+      /** Publications held for `key`, or for every key it begins (`list:`). */
+      waited: (key: string) =>
+        [...waited].reduce(
+          (sum, [k, n]) =>
+            k === key || (key.endsWith(":") && k.startsWith(key))
+              ? sum + n
+              : sum,
+          0,
+        ),
+      hold: (key: string) => held.add(key),
+      /** What a subscribed watch of `key` last served, captured to replay later. */
+      capture(key: string) {
+        if (!served.has(key)) throw new Error(`nothing served for ${key}`);
+        return served.get(key);
+      },
+      replay: (key: string, snapshot: unknown) => replays.set(key, snapshot),
+      async release(...keys: string[]) {
+        const due: Array<() => void> = [];
+        for (const key of keys) {
+          held.delete(key);
+          replays.delete(key);
+          for (const [k, set] of releases)
+            if (k === key || (key === "list:*" && k.startsWith("list:")))
+              due.push(...set);
+        }
+        await act(async () => {
+          for (const resume of due) resume();
+        });
+        await w.settle();
+      },
+    };
+  };
+  /** 1000 to 1099 all shown on page one, then 999 inserted: 1099 moves to page two, where it is shown too (two pages showed it). */
+  const twoPages = async (extra = {}) => {
+    const w = await start(range(1000, 100), extra);
+    await showAll(w);
+    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    expect(item(1099)).toBeNull();
+    await next(w);
+    expect(states()).toEqual([`${rid(1099)}:open`]);
+    return w;
+  };
+
+  test.each([
+    ["published resolved on page two", true],
+    ["control: deleted without a resolution", false],
+  ])(
+    "F28-1 the review's own schedule (shown on page one and on page two, then deleted from page two): %s",
+    async (_, resolved) => {
+      const w = await twoPages({ online: false });
+      if (resolved) {
+        await publish(w, 1099, true, 2);
+        expect(item(1099)).toBeNull();
+      }
+      await remove(w, 1099);
+      // Page two showed it: deleted unresolved it is said to be gone there too; resolved, nothing is said.
+      expect(gone()).toEqual(resolved ? [] : [rid(1099)]);
+      await back(w);
+      // Page one: 999 to 1098, and (deleted unresolved) its gone item.
+      expect(states()).toHaveLength(resolved ? 100 : 101);
+      expect(gone()).toEqual(resolved ? [] : [rid(1099)]);
+      if (!resolved) {
+        const left = present(item(1099));
+        expect(left).toHaveTextContent(words.NO_LONGER_AVAILABLE);
+        for (const button of within(left).getAllByRole("button"))
+          expect(button).toBeDisabled();
+      }
+      expect(elements(1099)).toBeLessThanOrEqual(1);
+    },
+  );
+
+  /**
+   * Three pages showed X (199000): ids 100000 to 199000 in steps of 1000 all shown on page one; 99999 inserted moves X to page two (shown
+   * there); 100 ids inserted between 198000 and X move it on to page three (shown there). The cursors stay [first, after 198000, after
+   * 198100]; Y (100000) is an unrelated review page one showed.
+   */
+  const X = 199000;
+  const Y = 100000;
+  const threePages = async () => {
+    const w = await start(range(100000, 100, 1000));
+    await showAll(w);
+    expect(item(X)).toHaveAttribute("data-review-state", "open");
+    await w.commit({ put: { store: "cache", rows: [many(99999)] } });
+    await next(w);
+    expect(states()).toEqual([`${rid(X)}:open`]);
+    await w.commit({ put: { store: "cache", rows: range(198001, 100) } });
+    expect(item(X)).toBeNull();
+    await showAll(w);
+    expect(
+      document.querySelectorAll('[data-review-state="open"]'),
+    ).toHaveLength(100);
+    await next(w);
+    expect(states()).toEqual([`${rid(X)}:open`]);
+    expect(gone()).toEqual([]);
+    return w;
+  };
+
+  test.each([
+    ["the last page (its card and list)", "last"],
+    ["the middle page (its departed id read)", "middle"],
+    ["the first page (its departed id read)", "first"],
+  ])(
+    "F28-1 three pages showed it, resolved seen on %s: every page's history retires it, back and forth; an unrelated deleted review is still gone",
+    async (_, where) => {
+      const w = await threePages();
+      if (where === "last") {
+        await publish(w, X, true, 2);
+        expect(item(X)).toBeNull();
+        await remove(w, X, Y);
+        expect(gone()).toEqual([]);
+        await back(w);
+        expect(gone()).toEqual([]);
+        await back(w);
+        expect(gone()).toEqual([rid(Y)]);
+        expect(item(X)).toBeNull();
+      } else if (where === "middle") {
+        await back(w);
+        expect(item(X)).toBeNull();
+        await publish(w, X, true, 2);
+        await remove(w, X, Y);
+        expect(gone()).toEqual([]);
+        await back(w);
+        expect(gone()).toEqual([rid(Y)]);
+        expect(item(X)).toBeNull();
+      } else {
+        await back(w);
+        await back(w);
+        expect(item(X)).toBeNull();
+        await publish(w, X, true, 2);
+        await remove(w, X);
+        expect(gone()).toEqual([]);
+        // Forward again over the same cursor (page one is unchanged): page two showed X too, and says nothing of it.
+        await next(w);
+        expect(item(198001)).toHaveAttribute("data-review-state", "open");
+        expect(gone()).toEqual([]);
+        await remove(w, Y);
+        await back(w);
+        expect(gone()).toEqual([rid(Y)]);
+        expect(item(X)).toBeNull();
+      }
+    },
+  );
+
+  test("F28-1 two reviews each shown on two pages, both resolved, the resolution published again (same and newer versions), then deleted: none is gone, an unrelated one is", async () => {
+    const w = await start(range(1000, 100));
+    await showAll(w);
+    await w.commit({ put: { store: "cache", rows: [many(998), many(999)] } });
+    await next(w);
+    expect(states()).toEqual([`${rid(1098)}:open`, `${rid(1099)}:open`]);
+    await publish(w, 1098, true, 2);
+    await publish(w, 1099, true, 2);
+    expect(states()).toEqual([]);
+    // Delivered again: the same resolution, then a newer resolved version. Nothing is shown and nothing loops.
+    await publish(w, 1099, true, 2);
+    await publish(w, 1098, true, 3);
+    expect(states()).toEqual([]);
+    await remove(w, 1098, 1099, 1000);
+    await back(w);
+    expect(gone()).toEqual([rid(1000)]);
+    expect(item(1098)).toBeNull();
+    expect(item(1099)).toBeNull();
+  });
+
+  test("F28-1 the LIST alone sees the resolution (the card's reading held): page one's history retires it; deleted while the card's reading is still held, nothing is said", async () => {
+    const w = await start(range(1000, 100));
+    const ctl = control(w);
+    await showAll(w);
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    await next(w);
+    expect(states()).toEqual([`${rid(1099)}:open`]);
+    expect(ctl.made(`view:${rid(1099)}`)).toBeGreaterThan(0);
+    ctl.hold(`view:${rid(1099)}`);
+    await publish(w, 1099, true, 2);
+    // From the hold on, the card's reading answers with what it had (1099 unresolved, version 1) and its publications wait; the card
+    // goes with the list's news, so whether one was waiting by then is not asserted. MU-2775 removes the list's retirement.
+    // The page's list says resolved: the card goes (its own reading never said so).
+    expect(item(1099)).toBeNull();
+    await remove(w, 1099);
+    expect(gone()).toEqual([]);
+    await back(w);
+    expect(gone()).toEqual([]);
+    await ctl.release(`view:${rid(1099)}`);
+    expect(gone()).toEqual([]);
+    expect(item(1099)).toBeNull();
+  });
+
+  test("F28-1 the CARD alone sees the resolution (the list held): it goes, and deleted while the list is still held nothing is said, before or after the list arrives, here or on page one", async () => {
+    const w = await start(range(1000, 100));
+    const ctl = control(w);
+    await showAll(w);
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    await next(w);
+    expect(states()).toEqual([`${rid(1099)}:open`]);
+    ctl.hold("list:*");
+    await publish(w, 1099, true, 2);
+    expect(ctl.waited("list:")).toBeGreaterThan(0);
+    // Only the card's own reading saw it: the card goes while the held list still lists it.
+    expect(item(1099)).toBeNull();
+    await remove(w, 1099);
+    // The card's reading now finds no row; the panel already saw it resolved, so it is not "no longer available".
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+    await ctl.release("list:*");
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+    await back(w);
+    expect(gone()).toEqual([]);
+  });
+
+  test("F28-1 a review the current page fetched resolved but never showed: the list's resolution still retires page one's history", async () => {
+    const w = await start(range(1000, 100));
+    await showAll(w);
+    // 21 earlier reviews: page two is 1079 to 1099, of which only the first 20 are shown, so page two never showed 1099.
+    await w.commit({ put: { store: "cache", rows: range(979, 21) } });
+    await next(w);
+    expect(states()).toHaveLength(20);
+    expect(item(1099)).toBeNull();
+    await publish(w, 1099, true, 2);
+    await remove(w, 1099);
+    await back(w);
+    expect(gone()).toEqual([]);
+    expect(item(1099)).toBeNull();
+  });
+
+  /** 1000 to 1100: page one is 1000 to 1099 (all shown), page two 1100. Next and back again, so page one's list and cards are read
+   * through watches made after `control` (their readings can then be captured). */
+  const reread = async () => {
+    const w = await start(range(1000, 101));
+    const ctl = control(w);
+    await showAll(w);
+    await next(w);
+    expect(states()).toEqual([`${rid(1100)}:open`]);
+    await back(w);
+    expect(states()).toHaveLength(100);
+    expect(ctl.made("list:first")).toBeGreaterThan(0);
+    return { w, ctl };
+  };
+
+  test("F28-1 an OLDER unresolved reading arriving after the resolution (page one's list and card readings replayed on return): not drawn, not remembered, never gone", async () => {
+    const { w, ctl } = await reread();
+    // Page one's list and 1099's card reading as they are now: 1099 listed and unresolved, version 1.
+    const list = ctl.capture("list:first");
+    const view = ctl.capture(`view:${rid(1099)}`);
+    expect(view).toMatchObject({
+      status: "ready",
+      value: { base: { id: rid(1099), version: 1 } },
+    });
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    await next(w);
+    expect(states()).toEqual([`${rid(1099)}:open`, `${rid(1100)}:open`]);
+    await publish(w, 1099, true, 2);
+    await remove(w, 1099);
+    expect(gone()).toEqual([]);
+    // Back to page one, its list answering from before 999 (1099 listed, unresolved) and 1099's new card reading from before the
+    // resolution.
+    const views = ctl.made(`view:${rid(1099)}`);
+    const lists = ctl.made("list:first");
+    ctl.replay("list:first", list);
+    ctl.replay(`view:${rid(1099)}`, view);
+    await back(w);
+    expect(ctl.made("list:first")).toBeGreaterThan(lists);
+    expect(ctl.made(`view:${rid(1099)}`)).toBeGreaterThan(views);
+    expect(item(999)).toBeNull();
+    // The older reading is not drawn (and so not remembered), and its card is not "no longer available".
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+    await ctl.release("list:first", `view:${rid(1099)}`);
+    expect(item(999)).toHaveAttribute("data-review-state", "open");
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+  });
+
+  test("F28-1 reopened: a NEWER unresolved version after the resolution is shown and remembered again; deleted, it is said to be gone", async () => {
+    const w = await twoPages();
+    await publish(w, 1099, true, 2);
+    expect(item(1099)).toBeNull();
+    await publish(w, 1099, false, 3);
+    expect(states()).toEqual([`${rid(1099)}:open`]);
+    await back(w);
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+    await next(w);
+    expect(states()).toEqual([`${rid(1099)}:open`]);
+    await remove(w, 1099);
+    expect(gone()).toEqual([rid(1099)]);
+    // Page one's history was retired by the resolution and the reopened review was not shown there since.
+    await back(w);
+    expect(gone()).toEqual([]);
+  });
+
+  test("F28-1 an OLDER resolved reading after a reopening (a replayed card reading) settles nothing: deleted while it is replayed, the review is said to be gone", async () => {
+    const { w, ctl } = await reread();
+    // Resolved at version 2, seen by the card's reading alone (the list held), captured, then reopened at version 3.
+    ctl.hold("list:*");
+    await publish(w, 1000, true, 2);
+    expect(item(1000)).toBeNull();
+    const resolved = ctl.capture(`view:${rid(1000)}`);
+    expect(resolved).toMatchObject({
+      status: "ready",
+      value: { base: { id: rid(1000), version: 2 } },
+    });
+    await ctl.release("list:*");
+    await publish(w, 1000, false, 3);
+    expect(item(1000)).toHaveAttribute("data-review-state", "open");
+    // A new card for it (next and back) whose reading answers with the older resolution.
+    await next(w);
+    const views = ctl.made(`view:${rid(1000)}`);
+    ctl.replay(`view:${rid(1000)}`, resolved);
+    await back(w);
+    expect(ctl.made(`view:${rid(1000)}`)).toBeGreaterThan(views);
+    expect(item(1000)).toBeNull();
+    // Deleted while that older reading is still being answered: the panel last saw it open, so it is gone.
+    await remove(w, 1000);
+    expect(gone()).toEqual([rid(1000)]);
+    await ctl.release(`view:${rid(1000)}`);
+    expect(gone()).toEqual([rid(1000)]);
+  });
+});
