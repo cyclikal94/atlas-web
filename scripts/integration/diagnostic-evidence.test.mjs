@@ -18,6 +18,7 @@ import {
   PROOF_SCHEMA,
   PROOF_VALIDATORS,
   proofExchanges,
+  retentionProblems,
   x0Problems,
   x2Problems,
 } from "./diagnostic-evidence.mjs";
@@ -160,8 +161,23 @@ const ready = (w) => (w.frozen ? w : finalise(w));
  * Revision 34 (R34-RET): the record a VERIFIED materialisation writes (diagnostic-fixture.mjs `materialiseRetained`), for these synthetic
  * envelopes (database identity 1/3 as the transcript's receipt parses it). Its real production from anchored SQLite files is qualified in
  * diagnostic-fixture.test.mjs; here only the reader is judged.
+ * Revision 35 (R35-RET): /2 — the guarded anchors of the removed source (database + the WAL the reader guard held), with the guard's proof.
  */
 function retainedRecord(attempt, receiptSha256) {
+  const database = {
+    name: "fixture.sqlite",
+    dev: "1",
+    ino: "3",
+    size: "8192",
+    sha256: "a".repeat(64),
+  };
+  const wal = {
+    name: "fixture.sqlite-wal",
+    dev: "1",
+    ino: "6",
+    size: "4152",
+    sha256: "f".repeat(64),
+  };
   return {
     schema: RETAINED_SCHEMA,
     attempt,
@@ -169,13 +185,7 @@ function retainedRecord(attempt, receiptSha256) {
     dir: `/retained/retained-${attempt}`,
     source: `/t/fixture-${attempt}`,
     anchors: [
-      {
-        name: "fixture.sqlite",
-        dev: "1",
-        ino: "3",
-        size: "8192",
-        sha256: "a".repeat(64),
-      },
+      database,
       {
         name: "receipt.json",
         dev: "1",
@@ -183,11 +193,41 @@ function retainedRecord(attempt, receiptSha256) {
         size: "700",
         sha256: receiptSha256,
       },
+      wal,
     ],
     quiescence: {
       exit: { code: 0, signal: null },
       stopped_seq: 9,
-      removed: ["fixture.sqlite", "receipt.json"],
+      removed: [
+        "fixture.sqlite",
+        "fixture.sqlite-wal",
+        "fixture.sqlite-shm",
+        "receipt.json",
+      ],
+    },
+    guard: {
+      acquired: {
+        method: "sqlite-shared-reader/1",
+        held: true,
+        journal_mode: "wal",
+        database: { dev: "1", ino: "3" },
+        wal: { dev: "1", ino: "6" },
+      },
+      release: {
+        released: true,
+        lost: false,
+        exit_observed_before_release: true,
+        exit: { code: 0, signal: null },
+        problems: [],
+      },
+    },
+    selection: {
+      method: "guarded-anchors",
+      wal_generation: "guarded",
+      files: [
+        { ...database, origin: "anchor" },
+        { ...wal, origin: "anchor" },
+      ],
     },
     inspect: {
       file: "inspect.sqlite",
@@ -258,7 +298,13 @@ function attemptWorld(commands, { attempt = "att-1", stderr = [] } = {}) {
           attempt,
           seq,
           served: true,
-          removed: ["fixture.sqlite", "receipt.json"],
+          // Revision 35: under the reader guard the executable's removal finds the WAL and its index (SQLite could not retire them).
+          removed: [
+            "fixture.sqlite",
+            "fixture.sqlite-wal",
+            "fixture.sqlite-shm",
+            "receipt.json",
+          ],
           cleanup_error: null,
           ...fields,
         },
@@ -1416,6 +1462,188 @@ for (const [name, edit, expected] of [
     edit(w);
     attemptRefused(w, expected);
   });
+// ---- revision 35 (R35-RET; design assessment T3): the retention must name its ONE SQLite state and justify it -----------------------
+const r35 = (w) => w.envelope.retention;
+const selectedWal = (w) =>
+  r35(w).selection.files.find((f) => f.name === "fixture.sqlite-wal");
+const stoppedLine = (en) => en.findLast((x) => x.stream === "stdout");
+for (const [name, edit, expected] of [
+  [
+    "a revision-34 retention (schema /1, no selection)",
+    (w) => {
+      r35(w).schema = "web09c-diagnostic-retained/1";
+      delete r35(w).selection;
+      delete r35(w).guard;
+    },
+    /retention: retention schema "web09c-diagnostic-retained\/1"/,
+  ],
+  [
+    "no selection (a self-consistent record that never says which state it is)",
+    (w) => delete r35(w).selection,
+    /retention: the retention does not name how its one SQLite state was selected \(null\)/,
+  ],
+  [
+    "an unknown selection method",
+    (w) => (r35(w).selection.method = "latest-inode"),
+    /does not name how its one SQLite state was selected \("latest-inode"\)/,
+  ],
+  [
+    "the review's stale schedule: the anchored WAL replayed for a removed source with NO guard",
+    (w) => delete r35(w).guard,
+    /retention: no reader guard was held before the anchor/,
+  ],
+  [
+    "a guard that was not held",
+    (w) => (r35(w).guard.acquired.held = false),
+    /retention: no reader guard was held before the anchor/,
+  ],
+  [
+    "a guard of another method",
+    (w) => (r35(w).guard.acquired.method = "other/1"),
+    /retention: no reader guard was held before the anchor/,
+  ],
+  [
+    "a guard on another database",
+    (w) => (r35(w).guard.acquired.database = { dev: "1", ino: "99" }),
+    /retention: the guard held another database than the receipt's/,
+  ],
+  [
+    "a selected WAL that is not the generation the guard held",
+    (w) => (r35(w).guard.acquired.wal = { dev: "1", ino: "77" }),
+    /retention: the selected WAL is not the anchored generation the guard held/,
+  ],
+  [
+    "a selected WAL whose bytes are not its anchor's",
+    (w) => (selectedWal(w).sha256 = "e".repeat(64)),
+    /retention: the selected fixture\.sqlite-wal is not its anchor/,
+  ],
+  [
+    "no selected WAL",
+    (w) =>
+      (r35(w).selection.files = r35(w).selection.files.filter(
+        (f) => f.name !== "fixture.sqlite-wal",
+      )),
+    /retention: the selected WAL is not the anchored generation the guard held/,
+  ],
+  [
+    "a rollback journal selected beside the guarded WAL",
+    (w) =>
+      r35(w).selection.files.push({
+        name: "fixture.sqlite-journal",
+        dev: "1",
+        ino: "8",
+        sha256: "9".repeat(64),
+        origin: "anchor",
+      }),
+    /retention: a rollback journal is selected beside the guarded WAL/,
+  ],
+  [
+    "a selected database that is not the receipt's anchor",
+    (w) => (r35(w).selection.files[0].sha256 = "e".repeat(64)),
+    /retention: the selected database is not the receipt's anchored file/,
+  ],
+  [
+    "a guard lost before its release",
+    (w) => (r35(w).guard.release.lost = true),
+    /retention: the guard was lost or not released/,
+  ],
+  [
+    "a guard never released",
+    (w) => (r35(w).guard.release.released = false),
+    /retention: the guard was lost or not released/,
+  ],
+  [
+    "a guard released before the exit",
+    (w) => (r35(w).guard.release.exit_observed_before_release = false),
+    /retention: the guard was released before the executable's exit/,
+  ],
+  [
+    "a removal that did not find the guarded WAL (both records agree)",
+    (w) => {
+      const drop = (list) => list.filter((n) => n !== "fixture.sqlite-wal");
+      r35(w).quiescence.removed = drop(r35(w).quiescence.removed);
+      retranscribe(w, (en) => {
+        const e = stoppedLine(en);
+        const v = JSON.parse(e.line);
+        v.removed = drop(v.removed);
+        e.line = JSON.stringify(v);
+      });
+    },
+    /retention: the executable's removal did not find the guarded WAL/,
+  ],
+  [
+    "a retention whose removal is not the transcript's stopped removal",
+    (w) => r35(w).quiescence.removed.pop(),
+    /retention: its removal is not the transcript's stopped removal/,
+  ],
+  [
+    "a removed source retained as its final names",
+    (w) => {
+      r35(w).selection.method = "final-named-after-exit";
+      for (const f of r35(w).selection.files)
+        if (f.name !== "fixture.sqlite") f.origin = "final";
+    },
+    /retention: a removed fixture is not retained as its guarded anchors/,
+  ],
+  [
+    "a file selected twice",
+    (w) => r35(w).selection.files.push({ ...r35(w).selection.files[0] }),
+    /retention: a file is selected twice/,
+  ],
+  [
+    "a selected file that is not SQLite state",
+    (w) =>
+      r35(w).selection.files.push({
+        name: "receipt.json",
+        dev: "1",
+        ino: "4",
+        sha256: "1".repeat(64),
+        origin: "anchor",
+      }),
+    /retention: receipt\.json is selected, but it is not SQLite state/,
+  ],
+])
+  test(`R35-RET attempt refused: ${name}`, () => {
+    const w = x0World();
+    edit(w);
+    attemptRefused(w, expected);
+  });
+test("R35-RET: a kept source's final-named retention is internally valid (its attempt fails only on the kept fixture and its removal)", () => {
+  const w = x0World();
+  const r = r35(w);
+  r.selection.method = "final-named-after-exit";
+  r.selection.wal_generation = "replaced";
+  for (const f of r.selection.files)
+    if (f.name !== "fixture.sqlite") f.origin = "final";
+  r.quiescence.removed = null;
+  assert.deepEqual(
+    retentionProblems(r, {
+      attempt: w.envelope.attempt,
+      receipt: { database: { dev: "1", ino: "3" } },
+      receiptSha256: r.anchors[1].sha256,
+    }),
+    [],
+  );
+  r.selection.files[1].origin = "anchor";
+  assert.deepEqual(
+    retentionProblems(r, {
+      attempt: w.envelope.attempt,
+      receipt: { database: { dev: "1", ino: "3" } },
+      receiptSha256: r.anchors[1].sha256,
+    }),
+    ["the kept fixture.sqlite-wal was not read from the final state"],
+  );
+  r.quiescence.removed = ["fixture.sqlite"];
+  assert.ok(
+    retentionProblems(r, {
+      attempt: w.envelope.attempt,
+      receipt: { database: { dev: "1", ino: "3" } },
+      receiptSha256: r.anchors[1].sha256,
+    }).includes(
+      "the source was removed, so its final names cannot be the selection",
+    ),
+  );
+});
 test("R34-RET: a preliminary attempt may not already record a retention (it is made after the removal decision)", () => {
   const w = x0World();
   ready(w);

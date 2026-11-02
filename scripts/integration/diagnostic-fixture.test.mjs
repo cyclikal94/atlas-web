@@ -19,6 +19,7 @@ import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { createJournal } from "./causal-journal.mjs";
 import {
+  acquireGuard,
   CommandFailed,
   childEnvironment,
   concludeAttempt,
@@ -1059,7 +1060,11 @@ test("bridge: without a journal a marker is refused (409), never answered with a
 });
 
 // ---- revision 27 (DA-DIAG-F; design assessment Q4): the evidence is judged BEFORE the removal is decided --------------------------
-/** concludeAttempt with recording fakes: what was asked of `finish`, and in which order the steps ran. */
+/**
+ * concludeAttempt with recording fakes: what was asked of `finish`, and in which order the steps ran.
+ * Revision 35 (labelled adaptation): the order arrays below now include the two new steps (`guard` before `preserve`, `release` after
+ * `finish`); every earlier step, its position relative to the others and every verdict assertion are unchanged.
+ */
 async function conclude({
   transport = [],
   preliminary = [],
@@ -1068,6 +1073,8 @@ async function conclude({
   throwIn = null,
   // Revision 34: a ready anchor by default (the healthy composition); `null` composes no preservation step at all.
   preservation = { ready: true, problems: [], dir: "/retained", anchors: [] },
+  // Revision 35: a held reader guard by default; `null` composes no guard step at all.
+  held = { held: true, problems: [], record: { held: true } },
 } = {}) {
   const order = [];
   const step =
@@ -1086,15 +1093,27 @@ async function conclude({
       order.push("latched");
       return latched;
     },
+    ...(held === null ? {} : { guard: step("guard", held) }),
     ...(preservation === null
       ? {}
-      : { preserve: step("preserve", preservation) }),
+      : {
+          preserve: step("preserve", (guard) => {
+            seen.preservedWith = guard;
+            return typeof preservation === "function"
+              ? preservation(guard)
+              : preservation;
+          }),
+        }),
     finish: step("finish", (eligible) => {
       asked = eligible;
       return { requested_remove: eligible };
     }),
-    materialise: step("materialise", (kept, finished) => {
-      seen.materialised = { kept, finished };
+    release: step("release", (guard, finished) => {
+      seen.released = { guard, finished };
+      return { released: true, lost: false, problems: [] };
+    }),
+    materialise: step("materialise", (kept, finished, released) => {
+      seen.materialised = { kept, finished, released };
       return { status: "verified", problems: [] };
     }),
     terminal: step("terminal", (finished, retention) => {
@@ -1110,8 +1129,10 @@ test("DA-DIAG-F: a healthy attempt is judged first, then asked to remove its fix
     "stop",
     "preliminary",
     "latched",
+    "guard",
     "preserve",
     "finish",
+    "release",
     "materialise",
     "terminal",
   ]);
@@ -1148,8 +1169,10 @@ for (const [name, opts] of [
       "stop",
       "preliminary",
       "latched",
+      "guard",
       "preserve",
       "finish",
+      "release",
       "materialise",
       "terminal",
     ]);
@@ -1265,15 +1288,33 @@ test("DA-DIAG-F with the real stand-in child: an outstanding unanswered command 
 // ---- revision 34 (R34-RET; design assessment Q1-Q5): the owned fixture survives the terminal judgement ------------------------------
 // The SQLite stand-in (`sqlite:` modes of diagnostic-fake.mjs) keeps a REAL WAL-mode database with committed rows; the maintained
 // preservation, shutdown, materialisation and verification are composed as the runner composes them. Stand-in evidence, never backend.
-function preserveOf(running, retainedParent, deps = retentionDeps()) {
+function preserveOf(
+  running,
+  retainedParent,
+  deps = retentionDeps(),
+  guard = null,
+) {
   return preserveFixture(deps, {
     fixtureDir: running.fixtureDir,
     receipt: running.ready.receipt,
     receiptSha256: running.ready.receipt_sha256,
     retainedParent,
     attempt: "att-1",
+    guard: guard?.record ?? null,
   });
 }
+/** Revision 35: the reader guard on the attempt's database, spawned as the runner spawns it (a child reaped with the others). */
+const guardDeps = {
+  spawn: (command, args, options) => {
+    const child = spawn(command, args, options);
+    children.add(child);
+    return child;
+  },
+};
+const guardOf = (running) =>
+  acquireGuard(guardDeps, {
+    database: join(running.fixtureDir, "fixture.sqlite"),
+  });
 const scratch = [];
 const fresh = () => {
   const dir = tmp();
@@ -1323,6 +1364,9 @@ async function realAttempt(
     retainedParent = null,
     nest = false,
     kill = false,
+    // Revision 35: the reader guard is composed as the runner composes it unless `guarded: false` (no guard step at all).
+    guarded = true,
+    afterGuard = null,
   } = {},
 ) {
   const parent = fresh();
@@ -1350,8 +1394,17 @@ async function realAttempt(
       stopTransports: async () => [],
       preliminary: async () => preliminary,
       latched: () => running.control.latched(),
-      preserve: async () => {
-        const kept = preserveOf(running, retained, deps);
+      ...(guarded
+        ? {
+            guard: async () => {
+              const held = await guardOf(running);
+              await afterGuard?.(running, held);
+              return held;
+            },
+          }
+        : {}),
+      preserve: async (guard) => {
+        const kept = preserveOf(running, retained, deps, guard);
         if (kill) {
           running.child.kill("SIGKILL");
           await running.exited;
@@ -1359,12 +1412,17 @@ async function realAttempt(
         return kept;
       },
       finish: (remove) => finishAttempt(running, { remove }),
-      materialise: (kept, finished) =>
+      release: (guard, finished) =>
+        guard.release({
+          exitObserved: finished?.exit !== null && finished?.exit !== undefined,
+        }),
+      materialise: (kept, finished, released) =>
         materialiseRetained(deps, kept, {
           exit: finished?.exit ?? null,
           stopped: finished?.stopped ?? null,
           receipt: running.ready.receipt,
           receiptSha256: running.ready.receipt_sha256,
+          guard: released ?? null,
         }),
       terminal: async (finished, retention) => {
         if (terminalThrows)
@@ -1633,12 +1691,19 @@ test("R34-RET with real SQLite: a manifest that cannot be written after the remo
     assert.ok(
       out.terminal.some((p) => /not retained verified \(failed\)/.test(p)),
     );
+    // Revision 35 (labelled adaptation): under the reader guard the executable's close cannot checkpoint, so the rows are in the anchored
+    // generation (database + its guarded WAL) rather than in the database alone; the oracle reads that pair, as the selection does.
+    assert.ok(
+      existsSync(join(out.preservation.dir, "fixture.sqlite-wal")),
+      "the anchored WAL survives (never opened in place)",
+    );
     assert.deepEqual(
       await usernamesOf({
         "fixture.sqlite": join(out.preservation.dir, "fixture.sqlite"),
+        "fixture.sqlite-wal": join(out.preservation.dir, "fixture.sqlite-wal"),
       }),
       ["ada", "grace"],
-      "the anchored database (checkpointed at the close) still holds the rows",
+      "the anchored generation still holds the rows",
     );
   } finally {
     clean();
@@ -1653,7 +1718,8 @@ test("R34-RET with real SQLite: before the exit is observed nothing is materiali
       username: "ada",
       password: "p",
     });
-    const kept = preserveOf(running, retained);
+    const held = await guardOf(running);
+    const kept = preserveOf(running, retained, retentionDeps(), held);
     assert.equal(kept.ready, true);
     const early = await materialiseRetained(retentionDeps(), kept, {
       exit: null,
@@ -1666,6 +1732,7 @@ test("R34-RET with real SQLite: before the exit is observed nothing is materiali
     assert.equal(existsSync(join(kept.dir, "fixture.sqlite")), true);
     assert.notDeepEqual(verifyRetained(retentionDeps(), early), []);
     await finishAttempt(running, { remove: false });
+    await held.release({ exitObserved: true });
   } finally {
     clean();
   }
@@ -1719,13 +1786,23 @@ test("R34-RET: the runner composes the maintained preservation, materialisation 
     new URL("./run-development-pair.mjs", import.meta.url),
     "utf8",
   );
+  // Revision 35 (labelled adaptation): preserve now receives the guard and materialise the guard's release result.
   assert.match(
     runner,
-    /preserve: async \(\) =>\s+running\s+\? preserveFixture\(retentionDeps\(\), \{/,
+    /preserve: async \(guard\) =>\s+running\s+\? preserveFixture\(retentionDeps\(\), \{[\s\S]{0,240}guard: guard\?\.record \?\? null,/,
   );
   assert.match(
     runner,
-    /materialise: async \(preservation, finished\) => \{[\s\S]{0,120}materialiseRetained\(/,
+    /materialise: async \(preservation, finished, released\) => \{[\s\S]{0,120}materialiseRetained\([\s\S]{0,400}guard: released \?\? null,/,
+  );
+  // Revision 35: the reader guard is an owned process on the attempt's database, acquired before the anchor and released after the exit.
+  assert.match(
+    runner,
+    /guard: async \(\) =>\s+running\s+\? acquireGuard\(\s+\{\s+spawn: \(command, argv, options\) =>\s+groups\.spawn\("diagnostic-guard", command, argv, options\),\s+\},\s+\{ database: `\$\{running\.fixtureDir\}\/fixture\.sqlite` \},/,
+  );
+  assert.match(
+    runner,
+    /release: async \(guard, finished\) =>\s+guard\.release\(\{\s+exitObserved: finished\?\.exit !== null && finished\?\.exit !== undefined,/,
   );
   assert.match(runner, /verifyRetained\(retentionDeps\(\), retention\)/);
   assert.match(
@@ -1734,7 +1811,7 @@ test("R34-RET: the runner composes the maintained preservation, materialisation 
   );
   assert.match(
     runner,
-    /concluded\.preserved &&\s+concluded\.retention\?\.status === "verified" &&/,
+    /concluded\.guarded &&\s+concluded\.preserved &&\s+concluded\.retention\?\.status === "verified" &&\s+concluded\.retention\?\.selection\?\.method === "guarded-anchors" &&/,
   );
   // The retained parent is a TMPDIR sibling of the fixture's parent: never inside the invocation's recursively removed tree.
   assert.match(
@@ -1759,7 +1836,870 @@ test("R34-RET with real SQLite: a changed receipt.json is never anchored as the 
       ),
     );
     assert.equal(existsSync(join(out.preservation.dir, "receipt.json")), false);
+    // Revision 35: a refused anchor is never materialised, even though the kept source's final state could be read.
+    assert.equal(out.retention.status, "anchored_unverified");
+    assert.match(
+      out.retention.problems[0],
+      /^the anchor was refused, so it is kept and never materialised: /,
+    );
     assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+
+// ---- revision 35 (R35-RET; design assessment T1-T4): ONE SQLite state, never a retired WAL replayed over a later database -----------
+// Real node:sqlite files in disposable directories; the executable's later connections are simulated by this process (a writer), the
+// guard is the maintained separate child. The ORACLE of every schedule is independent of the retention: the stopped source's named files
+// are copied when the last writer has closed (before any removal) and read through their own copy: rows, values and schema.
+const { DatabaseSync: Sqlite } = await import("node:sqlite");
+const { createHash: hashOf } = await import("node:crypto");
+const fileSha = (path) =>
+  hashOf("sha256").update(readFileSync(path)).digest("hex");
+const idOf = (path) => {
+  const s = statSync(path, { bigint: true });
+  return { dev: String(s.dev), ino: String(s.ino) };
+};
+const idOrNull = (path) => (existsSync(path) ? idOf(path) : null);
+/**
+ * Rows (all columns, by id) and schema of the database in `files` ({name: path}), read through a fresh copy. A database without the
+ * table yields `rows: null` (so a wrong selection fails the content ASSERTION, never with an SQLite error).
+ */
+function contentOf(files) {
+  const dir = fresh();
+  for (const [name, from] of Object.entries(files))
+    writeFileSync(join(dir, name), readFileSync(from));
+  const db = new Sqlite(join(dir, "fixture.sqlite"));
+  try {
+    const integrity = db.prepare("PRAGMA integrity_check").get();
+    return {
+      integrity: integrity.integrity_check,
+      schema: db
+        .prepare(
+          "SELECT type, name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .all()
+        .map((r) => ({ ...r })),
+      rows: db
+        .prepare(
+          "SELECT count(*) AS n FROM sqlite_schema WHERE type = 'table' AND name = 'facts'",
+        )
+        .get().n
+        ? db
+            .prepare("SELECT * FROM facts ORDER BY id")
+            .all()
+            .map((r) => ({ ...r }))
+        : null,
+    };
+  } finally {
+    db.close();
+  }
+}
+const namedSet = (leaf) =>
+  Object.fromEntries(
+    ["fixture.sqlite", "fixture.sqlite-wal", "fixture.sqlite-journal"]
+      .filter((n) => existsSync(join(leaf, n)))
+      .map((n) => [n, join(leaf, n)]),
+  );
+const LATE =
+  "UPDATE facts SET value = 'after-anchor' WHERE id = 1; DELETE FROM facts WHERE id = 2; INSERT INTO facts VALUES (3, 'committed-later')";
+/** The later activity of each schedule (after the anchor), given the open writer; returns the writer still open (or null). */
+const SCHEDULES = {
+  "one-lifetime": (w) => w,
+  "same-wal": (w) => {
+    w.exec(LATE);
+    return w;
+  },
+  rotate: (w, path) => {
+    w.close();
+    const next = new Sqlite(path);
+    next.exec(`PRAGMA wal_autocheckpoint=0; ${LATE}`);
+    return next;
+  },
+  "rotate-many": (w, path) => {
+    let writer = w;
+    for (const [i, sql] of [
+      "UPDATE facts SET value = 'after-anchor' WHERE id = 1",
+      "DELETE FROM facts WHERE id = 2",
+      "INSERT INTO facts VALUES (3, 'committed-later')",
+    ].entries()) {
+      writer.close();
+      writer = new Sqlite(path);
+      writer.exec(`PRAGMA wal_autocheckpoint=0; ${sql}`);
+      if (i === 1) writer.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    }
+    return writer;
+  },
+  truncate: (w) => {
+    w.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    w.exec(LATE);
+    return w;
+  },
+  restart: (w) => {
+    w.exec("PRAGMA wal_checkpoint(RESTART)");
+    w.exec(LATE);
+    return w;
+  },
+  "schema-change": (w, path) => {
+    w.close();
+    const next = new Sqlite(path);
+    next.exec(
+      `PRAGMA wal_autocheckpoint=0; ${LATE}; ALTER TABLE facts ADD COLUMN note TEXT; CREATE INDEX facts_value ON facts(value); UPDATE facts SET note = 'n' WHERE id = 3`,
+    );
+    return next;
+  },
+};
+/**
+ * One schedule through the maintained preserve → (removal) → release → materialise, as the runner orders them. `guarded`: the reader
+ * guard is held before the anchor (else none); `keep`: the source is kept (else its owned names are unlinked as the executable's
+ * `remove` does, after the last writer closed); `walAbsentAtGuard`: the writer is closed (WAL retired) before the guard.
+ */
+async function schedule(
+  name,
+  { guarded, keep, journal = "WAL", walAbsentAtGuard = false },
+) {
+  const container = fresh();
+  const leaf = join(container, "source", "fixture-r35");
+  mkdirSync(leaf, { recursive: true });
+  const retainedParent = join(container, "retained");
+  mkdirSync(retainedParent);
+  const path = join(leaf, "fixture.sqlite");
+  let writer = new Sqlite(path);
+  writer.exec(
+    `PRAGMA journal_mode=${journal}; PRAGMA wal_autocheckpoint=0; CREATE TABLE facts (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO facts VALUES (1, 'before-anchor'), (2, 'second')`,
+  );
+  if (walAbsentAtGuard) {
+    writer.close();
+    assert.equal(existsSync(`${path}-wal`), false, "the WAL was retired");
+    writer = new Sqlite(path);
+    writer.close();
+    writer = null;
+  }
+  const receipt = {
+    fixture_dir: { path: leaf, ...idOf(leaf) },
+    database: { path, ...idOf(path) },
+  };
+  writeFileSync(join(leaf, "receipt.json"), JSON.stringify(receipt));
+  const receiptSha256 = fileSha(join(leaf, "receipt.json"));
+  const held = guarded
+    ? await guardOf({ fixtureDir: leaf, ready: { receipt } })
+    : null;
+  const anchoredWal = idOrNull(`${path}-wal`);
+  const kept = preserveFixture(retentionDeps(), {
+    fixtureDir: leaf,
+    receipt,
+    receiptSha256,
+    retainedParent,
+    attempt: "r35",
+    guard: held?.record ?? null,
+  });
+  writer ??= new Sqlite(path);
+  writer = SCHEDULES[name](writer, path);
+  writer.close();
+  const finalWal = idOrNull(`${path}-wal`);
+  const expected = contentOf(namedSet(leaf));
+  let removed = null;
+  if (!keep) {
+    removed = [];
+    for (const n of [
+      "fixture.sqlite",
+      "fixture.sqlite-wal",
+      "fixture.sqlite-shm",
+      "fixture.sqlite-journal",
+      "receipt.json",
+    ])
+      if (existsSync(join(leaf, n))) {
+        rmSync(join(leaf, n));
+        removed.push(n);
+      }
+    rmdirSync(leaf);
+  }
+  const released = held ? await held.release({ exitObserved: true }) : null;
+  const retention = await materialiseRetained(retentionDeps(), kept, {
+    exit: { code: 0, signal: null },
+    stopped: { seq: 1, removed },
+    receipt,
+    receiptSha256,
+    guard: released,
+  });
+  const observed =
+    retention.status === "verified"
+      ? contentOf({
+          "fixture.sqlite": join(retention.dir, "inspect.sqlite"),
+        })
+      : null;
+  return {
+    retention,
+    expected,
+    observed,
+    kept,
+    held,
+    released,
+    anchoredWal,
+    finalWal,
+    removed,
+  };
+}
+
+test("R35-RET: while the reader guard is held SQLite never retires the WAL (close, reopen, write, close keep ONE inode); without it the same schedule makes a new WAL (control)", async () => {
+  try {
+    for (const guarded of [true, false]) {
+      const dir = fresh();
+      const path = join(dir, "fixture.sqlite");
+      let w = new Sqlite(path);
+      w.exec(
+        "PRAGMA journal_mode=WAL; CREATE TABLE facts (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO facts VALUES (1, 'a')",
+      );
+      const held = guarded
+        ? await acquireGuard(guardDeps, { database: path })
+        : null;
+      const first = idOf(`${path}-wal`);
+      if (guarded) {
+        assert.equal(held.held, true, JSON.stringify(held.problems));
+        assert.deepEqual(held.record.wal, first, "the guard holds that WAL");
+        assert.deepEqual(held.record.database, idOf(path));
+        assert.equal(held.record.journal_mode, "wal");
+      }
+      w.close();
+      assert.deepEqual(
+        idOrNull(`${path}-wal`),
+        guarded ? first : null,
+        guarded
+          ? "the last writer's close cannot retire the guarded WAL"
+          : "control: unguarded, the last close retires the WAL",
+      );
+      w = new Sqlite(path);
+      w.exec("INSERT INTO facts VALUES (2, 'b')");
+      const second = idOf(`${path}-wal`);
+      if (guarded) assert.deepEqual(second, first, "the same generation");
+      else assert.notEqual(second.ino, first.ino, "control: a new generation");
+      w.close();
+      if (guarded) {
+        assert.deepEqual(idOrNull(`${path}-wal`), first);
+        const before = [fileSha(path), fileSha(`${path}-wal`)];
+        const released = await held.release({ exitObserved: true });
+        assert.deepEqual(released, {
+          released: true,
+          lost: false,
+          exit_observed_before_release: true,
+          exit: { code: 0, signal: null },
+          problems: [],
+        });
+        assert.deepEqual(
+          [fileSha(path), fileSha(`${path}-wal`)],
+          before,
+          "releasing the read-only guard changes no byte (it never checkpoints or deletes)",
+        );
+        assert.deepEqual(idOrNull(`${path}-wal`), first);
+      }
+    }
+  } finally {
+    clean();
+  }
+});
+
+test("R35-RET: the guard refuses what it cannot hold (rollback journal mode, an absent database, a relative path); a refusal is never `held`", async () => {
+  try {
+    const dir = fresh();
+    const path = join(dir, "fixture.sqlite");
+    const w = new Sqlite(path);
+    w.exec("PRAGMA journal_mode=DELETE; CREATE TABLE facts (id INTEGER)");
+    w.close();
+    const deleteMode = await acquireGuard(guardDeps, { database: path });
+    assert.equal(deleteMode.held, false);
+    assert.match(deleteMode.problems[0], /delete journal mode, not WAL/);
+    assert.equal(deleteMode.record.held, false);
+    const absent = await acquireGuard(guardDeps, {
+      database: join(dir, "missing.sqlite"),
+    });
+    assert.equal(absent.held, false);
+    assert.match(absent.problems[0], /the guard was not held \(failed: /);
+    const relative = await acquireGuard(guardDeps, {
+      database: "fixture.sqlite",
+    });
+    assert.equal(relative.held, false);
+    assert.match(relative.problems[0], /not a safe absolute path/);
+    const never = await deleteMode.release({ exitObserved: true });
+    assert.equal(never.released, false);
+    assert.deepEqual(never.problems, ["the guard was never held"]);
+  } finally {
+    clean();
+  }
+});
+
+test("R35-RET: a guard that ended before its release is LOST: the release says so and proves nothing", async () => {
+  try {
+    const dir = fresh();
+    const path = join(dir, "fixture.sqlite");
+    const w = new Sqlite(path);
+    w.exec("PRAGMA journal_mode=WAL; CREATE TABLE facts (id INTEGER)");
+    const held = await acquireGuard(guardDeps, { database: path });
+    assert.equal(held.alive(), true);
+    process.kill(held.record.pid, "SIGKILL");
+    const settled = await within(
+      new Promise((resolve) => {
+        const poll = () => (held.alive() ? setTimeout(poll, 5) : resolve());
+        poll();
+      }),
+      3000,
+    );
+    assert.equal(settled.timedOut, undefined, "the death is observed");
+    const released = await held.release({ exitObserved: true });
+    assert.equal(released.lost, true);
+    assert.equal(released.released, false);
+    assert.match(released.problems[0], /ended before its release/);
+    w.close();
+  } finally {
+    clean();
+  }
+});
+
+for (const name of Object.keys(SCHEDULES)) {
+  test(`R35-RET T1 ${name}: guarded, removed source — verified, and the inspectable copy IS the stopped state (rows, values, schema)`, async () => {
+    try {
+      const r = await schedule(name, { guarded: true, keep: false });
+      assert.equal(r.held.held, true, JSON.stringify(r.held.problems));
+      assert.equal(r.kept.ready, true, JSON.stringify(r.kept.guard_problems));
+      assert.deepEqual(r.finalWal, r.anchoredWal, "one WAL generation");
+      assert.equal(
+        r.retention.status,
+        "verified",
+        JSON.stringify(r.retention.problems),
+      );
+      assert.equal(r.retention.selection.method, "guarded-anchors");
+      assert.equal(r.expected.integrity, "ok");
+      assert.deepEqual(r.observed, r.expected);
+      assert.deepEqual(verifyRetained(retentionDeps(), r.retention), []);
+    } finally {
+      clean();
+    }
+  });
+  test(`R35-RET T1 ${name}: guarded, KEPT source — verified from its final named state, equal to the stopped state`, async () => {
+    try {
+      const r = await schedule(name, { guarded: true, keep: true });
+      assert.equal(
+        r.retention.status,
+        "verified",
+        JSON.stringify(r.retention.problems),
+      );
+      assert.equal(r.retention.selection.method, "final-named-after-exit");
+      assert.equal(r.retention.selection.wal_generation, "anchored");
+      assert.deepEqual(r.observed, r.expected);
+      assert.deepEqual(verifyRetained(retentionDeps(), r.retention), []);
+    } finally {
+      clean();
+    }
+  });
+  test(`R35-RET T1 ${name}: UNGUARDED, kept source — verified from the final named state (never the retired anchor), equal to the stopped state`, async () => {
+    try {
+      const r = await schedule(name, { guarded: false, keep: true });
+      assert.equal(r.kept.anchored, true);
+      assert.equal(r.kept.ready, false, "no guard: removal would not be asked");
+      assert.equal(
+        r.retention.status,
+        "verified",
+        JSON.stringify(r.retention.problems),
+      );
+      assert.equal(r.retention.selection.method, "final-named-after-exit");
+      assert.deepEqual(r.observed, r.expected);
+    } finally {
+      clean();
+    }
+  });
+  test(`R35-RET T1 ${name}: UNGUARDED, removed source — never verified (the anchors are kept, labelled unproven)`, async () => {
+    try {
+      const r = await schedule(name, { guarded: false, keep: false });
+      assert.equal(r.retention.status, "failed");
+      assert.equal(r.retention.inspect, null);
+      assert.match(
+        r.retention.problems[0],
+        /^the anchors of a removed source are not one proven SQLite state: no reader guard was held before the anchor/,
+      );
+      assert.ok(
+        existsSync(join(r.kept.dir, "fixture.sqlite")),
+        "raw anchors kept",
+      );
+    } finally {
+      clean();
+    }
+  });
+}
+
+test("R35-RET T1 (the review's own stimulus): unguarded rotation replaced the WAL and the anchor holds the RETIRED generation; replaying it would be stale, so the retention is refused", async () => {
+  try {
+    const r = await schedule("rotate", { guarded: false, keep: false });
+    assert.notEqual(r.anchoredWal, null);
+    assert.equal(
+      r.finalWal,
+      null,
+      "the second generation was checkpointed and deleted",
+    );
+    // The stimulus is the reviewer's: the anchored pair alone holds only the earlier state, while the stopped state holds the later one.
+    const stale = contentOf({
+      "fixture.sqlite": join(r.kept.dir, "fixture.sqlite"),
+      "fixture.sqlite-wal": join(r.kept.dir, "fixture.sqlite-wal"),
+    });
+    assert.equal(stale.integrity, "ok", "a stale replay is internally valid");
+    assert.notDeepEqual(stale.rows, r.expected.rows);
+    assert.deepEqual(stale.rows.length, r.expected.rows.length, "same count");
+    assert.notEqual(r.retention.status, "verified");
+  } finally {
+    clean();
+  }
+});
+
+test("R35-RET T1: no WAL at the first observation — the guard's own read opens one generation, and it is the one every later commit uses", async () => {
+  try {
+    const r = await schedule("same-wal", {
+      guarded: true,
+      keep: false,
+      walAbsentAtGuard: true,
+    });
+    // Observed with the pinned Node 22.23.2 / SQLite 3.51.3: the read-only reader opens the WAL; a SQLite that refused would keep the source.
+    assert.equal(r.held.held, true, JSON.stringify(r.held.problems));
+    assert.notEqual(r.anchoredWal, null);
+    assert.equal(
+      r.retention.status,
+      "verified",
+      JSON.stringify(r.retention.problems),
+    );
+    assert.deepEqual(r.observed, r.expected);
+  } finally {
+    clean();
+  }
+});
+
+test("R35-RET T1: a rollback-journal database is outside the guard: refused, so removal would not be asked; a kept source is read from its final state", async () => {
+  try {
+    const r = await schedule("same-wal", {
+      guarded: true,
+      keep: true,
+      journal: "DELETE",
+    });
+    assert.equal(r.held.held, false);
+    assert.equal(r.kept.ready, false);
+    assert.match(r.kept.guard_problems[0], /no SQLite reader guard is held/);
+    assert.equal(
+      r.retention.status,
+      "verified",
+      JSON.stringify(r.retention.problems),
+    );
+    assert.equal(r.retention.selection.method, "final-named-after-exit");
+    assert.deepEqual(r.observed, r.expected);
+  } finally {
+    clean();
+  }
+});
+
+test("R35-RET T4: each missing part of the guard's proof refuses the anchors of a removed source", async () => {
+  try {
+    const base = await schedule("same-wal", { guarded: true, keep: false });
+    assert.equal(base.retention.status, "verified");
+    const again = (kept, options) =>
+      materialiseRetained(
+        {
+          ...retentionDeps(),
+          // a fresh materialisation of the same anchors (the first one's work/ and manifest stay)
+          mkdir: (p) =>
+            mkdirSync(
+              p.replace(/\/(work|final)$/, `/$1-again-${Math.random()}`),
+              { mode: 0o700 },
+            ),
+        },
+        kept,
+        options,
+      );
+    const options = {
+      exit: { code: 0, signal: null },
+      stopped: { seq: 1, removed: base.removed },
+      receipt: base.retention.quiescence && {
+        fixture_dir: { dev: "0", ino: "0" },
+        database: {
+          dev: base.kept.anchors.find((a) => a.name === "fixture.sqlite").dev,
+          ino: base.kept.anchors.find((a) => a.name === "fixture.sqlite").ino,
+        },
+      },
+      receiptSha256: base.kept.anchors.find((a) => a.name === "receipt.json")
+        .sha256,
+      guard: base.released,
+    };
+    for (const [why, edit, want] of [
+      [
+        "the guard lost before its release",
+        (o) => (o.guard = { ...o.guard, lost: true }),
+        /the guard was lost/,
+      ],
+      [
+        "the guard not released",
+        (o) => (o.guard = { ...o.guard, released: false }),
+        /the guard was not released/,
+      ],
+      [
+        "the guard released before the exit",
+        (o) => (o.guard = { ...o.guard, exit_observed_before_release: false }),
+        /not released after the exit/,
+      ],
+      ["no release result", (o) => (o.guard = null), /the guard was lost/],
+      [
+        "the removal did not find the WAL",
+        (o) =>
+          (o.stopped = {
+            seq: 1,
+            removed: o.stopped.removed.filter(
+              (n) => n !== "fixture.sqlite-wal",
+            ),
+          }),
+        /removal did not find the guarded WAL/,
+      ],
+      [
+        "no stopped event",
+        (o) => (o.stopped = null),
+        /removal did not find the guarded WAL/,
+      ],
+    ]) {
+      const o = { ...options };
+      edit(o);
+      const r = await again(base.kept, o);
+      assert.equal(r.status, "failed", why);
+      assert.match(r.problems[0], want, why);
+    }
+    for (const [why, guard, want] of [
+      [
+        "another WAL generation",
+        { ...base.kept.guard, wal: { dev: "1", ino: "1" } },
+        /the anchored WAL is not the guarded generation/,
+      ],
+      [
+        "another database",
+        { ...base.kept.guard, database: { dev: "1", ino: "1" } },
+        /the guard held another database/,
+      ],
+      [
+        "an unknown guard method",
+        { ...base.kept.guard, method: "other/1" },
+        /the guard method other\/1/,
+      ],
+      ["no guard", null, /no reader guard was held before the anchor/],
+    ]) {
+      const r = await again({ ...base.kept, guard }, options);
+      assert.equal(r.status, "failed", why);
+      assert.match(r.problems[0], want, why);
+    }
+  } finally {
+    clean();
+  }
+});
+
+test("R35-RET T4: a kept source whose database name was replaced after the anchor is never inspected; nor is a replaced directory", async () => {
+  try {
+    const r = await schedule("one-lifetime", { guarded: false, keep: true });
+    const leaf = r.retention.source;
+    rmSync(join(leaf, "fixture.sqlite"));
+    writeFileSync(join(leaf, "fixture.sqlite"), "a replacement");
+    const db = r.kept.anchors.find((a) => a.name === "fixture.sqlite");
+    const receipt = {
+      fixture_dir: idOf(leaf),
+      database: { dev: db.dev, ino: db.ino },
+    };
+    const again = await materialiseRetained(
+      {
+        ...retentionDeps(),
+        mkdir: (p) => mkdirSync(`${p}-again`, { mode: 0o700 }),
+      },
+      r.kept,
+      { exit: { code: 0, signal: null }, stopped: null, receipt },
+    );
+    assert.equal(again.status, "failed");
+    assert.match(
+      again.problems[0],
+      /^the source's final state is not the fixture's own \(directory owned, database replaced\)/,
+    );
+    const moved = await materialiseRetained(retentionDeps(), r.kept, {
+      exit: { code: 0, signal: null },
+      stopped: null,
+      receipt: { ...receipt, fixture_dir: { dev: "1", ino: "1" } },
+    });
+    assert.equal(moved.status, "failed");
+    assert.match(moved.problems[0], /\(directory replaced, database absent\)/);
+    assert.equal(
+      readFileSync(join(leaf, "fixture.sqlite"), "utf8"),
+      "a replacement",
+      "the replacement is untouched",
+    );
+  } finally {
+    clean();
+  }
+});
+
+test("R35-RET T3: verifyRetained re-reads the final files a kept source's selection names", async () => {
+  try {
+    const r = await schedule("same-wal", { guarded: true, keep: true });
+    assert.deepEqual(verifyRetained(retentionDeps(), r.retention), []);
+    const wal = r.retention.selection.files.find((f) => f.origin === "final");
+    assert.ok(wal, "the kept WAL is selected from the final state");
+    assert.equal(wal.name, "fixture.sqlite-wal");
+    writeFileSync(join(r.retention.dir, "final", wal.name), "changed");
+    // The kept WAL is the anchored inode (one generation), so its anchor and its final link both report the change.
+    assert.deepEqual(verifyRetained(retentionDeps(), r.retention), [
+      "the retained anchor fixture.sqlite-wal changed",
+      "the retained final fixture.sqlite-wal changed",
+    ]);
+  } finally {
+    clean();
+  }
+});
+
+// Through the maintained conclusion with the real SQLite stand-in (`sqlite:rotate`: close, reopen, same-count UPDATE/DELETE/INSERT, close).
+test("R35-RET with real SQLite: a healthy guarded attempt whose executable rotates its connection is removed, and the retained copy holds the LATE rows", async () => {
+  try {
+    const { out, running } = await realAttempt("rotate");
+    assert.equal(out.guarded, true, JSON.stringify(out.guard_problems));
+    assert.equal(out.remove_requested, true);
+    assert.deepEqual(out.terminal, []);
+    assert.equal(existsSync(running.fixtureDir), false);
+    assert.ok(
+      out.finished.stopped.removed.includes("fixture.sqlite-wal"),
+      "the executable's removal found the guarded WAL",
+    );
+    assert.equal(out.retention.status, "verified");
+    assert.equal(out.retention.selection.method, "guarded-anchors");
+    assert.deepEqual(out.released.lost, false);
+    assert.deepEqual(await inspectedUsernames(out.retention), [
+      "ada-late",
+      "hopper-late",
+    ]);
+  } finally {
+    clean();
+  }
+});
+test("R35-RET with real SQLite: the same rotation WITHOUT a guard step is never asked to remove; the kept source's final state is retained", async () => {
+  try {
+    const { out, running } = await realAttempt("rotate", { guarded: false });
+    assert.equal(out.eligible, true);
+    assert.equal(out.preserved, false);
+    assert.equal(out.guarded, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(
+      out.guard_problems.includes(
+        "no SQLite reader guard step: the fixture's removal is never asked",
+      ),
+    );
+    assert.ok(existsSync(join(running.fixtureDir, "fixture.sqlite")));
+    assert.equal(out.retention.status, "verified");
+    assert.equal(out.retention.selection.method, "final-named-after-exit");
+    assert.deepEqual(await inspectedUsernames(out.retention), [
+      "ada-late",
+      "hopper-late",
+    ]);
+    assert.deepEqual(await sourceRows(running), ["ada-late", "hopper-late"]);
+  } finally {
+    clean();
+  }
+});
+test("R35-RET with real SQLite: a WAL name replaced between the guard and the anchor is not the guarded generation; removal is not asked", async () => {
+  try {
+    const { out, running } = await realAttempt("normal", {
+      afterGuard: (r) => {
+        const wal = join(r.fixtureDir, "fixture.sqlite-wal");
+        const copy = `${wal}.copy`;
+        writeFileSync(copy, readFileSync(wal));
+        rmSync(wal);
+        writeFileSync(wal, readFileSync(copy));
+        rmSync(copy);
+      },
+    });
+    assert.equal(out.guarded, true);
+    assert.equal(out.preserved, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(
+      out.preservation_problems.includes(
+        "the anchored WAL is not the generation the guard holds",
+      ),
+      JSON.stringify(out.preservation_problems),
+    );
+    assert.ok(existsSync(join(running.fixtureDir, "fixture.sqlite")));
+    // The kept source is retained from its FINAL named state (never from the unguarded anchor), equal to the source itself.
+    assert.equal(out.retention.selection?.method, "final-named-after-exit");
+    assert.deepEqual(
+      await inspectedUsernames(out.retention),
+      await sourceRows(running),
+    );
+  } finally {
+    clean();
+  }
+});
+test("R35-RET with real SQLite: a guard that ended before the removal decision prevents the removal; the kept source is retained", async () => {
+  try {
+    const { out, running } = await realAttempt("normal", {
+      afterGuard: async (_r, held) => {
+        process.kill(held.record.pid, "SIGKILL");
+        await new Promise((resolve) => {
+          const poll = () => (held.alive() ? setTimeout(poll, 5) : resolve());
+          poll();
+        });
+      },
+    });
+    assert.equal(out.eligible, true);
+    assert.equal(out.preserved, true, "the anchor itself was bound");
+    assert.equal(out.guarded, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(
+      out.guard_problems.includes(
+        "the SQLite reader guard ended before the removal decision",
+      ),
+    );
+    assert.equal(out.released.lost, true);
+    assert.ok(existsSync(join(running.fixtureDir, "fixture.sqlite")));
+    assert.equal(out.retention.status, "verified");
+    assert.equal(out.retention.selection.method, "final-named-after-exit");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+
+// The conclusion's decision with recording fakes (revision 35: the guard step).
+for (const [name, opts, problem] of [
+  ["no guard step composed", { held: null }, /no SQLite reader guard step/],
+  [
+    "a guard that was not held",
+    {
+      held: { held: false, problems: ["the guard was not held (refused: x)"] },
+    },
+    /the guard was not held/,
+  ],
+  [
+    "a guard held with a problem",
+    { held: { held: true, problems: ["late"] } },
+    /^late$/,
+  ],
+  ["a guard step that threw", { throwIn: "guard" }, /guard broke/],
+  [
+    "a guard that ended before the decision",
+    { held: { held: true, problems: [], alive: () => false } },
+    /ended before the removal decision/,
+  ],
+  [
+    "a guard step that returned nothing",
+    { held: () => undefined },
+    /the SQLite reader guard is not held/,
+  ],
+])
+  test(`R35-RET: a healthy, preserved attempt with ${name} is NEVER asked to remove its fixture`, async () => {
+    const { out, asked } = await conclude(opts);
+    assert.equal(out.eligible, true);
+    assert.equal(asked, false);
+    assert.equal(out.guarded, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(
+      out.guard_problems.some((p) => problem.test(p)),
+      JSON.stringify(out.guard_problems),
+    );
+  });
+test("R35-RET: the guard handle reaches preserve and release; the release result reaches materialise", async () => {
+  const held = { held: true, problems: [], record: { held: true, id: 7 } };
+  const { out, seen, asked } = await conclude({ held });
+  assert.equal(asked, true);
+  assert.equal(seen.preservedWith, held);
+  assert.equal(seen.released.guard, held);
+  assert.equal(seen.released.finished.requested_remove, true);
+  assert.deepEqual(seen.materialised.released, {
+    released: true,
+    lost: false,
+    problems: [],
+  });
+  assert.deepEqual(out.guard, { held: true, id: 7 });
+});
+test("R35-RET: preserveFixture binds the anchor to the guard it is given (method, WAL mode, database, the anchored WAL, no journal)", async () => {
+  try {
+    const r = await schedule("one-lifetime", { guarded: true, keep: true });
+    const leaf = r.retention.source;
+    const receipt = JSON.parse(
+      readFileSync(join(leaf, "receipt.json"), "utf8"),
+    );
+    const preserveWith = (guard, extra = () => undefined) => {
+      const parent = fresh();
+      extra();
+      return preserveFixture(retentionDeps(), {
+        fixtureDir: leaf,
+        receipt,
+        receiptSha256: fileSha(join(leaf, "receipt.json")),
+        retainedParent: parent,
+        attempt: "bind",
+        guard,
+      });
+    };
+    const good = r.held.record;
+    assert.equal(preserveWith(good).ready, true, "positive control");
+    for (const [why, guard, want] of [
+      ["no guard", null, /^no SQLite reader guard is held/],
+      [
+        "a guard not held",
+        { ...good, held: false },
+        /^no SQLite reader guard is held/,
+      ],
+      [
+        "another method",
+        { ...good, method: "other/1" },
+        /^the guard method other\/1 is not sqlite-shared-reader\/1$/,
+      ],
+      [
+        "another journal mode",
+        { ...good, journal_mode: "delete" },
+        /^the guarded database is in delete mode$/,
+      ],
+      [
+        "another database",
+        { ...good, database: { dev: "1", ino: "1" } },
+        /^the guard holds another database than the receipt's$/,
+      ],
+      [
+        "another WAL",
+        { ...good, wal: { dev: "1", ino: "1" } },
+        /^the anchored WAL is not the generation the guard holds$/,
+      ],
+    ]) {
+      const kept = preserveWith(guard);
+      assert.equal(kept.anchored, true, why);
+      assert.equal(kept.ready, false, why);
+      assert.ok(
+        kept.guard_problems.some((p) => want.test(p)),
+        `${why}: ${JSON.stringify(kept.guard_problems)}`,
+      );
+    }
+    const journal = join(leaf, "fixture.sqlite-journal");
+    const withJournal = preserveWith(good, () => writeFileSync(journal, "x"));
+    rmSync(journal);
+    assert.equal(withJournal.ready, false);
+    assert.ok(
+      withJournal.guard_problems.includes(
+        "a rollback journal is anchored beside the guarded WAL",
+      ),
+    );
+    const wal = join(leaf, "fixture.sqlite-wal");
+    const saved = readFileSync(wal);
+    const noWal = preserveWith(good, () => rmSync(wal));
+    writeFileSync(wal, saved);
+    assert.equal(noWal.ready, false);
+    assert.ok(noWal.guard_problems.includes("the guarded WAL is not anchored"));
+  } finally {
+    clean();
+  }
+});
+test("R35-RET: a guard released before the executable's exit was observed says so", async () => {
+  try {
+    const dir = fresh();
+    const path = join(dir, "fixture.sqlite");
+    const w = new Sqlite(path);
+    w.exec("PRAGMA journal_mode=WAL; CREATE TABLE facts (id INTEGER)");
+    const held = await acquireGuard(guardDeps, { database: path });
+    const released = await held.release({ exitObserved: false });
+    assert.equal(released.released, true);
+    assert.equal(released.exit_observed_before_release, false);
+    assert.deepEqual(released.problems, [
+      "the guard was released before the executable's exit was observed",
+    ]);
+    w.close();
   } finally {
     clean();
   }

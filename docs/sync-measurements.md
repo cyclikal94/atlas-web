@@ -322,7 +322,14 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   exit, the saved evidence) follows the executable's own removal, so before the sequenced shutdown every attempt's database, WAL/journal and receipt are
   hard-linked into a private `atlas-diagnostic-retained-*/retained-<attempt>` directory beside (never inside) the fixture's parent, bound to the receipt's
   identities; after the exit the final bytes are hashed and materialised as one intact, self-contained `inspect.sqlite` with a sealed `manifest.json`.
-  A refused anchor keeps the source (`remove:false`); a complete attempt needs that retention verified; nothing removes the retained directory, on any outcome
+  Hard links keep inodes, not one SQLite state (revision 35, R35-RET: a WAL anchored and later retired by a close-and-reopen was replayed over the newer
+  checkpointed database and sealed as verified). So a separate read-only SQLite reader process (`diagnostic-guard.mjs`) now holds the database from before the
+  anchor until after the exit: while it holds, SQLite cannot retire the WAL, and the anchor binds that one generation; removal also needs the guard. After the
+  exit exactly ONE source set is selected and recorded (retention `/2`): a kept source's final named state, or a removed source's anchors only with the guard's
+  whole proof (held on the receipt's database, never lost, released after the exit, its WAL found by the executable's own removal); anything else is `failed`
+  with the raw anchors kept. A guard-held removal therefore also lists the WAL and its index among the removed names (the executable's close cannot checkpoint).
+  Whether the approved executable behaves so is for the independent exact-build review (Q6c); only stand-ins have run.
+  A refused anchor or guard keeps the source (`remove:false`); a complete attempt needs that retention verified; nothing removes the retained directory, on any outcome
   (it survives the outer driver only under the reviewed retention wrapper, whose TMPDIR is outside the shared driver's purge). A startup failure before
   `ready` is removed by the executable itself and is NOT covered (design assessment D2, owner decision open). **Status: the adapter and the five cases
   are qualified with stand-ins (the retention with a real-SQLite stand-in), and the rendering adapter against the fixture DOM, only; the approved executable

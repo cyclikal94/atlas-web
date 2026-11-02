@@ -36,6 +36,13 @@
 // After the executable's exit (no writer is left), `materialiseRetained` hashes the final anchored bytes and materialises a verified,
 // self-contained inspectable copy (SQLite integrity check + VACUUM INTO, with the WAL when one was anchored), sealed by a manifest. A failed
 // anchor keeps the source (remove:false); nothing here ever deletes a file; the retained directory survives every outcome, success included.
+// Revision 35 (R35-RET, incomplete fix of the same family): inodes are not one SQLite state. A WAL anchored and later RETIRED (the last
+// connection checkpointed and deleted it; a new WAL's commits were then checkpointed into the same database inode) was replayed over newer
+// pages and sealed as `verified`. Now (1) a separate read-only reader process (diagnostic-guard.mjs, `acquireGuard`) holds the database
+// from BEFORE the anchor until AFTER the exit, so SQLite cannot retire the anchored WAL; the anchor binds that generation and removal also
+// needs the guard; (2) `materialiseRetained` selects ONE authoritative set: the final named state when the source was kept, or the anchors
+// of a removed source only with the guard's complete proof (held, never lost, released after the exit, the WAL found by the executable's
+// own removal); otherwise `failed`, the raw anchors kept; (3) the retention record (/2) states that selection and proof.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   appendFileSync,
@@ -850,8 +857,189 @@ export function removeParentIfEmpty(deps, parent) {
   }
 }
 
+// ---- revision 35 (R35-RET): one SQLite generation, held by a separate read-only reader from before the anchor until after the exit ----
+/** The guard child (diagnostic-guard.mjs: why it is a separate process, and its protocol). */
+export const GUARD_SCRIPT = new URL("./diagnostic-guard.mjs", import.meta.url)
+  .pathname;
+export const GUARD_METHOD = "sqlite-shared-reader/1";
+/**
+ * Holds the attempt's database with the reader guard. `deps.spawn(command, args, options)` → child (the runner's owned-group spawn).
+ * Resolves with a handle: `held` (true only on the guard's `held` report), `record` (JSON: method, pid, journal mode, the database and WAL
+ * identities it holds, or why not), `problems`, `alive()` (when held: the guard has not ended), and `release({ exitObserved })` →
+ * { released, lost, exit_observed_before_release, exit,
+ * problems }. `lost` is true when the guard ended BEFORE its release was asked (its hold, and so the single-generation proof, ended
+ * early). A guard that never reported `held` is told EOF (it then closes and exits) and proves nothing.
+ */
+export async function acquireGuard(
+  deps,
+  { database, timeoutMs = 10_000, releaseTimeoutMs = 10_000 },
+) {
+  const record = {
+    method: GUARD_METHOD,
+    database_path: database ?? null,
+    pid: null,
+    held: false,
+    journal_mode: null,
+    database: null,
+    wal: null,
+    refused: null,
+  };
+  const problems = [];
+  const lines = [];
+  let wake = null;
+  let exited = null;
+  let releaseAsked = false;
+  let lostAt = null;
+  let child = null;
+  const handle = {
+    held: false,
+    record,
+    problems,
+    release: async () => ({
+      released: false,
+      lost: false,
+      exit_observed_before_release: false,
+      exit: null,
+      problems: ["the guard was never held"],
+    }),
+  };
+  if (!FIXTURE_PATH_PATTERN.test(String(database ?? ""))) {
+    problems.push(
+      `the guarded database ${database} is not a safe absolute path`,
+    );
+    return handle;
+  }
+  try {
+    child = deps.spawn(
+      process.execPath,
+      ["--no-warnings", GUARD_SCRIPT, "--database", database],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+  } catch (error) {
+    problems.push(`the guard could not start: ${codeOf(error)}`);
+    return handle;
+  }
+  record.pid = child.pid ?? null;
+  child.stdin?.on("error", () => undefined);
+  child.stderr?.resume();
+  let text = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    text += chunk;
+    for (let at = text.indexOf("\n"); at >= 0; at = text.indexOf("\n")) {
+      const line = text.slice(0, at);
+      text = text.slice(at + 1);
+      try {
+        lines.push(JSON.parse(line));
+      } catch {
+        lines.push({ event: "malformed", line });
+      }
+    }
+    wake?.();
+  });
+  const exit = new Promise((resolve) => {
+    const done = (code, signal) => {
+      if (exited) return;
+      exited = { code, signal };
+      if (!releaseAsked) lostAt = exited;
+      wake?.();
+      resolve(exited);
+    };
+    child.once("exit", done);
+    child.once("error", () => done(null, null));
+  });
+  const next = (ms) =>
+    new Promise((resolve) => {
+      let timer = null;
+      const check = () => {
+        if (lines.length > 0 || exited) {
+          wake = null;
+          clearTimeout(timer);
+          resolve(lines.shift() ?? null);
+        }
+      };
+      wake = check;
+      timer = setTimeout(() => {
+        wake = null;
+        resolve(undefined);
+      }, ms);
+      check();
+    });
+  const bounded = (promise, ms) => {
+    let timer;
+    return Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]).finally(() => clearTimeout(timer));
+  };
+  const first = await next(timeoutMs);
+  if (first?.event !== "held") {
+    record.refused = first?.reason ?? first?.error ?? null;
+    if (first?.event === "refused") {
+      record.journal_mode = first.journal_mode ?? null;
+      record.database = first.database ?? null;
+      record.wal = first.wal ?? null;
+    }
+    problems.push(
+      first === undefined
+        ? `the guard did not answer within ${timeoutMs} ms`
+        : first === null
+          ? `the guard ended without an answer (${JSON.stringify(exited)})`
+          : `the guard was not held (${first.event}: ${record.refused})`,
+    );
+    child.stdin?.end();
+    return handle;
+  }
+  record.held = true;
+  record.journal_mode = first.journal_mode;
+  record.database = first.database;
+  record.wal = first.wal;
+  handle.held = true;
+  handle.alive = () => exited === null;
+  handle.release = async ({ exitObserved = false } = {}) => {
+    const result = {
+      released: false,
+      lost: lostAt !== null || exited !== null,
+      exit_observed_before_release: exitObserved === true,
+      exit: null,
+      problems: [],
+    };
+    if (result.lost) {
+      result.exit = exited;
+      result.problems.push(
+        `the guard ended before its release (${JSON.stringify(exited)}): the single-generation hold is not proven`,
+      );
+      return result;
+    }
+    releaseAsked = true;
+    child.stdin.write("release\n");
+    child.stdin.end();
+    const ack = await next(releaseTimeoutMs);
+    result.released = ack?.event === "released";
+    if (!result.released)
+      result.problems.push(
+        `the guard did not report its release (${JSON.stringify(ack ?? null)})`,
+      );
+    result.exit = await bounded(exit, releaseTimeoutMs);
+    if (result.exit?.code !== 0)
+      result.problems.push(
+        `the guard exited ${JSON.stringify(result.exit)} after its release`,
+      );
+    if (!result.exit_observed_before_release)
+      result.problems.push(
+        "the guard was released before the executable's exit was observed",
+      );
+    return result;
+  };
+  return handle;
+}
+
 // ---- revision 34 (R34-RET): the owned fixture is anchored before its removal can be asked, and materialised after the exit ----------
-export const RETAINED_SCHEMA = "web09c-diagnostic-retained/1";
+// Revision 35 (R35-RET): /2 — the retention names the ONE source set it materialised and how it was selected (`selection`), with the reader
+// guard's proof when that set is the anchors of a removed source. A /1 retention is refused, never upgraded.
+export const RETAINED_SCHEMA = "web09c-diagnostic-retained/2";
 /** SQLite's own state, materialised together for inspection (the shared-memory index is rebuilt by SQLite and is never needed). */
 export const MATERIALISED_FILES = Object.freeze([
   "fixture.sqlite",
@@ -892,19 +1080,39 @@ const within = (path, dir) => path === dir || path.startsWith(`${dir}/`);
  * receipt.json hashes to the ready event's hash; a replaced, linked or unknown file is never anchored as the fixture. `ready` only when the
  * database and receipt are anchored and nothing was refused; otherwise the caller must not ask for removal (the source then stays). Never
  * removes anything (a partial anchor stays, labelled by its problems).
+ *
+ * Revision 35 (R35-RET): hard links keep inodes, not one SQLite state. A WAL anchored here and later RETIRED (the last connection closed
+ * after a full checkpoint; the next one made a new WAL whose commits were checkpointed into the same database inode) would be replayed
+ * over newer pages: an intact but stale database. So the anchor is bound to the reader `guard` (acquireGuard), held BEFORE this call:
+ * while it is held SQLite cannot retire the WAL, and `ready` additionally needs the guard held on the receipt's database and the anchored
+ * WAL to be exactly the generation the guard holds (no rollback journal beside it). `anchored` is the ownership/anchor verdict alone
+ * (problems); `guard_problems` say why removal would not be covered. A refused guard keeps the source: materialiseRetained then reads its
+ * final named state after the exit instead.
  */
 export function preserveFixture(
   deps,
-  { fixtureDir, receipt, receiptSha256, retainedParent, attempt },
+  { fixtureDir, receipt, receiptSha256, retainedParent, attempt, guard = null },
 ) {
   const out = {
     schema: RETAINED_SCHEMA,
     attempt,
     ready: false,
+    anchored: false,
     dir: null,
     source: fixtureDir ?? null,
     anchors: [],
     absent: [],
+    guard:
+      guard === null || guard === undefined
+        ? null
+        : {
+            method: guard.method ?? null,
+            held: guard.held === true,
+            journal_mode: guard.journal_mode ?? null,
+            database: guard.database ?? null,
+            wal: guard.wal ?? null,
+          },
+    guard_problems: [],
     problems: [],
   };
   const bad = (p) => {
@@ -1016,7 +1224,27 @@ export function preserveFixture(
   for (const name of ["fixture.sqlite", "receipt.json"])
     if (!out.anchors.some((a) => a.name === name))
       bad(`${name} is not anchored`);
-  out.ready = out.problems.length === 0;
+  out.anchored = out.problems.length === 0;
+  const unguarded = (p) => out.guard_problems.push(p);
+  const wal = out.anchors.find((a) => a.name === "fixture.sqlite-wal");
+  if (out.guard?.held !== true)
+    unguarded(
+      "no SQLite reader guard is held: the WAL generation cannot be bound, so removal is not asked",
+    );
+  else {
+    if (out.guard.method !== GUARD_METHOD)
+      unguarded(`the guard method ${out.guard.method} is not ${GUARD_METHOD}`);
+    if (out.guard.journal_mode !== "wal")
+      unguarded(`the guarded database is in ${out.guard.journal_mode} mode`);
+    if (!sameIdentity(out.guard.database, receipt.database))
+      unguarded("the guard holds another database than the receipt's");
+    if (!wal) unguarded("the guarded WAL is not anchored");
+    else if (!sameIdentity(wal, out.guard.wal))
+      unguarded("the anchored WAL is not the generation the guard holds");
+    if (out.anchors.some((a) => a.name === "fixture.sqlite-journal"))
+      unguarded("a rollback journal is anchored beside the guarded WAL");
+  }
+  out.ready = out.anchored && out.guard_problems.length === 0;
   return out;
 }
 
@@ -1043,17 +1271,31 @@ const tablesOf = (db) =>
   );
 
 /**
- * After the shutdown: the anchored bytes made inspectable. Only once the executable's EXIT was observed (no writer is left) are the final
- * anchored bytes hashed and copied (database with its WAL/journal when anchored) to `work/`, checked by SQLite's integrity check, and
- * materialised by VACUUM INTO as one self-contained `inspect.sqlite`, checked again read-only; a manifest binding the attempt, receipt,
- * identities, final hashes, quiescence and inspection is then written exclusively and read back. `status`: `verified`; `anchored_unverified`
- * (exit not observed: the anchors are kept, never judged); `unavailable` (nothing anchored); `failed` (an anchor or the materialisation was
- * refused: the anchors stay). The anchors are never opened, only read; nothing is removed.
+ * After the shutdown: ONE coherent SQLite state made inspectable (revision 35, R35-RET; design assessment invariants 1-5). Nothing is
+ * judged until the executable's EXIT was observed (no writer of it is left). The anchors are re-identified and hashed; they are the raw
+ * evidence and are never opened. Then exactly ONE authoritative source set is selected (never a retired WAL with a later database):
+ *   - `final-named-after-exit`: the source was KEPT (its directory and database are still the receipt's). After the exit its names ARE the
+ *     stopped SQLite state: the database (the anchored inode) with whatever WAL/journal is named now, each first linked into `final/`.
+ *   - `guarded-anchors`: the executable REMOVED the source. Its anchors are that state only with the reader guard's whole proof: held on the
+ *     receipt's database before the anchor, the anchored WAL being the generation it held, no rollback journal, never lost, released only
+ *     after the exit, and the executable's own removal finding that WAL (so SQLite never retired it). Without every part the status is
+ *     `failed`: the anchors stay, labelled, and are never presented as the stopped state.
+ *   - a replaced directory or database name is `failed`: a replacement is never inspected as the fixture.
+ * The selected files are copied to `work/`, checked by SQLite's integrity check, materialised by VACUUM INTO as one self-contained
+ * `inspect.sqlite`, checked again read-only, and sealed by an exclusively written, read-back manifest (attempt, receipt, identities, the
+ * selection with each file's origin and final hash, the guard's proof, quiescence, inspection). `status`: `verified`; `anchored_unverified`
+ * (exit not observed, or the anchor itself refused: kept, never judged); `unavailable` (nothing anchored); `failed`. Nothing is removed.
  */
 export async function materialiseRetained(
   deps,
   preservation,
-  { exit = null, stopped = null, receipt = null, receiptSha256 = null } = {},
+  {
+    exit = null,
+    stopped = null,
+    receipt = null,
+    receiptSha256 = null,
+    guard = null,
+  } = {},
 ) {
   const out = {
     schema: RETAINED_SCHEMA,
@@ -1067,6 +1309,8 @@ export async function materialiseRetained(
       stopped_seq: stopped?.seq ?? null,
       removed: stopped?.removed ?? null,
     },
+    guard: { acquired: preservation?.guard ?? null, release: guard ?? null },
+    selection: null,
     inspect: null,
     manifest: null,
     problems: [],
@@ -1082,7 +1326,7 @@ export async function materialiseRetained(
   }
   out.status = "anchored_unverified";
   if (
-    preservation.ready !== true ||
+    preservation.anchored !== true ||
     !preservation.anchors.some((a) => a.name === "fixture.sqlite")
   ) {
     // A refused anchor (the source was then kept) is never materialised: what is anchored may be partial or not the fixture's own.
@@ -1097,7 +1341,7 @@ export async function materialiseRetained(
     );
     return out;
   }
-  const { dir } = preservation;
+  const { dir, source } = preservation;
   for (const anchor of preservation.anchors) {
     const path = `${dir}/${anchor.name}`;
     try {
@@ -1113,15 +1357,130 @@ export async function materialiseRetained(
       return fail(`the anchor of ${anchor.name}: ${codeOf(error)}`);
     }
   }
+  const anchorOf = (name) => out.anchors.find((a) => a.name === name) ?? null;
+  // The source's state after the exit: `owned` (the receipt's identity), `absent`, or `replaced` (anything else).
+  const stateOf = (path, want, directory) => {
+    try {
+      const s = deps.lstat(path);
+      return (directory ? s.isDirectory() : s.isFile()) &&
+        sameIdentity(identityOf(s), want)
+        ? "owned"
+        : "replaced";
+    } catch (error) {
+      return error?.code === "ENOENT"
+        ? "absent"
+        : `unreadable (${codeOf(error)})`;
+    }
+  };
+  const dirState = stateOf(source, receipt?.fixture_dir, true);
+  const dbState =
+    dirState === "owned"
+      ? stateOf(`${source}/fixture.sqlite`, receipt?.database, false)
+      : "absent";
+  if (![dirState, dbState].every((s) => s === "owned" || s === "absent"))
+    return fail(
+      `the source's final state is not the fixture's own (directory ${dirState}, database ${dbState}): it is never inspected as the fixture`,
+    );
+  const walAnchor = anchorOf("fixture.sqlite-wal");
+  const files = [];
+  let method;
+  let walGeneration;
+  if (dbState === "owned") {
+    // Kept: after the exit the NAMES are the stopped state. The database name is the anchored inode; each named companion is linked now.
+    method = "final-named-after-exit";
+    files.push({ ...anchorOf("fixture.sqlite"), origin: "anchor" });
+    let finalWal = null;
+    try {
+      deps.mkdir(`${dir}/final`);
+      for (const name of MATERIALISED_FILES.filter(
+        (n) => n !== "fixture.sqlite",
+      )) {
+        const from = `${source}/${name}`;
+        let s;
+        try {
+          s = deps.lstat(from);
+        } catch (error) {
+          if (error?.code === "ENOENT") continue;
+          throw error;
+        }
+        if (!s.isFile())
+          return fail(`the kept ${name} is not a regular file: not inspected`);
+        const to = `${dir}/final/${name}`;
+        deps.link(from, to);
+        const linked = deps.lstat(to);
+        if (!sameIdentity(identityOf(linked), identityOf(s)))
+          return fail(`the final ${name} changed while it was linked`);
+        const file = {
+          name,
+          ...identityOf(linked),
+          size: String(linked.size),
+          sha256: sha256(deps.readFile(to)),
+          origin: "final",
+        };
+        if (name === "fixture.sqlite-wal") finalWal = file;
+        files.push(file);
+      }
+    } catch (error) {
+      return fail(`linking the kept source's final state: ${codeOf(error)}`);
+    }
+    walGeneration =
+      finalWal === null
+        ? "absent"
+        : walAnchor !== null && sameIdentity(finalWal, walAnchor)
+          ? "anchored"
+          : "replaced";
+  } else {
+    // Removed by the executable: only the guard's whole proof makes the anchors that state.
+    method = "guarded-anchors";
+    walGeneration = "guarded";
+    const held = preservation.guard;
+    const unproven = [];
+    if (held?.held !== true)
+      unproven.push("no reader guard was held before the anchor");
+    else {
+      if (held.method !== GUARD_METHOD)
+        unproven.push(`the guard method ${held.method}`);
+      if (!sameIdentity(held.database, receipt?.database))
+        unproven.push("the guard held another database");
+      if (walAnchor === null) unproven.push("no WAL was anchored");
+      else if (!sameIdentity(walAnchor, held.wal))
+        unproven.push("the anchored WAL is not the guarded generation");
+    }
+    if (anchorOf("fixture.sqlite-journal") !== null)
+      unproven.push("a rollback journal was anchored");
+    if (guard?.lost !== false)
+      unproven.push(
+        "the guard was lost (or never reported) before its release",
+      );
+    if (guard?.released !== true) unproven.push("the guard was not released");
+    if (guard?.exit_observed_before_release !== true)
+      unproven.push("the guard was not released after the exit");
+    if (
+      !(
+        Array.isArray(stopped?.removed) &&
+        stopped.removed.includes("fixture.sqlite-wal")
+      )
+    )
+      unproven.push(
+        "the executable's removal did not find the guarded WAL (it may have been retired)",
+      );
+    if (unproven.length > 0)
+      return fail(
+        `the anchors of a removed source are not one proven SQLite state: ${unproven.join("; ")}`,
+      );
+    for (const name of ["fixture.sqlite", "fixture.sqlite-wal"])
+      files.push({ ...anchorOf(name), origin: "anchor" });
+  }
+  out.selection = { method, wal_generation: walGeneration, files };
   const work = `${dir}/work`;
   const inspect = `${dir}/inspect.sqlite`;
+  const pathOf = (f) =>
+    f.origin === "final" ? `${dir}/final/${f.name}` : `${dir}/${f.name}`;
   try {
     deps.mkdir(work);
-    for (const anchor of out.anchors)
-      if (MATERIALISED_FILES.includes(anchor.name))
-        deps.copyExclusive(`${dir}/${anchor.name}`, `${work}/${anchor.name}`);
+    for (const f of files) deps.copyExclusive(pathOf(f), `${work}/${f.name}`);
   } catch (error) {
-    return fail(`copying the anchors for inspection: ${codeOf(error)}`);
+    return fail(`copying the selected state for inspection: ${codeOf(error)}`);
   }
   let db = null;
   try {
@@ -1129,11 +1488,11 @@ export async function materialiseRetained(
     const integrity = integrityOf(db);
     if (integrity.join() !== "ok")
       return fail(
-        `the anchored database is not intact: ${integrity.join("; ")}`,
+        `the selected database is not intact: ${integrity.join("; ")}`,
       );
     db.exec(`VACUUM INTO '${inspect}'`);
   } catch (error) {
-    return fail(`materialising the anchored database: ${codeOf(error)}`);
+    return fail(`materialising the selected database: ${codeOf(error)}`);
   } finally {
     try {
       db?.close();
@@ -1174,6 +1533,8 @@ export async function materialiseRetained(
       ? { dev: receipt.database.dev, ino: receipt.database.ino }
       : null,
     anchors: out.anchors,
+    selection: out.selection,
+    guard: out.guard,
     quiescence: out.quiescence,
     inspect: out.inspect,
   };
@@ -1190,7 +1551,7 @@ export async function materialiseRetained(
   return out;
 }
 
-/** Re-reads a `verified` retention from disk (manifest and inspectable copy, by hash) and returns its problems (none: still retained). */
+/** Re-reads a `verified` retention from disk (manifest, inspectable copy, anchors and selected final files, by hash); its problems. */
 export function verifyRetained(deps, retention) {
   if (retention?.status !== "verified")
     return [
@@ -1201,6 +1562,9 @@ export function verifyRetained(deps, retention) {
     ["manifest", retention.manifest?.file, retention.manifest?.sha256],
     ["inspectable copy", retention.inspect?.file, retention.inspect?.sha256],
     ...retention.anchors.map((a) => [`anchor ${a.name}`, a.name, a.sha256]),
+    ...(retention.selection?.files ?? [])
+      .filter((f) => f.origin === "final")
+      .map((f) => [`final ${f.name}`, `final/${f.name}`, f.sha256]),
   ])
     try {
       if (sha256(deps.readFile(`${retention.dir}/${file}`)) !== want)
@@ -1228,13 +1592,22 @@ export function verifyRetained(deps, retention) {
  *   3b. `finish(remove)` as before, with that conjunction.
  *   3c. `materialise(preservation, finished)` — after the exit, the verified inspectable representation (`materialiseRetained`).
  *   4.  `terminal(finished, retention)` judges the retention too. A late failure therefore leaves the anchored fixture, not an empty parent.
+ *
+ * Revision 35 (R35-RET): an anchor is one SQLite state only while no WAL generation can be retired after it.
+ *   3a'. `guard()` — BEFORE the anchor, the reader guard (`acquireGuard`) holds the database; its handle is given to `preserve(guard)`,
+ *        which binds the anchored WAL to the generation it holds. Removal is asked only when the attempt is eligible AND preserved AND the
+ *        guard is held with no problem. Without a `guard` step, or when it throws, refuses or is not held, removal is never asked.
+ *   3b'. `release(guard, finished)` — after the shutdown and the exit; its result (released, lost, after the exit) is the guard's proof.
+ *   3c'. `materialise(preservation, finished, released)`.
  */
 export async function concludeAttempt({
   stopTransports,
   preliminary,
   latched,
+  guard = null,
   preserve = null,
   finish,
+  release = null,
   materialise = null,
   terminal,
 }) {
@@ -1257,8 +1630,23 @@ export async function concludeAttempt({
   const latch = latched();
   const eligible =
     transport.length === 0 && before.length === 0 && latch === null;
+  const holding = guard
+    ? await run(guard)
+    : {
+        value: null,
+        problems: [
+          "no SQLite reader guard step: the fixture's removal is never asked",
+        ],
+      };
+  const guardProblems = [
+    ...holding.problems,
+    ...(holding.value?.problems ?? []),
+  ];
+  const guarded = holding.value?.held === true && guardProblems.length === 0;
+  if (!guarded && guardProblems.length === 0)
+    guardProblems.push("the SQLite reader guard is not held");
   const kept = preserve
-    ? await run(preserve)
+    ? await run(preserve, holding.value)
     : {
         value: null,
         problems: [
@@ -1268,15 +1656,29 @@ export async function concludeAttempt({
   const preservationProblems = [
     ...kept.problems,
     ...(kept.value?.problems ?? []),
+    ...(kept.value?.guard_problems ?? []),
   ];
   const preserved =
     kept.value?.ready === true && preservationProblems.length === 0;
   if (!preserved && preservationProblems.length === 0)
     preservationProblems.push("the fixture's anchor is not ready");
-  const remove = eligible && preserved;
+  // The guard must still be holding when the removal is decided (a guard that ended after its report proves nothing from then on).
+  const holdingNow = guarded && holding.value?.alive?.() !== false;
+  if (guarded && !holdingNow)
+    guardProblems.push(
+      "the SQLite reader guard ended before the removal decision",
+    );
+  const remove = eligible && preserved && holdingNow;
   const done = await run(finish, remove);
+  const freed =
+    holding.value && release
+      ? await run(release, holding.value, done.value)
+      : {
+          value: null,
+          problems: holding.value ? ["no guard release step"] : [],
+        };
   const retained = materialise
-    ? await run(materialise, kept.value, done.value)
+    ? await run(materialise, kept.value, done.value, freed.value)
     : { value: null, problems: [] };
   const end = await run(terminal, done.value, retained.value);
   return {
@@ -1287,6 +1689,11 @@ export async function concludeAttempt({
     preservation: kept.value,
     preservation_problems: preservationProblems,
     preserved,
+    guard: holding.value?.record ?? null,
+    guard_problems: guardProblems,
+    guarded: holdingNow,
+    released: freed.value,
+    release_problems: [...freed.problems, ...(freed.value?.problems ?? [])],
     remove_requested: remove,
     finished: done.value,
     finish_problems: done.problems,

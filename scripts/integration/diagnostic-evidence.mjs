@@ -6,7 +6,8 @@
 //     owned termination. Valid only when every command we sent was answered exactly once, in order, `ok` with its operation's effect;
 //     nothing was rejected, lost, partial or unknown; no HTTP admission was refused; the sequenced shutdown was answered by its `stopped`
 //     with `served: true`, the owned files removed and no clean-up error; the process exited 0; and the fixture is gone — and (revision
-//     34, R34-RET) its anchored representation is retained VERIFIED (`retentionProblems`).
+//     34, R34-RET) its anchored representation is retained VERIFIED (`retentionProblems`; revision 35, R35-RET: as ONE selected SQLite
+//     state, the guarded anchors of a removed source).
 //   - the case's causal PROOF (`web09c-diagnostic-proof/2`, written by the spec) for PAIR-X0 (real continuation EXPIRY) or PAIR-X2 (real
 //     PRUNING), and their revision-27 variants (PAIR-XR0/XR2: the fenced RECOVERY caller; PAIR-XL0: X0 with named admitted local work and a
 //     reload), checked against that transcript (the control answers it names, by sequence number) and the interval's tap records (the
@@ -168,11 +169,27 @@ function transcriptBindingProblems(entries, events) {
 }
 
 const HEX64 = /^[0-9a-f]{64}$/;
+const sameId = (a, b) =>
+  a !== null &&
+  a !== undefined &&
+  b !== null &&
+  b !== undefined &&
+  a.dev === b.dev &&
+  a.ino === b.ino;
 /**
  * Revision 34 (R34-RET): the attempt's retained fixture as its envelope records it (diagnostic-fixture.mjs `materialiseRetained`). A
  * complete attempt needs a VERIFIED retention: anchored after ownership was bound, materialised only after the executable's exit, the
  * database anchor being the receipt's file and the receipt anchor the ready receipt's bytes, a sealed manifest and an intact inspectable
  * copy. (The runner re-reads the retained files themselves by hash: `verifyRetained`.)
+ *
+ * Revision 35 (R35-RET): /2 must also say WHICH one SQLite state it materialised, and that choice must be justified by what it recorded:
+ *   - `guarded-anchors` (required when the executable removed the source): the reader guard held the receipt's database before the anchor,
+ *     the selected WAL is the anchored generation it held, the guard was never lost and was released after the exit, the executable's own
+ *     removal found that WAL, no rollback journal is selected, and each selected file is its anchor (same identity and final hash);
+ *   - `final-named-after-exit` (only when the source was kept): the database is the receipt's anchored file and each companion was linked
+ *     from the kept source after the exit.
+ * A self-consistent record without that justification (a /1 record, a missing or unknown selection, an anchored WAL replayed for a
+ * removed source without the guard's proof) is refused even when every hash matches.
  */
 export function retentionProblems(
   retention,
@@ -222,6 +239,70 @@ export function retentionProblems(
     bad("the retained fixture has no intact inspectable copy");
   if (!HEX64.test(String(retention.manifest?.sha256)))
     bad("the retained fixture's manifest is not sealed");
+  // Revision 35: the one selected state and its justification.
+  const selection = retention.selection;
+  const files = Array.isArray(selection?.files) ? selection.files : [];
+  const fileNames = files.map((f) => f?.name);
+  if (new Set(fileNames).size !== fileNames.length)
+    bad("a file is selected twice");
+  for (const f of files) {
+    if (
+      ![
+        "fixture.sqlite",
+        "fixture.sqlite-wal",
+        "fixture.sqlite-journal",
+      ].includes(f?.name)
+    )
+      bad(`${f?.name} is selected, but it is not SQLite state`);
+    if (!HEX64.test(String(f?.sha256)))
+      bad(`the selected ${f?.name} has no final hash`);
+  }
+  const selected = (name) => files.find((f) => f?.name === name) ?? null;
+  const asAnchored = (f) => {
+    const a = anchors.find((x) => x.name === f.name);
+    return (
+      f.origin === "anchor" &&
+      a !== undefined &&
+      sameId(a, f) &&
+      a.sha256 === f.sha256
+    );
+  };
+  const db = selected("fixture.sqlite");
+  if (!db || !asAnchored(db) || !sameId(db, receipt?.database))
+    bad("the selected database is not the receipt's anchored file");
+  const removed = Array.isArray(retention.quiescence?.removed);
+  if (selection?.method === "guarded-anchors") {
+    const held = retention.guard?.acquired;
+    const freed = retention.guard?.release;
+    const wal = selected("fixture.sqlite-wal");
+    if (held?.held !== true || held?.method !== "sqlite-shared-reader/1")
+      bad("no reader guard was held before the anchor");
+    if (!sameId(held?.database, receipt?.database))
+      bad("the guard held another database than the receipt's");
+    if (!wal || !asAnchored(wal) || !sameId(wal, held?.wal))
+      bad("the selected WAL is not the anchored generation the guard held");
+    if (selected("fixture.sqlite-journal") !== null)
+      bad("a rollback journal is selected beside the guarded WAL");
+    if (freed?.lost !== false || freed?.released !== true)
+      bad("the guard was lost or not released");
+    if (freed?.exit_observed_before_release !== true)
+      bad("the guard was released before the executable's exit");
+    if (
+      !(removed && retention.quiescence.removed.includes("fixture.sqlite-wal"))
+    )
+      bad("the executable's removal did not find the guarded WAL");
+    for (const f of files)
+      if (!asAnchored(f)) bad(`the selected ${f.name} is not its anchor`);
+  } else if (selection?.method === "final-named-after-exit") {
+    if (removed)
+      bad("the source was removed, so its final names cannot be the selection");
+    for (const f of files)
+      if (f.name !== "fixture.sqlite" && f.origin !== "final")
+        bad(`the kept ${f.name} was not read from the final state`);
+  } else
+    bad(
+      `the retention does not name how its one SQLite state was selected (${JSON.stringify(selection?.method ?? null)})`,
+    );
   return problems;
 }
 
@@ -318,6 +399,7 @@ export function attemptProblems(
       `stdout lines that answer no command: ${x.stray.map((s) => s.n).join(",")}`,
     );
   // Every command: the next sequence number, answered exactly once, `ok`, with its operation's effect.
+  let stoppedRemoved = null;
   x.commands.forEach((c, i) => {
     if (c.seq !== i + 1)
       bad(`command ${c.n} has seq ${c.seq}, expected ${i + 1}`);
@@ -344,6 +426,7 @@ export function attemptProblems(
         if (s.cleanup_error !== null && s.cleanup_error !== undefined)
           bad(`clean-up error: ${s.cleanup_error}`);
         const removed = Array.isArray(s.removed) ? s.removed : [];
+        stoppedRemoved = s.removed ?? null;
         for (const name of ["fixture.sqlite", "receipt.json"])
           if (!removed.includes(name)) bad(`stopped did not remove ${name}`);
         for (const name of removed)
@@ -465,6 +548,16 @@ export function attemptProblems(
       receiptSha256: x.ready?.event?.receipt_sha256,
     }))
       bad(`retention: ${p}`);
+    // Revision 35 (R35-RET): the removed source's retention is the guarded anchors, judged on the removal this envelope recorded.
+    if (envelope.retention?.selection?.method !== "guarded-anchors")
+      bad(
+        "retention: a removed fixture is not retained as its guarded anchors",
+      );
+    if (
+      canonical(envelope.retention?.quiescence?.removed ?? null) !==
+      canonical(stoppedRemoved)
+    )
+      bad("retention: its removal is not the transcript's stopped removal");
   } else {
     if (envelope.shutdown !== null && envelope.shutdown !== undefined)
       bad("a preliminary attempt already records a shutdown");

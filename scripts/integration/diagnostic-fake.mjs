@@ -10,6 +10,7 @@
 // committed rows stay in the WAL until the close): each add_account commits a row, and every stop closes the database (its checkpoint and
 // WAL deletion) BEFORE the owned removal, as the executable's pool close does; `sqlite:unclosed` removes without closing (the rows then
 // exist only in the WAL). Still never evidence about the backend's own SQLite use.
+// Revision 35 (R35-RET): `sqlite:rotate` closes, reopens, commits same-count late changes and closes again before the removal.
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -43,7 +44,19 @@ for (let i = 0; i < argv.length; i += 2) {
 const sqlite = mode.startsWith("sqlite:");
 if (sqlite) mode = mode.slice("sqlite:".length);
 let database = null;
+let databasePath = null;
+let DatabaseSync = null;
 const closeDatabase = () => {
+  if (database !== null && mode === "rotate") {
+    // Revision 35 (R35-RET): the reviewer's WAL-replacement schedule inside the stand-in: the LAST connection closes (unguarded, SQLite
+    // checkpoints and deletes the WAL), a new connection then commits an UPDATE, a DELETE and an INSERT (the same row count) through
+    // whatever WAL it opens, and closes again. Under the client's reader guard both closes keep the one anchored WAL.
+    database.close();
+    database = new DatabaseSync(databasePath);
+    database.exec(
+      "PRAGMA wal_autocheckpoint=0; UPDATE accounts SET username = 'ada-late' WHERE username = 'ada'; DELETE FROM accounts WHERE username = 'grace'; INSERT INTO accounts (id, username) VALUES ('late', 'hopper-late')",
+    );
+  }
   if (database !== null && mode !== "unclosed") database.close();
   database = null;
 };
@@ -72,8 +85,9 @@ else {
   }
   closeSync(openSync(join(dir, "fixture.sqlite"), "wx", 0o600));
   if (sqlite) {
-    const { DatabaseSync } = await import("node:sqlite");
-    database = new DatabaseSync(join(dir, "fixture.sqlite"));
+    ({ DatabaseSync } = await import("node:sqlite"));
+    databasePath = join(dir, "fixture.sqlite");
+    database = new DatabaseSync(databasePath);
     database.exec(
       "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE accounts (id TEXT PRIMARY KEY, username TEXT NOT NULL)",
     );

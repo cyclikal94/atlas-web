@@ -68,6 +68,7 @@ import {
   readTranscript,
 } from "./diagnostic-evidence.mjs";
 import {
+  acquireGuard,
   attemptJournal,
   childEnvironment,
   composeAttemptTransport,
@@ -1290,8 +1291,20 @@ async function diagnosticStack(browser, caseId) {
     },
     latched: () =>
       running ? running.control.latched() : { kind: "not_launched" },
+    // Revision 35 (R35-RET): BEFORE the anchor, a separate read-only reader (an owned process) holds the database so SQLite cannot retire
+    // the anchored WAL; it is released only after the shutdown and the exit. Removal needs it held.
+    guard: async () =>
+      running
+        ? acquireGuard(
+            {
+              spawn: (command, argv, options) =>
+                groups.spawn("diagnostic-guard", command, argv, options),
+            },
+            { database: `${running.fixtureDir}/fixture.sqlite` },
+          )
+        : null,
     // Revision 34 (R34-RET): every launched attempt's owned files are anchored before the shutdown; removal needs that anchor.
-    preserve: async () =>
+    preserve: async (guard) =>
       running
         ? preserveFixture(retentionDeps(), {
             fixtureDir: running.fixtureDir,
@@ -1299,6 +1312,7 @@ async function diagnosticStack(browser, caseId) {
             receiptSha256: running.ready?.receipt_sha256,
             retainedParent,
             attempt,
+            guard: guard?.record ?? null,
           })
         : null,
     finish: async (remove) => {
@@ -1313,7 +1327,11 @@ async function diagnosticStack(browser, caseId) {
       envelope.exit = finished.exit;
       return finished;
     },
-    materialise: async (preservation, finished) => {
+    release: async (guard, finished) =>
+      guard.release({
+        exitObserved: finished?.exit !== null && finished?.exit !== undefined,
+      }),
+    materialise: async (preservation, finished, released) => {
       if (!preservation) return null;
       envelope.retention = await materialiseRetained(
         retentionDeps(),
@@ -1323,6 +1341,7 @@ async function diagnosticStack(browser, caseId) {
           stopped: finished?.stopped ?? null,
           receipt: running?.ready?.receipt ?? null,
           receiptSha256: running?.ready?.receipt_sha256 ?? null,
+          guard: released ?? null,
         },
       );
       return envelope.retention;
@@ -1359,6 +1378,14 @@ async function diagnosticStack(browser, caseId) {
     dir: concluded.retention?.dir ?? concluded.preservation?.dir ?? null,
     status: concluded.retention?.status ?? "unavailable",
   };
+  record.guard = {
+    held: concluded.guarded,
+    record: concluded.guard,
+    released: concluded.released,
+  };
+  for (const p of concluded.guard_problems) record.problems.push(`guard: ${p}`);
+  for (const p of concluded.release_problems)
+    record.problems.push(`guard release: ${p}`);
   for (const p of concluded.preservation_problems)
     record.problems.push(`preservation: ${p}`);
   for (const p of concluded.retention_problems)
@@ -1388,8 +1415,10 @@ async function diagnosticStack(browser, caseId) {
   record.complete =
     record.problems.length === 0 &&
     concluded.eligible &&
+    concluded.guarded &&
     concluded.preserved &&
     concluded.retention?.status === "verified" &&
+    concluded.retention?.selection?.method === "guarded-anchors" &&
     concluded.terminal.length === 0;
   record.finished_at = new Date().toISOString();
   writeJson(`stack-${browser}-${caseId}.json`, record);

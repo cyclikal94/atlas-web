@@ -225,7 +225,15 @@ function standIn({ attempt, fixtureDir, origin, start }) {
               attempt,
               seq: cmd.seq,
               served: true,
-              removed: args.remove ? ["fixture.sqlite", "receipt.json"] : null,
+              // Revision 35: the removal the executable reports under the client's reader guard (the WAL and its index were kept).
+              removed: args.remove
+                ? [
+                    "fixture.sqlite",
+                    "fixture.sqlite-wal",
+                    "fixture.sqlite-shm",
+                    "receipt.json",
+                  ]
+                : null,
               cleanup_error: null,
             });
             child.stdout.end();
@@ -648,6 +656,7 @@ async function composed({ kind, journalNow, invert = false, corrupt = null }) {
       fixture_after: { leaf_exists: false },
       // Revision 34 (R34-RET): this stand-in has no fixture files; the record a verified materialisation writes is supplied (its real
       // production from anchored SQLite is qualified in diagnostic-fixture.test.mjs). The composition judged here is the transports'.
+      // Revision 35 (R35-RET): the /2 record of a removed source: its guarded anchors with the reader guard's proof (synthetic, labelled).
       retention: {
         schema: RETAINED_SCHEMA,
         attempt,
@@ -669,11 +678,56 @@ async function composed({ kind, journalNow, invert = false, corrupt = null }) {
             size: "1",
             sha256: running.ready.receipt_sha256,
           },
+          {
+            name: "fixture.sqlite-wal",
+            dev: "1",
+            ino: "6",
+            size: "4152",
+            sha256: "f".repeat(64),
+          },
         ],
         quiescence: {
           exit: finished.exit,
           stopped_seq: finished.stopped?.seq ?? null,
           removed: finished.stopped?.removed ?? null,
+        },
+        guard: {
+          acquired: {
+            method: "sqlite-shared-reader/1",
+            held: true,
+            journal_mode: "wal",
+            database: { dev: "1", ino: "3" },
+            wal: { dev: "1", ino: "6" },
+          },
+          release: {
+            released: true,
+            lost: false,
+            exit_observed_before_release: true,
+            exit: { code: 0, signal: null },
+            problems: [],
+          },
+        },
+        selection: {
+          method: "guarded-anchors",
+          wal_generation: "guarded",
+          files: [
+            {
+              name: "fixture.sqlite",
+              dev: "1",
+              ino: "3",
+              size: "8192",
+              sha256: "a".repeat(64),
+              origin: "anchor",
+            },
+            {
+              name: "fixture.sqlite-wal",
+              dev: "1",
+              ino: "6",
+              size: "4152",
+              sha256: "f".repeat(64),
+              origin: "anchor",
+            },
+          ],
         },
         inspect: {
           file: "inspect.sqlite",
