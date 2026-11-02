@@ -416,7 +416,11 @@ reopens it with its draft), and `/settings/archived`.
   new-command check. A shared field create keeps the existing one-attempt-per-body rule: its Home policy is the one the editor shows, so a
   changed primary household is a new body (a second create of the same id is refused by the server, never made twice). Tests:
   `uncertain-replay.test.tsx` (every arrival order of detail, summary and sync before the retry; later states; every answer; edits;
-  offline; reopening), `replay.test.ts`.
+  offline; reopening), `replay.test.ts`. Revision 27 (review 28, R28.1): a page restored from the back/forward cache keeps that memory
+  (the same heap) and must cross the session gate first. E-P50 (`bfcache.people-restore.spec.ts`, the full Chromium build, which alone
+  restores a persisted page under test) leaves the page with an uncertain Rename, changes the linkage, goes Back and saves by a real click:
+  the original key and body are sent. It found the closed gate still covering the page (the fix is in `src/styles/base.css`; see
+  docs/session.md). E-P51 (`fixture.people.spec.ts`, three engines) is the reload: the attempt and the typed name are forgotten.
 
 What is shown of unsent changes: a queued draft has no overlay until it is claimed, so the screens fold the bodies of the outstanding drafts
 (`useOutstandingCreates`) over the cache (`model/project.ts`): a create is projected and marked "Not sent yet"; a later rename, field update or

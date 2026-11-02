@@ -71,6 +71,8 @@ import {
  * editor until that version is read (R25.1, A5, A9, A15; the reviewer's native probe, maintained).
  * Review 26 (1 November 2026): E-P49 an uncertain Unlink or Rename is tried again with its original key and body after its own commit is
  * read back or synced, and stays reachable after its confirmation closed (R26.1/R26.2, A10, A17; the reviewer's native probes, maintained).
+ * Review 28 (2 November 2026): E-P51 an uncertain Rename across a reload is forgotten, read afresh and never sent by itself (the
+ * nonpersisted companion of E-P50, a real persisted Back in `bfcache.people-restore.spec.ts`; R28.1, A17).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const Q = "77777777-7777-4777-8777-777777777777";
@@ -4809,4 +4811,98 @@ test.describe("E-P49: an uncertain Unlink or Rename is tried again as it was sen
       expect(await draftsOf(page)).toEqual([]);
       recordEvidence(info, "e-p49-rename", { synced, sent });
     });
+});
+
+test.describe("E-P51: an uncertain Rename across a reload is forgotten, read afresh and never sent by itself (D-11a-32, A17; review 28 design assessment M07)", () => {
+  // The nonpersisted companion of E-P50 (bfcache.people-restore.spec.ts, a real persisted Back in the full Chromium build). A reload
+  // makes a new heap: People attempts and the typed name live in page memory only, so neither survives, and nothing replays itself.
+  test("E-P51: after a reload the attempt and the typed name are gone, the linkage is read again, and nothing more is sent", async ({
+    context,
+  }, info) => {
+    await context.addInitScript(() => {
+      const w = window as unknown as {
+        __heap?: string;
+        __pageshows?: boolean[];
+      };
+      w.__heap = crypto.randomUUID();
+      w.__pageshows = [];
+      window.addEventListener("pageshow", (event) =>
+        w.__pageshows?.push(event.persisted),
+      );
+    });
+    const witness = (page: Page) =>
+      page.evaluate(() => {
+        const w = window as unknown as {
+          __heap?: string;
+          __pageshows?: boolean[];
+        };
+        return { heap: w.__heap ?? null, pageshows: w.__pageshows ?? [] };
+      });
+    const { page, served } = await setup(
+      context,
+      `/people/${P}`,
+      [personP(P, "Initial")],
+      { linked: { [P]: ME } },
+    );
+    const sent: Array<{ key: string | null; body: string | null }> = [];
+    await context.route(`**${API}/people-commands`, async (route) => {
+      sent.push({
+        key: route.request().headers()["idempotency-key"] ?? null,
+        body: route.request().postData(),
+      });
+      if (sent.length === 1) await route.abort("connectionreset");
+      else await route.fulfill(json(200, { revision: 2, person_id: P }));
+    });
+    const header = page.locator("[data-identity-header]");
+    await expect(header.locator("[data-linkage]")).toHaveAttribute(
+      "data-linkage",
+      "self",
+    );
+    await header.getByRole("button", { name: "Rename", exact: true }).click();
+    await header
+      .getByRole("textbox", { name: "Name", exact: true })
+      .fill("Retained");
+    await header.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(header).toContainText("We couldn't confirm this was saved");
+    const before = await witness(page);
+    const reads = served.log.filter(
+      (line) => line === `GET /people/${P}/summary`,
+    ).length;
+    served.people.set(P, {
+      person: personP(P, "Initial", { version: 2 }),
+      linked: null,
+    });
+
+    // The reload: this tab loads the page again, a new document. The fixture's production composition boots only through its harness
+    // entry, so the load goes there for the same public route (a bare `page.reload()` of `/people/…` loads the fixture shell without
+    // the session harness; revision 27's first attempt, kept in its evidence).
+    await page.goto(`/__session?route=${encodeURIComponent(`/people/${P}`)}`);
+    await page.waitForFunction(
+      () => window.__atlasFixture?.session?.booted !== undefined,
+    );
+    await page.evaluate(() => window.__atlasFixture?.session?.ready);
+    await expect(page).toHaveURL(new RegExp(`/people/${P}$`));
+    await expect(header.locator("[data-linkage]")).toHaveAttribute(
+      "data-linkage",
+      "unlinked",
+    );
+    const after = await witness(page);
+    expect(after.heap, "a new heap").not.toBe(before.heap);
+    expect(after.pageshows.at(-1) ?? false, "not a persisted restore").toBe(
+      false,
+    );
+    expect(
+      served.log.filter((line) => line === `GET /people/${P}/summary`).length,
+    ).toBeGreaterThan(reads);
+    await expect(header.locator("[data-rename-form]")).toHaveCount(0);
+    await expect(header).not.toContainText(
+      "We couldn't confirm this was saved",
+    );
+    await header.getByRole("button", { name: "Rename", exact: true }).click();
+    await expect(
+      header.getByRole("textbox", { name: "Name", exact: true }),
+    ).toHaveValue("Initial");
+    expect(sent, "nothing was sent again by itself").toHaveLength(1);
+    recordEvidence(info, "e-p51-reload", { before, after, sent });
+  });
 });

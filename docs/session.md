@@ -207,6 +207,16 @@ The level-0 resume gate is a separate surface (`components/ui/gate-dialog.ts`): 
 account" focused, a `role="status"` message, Escape does not dismiss it. It is built with the DOM, not React, because it must close over the page **synchronously** inside
 `visibilitychange` and `pagehide`.
 
+**A closed gate is absent** (WEB-11a revision 27, review 28 R28.1). `close()` keeps the `<dialog>` in the document for the next opening, so the
+gate's layout in `src/styles/base.css` applies only to `.neutral-gate[open]`: the browser's own hiding of a closed dialog then removes it from
+layout, painting and hit testing. Until then an unconditional `display: flex` (from WEB-07) kept the closed gate over the whole viewport at
+z-index 100, taking every click, while `open`, `:modal`, `inert`, focus and the session's view all said it had lifted. Every gate (the static
+boot gate in `index.html`/`fixture.html`, React's `NeutralGate` and this one) is a native `<dialog>` that is open whenever it is shown. The
+evidence reads the engine itself: S-GATE "R28.1" (`fixture.session-gate.spec.ts`: rendering, coverage and hit testing at the next control,
+then a real click, over two hide/show cycles and both level-1 neutral cards) and E-P50 (`bfcache.people-restore.spec.ts`, a real persisted
+Back in the full Chromium build); `tests/static/gate-css.test.ts` is a static guard of the rule only. Mutants MU-2954..MU-2957 express
+the same effects through the dialog element (a patched stylesheet does not reach a mutant build).
+
 Precedence when several records hold at once (D-05): operation fence (1a) → gating attempt (1c) → `drift` (1d) → `invalid_session` (1b) → `credential_unverified` (1e) →
 unresolved lease (1e) → waiting (1e) → read failure (1e). After a re-authentication, fences of an **older epoch** show 2 (or 3), not 1b.
 

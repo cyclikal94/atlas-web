@@ -31532,6 +31532,73 @@ export const ENGINE = [
         "      rebind();\n",
       ),
   },
+  // WEB-11a revision 27 (review 28, R28.1). The defect itself is a stylesheet rule, and the harness redirects only modules (Tailwind
+  // resolves `@import` itself, so a patched `src/styles/base.css` never reaches a mutant build: it was tried, and the built CSS was the
+  // control's). These patch the gate dialog instead, with the same effects on the element: each is judged natively by its own assertion.
+  {
+    id: "MU-2954",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the closed resume gate keeps the cover's layout (an author display/position on the dialog whatever its `open`, as the unconditional `.neutral-gate` rule had): it still covers the page and takes the next click",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "R28\\.1: ",
+    expect: /R28\.1: /,
+    patch: (t) =>
+      sub(
+        t,
+        '    element.className = "neutral-gate";\n',
+        '    element.className = "neutral-gate";\n    element.style.cssText =\n      "display:flex;position:fixed;inset:0;z-index:100;width:100%;height:100%;max-width:none;max-height:none;margin:0;border:0;background:var(--canvas)";\n',
+      ),
+  },
+  {
+    id: "MU-2955",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the pointer-only workaround: a closed gate keeps its opaque cover but lets clicks through (pointer-events: none), so it is still laid out and painted over the page",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "R28\\.1: ",
+    expect: /R28\.1: /,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '      else dialog.removeAttribute("open");\n',
+          '      else dialog.removeAttribute("open");\n      dialog.style.cssText =\n        "display:flex;position:fixed;inset:0;z-index:100;width:100%;height:100%;max-width:none;max-height:none;margin:0;border:0;background:var(--canvas);pointer-events:none";\n',
+        ),
+        '      if (typeof dialog.showModal === "function") dialog.showModal();\n',
+        '      dialog.style.cssText = "";\n      if (typeof dialog.showModal === "function") dialog.showModal();\n',
+      ),
+  },
+  {
+    id: "MU-2956",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the over-correction: the gate is hidden even while it is open (modal but not rendered), so the protected page shows through while the account is checked",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "R28\\.1: ",
+    expect: /R28\.1: /,
+    patch: (t) =>
+      sub(
+        t,
+        '      else dialog.setAttribute("open", "");\n',
+        '      else dialog.setAttribute("open", "");\n      dialog.style.display = "none";\n',
+      ),
+  },
+  {
+    id: "MU-2957",
+    title:
+      "WEB-11a R28.1: (REAL ENGINE) the gate is never closed: the lift removes `inert` but the modal dialog stays open (the open/modal-state assertion, not rendering, must catch it)",
+    file: "src/components/ui/gate-dialog.ts",
+    spec: "tests/e2e/fixture.session-gate.spec.ts",
+    grep: "visible: the gate STAYS UP",
+    expect: /visible: the gate STAYS UP/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (typeof dialog.close === "function") dialog.close();\n',
+        '      if (typeof dialog.close === "function") void dialog;\n',
+      ),
+  },
 
   ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
