@@ -1334,7 +1334,9 @@ async function realAttempt(
   const { running } = await launch(
     `sqlite:${mode}`,
     parent,
-    mode.startsWith("no-ack") ? { timeoutMs: 200 } : {},
+    // A short acknowledgement bound where one is expected to lapse (the unanswered command; the shutdown sent to a killed child): the
+    // test judges retention, not that duration, and the maintained default is unchanged.
+    mode.startsWith("no-ack") || kill ? { timeoutMs: 200 } : {},
   );
   assert.deepEqual(running.problems, []);
   for (const username of ["ada", "grace"])
