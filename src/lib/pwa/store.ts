@@ -11,6 +11,8 @@ import { useSyncExternalStore } from "react";
  *  - `saving`: this tab is saving its unfinished forms before it reloads (Q4).
  *  - `save_failed`: a save failed (`refused`: the account is being signed out); the form stays open (though a session gate may hide or
  *    unmount the shell meanwhile: the neutral root then offers the same choices, revision 12, R19), and the update stays pending.
+ *  - `kept_input` (revision 39, R40-COMPOSITION): this tab holds unfinished input that no reload can bring back (signing in, joining); it
+ *    stays, with the input, until the person finishes it or discards it and reloads.
  *  - `discard_failed`: "Discard and reload anyway" could not discard a saved copy of a form (revision 1, R6): it may come back after a reload,
  *    so nothing reloads until the person retries or chooses to reload anyway (on whichever surface is shown).
  *  - `reloading`: this tab is reloading onto the newer version.
@@ -25,6 +27,7 @@ export type UpdateState =
   | { kind: "updated_elsewhere"; dismissed: boolean }
   | { kind: "saving" }
   | { kind: "save_failed"; refused: boolean }
+  | { kind: "kept_input" }
   | { kind: "discard_failed" }
   | { kind: "reloading" }
   | { kind: "data_superseded" };

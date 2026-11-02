@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import {
+  armReload,
   build,
   checkForUpdate,
   displayed,
@@ -70,7 +71,9 @@ const failRecoveryWrites = (page: Page, count: number) =>
 async function newTaskRows(
   context: BrowserContext,
   world: Generations,
-): Promise<Array<{ form_context: string; terminal: boolean }>> {
+): Promise<
+  Array<{ form_context: string; tab_instance_id: string; terminal: boolean }>
+> {
   const page = await context.newPage();
   try {
     await navigate(page, `${world.url}/__data`);
@@ -83,7 +86,11 @@ async function newTaskRows(
       const all = await data.rows("acct-a", "form_recovery");
       data.close("acct-a");
       return all;
-    })) as Array<{ form_context: string; terminal: boolean }>;
+    })) as Array<{
+      form_context: string;
+      tab_instance_id: string;
+      terminal: boolean;
+    }>;
     return rows.filter((row) => row.form_context.endsWith("task-form:new"));
   } finally {
     await page.close();
@@ -125,9 +132,11 @@ test.describe("R40: the production new-task editor across an accepted update", (
   }) => {
     const page = await typedWithUpdate(context, generations);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
+    await pageReload.loaded();
     await expect(page.locator("html")).toHaveAttribute("data-atlas-build", "b");
     await displayed(page);
     // The stage the person had reached (the form), never the picker again; the name as typed; nothing submitted.
@@ -139,31 +148,56 @@ test.describe("R40: the production new-task editor across an accepted update", (
     expect(await writes(generations), "nothing is submitted").toEqual([]);
   });
 
-  test("restored, then 'Discard instead': the copies go, and an ordinary reload brings back nothing", async ({
+  test("restored, then 'Discard instead': its own copies go, the hand-off stays (R42); an ordinary reload restores nothing and offers the hand-off", async ({
     context,
     generations,
   }) => {
     const page = await typedWithUpdate(context, generations);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
+    await pageReload.loaded();
     await expect(page.locator("html")).toHaveAttribute("data-atlas-build", "b");
     await displayed(page);
     await expect(restoredBanner(page)).toBeVisible();
+    const isHandoff = (row: { form_context: string }) =>
+      row.form_context.startsWith("atlas-update-handoff:");
+    const handed = (await newTaskRows(context, generations))
+      .filter((row) => isHandoff(row) && !row.terminal)
+      .map((row) => row.tab_instance_id);
+    expect(handed).toHaveLength(1);
     await restoredBanner(page)
       .getByRole("button", { name: "Discard instead" })
       .click();
     await expect(restoredBanner(page)).toHaveCount(0);
     await expect(nameField(page)).toHaveValue("");
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "every new-task row is terminal"; now every
+    // ORDINARY row is terminal and the hand-off A wrote stays, exactly that one (B restored it; no page that took it over removes it).
     await expect
       .poll(async () =>
-        (await newTaskRows(context, generations)).every((row) => row.terminal),
+        (await newTaskRows(context, generations))
+          .filter((row) => !isHandoff(row))
+          .every((row) => row.terminal),
       )
       .toBe(true);
+    expect(
+      (await newTaskRows(context, generations))
+        .filter((row) => isHandoff(row) && !row.terminal)
+        .map((row) => row.tab_instance_id),
+    ).toEqual(handed);
     await reloadQuietly(page);
     await expect(scratch(page)).toBeVisible();
     await expect(restoredBanner(page)).toHaveCount(0);
+    // Revision 40 adaptation (R42): was "an ordinary reload brings back nothing"; now nothing is restored (the reference was used up by
+    // B's look) and the hand-off, no longer held by any page, is offered as an earlier copy on the form's own stage, never restored.
+    await scratch(page).click();
+    await expect(nameField(page)).toHaveValue("");
+    await expect(restoredBanner(page)).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: /^Restore the copy saved / }),
+    ).toHaveCount(1);
     expect(await writes(generations)).toEqual([]);
   });
 
@@ -185,10 +219,11 @@ test.describe("R40: the production new-task editor across an accepted update", (
     expect(await marked(page)).toBe(true);
     await failRecoveryWrites(page, 0);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Retry save" })
       .click();
-    await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+    await pageReload.loaded();
     await displayed(page);
     await expect(nameField(page)).toHaveValue(`${TEXT}, edited`);
     await expect(restoredBanner(page)).toBeVisible();
@@ -207,10 +242,11 @@ test.describe("R40: the production new-task editor across an accepted update", (
       .click();
     await expect(updateRegion(page).getByText(SAVE_FAILED)).toBeVisible();
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Discard and reload anyway" })
       .click();
-    await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+    await pageReload.loaded();
     await displayed(page);
     await expect(scratch(page)).toBeVisible();
     await expect(restoredBanner(page)).toHaveCount(0);
@@ -248,9 +284,11 @@ test.describe("R40: the production new-task editor across an accepted update", (
     ).toBeVisible();
     await generations.clearLog();
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
+    await pageReload.loaded();
     await expect(page.locator("html")).toHaveAttribute("data-atlas-build", "b");
     await displayed(page);
     await page.goBack();
@@ -280,9 +318,11 @@ test.describe("R40: the production new-task editor across an accepted update", (
     await generations.serve("fixture-b");
     await checkForUpdate(page);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
+    await pageReload.loaded();
     await expect(page.locator("html")).toHaveAttribute("data-atlas-build", "b");
     await displayed(page);
     await expect(page.locator("[data-fixture-form]")).toHaveAttribute(

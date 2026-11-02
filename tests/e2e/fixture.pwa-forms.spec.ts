@@ -2,6 +2,7 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { untilTreeSettled } from "./data-sync-helpers";
 import { pressTab } from "./helpers";
 import {
+  armReload,
   BANNER,
   build,
   checkForUpdate,
@@ -13,12 +14,18 @@ import {
   navigate,
   openApp,
   quiet,
+  type ReloadReceipt,
   reloadQuietly,
   seedAccount,
   test,
   updateRegion,
   workerActive,
 } from "./pwa-world";
+import {
+  ageSharedConfirmation,
+  settledIdentityOf,
+  sharedConfirmationAge,
+} from "./shared-confirmation";
 
 /**
  * WEB-14a P-U3, P-U4, P-U5: Q4 (save and restore unfinished form content around an update reload; the person chooses when; a failed save
@@ -149,10 +156,11 @@ test.describe("P-U3: save before the reload, restore after it, never submit", ()
     await mark(first);
     await generations.clearLog();
     await quiet(first);
+    const firstReload = await armReload(first);
     await updateRegion(first)
       .getByRole("button", { name: "Save and reload" })
       .click();
-    await expect.poll(() => marked(first).catch(() => false)).toBe(false);
+    await firstReload.loaded();
     await displayed(first);
     await expect.poll(() => build(first)).toBe("b");
     await formReady(first);
@@ -210,10 +218,11 @@ test.describe("P-U4: a save that fails keeps the form and the update", () => {
     expect(await marked(first)).toBe(true);
     await failRecoveryWrites(first, 0);
     await quiet(first);
+    const firstReload = await armReload(first);
     await updateRegion(first)
       .getByRole("button", { name: "Retry save" })
       .click();
-    await expect.poll(() => marked(first).catch(() => false)).toBe(false);
+    await firstReload.loaded();
     await displayed(first);
     await formReady(first);
     await expect(title(first)).toHaveValue("Keep me, edited");
@@ -232,10 +241,11 @@ test.describe("P-U4: a save that fails keeps the form and the update", () => {
       .click();
     await expect(updateRegion(first).getByText(SAVE_FAILED)).toBeVisible();
     await quiet(first);
+    const firstReload = await armReload(first);
     await updateRegion(first)
       .getByRole("button", { name: "Discard and reload anyway" })
       .click();
-    await expect.poll(() => marked(first).catch(() => false)).toBe(false);
+    await firstReload.loaded();
     await displayed(first);
     await formReady(first);
     await expect(title(first)).toHaveValue("");
@@ -283,10 +293,11 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     await mark(first);
     await mark(second);
     await quiet(first);
+    const firstReload = await armReload(first);
     await updateRegion(first)
       .getByRole("button", { name: "Save and reload" })
       .click();
-    await expect.poll(() => marked(first).catch(() => false)).toBe(false);
+    await firstReload.loaded();
     await displayed(first);
     await expect.poll(() => build(first)).toBe("b");
     // The second tab saved its input under its OWN identifier, did not reload, and its form is still open and editable.
@@ -311,6 +322,9 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     expect(all.filter(isHandoffRow).map((row) => row.fields.title)).toEqual([
       "From the first tab",
     ]);
+    const firstHandoff = all
+      .filter(isHandoffRow)
+      .map((row) => row.tab_instance_id);
     // The reloaded first tab restored its own copy and left the open second tab's alone.
     await formReady(first);
     await expect(title(first)).toHaveValue("From the first tab");
@@ -319,10 +333,11 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     // The second tab edits further, then reloads here: its newest copy is restored, and the other copy is offered.
     await title(second).fill("From the second tab, later");
     await quiet(second);
+    const secondReload = await armReload(second);
     await updateRegion(second)
       .getByRole("button", { name: "Reload here" })
       .click();
-    await expect.poll(() => marked(second).catch(() => false)).toBe(false);
+    await secondReload.loaded();
     await displayed(second);
     await formReady(second);
     await expect(title(second)).toHaveValue("From the second tab, later");
@@ -340,9 +355,18 @@ test.describe("P-U5: the fresh-identifier flush", () => {
         .map((row) => row.fields.title)
         .sort(),
     ).toEqual(["From the first tab", "From the second tab, later"]);
-    expect(await handoffTitles(context, generations)).toEqual([
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "only the second tab's hand-off is left"
+    // (["From the second tab, later"]); now the first tab's hand-off stays too, exactly the one its update wrote (its replacement restored
+    // it, and no page that took it over removes it), beside the second tab's.
+    expect((await handoffTitles(context, generations)).sort()).toEqual([
+      "From the first tab",
       "From the second tab, later",
     ]);
+    expect(
+      (await recoveryRows(context, generations))
+        .filter((row) => !row.terminal && isHandoffRow(row))
+        .map((row) => row.tab_instance_id),
+    ).toEqual(expect.arrayContaining(firstHandoff));
     // The second tab saves its own copy (so the next page's choice is not a race between two gone copies), then the first tab goes.
     expect(await flushNow(second)).toBe("saved");
     await first.close();
@@ -350,6 +374,9 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     await formReady(third);
     await expect(title(third)).toHaveValue("From the first tab");
     await expect(restoredBanner(third)).toBeVisible();
+    // Revision 40 adaptation (R42): the first tab's hand-off, no longer held by any page, is offered here (never restored); the second
+    // tab's, still held by that open tab, is not.
+    await expect(third.locator('[data-handoff="true"]')).toHaveCount(1);
   });
 
   test("an opener-copied tab saves under an identifier of its own", async ({
@@ -375,8 +402,9 @@ test.describe("P-U5: the fresh-identifier flush", () => {
     // A third tab accepts: both tabs are asked to save.
     await mark(acting);
     await quiet(acting);
+    const actingReload = await armReload(acting);
     await updateRegion(acting).getByRole("button", { name: "Reload" }).click();
-    await expect.poll(() => marked(acting).catch(() => false)).toBe(false);
+    await actingReload.loaded();
     await displayed(acting);
     await expect(updateRegion(copy).getByText(BANNER.elsewhere)).toBeVisible();
     const all = await recoveryRows(context, generations);
@@ -431,13 +459,18 @@ const dirtyCount = (page: Page) =>
 async function saveAndReload(page: Page): Promise<void> {
   await mark(page);
   await quiet(page);
+  const pageReload = await armReload(page);
   await updateRegion(page)
     .getByRole("button", { name: "Save and reload" })
     .click();
-  await reloadedOntoB(page);
+  await reloadedOntoB(page, pageReload);
 }
-async function reloadedOntoB(page: Page): Promise<void> {
-  await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+async function reloadedOntoB(
+  page: Page,
+  reloading: ReloadReceipt,
+): Promise<void> {
+  // Revision 47 (F-R46-PWA-LOAD): the receipt armed before the action that reloads; nothing is asked of B before it has loaded.
+  await reloading.loaded();
   await displayed(page);
   await expect.poll(() => build(page)).toBe("b");
   await formReady(page);
@@ -494,6 +527,7 @@ test.describe("revision 1, R3: nothing can be typed between the last save and th
     });
     await mark(page);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
@@ -513,7 +547,7 @@ test.describe("revision 1, R3: nothing can be typed between the last save and th
     await page.keyboard.type(" and keys");
     expect(await title(page).inputValue()).toBe("before accept");
     expect(await marked(page)).toBe(true);
-    await reloadedOntoB(page);
+    await reloadedOntoB(page, pageReload);
     await expect(title(page)).toHaveValue("before accept");
   });
 
@@ -672,10 +706,11 @@ test.describe("revision 1, R6: 'Discard and reload anyway' discards the copies, 
     await expect(updateRegion(page).getByText(SAVE_FAILED)).toBeVisible();
     await mark(page);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Discard and reload anyway" })
       .click();
-    await reloadedOntoB(page);
+    await reloadedOntoB(page, pageReload);
     await expect(title(page)).toHaveValue("");
     await expect(restoredBanner(page)).toHaveCount(0);
   });
@@ -702,10 +737,11 @@ test.describe("revision 1, R6: 'Discard and reload anyway' discards the copies, 
     expect(await marked(page)).toBe(true);
     await expect(title(page)).toHaveValue("discard this form");
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Reload anyway" })
       .click();
-    await reloadedOntoB(page);
+    await reloadedOntoB(page, pageReload);
     // As the person was told: the earlier copy comes back (nothing was claimed discarded).
     await expect(title(page)).toHaveValue("previously saved input");
   });
@@ -788,8 +824,9 @@ test.describe("revision 1, F-1 (reassessed): a page that boots does not cost ano
     await expect(title(second)).toHaveValue("Second");
     await mark(acting);
     await quiet(acting);
+    const actingReload = await armReload(acting);
     await updateRegion(acting).getByRole("button", { name: "Reload" }).click();
-    await expect.poll(() => marked(acting).catch(() => false)).toBe(false);
+    await actingReload.loaded();
     await displayed(acting);
     await expect(
       updateRegion(second).getByText(BANNER.elsewhere),
@@ -1060,6 +1097,7 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
     await slowPeer(page);
     await mark(page);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
@@ -1088,7 +1126,7 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
     await discardInstead.click({ timeout: 300 }).catch(() => undefined);
     expect(await title(page).inputValue()).toBe("newest initial copy");
     expect(await marked(page)).toBe(true);
-    await reloadedOntoB(page);
+    await reloadedOntoB(page, pageReload);
     await expect(title(page)).toHaveValue("newest initial copy");
   });
 
@@ -1101,6 +1139,7 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
     await slowPeer(page);
     await mark(page);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
@@ -1115,7 +1154,7 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
       .catch(() => undefined);
     expect(await title(page).inputValue()).toBe("before accept");
     expect(await marked(page)).toBe(true);
-    await reloadedOntoB(page);
+    await reloadedOntoB(page, pageReload);
     await expect(title(page)).toHaveValue("before accept");
   });
 
@@ -1140,6 +1179,7 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
         .click();
       await mark(page);
       await quiet(page);
+      const pageReload = await armReload(page);
       await updateRegion(page)
         .getByRole("button", { name: "Save and reload" })
         .click();
@@ -1156,7 +1196,7 @@ test.describe("revision 2, R3: while the tab prepares the reload, the recovery c
         (ok) => (window as unknown as FixtureWindow).__releaseSubmit?.(ok),
         outcome === "succeeds",
       );
-      await reloadedOntoB(page);
+      await reloadedOntoB(page, pageReload);
       if (outcome === "succeeds") {
         await expect(title(page)).toHaveValue("");
         await expect(restoredBanner(page)).toHaveCount(0);
@@ -1228,6 +1268,7 @@ test.describe("revision 3, R3: a submission's success acknowledges what it SENT;
     await title(page).fill("LATER UNSENT EDIT");
     await mark(page);
     await quiet(page);
+    const pageReload = await armReload(page);
     await updateRegion(page)
       .getByRole("button", { name: "Save and reload" })
       .click();
@@ -1241,7 +1282,7 @@ test.describe("revision 3, R3: a submission's success acknowledges what it SENT;
     expect(await title(page).inputValue()).toBe("LATER UNSENT EDIT");
     expect(await marked(page)).toBe(true);
     await releaseSubmission(page, true);
-    await reloadedOntoB(page);
+    await reloadedOntoB(page, pageReload);
     await expect(title(page)).toHaveValue("LATER UNSENT EDIT");
     await expect(restoredBanner(page)).toBeVisible();
     expect(await liveTitles(context, generations)).toEqual([
@@ -1475,6 +1516,7 @@ test.describe("revision 4, R3: a later edit back to an EARLIER successful submis
       expect(await dirtyCount(page)).toBe(1);
       await mark(page);
       await quiet(page);
+      const pageReload = await armReload(page);
       await updateRegion(page)
         .getByRole("button", { name: "Save and reload" })
         .click();
@@ -1482,7 +1524,7 @@ test.describe("revision 4, R3: a later edit back to an EARLIER successful submis
       expect(await title(page).inputValue()).toBe(later);
       expect(await marked(page)).toBe(true);
       await releaseSubmission(page, true);
-      await reloadedOntoB(page);
+      await reloadedOntoB(page, pageReload);
       await expect(title(page)).toHaveValue(later);
       await expect(restoredBanner(page)).toBeVisible();
       await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
@@ -1542,10 +1584,11 @@ test.describe("revision 4, R11: a field that leaves the page keeps its unfinishe
         shown: ["title", "notes"],
       });
       await expect(notes(page)).toHaveValue("UNFINISHED NOTES");
+      const pageReload = await armReload(page);
       await updateRegion(page)
         .getByRole("button", { name: "Retry save" })
         .click();
-      await reloadedOntoB(page);
+      await reloadedOntoB(page, pageReload);
       await expect(notes(page)).toHaveValue("UNFINISHED NOTES");
       await expect(restoredBanner(page)).toBeVisible();
     });
@@ -2010,6 +2053,7 @@ test.describe("revision 5: the real worker update (generations A to B) keeps lat
       await holdRecoveryLock(first);
       await mark(first);
       await quiet(first);
+      const firstReload = await armReload(first);
       await updateRegion(first)
         .getByRole("button", { name: "Save and reload" })
         .click();
@@ -2030,7 +2074,7 @@ test.describe("revision 5: the real worker update (generations A to B) keeps lat
       expect(await marked(first)).toBe(true);
       expect(await title(first).inputValue()).toBe(ORIGINAL);
       await releaseRecoveryLock(first);
-      await reloadedOntoB(first);
+      await reloadedOntoB(first, firstReload);
       await expect(title(first)).toHaveValue(ORIGINAL);
       await expect(restoredBanner(first)).toBeVisible();
     });
@@ -2056,10 +2100,11 @@ test.describe("revision 5: the real worker update (generations A to B) keeps lat
         ).toBeVisible();
         expect(await marked(first)).toBe(true);
         expect(await liveTitles(context, generations)).toEqual([ORIGINAL]);
+        const firstReload = await armReload(first);
         await updateRegion(first)
           .getByRole("button", { name: "Retry save" })
           .click();
-        await reloadedOntoB(first);
+        await reloadedOntoB(first, firstReload);
       } else await saveAndReload(first);
       await expect(title(first)).toHaveValue(ORIGINAL);
       await expect(restoredBanner(first)).toBeVisible();
@@ -2105,12 +2150,14 @@ async function updatedAndHeld(
   await quiet(first);
   await mark(first);
   await holdNextDocument(first);
+  const firstReload = await armReload(first);
   await updateRegion(first)
     .getByRole("button", { name: "Save and reload", exact: true })
     .click();
-  await expect.poll(() => build(first).catch(() => null)).toBe("b");
+  await firstReload.loaded();
+  await expect.poll(() => build(first)).toBe("b");
   // A2 is the page B brought (A's mark is gone), its form held unbound: it has read nothing.
-  await expect.poll(() => marked(first).catch(() => true)).toBe(false);
+  expect(await marked(first)).toBe(false);
   await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
     "data-port",
     "none",
@@ -2126,6 +2173,13 @@ const liveCopies = async (context: BrowserContext, world: Generations) =>
       isHandoffRow(row) ? "handoff" : "ordinary",
       row.fields.title,
     ]);
+
+/** Revision 40 (R42): the identifiers of the non-terminal hand-off rows, sorted (a hand-off is compared by identity, never by text). */
+const handoffIds = async (context: BrowserContext, world: Generations) =>
+  (await recoveryRows(context, world))
+    .filter((row) => !row.terminal && isHandoffRow(row))
+    .map((row) => row.tab_instance_id)
+    .sort();
 
 test.describe("revision 6, R13: the update hands the form to the next page of the tab, whatever another tab does with the copies", () => {
   type Act = {
@@ -2202,13 +2256,12 @@ test.describe("revision 6, R13: the update hands the form to the next page of th
         "data-submitted",
         "0",
       );
-      // A2's own save removes the hand-off (only the page holding it may).
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "A2's own save removes the hand-off (only the page
+      // holding it may)"; now it stays exactly (A2's lock and reference prove no more than a copied tab's would, once A has gone).
+      const handed = await handoffIds(context, generations);
+      expect(handed).toHaveLength(1);
       expect(await flushAll(first)).toEqual(["saved"]);
-      expect(
-        (await liveCopies(context, generations)).filter(
-          ([where]) => where === "handoff",
-        ),
-      ).toEqual([]);
+      expect(await handoffIds(context, generations)).toEqual(handed);
     });
 
   /** As above, but A2 never comes back (its tab is closed while held), and C removes A's ordinary copy: only the hand-off is left. */
@@ -2262,6 +2315,92 @@ test.describe("revision 6, R13: the update hands the form to the next page of th
     await expect(later.locator('[data-handoff="true"]')).toHaveCount(0);
     expect(await liveCopies(context, generations)).toEqual([]);
   });
+});
+
+// ---- revision 40 ------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * Revision 40 (review of revision 39, R42 `recovery-shared-source-reload-coverage`; owner decision WEB14A-R42-NON-CONSUMING-20261028; design
+ * assessment ae2a506e… C3, Q5) through the REAL update (generations A to B, production timers and headers, the real IndexedDB store, Web
+ * Locks and session storage). A types ORIGINAL and accepts "Save and reload"; A2 (on B) is held before it reads anything. A tab D whose
+ * session storage holds a COPY of A2's hand-off reference (seeded by an init script from A2's own record: the hand-off reference key only;
+ * a native duplicate-tab gesture is not executed, Playwright has none) opens after A has gone, takes the free hand-off lock first,
+ * restores ORIGINAL and then acts; D closes; A2 is released. Whatever D did, the hand-off stays exactly and A2 restores ORIGINAL, nothing
+ * submitted. Control: no D. FIXTURE evidence.
+ */
+async function openCopied(
+  context: BrowserContext,
+  world: Generations,
+  reference: string,
+): Promise<Page> {
+  const page = await context.newPage();
+  await page.addInitScript((copied) => {
+    // Seeded once per tab, as a copied tab's storage is: the page's own later changes to it are its own.
+    if (sessionStorage.getItem("atlas-r40-copied") !== null) return;
+    sessionStorage.setItem("atlas-r40-copied", "1");
+    sessionStorage.setItem("atlas-update-handoff", copied);
+  }, reference);
+  const query = new URLSearchParams({
+    sticky: "1",
+    route: "/today",
+    form: "1",
+  });
+  await navigate(page, `${world.url}/__session?${query}`);
+  await displayed(page);
+  return page;
+}
+
+test.describe("revision 40, R42: a tab holding a copied hand-off reference never consumes the original tab's hand-off (actual worker A to B)", () => {
+  for (const act of ["none", "Discard instead", "submission"] as const)
+    test(`${act === "none" ? "control: no copied tab" : `the copied tab restores ORIGINAL first, then its ${act}`}; the hand-off stays exactly and A2 restores ORIGINAL, nothing submitted`, async ({
+      context,
+      generations,
+    }) => {
+      const first = await updatedAndHeld(context, generations);
+      const handed = await handoffIds(context, generations);
+      expect(handed).toHaveLength(1);
+      const reference = await first.evaluate(() =>
+        sessionStorage.getItem("atlas-update-handoff"),
+      );
+      expect(reference).not.toBeNull();
+      if (act !== "none") {
+        const copied = await openCopied(
+          context,
+          generations,
+          reference as string,
+        );
+        await settledPeer(copied, [first]);
+        // D took the free lock first and restored the hand-off as A2 would have.
+        await expect(title(copied)).toHaveValue(ORIGINAL);
+        await expect(restoredBanner(copied)).toBeVisible();
+        if (act === "Discard instead") {
+          await copied.getByRole("button", { name: "Discard instead" }).click();
+          await expect(title(copied)).toHaveValue("");
+        } else {
+          await copied
+            .getByRole("button", { name: "Save note", exact: true })
+            .click();
+          await expect(copied.locator("[data-fixture-form]")).toHaveAttribute(
+            "data-submitted",
+            "1",
+          );
+        }
+        await expect.poll(() => pendingCount(copied)).toBe(0);
+        expect(await handoffIds(context, generations)).toEqual(handed);
+        await copied.close();
+      }
+      await releaseNext(first);
+      await bindForm(first);
+      await expect(title(first)).toHaveValue(ORIGINAL);
+      await expect(restoredBanner(first)).toBeVisible();
+      await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
+        "data-submitted",
+        "0",
+      );
+      // A2's own save keeps it too (no page that took it over removes it).
+      expect(await flushAll(first)).toEqual(["saved"]);
+      expect(await handoffIds(context, generations)).toEqual(handed);
+    });
 });
 
 // ---- revision 7 -------------------------------------------------------------------------------------------------------------------------
@@ -2339,6 +2478,13 @@ const failHandoffRows = (page: Page) =>
  * the account closes its tree and checks the session with a read that waits too. The save fails closed: nothing written or removed, the
  * tab is not reloaded, the input is kept; once the session check finishes and C is shown again, its save lands and A2 still restores
  * ORIGINAL with nothing submitted. FIXTURE evidence.
+ *
+ * Revision 41 (review r40 R40-F8, family `r43-premise-shared-confirmation`): D's identity read is a background verification, which the
+ * product does not make while the settled session's shared confirmation is less than the unchanged 30-second interval old
+ * (src/session/session.ts `confirmedRecently`). Every page here boots well within that interval, so D displayed `/today` without a read
+ * and its lease never stood. The case now makes that read eligible ONCE, by the checked `ageSharedConfirmation`, in a page that runs no
+ * session and is closed before D boots, after every identity read is already held (so no page's clean read can refresh the confirmation
+ * in between), and checks eligibility just before D boots. Nothing else changed: no timer, lease condition or assertion.
  */
 test.describe("revision 13, F-8: a peer whose tree is closed for a session check when it saves", () => {
   // `typed`: C first types input of its own that is in no copy (PEER), so what C shows again can only be its own kept input, never a
@@ -2356,6 +2502,25 @@ test.describe("revision 13, F-8: a peer whose tree is closed for a session check
       if (typed) await title(peer).fill(PEER);
       await mark(peer);
       await generations.holdIdentity(true);
+      // Revision 41 (R40-F8): the background read D must make is eligible (see above). Its own page, with no session and no observer,
+      // closed before D boots; the receipt (booleans and ages only) is attached.
+      const setup = await context.newPage();
+      await navigate(setup, `${generations.url}/__session?boot=off`);
+      const settled = await settledIdentityOf(setup);
+      const found = await sharedConfirmationAge(setup, settled);
+      const ageing = await ageSharedConfirmation(setup, settled);
+      const eligible = await sharedConfirmationAge(setup, settled);
+      expect(eligible).toEqual({
+        settlement_matched: true,
+        confirmation_matched: true,
+        age_ms: expect.any(Number),
+        eligible: true,
+      });
+      await test.info().attach("shared-confirmation-premise", {
+        body: JSON.stringify({ found, ageing, eligible }),
+        contentType: "application/json",
+      });
+      await setup.close();
       const away = await context.newPage();
       await navigate(
         away,
@@ -2440,12 +2605,12 @@ test.describe("revision 13, F-8: a peer whose tree is closed for a session check
         "data-submitted",
         "0",
       );
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "A2's own save removes the hand-off"; now it stays
+      // exactly (no page removes a hand-off it did not write).
+      const handed = await handoffIds(context, generations);
+      expect(handed).toHaveLength(1);
       expect(await flushAll(first)).toEqual(["saved"]);
-      expect(
-        (await liveCopies(context, generations)).filter(
-          ([where]) => where === "handoff",
-        ),
-      ).toEqual([]);
+      expect(await handoffIds(context, generations)).toEqual(handed);
     });
 });
 
@@ -2489,6 +2654,9 @@ test.describe("revision 7, R6: 'Discard and reload anyway' after a save that fai
       await quiet(page);
       if (leg.fail === "reference") await failReference(page);
       if (leg.fail === "row") await failHandoffRows(page);
+      // Revision 47 (F-R46-PWA-LOAD): the receipt is armed before whichever action reloads: this save when it succeeds, otherwise the
+      // later retry or discard (a failed save does not reload, as the checks below show).
+      let pageReload = leg.fail ? null : await armReload(page);
       await updateRegion(page)
         .getByRole("button", { name: "Save and reload", exact: true })
         .click();
@@ -2522,6 +2690,7 @@ test.describe("revision 7, R6: 'Discard and reload anyway' after a save that fai
             ),
           ).toBeGreaterThan(0);
         if (leg.choice === "retry") await repairReference(page);
+        pageReload = await armReload(page);
         await updateRegion(page)
           .getByRole("button", {
             name:
@@ -2532,7 +2701,9 @@ test.describe("revision 7, R6: 'Discard and reload anyway' after a save that fai
           })
           .click();
       }
-      await expect.poll(() => build(page).catch(() => null)).toBe("b");
+      if (pageReload === null) throw new Error("no reload receipt was armed");
+      await pageReload.loaded();
+      await expect.poll(() => build(page)).toBe("b");
       await displayed(page);
       await formReady(page);
       await expect(page.locator("[data-fixture-form]")).toHaveAttribute(
@@ -2627,7 +2798,7 @@ test.describe("revision 7, R13: a successor that cannot read the hand-off says s
  */
 test.describe("revision 8, R16: an update hand-off removes exactly its own predecessor (actual worker A to B)", () => {
   for (const same of [false, true])
-    test(`${same ? "" : "control: "}B's later copy holds ${same ? "A's very text" : "other text"}: A2's 'Discard instead' removes A's copy and the hand-off, B's copy stays`, async ({
+    test(`${same ? "" : "control: "}B's later copy holds ${same ? "A's very text" : "other text"}: A2's 'Discard instead' removes A's copy, the hand-off stays (R42), B's copy stays`, async ({
       context,
       generations,
     }) => {
@@ -2654,17 +2825,21 @@ test.describe("revision 8, R16: an update hand-off removes exactly its own prede
       await quiet(first);
       await mark(first);
       await holdNextDocument(first);
+      const firstReload = await armReload(first);
       await updateRegion(first)
         .getByRole("button", { name: "Save and reload", exact: true })
         .click();
-      await expect.poll(() => build(first).catch(() => null)).toBe("b");
-      await expect.poll(() => marked(first).catch(() => true)).toBe(false);
+      await firstReload.loaded();
+      await expect.poll(() => build(first)).toBe("b");
+      expect(await marked(first)).toBe(false);
       await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
         "data-port",
         "none",
       );
       const aId = (await ordinaryIds()).find((id) => id !== bId);
       expect(aId).toBeDefined();
+      const handed = await handoffIds(context, generations);
+      expect(handed).toHaveLength(1);
       await title(peer).fill(same ? ORIGINAL : "B INDEPENDENT");
       expect(await flushAll(peer)).toEqual(["saved"]);
       await peer.close();
@@ -2678,8 +2853,16 @@ test.describe("revision 8, R16: an update hand-off removes exactly its own prede
       const live = (await recoveryRows(context, generations)).filter(
         (row) => !row.terminal,
       );
-      expect(live.filter(isHandoffRow)).toEqual([]);
-      expect(live.map((row) => row.tab_instance_id)).toEqual([bId]);
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "A2's 'Discard instead' removes A's copy and the
+      // hand-off"; now it removes A's copy (exactly, by capture: never B's) and the hand-off stays, exactly the one A wrote.
+      expect(
+        live.filter(isHandoffRow).map((row) => row.tab_instance_id),
+      ).toEqual(handed);
+      expect(
+        live
+          .filter((row) => !isHandoffRow(row))
+          .map((row) => row.tab_instance_id),
+      ).toEqual([bId]);
       await expect(first.locator("[data-fixture-form]")).toHaveAttribute(
         "data-submitted",
         "0",
@@ -2811,10 +2994,11 @@ test.describe("revision 9, R17: a choice the form cannot show is never lost acro
         await expect.poll(() => chosen(page)).toEqual(["home", "work"]);
         expect(await marked(page)).toBe(true);
         await quiet(page);
+        const pageReload = await armReload(page);
         await updateRegion(page)
           .getByRole("button", { name: "Retry save" })
           .click();
-        await reloadedOntoB(page);
+        await reloadedOntoB(page, pageReload);
       } else await saveAndReload(page);
       expect(await chosen(page)).toEqual(["home", "work"]);
       await expect(restoredBanner(page)).toBeVisible();
@@ -2823,7 +3007,7 @@ test.describe("revision 9, R17: a choice the form cannot show is never lost acro
     });
 
   for (const missing of [true, false])
-    test(`${missing ? "" : "control: "}priority 'high' saved by A; B ${missing ? "WITHOUT the option: the restore is incomplete, B's save fails and A's copy and hand-off stay; the option back: 'high' is chosen, saved, and A's copies are removed" : "with it: restored completely, and B's save removes A's copies"}`, async ({
+    test(`${missing ? "" : "control: "}priority 'high' saved by A; B ${missing ? "WITHOUT the option: the restore is incomplete, B's save fails and A's copy and hand-off stay; the option back: 'high' is chosen, saved, and A's copy is removed (its hand-off stays, R42)" : "with it: restored completely, and B's save removes A's copy (its hand-off stays, R42)"}`, async ({
       context,
       generations,
     }) => {
@@ -2864,15 +3048,23 @@ test.describe("revision 9, R17: a choice the form cannot show is never lost acro
         expect(await priority(page).inputValue()).toBe("high");
       }
       expect(await flushNow(page)).toBe("saved");
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "only B's own copy is left (A's copy and
+      // hand-off removed)"; now B's own ordinary copy and A's hand-off, exactly the one written (B restored it and never removes it); A's
+      // ordinary copy is still removed.
       const after = (await recoveryRows(context, generations)).filter(
-        (row) => !row.terminal,
+        (row) => !row.terminal && !isHandoffRow(row),
       );
       expect(after).toHaveLength(1);
       expect(isHandoffRow(after[0] as { form_context: string })).toBe(false);
-      for (const row of fromA)
+      for (const row of fromA.filter((one) => !isHandoffRow(one)))
         expect(after.map((one) => one.tab_instance_id)).not.toContain(
           row.tab_instance_id,
         );
+      expect(
+        (await recoveryRows(context, generations))
+          .filter((row) => !row.terminal && isHandoffRow(row))
+          .map((row) => row.tab_instance_id),
+      ).toEqual(fromA.filter(isHandoffRow).map((row) => row.tab_instance_id));
       await expect(section(page)).toHaveAttribute("data-submitted", "0");
     });
 });
@@ -2939,10 +3131,11 @@ test.describe("revision 10, R17 and R11: what the form cannot account for is nev
         await count(page).pressSequentially("5");
         expect(await native(page)).toEqual({ value: "1e5", badInput: false });
         await quiet(page);
+        const pageReload = await armReload(page);
         await updateRegion(page)
           .getByRole("button", { name: "Retry save" })
           .click();
-        await reloadedOntoB(page);
+        await reloadedOntoB(page, pageReload);
         await expect(count(page)).toHaveValue("1e5");
       } else {
         await saveAndReload(page);
@@ -3010,7 +3203,7 @@ test.describe("revision 10, R17 and R11: what the form cannot account for is nev
     });
 
   for (const narrowed of [true, false])
-    test(`${narrowed ? "" : "control: "}A saves title and notes; B ${narrowed ? "admits only the title: incomplete, B's save fails and A's copy and hand-off stay; notes shown again: back, saved, A's copies removed" : "admits both: restored completely, and B's save removes A's copies"}`, async ({
+    test(`${narrowed ? "" : "control: "}A saves title and notes; B ${narrowed ? "admits only the title: incomplete, B's save fails and A's copy and hand-off stay; notes shown again: back, saved, A's copy removed (its hand-off stays, R42)" : "admits both: restored completely, and B's save removes A's copy (its hand-off stays, R42)"}`, async ({
       context,
       generations,
     }) => {
@@ -3055,18 +3248,26 @@ test.describe("revision 10, R17 and R11: what the form cannot account for is nev
         await expect(notes(page)).toHaveValue("UNFINISHED NOTES");
       }
       expect(await flushNow(page)).toBe("saved");
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "only B's own copy is left (A's copy and
+      // hand-off removed)"; now B's own ordinary copy and A's hand-off, exactly the one written (B restored it and never removes it); A's
+      // ordinary copy is still removed.
       const after = (await recoveryRows(context, generations)).filter(
-        (row) => !row.terminal,
+        (row) => !row.terminal && !isHandoffRow(row),
       );
       expect(after).toHaveLength(1);
       expect(after[0]?.fields).toEqual({
         title: ORIGINAL,
         notes: "UNFINISHED NOTES",
       });
-      for (const row of fromA)
+      for (const row of fromA.filter((one) => !isHandoffRow(one)))
         expect(after.map((one) => one.tab_instance_id)).not.toContain(
           row.tab_instance_id,
         );
+      expect(
+        (await recoveryRows(context, generations))
+          .filter((row) => !row.terminal && isHandoffRow(row))
+          .map((row) => row.tab_instance_id),
+      ).toEqual(fromA.filter(isHandoffRow).map((row) => row.tab_instance_id));
       await expect(section(page)).toHaveAttribute("data-submitted", "0");
     });
 });
@@ -3162,8 +3363,9 @@ test.describe("revision 11, R18: a field associated from outside the form is the
       await remount(page);
       await expect(place(page)).toHaveValue("UNFINISHED PLACE");
       await quiet(page);
+      const pageReload = await armReload(page);
       await updateRegion(page).getByRole("button", { name: then }).click();
-      await reloadedOntoB(page);
+      await reloadedOntoB(page, pageReload);
       await expect(place(page)).toHaveValue(
         then === "Retry save" ? "UNFINISHED PLACE" : "",
       );
@@ -3283,8 +3485,9 @@ test.describe("revision 19, R26/R27: Q4 focus through the real update", () => {
     await failRecoveryWrites(page, 0);
     await quiet(page);
     await expect(retry).toBeFocused();
+    const pageReload = await armReload(page);
     await page.keyboard.press("Enter");
-    await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+    await pageReload.loaded();
     await displayed(page);
     await formReady(page);
     expect(await build(page)).toBe("b");
@@ -3347,8 +3550,9 @@ test.describe("revision 19, R26/R27: Q4 focus through the real update", () => {
       await expect(save(page)).toBeFocused();
       if (order === "prompt first") await holdNextDocument(page);
       await quiet(page);
+      const pageReload = await armReload(page);
       await page.keyboard.press("Enter");
-      await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+      await pageReload.loaded();
       await displayed(page);
       expect(await build(page)).toBe("b");
       if (order === "restored first") {

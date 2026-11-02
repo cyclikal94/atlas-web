@@ -17,7 +17,18 @@ const code = (file: string) =>
     .filter((line) => !/^\s*(?:\/\/|\/\*|\*)/.test(line))
     .join("\n");
 const specs = readdirSync(E2E).filter((file) => file.endsWith(".spec.ts"));
-const stubbed = specs.filter((file) => /\bnew AuthStub\(/.test(read(file)));
+/**
+ * WEB-14a revision 40 adaptation (P-P8, R40-GATE), labelled for review: the worker-enabled production PWA suite may stub the network on a
+ * page the worker does NOT control (the first load: no `clientsClaim`), which `context.route` reaches in every engine, because R40-GATE
+ * needs the real session gate AND the real worker update together. It must assert that page uncontrolled (below); its controlled peer tab
+ * only makes the update wait. Every other AuthStub suite keeps the intercepted-auth topology.
+ */
+const WORKER_ENABLED_STUBBED = ["production.pwa.spec.ts"];
+const stubbed = specs.filter(
+  (file) =>
+    /\bnew AuthStub\(/.test(read(file)) &&
+    !WORKER_ENABLED_STUBBED.includes(file),
+);
 const importsTest = (source: string, from: string) =>
   new RegExp(
     `import \\{[^}]*\\btest\\b[^}]*\\} from "${from.replace(".", "\\.")}";`,
@@ -57,7 +68,20 @@ describe("every AuthStub suite declares the intercepted-auth topology", () => {
       /^production\.(offline|pwa)\b|^fixture\.pwa/.test(name),
     )) {
       const source = code(file);
-      expect(source, file).not.toMatch(/intercepted-auth|new AuthStub\(/);
+      // Revision 40 adaptation (P-P8): was "no AuthStub" for every worker-enabled suite; now no intercepted-auth anywhere here, and AuthStub
+      // only in the named suite, which proves its stubbed page uncontrolled.
+      expect(source, file).not.toMatch(/intercepted-auth/);
+      if (WORKER_ENABLED_STUBBED.includes(file)) {
+        // Each case that stubs the network asserts, in its own body, that its page is not controlled by the worker.
+        const cases = source
+          .split(/\ntest\(/)
+          .filter((body) => /new AuthStub\(/.test(body));
+        expect(cases.length, file).toBeGreaterThan(0);
+        for (const body of cases)
+          expect(body, file).toMatch(
+            /navigator\.serviceWorker\.controller === null/,
+          );
+      } else expect(source, file).not.toMatch(/new AuthStub\(/);
       expect(source, file).not.toMatch(/serviceWorkers\s*:\s*"block"/);
     }
     expect(

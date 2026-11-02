@@ -604,8 +604,9 @@ describe("revision 38: the claimed hand-off chosen again keeps its lineage (DA-R
     return { b, storage, ordinary, handoff };
   }
 
-  test("choose X, choose the hand-off again, discard: the hand-off AND the copy it names go; X stays; a later page cannot restore {A}", async () => {
+  test("choose X, choose the hand-off again, discard: the copy it names goes, the hand-off stays (R42); X stays; a later page restores {X} and only offers {A}", async () => {
     const { b, ordinary, handoff } = await claimed();
+    const kept = await world.handoffs(CONTEXT);
     expect(await b.model.restoreAlternative("gone-x")).toBe("restored");
     expect(await b.model.restoreAlternative(handoff)).toBe("restored");
     expect(b.owner.value).toBe("{A}");
@@ -613,22 +614,35 @@ describe("revision 38: the claimed hand-off chosen again keeps its lineage (DA-R
     const left = (await world.store.list(CONTEXT)).map((c) => c.tabInstanceId);
     expect(left).not.toContain(ordinary);
     expect(left).toContain("gone-x");
-    expect(await world.handoffs(CONTEXT)).toHaveLength(0);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was no hand-off left; now H stays exactly (same id
+    // and capture): B's claim restores it, never removes it.
+    expect(
+      (await world.handoffs(CONTEXT)).map((c) => [c.tabInstanceId, c.capture]),
+    ).toEqual(kept.map((c) => [c.tabInstanceId, c.capture]));
     b.leave();
     const c = await page("C").bound();
     expect(c.owner.restored).toEqual(["{X}"]);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was {A} neither restored nor offered; now {A} is
+    // not restored but is offered, from the retained hand-off only (B has gone; nobody holds it), for the person to restore or discard.
     expect(
-      c.model.view().alternatives.map((copy) => copy.values.model),
-    ).not.toContain("{A}");
+      c.model
+        .view()
+        .alternatives.filter((copy) => copy.values.model === "{A}")
+        .map((copy) => copy.tabInstanceId),
+    ).toEqual([handoff]);
   });
 
-  test("CONTROL: the hand-off restored at once and discarded removes the same two copies", async () => {
+  test("CONTROL: the hand-off restored at once and discarded removes the same copy it names and keeps the hand-off (R42)", async () => {
     const { b, ordinary } = await claimed();
+    const kept = await world.handoffs(CONTEXT);
     expect(await b.model.discard("{}")).toBe("discarded");
     const left = (await world.store.list(CONTEXT)).map((c) => c.tabInstanceId);
     expect(left).not.toContain(ordinary);
     expect(left).toContain("gone-x");
-    expect(await world.handoffs(CONTEXT)).toHaveLength(0);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was no hand-off left; now H stays exactly.
+    expect(
+      (await world.handoffs(CONTEXT)).map((c) => [c.tabInstanceId, c.capture]),
+    ).toEqual(kept.map((c) => [c.tabInstanceId, c.capture]));
   });
 
   test("a predecessor whose removal fails keeps the hand-off as its carrier (removed last, never before what it names)", async () => {

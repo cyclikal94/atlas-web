@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import {
+  armReload,
   build,
   checkForUpdate,
   displayed,
@@ -71,10 +72,11 @@ const sha256Of = (page: Page, path: string) =>
 async function accept(page: Page, generation: string): Promise<void> {
   await mark(page);
   await quiet(page);
+  const pageReload = await armReload(page);
   await updateRegion(page)
     .getByRole("button", { name: /^Reload( here)?$/ })
     .click();
-  await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+  await pageReload.loaded();
   await displayed(page);
   await expect.poll(() => build(page)).toBe(generation.slice(-1));
 }

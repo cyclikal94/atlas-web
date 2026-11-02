@@ -32,7 +32,7 @@ import {
 } from "./fields";
 import { restoreValues } from "./guard";
 import { HANDOFF_PREFIX, type HandoffStore, pageHandoffs } from "./handoff";
-import { adoptCopy, chooseLeft, isHandoff, readLeft } from "./look";
+import { adoptCopy, chooseLeft, claimLeft, isHandoff, readLeft } from "./look";
 import {
   type DiscardResult,
   type FormRecoveryPort,
@@ -454,8 +454,9 @@ export function useRecoverableForm(
         current.relook = null;
         setUnavailable(false);
         const { handed, own } = found;
-        // Holding its lock, read just now: the hand-off is this page's to remove (its source, once restored or chosen).
-        if (handed) current.claimed = handed.tabInstanceId;
+        // Holding its lock, read just now: the hand-off is this page's to restore (its source, once restored or chosen); revision 40
+        // (R42): never to remove (`claimLeft`).
+        claimLeft(current, found);
         const { candidates, lineage, offered } = chooseLeft(current, found);
         if (mode === "offer") {
           offerOwed.current = false;

@@ -51,15 +51,47 @@ import { AUTHORISED_MUTANTS, SELECTIONS } from "./mutation/unit-selections.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
-const flag = (name) => args.includes(name);
-const value = (name, fallback) => {
-  const at = args.indexOf(name);
-  return at >= 0 ? args[at + 1] : fallback;
-};
-const outDir = resolve(root, value("--out", ".agtx/evidence/WEB-09a/mutants"));
-const only = value("--only", "").split(",").filter(Boolean);
-const jobs = Number(value("--jobs", "3"));
-const check = flag("--check");
+
+// WEB-14a revision 41 (review r40 R40-TOOLS): the command line is checked before anything is claimed or started, as the accepted
+// WEB-08d runner did (scripts/validation/unit-runner.test.mjs Q3/Q15), so a selection that cannot run never runs something else: an
+// unknown or repeated argument, a missing value, a `--jobs` that is not a positive integer and an `--only` with an empty id are refused
+// (exit 2). An unknown or repeated catalogue id stays an INVENTORY problem (exit 1, below).
+function options() {
+  const known = new Set(["--out", "--only", "--jobs", "--check"]);
+  const takesValue = new Set(["--out", "--only", "--jobs"]);
+  const seen = {};
+  for (let i = 0; i < args.length; i += 1) {
+    const name = args[i];
+    if (!known.has(name)) throw new Error(`unknown argument ${name}`);
+    if (name in seen) throw new Error(`${name} given twice`);
+    if (takesValue.has(name)) {
+      const v = args[i + 1];
+      if (v === undefined || v.startsWith("--"))
+        throw new Error(`${name} needs a value`);
+      seen[name] = v;
+      i += 1;
+    } else seen[name] = true;
+  }
+  const jobs = Number(seen["--jobs"] ?? "3");
+  if (!Number.isInteger(jobs) || jobs < 1)
+    throw new Error("--jobs must be a positive integer");
+  const only = seen["--only"] === undefined ? [] : seen["--only"].split(",");
+  if (only.some((id) => id === "")) throw new Error("--only has an empty id");
+  return {
+    outDir: resolve(root, seen["--out"] ?? ".agtx/evidence/WEB-09a/mutants"),
+    only,
+    jobs,
+    check: seen["--check"] === true,
+  };
+}
+let opts;
+try {
+  opts = options();
+} catch (error) {
+  console.error(`run-data-mutants: ${error.message}`);
+  process.exit(2);
+}
+const { outDir, only, jobs, check } = opts;
 
 // Check the complete inventory before any patch or child runs, including narrowed and patch-only invocations.
 const inventory = [
@@ -87,6 +119,11 @@ const selected = UNIT.filter(
   (m) => only.length === 0 || only.includes(m.id),
 ).map((m) => (SELECTIONS[m.id] ? { ...m, selection: SELECTIONS[m.id] } : m));
 
+// Revision 41: SIGINT/SIGTERM stop admission, end the running children and still write the account (exit 1); a second one is fatal.
+const interruption = new AbortController();
+for (const signal of ["SIGINT", "SIGTERM"])
+  process.once(signal, () => interruption.abort(signal));
+
 const { code } = await runUnitMutants({
   root,
   mutants: selected,
@@ -94,6 +131,7 @@ const { code } = await runUnitMutants({
   config: join(root, "vitest.mutant.config.ts"),
   jobs,
   check,
+  interrupt: interruption.signal,
   expectedCount: only.length > 0 ? null : EXPECTED_UNIT,
   extraSummary: {
     expected_unit_mutants: EXPECTED_UNIT,

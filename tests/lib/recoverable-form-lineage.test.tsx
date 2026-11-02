@@ -97,10 +97,27 @@ async function left(world: World): Promise<{
   };
 }
 
-/** A page of a NEW tab (no reference): what it restores, by id. */
-async function nextTab(world: World): Promise<string | undefined> {
+/** A page of a NEW tab (no reference): what it restores, and (revision 40, R42; was `nextTab`, the restored id only) the hand-offs it offers, by id. */
+async function nextTabSees(
+  world: World,
+): Promise<{ restored: string | undefined; handoffs: string[] }> {
   const page = await world.page("NEXT").mount();
-  return page.handle?.restored?.tabInstanceId;
+  return {
+    restored: page.handle?.restored?.tabInstanceId,
+    handoffs: (page.handle?.alternatives ?? [])
+      .filter(isHandoff)
+      .map((c) => c.tabInstanceId),
+  };
+}
+
+/** Revision 40 (R42): the hand-offs left are exactly `kept`, each its row as first read (same id and capture). */
+async function handoffsKept(
+  world: World,
+  kept: readonly RecoverySnapshot[],
+): Promise<void> {
+  expect(
+    (await world.handoffs()).map((c) => [c.tabInstanceId, c.capture]).sort(),
+  ).toEqual(kept.map((c) => [c.tabInstanceId, c.capture]).sort());
 }
 
 const ends: Array<{
@@ -155,7 +172,7 @@ const ends: Array<{
 describe("R16 (Q1): equal text is no predecessor; every clean-up removes exactly the hand-off's own predecessor", () => {
   for (const same of [false, true])
     for (const end of ends)
-      test(`${same ? "REQUIREMENT (equal text)" : "CONTROL (other text)"}: ${end.name} removes A's copy and the hand-off, B's copy stays, and the next tab restores B's`, async () => {
+      test(`${same ? "REQUIREMENT (equal text)" : "CONTROL (other text)"}: ${end.name} removes A's copy and keeps the hand-off (R42), B's copy stays, and the next tab restores B's and offers the hand-off`, async () => {
         const s = await reviewSchedule(same ? ORIGINAL : "B INDEPENDENT");
         const before = await left(s.world);
         expect(before.ordinary).toEqual([s.aId, s.bId].sort());
@@ -169,22 +186,33 @@ describe("R16 (Q1): equal text is no predecessor; every clean-up removes exactly
           ],
         });
         expect(await end.act(s)).toEqual(end.expect);
+        // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was the hand-off removed with A's copy; now A's copy
+        // (named by the hand-off) goes and the hand-off stays exactly (A2 holds a copied-or-original reference alike: never its to remove).
         expect(await left(s.world)).toEqual({
           ordinary: [s.bId],
-          handoffs: [],
+          handoffs: [s.hId],
         });
+        await handoffsKept(s.world, h ? [h] : []);
         s.a2.leave();
-        expect(await nextTab(s.world)).toBe(s.bId);
+        // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was the next tab restoring B's copy only; now it still
+        // restores B's, and offers the retained hand-off (no live page holds it) for the person to restore or discard.
+        expect(await nextTabSees(s.world)).toEqual({
+          restored: s.bId,
+          handoffs: [s.hId],
+        });
       });
 
-  test("REQUIREMENT: the page's own save cleans up exactly A's copy and the hand-off (B's equal copy stays)", async () => {
+  test("REQUIREMENT: the page's own save cleans up exactly A's copy, never the hand-off (R42) (B's equal copy stays)", async () => {
     const s = await reviewSchedule(ORIGINAL);
+    const [h] = await s.world.handoffs();
     expect(await s.a2.flush()).toEqual(["saved"]);
     const a2Id = s.a2.tab.current() as string;
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was the hand-off removed by the own save; now it stays exactly.
     expect(await left(s.world)).toEqual({
       ordinary: [a2Id, s.bId].sort(),
-      handoffs: [],
+      handoffs: [s.hId],
     });
+    await handoffsKept(s.world, h ? [h] : []);
   });
 
   for (const variant of [
@@ -198,8 +226,9 @@ describe("R16 (Q1): equal text is no predecessor; every clean-up removes exactly
       options: { extraEqual: 3 },
     },
   ])
-    test(`REQUIREMENT: ${variant.name}: the discard removes A's copy only`, async () => {
+    test(`REQUIREMENT: ${variant.name}: the discard removes A's copy only (the hand-off stays, R42)`, async () => {
       const s = await reviewSchedule(ORIGINAL, variant.options);
+      const [h] = await s.world.handoffs();
       const others = (await s.world.store.list(FORM))
         .map((c) => c.tabInstanceId)
         .filter((id) => id !== s.aId);
@@ -208,10 +237,12 @@ describe("R16 (Q1): equal text is no predecessor; every clean-up removes exactly
         result = await s.a2.handle?.discard();
       });
       expect(result).toBe("discarded");
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was the hand-off removed with A's copy; now it stays exactly.
       expect(await left(s.world)).toEqual({
         ordinary: others.sort(),
-        handoffs: [],
+        handoffs: [s.hId],
       });
+      await handoffsKept(s.world, h ? [h] : []);
     });
 
   test("the restored hand-off's predecessor is part of it (not offered on its own); B's equal copy is offered", async () => {
@@ -249,7 +280,7 @@ describe("R16 (Q2): the hand-off chosen later brings the same lineage as one res
     return { world, a2, aId, bId, hId: h?.tabInstanceId as string };
   }
 
-  test("the hand-off is offered (not A's copy, which it names); B's equal copy is offered; choosing it then discarding removes A's copy and the hand-off only", async () => {
+  test("the hand-off is offered (not A's copy, which it names); B's equal copy is offered; choosing it then discarding removes A's copy only and keeps the hand-off (R42)", async () => {
     const { world, a2, aId, bId, hId } = await typedFirst();
     expect(a2.title).toBe("TYPED FIRST");
     const offered = (a2.handle?.alternatives ?? []).map((c) => c.tabInstanceId);
@@ -266,10 +297,12 @@ describe("R16 (Q2): the hand-off chosen later brings the same lineage as one res
       result = await a2.handle?.discard();
     });
     expect(result).toBe("discarded");
-    expect(await left(world)).toEqual({ ordinary: [bId], handoffs: [] });
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was { ordinary: [B], handoffs: [] }; now the chosen
+    // hand-off stays (a claim restores it, never removes it) while A's copy it names still goes.
+    expect(await left(world)).toEqual({ ordinary: [bId], handoffs: [hId] });
   });
 
-  test("switching to B's copy and back to the hand-off keeps the hand-off's lineage: the discard removes A's copy and the hand-off, never B's", async () => {
+  test("switching to B's copy and back to the hand-off keeps the hand-off's lineage: the discard removes A's copy, never B's or the hand-off (R42)", async () => {
     const { world, a2, bId, hId } = await typedFirst();
     for (const id of [hId, bId, hId]) {
       let chosen: unknown;
@@ -283,7 +316,9 @@ describe("R16 (Q2): the hand-off chosen later brings the same lineage as one res
       result = await a2.handle?.discard();
     });
     expect(result).toBe("discarded");
-    expect(await left(world)).toEqual({ ordinary: [bId], handoffs: [] });
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was { ordinary: [B], handoffs: [] }; now the chosen
+    // hand-off stays (a claim restores it, never removes it) while A's copy it names still goes.
+    expect(await left(world)).toEqual({ ordinary: [bId], handoffs: [hId] });
   });
 });
 
@@ -304,9 +339,10 @@ describe("R16 (Q3): a predecessor its own page wrote again is not removed", () =
         result = await s.a2.handle?.discard();
       });
       expect(result).toBe("discarded");
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was handoffs: []; now the hand-off stays.
       expect(await left(s.world)).toEqual({
         ordinary: changed ? [s.aId, s.bId].sort() : [s.bId],
-        handoffs: [],
+        handoffs: [s.hId],
       });
       // Conditional on exactly the capture the hand-off named.
       const asked = s.world.store.discards.find(
@@ -336,10 +372,15 @@ describe("R16 (Q4): a clean-up that does not land stays owed, durably, until it 
       result = await s.a2.handle?.discard();
     });
     expect(result).toBe("discarded");
-    expect(await left(s.world)).toEqual({ ordinary: [s.bId], handoffs: [] });
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was handoffs: [] once A's copy went; now the hand-off
+    // stays (it was never this page's to remove; only what it names was owed).
+    expect(await left(s.world)).toEqual({
+      ordinary: [s.bId],
+      handoffs: [s.hId],
+    });
   });
 
-  test("the own save lands while A's copy cannot be removed; the next update writes what is owed into its hand-off; the page after it removes every owed copy", async () => {
+  test("the own save lands while A's copy cannot be removed; the next update writes what is owed into its hand-off (never the hand-off A2 restored, R42); the page after it removes every owed copy", async () => {
     const s = await reviewSchedule(ORIGINAL);
     s.world.store.failDiscardOf = (_ctx, id) => id === s.aId;
     expect(await s.a2.flush()).toEqual(["saved"]);
@@ -358,10 +399,11 @@ describe("R16 (Q4): a clean-up that does not land stays owed, durably, until it 
         .map((t) => [t.formContext, t.tabInstanceId])
         .sort(),
     ).toEqual(
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was [A2, A, H]; now [A2, A]: H is
+      // never owed by a page that restored it, so the next hand-off does not name it either.
       [
         [FORM, a2Id],
         [FORM, s.aId],
-        [handoffContext(FORM), s.hId],
       ].sort(),
     );
     s.a2.leave();
@@ -370,13 +412,17 @@ describe("R16 (Q4): a clean-up that does not land stays owed, durably, until it 
     expect(a3.title).toBe(ORIGINAL);
     expect(a3.handle?.restored?.tabInstanceId).toBe(h2.tabInstanceId);
     // Nothing the chain owes is offered on its own; B's copy is.
-    expect((a3.handle?.alternatives ?? []).map((c) => c.tabInstanceId)).toEqual(
-      [s.bId],
-    );
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was [B] only; now the retained first
+    // hand-off H is offered too (A2 has gone, nobody holds it, and H2 does not name it).
+    expect(
+      (a3.handle?.alternatives ?? []).map((c) => c.tabInstanceId).sort(),
+    ).toEqual([s.bId, s.hId].sort());
     expect(await a3.flush()).toEqual(["saved"]);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was handoffs: []; now both hand-offs
+    // stay (H, and H2 that A3 restored); the ordinary copies owed (A's, A2's) still go.
     expect(await left(s.world)).toEqual({
       ordinary: [a3.tab.current() as string, s.bId].sort(),
-      handoffs: [],
+      handoffs: [h2.tabInstanceId, s.hId].sort(),
     });
   });
 
@@ -404,15 +450,20 @@ describe("R16 (Q4): a clean-up that does not land stays owed, durably, until it 
       result = await s.a2.handle?.discard();
     });
     expect(result).toBe("discarded");
-    expect(await left(s.world)).toEqual({ ordinary: [s.bId], handoffs: [] });
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was handoffs: []; now the hand-off stays.
+    expect(await left(s.world)).toEqual({
+      ordinary: [s.bId],
+      handoffs: [s.hId],
+    });
   });
 
-  test("CONTROL: every removal lands: the own save leaves only the page's copy and B's", async () => {
+  test("CONTROL: every removal lands: the own save leaves only the page's copy and B's, and the hand-off (R42)", async () => {
     const s = await reviewSchedule(ORIGINAL);
     expect(await s.a2.flush()).toEqual(["saved"]);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was handoffs: []; now the hand-off stays.
     expect(await left(s.world)).toEqual({
       ordinary: [s.a2.tab.current() as string, s.bId].sort(),
-      handoffs: [],
+      handoffs: [s.hId],
     });
   });
 });

@@ -20,10 +20,15 @@ import type {
  *    then may the page reload (a failure keeps the form open, as any failed save does). Revision 7 (DA-A): the record is never rewritten
  *    from one that could not be read, and the reload is certified on the record itself.
  *  - The replacement takes its lock, THEN reads it (revision 7, R15: what it shows is what it read while holding the lock, so nobody can
- *    have resolved it since), restores it first (never submitting it) and removes it once its own copy is saved, or at its own submission
- *    or discard: the hand-off is its source, and only it may remove it. A page that cannot take the lock in time (a duplicated or
+ *    have resolved it since) and restores it first (never submitting it). A page that cannot take the lock in time (a duplicated or
  *    opener-copied tab carrying the same reference, while the page holding it lives) neither reads nor shows it: it falls back to the
  *    ordinary copies (the owner's decision).
+ *  - Revision 40 (review of revision 39, R42; owner decision WEB14A-R42-NON-CONSUMING-20261028, 28 October 2026): NO PAGE CONSUMES IT. Once its
+ *    writer has gone, a tab copied from the writer (its `sessionStorage`, reference included) can take the lock as readily as the writer's
+ *    replacement, and no signal this build reads (none qualified in every engine) tells the two apart. So the page that takes it restores it and drops its reference, but its
+ *    own save, submission or discard never removes it (`session.ts`, `removable`); only the ordinary copies its lineage names go. Once no
+ *    live page holds it, it is offered like a hand-off whose replacement never came (below), until the person discards it there. Only the
+ *    page that wrote it removes it of its own accord (its own submission or discard, while it lives).
  *  - A hand-off nobody holds (its replacement never came: the tab closed or crashed during the reload) is offered to later pages of the
  *    form as an alternative they may restore, never remove; only an explicit "Discard this copy" of that alternative removes it.
  *

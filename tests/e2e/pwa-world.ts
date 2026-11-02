@@ -4,6 +4,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { BrowserContext, Page } from "@playwright/test";
 import { test as base, expect } from "./helpers";
+import { armedOn, unsettled } from "./reload-receipt";
+import { RequestRecorder } from "./request-origin";
+
+export { armReload, type ReloadReceipt, reloadAfter } from "./reload-receipt";
 
 /**
  * The PWA browser checks' world (WEB-14a): each test gets its OWN generation server (scripts/serve-generations.mjs over dist-pwa/, loopback,
@@ -16,13 +20,24 @@ import { test as base, expect } from "./helpers";
  * encountered an internal error"), by the server destroying every connection (`dark`). WebKit's page then still believes it is online.
  */
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DIST = join(ROOT, "dist-pwa");
+/**
+ * The built generations. WEB-14a revision 43 (F-FRESH-2, QUALIFICATION ONLY): `ATLAS_PWA_DIST` serves a disposable copy instead, so a
+ * qualification can run the unchanged specs against a deliberately faulty worker (.agtx/evidence/revision-r43-20261102). No ordinary run
+ * sets it.
+ */
+const DIST = process.env.ATLAS_PWA_DIST
+  ? resolve(process.env.ATLAS_PWA_DIST)
+  : join(ROOT, "dist-pwa");
 
 export interface LogEntry {
+  /** The server's unique, increasing request id (also sent as the response's `X-Atlas-Fixture-Request`). */
+  id: number;
   method: string;
   path: string;
   at: number;
   status: number;
+  /** null while the response is unfinished; "finished" once sent; "closed" if the connection closed first. */
+  end: "finished" | "closed" | null;
 }
 
 export interface Generations {
@@ -38,6 +53,13 @@ export interface Generations {
   holdIdentity(on: boolean): Promise<number>;
   log(): Promise<LogEntry[]>;
   clearLog(): Promise<void>;
+  /**
+   * WEB-14a revision 43 (F-FRESH-2): the append-only ledger after request `after` (`clearLog` never touches it), and the latest id.
+   */
+  ledger(
+    after: number,
+    signal?: AbortSignal,
+  ): Promise<{ high: number; entries: LogEntry[] }>;
   /** The files of a built generation, by path, with their SHA-256 (dist-pwa/generations.json). */
   files(generation: string): Record<string, string>;
   entry(generation: string): string;
@@ -63,6 +85,8 @@ async function startGenerations(
     process.execPath,
     [
       join(ROOT, "scripts/serve-generations.mjs"),
+      "--dir",
+      DIST,
       "--generation",
       generation,
       // EVERY production header, Cross-Origin-Opener-Policy included, in every engine (revision 1, R9). Revision 0 omitted COOP for Firefox;
@@ -122,6 +146,17 @@ async function startGenerations(
     clearLog: async () => {
       await post("/log/clear");
     },
+    ledger: async (after, signal) => {
+      // Revision 44 (design assessment C5): abortable, so the recorder's bound covers the control read and its body.
+      const response = await fetch(`${urls.control}/ledger?after=${after}`, {
+        signal,
+      });
+      if (!response.ok)
+        throw new Error(
+          `control /ledger: ${response.status} ${await response.text()}`,
+        );
+      return (await response.json()) as { high: number; entries: LogEntry[] };
+    },
     files: (name) => manifest()[name]?.files ?? {},
     entry: (name) => manifest()[name]?.entry ?? "",
   };
@@ -148,8 +183,22 @@ export const test = base.extend<{
   generations: Generations;
   /** The generation the server starts with (`test.use({ firstGeneration: "production-a" })` for the production build). */
   firstGeneration: string;
+  /**
+   * WEB-14a revision 43 (F-FRESH-2): who made each request the server received, per occurrence (tests/e2e/request-origin.ts). Set up
+   * after the server and before the test body, so before any page of the test navigates.
+   */
+  requests: RequestRecorder;
 }>({
   firstGeneration: ["fixture-a", { option: true }],
+  requests: async ({ context, generations }, use) => {
+    await use(
+      new RequestRecorder(
+        context,
+        new URL(generations.url).origin,
+        (after, signal) => generations.ledger(after, signal),
+      ),
+    );
+  },
   generations: async (
     { context, browserName, firstGeneration },
     use,
@@ -209,6 +258,13 @@ export const test = base.extend<{
     const started = await startGenerations(firstGeneration);
     try {
       await use(started.world);
+      // Revision 47 (F-R46-PWA-LOAD): a test that armed a reload receipt joins or cancels it (an unjoined one checked nothing). Only for a
+      // test that otherwise passed: a failed test's receipts are left as its failure left them.
+      if (testInfo.status === "passed")
+        expect(
+          unsettled(context),
+          "reload receipts armed and never joined or cancelled",
+        ).toEqual([]);
       // The pages go before the server does: a server that stops under a live page fails its requests in flight.
       for (const page of context.pages())
         await page.close().catch(() => undefined);
@@ -357,7 +413,19 @@ export async function openApp(
   return page;
 }
 
+/**
+ * Waits until the page's protected root is shown (not `inert`). PRECONDITION (revision 47, F-R46-PWA-LOAD): the page's CURRENT document is
+ * already known to have loaded or to be loading under a navigation Playwright itself awaits: a `goto`/`reload`/`navigate` the test made,
+ * a popup's own first load, or a joined reload receipt (`armReload` … `loaded()`) after a reload the APP started. The load wait below only
+ * covers the document Playwright already knows: it does NOT wait for a later replacement (the client returns at once while it still holds
+ * the old document's load state), so it is never evidence that an app-initiated reload finished. A receipt armed on the page and not yet
+ * joined is refused. Same-document callers (a gate lifted again after a peer's identity read) use this unchanged.
+ */
 export async function displayed(page: Page): Promise<void> {
+  if (armedOn(page))
+    throw new Error(
+      "displayed(): a reload receipt is armed on this page; join it (`loaded()`) before inspecting the replacement",
+    );
   // Nothing is asked of the page before it has loaded (Firefox warns of a layout forced by an early evaluation).
   await page.waitForLoadState("load");
   await expect

@@ -2,6 +2,7 @@ import { X } from "lucide-react";
 import { useEffect, useSyncExternalStore } from "react";
 import { neutralLiveRegion, useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
+import { isActivity } from "../form-recovery/activity";
 import { keepFocus, useUpdateFocus } from "../form-recovery/focus";
 import {
   DISCARD_FAILED_TEXT,
@@ -45,6 +46,12 @@ export const NEUTRAL_SAVE_FAILED_TEXT =
   "Atlas couldn't save unfinished changes before reloading. You can retry saving, or discard those changes and reload.";
 export const NEUTRAL_SAVE_REFUSED_TEXT =
   "Atlas can't save unfinished changes while sign-out is in progress. You can discard those changes and reload.";
+/**
+ * Revision 39 (R40-COMPOSITION): unfinished input that no reload can bring back (signing in, joining, a page-memory step). PROPOSED copy
+ * (WEB-15 owns it). It names no form, field or account, so it is the same on both surfaces.
+ */
+export const KEPT_INPUT_TEXT =
+  "Reloading now would lose what you've entered here, so Atlas hasn't reloaded. Finish or clear it, then reload — or discard it and reload now.";
 export const NEUTRAL_DISCARD_FAILED_TEXT =
   "Atlas couldn't clear an earlier saved copy. Try again, or reload knowing that copy may be restored afterwards.";
 
@@ -86,6 +93,12 @@ const DISCARD_AND_RELOAD: UpdateChoice = {
   label: "Discard and reload anyway",
   act: "discardAndReload",
   variant: "quiet",
+};
+/** Revision 39: the stopped act again, once the input is finished or cleared (it re-checks what this page holds). */
+const RELOAD_AGAIN: UpdateChoice = {
+  label: "Reload",
+  act: "retrySave",
+  variant: "secondary",
 };
 const TRY_AGAIN: UpdateChoice = {
   label: "Try again",
@@ -142,6 +155,8 @@ export function noticeOf(
             RETRY_SAVE,
             DISCARD_AND_RELOAD,
           ]);
+    case "kept_input":
+      return failed(KEPT_INPUT_TEXT, [RELOAD_AGAIN, DISCARD_AND_RELOAD]);
     case "discard_failed":
       return failed(
         neutral ? NEUTRAL_DISCARD_FAILED_TEXT : DISCARD_FAILED_TEXT,
@@ -262,7 +277,9 @@ function Notice({
 
 const subscribeForms = (listener: () => void) =>
   pageFormRegistry.subscribe(listener);
-const formsOpen = () => pageFormRegistry.all().length > 0;
+// Revision 39: outstanding page work (`activity.ts`) is not an open form.
+const formsOpen = () =>
+  pageFormRegistry.all().some((form) => !isActivity(form));
 
 /** The banner in the protected tree (the shell), where forms live and the announcer is mounted. */
 export function AppUpdateBanner() {

@@ -372,13 +372,20 @@ describe("R13: the next page of the tab restores the update's input, whatever an
       // Nothing was submitted; A2 is dirty until it has a copy of its own (the hand-off is its source).
       expect(a2.dirty()).toBe(1);
       expect(await a2.flush()).toEqual(["saved"]);
-      // Its own copy saved, A2 removed the hand-off (and A's identical ordinary copy, if C left it) and its reference.
-      expect(await world.handoffs()).toEqual([]);
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "its own copy saved, A2 removed the hand-off"; now the
+      // hand-off stays exactly as A wrote it (a page that takes a hand-off over restores it, never removes it), while A's identical ordinary
+      // copy (which it names) still goes, and the reference went once A2's look was applied.
+      expect(await world.handoffs()).toEqual([handoff]);
       expect(storage.getItem("atlas-update-handoff")).toBeNull();
       const rows = await world.rows();
       expect(
-        rows.filter(([, , value]) => value === ORIGINAL).map(([w]) => w),
+        rows
+          .filter(([w, , value]) => w === "ordinary" && value === ORIGINAL)
+          .map(([w]) => w),
       ).toEqual(Array(step.copies).fill("ordinary"));
+      expect(rows.filter(([w]) => w === "handoff")).toEqual([
+        ["handoff", handoff?.tabInstanceId, ORIGINAL],
+      ]);
       if (c) expect(c.title).toBe(step.shows);
     });
 
@@ -419,9 +426,10 @@ describe("R13: the next page of the tab restores the update's input, whatever an
     ).toBe(ORIGINAL);
   });
 
-  test("A2's submission succeeds: the hand-off and its reference are removed; nothing comes back", async () => {
+  test("A2's submission succeeds: A's ordinary copy and the reference go; the hand-off stays, offered (never restored) once A2 has gone", async () => {
     const world = new World();
     const { storage } = await updated(world);
+    const handoff = (await world.handoffs())[0];
     const a2 = await world.page("A2", storage).mount();
     const ticket = a2.handle?.submitting();
     let result: string | undefined;
@@ -429,31 +437,66 @@ describe("R13: the next page of the tab restores the update's input, whatever an
       result = await ticket?.succeeded();
     });
     expect(result).toBe("discarded");
-    expect(await world.rows()).toEqual([]);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "the hand-off and every copy removed, nothing comes
+    // back"; now only the hand-off stays, exactly (A2 cannot prove it is A's replacement rather than a copied tab), offered to a later page.
+    expect(await world.rows()).toEqual([
+      ["handoff", handoff?.tabInstanceId, ORIGINAL],
+    ]);
+    expect(await world.handoffs()).toEqual([handoff]);
     expect(storage.getItem("atlas-update-handoff")).toBeNull();
+    a2.leave();
+    const e = await world.page("E").mount();
+    expect(e.title).toBe("");
+    expect(e.handle?.restored).toBeNull();
+    expect(
+      e.handle?.alternatives.map((copy) => [
+        isHandoff(copy),
+        copy.tabInstanceId,
+      ]),
+    ).toEqual([[true, handoff?.tabInstanceId]]);
   });
 
-  test("A2's 'Discard instead' removes the hand-off with the other copies", async () => {
+  test("A2's 'Discard instead' removes the other copies; the hand-off stays, offered (never restored) once A2 has gone", async () => {
     const world = new World();
     const { storage } = await updated(world);
+    const handoff = (await world.handoffs())[0];
     const a2 = await world.page("A2", storage).mount();
     let result: string | undefined;
     await act(async () => {
       result = await a2.handle?.discard();
     });
     expect(result).toBe("discarded");
-    expect(await world.rows()).toEqual([]);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "every copy removed, the hand-off with them"; now only
+    // the hand-off stays, exactly (no page's discard consumes a hand-off it did not write), offered to a later page.
+    expect(await world.rows()).toEqual([
+      ["handoff", handoff?.tabInstanceId, ORIGINAL],
+    ]);
+    a2.leave();
+    const e = await world.page("E").mount();
+    expect(e.title).toBe("");
+    expect(
+      e.handle?.alternatives.map((copy) => [
+        isHandoff(copy),
+        copy.tabInstanceId,
+      ]),
+    ).toEqual([[true, handoff?.tabInstanceId]]);
   });
 
-  test("chained: A2 updates again before saving; its own copy replaces the first hand-off and A3 restores ORIGINAL", async () => {
+  test("chained: A2 updates again before saving; its own hand-off is written beside the first (which stays) and A3 restores ORIGINAL", async () => {
     const world = new World();
     const { storage } = await updated(world);
     const a2 = await world.page("A2", storage).mount();
-    const first = (await world.handoffs())[0]?.tabInstanceId;
+    const firstCopy = (await world.handoffs())[0];
+    const first = firstCopy?.tabInstanceId;
     expect(await a2.update()).toEqual(["saved", "saved"]);
     const second = await world.handoffs();
-    expect(second).toHaveLength(1);
-    expect(second[0]?.tabInstanceId).not.toBe(first);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "A2's own copy replaces the first hand-off" (one
+    // hand-off); now the first stays exactly beside A2's own (A2 restored it, never removes it), and A2's is a new one.
+    expect(second).toHaveLength(2);
+    expect(second).toContainEqual(firstCopy);
+    expect(second.filter((copy) => copy.tabInstanceId !== first)).toHaveLength(
+      1,
+    );
     a2.leave();
     const c = await world.page("C").mount();
     let discarded: string | undefined;
@@ -569,9 +612,10 @@ describe("R13: who may remove a hand-off", () => {
     expect(ordinary).toBe("failed");
   });
 
-  test("a duplicated tab carrying the same reference: both restore ORIGINAL; only the page holding the hand-off removes it", async () => {
+  test("a duplicated tab carrying the same reference: both restore ORIGINAL; neither removes the hand-off, not even the page holding it", async () => {
     const world = new World();
     const { storage } = await updated(world);
+    const handoff = (await world.handoffs())[0];
     const a2 = await world.page("A2", storage).mount();
     const duplicate = await world.page("DUP", storage.copy()).mount(5_000);
     expect(a2.title).toBe(ORIGINAL);
@@ -580,7 +624,9 @@ describe("R13: who may remove a hand-off", () => {
     expect(await duplicate.flush()).toEqual(["saved"]);
     expect(await world.handoffs()).toHaveLength(1);
     expect(await a2.flush()).toEqual(["saved"]);
-    expect(await world.handoffs()).toEqual([]);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "the page holding the hand-off removes it with its own
+    // save"; now it stays exactly (holding its lock proves no more than the duplicate's copied reference would once A2 had gone).
+    expect(await world.handoffs()).toEqual([handoff]);
   }, 10_000);
 });
 

@@ -636,7 +636,7 @@ describe("R17-B (Q5): a restore the form cannot show is never certified", () => 
   }
 
   for (const kind of KINDS)
-    test(`REQUIREMENT ${kind.name}: the successor without B reports the restore incomplete, its save fails, P and H stay exactly; B shown: back, saved, then P and H removed`, async () => {
+    test(`REQUIREMENT ${kind.name}: the successor without B reports the restore incomplete, its save fails, P and H stay exactly; B shown: back, saved, then P removed and H kept exactly`, async () => {
       const { world, a2, before, captures, show } = await successor(
         ["a", "c"],
         kind,
@@ -656,24 +656,38 @@ describe("R17-B (Q5): a restore the form cannot show is never certified", () => 
       await waitFor(() => expect(kind.state(a2.view)).toEqual(kind.withB));
       expect(await update(a2.registry)).toEqual(["saved", "saved"]);
       const after = await rows(world);
-      // Only A2's own copies hold B now; A's P and H were removed (exact, authorised cleanup).
-      expect(after.map(([where, , state]) => [where, state])).toEqual([
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was only A2's own copies left (A's P and H removed);
+      // now A's P is removed (exact, authorised clean-up) and A's hand-off H stays exactly beside A2's own copies, all holding B (no page
+      // that claims a hand-off may remove it).
+      const aHandoff = before.filter(([where]) => where === "handoff");
+      const aOrdinary = before.filter(([where]) => where === "ordinary");
+      expect(aHandoff).toHaveLength(1);
+      expect(aOrdinary).toHaveLength(1);
+      for (const row of aHandoff) expect(after).toContainEqual(row);
+      for (const [, id] of aOrdinary)
+        expect(after.map(([, own]) => own)).not.toContain(id);
+      const own = after.filter(
+        ([, id]) => !aHandoff.some(([, handed]) => handed === id),
+      );
+      expect(own.map(([where, , state]) => [where, state])).toEqual([
         ["ordinary", kind.stored],
         ["handoff", kind.stored],
       ]);
-      for (const [, id] of before)
-        expect(after.map(([, own]) => own)).not.toContain(id);
       expect(a2.submits()).toBe(0);
     });
 
-  test("CONTROL: the successor showing B restores it completely, and its save removes P and H", async () => {
+  test("CONTROL: the successor showing B restores it completely, and its save removes P (the hand-off H is kept exactly)", async () => {
     const { world, a2, before } = await successor(ALL);
     expect(a2.handle().incomplete).toEqual([]);
     expect(selectedOf(a2.view)).toEqual(["b"]);
     expect(await update(a2.registry)).toEqual(["saved", "saved"]);
     const after = await rows(world);
-    for (const [, id] of before)
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was neither P nor H left; now P is removed and H stays
+    // exactly (no page that claims a hand-off may remove it).
+    for (const [, id] of before.filter(([where]) => where === "ordinary"))
       expect(after.map(([, own]) => own)).not.toContain(id);
+    for (const row of before.filter(([where]) => where === "handoff"))
+      expect(after).toContainEqual(row);
   });
 
   test("the person chooses C while B cannot be shown: C is theirs, B stays owed (still not saved, P and H kept)", async () => {

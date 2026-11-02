@@ -25,13 +25,18 @@
 // projection of a thrown value is total (`describeError`); the first raw value is kept in memory; each infrastructure record names the
 // stage it reached; an infrastructure-marked record never counts as a clean catch; reporting and the results file are guarded.
 //
+// Revision 41 (review r40 R40-TOOLS): two guarantees of the accepted WEB-08d runner (scripts/validation/unit-runner.test.mjs H7 Q3 and Q6),
+// lost when the 27 October 2026 merge kept this runner, are restored: a child whose run did not include every selected test file is
+// incomplete evidence (`supervisedRun`), and an interruption (`interrupt`, an AbortSignal whose reason is the signal's name) latches
+// the stop, ends every running child with that signal and still writes the account.
+//
 // Kept from the earlier runner: patched copies, never the tree; one unmutated control per distinct set of tests; the catalogue's
 // `expect` rule; an earlier revision's mutant (no `expect`) that is not cleanly caught is LISTED (crash_only_legacy, tainted_legacy),
 // never counted as caught, and does not fail the run.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import {
   controlVerdict,
   namePatternOf,
@@ -124,23 +129,25 @@ export function patchAll({ root, mutants, work }) {
   return out;
 }
 
-function spawnChild(argv, { cwd, env }) {
+function spawnChild(argv, { cwd, env, children }) {
   return new Promise((done) => {
     let output = "";
     let settled = false;
+    let child;
     const finish = (value) => {
       if (!settled) {
         settled = true;
+        children?.delete(child);
         done({ ...value, output });
       }
     };
-    let child;
     try {
       child = spawn(argv[0], argv.slice(1), {
         cwd,
         env: { ...process.env, ...env },
         stdio: ["ignore", "pipe", "pipe"],
       });
+      children?.add(child);
     } catch (error) {
       finish({
         spawnError: describeError(error),
@@ -171,6 +178,7 @@ function spawnChild(argv, { cwd, env }) {
 /**
  * One supervised Vitest child over `files`, judged from its complete evidence. Revision 30: `progress.stage` names how far it got
  * (`request`, `launch`, `started`, `complete`, `evidence`), and `halt(error)` is called synchronously at the failure, before it propagates.
+ * Revision 41: a run that did not include every one of `files` as a test module is incomplete; `children` (a Set) holds the live child.
  */
 export async function supervisedRun({
   root,
@@ -184,6 +192,7 @@ export async function supervisedRun({
   onLaunch,
   progress = {},
   halt,
+  children,
 }) {
   try {
     return await supervise();
@@ -217,12 +226,13 @@ export async function supervisedRun({
       {
         cwd: root,
         env,
+        children,
       },
     );
     progress.stage = "complete";
     writeFileSync(join(dir, "output.log"), child.output);
     progress.stage = "evidence";
-    const run = readRun({
+    const read = readRun({
       child,
       envelopePath: request.envelope,
       reportPath: request.json,
@@ -230,8 +240,22 @@ export async function supervisedRun({
       nonce: request.nonce,
       label,
     });
+    const missing = read.complete ? filesNotRun(root, files, read.modules) : [];
+    const run =
+      missing.length > 0
+        ? {
+            complete: false,
+            problems: [`selected test file(s) not run: ${missing.join(", ")}`],
+          }
+        : read;
     return { run, child, ms: Date.now() - started, output: child.output };
   }
+}
+
+/** The selected files (relative to `root`) that are not among a complete run's test modules (Vitest's root-relative ids). */
+export function filesNotRun(root, files, modules) {
+  const ran = new Set(modules.map((id) => relative(root, resolve(root, id))));
+  return files.filter((file) => !ran.has(relative(root, resolve(root, file))));
 }
 
 /** Narrowed selections that name a mutant outside their decision or outside the catalogue (refused before anything runs). */
@@ -255,7 +279,9 @@ export function failsRun(verdict, mutant) {
 
 /**
  * Run `mutants` (each `{ id, title, file, patch, tests, expect? }`). `config` is the Vitest config path, `expectedCount` the catalogue
- * size (null to skip the count check). Returns `{ code, summary, results }` and writes `unit-results.json` into `outDir`.
+ * size (null to skip the count check). Returns `{ code, summary, results }` and writes `unit-results.json` into `outDir`. `interrupt`
+ * (revision 41) is an AbortSignal: its abort latches `interrupted by <reason>`, ends the running children with that signal (SIGKILL
+ * after 10 s) and the run still joins them and writes its account.
  */
 export async function runUnitMutants({
   root,
@@ -269,6 +295,7 @@ export async function runUnitMutants({
   closeTimeoutMs,
   log = console.log,
   onRecord,
+  interrupt,
 }) {
   const claim = claimOutput(outDir);
   if (!claim.ok) {
@@ -322,6 +349,21 @@ export async function runUnitMutants({
       halt("log", "infrastructure failure", error);
     }
   };
+  const children = new Set();
+  const onInterrupt = () => {
+    const reason = describeError(interrupt.reason);
+    halt("run", `interrupted by ${reason}`, undefined, false);
+    say(
+      `STOPPING: interrupted by ${reason}; nothing new is started and ${children.size} running child(ren) are ended.`,
+    );
+    const signal = /^SIG[A-Z0-9]+$/.test(reason) ? reason : "SIGTERM";
+    for (const child of children) child.kill(signal);
+    setTimeout(() => {
+      for (const child of children) child.kill("SIGKILL");
+    }, 10_000).unref();
+  };
+  if (interrupt?.aborted) onInterrupt();
+  else interrupt?.addEventListener("abort", onInterrupt, { once: true });
   // The unmutated control, once per distinct set of tests, before any mutant.
   // A mutant with a declared `selection` (scripts/mutation/unit-selections.mjs) runs only those cases of its files, so it has a control
   // of its own over exactly the same selection; every other mutant shares the control of its set of files, as before.
@@ -363,6 +405,7 @@ export async function runUnitMutants({
         onLaunch,
         progress,
         halt: (error) => halt(label, "infrastructure failure", error),
+        children,
       });
       try {
         progress.stage = "judged";
@@ -505,6 +548,7 @@ export async function runUnitMutants({
         onLaunch,
         progress,
         halt: (error) => halt(mutant.id, "infrastructure failure", error),
+        children,
       });
       progress.stage = "judged";
       const inventory = mutant.selection
@@ -564,6 +608,7 @@ export async function runUnitMutants({
   for (const outcome of joined)
     if (outcome.status === "rejected")
       halt("worker", "worker failed", outcome.reason);
+  interrupt?.removeEventListener("abort", onInterrupt);
   const notRun = queue.map((m) => m.id);
   results.sort((a, b) => a.id.localeCompare(b.id));
 

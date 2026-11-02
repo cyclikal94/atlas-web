@@ -4,6 +4,7 @@ import {
   DECLARED_IDB_VERSION,
 } from "../../src/data/model/schema";
 import {
+  armReload,
   BANNER,
   displayed,
   expect,
@@ -98,8 +99,9 @@ test("an upgrade by a newer build: the open tab and a tab opened later both stop
 
   // "Reload here" reloads this tab only (it then finds the newer version again: this build cannot use it).
   await quiet(open);
+  const openReload = await armReload(open);
   await updateRegion(open).getByRole("button", { name: "Reload here" }).click();
-  await expect.poll(() => marked(open).catch(() => false)).toBe(false);
+  await openReload.loaded();
   await displayed(open);
   await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
 });
@@ -219,10 +221,11 @@ test.describe("revision 1, R7: the form's recovery path through a newer build's 
     );
     await mark(open);
     await quiet(open);
+    const openReload = await armReload(open);
     await updateRegion(open)
       .getByRole("button", { name: "Reload here" })
       .click();
-    await expect.poll(() => marked(open).catch(() => false)).toBe(false);
+    await openReload.loaded();
     await displayed(open);
     // This build still cannot use the newer database (it asks again); the copy is there, at the newer version, unchanged by this build.
     await expect(updateRegion(open).getByText(BANNER.superseded)).toBeVisible();
@@ -252,10 +255,11 @@ test.describe("revision 1, R7: the form's recovery path through a newer build's 
     expect((await recoveryState(open)).version).toBe(DECLARED_IDB_VERSION);
     await mark(open);
     await quiet(open);
+    const openReload = await armReload(open);
     await updateRegion(open)
       .getByRole("button", { name: "Reload here" })
       .click();
-    await expect.poll(() => marked(open).catch(() => false)).toBe(false);
+    await openReload.loaded();
     await displayed(open);
     await expect(open.locator("[data-fixture-form]")).toHaveAttribute(
       "data-ready",

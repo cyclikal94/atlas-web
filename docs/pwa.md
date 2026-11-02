@@ -110,8 +110,9 @@ an unmount or another account's tree ends a pending one.
   written; then a reference in this tab's `sessionStorage` (`atlas-update-handoff`: the form context, the account database's scope and the
   hand-off identifier only, never a value). The checkpoint above also requires every form with a copy (a clean one with a copy, and a kept
   session no mount shows, included) to have handed off its current copy; a hand-off or reference that cannot be written is a failed save.
-  The next page of the tab takes the hand-off's lock FIRST, then reads it (revision 7, R15: nothing read before the lock is shown), restores
-  it (never submitting it), and removes it once its own copy is saved, or at its own submission or discard. **Revision 8 (R16): what a
+  The next page of the tab takes the hand-off's lock FIRST, then reads it (revision 7, R15: nothing read before the lock is shown) and
+  restores it (never submitting it). Until revision 40 it then removed it once its own copy was saved, or at its own submission or discard;
+  **revision 40 (R42) makes the hand-off non-consuming** (see "Who may remove a hand-off" below). **Revision 8 (R16): what a
   hand-off owes is written with it, never guessed.** Every capture has an identity (`RecoverySnapshot.capture`, written with the row), and
   the hand-off carries its LINEAGE: the exact copies (key and capture) its page owed the removal of (its own ordinary copy, holding the same
   input, and every clean-up it had not finished). The next page removes exactly those, each only while it still holds that capture (a
@@ -372,7 +373,7 @@ update banner offered a plain Reload, the coordinator found the page sealed, and
   refused one keeps the input, and recovery never replays an uncertain operation.
 - **Not recovered.** Passwords and calendar connection secrets (Q4, Q22); the change-password form holds nothing else. Directory searches
   are presentation, not committed input. (Revision 37 left the sign-in and join username unwritten pending an owner decision; revision 38
-  applies that decision, below.)
+  applied that decision; revision 39 takes its preservation branch instead, below.)
 
 ## The owners' actions (revision 38; review of revision 37, R40-A/R40-B; design assessment C1-C5)
 
@@ -408,17 +409,82 @@ once a copy had been restored automatically (R40-B). Each action is now one step
   Cancel discards the input, and the input-preserving way out is the dialog's own sync control, which keeps the session for the visit: the
   update is then accepted from the queue, saves it, and Back reopens the dialog on it (`fixture.pwa-editors.spec.ts`). Whether the update
   should be reachable from inside a dialog is a design decision for its owner (WEB-15), not made here.
-- **The pre-account username** (Kieran's decision WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026, 26 October 2026). The sign-in and join
-  forms are shown before any account is displayed, so their models (`preAccount`) are bound to this tab's session storage
-  (`tab-session-port.ts`) instead of an account's store, and only for the `sign-in`/`join` contexts and their hand-offs: a copy holds the
-  username's text and nothing else (a password, an invitation token or any other field is refused). The update saves and hands it off as
-  any form; the tab's next page restores only the hand-off left to it (`list` offers nothing, so a duplicated tab or an earlier page's copy
-  is never offered or restored), only into an untouched form, never submitted; the restored copy is removed at once (`releaseSource`) and,
-  once the look has read the store, every other copy of the form in the tab (`sweep`), while the restored text stays unsaved input (a
-  second update saves it again). Leaving the form removes its copies. A pre-account model never retires an account's sessions, nor is it
-  retired by an account's editor; it never writes to an account's store. Storage that cannot be written fails the save (the update stops
-  with retry or an explicit discard); storage that cannot be read leaves the look unavailable, the input as it is. No notice is shown in
-  these forms (the signed-out tree has no announcer); the update's own explicit choices are unchanged.
+- **The pre-account username** (Kieran's decision WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026, 26 October 2026). Revision 38 kept the
+  sign-in and join username in this tab's session storage and restored the hand-off left to the next page. Revision 39 replaced that with
+  the decision's preservation branch (below): restoration could not be shown to reach the person.
+
+## Input no reload brings back; admission while preparing (revision 39; review of revision 38, R40-COMPOSITION/R40-FREEZE; design assessment C1-C4)
+
+- **A saved copy is not a restoration.** A form handle may say that nothing it holds can come back after a reload (`restorable` false).
+  The coordinator checks it while preparing a save's reload, before anything is saved or handed off for it, and again in the reload's own
+  checkpoint (every exit: the activation, a controller change, the fallback, a refused skip-waiting, an update another tab applied). While
+  such a form holds unfinished input (dirty, or a copy not discarded) the tab does not reload: the banner says so (`kept_input`, proposed
+  copy: "Reloading now would lose what you've entered here…") with "Reload" (which checks again) and "Discard and reload anyway" (the
+  person's explicit choice). A handle that cannot say counts as not restorable.
+- **The pre-account forms.** Join's form is mounted only while the page holds the invitation, which boot strips from the address and
+  keeps in memory, so a reload shows "This link is no longer valid". A sign-in requested from Join or from a neutral state, a switch and a
+  confirmation are page-memory flows too. And a duplicated tab inherits this tab's session storage, hand-off reference included, so
+  holding the hand-off's lock proves no same-tab continuation. Their models (`preAccount`) are therefore bound to no store at all, write
+  nothing anywhere, and say they are not restorable: their unfinished username keeps the page (the password never leaves the page). Each
+  host has its own context (`sign-in`, `sign-in:again`, `sign-in:switch`, `sign-in:confirm`, `join`). Join's sign-in guidance after a
+  submission whose result is unknown (spent, refused after submitting, an earlier link's outcome) and a username carried into sign-in from
+  Join are page memory too, and hold the update the same way (`holdUnrestorable`; revision 40: held by that page memory itself) until the
+  person acts on them. Restoring a username
+  across an update again would need a proven same-tab continuation (for example a navigation-bound proof qualified in every engine); that
+  is a product decision, not made here.
+- **Admission at the gesture.** While an update reload is being prepared (the registry's freeze), no new authentication work starts: the
+  password sign-in and the registration take the username's submission ticket (none while frozen) in the same step as they start, from a
+  button, Enter or a script alike; single sign-on (the form's, and linking from Settings) takes an outstanding activity
+  (`form-recovery/activity.ts`). Work admitted before the freeze is outstanding until its outcome (the update waits for it, whatever unmounts
+  meanwhile: the activation gate is not a cancellation); only a durable success consumes the username. Single sign-on leaving for its
+  provider stays outstanding until the page is shown again (a return from the back-forward cache), so no reload is made over the
+  navigation. The OIDC landing and the session kernel's settlement are protocol continuations, not new submissions: they are not refused.
+- **The device name** (merged from WEB-08d). `NameDeviceDialog` keeps the typed name as recoverable raw text per device
+  (`device-name:<device>`) of the displayed identity; Save, Enter and Remove name are admitted at the gesture (the footer is shown
+  unavailable while frozen); a late success acknowledges only what it sent. The devices list opens the dialog again on a name left before a
+  reload, or kept by the dialog's sync control, once the device is listed with naming; a name for a device no longer listed stays in the
+  account's recovery store, neither sent nor removed. Cancel, Close and Escape discard it.
+
+## Journeys and continuation authority (revision 40; review of revision 39, R40-GATE and R42; design assessment ae2a506e… C1-C3)
+
+- **A pre-account form's username belongs to its journey, not its mount (R40-GATE).** The neutral gate removes the sign-in or join form
+  while its attempt resolves (`1c.finishing` and the other neutral states), and a refusal brings the same host back. Revision 39 still took
+  that unmount for the person's dismissal: after one turn the editor ended the model and reset the username, so a refusal that arrived
+  later left nothing unfinished and an accepted update reloaded over the form. Now a pre-account editor's unmount only detaches it
+  (`editor.ts`): the exact username, its input revision and its submission tickets stay the model's, the handle stays registered (shown
+  or not, its unfinished input keeps the page: `kept_input`), and the editor that mounts again for the same journey shows that exact
+  username instead of beginning again. Either delivery order (the signed-out view before the refusal, or the refusal first) ends the same
+  way. Only an authoritative event ends the input: a durable success of exactly what was sent (its ticket), the person's Back or Cancel
+  (the form's Back, a switch dialog's Close or Escape: `endPreAccountInput`), another journey of the same host (a newer invitation link, a
+  switch to another target), or an account displayed (`settlePreAccountInput` from `SessionRoot`: the public sign-in, neutral sign-in
+  and join journeys end once an account displays; a switch or confirmation ends when the displayed account changes or signs out). An
+  editor shown at that moment is left alone. `gating` is not a success: the username stays unfinished until the attempt's real outcome.
+  Each host renders its own form instance (keyed by host and journey), so one host's typed state never reaches another's. Account editors
+  are unchanged: their unmount is a dialog's close, a departure or the session's protective closure (session matrix 3.6.2), each a dismissal.
+- **Page-memory guidance is held by the page memory (C2).** Join's guidance after a submission (spent, unusable after submitting, an
+  earlier link's outcome) and a username carried into sign-in from Join hold the update from the store that keeps them
+  (`invitationMemory`, `signInRequest`), taken and released in the same step as the memory changes, never by a mounted surface's effect:
+  the gate unmounting the join page no longer releases it, and the guidance hands the username to the sign-in request with no moment
+  unheld. "Unusable after submitting" (a `401` after the submission) is page memory too (`invitationMemory.unusable`), so the join page
+  that comes back after a gate still says it.
+- **Who may remove a hand-off (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028, Kieran, 28 October 2026).** A page that took a referenced
+  hand-off over proved only that it held a copy of the tab's `sessionStorage` and, once the writer had gone, its lock: a tab duplicated or
+  opener-copied from the writer holds the same reference, can take the lock first, and no signal this build reads tells it from the writer's
+  real replacement (session storage, the address, history and `window.name` are all copied; automation cannot perform a duplicate-tab
+  gesture to qualify any other signal; this is the design's limit, not a claim that no engine could ever tell them apart; authority record
+  `atlas-orchestrator/approval/web14a-r42-native-decision-20261028.json`, SHA-256
+  `745424702265256c116ac0bfe5887242fedd2ed8c2aad8387303267f9a59c60f`). Revision 39 let that claimant remove the hand-off and its lineage by its own discard, submission
+  or save, so a copied tab could erase the input that justified the writer's reload. Now no page removes a hand-off it did not write
+  (`session.ts`, `removable`): not by `end`, "Discard instead", a successful submission, its own save's clean-up (debts), "Discard and reload
+  anyway" or a later choice of an alternative, in the model and the DOM form alike. It restores it; the ordinary copies its lineage names
+  may still go (the hand-off, which stays, holds everything they hold). Its reference is used up when the look that read it is applied
+  (`claimLeft`), so an ordinary reload of the tab does not restore it again. The page that wrote a hand-off still removes it of its own
+  accord while it lives (a reload that did not happen), and a hand-off no live page holds is offered to later pages of the form, where
+  the person's explicit "Discard this copy" removes it. **The accepted cost:** after a restored form is finished or discarded, its
+  pre-update copy is offered once more on a later visit to that form until the person discards it there, and until then it counts in the
+  local-work, wipe and quota totals; a tab copied from the writer restores it too. A form's `discarded` result means every copy that page
+  may remove has gone, not that the retained hand-off has. No released build wrote or read hand-offs before this rule (WEB-14a is
+  unreleased), so there is no older consumer to migrate.
 
 ## Test builds and constants
 
@@ -429,3 +495,27 @@ generation of its own; HTML `modulepreload` hints are omitted, as in production,
 included, to every engine (revision 1, R9: revision 0 omitted COOP for Firefox; that run's evidence is kept as adapted evidence). The first
 navigation of a fresh Firefox page is made by the page itself (`navigate` in `tests/e2e/pwa-world.ts`; `docs/browser-support.md`). Every
 timing above is a production constant; no test shortens one.
+
+The checks that the worker never asks for a backend path (WEB-14a revision 43, F-FRESH-2) judge each request, not the server's whole log:
+open signed-in tabs keep reading (Today's sharing defaults and both daily scopes, among others), so neither "nothing else was requested" nor
+a list of allowed paths can tell a page's read from a worker's. The server numbers every request and returns the number in
+`X-Atlas-Fixture-Request` (test builds only; its append-only `/ledger` is never cleared). `tests/e2e/request-origin.ts` joins each number
+to Playwright's own record of the response: a backend request passes only if a page's frame made it and the server, not a worker's fetch
+handler, answered it. Qualified per engine: Firefox and WebKit never report a worker's own request (it stays unattributed and fails),
+Chromium reports it as the worker's, and `fromServiceWorker` marks a forwarded answer in all three
+(`.agtx/evidence/revision-r43-20261102`).
+
+Revision 44 (review r43: F-FRESH-2 incompletely fixed) makes the accounting total. Every request admitted to a window must also END inside
+its bound. The browser must report `requestfinished` (response headers alone are not an end) and, for a backend request, the server
+must have finished its own receipt; a request still pending, failed (before or after headers), of unknown origin or without its receipt is
+a problem, never a pass. One function, `reconcile` in `tests/e2e/request-origin-judge.ts`, decides both when the wait may stop and whether
+the window passes. Its domain is the window's server ids plus every receipt its backend records name, and the window's browser records plus
+every record still unfinished when it opened. Windows are handed out one at a time. The opening browser cut is taken before the ledger
+read, and each close judges exactly one ledger reply and the browser snapshot copied after it. One unchanged 5,000 ms bound covers the
+close, its abortable ledger reads included. The last window is `final`: it has no successor to pass unfinished work to. What a window
+proves is the interval it observed, not the absence of later traffic. Engine limits found by native qualification
+(`.agtx/evidence/revision-r44-20261102`):
+
+- Chromium reports a `fetch()` as finished only once its body is read. The app's transports read every body.
+- Firefox does not report a page request whose worker `respondWith` never settles. That case cannot be admitted there; a server-held
+  request is Firefox's native witness of an unfinished request.

@@ -56,6 +56,7 @@ describe("R13 (Q4, Q5): a look that cannot read the store is not an empty answer
     test(`${failing ? "" : "control: "}A2's hand-off read ${failing ? "fails after C consumed A's ordinary copy: not ready, unavailable, nothing restored, offered, claimed or forgotten; repaired, 'Try again' restores ORIGINAL" : "succeeds: ORIGINAL"}`, async () => {
       const world = new World();
       const { storage } = await updated(world);
+      const handoff = (await world.handoffs())[0];
       await consumer(world);
       const a2 = world.page("A2", storage);
       if (failing) a2.spy.failHandoffLoads = 1;
@@ -88,9 +89,10 @@ describe("R13 (Q4, Q5): a look that cannot read the store is not an empty answer
       expect(a2.handle?.unavailable).toBe(false);
       expect(a2.title).toBe(ORIGINAL);
       expect(a2.handle?.restored?.formContext).toBe(handoffContext(FORM));
-      // A2 holds the hand-off: its own save removes it and its reference.
+      // A2 holds the hand-off. Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "its own save removes it"; now
+      // its own save leaves it exactly as A wrote it (A2 restores it, never removes it), and its reference went once A2's look was applied.
       expect(await a2.flush()).toEqual(["saved"]);
-      expect(await world.handoffs()).toEqual([]);
+      expect(await world.handoffs()).toEqual([handoff]);
       expect(storage.getItem("atlas-update-handoff")).toBeNull();
     });
 
@@ -135,12 +137,35 @@ describe("R13 (Q4, Q5): a look that cannot read the store is not an empty answer
       expect(a2.handle?.ready).toBe(true);
     });
 
-  test("controls: a genuinely empty store, and a hand-off already resolved (A2 submitted it), are successful empty looks: ready, blank, the stale reference forgotten", async () => {
+  test("controls: a genuinely empty store, and a hand-off already resolved (its writer discarded it), are successful empty looks: ready, blank, the stale reference forgotten; a hand-off A2 submitted stays, and DUP restores it", async () => {
     const empty = await new World().page("X").mount();
     expect(empty.handle?.unavailable).toBe(false);
     expect(empty.title).toBe("");
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "a hand-off A2 submitted is resolved:
+    // DUP's look is empty"; A2's submission no longer removes it (below), so the resolved hand-off is now one its own writer removed: A
+    // prepared its update, the reload did not happen, and A discarded its form (its own hand-off goes with it).
+    const resolved = new World();
+    const tab = new TabStorage();
+    const a = await resolved.page("A", tab).mount();
+    a.type(ORIGINAL);
+    expect(await a.update()).toEqual(["saved", "saved"]);
+    const stale = tab.copy();
+    await act(async () => {
+      expect(await a.handle?.discard()).toBe("discarded");
+    });
+    a.leave();
+    expect(await resolved.handoffs()).toEqual([]);
+    // A copy of the tab's storage still names the hand-off A resolved.
+    expect(stale.getItem("atlas-update-handoff")).not.toBeNull();
+    const after = await resolved.page("DUP", stale).mount();
+    expect(after.handle?.unavailable).toBe(false);
+    expect(after.title).toBe("");
+    expect(after.handle?.alternatives).toEqual([]);
+    expect(stale.getItem("atlas-update-handoff")).toBeNull();
+    // The old schedule: A2 submits and leaves; DUP's copied reference finds the hand-off, which stayed, and restores it (never submitted).
     const world = new World();
     const { storage } = await updated(world);
+    const handoff = (await world.handoffs())[0];
     const copied = storage.copy();
     const a2 = await world.page("A2", storage).mount();
     const ticket = a2.handle?.submitting();
@@ -148,13 +173,14 @@ describe("R13 (Q4, Q5): a look that cannot read the store is not an empty answer
       expect(await ticket?.succeeded()).toBe("discarded");
     });
     a2.leave();
-    // A copy of the tab's storage still names the hand-off A2 resolved.
+    expect(await world.handoffs()).toEqual([handoff]);
     expect(copied.getItem("atlas-update-handoff")).not.toBeNull();
     const later = await world.page("DUP", copied).mount();
     expect(later.handle?.unavailable).toBe(false);
-    expect(later.title).toBe("");
-    expect(later.handle?.alternatives).toEqual([]);
+    expect(later.title).toBe(ORIGINAL);
+    expect(later.handle?.restored?.formContext).toBe(handoffContext(FORM));
     expect(copied.getItem("atlas-update-handoff")).toBeNull();
+    expect(await world.handoffs()).toEqual([handoff]);
   });
 
   test("a form mounted again whose offer look fails is not ready until it has read the store again", async () => {
@@ -303,9 +329,10 @@ describe("R15 (Q6, Q7): the hand-off is read only under its lock, and only what 
     },
   ];
   for (const terminal of terminals)
-    test(`${terminal.control ? "control: " : ""}DUP (copied reference) waits for the lock A2 holds; ${terminal.name}; DUP reads only once it holds it and shows ${terminal.control ? "ORIGINAL, as its source" : "nothing"}`, async () => {
+    test(`${terminal.control ? "control: " : ""}DUP (copied reference) waits for the lock A2 holds; ${terminal.name}; DUP reads only once it holds it and shows ${terminal.control ? "ORIGINAL, as its source" : "ORIGINAL from the hand-off, which stayed"}`, async () => {
       const world = new World();
       const { storage } = await updated(world);
+      const handoff = (await world.handoffs())[0];
       const copied = storage.copy();
       const a2 = await world.page("A2", storage).mount();
       expect(a2.title).toBe(ORIGINAL);
@@ -326,22 +353,32 @@ describe("R15 (Q6, Q7): the hand-off is read only under its lock, and only what 
       expect(dup.spy.handoffLoads).toBe(1);
       if (terminal.control) {
         expect(dup.title).toBe(ORIGINAL);
-        // It holds the hand-off: its own save removes it.
+        // It holds the hand-off. Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "its own save removes it";
+        // now it stays exactly (DUP's copied reference proves nothing about which page replaced A).
         expect(await dup.flush()).toEqual(["saved"]);
-        expect(await world.handoffs()).toEqual([]);
+        expect(await world.handoffs()).toEqual([handoff]);
       } else {
-        expect(dup.title).toBe("");
-        expect(dup.handle?.restored).toBeNull();
-        expect(dup.handle?.alternatives).toEqual([]);
-        expect(await world.rows()).toEqual([]);
+        // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "DUP shows nothing and the store is
+        // empty" (A2's terminal act consumed the hand-off); now A2's act removed only its own copies and A's ordinary one, the hand-off
+        // stayed, and DUP (which nothing distinguishes from A's replacement) restores it, never submitting it.
+        expect(dup.title).toBe(ORIGINAL);
+        expect(dup.handle?.restored?.formContext).toBe(handoffContext(FORM));
+        expect(await world.rows()).toEqual([
+          ["handoff", handoff?.tabInstanceId, ORIGINAL],
+        ]);
       }
     });
 
   test("A2 stays: DUP's lock wait (the production 2 s) ends; DUP falls back to the ordinary copies without reading the hand-off, and never removes it", async () => {
     const world = new World();
     const { storage } = await updated(world);
+    const handoff = (await world.handoffs())[0];
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): the duplicate was copied after A2's
+    // look; now it is copied before (A2's applied look drops the tab's reference, so a later copy would carry none and wait for nothing).
+    const copied = storage.copy();
     const a2 = await world.page("A2", storage).mount();
-    const dup = await world.page("DUP", storage.copy()).mount(5_000);
+    expect(copied.getItem("atlas-update-handoff")).not.toBeNull();
+    const dup = await world.page("DUP", copied).mount(5_000);
     // Ordinary selection: A's ordinary copy (A has gone; A2 has not saved yet), never the hand-off A2 holds.
     expect(dup.spy.handoffLoads).toBe(0);
     expect(dup.title).toBe(ORIGINAL);
@@ -351,7 +388,9 @@ describe("R15 (Q6, Q7): the hand-off is read only under its lock, and only what 
     // A2 still holds it and is unaffected.
     expect(a2.title).toBe(ORIGINAL);
     expect(await a2.flush()).toEqual(["saved"]);
-    expect(await world.handoffs()).toEqual([]);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was "A2's own save removes it"; now
+    // it stays exactly (A2 restores it, never removes it).
+    expect(await world.handoffs()).toEqual([handoff]);
   }, 10_000);
 
   test("A2 stays and has saved its own copy: DUP finds no gone tab's copy and shows nothing; the input stays A2's", async () => {
@@ -359,7 +398,8 @@ describe("R15 (Q6, Q7): the hand-off is read only under its lock, and only what 
     const { storage } = await updated(world);
     const a2 = await world.page("A2", storage).mount();
     expect(await a2.flush()).toEqual(["saved"]);
-    // A2's own save removed the hand-off and A's twin; nothing is left to take over.
+    // A2's own save removed A's twin (revision 40, R42: the hand-off stays, held by A2, and the tab's reference went at A2's look); no gone
+    // tab's copy is left to take over.
     const dup = await world.page("DUP", storage.copy()).mount(5_000);
     expect(dup.title).toBe("");
     expect(dup.handle?.alternatives).toEqual([]);
@@ -369,8 +409,11 @@ describe("R15 (Q6, Q7): the hand-off is read only under its lock, and only what 
   test("DUP typed before its look answered: its own input stays; nothing is restored over it", async () => {
     const world = new World();
     const { storage } = await updated(world);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): the duplicate was copied after A2's
+    // look; now before it (A2's applied look drops the tab's reference, so a later copy would carry none and wait for nothing).
+    const copied = storage.copy();
     await world.page("A2", storage).mount();
-    const dup = world.page("DUP", storage.copy());
+    const dup = world.page("DUP", copied);
     dup.show();
     await waitFor(() =>
       expect(world.locks.waits(dup.name, PENDING)).toBe(true),

@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { NeutralStatus } from "../../components/ui/neutral-status";
+import { admitActivity } from "../../lib/form-recovery/activity";
 import { useRecoverableEditor } from "../../lib/form-recovery/editor";
 import type { FormFailure, SignInResult, SsoResult } from "./controller";
 import { RequestId } from "./MessageText";
@@ -35,6 +36,11 @@ interface FieldError {
  * password lives in component state for the duration of one submit and is not kept: nothing here reads it back after the
  * call. It renders nothing about any account.
  *
+ * WEB-14a revision 39 (review of revision 38, R40-FREEZE; design assessment C2, I3/I4): every submission and single sign-on is admitted
+ * or refused at the gesture, against the app update's freeze: the sign-in takes the username's ticket, single sign-on an outstanding
+ * activity, in the same step as it starts, so neither starts while an update reload is being prepared (Enter, the button or a script
+ * alike), and one started before is waited for until its outcome. Single sign-on that leaves the page for its provider stays outstanding.
+ *
  * A refusal of the password sign-in reaches the form through `carried`, not through the return value of `onSubmit`: the neutral
  * gate unmounts the form between the exchange and the activation, so a form that is mounted when the refusal arrives is not
  * necessarily the one that submitted (review R1). The controller carries every refusal in page memory; this form shows it, once,
@@ -51,6 +57,8 @@ export function SignInForm({
   submitLabel = "Sign in",
   backLabel = "Back",
   usernameReadOnly = false,
+  recoveryContext = "sign-in",
+  journey = "",
 }: {
   online: boolean;
   initialUsername: string;
@@ -71,15 +79,26 @@ export function SignInForm({
   backLabel?: string;
   /** WEB-08c (G-23): the in-place re-authentication confirms the SAME account, so its username is shown and not editable. */
   usernameReadOnly?: boolean;
+  /**
+   * Revision 39 (design assessment DA-AUTH-HOSTS, I6): the form's own recovery context per host (the public page, a neutral state's
+   * sign-in, a switch, a confirmation), so one host's unfinished username is never another's.
+   */
+  recoveryContext?: string;
+  /**
+   * Revision 40 (review of revision 39, R40-GATE; design assessment C1): which journey of the host this form serves (a switch's target); the
+   * same journey's unfinished username comes back to the form after a gate, another journey's never does.
+   */
+  journey?: string;
 }) {
   const [username, setUsername] = useState(initialUsername);
-  // WEB-14a revision 37 (R40): the username typed here is non-secret input of a form shown BEFORE any account is displayed. Revision 38
-  // (Kieran's decision WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): only the unfinished username is kept, in this tab's session storage,
-  // for an app-update reload; restored, never submitted, its copy is removed; leaving the form removes it. The password is never part of it.
+  // WEB-14a revision 37 (R40): the username typed here is non-secret input of a form shown BEFORE any account is displayed. Revision 39
+  // (R40-COMPOSITION; design assessment C1/C3): no reload is proven to bring it back to this form, so its unfinished input stops an update
+  // reload and stays here; nothing of it is written anywhere. The password is never part of it. Revision 40 (R40-GATE): it is the journey's,
+  // not this mount's: the gate's unmount keeps it, and the form that comes back for the journey shows it again (`restored`).
   const typed = useRef(false);
   const recovery = useRecoverableEditor<string>({
     identity: "pre-account",
-    context: "sign-in",
+    context: recoveryContext,
     encode: (text) => text,
     decode: (text) => text,
     start: () => initialUsername,
@@ -90,6 +109,7 @@ export function SignInForm({
       setUsername(text);
     },
     preAccount: true,
+    journey,
   });
   const changeUsername = (text: string) => {
     if (!recovery.edit(text)) return;
@@ -131,13 +151,22 @@ export function SignInForm({
     const secret = checkCurrentPassword(password);
     if (!secret.ok)
       return show("password", FIELD_MESSAGE[secret.reason as FieldReason]);
+    // Revision 39 (R40-FREEZE): admitted now, or nothing is sent.
+    const ticket = recovery.submitting();
+    if (ticket === null) return;
     setError(null);
     inflight.current = true;
     setBusy(true);
+    let settled = false;
     try {
-      // The outcome is not read here: a refusal arrives as `carried` (see above).
-      await onSubmit({ username: name.value, password: secret.value });
+      // A refusal arrives as `carried` (see above); the outcome only settles the username's ticket.
+      settled =
+        (await onSubmit({ username: name.value, password: secret.value }))
+          .kind === "settled";
     } finally {
+      // Only a durable sign-in consumed what it sent; anything else leaves the username unfinished input.
+      if (settled) void ticket.succeeded();
+      else ticket.failed();
       inflight.current = false;
       setBusy(false);
       // A password never outlives its submit.
@@ -147,17 +176,25 @@ export function SignInForm({
 
   const sso = async () => {
     if (inflight.current || !online) return;
+    // Revision 39 (R40-FREEZE): admitted now, or nothing starts.
+    const departure = admitActivity("sso");
+    if (departure === null) return;
     setError(null);
     inflight.current = true;
     setBusy(true);
     let result: SsoResult;
     try {
       result = await onSso();
+    } catch (error) {
+      departure.end();
+      throw error;
     } finally {
       inflight.current = false;
       // After a successful redirect the page is leaving; a failure keeps the form usable.
       setBusy(false);
     }
+    if (result.kind === "navigating") departure.depart();
+    else departure.end();
     if (result.kind === "failed") fromFailure(result);
   };
 
@@ -249,7 +286,14 @@ export function SignInForm({
           </Button>
         )}
         {onBack ? (
-          <Button variant="quiet" onClick={onBack}>
+          <Button
+            variant="quiet"
+            onClick={() => {
+              // Revision 40 (R40-GATE): Back is the person's cancellation of this journey: its username ends here (a gate never ends it).
+              void recovery.end();
+              onBack();
+            }}
+          >
             {backLabel}
           </Button>
         ) : null}

@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import {
+  armReload,
   build,
   expect,
   type Generations,
@@ -107,8 +108,9 @@ test("case 3, mismatched: paused; a newer client is looked for and offered; the 
   ).toBeVisible();
   await mark(page);
   await quiet(page);
+  const pageReload = await armReload(page);
   await reload.click();
-  await expect.poll(() => marked(page).catch(() => false)).toBe(false);
+  await pageReload.loaded();
   await page.waitForLoadState("load");
   await expect.poll(() => build(page)).toBe("b");
   // B's range is the same as A's: still paused, and nothing more to offer.

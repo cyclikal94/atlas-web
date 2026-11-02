@@ -14431,11 +14431,13 @@ export const UNIT = [
     // ADAPTED in WEB-12a review cycle 1 (R1/R5): Save now sends the draft's own `base` (the version it was composed against, so a draft
     // kept through the sync control stays guarded by it). A fresh draft takes its base from the read, so the same defect (the cache's
     // lagging policy_version guarding the save instead of GET /policies') is now made where the base is set.
+    // ADAPTED in WEB-14a revision 42 (F-FRESH-1): update recovery added two recovery baselines carrying the same `base:` line, so the
+    // anchor is the whole fresh-draft `setDraft` block; the recovery baselines (not the base Save sends) stay unmutated.
     patch: (t) =>
       sub(
         t,
-        "      base: policyLoad.value.version,\n",
-        "      base: merged?.policy_version ?? policyLoad.value.version,\n",
+        "    setDraft({\n      policy: policyLoad.value.policy,\n      refused: null,\n      base: policyLoad.value.version,\n    });\n",
+        "    setDraft({\n      policy: policyLoad.value.policy,\n      refused: null,\n      base: merged?.policy_version ?? policyLoad.value.version,\n    });\n",
       ),
   },
   {

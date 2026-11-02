@@ -12,6 +12,12 @@ import {
   type SettledIdentity,
   STALE_CONFIRMATION_AGE_MS,
 } from "../e2e/shared-confirmation";
+import {
+  type AbandonmentWitness,
+  type DocumentSample,
+  judgeAbandonment,
+  judgeReplacement,
+} from "./navigation-premise";
 
 /**
  * Part C (plan 14): helpers for the integration specs. They run the session module and its PRODUCTION adapters in a real engine
@@ -647,6 +653,11 @@ export async function untilRequestsRetired(
  * app route itself, without the fixture bridge), waits for its boot and exposes its session, and checks that the new document's
  * durable record still settles exactly `expected`: otherwise the premise (the same session, now unconfirmed) is gone and it throws.
  * The context's init scripts run again in the new document; `window.__t` is new.
+ *
+ * WEB-14a revision 46 (review r45 F-R45-I14D, R34-N1): this is the CLEAN replacement. Its premise is that the old document has
+ * finished its own requests (no request lease is left for the new document to verify), established durably before the navigation.
+ * Callers (each states this premise): I-01 (integration.password-path.spec.ts). A test that abandons a request on purpose states the
+ * opposite premise and uses `abandonHarnessDocument`; neither may stand in for the other.
  */
 export async function freshHarnessDocument(
   page: Page,
@@ -664,6 +675,18 @@ export async function freshHarnessDocument(
     label:
       "the replaced document's own requests have finished (no request lease is left for the new document to verify)",
   });
+  await navigateHarnessDocument(page, expected, route);
+}
+
+/**
+ * The navigation both replacements share (not exported: each caller names its premise through `freshHarnessDocument` or
+ * `abandonHarnessDocument`). It does not wait for display: an abandonment's new document must verify the abandoned lease first.
+ */
+async function navigateHarnessDocument(
+  page: Page,
+  expected: SettledLike,
+  route: string,
+): Promise<void> {
   await page.goto(`/__session?route=${encodeURIComponent(route)}`);
   // A document without the fixture bridge (the app route itself, as `reload()` of a harness page loads) is a setup failure named as
   // such, within a bound, before anything is read from it.
@@ -686,6 +709,97 @@ export async function freshHarnessDocument(
     throw new Error(
       "setup: the new document's record does not settle the expected session",
     );
+}
+
+/** Read one document's evidence for navigation-premise.ts (metadata only), writing its marker on first read. */
+const sampleDocument = (page: Page): Promise<DocumentSample> =>
+  page.evaluate(async () => {
+    const scope = window as unknown as { __navigationDocument?: string };
+    scope.__navigationDocument ??= crypto.randomUUID();
+    const bridge = window.__atlasFixture?.session;
+    const read = bridge
+      ? ((await bridge.readRecords()) as {
+          auth_state?: {
+            settled: DocumentSample["settled"];
+            leases: DocumentSample["leases"];
+          };
+        })
+      : undefined;
+    return {
+      bridged: bridge !== undefined,
+      boot: (window.__s as { bootId?: string } | undefined)?.bootId ?? null,
+      document: scope.__navigationDocument,
+      settled: read?.auth_state?.settled ?? null,
+      leases: read?.auth_state?.leases ?? {},
+      trace: (bridge?.trace ?? []) as DocumentSample["trace"],
+    };
+  });
+
+/**
+ * WEB-14a revision 46 (review r45 F-R45-I14D, family `i14d-post-navigation-lease-premise` (R34-N1); design assessment C1/C2): the
+ * INTENTIONAL ABANDONMENT of a request by navigation, the opposite premise of `freshHarnessDocument`. The caller has made ONE named
+ * ordinary request in `page`'s document, whose answer the proxy holds (`witness.held`) and whose continuation the document never runs,
+ * and it holds the next document's verification. Before the navigation, within `timeout` (the clean replacement's bound), the old
+ * document must show that request and nothing else outstanding (navigation-premise.ts `judgeAbandonment`): the witnessed lease, of its
+ * boot, account, epoch and class, correlated with exactly one `request.issued` of its own trace and never retired, the answer held,
+ * and every OTHER request lease retired by its live owner. Any other problem fails at once as a SETUP error: it is not waited out.
+ * The same navigation as the clean replacement follows (bridge and settlement checked; display is NOT waited for). The new document
+ * must then be a different document and boot that still settles `expected` and still holds the witnessed lease unchanged
+ * (`judgeReplacement`). Nothing is retired, released, deleted or aged here; the caller asserts what the new document does with the
+ * lease. Callers: the I-14d premise control "a navigation that abandons the seed's held request ..." (integration.pages.spec.ts).
+ * Returns what it established, metadata only, for an attachment.
+ */
+export async function abandonHarnessDocument(
+  page: Page,
+  expected: SettledLike,
+  witness: AbandonmentWitness,
+  options: { route?: string; timeout?: number } = {},
+): Promise<{
+  before: { document: string; boot: string; issued: number | null };
+  after: { document: string; boot: string | null };
+  lease: string;
+}> {
+  const timeout = options.timeout ?? 15_000;
+  const end = Date.now() + timeout;
+  const first = await sampleDocument(page);
+  let issued: number | null = null;
+  for (;;) {
+    const before = await sampleDocument(page);
+    const held = (await proxy.held())[witness.held] ?? 0;
+    const verdict = judgeAbandonment({
+      expected,
+      witness,
+      document: first.document,
+      before,
+      held,
+    });
+    if (verdict.problems.length > 0)
+      throw new Error(
+        `setup (intentional abandonment): ${verdict.problems.join("; ")}`,
+      );
+    issued = verdict.issued;
+    if (verdict.waiting.length === 0) break;
+    if (Date.now() > end)
+      throw new Error(
+        `setup (intentional abandonment): other requests of the old document were not retired within ${timeout} ms (${verdict.waiting.join(", ")}); only the abandoned request may be left for the next document`,
+      );
+    await page.waitForTimeout(50);
+  }
+  await navigateHarnessDocument(page, expected, options.route ?? "/today");
+  const after = await sampleDocument(page);
+  const problems = judgeReplacement({
+    expected,
+    witness,
+    document: first.document,
+    after,
+  });
+  if (problems.length > 0)
+    throw new Error(`setup (intentional abandonment): ${problems.join("; ")}`);
+  return {
+    before: { document: first.document, boot: witness.boot, issued },
+    after: { document: after.document, boot: after.boot },
+    lease: witness.lease,
+  };
 }
 
 /** The proxy's log entries of the identity read (`GET /browser-sessions/current`). */

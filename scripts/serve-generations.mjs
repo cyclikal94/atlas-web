@@ -27,8 +27,15 @@
 //   POST /identity/hold?on=1|0    hold every identity read (`browser-sessions/current`) unanswered from now on, or answer every held one
 //                                 as the stub stands and stop holding; answers {"hold", "held"} (WEB-14a revision 13, F-8: a page's
 //                                 session check that does not finish, in every engine: Playwright's WebKit routing misses this page's request)
-//   GET  /log                     every request served so far: [{ "method", "path", "at", "status" }]
-//   POST /log/clear
+//   GET  /log                     every request served so far: [{ "id", "method", "path", "at", "status", "end" }]
+//   POST /log/clear               empties /log only (the ledger below keeps every request)
+//   GET  /ledger?after=<id>       WEB-14a revision 43 (F-FRESH-2): the APPEND-ONLY ledger of every request the app port has received, in
+//                                 arrival order, after request `<id>`: {"high": <latest id>, "entries": [...]}. Nothing clears it.
+//
+// Every app-port request has a unique, increasing `id` (1, 2, ...), and its response carries it in `X-Atlas-Fixture-Request`, so a check can
+// tie the server's record of a request to the browser's record of the response it got (tests/e2e/request-origin.ts) instead of guessing
+// from a path. `end` is null while the response is unfinished, "finished" once it was sent, "closed" if the connection closed first. No
+// request body, cookie or credential is recorded.
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, extname, join, normalize, resolve } from "node:path";
@@ -89,6 +96,9 @@ let identity = null;
 let holdIdentity = false;
 const heldReads = [];
 const log = [];
+/** WEB-14a revision 43: every request, never cleared (the `/log` view above is clearable). */
+const ledger = [];
+let lastId = 0;
 const sockets = new Set();
 
 /** The stub identity read's answer, as the stub stands when it is answered (none now: the backend's 404). */
@@ -116,15 +126,29 @@ const app = createServer((request, response) => {
   const url = new URL(request.url ?? "/", "http://x");
   const path = url.pathname;
   const entry = {
+    id: ++lastId,
     method: request.method,
     path: path + url.search,
     at: Date.now(),
     status: 0,
+    end: null,
   };
   log.push(entry);
+  ledger.push(entry);
+  response.on("finish", () => {
+    entry.end ??= "finished";
+  });
+  response.on("close", () => {
+    entry.end ??= "closed";
+  });
   const answer = (status, headers, body) => {
     entry.status = status;
-    send(response, status, headers, body);
+    send(
+      response,
+      status,
+      { ...headers, "X-Atlas-Fixture-Request": String(entry.id) },
+      body,
+    );
   };
   if (request.method !== "GET" && request.method !== "HEAD")
     return answer(405, { Allow: "GET, HEAD", "Cache-Control": "no-store" }, "");
@@ -310,6 +334,17 @@ const control = createServer((request, response) => {
       }
       case "/log":
         return done(log);
+      case "/ledger": {
+        const after = Number(url.searchParams.get("after") ?? "0");
+        if (!Number.isInteger(after) || after < 0) {
+          response.writeHead(400).end("after must be a request id");
+          return;
+        }
+        return done({
+          high: lastId,
+          entries: ledger.filter((logged) => logged.id > after),
+        });
+      }
       case "/log/clear":
         log.length = 0;
         return done({ cleared: true });

@@ -636,7 +636,7 @@ export function validateEnvelope(
 
 /**
  * Read one supervised child's complete evidence: process outcome, terminal envelope and JSON report, bound together. `child` is
- * `{ code, signal, spawnError }`. Returns `{ complete, problems, cases, taint, exitCode }`: `cases` lists each case (`name` is
+ * `{ code, signal, spawnError }`. Returns `{ complete, problems, cases, modules, taint, exitCode }`: `cases` lists each case (`name` is
  * `ancestors > title`; titles may repeat) with its module, status, mode and classified errors; `taint` lists every error outside a test (module, suite,
  * unhandled, late, logged, process, start, close, witness), each counted, never inferred from text.
  */
@@ -782,6 +782,8 @@ export function readRun({
     complete: true,
     problems: [],
     cases,
+    // Revision 41: the ids of the test modules the run reported (the unit runner checks its selected files against them).
+    modules: w.modules.map((m) => m.id),
     taint,
     outside,
     exitCode: envelope.exitCode,

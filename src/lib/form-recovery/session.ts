@@ -69,8 +69,11 @@ import type { RecoveryTab } from "./tab-identity";
  *    other, which another page may restore and remove. So before an update reload the session writes its UPDATE HAND-OFF (`handOff`): its
  *    copy again, under a hand-off identifier of its own that no other page lists or may remove, with a reference for the next page of this
  *    tab. The reload waits until every session with a copy has handed it off (`handedOff`). The next page's session takes the hand-off as
- *    its source (`persisted.source`, in the hand-off's context) and removes it like any source: once its own copy is saved, or at its own
- *    submission or discard. A submission or discard of the page that wrote it removes it too (`discardAt`).
+ *    its source (`persisted.source`, in the hand-off's context). Revision 40 (review of revision 39, R42; owner decision
+ *    WEB14A-R42-NON-CONSUMING-20261028): it never removes it (`removable`): a tab copied from the writer holds the same reference and, once the
+ *    writer has gone, the same lock, so taking it over proves nothing about which page replaced the writer. It removes the ordinary copies
+ *    the hand-off names, as a source's own clean-up; the hand-off stays, offered once no page holds it, until the person discards it there.
+ *    A submission or discard of the page that wrote it removes it (`discardAt`): that page's own.
  *  - ONE SCOPE. A session belongs to one account's database as it was when the session began (`scope`: the account and its incarnation,
  *    `FormRecoveryPort.pin`). Every write is pinned when it is asked for and made only if the port still reaches that same scope (DA-2: a
  *    form that stays mounted while its account's database is deleted and created again writes nothing into the new one). A session is
@@ -220,7 +223,7 @@ export interface FormSession extends PageFormSession {
   /** Revision 6 (R13): this tab's hand-off references, and this page's hand-off identifier for the form once it has asked to write one. */
   readonly handoffs: HandoffStore;
   handoffId: string | null;
-  /** Revision 6 (R13): the hand-off left to this page whose lock it holds (the right to remove it), once taken. */
+  /** Revision 6 (R13): the hand-off left to this page whose lock it holds, once taken (revision 40, R42: never the right to remove it). */
   claimed: string | null;
   readonly order: { next: number; lastTerminal: number };
   /** The newest submission acknowledged (its input revision) and what its acknowledgement answered (revision 3, R3: no older one regresses it). */
@@ -361,8 +364,10 @@ export async function discardAt(
       capture: null,
     });
   for (const owedCopy of [...(state.source?.lineage ?? []), ...state.debts])
-    stages[isHandoffContext(owedCopy.formContext) ? 1 : 0]?.push(owedCopy);
-  if (state.source !== null)
+    if (removable(session, owedCopy))
+      stages[isHandoffContext(owedCopy.formContext) ? 1 : 0]?.push(owedCopy);
+  // Revision 40 (R42): a hand-off this page was restored from stays (`removable`); only what it names, and this page's own, go.
+  if (state.source !== null && removable(session, sourceTarget(state.source)))
     stages[isHandoffContext(state.source.context) ? 2 : 0]?.push(
       sourceTarget(state.source),
     );
@@ -374,8 +379,9 @@ export async function discardAt(
     });
   const { settled, outcome } = await removeCopies(target, stages);
   const next = { ...session.persisted };
-  const gone = (copy: { formContext: string; tabInstanceId: string }) =>
-    settled.has(keyOf(copy));
+  // Revision 40 (R42): a copy this page may not remove counts as settled for it (nothing of this page's is owed for it any more).
+  const gone = (copy: Pick<CopyTarget, "formContext" | "tabInstanceId">) =>
+    settled.has(keyOf(copy)) || !removable(session, copy);
   if (
     own !== null &&
     gone({ formContext: context, tabInstanceId: own }) &&
@@ -418,6 +424,21 @@ type Removal = CopyTarget;
 
 const isHandoffContext = (context: string): boolean =>
   context.startsWith(HANDOFF_PREFIX);
+
+/**
+ * Revision 40 (review of revision 39, R42; owner decision WEB14A-R42-NON-CONSUMING-20261028; design assessment C3, I6/I7): whether this page may
+ * remove `copy` through its session (a save's clean-up, a submission, a discard, a debt). Never a hand-off it did not write: a reference
+ * in `sessionStorage` and the lock of a hand-off whose writer has gone are held equally by the writer's replacement and by any tab copied
+ * from it, and no signal this build reads (none qualified in every engine) tells the two apart. So a hand-off left to this page is RESTORED, never consumed: it stays until
+ * the person discards it as an alternative ("Discard this copy", while no live page holds it). Its lineage's ORDINARY copies may go: the
+ * hand-off, which stays, holds everything they hold (its writer wrote it from that very capture). This page's own hand-off is its own.
+ */
+const removable = (
+  session: FormSession,
+  copy: Pick<CopyTarget, "formContext" | "tabInstanceId">,
+): boolean =>
+  !isHandoffContext(copy.formContext) ||
+  copy.tabInstanceId === session.handoffId;
 
 const keyOf = (copy: { formContext: string; tabInstanceId: string }): string =>
   JSON.stringify([copy.formContext, copy.tabInstanceId]);
@@ -566,7 +587,7 @@ export async function flushSession(session: FormSession): Promise<SaveResult> {
             ...state.debts,
             ...restored.lineage,
             sourceTarget(restored),
-          ])
+          ]).filter((copy) => removable(session, copy))
         : state.debts,
       // This page's own copy is newer than every discard that did not land: nothing unwanted can be restored in its place.
       owed: state.source === null && state.owed < op ? 0 : state.owed,
@@ -585,7 +606,10 @@ async function settleDebts(
   target: FormRecoveryPort,
   op: number,
 ): Promise<void> {
-  const debts = session.persisted.debts;
+  // Revision 40 (R42): never a hand-off this page did not write (none is ever owed: `removable`).
+  const debts = session.persisted.debts.filter((copy) =>
+    removable(session, copy),
+  );
   if (debts.length === 0) return;
   const { settled, outcome } = await removeCopies(target, [
     debts.filter((copy) => !isHandoffContext(copy.formContext)),
@@ -595,7 +619,7 @@ async function settleDebts(
     if (settled.has(keyOf(copy)) && isHandoffContext(copy.formContext))
       forgetHandoff(session.handoffs, copy.tabInstanceId);
   const left = session.persisted.debts.filter(
-    (copy) => !settled.has(keyOf(copy)),
+    (copy) => !settled.has(keyOf(copy)) && removable(session, copy),
   );
   session.persisted = {
     ...session.persisted,
@@ -608,27 +632,6 @@ async function settleDebts(
         ? 0
         : session.persisted.owed,
   };
-}
-
-/**
- * WEB-14a revision 38 (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): the copy the session restored (its source, and every copy a hand-off
- * source names) is removed NOW, not once this page's own copy lands: its input stays the session's, unsaved (an update saves it again).
- * What does not land stays owed (`debts`: tried again at the next save or terminal act).
- */
-export function releaseSource(session: FormSession): Promise<void> {
-  const source = session.persisted.source;
-  const target = targetOf(session);
-  if (source === null || target === null) return Promise.resolve();
-  session.persisted = {
-    ...session.persisted,
-    source: null,
-    debts: distinctCopies([
-      ...session.persisted.debts,
-      ...source.lineage,
-      sourceTarget(source),
-    ]),
-  };
-  return track(session, settleDebts(session, target, session.order.next));
 }
 
 /**

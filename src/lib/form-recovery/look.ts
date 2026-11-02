@@ -92,6 +92,18 @@ export async function readLeft(
 }
 
 /**
+ * The look `found` is applied (both adapters, once it has read everything): the hand-off it read under its lock is this page's claim.
+ * Revision 40 (review of revision 39, R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): a claim to restore it, never to remove it
+ * (`session.ts`, `removable`); and its reference goes now, so a later page of this tab (an ordinary reload) does not restore it again but
+ * finds it among the hand-offs no page holds, offered. A look that could not finish forgets nothing (it is made again).
+ */
+export function claimLeft(current: FormSession, found: Found): void {
+  if (!found.handed) return;
+  current.claimed = found.handed.tabInstanceId;
+  forgetHandoff(current.handoffs, found.handed.tabInstanceId);
+}
+
+/**
  * Revision 8 (R16, DA-C): whether `copy` is one of the copies a hand-off's lineage names, by its exact key and the capture named (a copy
  * named by key alone, written before captures had identities, by its key). Equal text never makes a copy part of a lineage.
  */
@@ -148,6 +160,7 @@ export function chooseLeft(current: FormSession, found: Found): Choice {
 /**
  * The session takes `newest` as what it was restored from (revision 10, R11: `values` is ALL the copy holds): the hand-off left to this page
  * and held by it is its source with the copies its lineage names; this page's own copy is its own; any other is a gone tab's source.
+ * Revision 40 (R42): a hand-off source is never removed by this page (`session.ts`, `removable`); the ordinary copies it names may be.
  */
 export function adoptCopy(
   current: FormSession,

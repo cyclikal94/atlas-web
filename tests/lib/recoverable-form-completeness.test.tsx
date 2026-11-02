@@ -161,6 +161,13 @@ async function rows(world: World): Promise<unknown[]> {
   }));
 }
 
+/** Revision 40 (R42): the hand-off rows of `all` (`rows`), exactly as listed. */
+const handoffRows = (all: unknown[]): unknown[] =>
+  all.filter((row) => (row as { where: string }).where === "handoff");
+/** Revision 40 (R42): the ordinary rows of `all` (`rows`), exactly as listed. */
+const ordinaryRows = (all: unknown[]): unknown[] =>
+  all.filter((row) => (row as { where: string }).where === "ordinary");
+
 /** A browser's native editing state with no value (jsdom has none): the element's own `validity`, as the engine reports it. */
 function badInput(input: HTMLInputElement, on: boolean): void {
   Object.defineProperty(input, "validity", {
@@ -612,7 +619,7 @@ async function updatedFrom(
 
 describe("R11 (Q4): a successor that does not admit a saved field keeps the protected copies", () => {
   for (const admitted of [false, true])
-    test(`${admitted ? "CONTROL: the successor admits it: restored completely, saved, A's copies removed" : "REQUIREMENT: the successor admits nothing: incomplete, the save fails, P and H (key and capture) and the reference stay; admitted and shown again, the value comes back and is saved"}`, async () => {
+    test(`${admitted ? "CONTROL: the successor admits it: restored completely, saved, A's copy P removed, the hand-off H kept exactly" : "REQUIREMENT: the successor admits nothing: incomplete, the save fails, P and H (key and capture) stay; admitted and shown again, the value comes back and is saved (P removed, H kept)"}`, async () => {
       const world = new World();
       const storage = new TabStorage();
       const before = await updatedFrom(world, storage, {
@@ -632,8 +639,11 @@ describe("R11 (Q4): a successor that does not admit a saved field keeps the prot
         expect(b.handle().incomplete).toEqual([]);
         expect(await flush(b.registry)).toEqual(["saved"]);
         const after = await rows(world);
-        expect(after).toHaveLength(1);
-        expect((after[0] as { values: unknown }).values).toEqual({
+        // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was only A2's own copy left (P and H removed); now P is
+        // removed and H stays exactly (no page that claims a hand-off may remove it).
+        expect(after).toHaveLength(2);
+        expect(handoffRows(after)).toEqual(handoffRows(before));
+        expect((ordinaryRows(after)[0] as { values: unknown }).values).toEqual({
           choice: "UNFINISHED",
           title: "",
         });
@@ -643,20 +653,26 @@ describe("R11 (Q4): a successor that does not admit a saved field keeps the prot
       expect(b.registry.dirty()).toHaveLength(1);
       expect(await flush(b.registry)).toEqual(["failed"]);
       expect(await rows(world)).toEqual(before);
-      expect([...storage.items]).toEqual(reference);
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was the reference kept in the tab's storage; now the look
+      // that claimed the hand-off forgets it (`claimLeft`: a later page of the tab finds H offered, not restored again). H itself stays (above).
+      expect(reference).not.toEqual([]);
+      expect([...storage.items]).toEqual([]);
       await b.set({ allow: FULL.allow, shown: FULL.shown });
       expect(b.input("choice").value).toBe("UNFINISHED");
       expect(b.handle().incomplete).toEqual([]);
       expect(await flush(b.registry)).toEqual(["saved"]);
       const after = await rows(world);
-      expect(after).toHaveLength(1);
-      expect((after[0] as { values: unknown }).values).toEqual({
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was only A2's own copy left; now P is removed and H stays
+      // exactly.
+      expect(after).toHaveLength(2);
+      expect(handoffRows(after)).toEqual(handoffRows(before));
+      expect((ordinaryRows(after)[0] as { values: unknown }).values).toEqual({
         choice: "UNFINISHED",
         title: "",
       });
     });
 
-  test("partial admission: the admitted field is restored, the other is incomplete; the save fails until it is shown, then both are saved and A's copies removed", async () => {
+  test("partial admission: the admitted field is restored, the other is incomplete; the save fails until it is shown, then both are saved, A's copy P removed and the hand-off H kept", async () => {
     const world = new World();
     const storage = new TabStorage();
     const before = await updatedFrom(world, storage, {
@@ -676,8 +692,11 @@ describe("R11 (Q4): a successor that does not admit a saved field keeps the prot
     await b.set({ allow: FULL.allow, shown: FULL.shown });
     expect(b.input("choice").value).toBe("UNFINISHED");
     expect(await flush(b.registry)).toEqual(["saved"]);
+    const after = await rows(world);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was only A2's own copy left; now P is removed and H stays exactly.
+    expect(handoffRows(after)).toEqual(handoffRows(before));
     expect(
-      (await rows(world)).map((row) => (row as { values: unknown }).values),
+      ordinaryRows(after).map((row) => (row as { values: unknown }).values),
     ).toEqual([{ title: "KEPT", choice: "UNFINISHED" }]);
   });
 });
@@ -990,23 +1009,26 @@ describe("R11 (Q7): shown again, edited, or fully adopted", () => {
     expect(await rows(world)).toEqual(before);
   });
 
-  test("CONTROL: fully adopted, then edited: the edit is the person's progress; saved, and A's copies removed", async () => {
+  test("CONTROL: fully adopted, then edited: the edit is the person's progress; saved, A's copy P removed and the hand-off H kept", async () => {
     const world = new World();
     const storage = new TabStorage();
-    await updatedFrom(world, storage, { choice: "UNFINISHED" });
+    const before = await updatedFrom(world, storage, { choice: "UNFINISHED" });
     const b = mountPage(world, storage, "A2", FULL);
     await ready(b);
     typeValue(b.input("choice"), "EDITED");
     expect(await flush(b.registry)).toEqual(["saved"]);
+    const after = await rows(world);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was only A2's own copy left; now P is removed and H stays exactly.
+    expect(handoffRows(after)).toEqual(handoffRows(before));
     expect(
-      (await rows(world)).map((row) => (row as { values: unknown }).values),
+      ordinaryRows(after).map((row) => (row as { values: unknown }).values),
     ).toEqual([{ choice: "EDITED", title: "" }]);
   });
 });
 
 describe("R11 (Q8): only a terminal act resolves what is not shown", () => {
   for (const outcome of ["succeeds", "fails"] as const)
-    test(`a ticket taken with the saved value not shown; the submission ${outcome}: ${outcome === "succeeds" ? "it covered it (the state it saved): clean, P and H removed" : "still incomplete and unsaved, P and H kept"}`, async () => {
+    test(`a ticket taken with the saved value not shown; the submission ${outcome}: ${outcome === "succeeds" ? "it covered it (the state it saved): clean, P removed, the hand-off H kept" : "still incomplete and unsaved, P and H kept"}`, async () => {
       const world = new World();
       const storage = new TabStorage();
       const before = await updatedFrom(world, storage, {
@@ -1030,17 +1052,19 @@ describe("R11 (Q8): only a terminal act resolves what is not shown", () => {
       else act(() => sent.failed());
       if (outcome === "succeeds") {
         expect(b.registry.dirty()).toHaveLength(0);
-        expect(await rows(world)).toEqual([]);
+        // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was no row left (P and H removed); now P is removed and
+        // H stays exactly.
+        expect(await rows(world)).toEqual(handoffRows(before));
         return;
       }
       expect(await flush(b.registry)).toEqual(["failed"]);
       expect(await rows(world)).toEqual(before);
     });
 
-  test("'Discard instead' resolves it; when the clean-up of P and H fails, a later save still cleans them up (the act resolved what they held)", async () => {
+  test("'Discard instead' resolves it; when the clean-up of P fails, a later save still cleans it up (the act resolved what it held); the hand-off H is kept", async () => {
     const world = new World();
     const storage = new TabStorage();
-    await updatedFrom(world, storage, { choice: "UNFINISHED" });
+    const before = await updatedFrom(world, storage, { choice: "UNFINISHED" });
     const b = mountPage(world, storage, "A2", {
       ...FULL,
       allow: ["title"],
@@ -1056,15 +1080,19 @@ describe("R11 (Q8): only a terminal act resolves what is not shown", () => {
     world.store.failDiscardOf = () => false;
     typeValue(b.input("title"), "NEW");
     expect(await flush(b.registry)).toEqual(["saved"]);
+    const after = await rows(world);
+    // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was only A2's own copy left (P and H cleaned up); now P is
+    // cleaned up and H stays exactly.
+    expect(handoffRows(after)).toEqual(handoffRows(before));
     expect(
-      (await rows(world)).map((row) => (row as { values: unknown }).values),
+      ordinaryRows(after).map((row) => (row as { values: unknown }).values),
     ).toEqual([{ title: "NEW" }]);
   });
 });
 
 describe("R11 (C4): a save accounts for the copy positively, at its destructive step", () => {
   for (const consistent of [false, true])
-    test(`${consistent ? "CONTROL: the copy's other field shown and admitted again: accounted for, saved, A's copies removed" : "REQUIREMENT: the form holds NO value for one of the copy's fields (no debt to see): the save neither replaces nor cleans up the copy"}`, async () => {
+    test(`${consistent ? "CONTROL: the copy's other field shown and admitted again: accounted for, saved, A's copy P removed, the hand-off H kept" : "REQUIREMENT: the form holds NO value for one of the copy's fields (no debt to see): the save neither replaces nor cleans up the copy"}`, async () => {
       const world = new World();
       const storage = new TabStorage();
       const before = await updatedFrom(world, storage, {
@@ -1096,8 +1124,12 @@ describe("R11 (C4): a save accounts for the copy positively, at its destructive 
         expect(await rows(world)).toEqual(before);
         return;
       }
+      const after = await rows(world);
+      // Revision 40 adaptation (R42; owner decision WEB14A-R42-NON-CONSUMING-20261028): was only A2's own copy left; now P is removed and H stays
+      // exactly.
+      expect(handoffRows(after)).toEqual(handoffRows(before));
       expect(
-        (await rows(world)).map((row) => (row as { values: unknown }).values),
+        ordinaryRows(after).map((row) => (row as { values: unknown }).values),
       ).toEqual([{ title: "T2", choice: "UNFINISHED" }]);
     });
 

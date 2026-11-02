@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { useFormRecoveryPort } from "../../data";
-import { pageHandoffs } from "./handoff";
 import {
   createRecoverableModel,
   type ModelTicket,
@@ -10,8 +9,6 @@ import {
 } from "./model";
 import type { DiscardResult } from "./port";
 import { pageFormRegistry } from "./registry";
-import { getPageRecoveryTab } from "./tab-identity";
-import { preAccountRecoveryPort } from "./tab-session-port";
 
 /**
  * RECOVERABLE EDITORS WHOSE INPUT IS COMPONENT STATE (WEB-14a revision 37; review of 25 October 2026, R40; design assessment C1-C3). The
@@ -36,6 +33,16 @@ import { preAccountRecoveryPort } from "./tab-session-port";
  * step as the model takes it and its copies' removal starts. The removal's completion changes nothing on screen (a later edit is never
  * erased by an earlier discard). A copy the person chooses replaces what the editor shows (`restored`), touched or not; only the look's
  * automatic restore needs untouched input.
+ *
+ * Revision 40 (review of revision 39, R40-GATE; design assessment C1/C2, I1-I4): A PRE-ACCOUNT EDITOR'S INPUT BELONGS TO ITS JOURNEY, NOT
+ * TO ITS MOUNT. The neutral gate removes a sign-in or join form while its attempt resolves, and a refusal brings the same host back: the
+ * form's absence is not the person's dismissal. So a pre-account editor's unmount only detaches it (no `end`, no timer); the input, its
+ * revision and its tickets stay the model's, and the editor that mounts again for the same journey shows that exact input (`restored`)
+ * instead of beginning again. Only an authoritative event ends it: a durable success of the exact input (its ticket), the person's own
+ * Back or Cancel (`end`, or `endPreAccountInput` for a host's close), another journey of the same host (`journey`: a new invitation, a
+ * switch to another account), or an account displayed (`settlePreAccountInput`). Its unfinished input stops an update reload while it lasts,
+ * shown or not. An account's editors keep their own closure rules: their unmount is a dialog's close, a departure or the session's
+ * protective closure (session matrix 3.6.2), each a dismissal.
  */
 
 interface Editor {
@@ -46,8 +53,11 @@ interface Editor {
 
 interface Entry {
   readonly identity: string;
+  readonly context: string;
   readonly model: RecoverableModel;
-  /** Revision 38: a pre-account form's (its copies live in the tab's session storage, removed once restored or left). */
+  /** Revision 40 (R40-GATE): a pre-account editor's journey (null until an editor mounts): another journey's input is never shown. */
+  journey: string | null;
+  /** Revision 38: a pre-account form's (revision 39: never bound to a store; its input is never restored after a reload). */
   readonly preAccount: boolean;
   /** A copy restored while no editor showed the context, for the next editor to take. */
   pending: string | null;
@@ -73,7 +83,7 @@ function entryFor(
   preAccount = false,
 ): Entry {
   // Revision 38: a pre-account form is no account's: it is neither retired by an account's editor (a sign-in shown over the account,
-  // switching) nor retires one; its model is only ever bound to the tab's pre-account store, and leaving it removes its copies.
+  // switching) nor retires one (revision 39: its submissions' tickets stay outstanding work, whatever account binds meanwhile).
   for (const [key, other] of [...entries])
     if (other.identity !== identity && !other.preAccount && !preAccount) {
       other.model.retire();
@@ -84,6 +94,8 @@ function entryFor(
   if (known !== undefined) return known;
   const entry: Entry = {
     identity,
+    context,
+    journey: null,
     preAccount,
     pending: null,
     editor: null,
@@ -109,10 +121,61 @@ function entryFor(
   return entry;
 }
 
+/** Revision 40 (R40-GATE; design assessment Q1): how many dismissals are scheduled and not decided yet, and who waits for them. */
+let undecided = 0;
+let waiting: (() => void)[] = [];
+const decided = (): void => {
+  undecided -= 1;
+  if (undecided > 0) return;
+  const told = waiting;
+  waiting = [];
+  for (const tell of told) tell();
+};
+
+/** For tests: settles once every editor dismissal scheduled so far has been decided (an explicit acknowledgement, not a sleep). */
+export const dismissalsDecided = (): Promise<void> =>
+  undecided === 0
+    ? Promise.resolve()
+    : new Promise((resolve) => {
+        waiting.push(resolve);
+      });
+
 /** For tests: every editor model leaves its registry and is forgotten. */
 export function forgetRecoverableEditors(): void {
   for (const entry of entries.values()) entry.model.retire();
   entries.clear();
+}
+
+/**
+ * Revision 40 (R40-GATE): the person closed a pre-account host (a dialog's Close or Escape) for `journey` of `context`: its input ends as
+ * at the form's own Back (`end`). Another journey's input is untouched.
+ */
+export function endPreAccountInput(context: string, journey: string): void {
+  for (const entry of entries.values())
+    if (
+      entry.preAccount &&
+      entry.context === context &&
+      entry.journey === journey
+    )
+      void entry.model.end();
+}
+
+/**
+ * Revision 40 (R40-GATE): an account displays, the displayed one changed or signed out, or a newer invitation link replaced the join page:
+ * the pre-account journeys `ends` names are over (an account is signed in; the switch or confirmation was the previous account's; the old
+ * link's form can never show again). Their unfinished input ends; a ticket still out stays outstanding work until its outcome. An editor
+ * shown now is the person's to finish and is left alone.
+ */
+export function settlePreAccountInput(
+  ends: (context: string, journey: string | null) => boolean,
+): void {
+  for (const entry of entries.values())
+    if (
+      entry.preAccount &&
+      entry.editor === null &&
+      ends(entry.context, entry.journey)
+    )
+      void entry.model.end();
 }
 
 /**
@@ -154,8 +217,11 @@ export interface RecoverableEditor<T> extends RecoveryControls {
   edit(value: T): boolean;
   /** Before a submission; null while an update reload is prepared (send nothing). */
   submitting(): ModelTicket | null;
-  /** The editor's session is kept for a visit to the sync screens: its unmount is not a dismissal. */
-  keep(): void;
+  /**
+   * The editor's session is kept for a visit to the sync screens: its unmount is not a dismissal. Revision 39 (DA-DEVICE-NAME): given the
+   * editor's input, the editor's host opens it again on that input when it mounts (the person comes back), as for a restored copy.
+   */
+  keep(value?: T): void;
   /** The person dismissed the editor (Cancel, Close, Escape): its copies are discarded. */
   end(): Promise<DiscardResult>;
   /**
@@ -170,7 +236,7 @@ export interface RecoverableEditor<T> extends RecoveryControls {
  * The editor of `context` (see above). `restored(value)` puts a copy's input into the editor (the session's input from now on, not an
  * edit); `untouched()` says whether the person has changed nothing since the session began, so a copy may be restored into it. `decode`
  * returns null for a text this build cannot read (offered, never restored in part). The model is shown while the editor is mounted; its
- * unmount ends the session (a dismissal) unless `keep` was called since the last change.
+ * unmount ends the session (a dismissal) unless `keep` was called since the last change, or (revision 40) the editor is a pre-account one.
  */
 export function useRecoverableEditor<T>(options: {
   identity: string;
@@ -191,12 +257,18 @@ export function useRecoverableEditor<T>(options: {
   /** The editor shows a native editing state its value cannot hold (`RecoverableModel.probe`). */
   unfinished?: () => boolean;
   /**
-   * Input typed before any account is displayed (signing in, joining; revision 38, WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): never
-   * bound to an account's store, but to this tab's session storage (`tab-session-port.ts`, the username's text only), for an app-update
-   * reload. A copy restored is removed at once and every other copy of the context in the tab once the look has read it; leaving the form
-   * removes its own. Storage that cannot be written fails the save (the update stops with retry or an explicit discard).
+   * Input typed before any account is displayed (signing in, joining; revision 38, WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026). Revision 39
+   * (review of revision 38, R40-COMPOSITION; design assessment C1/C3): never bound to any store and never restored after a reload (see
+   * `ModelOptions.preAccount`); its unfinished input stops an update reload, and stays on screen. Its submissions still take tickets: none
+   * while an update reload is being prepared, and one taken before is outstanding work until its outcome. Revision 40 (R40-GATE): its
+   * input belongs to its journey (see above): an unmount only detaches it.
    */
   preAccount?: boolean;
+  /**
+   * Revision 40 (R40-GATE; design assessment C1): which journey of the host a pre-account editor serves (an invitation's link, a switch's
+   * target). An editor of another journey ends the previous one's input and begins its own; the same journey's comes back to it. Default "".
+   */
+  journey?: string;
 }): RecoverableEditor<T> {
   const { identity, context } = options;
   const port = useFormRecoveryPort();
@@ -221,7 +293,10 @@ export function useRecoverableEditor<T>(options: {
     };
     entry.editor = editor;
     const resumed = entry.leaving !== null;
-    if (entry.leaving !== null) clearTimeout(entry.leaving);
+    if (entry.leaving !== null) {
+      clearTimeout(entry.leaving);
+      decided();
+    }
     entry.leaving = null;
     const hide = entry.model.show();
     if (latest.current.unfinished)
@@ -231,6 +306,19 @@ export function useRecoverableEditor<T>(options: {
     entry.pending = null;
     const waiting = pending === null ? null : latest.current.decode(pending);
     if (waiting !== null) latest.current.restored(waiting);
+    else if (entry.preAccount) {
+      // Revision 40 (R40-GATE): the same journey's unfinished input comes back exactly as it was (no new session over it); another
+      // journey's ends, and this one begins.
+      const journey = latest.current.journey ?? "";
+      if (entry.journey !== null && entry.journey !== journey)
+        void entry.model.end();
+      const held =
+        entry.journey === journey ? entry.model.unfinishedText() : null;
+      entry.journey = journey;
+      const value = held === null ? null : latest.current.decode(held);
+      if (value !== null) latest.current.restored(value);
+      else entry.model.begin(latest.current.encode(latest.current.start()));
+    }
     // A session kept for a visit to the sync screens, or resumed by a mount in the turn its editor unmounted, goes on (its unsaved input
     // stays the model's); otherwise a new one begins.
     else if (!entry.kept && !resumed)
@@ -241,36 +329,25 @@ export function useRecoverableEditor<T>(options: {
       if (entry.editor === editor) entry.editor = null;
       entry.model.probe(null);
       hide();
-      if (entry.kept) return;
+      // Revision 40 (R40-GATE): a pre-account editor's unmount is never its journey's end (a gate, a host replaced for a moment).
+      if (entry.kept || entry.preAccount) return;
       // A dismissal, decided after this turn (see `leaving`).
+      undecided += 1;
       entry.leaving = setTimeout(() => {
         entry.leaving = null;
         if (entry.editor === null && !entry.kept) void entry.model.end();
+        decided();
       }, 0);
     };
   }, [entry]);
   useEffect(() => {
-    entry.model.bind(preAccount ? preAccountRecoveryPort() : port);
-  }, [entry, port, preAccount]);
+    entry.model.bind(port);
+  }, [entry, port]);
   const view = useSyncExternalStore(
     entry.model.subscribe,
     entry.model.view,
     entry.model.view,
   );
-  // Revision 38: once a pre-account form's look has read the tab's store, nothing an earlier page of the tab left for it stays there.
-  const looked = view.ready;
-  useEffect(() => {
-    if (!preAccount || !looked) return;
-    // Never this page's own copy or a hand-off it wrote (an update may be prepared by then).
-    const sweep = (id: string | null) =>
-      preAccountRecoveryPort().sweep(
-        context,
-        (tab) => tab === id || pageHandoffs.written.has(tab),
-      );
-    void getPageRecoveryTab()
-      .id()
-      .then(sweep, () => sweep(null));
-  }, [preAccount, looked, context]);
   const locked = useSyncExternalStore(
     pageFormRegistry.subscribe,
     pageFormRegistry.frozen,
@@ -290,8 +367,11 @@ export function useRecoverableEditor<T>(options: {
       return true;
     },
     submitting: () => model.submitting(),
-    keep() {
+    keep(value) {
       entry.kept = true;
+      if (value === undefined) return;
+      // The host's next mount opens the editor on it (a session kept: the editor resumes it, never a new one).
+      entry.pending = latest.current.encode(value);
     },
     end: () => model.end(),
     discard() {

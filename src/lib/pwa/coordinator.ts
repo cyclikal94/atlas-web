@@ -40,6 +40,13 @@ import type { AppUpdatesActions, UpdateState } from "./store";
  *    forms is outstanding (a save, a discard, a submission sent before the person accepted), every form is held still, and none is dirty
  *    (in a discard, none still holds input that was not discarded). Work that arrived during the waits (a form mounted again with its
  *    input, a submission that succeeded) is settled first; what cannot be settled stops this tab's reload and is shown, never lost.
+ *  - A SAVED COPY IS NOT A RESTORATION (revision 39; review of revision 38, R40-COMPOSITION; design assessment C1, I1/I2). A form whose
+ *    input no reload can bring back (`restorable` false: no reader on the next page, or no proof that the next page is this tab's) stops a
+ *    save's reload while it holds unfinished input, before anything is saved for it, and in that same checkpoint ("kept_input"): the page
+ *    stays with the input. Only "Discard and reload anyway" (the person's explicit choice) reloads over it.
+ *  - WORK ADMITTED BEFORE THE FREEZE IS WAITED FOR (revision 39, R40-FREEZE; C2, I3/I4): a sign-in, a registration or a single sign-on
+ *    started before the person accepted is outstanding work (`form-recovery/activity.ts`, a submission ticket); one started after is
+ *    refused. A single sign-on that is leaving the page for its provider stays outstanding: no reload is made over its navigation.
  *  - A SAVE HANDS THE FORMS TO THE NEXT PAGE (revision 6, R13; `form-recovery/handoff.ts`). After the saves, "Reload" and "Retry save"
  *    write every form's update hand-off (a copy no other tab may take or remove, with a reference this tab's next page reads), and the
  *    checkpoint holds only when every form with a copy has handed it off: another tab can no longer leave the next page blank by restoring
@@ -164,6 +171,7 @@ const SETTLE_ROUNDS = 3;
 type Busy =
   | { kind: "saving" }
   | { kind: "save_failed"; refused: boolean }
+  | { kind: "kept_input" }
   | { kind: "discard_failed" }
   | { kind: "reloading" };
 
@@ -244,6 +252,17 @@ export function startAppUpdates(
       return true;
     }
   };
+  /**
+   * Revision 39 (R40-COMPOSITION; design assessment C1, I1/I2): a form whose unfinished input no reload can bring back (`restorable` false),
+   * however it was saved. A form that cannot say is taken for one: keeping the input is the safe direction.
+   */
+  const stranded = (form: RecoverableFormHandle): boolean => {
+    try {
+      return form.restorable?.() === false && !discardedNow(form);
+    } catch {
+      return true;
+    }
+  };
   /** Revision 7 (R6): the forms a discard reload must still discard (the act's, the page's with a copy, the dirty ones), but not a refused one. */
   const discardTargets = (): RecoverableFormHandle[] =>
     [...new Set([...participants, ...handoffHandles(deps.forms)])].filter(
@@ -256,6 +275,8 @@ export function startAppUpdates(
     if (forms.pending() > 0 || forms.unheld() > 0) return false;
     // Revision 7 (R6): a discard's reload waits until nothing of any form of the act can come back, clean ones included.
     if (mode === "discard") return discardTargets().length === 0;
+    // Revision 39: saved or not, input no reload brings back stays in this page.
+    if (handoffHandles(forms).some(stranded)) return false;
     if (forms.dirty().length > 0) return false;
     // Revision 7 (R13): every form knows what was left to it; revision 6: every form's copy is handed to the next page of this tab first.
     return !handoffHandles(forms).some(unresolved) && handedOff(forms);
@@ -592,6 +613,13 @@ export function startAppUpdates(
         if (disposed) return false;
         // What settled may have started more (a submission's success discards the copies): that is waited for first.
         if (deps.forms.pending() > 0) continue;
+      }
+      // Revision 39 (R40-COMPOSITION; C1): input no reload brings back stops a save's reload before anything is saved or handed off for
+      // it. The page stays, with the input, until the person finishes it, or discards it ("Discard and reload anyway").
+      if (act === "save" && handoffHandles(deps.forms).some(stranded)) {
+        busy = { kind: "kept_input" };
+        publish();
+        return false;
       }
       if (sealed()) return true;
       if (act === "save") {

@@ -405,14 +405,17 @@ describe("the calendar Add source form (calendar-add)", () => {
 });
 
 /**
- * LABELLED ADAPTATION (revision 38): revision 37 asserted that this save FAILS, because where pre-account input may be kept was an open owner
- * decision. Kieran decided it (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026, hand-off sha256 e802f52e…ebaec3): the username only, in this
- * tab's session storage. The other intents are kept as they were: the typed username counts for the update, and it is never written to the
- * account's store. The original case is preserved in `.agtx/evidence/revision-r38-20261026/adaptations/`; the decision's own lifecycle,
- * isolation and failure cases are `tests/lib/pre-account-recovery.test.tsx`.
+ * LABELLED ADAPTATION (revision 39; the revision-38 version is in `.agtx/evidence/revision-r39-20261027/adaptations/`). Revision 37 asserted
+ * that this save FAILS (where pre-account input may be kept was open); revision 38 implemented Kieran's decision
+ * WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026 (hand-off sha256 e802f52e…ebaec3) and asserted a copy in this tab's session storage. The
+ * review of revision 38 (R40-COMPOSITION) and its design assessment (C1/C3, DA-TAB-HANDOFF) found that no next page is proven to be this
+ * tab's, and that most sign-in hosts' readers live in page memory: the decision's preservation fallback applies (keep the input on this page;
+ * no reload over it). Kept intents: the typed username counts for the update, and it is never written to the account's store. Changed: it is
+ * written nowhere (its save fails, as revision 37 asserted) and its handle says no reload brings it back. The coordinator's and the forms'
+ * own cases are `tests/features/authentication-update.test.tsx`.
  */
 describe("sign-in before any account is displayed (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026)", () => {
-  test("a typed username counts for the update; it is saved in this tab's session storage, never in the account's store", async () => {
+  test("a typed username counts for the update; it is written nowhere, and no reload can bring it back", async () => {
     render(
       protectedTree(
         <SignInForm
@@ -427,13 +430,10 @@ describe("sign-in before any account is displayed (WEB14A-PREACCOUNT-USERNAME-RE
       target: { value: "alice" },
     });
     expect(contextsOf(pageFormRegistry.dirty())).toEqual(["sign-in"]);
-    expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
+    expect(pageFormRegistry.dirty()[0]?.restorable?.()).toBe(false);
+    expect(await flushDirty(pageFormRegistry)).toEqual(["failed"]);
     expect(await store.list("sign-in")).toHaveLength(0);
-    expect(
-      Object.keys(window.sessionStorage).filter((key) =>
-        key.startsWith("atlas-preaccount-recovery:"),
-      ),
-    ).toHaveLength(1);
-    window.sessionStorage.clear();
+    expect(Object.keys(window.sessionStorage)).toEqual([]);
+    expect(Object.keys(window.localStorage)).toEqual([]);
   });
 });

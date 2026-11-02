@@ -1,33 +1,31 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { JoinForm } from "../../src/features/authentication/JoinForm";
 import { SignInForm } from "../../src/features/authentication/SignInForm";
 import { AddSourceDialog } from "../../src/features/calendars/AddSourceDialog";
 import {
-  type HandoffStore,
+  dismissalsDecided,
+  settlePreAccountInput,
+} from "../../src/lib/form-recovery/editor";
+import {
   handoffContext,
   prepareHandoffs,
   storageHandoffs,
 } from "../../src/lib/form-recovery/handoff";
 import { MemoryRecoveryAdapter } from "../../src/lib/form-recovery/memory-adapter";
-import {
-  createRecoverableModel,
-  type RecoverableModel,
-} from "../../src/lib/form-recovery/model";
+import { createRecoverableModel } from "../../src/lib/form-recovery/model";
 import {
   createRecoverableFormRegistry,
   flushDirty,
   pageFormRegistry,
-  type RecoverableFormRegistry,
 } from "../../src/lib/form-recovery/registry";
-import {
-  createRecoveryTab,
-  type RecoveryTab,
-} from "../../src/lib/form-recovery/tab-identity";
-import {
-  type TabSessionRecoveryPort,
-  tabSessionRecoveryPort,
-} from "../../src/lib/form-recovery/tab-session-port";
+import { createRecoveryTab } from "../../src/lib/form-recovery/tab-identity";
 import { installMatchMedia } from "../helpers/match-media";
 import {
   forgetRecoveryWorld,
@@ -39,403 +37,188 @@ import { Locks, ScopedSpyPort, TabStorage } from "../support/recovery-pages";
 import { ME } from "../support/tasks/world";
 
 /**
- * WEB-14a revision 38: Kieran's decision WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026 (hand-off
- * `delivery/handoffs/web14a-preaccount-username-approved-20261026.md`, SHA-256 e802f52e…ebaec3). The sign-in and join forms' unfinished
- * USERNAME only, in THAT tab's session storage only, across an app-update reload; removed once restored or when the form is left; never a
- * password, never submitted, never an account's store. Model level (the real session, registry, hand-offs and recovery identity over a Web
- * Locks double and a session-storage double): same-tab restore and removal, a second update after it, tab isolation (another tab, a
- * duplicated tab), newer input never replaced, failed and unreadable storage, cancellation. Component level (the production editor bridge
- * and forms): what is written, and where, and its removal.
+ * WEB-14a revision 39 (LABELLED ADAPTATION of revision 38's file; the original is
+ * `.agtx/evidence/revision-r39-20261027/removed/pre-account-recovery.test.tsx.HEAD`). Kieran's decision
+ * WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026 (hand-off sha256 e802f52e…ebaec3) PERMITS keeping only the unfinished username in that tab's
+ * session storage, and REQUIRES that the input be preserved when saving or restoration cannot be provided. The review of revision 38
+ * (R40-COMPOSITION) and its design assessment (C1/C3, DA-TAB-HANDOFF, DA-AUTH-HOSTS, I1/I2/I7) found that restoration cannot be provided:
+ * Join's and the transient hosts' readers live in page memory, and a cloned tab's session storage carries the same hand-off reference, so
+ * holding a lock proves no same-tab continuation. Revision 39 therefore takes the decision's preservation branch: the username is written
+ * NOWHERE, its model says no reload brings it back, and its unfinished input stops an update reload (`tests/pwa/coordinator-restorable.test.ts`,
+ * `tests/features/authentication-update.test.tsx`).
+ *
+ * Original intents → what is asserted now:
+ *  - only the username, never a password/secret, never the account's store → nothing of either form is written anywhere (both storages,
+ *    the account's store, the port a model is offered);
+ *  - same-tab restore after an update, then removal → no restore at all: an earlier page's session-storage copy or hand-off (as revision 38
+ *    wrote) is never read, restored or offered; the input is kept on the page instead;
+ *  - another tab / a duplicated tab sees nothing → no page restores anything;
+ *  - newer input never replaced → nothing ever replaces it (kept);
+ *  - an account's kept input is not retired by the pre-account form → kept (the model never binds, so never retires a scope);
+ *  - failed / unreadable storage keeps the input → the input never depends on storage: the update's save of it fails at once (no store),
+ *    and the page keeps it;
+ *  - cancellation removes its copies → there are none; leaving the form leaves nothing registered (revision 40, R40-GATE: an unmount is no
+ *    longer the end of the username: it stays the journey's, written nowhere, until an account displays, Back or another journey ends it).
  */
 installMatchMedia({ width: 1440 });
 beforeAll(installRecoveryLocks);
 afterEach(() => {
   forgetRecoveryWorld();
   window.sessionStorage.clear();
+  window.localStorage.clear();
 });
 
-const CONTEXT = "sign-in";
-const keys = (storage: TabStorage) =>
-  [...storage.items.keys()].filter((k) =>
-    k.startsWith("atlas-preaccount-recovery:"),
-  );
-const texts = (storage: TabStorage) =>
-  keys(storage).map(
-    (k) => JSON.parse(storage.items.get(k) ?? "null").values.model,
-  );
+const PASSWORD = "NeverPersistTheSecret1!";
+const username = () =>
+  screen.getByRole("textbox", { name: /username/i }) as HTMLInputElement;
 
-describe("the pre-account store (tab-session-port.ts)", () => {
-  const port = (storage: TabStorage) =>
-    tabSessionRecoveryPort(
-      () => storage as unknown as Storage,
-      ["sign-in", "join"],
-    );
-  const copy = (over: Record<string, unknown> = {}) => ({
-    formContext: CONTEXT,
-    tabInstanceId: "tab-1",
-    values: { model: "alice" },
-    savedAt: "2026-10-27T10:00:00.000Z",
-    capture: "c1",
-    ...over,
+function model(storage = new TabStorage()) {
+  const registry = createRecoverableFormRegistry();
+  const locks = new Locks();
+  let restored = 0;
+  const instance = createRecoverableModel({
+    formContext: "sign-in",
+    start: "",
+    restore: () => {
+      restored += 1;
+      return true;
+    },
+    untouched: () => true,
+    preAccount: true,
+    registry,
+    tab: createRecoveryTab({
+      uuid: () => `page-${Math.random()}`,
+      locks: locks.forPage("A"),
+    }),
+    handoffs: storageHandoffs(() => storage as unknown as Storage),
   });
-
-  test("keeps only one username text of the named forms (and their hand-offs); anything else is refused, nothing written", async () => {
-    const storage = new TabStorage();
-    const p = port(storage);
-    expect(await p.save(copy())).toBe("saved");
-    expect(
-      await p.save(
-        copy({ formContext: handoffContext(CONTEXT), tabInstanceId: "h1" }),
-      ),
-    ).toBe("saved");
-    expect(await p.save(copy({ formContext: "task-form:new" }))).toBe(
-      "refused",
-    );
-    expect(
-      await p.save(copy({ values: { model: "alice", password: "secret" } })),
-    ).toBe("refused");
-    expect(await p.save(copy({ values: { model: "x".repeat(1_001) } }))).toBe(
-      "refused",
-    );
-    expect(await p.save(copy({ controls: { version: 1, entries: {} } }))).toBe(
-      "refused",
-    );
-    expect(texts(storage)).toEqual(["alice", "alice"]);
-    expect(JSON.stringify([...storage.items.values()])).not.toContain("secret");
-  });
-
-  test("load reads a copy by its exact key; a conditional discard removes it only while it holds that capture; list offers nothing", async () => {
-    const storage = new TabStorage();
-    const p = port(storage);
-    await p.save(copy());
-    expect((await p.load(CONTEXT, "tab-1"))?.values.model).toBe("alice");
-    expect(await p.load(CONTEXT, "tab-2")).toBeNull();
-    expect(await p.list(CONTEXT)).toEqual([]);
-    expect(await p.discard(CONTEXT, "tab-1", "another-capture")).toBe(
-      "discarded",
-    );
-    expect(texts(storage)).toEqual(["alice"]);
-    expect(await p.discard(CONTEXT, "tab-1", "c1")).toBe("discarded");
-    expect(texts(storage)).toEqual([]);
-  });
-
-  test("storage that cannot be written fails the save; storage that cannot be read rejects the reads (never an empty answer)", async () => {
-    const storage = new TabStorage();
-    const p = port(storage);
-    storage.failing = true;
-    expect(await p.save(copy())).toBe("failed");
-    storage.failing = false;
-    await p.save(copy());
-    storage.unreadable = true;
-    await expect(p.load(CONTEXT, "tab-1")).rejects.toBeDefined();
-    await expect(p.list(CONTEXT)).rejects.toBeDefined();
-  });
-
-  test("sweep removes every copy of the context but those kept; another context's copies stay", async () => {
-    const storage = new TabStorage();
-    const p = port(storage);
-    await p.save(copy({ tabInstanceId: "old-page" }));
-    await p.save(
-      copy({ tabInstanceId: "this-page", values: { model: "bob" } }),
-    );
-    await p.save(
-      copy({
-        formContext: handoffContext(CONTEXT),
-        tabInstanceId: "old-handoff",
-      }),
-    );
-    await p.save(copy({ formContext: "join", tabInstanceId: "old-page" }));
-    p.sweep(CONTEXT, (tab) => tab === "this-page");
-    expect(keys(storage).map((k) => JSON.parse(k.slice(26)))).toEqual([
-      [CONTEXT, "this-page"],
-      ["join", "old-page"],
-    ]);
-  });
-});
-
-/** A page of one tab: its own registry, recovery identity and hand-off record over the tab's storage, and a pre-account model of `sign-in`. */
-class PreAccountPage {
-  readonly registry: RecoverableFormRegistry = createRecoverableFormRegistry();
-  readonly tab: RecoveryTab;
-  readonly handoffs: HandoffStore;
-  readonly port: TabSessionRecoveryPort;
-  readonly model: RecoverableModel;
-  value = "";
-  typed = false;
-  restored: string[] = [];
-  private n = 0;
-  constructor(
-    readonly locks: Locks,
-    readonly name: string,
-    readonly storage: TabStorage,
-  ) {
-    this.tab = createRecoveryTab({
-      uuid: () => `${name}-id-${++this.n}`,
-      locks: locks.forPage(name),
-    });
-    this.handoffs = storageHandoffs(() => storage as unknown as Storage);
-    this.port = tabSessionRecoveryPort(
-      () => storage as unknown as Storage,
-      [CONTEXT],
-    );
-    this.model = createRecoverableModel({
-      formContext: CONTEXT,
-      start: "",
-      restore: (text, chosen) => {
-        if (!chosen && this.typed) return false;
-        this.value = text;
-        this.restored.push(text);
-        return true;
-      },
-      untouched: () => !this.typed,
-      preAccount: true,
-      registry: this.registry,
-      tab: this.tab,
-      handoffs: this.handoffs,
-    });
-  }
-  async bound(): Promise<this> {
-    this.model.show();
-    this.model.bind(this.port);
-    await waitFor(() =>
-      expect(this.model.view().ready || this.model.view().unavailable).toBe(
-        true,
-      ),
-    );
-    return this;
-  }
-  type(text: string): void {
-    expect(this.model.edit(text)).toBe(true);
-    this.typed = true;
-    this.value = text;
-  }
-  /** "Save and reload" as the coordinator makes it: the saves, then the hand-offs. */
-  async update() {
-    return [
-      ...(await flushDirty(this.registry)),
-      ...(await prepareHandoffs(this.registry)),
-    ];
-  }
-  /** The saves only (an ordinary copy, no hand-off). */
-  flushOnly() {
-    return flushDirty(this.registry);
-  }
-  leave(): void {
-    this.locks.leave(this.name);
-  }
+  return { registry, model: instance, storage, restored: () => restored };
 }
 
-describe("the username across an app-update reload of the same tab (model level)", () => {
-  const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
-
-  test("restored into the untouched form of the tab's next page, never submitted; then the tab keeps NO copy, and the input is still unsaved input", async () => {
-    const locks = new Locks();
-    const storage = new TabStorage();
-    const a = await new PreAccountPage(locks, "A", storage).bound();
-    a.type("alice");
-    expect(await a.update()).toEqual(["saved", "saved"]);
-    expect(texts(storage)).toEqual(["alice", "alice"]);
-    a.leave();
-    const b = await new PreAccountPage(locks, "B", storage).bound();
-    expect(b.restored).toEqual(["alice"]);
-    expect(b.value).toBe("alice");
-    await waitFor(() => expect(keys(storage)).toEqual([]));
-    // Restored input is still the person's: dirty, saved again by a second update.
-    expect(b.registry.dirty()).toHaveLength(1);
-    expect(await b.update()).toEqual(["saved", "saved"]);
-    expect(texts(storage)).toEqual(["alice", "alice"]);
+describe("the pre-account model (model level)", () => {
+  test("never binds to a store: a port offered to it is never read or written, and its look never runs", async () => {
+    const { registry, model: m } = model();
+    const adapter = new MemoryRecoveryAdapter();
+    const port = new ScopedSpyPort(adapter);
+    const used = [
+      vi.spyOn(port, "save"),
+      vi.spyOn(port, "load"),
+      vi.spyOn(port, "list"),
+      vi.spyOn(port, "discard"),
+      vi.spyOn(port, "pin"),
+    ];
+    m.show();
+    m.bind(port);
+    m.begin("");
+    expect(m.edit("alice")).toBe(true);
+    expect(await flushDirty(registry)).toEqual(["failed"]);
+    await prepareHandoffs(registry);
+    for (const spy of used) expect(spy).not.toHaveBeenCalled();
+    expect(await adapter.list("sign-in")).toEqual([]);
+    expect(m.view().ready).toBe(false);
+    expect(m.view().restored).toBeNull();
   });
 
-  test("cancellation: leaving the form (end) removes its copies", async () => {
-    const storage = new TabStorage();
-    const a = await new PreAccountPage(new Locks(), "A", storage).bound();
-    a.type("alice");
-    await a.update();
-    expect(keys(storage)).toHaveLength(2);
-    expect(await a.model.end()).toBe("discarded");
-    await settled();
-    expect(keys(storage)).toEqual([]);
+  test("its handle says no reload brings it back, and it is dirty exactly while the input is unfinished", () => {
+    const { registry, model: m } = model();
+    m.show();
+    m.begin("");
+    const [handle] = registry.all();
+    expect(handle?.restorable?.()).toBe(false);
+    expect(handle?.isDirty()).toBe(false);
+    m.edit("alice");
+    expect(handle?.isDirty()).toBe(true);
+    m.edit("");
+    expect(handle?.isDirty()).toBe(false);
   });
 
-  test("another tab (its own session storage) sees nothing of it", async () => {
-    const locks = new Locks();
-    const a = await new PreAccountPage(locks, "A", new TabStorage()).bound();
-    a.type("alice");
-    await a.update();
-    a.leave();
-    const other = await new PreAccountPage(
-      locks,
-      "B",
-      new TabStorage(),
-    ).bound();
-    expect(other.restored).toEqual([]);
-    expect(other.model.view().alternatives).toEqual([]);
+  test("an earlier page's copy and hand-off in this tab's session storage (as revision 38 wrote them) are never restored or offered", async () => {
+    const storage = new TabStorage();
+    const legacy = {
+      formContext: "sign-in",
+      tabInstanceId: "earlier-page",
+      values: { model: "from-earlier-page" },
+      savedAt: "2026-10-27T10:00:00.000Z",
+      capture: "c1",
+    };
+    storage.setItem(
+      `atlas-preaccount-recovery:${JSON.stringify(["sign-in", "earlier-page"])}`,
+      JSON.stringify(legacy),
+    );
+    storage.setItem(
+      `atlas-preaccount-recovery:${JSON.stringify([handoffContext("sign-in"), "h1"])}`,
+      JSON.stringify({ ...legacy, formContext: handoffContext("sign-in") }),
+    );
+    const { model: m, restored } = model(storage);
+    m.show();
+    m.bind(new ScopedSpyPort(new MemoryRecoveryAdapter()));
+    m.begin("");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(restored()).toBe(0);
+    expect(m.view().alternatives).toEqual([]);
   });
 
-  test("a duplicated tab's copy of the storage restores nothing while the tab it was copied from is open, and offers nothing", async () => {
-    const locks = new Locks();
-    const storage = new TabStorage();
-    const a = await new PreAccountPage(locks, "A", storage).bound();
-    a.type("alice");
-    await a.flushOnly();
-    const duplicate = await new PreAccountPage(
-      locks,
-      "D",
-      storage.copy(),
-    ).bound();
-    expect(duplicate.restored).toEqual([]);
-    expect(duplicate.model.view().alternatives).toEqual([]);
-  });
-
-  test("newer input is never replaced: typed before the next page's look answers, the hand-off is not restored", async () => {
-    const locks = new Locks();
-    const storage = new TabStorage();
-    const a = await new PreAccountPage(locks, "A", storage).bound();
-    a.type("alice");
-    await a.update();
-    a.leave();
-    const b = new PreAccountPage(locks, "B", storage);
-    b.model.begin("");
-    b.type("bob");
-    await b.bound();
-    expect(b.restored).toEqual([]);
-    expect(b.value).toBe("bob");
-  });
-
-  test("binding the pre-account form leaves an account's kept input in the page's registry (another scope is not retired)", async () => {
-    const locks = new Locks();
-    const storage = new TabStorage();
-    const page = new PreAccountPage(locks, "A", storage);
-    // An account editor's kept input: bound to the account's (scoped) store, unshown, dirty.
+  test("binding an account's kept input beside it: the pre-account model retires no scope", () => {
+    const { registry, model: m } = model();
     const account = createRecoverableModel({
       formContext: "task-form:new",
       start: "",
       restore: () => false,
       untouched: () => true,
-      registry: page.registry,
-      tab: page.tab,
-      handoffs: page.handoffs,
+      registry,
     });
     account.bind(new ScopedSpyPort(new MemoryRecoveryAdapter()));
     account.begin("");
     expect(account.edit("{kept task}")).toBe(true);
-    expect(page.registry.dirty().map((h) => h.formContext)).toEqual([
-      "task-form:new",
-    ]);
-    await page.bound();
-    expect(page.registry.dirty().map((h) => h.formContext)).toContain(
-      "task-form:new",
-    );
-  });
-
-  test("storage that cannot be written: the update's save fails (retry or an explicit discard), the input stays", async () => {
-    const storage = new TabStorage();
-    const a = await new PreAccountPage(new Locks(), "A", storage).bound();
-    a.type("alice");
-    storage.failing = true;
-    expect(await flushDirty(a.registry)).toEqual(["failed"]);
-    expect(a.value).toBe("alice");
-    expect(a.registry.dirty()).toHaveLength(1);
-  });
-
-  test("storage that cannot be read: the look is unavailable, nothing restored or removed, the input stays", async () => {
-    const locks = new Locks();
-    const storage = new TabStorage();
-    const a = await new PreAccountPage(locks, "A", storage).bound();
-    a.type("alice");
-    await a.update();
-    a.leave();
-    storage.unreadable = true;
-    const b = await new PreAccountPage(locks, "B", storage).bound();
-    expect(b.model.view().unavailable).toBe(true);
-    expect(b.restored).toEqual([]);
-    storage.unreadable = false;
-    expect(keys(storage)).toHaveLength(2);
+    m.show();
+    m.bind(new ScopedSpyPort(new MemoryRecoveryAdapter()));
+    m.begin("");
+    expect(m.edit("alice")).toBe(true);
+    expect(
+      registry
+        .dirty()
+        .map((h) => h.formContext)
+        .sort(),
+    ).toEqual(["sign-in", "task-form:new"]);
   });
 });
 
 describe("the sign-in and join forms (the production editor bridge)", () => {
-  test("sign-in: the update saves the username only, in this tab's session storage; never the password, never the account's store", async () => {
-    render(
-      protectedTree(
-        <SignInForm
-          online
-          initialUsername=""
-          onSubmit={vi.fn()}
-          onSso={vi.fn()}
-        />,
-      ),
-    );
-    fireEvent.change(screen.getByRole("textbox", { name: /username/i }), {
-      target: { value: "alice" },
-    });
-    fireEvent.change(screen.getByLabelText(/password/i), {
-      target: { value: "PASSWORD-SENTINEL" },
-    });
-    expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
-    const held = Object.keys(window.sessionStorage)
-      .filter((k) => k.startsWith("atlas-preaccount-recovery:"))
-      .map((k) => window.sessionStorage.getItem(k) ?? "");
-    expect(held.map((text) => JSON.parse(text).values)).toEqual([
-      { model: "alice" },
-    ]);
-    expect(JSON.stringify(Object.entries(window.sessionStorage))).not.toContain(
-      "PASSWORD-SENTINEL",
-    );
-    expect(await store().list("sign-in")).toEqual([]);
-  });
-
-  test("join: leaving the form removes its copy (cancellation)", async () => {
-    const view = render(
-      protectedTree(<JoinForm online submitLabel="Join" onSubmit={vi.fn()} />),
-    );
-    fireEvent.change(screen.getByRole("textbox", { name: /username/i }), {
-      target: { value: "newcomer" },
-    });
-    expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
-    const copies = () =>
-      Object.keys(window.sessionStorage).filter((k) =>
-        k.startsWith("atlas-preaccount-recovery:"),
-      );
-    expect(copies()).toHaveLength(1);
-    view.unmount();
-    await waitFor(() => expect(copies()).toEqual([]));
-  });
-
-  test("a copy an earlier page of the tab left is removed once the form's look has read the store (nothing outlives the restore)", async () => {
-    window.sessionStorage.setItem(
-      `atlas-preaccount-recovery:${JSON.stringify(["sign-in", "earlier-page"])}`,
-      JSON.stringify({
-        formContext: "sign-in",
-        tabInstanceId: "earlier-page",
-        values: { model: "stale" },
-        savedAt: "2026-10-27T09:00:00.000Z",
-      }),
-    );
-    render(
-      protectedTree(
-        <SignInForm
-          online
-          initialUsername=""
-          onSubmit={vi.fn()}
-          onSso={vi.fn()}
-        />,
-      ),
-    );
-    await waitFor(() =>
-      expect(
-        Object.keys(window.sessionStorage).filter((k) =>
-          k.startsWith("atlas-preaccount-recovery:"),
+  test.each(["sign-in", "join"] as const)(
+    "%s: the typed username and the password are written nowhere; the update's save fails at once (the page keeps the input)",
+    async (kind) => {
+      render(
+        protectedTree(
+          kind === "join" ? (
+            <JoinForm online submitLabel="Create account" onSubmit={vi.fn()} />
+          ) : (
+            <SignInForm
+              online
+              initialUsername=""
+              onSubmit={vi.fn()}
+              onSso={vi.fn()}
+            />
+          ),
         ),
-      ).toEqual([]),
-    );
-    expect(
-      (screen.getByRole("textbox", { name: /username/i }) as HTMLInputElement)
-        .value,
-    ).toBe("");
-  });
+      );
+      fireEvent.change(username(), { target: { value: "alice" } });
+      fireEvent.change(screen.getByLabelText("Password"), {
+        target: { value: PASSWORD },
+      });
+      expect(pageFormRegistry.dirty().map((h) => h.formContext)).toEqual([
+        kind,
+      ]);
+      expect(await flushDirty(pageFormRegistry)).toEqual(["failed"]);
+      expect(await prepareHandoffs(pageFormRegistry)).not.toContain("failed");
+      expect(username().value).toBe("alice");
+      expect(Object.keys(window.sessionStorage)).toEqual([]);
+      expect(Object.keys(window.localStorage)).toEqual([]);
+      expect(await store().list(kind)).toEqual([]);
+      expect(await store().list(handoffContext(kind))).toEqual([]);
+    },
+  );
 
-  test("an account's editor shown meanwhile neither retires the sign-in form's model nor receives its input; leaving the form removes its copy", async () => {
+  test("an account's editor shown meanwhile neither retires the sign-in form's model nor receives its input; leaving the form keeps it until an account displays", async () => {
     const signIn = render(
       protectedTree(
         <SignInForm
@@ -446,8 +229,6 @@ describe("the sign-in and join forms (the production editor bridge)", () => {
         />,
       ),
     );
-    const username = () =>
-      screen.getByRole("textbox", { name: /username/i }) as HTMLInputElement;
     fireEvent.change(username(), { target: { value: "alice" } });
     // An account's editor (another identity) mounts while the sign-in form is shown, as a switch over the displayed account does.
     render(
@@ -461,18 +242,30 @@ describe("the sign-in and join forms (the production editor bridge)", () => {
     );
     fireEvent.change(username(), { target: { value: "alice2" } });
     expect(username().value).toBe("alice2");
-    expect(await flushDirty(pageFormRegistry)).not.toContain("failed");
-    const copies = () =>
-      Object.keys(window.sessionStorage).filter((k) =>
-        k.startsWith("atlas-preaccount-recovery:"),
-      );
     expect(
-      copies().map(
-        (k) => JSON.parse(window.sessionStorage.getItem(k) ?? "").values.model,
-      ),
-    ).toEqual(["alice2"]);
+      pageFormRegistry
+        .dirty()
+        .map((h) => h.formContext)
+        .includes("sign-in"),
+    ).toBe(true);
     expect(await store().list("sign-in")).toEqual([]);
     signIn.unmount();
-    await waitFor(() => expect(copies()).toEqual([]));
+    // Revision 40 adaptation (review of revision 39, R40-GATE; design assessment C1): was "leaving the form leaves nothing registered"; now
+    // the unmount is no dismissal (a gate removes the form while its attempt resolves): the unfinished username stays the journey's, still
+    // written nowhere, until an authoritative end (here an account displayed: `settlePreAccountInput`), which leaves nothing.
+    await act(async () => dismissalsDecided());
+    expect(
+      pageFormRegistry
+        .dirty()
+        .map((h) => h.formContext)
+        .includes("sign-in"),
+    ).toBe(true);
+    expect(await store().list("sign-in")).toEqual([]);
+    act(() => settlePreAccountInput((context) => context === "sign-in"));
+    await waitFor(() =>
+      expect(pageFormRegistry.all().map((h) => h.formContext)).not.toContain(
+        "sign-in",
+      ),
+    );
   });
 });

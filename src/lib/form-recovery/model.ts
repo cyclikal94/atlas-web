@@ -13,7 +13,7 @@ import {
   shownOf,
 } from "./fields";
 import { HANDOFF_PREFIX, type HandoffStore, pageHandoffs } from "./handoff";
-import { adoptCopy, chooseLeft, isHandoff, readLeft } from "./look";
+import { adoptCopy, chooseLeft, claimLeft, isHandoff, readLeft } from "./look";
 import {
   type DiscardResult,
   type FormRecoveryPort,
@@ -29,9 +29,9 @@ import {
 import {
   acknowledge,
   type FormSession,
+  isDirty,
   list,
   openSession,
-  releaseSource,
   retire,
   retireOtherScopes,
   type SubmissionResult,
@@ -152,9 +152,11 @@ export interface ModelOptions {
    * explicit discard), never a copy of the last value as if the field held it. Set by the editor shown (`probe`).
    */
   /**
-   * Revision 38 (WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026): the model of a form shown before any account is displayed, bound to the
-   * tab's pre-account store (`tab-session-port.ts`). A copy restored is removed at once (its source and lineage), not when this page's own
-   * copy lands, and binding it never retires another scope's sessions (an account's kept input stays the account's).
+   * The model of a form shown before any account is displayed (signing in, joining; revision 38, WEB14A-PREACCOUNT-USERNAME-RECOVERY-20261026).
+   * Revision 39 (review of revision 38, R40-COMPOSITION; design assessment C1/C3, I1/I2/I7): it is never bound to a store, and says that a
+   * reload cannot bring its input back (`restorable` false): no next page is proven to be this tab's (a duplicated tab inherits its
+   * session storage, hand-off reference included), and most of its readers exist only in page memory (an invitation, a requested sign-in, a
+   * switch or a confirmation). Its unfinished input stops an update reload instead; nothing of it is written anywhere.
    */
   preAccount?: boolean;
   /** Tests only. */
@@ -203,6 +205,11 @@ export interface RecoverableModel {
   end(): Promise<DiscardResult>;
   /** The owner forgets the input for good (another identity): the model leaves the page's registry, its copies stay in their store. */
   retire(): void;
+  /**
+   * Revision 40 (review of revision 39, R40-GATE; design assessment C1, I1/I2): the owner's input, exactly as last given, while the model
+   * holds it unfinished (dirty: no success, terminal act or baseline covers it); null otherwise. What an editor that comes back shows.
+   */
+  unfinishedText(): string | null;
   /** Revision 7 (R13): makes a look that could not read the store again; true once it has. */
   retry(): Promise<boolean>;
   restoreAlternative(tabInstanceId: string): Promise<ModelAlternativeResult>;
@@ -295,6 +302,7 @@ export function createRecoverableModel(
     },
     // The model refuses every change while frozen (`edit`): it is held whatever shows it.
     freeze: () => Object.assign(() => undefined, { holds: () => true }),
+    restorable: () => !options.preAccount,
     settled: () => {
       const waiting = [...tickets].filter((ticket) => !ticket.done);
       return waiting.length === 0
@@ -357,7 +365,7 @@ export function createRecoverableModel(
       }
       current.recovery = "ok";
       current.relook = null;
-      if (found.handed) current.claimed = found.handed.tabInstanceId;
+      claimLeft(current, found);
       const { candidates, lineage, offered } = chooseLeft(current, found);
       if (mode === "offer") {
         const showing = view.restored?.tabInstanceId;
@@ -393,7 +401,6 @@ export function createRecoverableModel(
         take(copied);
         noteInput(fields, [MODEL]);
         adoptCopy(current, newest, values, found, lineage);
-        if (options.preAccount) void releaseSource(current);
         relist();
         setView({
           unavailable: false,
@@ -430,7 +437,7 @@ export function createRecoverableModel(
   const model: RecoverableModel = {
     formContext,
     bind(port) {
-      if (retired || !port) return;
+      if (retired || !port || options.preAccount) return;
       const pinned = port.pin?.() ?? null;
       if (session) {
         // Never bound again to another scope (DA-2); a new port for the same database is used from now on.
@@ -440,7 +447,7 @@ export function createRecoverableModel(
       }
       if (port.pin && pinned === null) return;
       const scope = pinned?.scope ?? UNSCOPED;
-      if (!options.preAccount) retireOtherScopes(registry, scope);
+      retireOtherScopes(registry, scope);
       const existing = registry.session(formContext) as FormSession | undefined;
       session = openSession({
         formContext,
@@ -593,6 +600,11 @@ export function createRecoverableModel(
         go();
       }
     },
+    unfinishedText() {
+      if (retired) return null;
+      const dirty = session ? isDirty(session) : provisional.isDirty();
+      return dirty ? text : null;
+    },
     retry,
     restoreAlternative(tabInstanceId) {
       const current = session;
@@ -648,7 +660,6 @@ export function createRecoverableModel(
                 }
               : null,
         };
-        if (options.preAccount) void releaseSource(current);
         relist();
         setView({
           restored: copy,

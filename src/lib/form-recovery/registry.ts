@@ -43,6 +43,12 @@ export interface RecoverableFormHandle {
   unresolved?(): boolean;
   /** Revision 7 (R13): makes that look again; true once it has read the store. Never throws. */
   retryRecovery?(): Promise<boolean>;
+  /**
+   * Revision 39 (review of revision 38, R40-COMPOSITION; design assessment C1, I1/I2): false when nothing the form holds can be brought back
+   * after a reload, whatever is saved (no reader on the next page, or no proof that the next page is this tab's). Such a form's unfinished
+   * input stops an update reload (the person keeps it, or discards it explicitly). A handle without it can be restored.
+   */
+  restorable?(): boolean;
 }
 
 /**
@@ -75,7 +81,7 @@ export interface RecoverableFormRegistry {
    * not hold every member of the form now).
    */
   unheld(): number;
-  /** Revision 2: how many forms have operations outstanding now. */
+  /** Revision 2: how many forms have operations outstanding now (revision 39: and page work admitted before a freeze, `activity.ts`). */
   pending(): number;
   /** Revision 2: settles when every operation outstanding NOW has settled (later ones are not waited for). */
   settled(): Promise<void>;

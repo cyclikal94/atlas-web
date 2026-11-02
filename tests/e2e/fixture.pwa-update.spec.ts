@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import {
+  armReload,
   BANNER,
   build,
   checkForUpdate,
@@ -66,8 +67,9 @@ test.describe("P-U1/P-U2: the update banner across tabs", () => {
 
     // The first tab accepts: it alone reloads, onto B.
     await quiet(first);
+    const firstReload = await armReload(first);
     await first.getByRole("button", { name: "Reload", exact: true }).click();
-    await expect.poll(() => marked(first).catch(() => false)).toBe(false);
+    await firstReload.loaded();
     await displayed(first);
     await expect.poll(() => build(first)).toBe("b");
     await expect(updateRegion(first).getByText(BANNER.available)).toBeHidden();
@@ -82,8 +84,9 @@ test.describe("P-U1/P-U2: the update banner across tabs", () => {
 
     // "Reload here" reloads that tab only.
     await quiet(second);
+    const secondReload = await armReload(second);
     await second.getByRole("button", { name: "Reload here" }).click();
-    await expect.poll(() => marked(second).catch(() => false)).toBe(false);
+    await secondReload.loaded();
     await displayed(second);
     await expect.poll(() => build(second)).toBe("b");
     expect(await marked(third)).toBe(true);
@@ -137,8 +140,9 @@ test.describe("P-U1/P-U2: the update banner across tabs", () => {
     // Another tab accepts: this one is updated elsewhere, dismisses that too, and only its own navigation brings it back.
     await mark(acting);
     await quiet(acting);
+    const actingReload = await armReload(acting);
     await acting.getByRole("button", { name: "Reload", exact: true }).click();
-    await expect.poll(() => marked(acting).catch(() => false)).toBe(false);
+    await actingReload.loaded();
     await displayed(acting);
     await expect.poll(() => build(acting)).toBe("b");
     await tab.bringToFront();
@@ -173,7 +177,10 @@ test.describe("P-U1/P-U2: the update banner across tabs", () => {
   test("a version already waiting when a tab opens is shown there at once, and the worker sent no backend request", async ({
     context,
     generations,
+    requests,
   }) => {
+    // Observed from before the first page: the seeding pages, both installations (A's, then B's while it waits) and the late tab.
+    const observing = await requests.open();
     await seedAccount(context, generations);
     const first = await openApp(context, generations, { form: false });
     await workerActive(first);
@@ -186,20 +193,28 @@ test.describe("P-U1/P-U2: the update banner across tabs", () => {
     const late = await openApp(context, generations, { form: false });
     await expect(updateRegion(late).getByText(BANNER.available)).toBeVisible();
     // The worker's own requests are its installations (`Cache.addAll` of its static files), never a backend path: every backend request
-    // the server saw is one of the pages' own reads (the API-version check and the identity, profile and device reads), and all are GETs.
-    const backend = (await generations.log()).filter((entry) =>
-      /^\/(?:api|health|ready|auth|oidc)(?:[/?]|$)/.test(entry.path),
+    // the server saw is one of the pages' own reads, and all are GETs.
+    //
+    // ADAPTED in revision 43 (F-FRESH-2, labelled). The old oracle took "a page's read" to mean one of four historical paths (health, the
+    // identity, profile and device reads); the current Today screen also reads its sharing defaults and both daily scopes, so that list
+    // failed on legitimate page reads (review r42 fresh, Darwin Firefox: `/api/experimental/v1/defaults/snapshot`) and could never have
+    // told a worker's request for one of the four paths from a page's. The intent is unchanged and now checked per request: every backend
+    // request of the whole case is a GET made by a page's frame and answered by the server, not a worker's request and not answered by a
+    // worker's fetch handler (tests/e2e/request-origin-judge.ts); at least one such page read is attributed, so the check is not vacuous.
+    //
+    // Revision 44 (review r43, F-FRESH-2 incomplete_fix): the window is FINAL, and every backend request admitted to it must also END
+    // inside the bound: one still pending, failed without a server receipt or of unknown origin is a problem, not a pass.
+    const judged = await requests.close(observing, {
+      scope: "backend",
+      final: true,
+    });
+    expect(judged.problems).toEqual([]);
+    expect(judged.complete, "every backend request of the case ended").toBe(
+      true,
     );
-    expect(backend.length).toBeGreaterThan(0);
-    for (const entry of backend) {
-      expect(entry.method).toBe("GET");
-      expect([
-        "/health",
-        "/api/experimental/v1/browser-sessions/current",
-        "/api/experimental/v1/me",
-        "/api/experimental/v1/sessions",
-      ]).toContain(entry.path);
-    }
+    expect(judged.pageBackend.length).toBeGreaterThan(0);
+    for (const attributed of judged.pageBackend)
+      expect(attributed.entry.method).toBe("GET");
   });
 
   test("P-U6: a FROZEN tab that misses the broadcast and the controller change finds out when it comes back, and does not reload", async ({
@@ -227,10 +242,11 @@ test.describe("P-U1/P-U2: the update banner across tabs", () => {
     await cdp.send("Page.setWebLifecycleState", { state: "frozen" });
     await mark(acting);
     await quiet(acting);
+    const actingReload = await armReload(acting);
     await updateRegion(acting)
       .getByRole("button", { name: "Reload", exact: true })
       .click();
-    await expect.poll(() => marked(acting).catch(() => false)).toBe(false);
+    await actingReload.loaded();
     await displayed(acting);
     await expect.poll(() => build(acting)).toBe("b");
     await cdp.send("Page.setWebLifecycleState", { state: "active" });

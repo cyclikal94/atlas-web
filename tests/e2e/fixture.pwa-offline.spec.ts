@@ -103,10 +103,14 @@ test("backend paths and the OIDC callback are never answered with the shell, onl
   context,
   generations,
   browserName,
+  requests,
 }) => {
   await seedAccount(context, generations);
   const app = await openApp(context, generations, { form: false });
   await workerActive(app);
+  // Revision 43: observed from the app's reload on, so the first probe window always holds the reloaded app's own reads (in every engine,
+  // not only when they happen to be late): ordinary page traffic is checked to be told apart, not merely absent.
+  let observing = await requests.open();
   await reloadQuietly(app);
   // A page of the same origin, controlled by the worker, used ONLY to navigate to the backend paths (exempt: the browser's messages about
   // a backend's 404 document are not the app's).
@@ -119,26 +123,44 @@ test("backend paths and the OIDC callback are never answered with the shell, onl
   ).toBe(true);
 
   // Online: each navigation reaches the server (the worker passed it on), once, and the answer is the backend's, never the shell.
-  for (const path of BACKEND) {
-    await generations.clearLog();
+  //
+  // ADAPTED in revision 43 (F-FRESH-2, labelled). Revision 2's oracle compared the server's WHOLE log with `[path]`, so it assumed nothing
+  // else could ask the server anything during a probe; but the signed-in Today tab (`app`) stays open and legitimately reads its sharing
+  // defaults and both daily scopes after its reload (review r42 fresh: Darwin Firefox failed here with exactly those reads, from the app's
+  // page, while the probe's `/api` answer was the correct 404). The intent is unchanged and now checked per request instead of inferred:
+  // in consecutive windows that leave no gap, each probe navigation reaches the server exactly once, from the probe page, answered by
+  // the server (not by a worker's fetch handler) with the expected status; every other request in the window is a page's own (the app's
+  // reads), except exactly the browser's own `/sw.js` update check and `/favicon.ico` (revision 2's labelled exclusion); a worker's
+  // request, a worker-answered backend request, a duplicate, an unfinished or an unattributable request fails
+  // (tests/e2e/request-origin-judge.ts).
+  //
+  // Revision 44 (review r43, F-FRESH-2 incomplete_fix): every request admitted to a window must also END inside its bound (a browser
+  // request still pending, failed without a server receipt or of unknown origin is a problem, not a pass), and the last online window is
+  // FINAL: it has no successor to hand unfinished work to, and is closed before the offline half begins.
+  let appReads = 0;
+  for (const [index, path] of BACKEND.entries()) {
+    const status = path.startsWith("/health") || path === "/ready" ? 200 : 404;
     const response = await probe.goto(`${generations.url}${path}`);
     const body = (await response?.text()) ?? "";
     expect(body, path).not.toContain("protected-root");
-    expect(response?.status(), path).toBe(
-      path.startsWith("/health") || path === "/ready" ? 200 : 404,
+    expect(response?.status(), path).toBe(status);
+    const judged = await requests.close(observing, {
+      scope: "all",
+      probe: { page: requests.labelOf(probe), path, status },
+      final: index === BACKEND.length - 1,
+    });
+    expect(judged.problems, path).toEqual([]);
+    expect(judged.complete, `${path}: every request of the window ended`).toBe(
+      true,
     );
-    // ADAPTED in revision 2 (labelled): the worker SCRIPT's update check (`/sw.js`) is also excluded, as `/favicon.ico` was. The
-    // browser makes it for the registration on its own schedule (here when the probe's neutral page registers the app's worker, as every
-    // page of the app does); it is neither a backend path nor the shell. In driver attempt 7 (run 2026-10-10T23-10-15.198Z-f3d7f9de)
-    // WebKit's check fell inside the `/api` window, with no page request for it in the trace. The intent is unchanged: each backend
-    // navigation reaches the server exactly once, and nothing else of the app does.
-    const seen = (await generations.log())
-      .map((entry) => entry.path)
-      .filter(
-        (seenPath) => seenPath !== "/favicon.ico" && seenPath !== "/sw.js",
-      );
-    expect(seen, path).toEqual([path]);
+    appReads += judged.pageBackend.filter((attributed) =>
+      attributed.seen.some((record) => record.page === requests.labelOf(app)),
+    ).length;
+    if (judged.next !== null) observing = judged.next;
   }
+  expect(appReads, "the app's own backend reads, told apart").toBeGreaterThan(
+    0,
+  );
 
   // Offline: the same navigations fail; none is answered with the shell.
   await probe.goto(`${generations.url}/__neutral`);
