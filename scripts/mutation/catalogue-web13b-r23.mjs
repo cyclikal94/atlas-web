@@ -1,0 +1,142 @@
+// WEB-13b revision 23's mutants (review 27 F27-1 `new`, family calendar-review-page-membership; design assessment C1, invariants 1–7 and
+// P01–P12), in the form and under the rules of `data-catalogue.mjs`, which spreads them into its `UNIT` list after
+// `catalogue-web13b-r22.mjs`. Each restores ONE way the review panel could again mistake leaving a bounded page for leaving the cache (the
+// defect: a remembered review missing from the current 100-row page was said to be "no longer available", and every FETCHED unresolved
+// review was remembered although only 20 may have been shown), or breaks one part of the membership decision the revision adds; `expect`
+// names the tests written for it, so only an assertion of those tests catches it.
+//
+// Considered and not selected (recorded for the reviewer):
+// - "an id the answer does not cover is taken as absent" (assessment: omitted batch key as null). Every membership read asks for ONE id
+//   (`Departed` → `useCachedResources([id])`), and `readResourcesById` answers every id it was asked for up to 100, so a patch that turns a
+//   missing key into `null` is equivalent on every reachable schedule. The one-id shape is itself asserted ("many remembered reviews").
+// - remembering across account services (`byService` keyed by one constant): the panel sits under `WhileCacheOpen` inside the protected
+//   tree, so in the component world every service change also unmounts it (a new panel remembers nothing either way); no reachable schedule
+//   distinguishes the patch. The per-service key stays as defence in depth.
+import { sub } from "./data-catalogue.mjs";
+
+const PANEL = "src/features/calendars/ReviewPanel.tsx";
+const T_PANEL = "tests/features/calendars/review-panel.test.tsx";
+
+const DEPARTED_RETURN =
+  "  return known === null ? <GoneItem id={id} /> : null;\n";
+
+export const UNIT_13B_R23 = [
+  {
+    id: "MU-2762",
+    title:
+      "WEB-13b F27-1 (revision 23): the original defect — a remembered review missing from the current page is said to be gone without asking the cache for it",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect:
+      /F27-1 (boundary shift|shown, moved off the page, then published resolved|a LOCAL acknowledgement|the id read decides)/,
+    patch: (t) => sub(t, DEPARTED_RETURN, "  return <GoneItem id={id} />;\n"),
+  },
+  {
+    id: "MU-2763",
+    title:
+      "WEB-13b F27-1 (revision 23): the original defect's other half — every FETCHED unresolved review is remembered, shown or not",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect: /F27-1 never shown/,
+    patch: (t) =>
+      sub(
+        t,
+        '    if (page.status !== "ready") return;\n',
+        '    if (page.status !== "ready") return;\n    for (const row of unresolved) remember(row.base.id);\n',
+      ),
+  },
+  {
+    id: "MU-2764",
+    title:
+      "WEB-13b F27-1 (revision 23): an unanswered membership read (loading, held, no service) is taken as 'the cache holds none'",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect: /F27-1 the id read decides/,
+    patch: (t) =>
+      sub(
+        t,
+        "      ? read.value[id]\n      : undefined;\n",
+        "      ? read.value[id]\n      : null;\n",
+      ),
+  },
+  {
+    id: "MU-2765",
+    title:
+      "WEB-13b F27-1 (revision 23): a remembered review published resolved off its page is not forgotten (a later deletion says it is gone)",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect: /F27-1 shown, moved off the page, then published resolved/,
+    patch: (t) =>
+      sub(t, "    if (resolved) forget(id);\n", "    if (resolved) return;\n"),
+  },
+  {
+    id: "MU-2766",
+    title:
+      "WEB-13b F27-1 (revision 23): a LOCAL acknowledgement (the merged overlay) is taken as the published resolution and forgets the review",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect: /F27-1 a LOCAL acknowledgement/,
+    patch: (t) =>
+      sub(
+        t,
+        "    parseReview(known.base.value)?.resolved === true;\n",
+        "    parseReview(known.merged.value)?.resolved === true;\n",
+      ),
+  },
+  {
+    id: "MU-2767",
+    title:
+      "WEB-13b F27-1 (revision 23): a card is remembered before it draws its own reading (shown only as loading)",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect: /F27-1 a card that never drew/,
+    patch: (t) =>
+      sub(
+        t,
+        '  const drawn =\n    view.status === "ready" &&\n',
+        "  const drawn =\n    true ||\n",
+      ),
+  },
+  {
+    id: "MU-2768",
+    title:
+      "WEB-13b F27-1 (revision 23): a card whose own reading sees the published resolution does not forget it (the list's later removal says gone)",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect: /F27-1 published resolved then deleted while the LIST is held/,
+    patch: (t) =>
+      sub(t, "    if (settled) forget(id);\n", "    if (settled) return;\n"),
+  },
+  {
+    id: "MU-2769",
+    title:
+      "WEB-13b F27-1 (revision 23): what the panel showed is remembered for every page as one (not by the page's cursor)",
+    file: PANEL,
+    tests: [T_PANEL],
+    expect: /F27-1 page two/,
+    patch: (t) =>
+      sub(
+        t,
+        "  let shownHere = byPage?.get(after) ?? null;\n",
+        "  let shownHere = byPage?.get(null) ?? null;\n",
+      ),
+  },
+];
+
+/**
+ * Real-engine mutant (one isolated whole-mutant job, all three browsers, its own unmutated control): the original F27-1 defect again (the
+ * same patch as MU-2762), judged by the revision-23 case of `fixture.calendar-reviews.spec.ts`, where a sync page publishes a review whose
+ * id sorts first and the 100th shown review moves to page two.
+ */
+export const ENGINE_13B_R23 = [
+  {
+    id: "MU-2770",
+    title:
+      "WEB-13b F27-1 (revision 23): (REAL ENGINE) the original defect — a remembered review missing from the current page is said to be gone",
+    file: PANEL,
+    spec: "tests/e2e/fixture.calendar-reviews.spec.ts",
+    grep: "revision 23 \\(review 27 F27-1\\)",
+    expect: /revision 23 \(review 27 F27-1\)/,
+    patch: (t) => sub(t, DEPARTED_RETURN, "  return <GoneItem id={id} />;\n"),
+  },
+];

@@ -288,6 +288,14 @@ which the task screen reads strictly and consumes once to fill a NEW correction 
 `context_unavailable` review shows no date, title or task; one that leaves the cache while shown is "no longer available". The panel
 reads a page (100) at a time; "Show more reviews" shows 20 more and then the next page, and "Show previous reviews" goes back a page,
 showing it whole (R4); a later page with nothing unresolved still shows the way back. A stored acknowledgement's identity is spent too.
+**Revision 23 (review 27 F27-1):** a page is a bounded slice of the cache, so a review missing from it has not necessarily left the cache
+(a review whose id sorts earlier moves the 100th to the next page). The panel remembers, per page and account service, only the ids of the
+cards it actually drew (never every row the page fetched, and never a copy of a review's content); a remembered review missing from its
+page is asked for by its own id (one id per read, so nothing is clipped to a working set). Only the cache's answer that it holds no such row
+makes it "no longer available"; a review it still holds shows nothing there (it is on its own page, open and actionable); one whose
+PUBLISHED base is resolved is forgotten (a local acknowledgement waiting to be sent or confirmed is not a resolution); while the answer is
+not known nothing is claimed. A new panel (a remount, or the cache gate closing and reopening) remembers nothing. Evidence:
+`review-panel.test.tsx` "revision 23", the revision-23 case of `fixture.calendar-reviews.spec.ts`, MU-2762 to MU-2770.
 
 **Historical finding (F-13b-1; as recorded on 25 October 2026 at the first Running checkpoint `bfe4118`, pre-existing at `b9fd602`, not
 fixed in that checkpoint; kept as it was written):** an ordinary `403` to ANY queued command sent by the production

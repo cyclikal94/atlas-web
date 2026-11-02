@@ -356,3 +356,68 @@ for (const scheme of ["dark", "light"] as const)
       }
     });
   });
+
+test.describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving the cache", () => {
+  test("an earlier review moves the 100th shown review to page two: page one claims nothing of it; a shown review deleted is 'no longer available'; the moved one comes back open", async ({
+    context,
+  }) => {
+    test.setTimeout(120_000);
+    const task = buildTask({
+      n: 57,
+      title: "Put the bins out",
+      slotKey: `anchor:${EVENT}`,
+    });
+    const rid = (n: number) =>
+      `00000000-0000-4000-8000-0000000d${String(n).padStart(4, "0")}`;
+    const generic = (n: number) =>
+      resource({
+        id: rid(n),
+        kind: "review",
+        parent_id: task.occurrenceId,
+        label: "Review task",
+        value: { reason: "context_unavailable", resolved: false, slot: null },
+      });
+    const { page, net } = await reviewsPage(
+      context,
+      task,
+      Array.from({ length: 100 }, (_, i) => generic(1000 + i)),
+    );
+    const at = (n: number) => page.locator(`[data-review="${rid(n)}"]`);
+    const all = page.locator("[data-review]");
+    const gone = page.locator('[data-review-state="gone"]');
+    await expect(all).toHaveCount(20, { timeout: 30_000 });
+    for (let n = 0; n < 4; n += 1)
+      await page.getByRole("button", { name: "Show more reviews" }).click();
+    await expect(all).toHaveCount(100);
+    await expect(at(1099)).toHaveAttribute("data-review-state", "open");
+    // A sync page publishes a review whose id sorts first: the 100th moves to page two, unchanged in the cache.
+    await publish(page, net, [generic(999)], "cursor-2");
+    await expect(at(999)).toHaveAttribute("data-review-state", "open", {
+      timeout: 30_000,
+    });
+    await expect(at(1099)).toHaveCount(0);
+    await expect(gone).toHaveCount(0);
+    expect(
+      ((await rows(page, "cache")) as Array<{ id: string }>).some(
+        (row) => row.id === rid(1099),
+      ),
+    ).toBe(true);
+    // A shown review really deleted: said to be gone; and the moved one is back on page one, open.
+    await publish(page, net, [{ kind: "remove", id: rid(1098) }], "cursor-3");
+    await expect(at(1098)).toHaveAttribute("data-review-state", "gone", {
+      timeout: 30_000,
+    });
+    await expect(at(1098)).toContainText(
+      "This review is no longer available to you.",
+    );
+    await expect(
+      at(1098).getByRole("button", { name: "Acknowledge" }),
+    ).toBeDisabled();
+    await expect(at(1099)).toHaveAttribute("data-review-state", "open");
+    await expect(
+      at(1099).getByRole("button", { name: "Acknowledge" }),
+    ).toBeEnabled();
+    await expect(gone).toHaveCount(1);
+    await expect(all).toHaveCount(101);
+  });
+});

@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
 import { List } from "../../components/ui/list";
@@ -91,6 +91,11 @@ function occurrenceFacts(
     : null;
 }
 
+/** The ids of the reviews one page of the panel actually showed, by the page's cursor. Ids only: no copy of a review is kept. */
+type ShownByPage = Map<string | null, Set<string>>;
+/** Remembers that a card was shown on the current page, or forgets it (published resolved). */
+type Memory = (id: string) => void;
+
 /**
  * "Anchor review needed" (WEB-13b §4.5; the wireframe's review panel): this account's UNRESOLVED anchor reviews from the cache (they are
  * private to the binding's author, so the cache holds only the ones this account may see), a page (100) at a time, the first 20 of it
@@ -101,12 +106,22 @@ function occurrenceFacts(
  *
  * A review the person was shown that then leaves the cache (deleted, or access lost) stays as "This review is no longer available to you."
  * with both actions disabled until the screen is left; one published resolved simply goes.
+ *
+ * Revision 23 (review 27 F27-1): a page is a bounded slice of the cache, so a review missing from it has NOT necessarily left the cache;
+ * an earlier review inserted ahead of it moves it to the next page. So:
+ * - only a card that was actually shown (its own reading drawn on screen) is remembered, never every row the page fetched;
+ * - a remembered review missing from its page is asked for by its id (`Departed`); only the cache's answer that it holds no such row
+ *   makes it "no longer available"; a review still cached elsewhere shows nothing here (it is on its page), one published resolved is
+ *   forgotten, and while the answer is not known nothing is claimed;
+ * - what is remembered belongs to this panel and the account service it was shown under; another service starts with nothing.
  */
 export function ReviewPanel() {
+  const env = useOptionalDataEnv();
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const after = cursors[cursors.length - 1] ?? null;
   const page = useResourceList({ kind: "review", after, limit: PAGE });
   const [shownCount, setShownCount] = useState(STEP);
+  const [, forgotten] = useState(0);
   const rows: ListedResource[] = page.status === "ready" ? page.value.rows : [];
   const unresolved = useMemo(
     () =>
@@ -117,34 +132,51 @@ export function ReviewPanel() {
       }),
     [rows],
   );
-  // The reviews this mount showed on this page, so one that leaves the cache is said to be gone, not silently dropped.
-  const seenByPage = useRef(
-    new Map<string | null, Map<string, ListedResource>>(),
-  );
-  let seen = seenByPage.current.get(after);
-  if (seen === undefined) {
-    seen = new Map();
-    seenByPage.current.set(after, seen);
+  // What this panel showed, per account service (a new service, account or database incarnation remembers nothing of the old one's).
+  const [byService] = useState(() => new WeakMap<object, ShownByPage>());
+  const service = env?.service() ?? null;
+  let byPage: ShownByPage | null = null;
+  if (service !== null) {
+    byPage = byService.get(service) ?? null;
+    if (byPage === null) {
+      byPage = new Map();
+      byService.set(service, byPage);
+    }
   }
+  let shownHere = byPage?.get(after) ?? null;
+  if (byPage !== null && shownHere === null) {
+    shownHere = new Set();
+    byPage.set(after, shownHere);
+  }
+  const remember = useCallback<Memory>(
+    (id) => {
+      shownHere?.add(id);
+    },
+    [shownHere],
+  );
+  const forget = useCallback<Memory>(
+    (id) => {
+      if (shownHere?.delete(id) === true) forgotten((n) => n + 1);
+    },
+    [shownHere],
+  );
   const present = new Set(rows.map((row) => row.base.id));
-  const gone =
-    page.status === "ready"
-      ? [...seen.values()].filter((row) => !present.has(row.base.id))
+  // Shown here earlier, not on this page now: asked for by id before anything is said about them.
+  const departed =
+    page.status === "ready" && shownHere !== null
+      ? [...shownHere].filter((id) => !present.has(id))
       : [];
   useEffect(() => {
-    const own = seenByPage.current.get(after);
-    if (own === undefined || page.status !== "ready") return;
-    for (const row of unresolved) own.set(row.base.id, row);
+    if (page.status !== "ready") return;
     // A review still in the cache but resolved now was settled (by this device or another): it is not "gone".
-    for (const row of rows)
-      if (!unresolved.includes(row)) own.delete(row.base.id);
-  }, [rows, unresolved, after, page.status]);
+    for (const row of rows) if (!unresolved.includes(row)) forget(row.base.id);
+  }, [rows, unresolved, page.status, forget]);
   const shown = unresolved.slice(0, shownCount);
   const next = page.status === "ready" ? page.value.next : null;
   // A later page is kept on screen even with nothing to show on it, so the way back is never lost.
   if (
     shown.length === 0 &&
-    gone.length === 0 &&
+    departed.length === 0 &&
     next === null &&
     cursors.length === 1
   )
@@ -156,22 +188,15 @@ export function ReviewPanel() {
       </h2>
       <List className="flex flex-col gap-2">
         {shown.map((row) => (
-          <ReviewCard key={row.base.id} row={row} />
+          <ReviewCard
+            key={row.base.id}
+            row={row}
+            remember={remember}
+            forget={forget}
+          />
         ))}
-        {gone.map((row) => (
-          <li
-            key={`gone:${row.base.id}`}
-            data-review={row.base.id}
-            data-review-state="gone"
-            className="list-none rounded-row border border-hairline-strong bg-panel p-3.5"
-          >
-            <p className="text-[13.5px] text-ink-1">{NO_LONGER_AVAILABLE}</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Button disabled reason={NO_LONGER_AVAILABLE}>
-                {ACKNOWLEDGE}
-              </Button>
-            </div>
-          </li>
+        {departed.map((id) => (
+          <Departed key={`gone:${id}`} id={id} forget={forget} />
         ))}
       </List>
       {unresolved.length > shownCount || next !== null || cursors.length > 1 ? (
@@ -212,13 +237,62 @@ export function ReviewPanel() {
   );
 }
 
+const FRAME =
+  "list-none rounded-row border border-hairline-strong bg-panel p-3.5";
+
+/** "No longer available": nothing of the review is said, and nothing can be pressed or followed. */
+function GoneItem({ id }: { id: string }) {
+  return (
+    <li data-review={id} data-review-state="gone" className={FRAME}>
+      <p className="text-[13.5px] text-ink-1">{NO_LONGER_AVAILABLE}</p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <Button disabled reason={NO_LONGER_AVAILABLE}>
+          {ACKNOWLEDGE}
+        </Button>
+      </div>
+    </li>
+  );
+}
+
+/**
+ * A review this page showed that the page no longer lists (revision 23, review 27 F27-1). Leaving a bounded page is not leaving the
+ * cache, so the review is asked for by its id: the cache's answer that it holds no such row (deleted, or access lost) makes it "no longer
+ * available"; a review it still holds is on another page and shows nothing here; one published resolved is forgotten. Until that answer
+ * (loading, no open database, a closed service, an id the answer does not cover) nothing is claimed either way. The answer is only
+ * membership: nothing is shown from it and nothing is saved from it (a card's acknowledgement comes from the card's own reading).
+ */
+function Departed({ id, forget }: { id: string; forget: Memory }) {
+  const read = useCachedResources([id]);
+  const known =
+    read.status === "ready" && Object.hasOwn(read.value, id)
+      ? read.value[id]
+      : undefined;
+  // Published resolved: the base the server sent, not a local acknowledgement waiting to be sent or confirmed.
+  const resolved =
+    known !== undefined &&
+    known !== null &&
+    parseReview(known.base.value)?.resolved === true;
+  useEffect(() => {
+    if (resolved) forget(id);
+  }, [resolved, id, forget]);
+  return known === null ? <GoneItem id={id} /> : null;
+}
+
 /**
  * One review's card. The list row only says WHICH review it is; everything the card shows about the review (its reason, slot, privacy,
  * parent, resolved state and whether it may be acknowledged) and everything Acknowledge saves (base, observation, the conflict it
  * replaces) come from the card's own ONE read of it (`useResourceView`). The list and that read are published separately, so a card
  * drawn from the list could show an older review than the one its acknowledgement resolves (WEB-13b review 13, R8).
  */
-function ReviewCard({ row }: { row: ListedResource }) {
+function ReviewCard({
+  row,
+  remember,
+  forget,
+}: {
+  row: ListedResource;
+  remember: Memory;
+  forget: Memory;
+}) {
   const env = useOptionalDataEnv();
   const actions = useDataActions();
   const announcer = useAnnouncer();
@@ -288,6 +362,21 @@ function ReviewCard({ row }: { row: ListedResource }) {
       ? outstanding.latest.local_id
       : null;
 
+  // Shown: the card drew its own reading of an unresolved (or unreadable) review. Only that is remembered (review 27 F27-1), so a
+  // review the page fetched but never showed, or showed only as loading, is never later said to be gone.
+  const drawn =
+    view.status === "ready" &&
+    shownRow !== null &&
+    view.value.merged !== null &&
+    base?.resolved !== true;
+  const settled = view.status === "ready" && base?.resolved === true;
+  useEffect(() => {
+    if (drawn) remember(id);
+  }, [drawn, id, remember]);
+  useEffect(() => {
+    if (settled) forget(id);
+  }, [settled, id, forget]);
+
   const acknowledge = async (supersede: string | null) => {
     if (acting.current) return;
     const outbox = env?.outbox() ?? null;
@@ -329,8 +418,7 @@ function ReviewCard({ row }: { row: ListedResource }) {
     }
   };
 
-  const frame =
-    "list-none rounded-row border border-hairline-strong bg-panel p-3.5";
+  const frame = FRAME;
   // Not read yet (or no open database): the list's copy of the review is not shown in its place, and nothing can be pressed.
   if (view.status !== "ready")
     return (
@@ -347,16 +435,7 @@ function ReviewCard({ row }: { row: ListedResource }) {
     );
   // The review left the cache (deleted, or access lost) before the list said so: the panel's "gone" treatment, never the older copy.
   if (shownRow === null || view.value.merged === null)
-    return (
-      <li data-review={id} data-review-state="gone" className={frame}>
-        <p className="text-[13.5px] text-ink-1">{NO_LONGER_AVAILABLE}</p>
-        <div className="mt-2 flex flex-wrap gap-2">
-          <Button disabled reason={NO_LONGER_AVAILABLE}>
-            {ACKNOWLEDGE}
-          </Button>
-        </div>
-      </li>
-    );
+    return <GoneItem id={id} />;
   // Published resolved (by this device or another) before the list said so: the card goes, as it does once the list shows it.
   if (base?.resolved === true) return null;
   const taskName = task?.label ?? A_TASK;

@@ -8,6 +8,7 @@ import {
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { CacheRow, DraftRow } from "../../../src/data";
+import { admitReceipt, markInFlight } from "../../../src/data/plans/outbox";
 import * as words from "../../../src/features/calendars/copy-review";
 import {
   parseReview,
@@ -1011,5 +1012,453 @@ describe("revision 12 (review 13 R8): the card shows and acknowledges ONE readin
       within(ready).getByRole("button", { name: words.ACKNOWLEDGE }),
     ).toBeEnabled();
     expect(reviewDrafts(w)).toEqual([]);
+  });
+});
+
+describe("revision 23 (review 27 F27-1): leaving a bounded page is not leaving the cache", () => {
+  /** Reviews whose ids sort by `n` (the page's order), private and generic, under one occurrence (as a private review's cache row is). */
+  const rid = (n: number) =>
+    `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const many = (n: number, resolved = false, over: Partial<CacheRow> = {}) =>
+    review(
+      { reason: "context_unavailable", resolved, slot: null },
+      { id: rid(n), label: `Review ${n}`, ...over },
+    );
+  const range = (from: number, count: number) =>
+    Array.from({ length: count }, (_, i) => many(from + i));
+  const item = (n: number) =>
+    document.querySelector(`[data-review="${rid(n)}"]`) as HTMLElement | null;
+  const states = () =>
+    [...document.querySelectorAll("[data-review]")].map(
+      (el) =>
+        `${el.getAttribute("data-review")}:${el.getAttribute("data-review-state")}`,
+    );
+  const gone = () =>
+    [...document.querySelectorAll('[data-review-state="gone"]')].map((el) =>
+      el.getAttribute("data-review"),
+    );
+  const click = async (w: World, name: string) => {
+    await act(async () => {
+      fireEvent.click(present(screen.queryByRole("button", { name })));
+    });
+    await w.settle();
+  };
+  /** Shows the whole of page one (Show more until it holds no more), as a person reading every card does. */
+  const showAll = async (w: World) => {
+    for (let n = 0; n < 4; n += 1) await click(w, words.SHOW_MORE_REVIEWS);
+  };
+  const start = async (rows: CacheRow[], extra = {}) => {
+    const w = await calendarWorld({ cache: [sourceRow(), ...rows], ...extra });
+    await screen.findByText(words.REVIEWS_HEADING);
+    await w.settle();
+    return w;
+  };
+  const cached = (w: World, n: number) =>
+    (w.rows("cache") as CacheRow[]).find((row) => row.id === rid(n));
+  /**
+   * The id reads (`readResourcesById`) of the panel, recorded, and each one-id read can be HELD: the store commits and the watch reads on,
+   * but its publication waits until `release`. The real watches and plans underneath; installed on the mounted controller's store, before
+   * the reads it records are made.
+   */
+  const idReads = (w: World) => {
+    const store = w.env.service()?.store;
+    if (store === undefined) throw new Error("no service");
+    const watch = store.watch.bind(store);
+    const asked: string[][] = [];
+    const held = new Set<string>();
+    const waiting = new Map<string, Set<() => void>>();
+    const heldCount = new Map<string, number>();
+    vi.spyOn(store, "watch").mockImplementation(((
+      plan: { name: string },
+      input: { ids?: readonly string[] },
+    ) => {
+      const source = watch(plan as never, input as never);
+      if (plan.name !== "data.readResourcesById") return source;
+      const ids = [...(input.ids ?? [])];
+      asked.push(ids);
+      const only = ids.length === 1 ? (ids[0] as string) : null;
+      if (only === null) return source;
+      let snapshot = source.get();
+      return {
+        get: () => {
+          if (!held.has(only)) snapshot = source.get();
+          return snapshot;
+        },
+        subscribe: (listener: () => void) => {
+          const publish = () => {
+            snapshot = source.get();
+            listener();
+          };
+          const off = source.subscribe(() => {
+            if (!held.has(only)) return publish();
+            heldCount.set(only, (heldCount.get(only) ?? 0) + 1);
+            const set = waiting.get(only) ?? new Set();
+            set.add(publish);
+            waiting.set(only, set);
+          });
+          return () => {
+            waiting.get(only)?.delete(publish);
+            off();
+          };
+        },
+      };
+    }) as never);
+    return {
+      asked,
+      hold: (id: string) => held.add(id),
+      heldCount: (id: string) => heldCount.get(id) ?? 0,
+      async release(id: string) {
+        held.delete(id);
+        const queue = [...(waiting.get(id) ?? [])];
+        waiting.get(id)?.clear();
+        await act(async () => {
+          for (const publish of queue) publish();
+        });
+        await w.settle();
+      },
+    };
+  };
+
+  test("F27-1 boundary shift (all shown): an earlier review moves the 100th to page two; page one says nothing of it, it is open there and Acknowledge queues it", async () => {
+    const initial = range(1000, 100);
+    const w = await start(initial, { online: false });
+    await showAll(w);
+    expect(states()).toHaveLength(100);
+    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    // The displaced review is unchanged in the cache: only the page's boundary moved.
+    expect(cached(w, 1099)).toEqual(initial[99]);
+    expect(item(999)).toHaveAttribute("data-review-state", "open");
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+    expect(states()).toHaveLength(100);
+    await click(w, words.SHOW_MORE_REVIEWS);
+    expect(states()).toEqual([`${rid(1099)}:open`]);
+    await act(async () => {
+      fireEvent.click(
+        within(present(item(1099))).getByRole("button", {
+          name: words.ACKNOWLEDGE,
+        }),
+      );
+    });
+    await w.settle();
+    const stored = drafts(w);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      kind: "resolve_review",
+      status: "queued",
+      target_resource_ids: [rid(1099)],
+      expected_version: 1,
+    });
+    expect(item(1099)).toHaveAttribute("data-review-state", "queued");
+    // Back: page one whole again, still claiming nothing of the review now on page two.
+    await click(w, words.SHOW_PREVIOUS_REVIEWS);
+    expect(states()).toHaveLength(100);
+    expect(item(999)).not.toBeNull();
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+  });
+
+  test("F27-1 never shown: reviews the page fetched but did not show are not remembered (an insertion or a deletion makes no gone card)", async () => {
+    const w = await start(range(1000, 100));
+    expect(states()).toHaveLength(20);
+    expect(item(1099)).toBeNull();
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    expect(item(999)).not.toBeNull();
+    expect(gone()).toEqual([]);
+    // A fetched but never shown review that really leaves the cache: still nothing to say, the person never saw it.
+    await w.commit({ remove: [rid(1050)] });
+    expect(cached(w, 1050)).toBeUndefined();
+    expect(gone()).toEqual([]);
+    await showAll(w);
+    // Shown now: 999 to 1099 without 1050 is exactly the page.
+    expect(states()).toHaveLength(100);
+    expect(gone()).toEqual([]);
+    // Control: once shown, a review that leaves the cache is said to be gone.
+    await w.commit({ remove: [rid(1060)] });
+    expect(gone()).toEqual([rid(1060)]);
+  });
+
+  test("F27-1 shown, moved off the page, then deleted: page one says it is no longer available, with nothing to press or follow", async () => {
+    const w = await start(range(1000, 100));
+    await showAll(w);
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    expect(gone()).toEqual([]);
+    await w.commit({ remove: [rid(1099)] });
+    expect(cached(w, 1099)).toBeUndefined();
+    const left = present(item(1099));
+    expect(left.getAttribute("data-review-state")).toBe("gone");
+    expect(left).toHaveTextContent(words.NO_LONGER_AVAILABLE);
+    expect(left.textContent).not.toContain(words.PRIVATE_GENERIC);
+    for (const button of within(left).getAllByRole("button"))
+      expect(button).toBeDisabled();
+    expect(within(left).queryByRole("link")).toBeNull();
+    // One element for the review, never a card and a gone item together.
+    expect(
+      document.querySelectorAll(`[data-review="${rid(1099)}"]`),
+    ).toHaveLength(1);
+  });
+
+  test("F27-1 shown, moved off the page, then published resolved: forgotten (never gone), even when later deleted", async () => {
+    const w = await start(range(1000, 100));
+    await showAll(w);
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    await w.commit({
+      put: { store: "cache", rows: [many(1099, true, { version: 2 })] },
+    });
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+    await w.commit({ remove: [rid(1099)] });
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+  });
+
+  test("F27-1 a LOCAL acknowledgement is not a published resolution: sent and receipted on page two (its overlay says resolved), the review is still remembered on page one", async () => {
+    // A valid cache, as production holds rows in: a receipt shows its overlay only over a valid cache (`decideReceipt`).
+    const w = await start(range(1000, 100), {
+      online: false,
+      validCache: true,
+    });
+    await showAll(w);
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    await click(w, words.SHOW_MORE_REVIEWS);
+    await act(async () => {
+      fireEvent.click(
+        within(present(item(1099))).getByRole("button", {
+          name: words.ACKNOWLEDGE,
+        }),
+      );
+    });
+    await w.settle();
+    expect(item(1099)).toHaveAttribute("data-review-state", "queued");
+    // A queued draft has no overlay yet (it is written when the draft is claimed): the PRODUCTION claim (W5) and receipt (W6), so the
+    // merged review says resolved while the published base does not.
+    const stored = drafts(w);
+    expect(stored).toHaveLength(1);
+    const localId = (stored[0] as DraftRow).local_id;
+    const service = w.env.service();
+    if (service === null) throw new Error("no service");
+    await act(async () => {
+      expect(
+        await service.commit(markInFlight, {
+          captured: service.capture(1),
+          localId,
+        }),
+      ).toMatchObject({ kind: "applied" });
+      expect(
+        await service.commit(admitReceipt, {
+          captured: service.capture(1),
+          localId,
+          revision: 5,
+        }),
+      ).toMatchObject({ kind: "applied" });
+    });
+    await w.settle();
+    expect(drafts(w)[0]?.status).toBe("acknowledged");
+    // The precondition: the card's reading is the overlay's resolved review (an acknowledged card), the cache's base is unresolved.
+    expect(item(1099)).toHaveAttribute("data-review-state", "acknowledged");
+    expect(item(1099)).toHaveTextContent(words.ACKNOWLEDGED);
+    expect(parseReview(cached(w, 1099)?.value)?.resolved).toBe(false);
+    await click(w, words.SHOW_PREVIOUS_REVIEWS);
+    expect(item(1099)).toBeNull();
+    expect(gone()).toEqual([]);
+    // Access lost before the sync that would publish it: the review was shown on page one and has left the cache.
+    await w.commit({ remove: [rid(1099)] });
+    expect(gone()).toEqual([rid(1099)]);
+  });
+
+  test("F27-1 the id read decides, and until it answers nothing is claimed (held answer; deletion; a reinsertion after 'none')", async () => {
+    const w = await start(range(1000, 100));
+    const reads = idReads(w);
+    await showAll(w);
+    reads.hold(rid(1099));
+    await w.commit({ put: { store: "cache", rows: [many(999)] } });
+    expect(reads.asked).toContainEqual([rid(1099)]);
+    expect(item(1099)).toBeNull();
+    // Deleted while its read's answer is held: not yet known, so not yet said.
+    await w.commit({ remove: [rid(1099)] });
+    expect(reads.heldCount(rid(1099))).toBeGreaterThan(0);
+    expect(gone()).toEqual([]);
+    await reads.release(rid(1099));
+    expect(gone()).toEqual([rid(1099)]);
+    // It comes back (access regained) and onto page one again (999 deleted): the card, once, and no gone item.
+    reads.hold(rid(1099));
+    await w.commit({
+      put: { store: "cache", rows: [many(1099)] },
+      remove: [rid(999)],
+    });
+    expect(
+      document.querySelectorAll(`[data-review="${rid(1099)}"]`),
+    ).toHaveLength(1);
+    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    await reads.release(rid(1099));
+    expect(
+      document.querySelectorAll(`[data-review="${rid(1099)}"]`),
+    ).toHaveLength(1);
+    expect(item(1099)).toHaveAttribute("data-review-state", "open");
+    // 999 was shown (all of page one was) and has now left the cache: its deletion is said.
+    expect(gone()).toEqual([rid(999)]);
+  });
+
+  test("F27-1 many remembered reviews: each is asked for by its own id (never a read of more than one), and every one that left is said once", async () => {
+    const w = await start(range(1000, 100));
+    const reads = idReads(w);
+    await showAll(w);
+    await w.commit({ remove: range(1000, 100).map((row) => row.id) });
+    expect(gone()).toHaveLength(100);
+    // The page shows all of its reviews since Show more reached its end: the 30 new ones are drawn at once.
+    await w.commit({ put: { store: "cache", rows: range(2000, 30) } });
+    expect(
+      document.querySelectorAll('[data-review-state="open"]'),
+    ).toHaveLength(30);
+    await w.commit({ remove: range(2000, 30).map((row) => row.id) });
+    const left = gone();
+    expect(left).toHaveLength(130);
+    expect(new Set(left).size).toBe(130);
+    expect(new Set(left)).toEqual(
+      new Set([...range(1000, 100), ...range(2000, 30)].map((row) => row.id)),
+    );
+    // Every id read the panel's gone items made is of one id; none is clipped to a working set.
+    const departedReads = reads.asked.filter((ids) =>
+      ids.some((id) => left.includes(id)),
+    );
+    expect(departedReads.length).toBeGreaterThanOrEqual(130);
+    for (const ids of departedReads) expect(ids).toHaveLength(1);
+  });
+
+  test("F27-1 page two: the cursor's review deleted and one inserted behind the cursor; both ways still work and the inserted one is reachable", async () => {
+    const w = await start(range(1000, 101));
+    await showAll(w);
+    await click(w, words.SHOW_MORE_REVIEWS);
+    expect(states()).toEqual([`${rid(1100)}:open`]);
+    await w.commit({
+      remove: [rid(1099)],
+      put: { store: "cache", rows: [many(999)] },
+    });
+    // Page two is the reviews after the cursor: still 1100, and the way back.
+    expect(states()).toEqual([`${rid(1100)}:open`]);
+    await click(w, words.SHOW_PREVIOUS_REVIEWS);
+    // Page one: 999 (inserted behind the cursor) is reachable; 1099, shown here and deleted, is said to be gone.
+    expect(item(999)).toHaveAttribute("data-review-state", "open");
+    expect(gone()).toEqual([rid(1099)]);
+    expect(
+      document.querySelectorAll('[data-review-state="open"]'),
+    ).toHaveLength(100);
+    await click(w, words.SHOW_MORE_REVIEWS);
+    expect(states()).toEqual([`${rid(1100)}:open`]);
+  });
+
+  test("F27-1 a card that never drew its review (its reading not yet arrived) is not remembered: deleted, it simply goes", async () => {
+    const w = await start([many(1000)]);
+    // A new tree whose card's own reading is held, so the card is drawn only as loading.
+    const store = w.env.service()?.store;
+    if (store === undefined) throw new Error("no service");
+    const watch = store.watch.bind(store);
+    await w.detach();
+    let views = 0;
+    // One loading value, the same each time it is read (a new object per read would never settle).
+    const loading = { status: "loading" } as const;
+    vi.spyOn(store, "watch").mockImplementation(((
+      plan: { name: string },
+      input: { id?: string },
+    ) => {
+      const source = watch(plan as never, input as never);
+      if (plan.name !== "data.readResourceView" || input.id !== rid(1000))
+        return source;
+      views += 1;
+      return {
+        get: () => loading,
+        subscribe: () => source.subscribe(() => undefined),
+      };
+    }) as never);
+    await w.attach();
+    expect(views).toBeGreaterThan(0);
+    expect(item(1000)).toHaveAttribute("data-review-state", "loading");
+    await w.commit({ remove: [rid(1000)] });
+    expect(item(1000)).toBeNull();
+    expect(gone()).toEqual([]);
+  });
+
+  test("F27-1 published resolved then deleted while the LIST is held: the card's own reading forgets it, so the list's later news is not 'gone'", async () => {
+    const w = await start([many(1000), many(1001)]);
+    const store = w.env.service()?.store;
+    if (store === undefined) throw new Error("no service");
+    const watch = store.watch.bind(store);
+    await w.detach();
+    let held = false;
+    let heldPublications = 0;
+    const waiting = new Set<() => void>();
+    vi.spyOn(store, "watch").mockImplementation(((
+      plan: { name: string },
+      input: { kind?: string },
+    ) => {
+      const source = watch(plan as never, input as never);
+      if (plan.name !== "data.readResourceList" || input.kind !== "review")
+        return source;
+      let snapshot = source.get();
+      return {
+        get: () => {
+          if (!held) snapshot = source.get();
+          return snapshot;
+        },
+        subscribe: (listener: () => void) => {
+          const publish = () => {
+            snapshot = source.get();
+            listener();
+          };
+          const off = source.subscribe(() => {
+            if (!held) return publish();
+            heldPublications += 1;
+            waiting.add(publish);
+          });
+          return () => {
+            waiting.delete(publish);
+            off();
+          };
+        },
+      };
+    }) as never);
+    await w.attach();
+    await screen.findByText(words.REVIEWS_HEADING);
+    await w.settle();
+    expect(item(1000)).toHaveAttribute("data-review-state", "open");
+    held = true;
+    await w.commit({
+      put: { store: "cache", rows: [many(1000, true, { version: 2 })] },
+    });
+    // The card's own reading saw the resolution (the list did not): the card goes.
+    expect(item(1000)).toBeNull();
+    await w.commit({ remove: [rid(1000)] });
+    expect(heldPublications).toBeGreaterThan(0);
+    held = false;
+    await act(async () => {
+      for (const publish of [...waiting]) publish();
+    });
+    await w.settle();
+    // The list now lacks it without ever having shown it resolved: it was settled, not lost.
+    expect(item(1000)).toBeNull();
+    expect(gone()).toEqual([]);
+    expect(item(1001)).toHaveAttribute("data-review-state", "open");
+  });
+
+  test("F27-1 lifetime: what a panel showed does not outlive it (a remount, the cache invalidated and recovered)", async () => {
+    const w = await start(range(1000, 2), {
+      production: true,
+      validCache: true,
+    });
+    expect(states()).toEqual([`${rid(1000)}:open`, `${rid(1001)}:open`]);
+    await w.commit({ remove: [rid(1000)] });
+    expect(gone()).toEqual([rid(1000)]);
+    // A new tree: a new panel, which showed nothing yet.
+    await w.remount();
+    await screen.findByText(words.REVIEWS_HEADING);
+    expect(states()).toEqual([`${rid(1001)}:open`]);
+    // The cache invalidated (the panel goes with the gate) and replaced by a recovery without 1001: no deletion is inferred from that.
+    await w.invalidate();
+    expect(screen.queryByText(words.REVIEWS_HEADING)).toBeNull();
+    await w.recover([sourceRow(), many(1002)]);
+    await screen.findByText(words.REVIEWS_HEADING);
+    await w.settle();
+    expect(states()).toEqual([`${rid(1002)}:open`]);
   });
 });
