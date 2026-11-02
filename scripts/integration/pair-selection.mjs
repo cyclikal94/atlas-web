@@ -2,7 +2,7 @@
 //
 // The released integration runner (run.mjs) fetches the RELEASED backend named by contract-pin.json and verifies it against the release's
 // SHA256SUMS; nothing here touches that path, its cache or the pin. This module names the exact development artefacts Decision D approved
-// (backend-pairing/manifest.json in the orchestrator, itself pinned by hash) and checks, before anything starts, that every one of them is
+// (the orchestrator manifest, itself pinned by hash; since R40-PAIR the reconciled normal-pair-manifest.json) and checks, before anything starts, that every one of them is
 // on disk with exactly the approved bytes, that the backend checkout is at the approved commit and tree with no tracked change, and that the
 // host can run the Mach-O arm64 debug executable. Any difference REFUSES the run: there is no override, no fallback and no "closest match".
 //
@@ -12,48 +12,73 @@
 //
 // Labels: UNRELEASED, UNACCEPTED development pairing for diagnostic qualification only. Not a release, not a tagged verification, not
 // production activation, not acceptance; the inherited wrong-length HMAC-signature panic recorded in the backend's review stays open.
+//
+// Revision 40 (R40-PAIR, path reconciliation of 2 November 2026): the approved normal backend is unchanged (source 633edd4 / tree 1f1c84d,
+// executable a6a73bbf…, the same six file identities and types), but it is now read from the coordinator's stable isolated checkout named
+// by the reconciled manifest, not from the active BE-Q23 task checkout, which has moved on to the diagnostic build's source. The two
+// backends therefore have SEPARATE locations: NORMAL_BACKEND below, and DIAGNOSTIC_BACKEND (unchanged) for the diagnostic selection.
+// Decision D's authority stays pinned; the reconciliation authority and its hand-off are pinned beside it, and the authority's content
+// must name exactly this manifest, Decision D's record and its independent review (`reconciliation`, checked by `verifySelection`).
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ORCHESTRATOR = "/Users/kieran/atlas/atlas-orchestrator";
-const BACKEND =
+/** The approved normal backend's stable isolated checkout (path reconciliation, 2 Nov 2026). Never the active BE-Q23 checkout. */
+const NORMAL_BACKEND = `${ORCHESTRATOR}/.local/atlas/maintenance/web09c-r39-admission-20261102/normal-backend`;
+/** The BE-Q23 task checkout at the diagnostic executable's source (the diagnostic selection only). */
+const DIAGNOSTIC_BACKEND =
   "/Users/kieran/atlas/atlas/.agtx/worktrees/f3852338-BE-Q23--Measured-bounded-sync";
 const PAIRING = `${ORCHESTRATOR}/.local/atlas/maintenance/unblock-all-20261029/backend-pairing`;
+const DECISION_D_AUTHORITY = `${ORCHESTRATOR}/approval/web09c-development-pair-approved-20261029.json`;
+const RECONCILIATION_AUTHORITY = `${ORCHESTRATOR}/approval/web09c-r39-path-reconciliation-20261102.json`;
+const RECONCILIATION_REVIEW = `${ORCHESTRATOR}/delivery/tooling/web09c-r39-admission-20261102/review.md`;
 
-/** The approved selection. Every value was verified independently by the current review and design assessment (30 Oct 2026). */
+/** The approved selection. Identities: Decision D (29 Oct 2026); physical paths: the reconciliation of 2 Nov 2026 (R40-PAIR). */
 export const PAIR_SELECTION = Object.freeze({
   label:
-    "UNRELEASED development pairing (Decision D, 29 Oct 2026): diagnostic qualification only; not release, acceptance or activation",
+    "UNRELEASED development pairing (Decision D, 29 Oct 2026; paths reconciled 2 Nov 2026): diagnostic qualification only; not release, acceptance or activation",
   authority: Object.freeze({
-    [`${ORCHESTRATOR}/approval/web09c-development-pair-approved-20261029.json`]:
+    [DECISION_D_AUTHORITY]:
       "98209f388dcbcb11f56320ee225a61b4a6d6d2ea9eb614f5aa444676d89dd246",
     [`${ORCHESTRATOR}/delivery/handoffs/web09c-development-pair-approved-20261029.md`]:
       "65e3417644eaceaa2287411ea62afe4e0192b559591f8723a86a92b8141a377e",
+    [RECONCILIATION_AUTHORITY]:
+      "3b0dd3ccb74a8c6affb631c42c2a8b348fd051da0cc9b260475732789fdeae54",
+    [`${ORCHESTRATOR}/delivery/handoffs/web09c-r39-admission-reconciliation-20261102.md`]:
+      "3456ffa33ef8f8411d7fb0a51b9693ae4f72f2337bd3ec207fe6b90744d48429",
+    [RECONCILIATION_REVIEW]:
+      "f42aea475f3986eb92dde73497464b8f03b90207271f551c8f3b7a2d08a52d95",
+  }),
+  /** Which pinned authority reconciles the paths, and which pinned records its content must name (each a key of `authority`). */
+  reconciliation: Object.freeze({
+    authority: RECONCILIATION_AUTHORITY,
+    original: DECISION_D_AUTHORITY,
+    review: RECONCILIATION_REVIEW,
   }),
   manifest: Object.freeze({
-    path: `${PAIRING}/manifest.json`,
-    sha256: "f434df4ae2cfe8dd42e78efddff3819556bc01b01b88e5a54b818f6f643f70d6",
+    path: `${ORCHESTRATOR}/delivery/tooling/web09c-r39-admission-20261102/normal-pair-manifest.json`,
+    sha256: "202eac1826aa4a66749137d90ba7c7d64a3db4f0cb0ad37f594dedacadd910b4",
   }),
   backend: Object.freeze({
-    checkout: BACKEND,
+    checkout: NORMAL_BACKEND,
     head: "633edd4f3d36383df140f0022d129e49128ba338",
     tree: "1f1c84dc1e3e4fb9b83367fcd3aad86df4e78405",
-    executable: `${BACKEND}/target/debug/atlas-server`,
+    executable: `${NORMAL_BACKEND}/target/debug/atlas-server`,
     apiVersion: "0.30.0",
   }),
   files: Object.freeze({
-    [`${BACKEND}/target/debug/atlas-server`]:
+    [`${NORMAL_BACKEND}/target/debug/atlas-server`]:
       "a6a73bbfb368f17612d00b3b4d71c0c6273764b52e1b514fddd3814e96a294c9",
-    [`${BACKEND}/api/openapi.json`]:
+    [`${NORMAL_BACKEND}/api/openapi.json`]:
       "9433b84572d083b53fdf545e88f69d5a526d254908b97192854d0edeed80aaed",
-    [`${BACKEND}/.agtx/contract/bounded-sync-contract-v1.md`]:
+    [`${NORMAL_BACKEND}/.agtx/contract/bounded-sync-contract-v1.md`]:
       "d8677478cbc315750a6027b13faddf755def0fd33e4e6bd989e5670372bab386",
-    [`${BACKEND}/.agtx/review.md`]:
+    [`${NORMAL_BACKEND}/.agtx/review.md`]:
       "60f6e41a2621eea1810c08c18153fc9e65536aa3bba835a96118be61ae749e9c",
-    [`${BACKEND}/scripts/sync_dense_fixture.py`]:
+    [`${NORMAL_BACKEND}/scripts/sync_dense_fixture.py`]:
       "8ff71cc18b95175f9ad6c8cf1b929b22775fbacb8b09183c2860b69773736cd5",
-    [`${BACKEND}/scripts/api-types/package-lock.json`]:
+    [`${NORMAL_BACKEND}/scripts/api-types/package-lock.json`]:
       "ceb016b20df02408c885a7de9c202c31b4fcf02259a1a16cefae8c66f97200cf",
   }),
   types: Object.freeze({
@@ -130,6 +155,57 @@ export function verifySelection(deps, selection = PAIR_SELECTION) {
     if (got !== null && got !== expected)
       problems.push(`authority ${path}: sha256 ${got}, approved ${expected}`);
   }
+  // R40-PAIR: the path reconciliation must name exactly this manifest, the original authority and its review, as pinned here. A constant
+  // copied wrongly is refused, not trusted because each hash on its own matched.
+  const rec = selection.reconciliation;
+  for (const role of ["authority", "original", "review"])
+    if (!rec || !(rec[role] in selection.authority))
+      problems.push(
+        `the reconciliation's ${role} ${rec?.[role]} is not a pinned authority`,
+      );
+  const reconciliation = rec
+    ? attempt("reconciliation authority JSON", () =>
+        JSON.parse(String(deps.read(rec.authority))),
+      )
+    : null;
+  if (reconciliation !== null) {
+    const expectSame = (what, got, want) => {
+      if (got !== want)
+        problems.push(
+          `the reconciliation's ${what} is ${JSON.stringify(got)}, the selection ${JSON.stringify(want)}`,
+        );
+    };
+    expectSame(
+      "manifest path",
+      reconciliation.manifest?.path,
+      selection.manifest.path,
+    );
+    expectSame(
+      "manifest sha256",
+      reconciliation.manifest?.sha256,
+      selection.manifest.sha256,
+    );
+    expectSame(
+      "original authority path",
+      reconciliation.original_authority?.path,
+      rec.original,
+    );
+    expectSame(
+      "original authority sha256",
+      reconciliation.original_authority?.sha256,
+      selection.authority[rec.original],
+    );
+    expectSame(
+      "independent review path",
+      reconciliation.independent_review?.path,
+      rec.review,
+    );
+    expectSame(
+      "independent review sha256",
+      reconciliation.independent_review?.sha256,
+      selection.authority[rec.review],
+    );
+  }
   const bytes = attempt("manifest", () => deps.read(selection.manifest.path));
   if (bytes !== null) {
     const got = sha256Of(bytes);
@@ -147,6 +223,10 @@ export function verifySelection(deps, selection = PAIR_SELECTION) {
       if (manifest.backend_tree !== selection.backend.tree)
         problems.push(
           `manifest backend_tree ${manifest.backend_tree}, approved ${selection.backend.tree}`,
+        );
+      if (manifest.backend_checkout !== selection.backend.checkout)
+        problems.push(
+          `manifest backend_checkout ${manifest.backend_checkout}, selected ${selection.backend.checkout}`,
         );
       if (!manifest.files || !sameEntries(manifest.files, selection.files))
         problems.push(
@@ -236,8 +316,8 @@ export function stageExecutable(
 // Kieran's answer of 1 November 2026 (approval/be-q23-diagnostic-build-approved-20261101.json, assigned to this task by
 // delivery/handoffs/web-09c-diagnostic-build-approved-20261101.md) approves ONE exact diagnostic executable, `atlas-sync-diagnostic`, for
 // isolated real-expiry (PAIR-X0) and real-pruning (PAIR-X2) qualification, CONDITIONAL on an independent review of this client adapter
-// before any paired execution. It is a separate selection: the normal development selection above stays exactly as it was and keeps
-// refusing a backend checkout that has moved past it; the released control is untouched.
+// before any paired execution. It is a separate selection: the normal development selection above is not repointed at it (since R40-PAIR it
+// reads its own stable checkout, and this one keeps its own location); the released control is untouched.
 //
 // The approved review is pinned by its BYTES. The authority names the backend's rotating `.agtx/review.md`, which now holds a later review
 // (design assessment, 1 Nov 2026: DA-DIAG-PROVENANCE); the preserved copy in the orchestrator holds the approved Review 9 bytes exactly.
@@ -250,7 +330,7 @@ const DIAGNOSTIC_AUTHORITY = `${ORCHESTRATOR}/approval/be-q23-diagnostic-build-a
 const DIAGNOSTIC_HANDOVER = `${ORCHESTRATOR}/delivery/handoffs/web-09c-diagnostic-build-approved-20261101.md`;
 const DIAGNOSTIC_PROPOSAL = `${ORCHESTRATOR}/.local/atlas/maintenance/usage-reset-20261101/diagnostic-build-proposal.json`;
 const PRESERVED_REVIEW = `${ORCHESTRATOR}/.local/atlas/maintenance/unblock-20261101/BE-Q23-review-preserved.md`;
-const DIAGNOSTIC_EXECUTABLE = `${BACKEND}/target/q23-review9/debug/atlas-sync-diagnostic`;
+const DIAGNOSTIC_EXECUTABLE = `${DIAGNOSTIC_BACKEND}/target/q23-review9/debug/atlas-sync-diagnostic`;
 
 export const DIAGNOSTIC_SELECTION = Object.freeze({
   mode: "diagnostic",
@@ -265,16 +345,16 @@ export const DIAGNOSTIC_SELECTION = Object.freeze({
       "b368f2af77f4fb612a6d4fbb5df4e8d9f5d16c5195970133f51200cf64b948d2",
   }),
   review: Object.freeze({
-    named_path: `${BACKEND}/.agtx/review.md`,
+    named_path: `${DIAGNOSTIC_BACKEND}/.agtx/review.md`,
     preserved_path: PRESERVED_REVIEW,
     sha256: "2a8fcb1366fb0fc294606ea34e75679c9c385663786d194217078ed92af13a88",
   }),
   recipe: Object.freeze({
-    path: `${BACKEND}/docs/testing.md`,
+    path: `${DIAGNOSTIC_BACKEND}/docs/testing.md`,
     sha256: "d875870a427bb1ee39d799d3968e33534380c199dc448505c969cef14f0f8ee9",
   }),
   backend: Object.freeze({
-    checkout: BACKEND,
+    checkout: DIAGNOSTIC_BACKEND,
     head: "d9adb95de7ee7a7db90f2ad0fd90824688b8cad1",
     tree: "3ee3008bf8e6d987b15d37cf0103cf43c3d73ff6",
     apiVersion: "0.30.0",
@@ -286,13 +366,13 @@ export const DIAGNOSTIC_SELECTION = Object.freeze({
   }),
   /** Source and contract provenance at the approved HEAD (also covered by the tree; recorded so a reader sees which bytes). */
   files: Object.freeze({
-    [`${BACKEND}/api/openapi.json`]:
+    [`${DIAGNOSTIC_BACKEND}/api/openapi.json`]:
       "9433b84572d083b53fdf545e88f69d5a526d254908b97192854d0edeed80aaed",
-    [`${BACKEND}/.agtx/contract/bounded-sync-contract-v1.md`]:
+    [`${DIAGNOSTIC_BACKEND}/.agtx/contract/bounded-sync-contract-v1.md`]:
       "d8677478cbc315750a6027b13faddf755def0fd33e4e6bd989e5670372bab386",
-    [`${BACKEND}/crates/server/src/bin/atlas-sync-diagnostic.rs`]:
+    [`${DIAGNOSTIC_BACKEND}/crates/server/src/bin/atlas-sync-diagnostic.rs`]:
       "e144091a29e04637ca13bff3ad4baa3b37aa0ecd6163885a7ca26ad47cd4b03d",
-    [`${BACKEND}/crates/server/src/diagnostic.rs`]:
+    [`${DIAGNOSTIC_BACKEND}/crates/server/src/diagnostic.rs`]:
       "7ae7a37efcfb80e1c2dbe2d8ac65011538935210d05f5386d7ef89dc57120096",
   }),
   /** What the executable's ready receipt must say about itself (atlas-sync-diagnostic.rs `serve`). */

@@ -225,9 +225,15 @@ reviewed **before** paired execution. Nothing below is integration, activation o
 opt-in (`segmentedMinApiVersion: null`) are unchanged.
 
 * **Runner:** `node scripts/integration/run-development-pair.mjs --backend development|released|diagnostic [--browsers …] [--evidence <fresh dir>] [--grep …] [--check]`.
-  `development` selects the approved artefacts through `scripts/integration/pair-selection.mjs` (the orchestrator's `backend-pairing/manifest.json`,
-  SHA-256 `f434df4a…`, and every file it names: executable, OpenAPI, bounded contract, backend review, dense fixture, generator lock, types tarball
-  `0.0.0-pairing.20261029`; backend HEAD and tree; tracked-clean checkout; darwin/arm64). Any difference refuses the run. The executable is copied into the
+  `development` selects the approved artefacts through `scripts/integration/pair-selection.mjs` (Decision D's identities: backend HEAD `633edd4f…` and
+  tree `1f1c84dc…`, executable, OpenAPI, bounded contract, backend review, dense fixture, generator lock, types tarball `0.0.0-pairing.20261029`;
+  tracked-clean checkout; darwin/arm64). **Since revision 40 (R40-PAIR)** these are read from the coordinator's stable isolated checkout
+  `.local/atlas/maintenance/web09c-r39-admission-20261102/normal-backend` named by the reconciled manifest
+  `delivery/tooling/web09c-r39-admission-20261102/normal-pair-manifest.json` (SHA-256 `202eac18…`; it replaces Decision D's `backend-pairing/manifest.json`
+  `f434df4a…`, whose paths named the active BE-Q23 checkout, which has since moved on). Decision D's authority stays pinned beside the path reconciliation
+  (`approval/web09c-r39-path-reconciliation-20261102.json` `3b0dd3cc…`, its hand-off `3456ffa3…` and review `f42aea47…`), and that authority must name
+  exactly this manifest, Decision D's record and its review. The diagnostic selection keeps its own location (the BE-Q23 checkout). Any difference
+  refuses the run. The executable is copied into the
   run's own directory, the copy re-hashed and launched, and the kernel's view of the launched process checked. `released` is the released-backend CONTROL
   (the unchanged `fetch-backend.mjs`, verified against SHA256SUMS, into the pair runner's own cache), which runs only the whole-revision cases.
   `--check` verifies selection, source and discovery and starts nothing. The frontend source must be committed (`--diagnostic-dirty` labels a run NOT

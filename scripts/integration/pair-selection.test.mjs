@@ -1,7 +1,15 @@
 // WEB-09c R23-PAIR: the hash-bound selection refuses every difference (doubles), and the real selection holds on this host.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DIAGNOSTIC_SELECTION,
@@ -23,7 +31,6 @@ function world(change = {}) {
     "/b/openapi.json": "openapi",
     "/b/contract.md": "contract",
   };
-  const authority = { "/o/approval.json": "approval" };
   const types = { path: "/o/types.tgz", content: "types" };
   const files = Object.fromEntries(
     Object.entries(contents).map(([p, c]) => [p, sha256Of(c)]),
@@ -31,6 +38,7 @@ function world(change = {}) {
   const manifest = JSON.stringify({
     backend_head: "head1",
     backend_tree: "tree1",
+    backend_checkout: "/b",
     files,
     api_types: {
       path: types.path,
@@ -39,14 +47,36 @@ function world(change = {}) {
     },
     ...(change.manifest ?? {}),
   });
+  const manifestSha256 = sha256Of(change.manifestBytes ?? manifest);
+  // R40-PAIR: the original authority, the path reconciliation naming it, the manifest and the reconciliation's review.
+  const reconciliation = JSON.stringify({
+    original_authority: {
+      path: "/o/approval.json",
+      sha256: sha256Of("approval"),
+    },
+    manifest: { path: "/o/manifest.json", sha256: manifestSha256 },
+    independent_review: { path: "/o/review.md", sha256: sha256Of("review") },
+    ...(change.reconciliation ?? {}),
+  });
+  const authority = {
+    "/o/approval.json": "approval",
+    "/o/reconciliation.json": reconciliation,
+    "/o/review.md": "review",
+  };
   const selection = {
     label: "test",
     authority: Object.fromEntries(
       Object.entries(authority).map(([p, c]) => [p, sha256Of(c)]),
     ),
+    reconciliation: {
+      authority: "/o/reconciliation.json",
+      original: "/o/approval.json",
+      review: "/o/review.md",
+      ...(change.roles ?? {}),
+    },
     manifest: {
       path: "/o/manifest.json",
-      sha256: sha256Of(change.manifestBytes ?? manifest),
+      sha256: manifestSha256,
     },
     backend: {
       checkout: "/b",
@@ -196,6 +226,91 @@ test("refused: a manifest that names other files, another head or another API ve
   }
 });
 
+// R40-PAIR: the path reconciliation is bound by its CONTENT as well as its hash, and the manifest names the checkout that is read.
+for (const [name, change, expected] of [
+  [
+    "the manifest names another backend checkout",
+    { manifest: { backend_checkout: "/elsewhere" } },
+    /^manifest backend_checkout \/elsewhere, selected \/b$/,
+  ],
+  [
+    "the reconciliation names another manifest path",
+    { reconciliation: { manifest: { path: "/o/other.json", sha256: "x" } } },
+    /^the reconciliation's manifest path is "\/o\/other.json"/,
+  ],
+  [
+    "the reconciliation names another manifest hash",
+    {
+      reconciliation: {
+        manifest: { path: "/o/manifest.json", sha256: "f".repeat(64) },
+      },
+    },
+    /^the reconciliation's manifest sha256 is "f{64}"/,
+  ],
+  [
+    "the reconciliation names another original authority",
+    {
+      reconciliation: {
+        original_authority: {
+          path: "/o/approval.json",
+          sha256: "0".repeat(64),
+        },
+      },
+    },
+    /^the reconciliation's original authority sha256 is "0{64}"/,
+  ],
+  [
+    "the reconciliation names another independent review",
+    {
+      reconciliation: {
+        independent_review: {
+          path: "/o/elsewhere.md",
+          sha256: sha256Of("review"),
+        },
+      },
+    },
+    /^the reconciliation's independent review path is "\/o\/elsewhere.md"/,
+  ],
+  [
+    "the selection's reconciliation role is not a pinned authority",
+    { roles: { original: "/o/unpinned.json" } },
+    /^the reconciliation's original \/o\/unpinned.json is not a pinned authority$/,
+  ],
+  [
+    "the reconciliation's review bytes changed",
+    { disk: { "/o/review.md": "edited" } },
+    /^authority \/o\/review.md: sha256/,
+  ],
+  [
+    "the reconciliation authority is not JSON",
+    { disk: { "/o/reconciliation.json": "not json" } },
+    /^reconciliation authority JSON: /,
+  ],
+])
+  test(`refused: ${name} (R40-PAIR)`, () => {
+    const { selection, deps } = world(change);
+    const out = verifySelection(deps, selection);
+    assert.equal(out.ok, false);
+    assert.ok(
+      out.problems.some((p) => expected.test(p)),
+      `${name}: ${JSON.stringify(out.problems)}`,
+    );
+  });
+
+test("refused: a selection without a reconciliation (R40-PAIR)", () => {
+  const { selection, deps } = world();
+  const { reconciliation: _, ...without } = selection;
+  const out = verifySelection(deps, without);
+  assert.equal(out.ok, false);
+  for (const role of ["authority", "original", "review"])
+    assert.ok(
+      out.problems.includes(
+        `the reconciliation's ${role} undefined is not a pinned authority`,
+      ),
+      JSON.stringify(out.problems),
+    );
+});
+
 test("the executable is staged as a COPY and the copy is verified; a copy with other bytes throws", () => {
   const { selection } = world();
   const copies = [];
@@ -225,44 +340,364 @@ test("the executable is staged as a COPY and the copy is verified; a copy with o
   );
 });
 
-// The REAL selection on this host (read-only: hashes and git rev-parse/status of the backend checkout). Skipped, and said so, where the
-// approved artefacts are not present (another machine): there it proves nothing and passes nothing.
+// ---- R40-PAIR: the ADOPTED normal selection on this host ---------------------------------------------------------------------------
 //
-// Revision 26 ADAPTATION R26-A1 (for the reviewer to accept or reject; the original expectation is preserved in the execution report):
-// this test asserted `problems === []`. Since 1 November 2026 the approved backend checkout has moved (HEAD d9adb95, a new tree, a rotated
-// `.agtx/review.md`), so the normal development selection correctly REFUSES on this host (R26-DIAG: "This refusal is correct protection").
-// The intent kept: the real-host verdict is EXACT. Either the checkout is the approved one and nothing is wrong, or it has moved and the
-// refusal is exactly the moved-checkout set: no other file, authority, manifest, type or platform problem is tolerated, and the test
-// never reports the normal selection as usable when it is not.
-const MOVED = [
-  /^file .*\/\.agtx\/review\.md: sha256 [0-9a-f]{64}, approved 60f6e41a/,
-  /^backend HEAD [0-9a-f]{40}, approved 633edd4f/,
-  /^backend tree [0-9a-f]{40}, approved 1f1c84dc/,
-];
-test("the approved selection holds on this host, or refuses exactly a moved backend checkout (R26-A1)", {
-  skip:
-    !existsSync(PAIR_SELECTION.manifest.path) &&
-    "the approved pairing artefacts are not on this host",
-}, () => {
-  const out = verifySelection(
-    realSelectionDeps((cmd, args) =>
-      spawnSync(cmd, args, { encoding: "utf8" }),
+// Revision 40 retires revision 26's adaptation R26-A1 (which tolerated exactly a moved-checkout refusal while the maintained selection read
+// the active BE-Q23 checkout). The path reconciliation of 2 November 2026 retains the approved source at a stable isolated checkout, so the
+// ORIGINAL expectation is restored: on this host the maintained selection, through the DEFAULT dependencies the runner uses
+// (`realSelectionDeps`, git in `PAIR_SELECTION.backend.checkout`), verifies with no problem at all. The moved-checkout refusal is kept as
+// a deliberate NEGATIVE control below; it can no longer satisfy readiness. On a host without the artefacts these tests are skipped and say
+// so: there they prove nothing and pass nothing.
+const ORCH = "/Users/kieran/atlas/atlas-orchestrator";
+const STABLE = `${ORCH}/.local/atlas/maintenance/web09c-r39-admission-20261102/normal-backend`;
+const BE_Q23 =
+  "/Users/kieran/atlas/atlas/.agtx/worktrees/f3852338-BE-Q23--Measured-bounded-sync";
+/**
+ * The approved identities, fixed here INDEPENDENTLY of pair-selection.mjs (from Decision D's manifest f434df4a… and the reconciled manifest
+ * 202eac18…, read and hashed by the author on 2 Nov 2026): a constant mistyped in the selector fails this table, not just a hash on disk.
+ */
+const APPROVED = {
+  head: "633edd4f3d36383df140f0022d129e49128ba338",
+  tree: "1f1c84dc1e3e4fb9b83367fcd3aad86df4e78405",
+  apiVersion: "0.30.0",
+  files: {
+    "target/debug/atlas-server":
+      "a6a73bbfb368f17612d00b3b4d71c0c6273764b52e1b514fddd3814e96a294c9",
+    "api/openapi.json":
+      "9433b84572d083b53fdf545e88f69d5a526d254908b97192854d0edeed80aaed",
+    ".agtx/contract/bounded-sync-contract-v1.md":
+      "d8677478cbc315750a6027b13faddf755def0fd33e4e6bd989e5670372bab386",
+    ".agtx/review.md":
+      "60f6e41a2621eea1810c08c18153fc9e65536aa3bba835a96118be61ae749e9c",
+    "scripts/sync_dense_fixture.py":
+      "8ff71cc18b95175f9ad6c8cf1b929b22775fbacb8b09183c2860b69773736cd5",
+    "scripts/api-types/package-lock.json":
+      "ceb016b20df02408c885a7de9c202c31b4fcf02259a1a16cefae8c66f97200cf",
+  },
+  types: {
+    path: `${ORCH}/.local/atlas/maintenance/unblock-all-20261029/backend-pairing/api-types/atlas-api-types-0.0.0-pairing.20261029.tgz`,
+    sha256: "5694ff2da18af982b8275c32468df3c96ebb85876e63ad1c76698a850568c06a",
+    version: "0.0.0-pairing.20261029",
+  },
+  manifest: {
+    path: `${ORCH}/delivery/tooling/web09c-r39-admission-20261102/normal-pair-manifest.json`,
+    sha256: "202eac1826aa4a66749137d90ba7c7d64a3db4f0cb0ad37f594dedacadd910b4",
+  },
+  authority: {
+    [`${ORCH}/approval/web09c-development-pair-approved-20261029.json`]:
+      "98209f388dcbcb11f56320ee225a61b4a6d6d2ea9eb614f5aa444676d89dd246",
+    [`${ORCH}/delivery/handoffs/web09c-development-pair-approved-20261029.md`]:
+      "65e3417644eaceaa2287411ea62afe4e0192b559591f8723a86a92b8141a377e",
+    [`${ORCH}/approval/web09c-r39-path-reconciliation-20261102.json`]:
+      "3b0dd3ccb74a8c6affb631c42c2a8b348fd051da0cc9b260475732789fdeae54",
+    [`${ORCH}/delivery/handoffs/web09c-r39-admission-reconciliation-20261102.md`]:
+      "3456ffa33ef8f8411d7fb0a51b9693ae4f72f2337bd3ec207fe6b90744d48429",
+    [`${ORCH}/delivery/tooling/web09c-r39-admission-20261102/review.md`]:
+      "f42aea475f3986eb92dde73497464b8f03b90207271f551c8f3b7a2d08a52d95",
+  },
+};
+/** The diagnostic selection's identity BEFORE revision 40 (computed on 2d1d2ab): the normal-only change must not move it. */
+const DIAGNOSTIC_IDENTITY_R39 =
+  "eb628c991ae387f019afd596b6b856f37b26f3ee5755a55e45266085a276a259";
+const ON_HOST =
+  !existsSync(PAIR_SELECTION.manifest.path) &&
+  "the approved pairing artefacts are not on this host (unqualified here)";
+const spawn = (cmd, args) => spawnSync(cmd, args, { encoding: "utf8" });
+/** A deep, mutable copy of the maintained selection. */
+const copyOf = (s) => JSON.parse(JSON.stringify(s));
+/** The selection with its backend location moved to `checkout` (the six file keys and the executable follow), everything else kept. */
+function relocated(selection, checkout) {
+  const s = copyOf(selection);
+  s.files = Object.fromEntries(
+    Object.entries(s.files).map(([p, h]) => [
+      p.replace(selection.backend.checkout, checkout),
+      h,
+    ]),
+  );
+  s.backend.checkout = checkout;
+  s.backend.executable = selection.backend.executable.replace(
+    selection.backend.checkout,
+    checkout,
+  );
+  return s;
+}
+/** The default deps, with git run in `checkout` (only for descriptors deliberately not the maintained one). */
+const depsAt = (checkout) => ({
+  ...realSelectionDeps(spawn),
+  git: (args) => {
+    const done = spawn("git", ["-C", checkout, ...args]);
+    if (done.status !== 0) throw new Error(`git: exit ${done.status}`);
+    return done.stdout.trim();
+  },
+});
+
+test("R40-PAIR: the maintained selection names exactly the approved identities at the reconciled stable paths", () => {
+  assert.equal(PAIR_SELECTION.backend.checkout, STABLE);
+  assert.equal(
+    PAIR_SELECTION.backend.executable,
+    `${STABLE}/target/debug/atlas-server`,
+  );
+  assert.equal(PAIR_SELECTION.backend.head, APPROVED.head);
+  assert.equal(PAIR_SELECTION.backend.tree, APPROVED.tree);
+  assert.equal(PAIR_SELECTION.backend.apiVersion, APPROVED.apiVersion);
+  assert.deepEqual(
+    { ...PAIR_SELECTION.files },
+    Object.fromEntries(
+      Object.entries(APPROVED.files).map(([rel, h]) => [`${STABLE}/${rel}`, h]),
     ),
   );
-  if (out.record.observed.backend.head === PAIR_SELECTION.backend.head) {
-    assert.deepEqual(out.problems, []);
-    return;
-  }
-  assert.equal(out.ok, false, "a moved checkout is never usable");
-  for (const problem of out.problems)
-    assert.ok(
-      MOVED.some((m) => m.test(problem)),
-      `an unexpected refusal besides the moved checkout: ${problem}`,
-    );
-  assert.ok(
-    out.problems.some((p) => MOVED[1].test(p)),
-    "the moved HEAD is named",
+  assert.deepEqual({ ...PAIR_SELECTION.types }, APPROVED.types);
+  assert.deepEqual({ ...PAIR_SELECTION.manifest }, APPROVED.manifest);
+  assert.deepEqual({ ...PAIR_SELECTION.authority }, APPROVED.authority);
+  assert.deepEqual(
+    { ...PAIR_SELECTION.reconciliation },
+    {
+      authority: `${ORCH}/approval/web09c-r39-path-reconciliation-20261102.json`,
+      original: `${ORCH}/approval/web09c-development-pair-approved-20261029.json`,
+      review: `${ORCH}/delivery/tooling/web09c-r39-admission-20261102/review.md`,
+    },
   );
+  assert.deepEqual(
+    { ...PAIR_SELECTION.platform },
+    { os: "darwin", arch: "arm64" },
+  );
+  for (const path of Object.keys(PAIR_SELECTION.files))
+    assert.ok(
+      !path.startsWith(BE_Q23),
+      `${path} reads the active BE-Q23 checkout`,
+    );
+});
+
+test("R40-PAIR: the adopted selection verifies on this host through the runner's default dependencies, with no problem at all", {
+  skip: ON_HOST,
+}, () => {
+  const out = verifySelection(realSelectionDeps(spawn));
+  assert.deepEqual(out.problems, []);
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.record.observed.backend, {
+    head: APPROVED.head,
+    tree: APPROVED.tree,
+    tracked_changes: [],
+  });
+  for (const [rel, h] of Object.entries(APPROVED.files))
+    assert.equal(out.record.observed.files[`${STABLE}/${rel}`], h, rel);
+  assert.equal(out.record.observed.types.sha256, APPROVED.types.sha256);
+  assert.equal(out.record.observed.manifest.sha256, APPROVED.manifest.sha256);
+});
+
+test("R40-PAIR: the default staging copies the stable executable into the run's directory and the copy hashes to the approved bytes", {
+  skip: ON_HOST,
+}, () => {
+  const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "r40-stage-"));
+  try {
+    // A refused copy (other bytes, or no file) is this test's assertion failure, not an unrelated error.
+    let staged = null;
+    assert.doesNotThrow(() => {
+      staged = stageExecutable(dir);
+    });
+    assert.equal(staged.path, join(dir, "atlas-server"));
+    assert.equal(staged.sha256, APPROVED.files["target/debug/atlas-server"]);
+    assert.equal(sha256Of(readFileSync(staged.path)), staged.sha256);
+    assert.equal(statSync(staged.path).mode & 0o777, 0o755);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/** One real input perturbed at a time on top of the DEFAULT deps; each refusal must name its own cause. */
+const REAL_TAMPER = [
+  ...Object.keys(APPROVED.files).map((rel) => [
+    `the stable ${rel} changed`,
+    { hash: `${STABLE}/${rel}` },
+    new RegExp(
+      `^file ${STABLE}/${rel.replace(/[.]/g, "\\.")}: sha256 0{64}, approved ${APPROVED.files[rel]}$`,
+    ),
+  ]),
+  [
+    "the types tarball changed",
+    { hash: APPROVED.types.path },
+    /^types sha256 0{64}, approved 5694ff2d/,
+  ],
+  ...Object.keys(APPROVED.authority).map((path) => [
+    `the authority ${path.slice(ORCH.length)} changed`,
+    { hash: path },
+    new RegExp(
+      `^authority ${path.replace(/[.]/g, "\\.")}: sha256 0{64}, approved`,
+    ),
+  ]),
+  [
+    "Decision D's authority is missing",
+    {
+      missing: `${ORCH}/approval/web09c-development-pair-approved-20261029.json`,
+    },
+    /^authority .*web09c-development-pair-approved-20261029\.json: ENOENT/,
+  ],
+  [
+    "the reconciliation authority is missing",
+    {
+      missing: `${ORCH}/approval/web09c-r39-path-reconciliation-20261102.json`,
+    },
+    /^reconciliation authority JSON: ENOENT/,
+  ],
+  [
+    "the manifest bytes differ",
+    { manifestBytes: "{}" },
+    /^manifest sha256 [0-9a-f]{64}, approved 202eac18/,
+  ],
+  [
+    "the manifest is missing",
+    { missing: APPROVED.manifest.path },
+    /^manifest: ENOENT/,
+  ],
+  [
+    "the backend is at another commit",
+    { git: { "rev-parse HEAD": "d".repeat(40) } },
+    /^backend HEAD d{40}, approved 633edd4f/,
+  ],
+  [
+    "the backend tree differs",
+    { git: { "rev-parse HEAD^{tree}": "e".repeat(40) } },
+    /^backend tree e{40}, approved 1f1c84dc/,
+  ],
+  [
+    "the backend has tracked changes",
+    {
+      git: {
+        "status --porcelain --untracked-files=no":
+          " M crates/server/src/main.rs",
+      },
+    },
+    /^the backend checkout has tracked changes$/,
+  ],
+  [
+    "another platform",
+    { platform: "linux" },
+    /^unsupported platform linux\/arm64/,
+  ],
+  [
+    "another architecture",
+    { arch: "x64" },
+    /^unsupported platform darwin\/x64/,
+  ],
+];
+for (const [name, t, expected] of REAL_TAMPER)
+  test(`R40-PAIR refused on this host: ${name}`, { skip: ON_HOST }, () => {
+    const real = realSelectionDeps(spawn);
+    const deps = {
+      ...real,
+      read: (path) => {
+        if (path === t.missing) throw new Error(`ENOENT ${path}`);
+        if (t.manifestBytes && path === APPROVED.manifest.path)
+          return Buffer.from(t.manifestBytes);
+        return real.read(path);
+      },
+      hashFile: (path) => {
+        if (path === t.missing) throw new Error(`ENOENT ${path}`);
+        if (path === t.hash) return "0".repeat(64);
+        return real.hashFile(path);
+      },
+      git: (args) => t.git?.[args.join(" ")] ?? real.git(args),
+      platform: t.platform ?? real.platform,
+      arch: t.arch ?? real.arch,
+    };
+    const out = verifySelection(deps);
+    assert.equal(out.ok, false);
+    assert.ok(
+      out.problems.some((p) => expected.test(p)),
+      `${name}: ${JSON.stringify(out.problems)}`,
+    );
+  });
+
+test("R40-PAIR negative control: the same selection read from the active BE-Q23 checkout is refused, never usable", {
+  skip: ON_HOST,
+}, () => {
+  const moved = relocated(PAIR_SELECTION, BE_Q23);
+  const out = verifySelection(depsAt(BE_Q23), moved);
+  assert.equal(
+    out.ok,
+    false,
+    "the mutable checkout is never the approved backend",
+  );
+  // Deterministic whatever BE-Q23 now holds: the reconciled manifest names the stable location, not this one.
+  assert.ok(
+    out.problems.includes(
+      `manifest backend_checkout ${STABLE}, selected ${BE_Q23}`,
+    ),
+    JSON.stringify(out.problems),
+  );
+  assert.ok(
+    out.problems.includes(
+      "manifest files differ from the approved selection (paths or hashes)",
+    ),
+  );
+  // The pre-R40 descriptor (old manifest, old paths) is still refused on the moved checkout's identities, as revision 26 recorded.
+  if (out.record.observed.backend.head !== APPROVED.head)
+    assert.ok(
+      out.problems.some((p) =>
+        /^backend HEAD [0-9a-f]{40}, approved 633edd4f/.test(p),
+      ),
+    );
+});
+
+test("R40-PAIR negative control: a normal selection cross-wired to the diagnostic executable or checkout is refused", {
+  skip: ON_HOST,
+}, () => {
+  const wired = copyOf(PAIR_SELECTION);
+  const hash = wired.files[wired.backend.executable];
+  delete wired.files[wired.backend.executable];
+  wired.backend.executable = DIAGNOSTIC_SELECTION.executable.path;
+  wired.files[wired.backend.executable] = hash;
+  const out = verifySelection(realSelectionDeps(spawn), wired);
+  assert.equal(out.ok, false);
+  assert.ok(
+    out.problems.includes(
+      "manifest files differ from the approved selection (paths or hashes)",
+    ),
+  );
+  if (existsSync(DIAGNOSTIC_SELECTION.executable.path))
+    assert.ok(
+      out.problems.some((p) =>
+        p.startsWith(
+          `file ${DIAGNOSTIC_SELECTION.executable.path}: sha256 61e2a0e7`,
+        ),
+      ),
+      JSON.stringify(out.problems),
+    );
+  const atDiagnostic = relocated(
+    PAIR_SELECTION,
+    DIAGNOSTIC_SELECTION.backend.checkout,
+  );
+  assert.equal(
+    verifySelection(depsAt(DIAGNOSTIC_SELECTION.backend.checkout), atDiagnostic)
+      .ok,
+    false,
+  );
+});
+
+test("R40-PAIR: the normal-only change leaves the diagnostic selection's identity and location, and the released path, as they were", () => {
+  assert.equal(
+    selectionIdentity(DIAGNOSTIC_SELECTION),
+    DIAGNOSTIC_IDENTITY_R39,
+  );
+  assert.equal(DIAGNOSTIC_SELECTION.backend.checkout, BE_Q23);
+  assert.equal(
+    DIAGNOSTIC_SELECTION.executable.path,
+    `${BE_Q23}/target/q23-review9/debug/atlas-sync-diagnostic`,
+  );
+  assert.notEqual(
+    PAIR_SELECTION.backend.checkout,
+    DIAGNOSTIC_SELECTION.backend.checkout,
+  );
+  for (const path of [
+    ...Object.keys(PAIR_SELECTION.files),
+    PAIR_SELECTION.manifest.path,
+    PAIR_SELECTION.types.path,
+  ]) {
+    assert.ok(
+      !/contract-pin|atlas-pair-released-backend|SHA256SUMS/.test(path),
+      path,
+    );
+  }
 });
 
 // ---- R26-DIAG: the diagnostic selection ------------------------------------------------------------------------------------------------

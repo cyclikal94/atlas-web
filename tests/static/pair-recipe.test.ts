@@ -132,6 +132,34 @@ describe("the seam is diagnostic only", () => {
 });
 
 describe("the released path is untouched", () => {
+  it("revision 40 (R40-PAIR): the runner verifies the maintained normal selection through its default dependencies before discovery and again after the run, stages from it, and the released branch keeps the unchanged fetcher", () => {
+    const runner = code("scripts/integration/run-development-pair.mjs");
+    // Exactly two verifications of the maintained descriptor with the default deps (preflight, post-run), never another descriptor.
+    expect(
+      runner.match(/verifySelection\(realSelectionDeps\(run\)\)/g),
+    ).toHaveLength(2);
+    expect(runner.match(/verifySelection\(/g)).toHaveLength(2);
+    expect(runner).toMatch(
+      /selection = verifySelection\(realSelectionDeps\(run\)\);\s*writeJson\("selection\.json", selection\);\s*if \(!selection\.ok\)/,
+    );
+    expect(runner).toMatch(
+      /\? verifySelection\(realSelectionDeps\(run\)\)\s*: verifyDiagnosticSelection\(realDiagnosticDeps\(run\)\);\s*summary\.selection_after = \{ ok: after\.ok, problems: after\.problems \};\s*if \(!after\.ok\) failed = true;/,
+    );
+    // The staged copy is the maintained selection's executable (no descriptor argument), and the released branch fetches.
+    expect(runner.match(/stageExecutable\(/g)).toHaveLength(1);
+    expect(runner).toMatch(/const staged = stageExecutable\(tmp\);/);
+    expect(runner).toMatch(/scripts\/integration\/fetch-backend\.mjs/);
+    // The selector reads the normal backend from its own stable location and the diagnostic one from its own.
+    const selector = code("scripts/integration/pair-selection.mjs");
+    expect(selector).toMatch(
+      /const NORMAL_BACKEND = `\$\{ORCHESTRATOR\}\/\.local\/atlas\/maintenance\/web09c-r39-admission-20261102\/normal-backend`;/,
+    );
+    expect(selector).toMatch(/checkout: NORMAL_BACKEND,/);
+    expect(selector).toMatch(/checkout: DIAGNOSTIC_BACKEND,/);
+    // No shared location constant remains (`_` is a word character, so NORMAL_/DIAGNOSTIC_BACKEND do not match).
+    expect(selector).not.toMatch(/\bBACKEND\b/);
+  });
+
   it("the released integration runner and its fetcher never reach the pair modules", () => {
     for (const file of [
       "scripts/integration/run.mjs",

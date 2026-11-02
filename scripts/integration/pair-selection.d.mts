@@ -1,6 +1,12 @@
 export const PAIR_SELECTION: {
   readonly label: string;
   readonly authority: Readonly<Record<string, string>>;
+  /** R40-PAIR: the pinned path-reconciliation authority and the pinned records its content must name (each a key of `authority`). */
+  readonly reconciliation: {
+    readonly authority: string;
+    readonly original: string;
+    readonly review: string;
+  };
   readonly manifest: { readonly path: string; readonly sha256: string };
   readonly backend: {
     readonly checkout: string;
