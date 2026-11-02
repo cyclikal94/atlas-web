@@ -74,9 +74,13 @@ import {
   concludeAttempt,
   finishAttempt,
   launchAttempt,
+  materialiseRetained,
   newAttemptId,
+  preserveFixture,
   RETENTION_SECONDS,
   removeParentIfEmpty,
+  retentionDeps,
+  verifyRetained,
 } from "./diagnostic-fixture.mjs";
 import { freePort } from "./free-port.mjs";
 import { membersOf, processTable, stopMembers } from "./ownership.mjs";
@@ -815,6 +819,11 @@ async function diagnosticStack(browser, caseId) {
   const fixtureParent = mkdtempSync(
     join(process.env.TMPDIR ?? tmpdir(), "atlas-diagnostic-"),
   );
+  // Revision 34 (R34-RET): the attempt's RETAINED directory, a sibling of (never inside) the fixture's parent, equally unknown to the
+  // reaper and outside the invocation's tree: the anchored fixture is kept there through every later clean-up and the runner's exit.
+  const retainedParent = mkdtempSync(
+    join(process.env.TMPDIR ?? tmpdir(), "atlas-diagnostic-retained-"),
+  );
   const bridgeDir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "adc-"));
   const socketPath = join(bridgeDir, "c.sock");
   const envelope = {
@@ -824,7 +833,12 @@ async function diagnosticStack(browser, caseId) {
     engine: browser,
     selection_identity: DIAGNOSTIC_IDENTITY,
     executable: null,
-    fixture: { parent: fixtureParent, leaf: null },
+    fixture: {
+      parent: fixtureParent,
+      leaf: null,
+      retained_parent: retainedParent,
+    },
+    launch: null,
     public_origin: null,
     argv: null,
     env_keys: null,
@@ -849,6 +863,7 @@ async function diagnosticStack(browser, caseId) {
     latched: null,
     fixture_after: null,
     parent_removed: null,
+    retention: null,
   };
   let running = null;
   let bridge = null;
@@ -887,6 +902,21 @@ async function diagnosticStack(browser, caseId) {
             transcriptFile,
             `${JSON.stringify(recordedLine(entry))}\n`,
           ),
+        // Revision 34 (C1): the launch intent, written exclusively before ready is awaited (an intent, not a verified receipt).
+        onSpawn: ({ pid, fixtureDir, args }) => {
+          envelope.launch = {
+            pid,
+            intended_leaf: fixtureDir,
+            retained_parent: retainedParent,
+            argv: args,
+            at: new Date().toISOString(),
+          };
+          writeFileSync(
+            join(attemptDir, "launch-intent.json"),
+            `${JSON.stringify(envelope.launch, null, 2)}\n`,
+            { flag: "wx" },
+          );
+        },
       },
       {
         executable: staged.path,
@@ -1260,9 +1290,20 @@ async function diagnosticStack(browser, caseId) {
     },
     latched: () =>
       running ? running.control.latched() : { kind: "not_launched" },
-    finish: async (eligible) => {
+    // Revision 34 (R34-RET): every launched attempt's owned files are anchored before the shutdown; removal needs that anchor.
+    preserve: async () =>
+      running
+        ? preserveFixture(retentionDeps(), {
+            fixtureDir: running.fixtureDir,
+            receipt: running.ready?.receipt,
+            receiptSha256: running.ready?.receipt_sha256,
+            retainedParent,
+            attempt,
+          })
+        : null,
+    finish: async (remove) => {
       if (!running) return null;
-      const finished = await finishAttempt(running, { remove: eligible });
+      const finished = await finishAttempt(running, { remove });
       envelope.shutdown = {
         requested_remove: finished.requested_remove,
         eof: finished.eof,
@@ -1272,7 +1313,21 @@ async function diagnosticStack(browser, caseId) {
       envelope.exit = finished.exit;
       return finished;
     },
-    terminal: async () => {
+    materialise: async (preservation, finished) => {
+      if (!preservation) return null;
+      envelope.retention = await materialiseRetained(
+        retentionDeps(),
+        preservation,
+        {
+          exit: finished?.exit ?? null,
+          stopped: finished?.stopped ?? null,
+          receipt: running?.ready?.receipt ?? null,
+          receiptSha256: running?.ready?.receipt_sha256 ?? null,
+        },
+      );
+      return envelope.retention;
+    },
+    terminal: async (_finished, retention) => {
       envelope.fixture_after =
         envelope.fixture.leaf === null
           ? null
@@ -1286,15 +1341,35 @@ async function diagnosticStack(browser, caseId) {
         ...attemptProblems(envelope, { readFile: readEvidence, expected }).map(
           (p) => `attempt: ${p}`,
         ),
+        ...verifyRetained(retentionDeps(), retention).map(
+          (p) => `retained: ${p}`,
+        ),
         ...evidenceProblems(),
       ];
     },
   });
   record.removal = {
     eligible: concluded.eligible,
+    preserved: concluded.preserved,
     latched_at_decision: concluded.latched_at_decision,
     requested_remove: concluded.finished?.requested_remove ?? false,
   };
+  record.retention = {
+    parent: retainedParent,
+    dir: concluded.retention?.dir ?? concluded.preservation?.dir ?? null,
+    status: concluded.retention?.status ?? "unavailable",
+  };
+  for (const p of concluded.preservation_problems)
+    record.problems.push(`preservation: ${p}`);
+  for (const p of concluded.retention_problems)
+    record.problems.push(`retention: ${p}`);
+  if (record.retention.dir === null)
+    // Nothing was anchored (no ready attempt): the empty retained parent goes, never recursively.
+    removeParentIfEmpty({ rmdir: rmdirSync }, retainedParent);
+  else
+    log(
+      `${browser} ${caseId}: the attempt's fixture is retained (${record.retention.status}) at ${record.retention.dir}`,
+    );
   record.attempt = concluded.terminal;
   for (const p of concluded.transport) record.problems.push(`transport: ${p}`);
   for (const p of concluded.preliminary)
@@ -1313,6 +1388,8 @@ async function diagnosticStack(browser, caseId) {
   record.complete =
     record.problems.length === 0 &&
     concluded.eligible &&
+    concluded.preserved &&
+    concluded.retention?.status === "verified" &&
     concluded.terminal.length === 0;
   record.finished_at = new Date().toISOString();
   writeJson(`stack-${browser}-${caseId}.json`, record);

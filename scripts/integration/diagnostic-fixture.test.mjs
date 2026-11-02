@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmdirSync,
@@ -28,9 +30,14 @@ import {
   Latched,
   launchArguments,
   launchAttempt,
+  MATERIALISED_FILES,
+  materialiseRetained,
   parseLine,
+  preserveFixture,
   readyProblems,
   removeParentIfEmpty,
+  retentionDeps,
+  verifyRetained,
 } from "./diagnostic-fixture.mjs";
 
 const FAKE = new URL("./diagnostic-fake.mjs", import.meta.url).pathname;
@@ -1059,6 +1066,8 @@ async function conclude({
   latched = null,
   terminal = [],
   throwIn = null,
+  // Revision 34: a ready anchor by default (the healthy composition); `null` composes no preservation step at all.
+  preservation = { ready: true, problems: [], dir: "/retained", anchors: [] },
 } = {}) {
   const order = [];
   const step =
@@ -1069,6 +1078,7 @@ async function conclude({
       return typeof value === "function" ? value(...args) : value;
     };
   let asked = null;
+  const seen = {};
   const out = await concludeAttempt({
     stopTransports: step("stop", transport),
     preliminary: step("preliminary", preliminary),
@@ -1076,13 +1086,23 @@ async function conclude({
       order.push("latched");
       return latched;
     },
+    ...(preservation === null
+      ? {}
+      : { preserve: step("preserve", preservation) }),
     finish: step("finish", (eligible) => {
       asked = eligible;
       return { requested_remove: eligible };
     }),
-    terminal: step("terminal", terminal),
+    materialise: step("materialise", (kept, finished) => {
+      seen.materialised = { kept, finished };
+      return { status: "verified", problems: [] };
+    }),
+    terminal: step("terminal", (finished, retention) => {
+      seen.terminal = { finished, retention };
+      return terminal;
+    }),
   });
-  return { out, order, asked };
+  return { out, order, asked, seen };
 }
 test("DA-DIAG-F: a healthy attempt is judged first, then asked to remove its fixture, then judged again", async () => {
   const { out, order, asked } = await conclude();
@@ -1090,7 +1110,9 @@ test("DA-DIAG-F: a healthy attempt is judged first, then asked to remove its fix
     "stop",
     "preliminary",
     "latched",
+    "preserve",
     "finish",
+    "materialise",
     "terminal",
   ]);
   assert.equal(asked, true);
@@ -1121,17 +1143,22 @@ for (const [name, opts] of [
     const { out, asked, order } = await conclude(opts);
     assert.equal(asked, false);
     assert.equal(out.eligible, false);
-    // Every step still runs: the failure's evidence is complete, and the terminal validation is made too.
+    // Every step still runs: the failure's evidence is complete (its fixture anchored too), and the terminal validation is made.
     assert.deepEqual(order, [
       "stop",
       "preliminary",
       "latched",
+      "preserve",
       "finish",
+      "materialise",
       "terminal",
     ]);
   });
-test("DA-DIAG-F: a terminal-only failure after a healthy removal request stays a failure (and is not reported as retained)", async () => {
-  const { out, asked } = await conclude({
+// Revision 34 (R34-RET): this verdict test proves only that the late failure stays a failure; the RETAINED CONTENT of such an attempt is
+// asserted with the real SQLite stand-in below ("R34-RET with real SQLite: …"). Its retention oracle is now the materialised record handed
+// to the terminal judgement, not the absence of a claim.
+test("DA-DIAG-F: a terminal-only failure after a healthy removal request stays a failure (the retention made before it reaches the terminal judgement)", async () => {
+  const { out, asked, seen } = await conclude({
     terminal: ["attempt: shutdown #9 was not answered by its stopped event"],
   });
   assert.equal(asked, true);
@@ -1140,9 +1167,46 @@ test("DA-DIAG-F: a terminal-only failure after a healthy removal request stays a
     "attempt: shutdown #9 was not answered by its stopped event",
   ]);
   assert.equal(out.finished.requested_remove, true);
+  assert.equal(seen.materialised.kept.dir, "/retained");
+  assert.equal(seen.materialised.finished.requested_remove, true);
+  assert.equal(seen.terminal.retention.status, "verified");
+  assert.equal(out.retention.status, "verified");
 });
+for (const [name, opts] of [
+  ["no preservation step composed", { preservation: null }],
+  [
+    "a preservation that refused (the anchor is not ready)",
+    {
+      preservation: {
+        ready: false,
+        problems: ["anchoring fixture.sqlite: EXDEV"],
+      },
+    },
+  ],
+  [
+    "a preservation claiming ready with a problem",
+    {
+      preservation: { ready: true, problems: ["receipt.json is not anchored"] },
+    },
+  ],
+  ["a preservation that threw", { throwIn: "preserve" }],
+  ["a preservation that returned nothing", { preservation: () => undefined }],
+])
+  test(`R34-RET: a healthy attempt with ${name} is NEVER asked to remove its fixture`, async () => {
+    const { out, asked } = await conclude(opts);
+    assert.equal(
+      out.eligible,
+      true,
+      "the preliminary eligibility is unchanged",
+    );
+    assert.equal(asked, false);
+    assert.equal(out.preserved, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(out.preservation_problems.length > 0, "the refusal is reported");
+  });
 test("DA-DIAG-F with the real stand-in child: a known preliminary failure keeps the fixture (remove:false is sent), its files survive", async () => {
   const parent = tmp();
+  const retained = tmp();
   try {
     const { running } = await launch("normal", parent);
     assert.deepEqual(running.problems, []);
@@ -1153,6 +1217,7 @@ test("DA-DIAG-F with the real stand-in child: a known preliminary failure keeps 
         "interval PAIR-X0.chromium.json: the causal proof cannot be read",
       ],
       latched: () => running.control.latched(),
+      preserve: async () => preserveOf(running, retained),
       finish: (eligible) => finishAttempt(running, { remove: eligible }),
       terminal: async () => [],
     });
@@ -1167,10 +1232,12 @@ test("DA-DIAG-F with the real stand-in child: a known preliminary failure keeps 
   } finally {
     reap();
     rmSync(parent, { recursive: true, force: true });
+    rmSync(retained, { recursive: true, force: true });
   }
 });
 test("DA-DIAG-F with the real stand-in child: an outstanding unanswered command ends by EOF and keeps the fixture", async () => {
   const parent = tmp();
+  const retained = tmp();
   try {
     const { running } = await launch("no-ack-inspect", parent, {
       timeoutMs: 200,
@@ -1181,6 +1248,7 @@ test("DA-DIAG-F with the real stand-in child: an outstanding unanswered command 
       stopTransports: async () => [],
       preliminary: async () => [],
       latched: () => running.control.latched(),
+      preserve: async () => preserveOf(running, retained),
       finish: (eligible) => finishAttempt(running, { remove: eligible }),
       terminal: async () => [],
     });
@@ -1190,5 +1258,500 @@ test("DA-DIAG-F with the real stand-in child: an outstanding unanswered command 
   } finally {
     reap();
     rmSync(parent, { recursive: true, force: true });
+    rmSync(retained, { recursive: true, force: true });
+  }
+});
+
+// ---- revision 34 (R34-RET; design assessment Q1-Q5): the owned fixture survives the terminal judgement ------------------------------
+// The SQLite stand-in (`sqlite:` modes of diagnostic-fake.mjs) keeps a REAL WAL-mode database with committed rows; the maintained
+// preservation, shutdown, materialisation and verification are composed as the runner composes them. Stand-in evidence, never backend.
+function preserveOf(running, retainedParent, deps = retentionDeps()) {
+  return preserveFixture(deps, {
+    fixtureDir: running.fixtureDir,
+    receipt: running.ready.receipt,
+    receiptSha256: running.ready.receipt_sha256,
+    retainedParent,
+    attempt: "att-1",
+  });
+}
+const scratch = [];
+const fresh = () => {
+  const dir = tmp();
+  scratch.push(dir);
+  return dir;
+};
+const clean = () => {
+  reap();
+  for (const dir of scratch.splice(0))
+    rmSync(dir, { recursive: true, force: true });
+};
+/** The usernames committed in a database, read from a COPY (with its WAL when given) so the read never touches the original. */
+async function usernamesOf(files) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const dir = fresh();
+  for (const [name, from] of Object.entries(files))
+    writeFileSync(join(dir, name), readFileSync(from));
+  const db = new DatabaseSync(join(dir, "fixture.sqlite"));
+  try {
+    return db
+      .prepare("SELECT username FROM accounts ORDER BY username")
+      .all()
+      .map((r) => r.username);
+  } finally {
+    db.close();
+  }
+}
+/** The inspectable copy's committed usernames; its recorded tables are ASSERTED first (a missing table is an assertion, not a crash). */
+const inspectedUsernames = (retention) => {
+  assert.deepEqual(
+    retention?.inspect?.tables,
+    { accounts: 2 },
+    "the inspectable copy holds the two committed accounts",
+  );
+  return usernamesOf({
+    "fixture.sqlite": join(retention.dir, "inspect.sqlite"),
+  });
+};
+/** One real attempt of the SQLite stand-in with two committed accounts, concluded by the maintained composition. */
+async function realAttempt(
+  mode,
+  {
+    preliminary = [],
+    terminalThrows = false,
+    deps = retentionDeps(),
+    beforePreserve = null,
+    retainedParent = null,
+    nest = false,
+    kill = false,
+  } = {},
+) {
+  const parent = fresh();
+  let retained = retainedParent ?? fresh();
+  if (nest) {
+    retained = join(parent, "inner");
+    mkdirSync(retained);
+  }
+  const { running } = await launch(
+    `sqlite:${mode}`,
+    parent,
+    mode.startsWith("no-ack") ? { timeoutMs: 200 } : {},
+  );
+  assert.deepEqual(running.problems, []);
+  for (const username of ["ada", "grace"])
+    await running.control.send("add_account", { username, password: "p" });
+  if (mode.startsWith("no-ack"))
+    await within(running.control.send("inspect", {}), 2000);
+  await beforePreserve?.(running, parent);
+  const out = await concludeAttempt({
+    stopTransports: async () => [],
+    preliminary: async () => preliminary,
+    latched: () => running.control.latched(),
+    preserve: async () => {
+      const kept = preserveOf(running, retained, deps);
+      if (kill) {
+        running.child.kill("SIGKILL");
+        await running.exited;
+      }
+      return kept;
+    },
+    finish: (remove) => finishAttempt(running, { remove }),
+    materialise: (kept, finished) =>
+      materialiseRetained(deps, kept, {
+        exit: finished?.exit ?? null,
+        stopped: finished?.stopped ?? null,
+        receipt: running.ready.receipt,
+        receiptSha256: running.ready.receipt_sha256,
+      }),
+    terminal: async (finished, retention) => {
+      if (terminalThrows)
+        throw new Error("the saved evidence cannot be re-read");
+      const problems = [];
+      if (finished?.stopped?.served !== true)
+        problems.push("stopped with served:false");
+      if (finished?.exit?.code !== 0)
+        problems.push(`exited ${JSON.stringify(finished?.exit)}`);
+      problems.push(...verifyRetained(retentionDeps(), retention));
+      return problems;
+    },
+  });
+  return { out, running, parent, retained };
+}
+const sourceRows = (running) =>
+  usernamesOf({
+    "fixture.sqlite": join(running.fixtureDir, "fixture.sqlite"),
+    ...(existsSync(join(running.fixtureDir, "fixture.sqlite-wal"))
+      ? {
+          "fixture.sqlite-wal": join(running.fixtureDir, "fixture.sqlite-wal"),
+        }
+      : {}),
+  });
+
+test("R34-RET with real SQLite: a healthy attempt is removed only after its anchor; the verified retained copy holds the committed rows after the source is gone", async () => {
+  try {
+    const { out, running, parent, retained } = await realAttempt("normal");
+    assert.equal(out.eligible, true);
+    assert.equal(out.preserved, true);
+    assert.equal(out.remove_requested, true);
+    assert.deepEqual(out.terminal, []);
+    assert.equal(
+      existsSync(running.fixtureDir),
+      false,
+      "the executable removed its owned files",
+    );
+    assert.equal(out.retention.status, "verified");
+    assert.equal(out.retention.dir, `${realpathSync(retained)}/retained-att-1`);
+    assert.deepEqual(out.retention.inspect.tables, { accounts: 2 });
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+    const db = out.retention.anchors.find((a) => a.name === "fixture.sqlite");
+    assert.equal(db.dev, running.ready.receipt.database.dev);
+    assert.equal(db.ino, running.ready.receipt.database.ino);
+    const manifest = JSON.parse(
+      readFileSync(join(out.retention.dir, "manifest.json"), "utf8"),
+    );
+    assert.equal(manifest.attempt, "att-1");
+    assert.equal(manifest.receipt_sha256, running.ready.receipt_sha256);
+    assert.deepEqual(manifest.database, {
+      dev: running.ready.receipt.database.dev,
+      ino: running.ready.receipt.database.ino,
+    });
+    assert.deepEqual(manifest.inspect.tables, { accounts: 2 });
+    assert.deepEqual(manifest.quiescence.exit, { code: 0, signal: null });
+    assert.deepEqual(
+      removeParentIfEmpty({ rmdir: rmdirSync }, parent),
+      { removed: true, error: null },
+      "the retained directory is a sibling: the fixture's parent is still removed cleanly",
+    );
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: served:false after a healthy removal request stays a failure AND its fixture is retained with the committed rows", async () => {
+  try {
+    const { out, running } = await realAttempt("served-false");
+    assert.equal(out.remove_requested, true);
+    assert.deepEqual(out.terminal, ["stopped with served:false"]);
+    assert.equal(
+      existsSync(running.fixtureDir),
+      false,
+      "removed by the executable, as the backend does on served:false",
+    );
+    assert.equal(out.retention.status, "verified");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: a terminal evidence-reader exception stays a failure AND the fixture is retained with the committed rows", async () => {
+  try {
+    const { out } = await realAttempt("normal", { terminalThrows: true });
+    assert.equal(out.remove_requested, true);
+    assert.equal(out.terminal.length, 1);
+    assert.match(out.terminal[0], /the saved evidence cannot be re-read/);
+    assert.equal(out.retention.status, "verified");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: rows committed only in the WAL (no checkpoint before the removal) are in the retained copy", async () => {
+  try {
+    const { out, running } = await realAttempt("unclosed");
+    assert.equal(existsSync(running.fixtureDir), false);
+    assert.ok(
+      out.retention.anchors.some((a) => a.name === "fixture.sqlite-wal"),
+      "the WAL was anchored",
+    );
+    assert.equal(out.retention.status, "verified");
+    assert.deepEqual(out.retention.inspect.tables, { accounts: 2 });
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+    // The stimulus is meaningful: the anchored database alone, without its WAL, does not hold the rows.
+    await assert.rejects(
+      usernamesOf({
+        "fixture.sqlite": join(out.retention.dir, "fixture.sqlite"),
+      }),
+      /no such table: accounts/,
+    );
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: a preliminary failure keeps the source (remove:false) and also retains a verified copy", async () => {
+  try {
+    const { out, running } = await realAttempt("normal", {
+      preliminary: ["interval X: the causal proof cannot be read"],
+    });
+    assert.equal(out.remove_requested, false);
+    assert.equal(out.finished.stopped.removed, null);
+    assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+    assert.equal(out.retention.status, "verified");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: an outstanding command ends by EOF (never re-sent); the source and a verified copy are kept", async () => {
+  try {
+    const { out, running } = await realAttempt("no-ack-inspect");
+    assert.equal(out.eligible, false);
+    assert.equal(out.finished.eof, true);
+    assert.equal(out.remove_requested, false);
+    assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+    assert.equal(out.retention.status, "verified");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: a forced death after the anchor removes nothing; the copy is materialised from the anchors once the exit is seen", async () => {
+  try {
+    const { out, running } = await realAttempt("normal", { kill: true });
+    assert.deepEqual(out.finished.exit, { code: null, signal: "SIGKILL" });
+    assert.equal(out.finished.stopped, null);
+    assert.ok(existsSync(join(running.fixtureDir, "fixture.sqlite")));
+    assert.equal(out.retention.status, "verified");
+    assert.deepEqual(await inspectedUsernames(out.retention), ["ada", "grace"]);
+    assert.ok(out.terminal.length > 0, "still a failure");
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: a replaced database is never anchored as the fixture; removal is not asked and the replacement survives", async () => {
+  try {
+    const { out, running, parent } = await realAttempt("normal", {
+      beforePreserve: (r, p) => {
+        const db = join(r.fixtureDir, "fixture.sqlite");
+        writeFileSync(join(p, "moved.sqlite"), readFileSync(db));
+        rmSync(db);
+        writeFileSync(db, "a replacement, not the fixture");
+      },
+    });
+    assert.equal(parent.length > 0, true);
+    assert.equal(
+      out.preservation.ready,
+      false,
+      "preserveFixture itself is not ready",
+    );
+    assert.equal(out.preserved, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(
+      out.preservation_problems.includes(
+        "the fixture database is not the receipt's: not anchored",
+      ),
+    );
+    assert.equal(
+      readFileSync(join(running.fixtureDir, "fixture.sqlite"), "utf8"),
+      "a replacement, not the fixture",
+    );
+    assert.equal(
+      existsSync(join(out.preservation.dir, "fixture.sqlite")),
+      false,
+    );
+    assert.notEqual(out.retention.status, "verified");
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: an anchor that cannot be made (EXDEV) keeps the source; nothing is removed", async () => {
+  try {
+    const deps = {
+      ...retentionDeps(),
+      link: (from, to) => {
+        if (from.endsWith("/fixture.sqlite"))
+          throw Object.assign(new Error("cross-device link"), {
+            code: "EXDEV",
+          });
+        return retentionDeps().link(from, to);
+      },
+    };
+    const { out, running } = await realAttempt("normal", { deps });
+    assert.equal(out.eligible, true);
+    assert.equal(
+      out.preservation.ready,
+      false,
+      "preserveFixture itself is not ready",
+    );
+    assert.equal(out.preserved, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(
+      out.preservation_problems.includes("anchoring fixture.sqlite: EXDEV"),
+    );
+    assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+    assert.ok(out.terminal.length > 0 || out.retention.status !== "verified");
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: an existing retained directory is never reused; removal is not asked", async () => {
+  try {
+    const retained = fresh();
+    mkdirSync(join(retained, "retained-att-1"));
+    const { out, running } = await realAttempt("normal", {
+      retainedParent: retained,
+    });
+    assert.equal(out.preserved, false);
+    assert.equal(out.remove_requested, false);
+    assert.match(out.preservation_problems[0], /it must not exist\): EEXIST/);
+    assert.deepEqual(readdirSync(join(retained, "retained-att-1")), []);
+    assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: a retained parent nested in the fixture's parent is refused; removal is not asked", async () => {
+  try {
+    const { out, running } = await realAttempt("normal", { nest: true });
+    assert.equal(out.preserved, false);
+    assert.equal(out.remove_requested, false);
+    assert.match(out.preservation_problems[0], /nest$/);
+    assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: a manifest that cannot be written after the removal fails the attempt; the anchored bytes survive with the rows", async () => {
+  try {
+    const deps = {
+      ...retentionDeps(),
+      writeExclusive: () => {
+        throw Object.assign(new Error("no space"), { code: "ENOSPC" });
+      },
+    };
+    const { out, running } = await realAttempt("normal", { deps });
+    assert.equal(out.remove_requested, true);
+    assert.equal(existsSync(running.fixtureDir), false);
+    assert.equal(out.retention.status, "failed");
+    assert.deepEqual(out.retention.problems, ["writing the manifest: ENOSPC"]);
+    assert.ok(
+      out.terminal.some((p) => /not retained verified \(failed\)/.test(p)),
+    );
+    assert.deepEqual(
+      await usernamesOf({
+        "fixture.sqlite": join(out.preservation.dir, "fixture.sqlite"),
+      }),
+      ["ada", "grace"],
+      "the anchored database (checkpointed at the close) still holds the rows",
+    );
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: before the exit is observed nothing is materialised or judged; the anchors are kept", async () => {
+  try {
+    const parent = fresh();
+    const retained = fresh();
+    const { running } = await launch("sqlite:normal", parent);
+    await running.control.send("add_account", {
+      username: "ada",
+      password: "p",
+    });
+    const kept = preserveOf(running, retained);
+    assert.equal(kept.ready, true);
+    const early = await materialiseRetained(retentionDeps(), kept, {
+      exit: null,
+      receipt: running.ready.receipt,
+      receiptSha256: running.ready.receipt_sha256,
+    });
+    assert.equal(early.status, "anchored_unverified");
+    assert.equal(early.inspect, null);
+    assert.equal(existsSync(join(kept.dir, "work")), false);
+    assert.equal(existsSync(join(kept.dir, "fixture.sqlite")), true);
+    assert.notDeepEqual(verifyRetained(retentionDeps(), early), []);
+    await finishAttempt(running, { remove: false });
+  } finally {
+    clean();
+  }
+});
+test("R34-RET with real SQLite: an anchor replaced before the materialisation is refused (failed), never materialised", async () => {
+  try {
+    const parent = fresh();
+    const retained = fresh();
+    const { running } = await launch("sqlite:normal", parent);
+    await running.control.send("add_account", {
+      username: "ada",
+      password: "p",
+    });
+    const kept = preserveOf(running, retained);
+    const finished = await finishAttempt(running, { remove: true });
+    rmSync(join(kept.dir, "fixture.sqlite"));
+    writeFileSync(join(kept.dir, "fixture.sqlite"), "another file");
+    const r = await materialiseRetained(retentionDeps(), kept, {
+      exit: finished.exit,
+      receipt: running.ready.receipt,
+      receiptSha256: running.ready.receipt_sha256,
+    });
+    assert.equal(r.status, "failed");
+    assert.deepEqual(r.problems, ["the anchor of fixture.sqlite was replaced"]);
+    assert.equal(r.inspect, null);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET: verifyRetained re-reads the retained copy by hash (a changed copy or manifest is reported)", async () => {
+  try {
+    const { out } = await realAttempt("normal");
+    assert.deepEqual(verifyRetained(retentionDeps(), out.retention), []);
+    writeFileSync(join(out.retention.dir, "inspect.sqlite"), "changed");
+    assert.deepEqual(verifyRetained(retentionDeps(), out.retention), [
+      "the retained inspectable copy changed",
+    ]);
+  } finally {
+    clean();
+  }
+});
+test("R34-RET: the materialised files are SQLite's own state (database, WAL, journal), never the shared-memory index", () => {
+  assert.deepEqual(MATERIALISED_FILES, [
+    "fixture.sqlite",
+    "fixture.sqlite-wal",
+    "fixture.sqlite-journal",
+  ]);
+});
+test("R34-RET: the runner composes the maintained preservation, materialisation and re-verification, and needs a verified retention to pass", () => {
+  const runner = readFileSync(
+    new URL("./run-development-pair.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    runner,
+    /preserve: async \(\) =>\s+running\s+\? preserveFixture\(retentionDeps\(\), \{/,
+  );
+  assert.match(
+    runner,
+    /materialise: async \(preservation, finished\) => \{[\s\S]{0,120}materialiseRetained\(/,
+  );
+  assert.match(runner, /verifyRetained\(retentionDeps\(\), retention\)/);
+  assert.match(
+    runner,
+    /finish: async \(remove\) => \{\s+if \(!running\) return null;\s+const finished = await finishAttempt\(running, \{ remove \}\);/,
+  );
+  assert.match(
+    runner,
+    /concluded\.preserved &&\s+concluded\.retention\?\.status === "verified" &&/,
+  );
+  // The retained parent is a TMPDIR sibling of the fixture's parent: never inside the invocation's recursively removed tree.
+  assert.match(
+    runner,
+    /const retainedParent = mkdtempSync\(\s+join\(process\.env\.TMPDIR \?\? tmpdir\(\), "atlas-diagnostic-retained-"\),\s+\);/,
+  );
+});
+test("R34-RET with real SQLite: a changed receipt.json is never anchored as the ready receipt; removal is not asked", async () => {
+  try {
+    const { out, running } = await realAttempt("normal", {
+      beforePreserve: (r) => {
+        const receipt = join(r.fixtureDir, "receipt.json");
+        rmSync(receipt);
+        writeFileSync(receipt, "{}");
+      },
+    });
+    assert.equal(out.preserved, false);
+    assert.equal(out.remove_requested, false);
+    assert.ok(
+      out.preservation_problems.includes(
+        "receipt.json is not the ready receipt: not anchored",
+      ),
+    );
+    assert.equal(existsSync(join(out.preservation.dir, "receipt.json")), false);
+    assert.deepEqual(await sourceRows(running), ["ada", "grace"]);
+  } finally {
+    clean();
   }
 });

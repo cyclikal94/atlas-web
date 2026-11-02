@@ -52,6 +52,7 @@ import {
   controlCall,
   finishAttempt,
   launchAttempt,
+  RETAINED_SCHEMA,
   RETENTION_SECONDS,
 } from "./diagnostic-fixture.mjs";
 import { CORRELATION_HEADER } from "./pair-attempts.mjs";
@@ -645,6 +646,44 @@ async function composed({ kind, journalNow, invert = false, corrupt = null }) {
       exit: finished.exit,
       latched: finished.latched,
       fixture_after: { leaf_exists: false },
+      // Revision 34 (R34-RET): this stand-in has no fixture files; the record a verified materialisation writes is supplied (its real
+      // production from anchored SQLite is qualified in diagnostic-fixture.test.mjs). The composition judged here is the transports'.
+      retention: {
+        schema: RETAINED_SCHEMA,
+        attempt,
+        status: "verified",
+        dir: `/retained/retained-${attempt}`,
+        source: fixtureDir,
+        anchors: [
+          {
+            name: "fixture.sqlite",
+            dev: "1",
+            ino: "3",
+            size: "8192",
+            sha256: "a".repeat(64),
+          },
+          {
+            name: "receipt.json",
+            dev: "1",
+            ino: "4",
+            size: "1",
+            sha256: running.ready.receipt_sha256,
+          },
+        ],
+        quiescence: {
+          exit: finished.exit,
+          stopped_seq: finished.stopped?.seq ?? null,
+          removed: finished.stopped?.removed ?? null,
+        },
+        inspect: {
+          file: "inspect.sqlite",
+          sha256: "b".repeat(64),
+          integrity: "ok",
+          tables: {},
+        },
+        manifest: { file: "manifest.json", sha256: "c".repeat(64) },
+        problems: [],
+      },
     };
     const readFile = (f) => {
       if (!files.has(f)) throw new Error(`ENOENT ${f}`);

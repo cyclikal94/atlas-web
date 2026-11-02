@@ -28,8 +28,26 @@
 // acknowledged markers (`POST /mark`), so nothing compares the spec's own clock with the runner's.
 // Revision 27 (DA-DIAG-F, C5): `concludeAttempt` validates the evidence BEFORE the owned shutdown decides whether the fixture is removed,
 // and again after it (terminal); a known failure keeps the fixture.
+// Revision 34 (R34-RET, family `diagnostic-fixture-retention-composition`): a preliminary pass alone never authorises the only inspectable
+// fixture's removal, because the terminal judgement (stopped, served, exit, saved evidence) comes AFTER the executable's own removal. Before
+// the sequenced shutdown, `preserveFixture` ANCHORS the owned files: a hard link of each to a private retained directory outside the
+// fixture's parent and every recursively removed tree, bound to the receipt's directory/database identities and receipt hash. Removal is
+// asked only once that anchor is verified (`concludeAttempt` `preserve`); the executable's unlink then removes a NAME, never the bytes.
+// After the executable's exit (no writer is left), `materialiseRetained` hashes the final anchored bytes and materialises a verified,
+// self-contained inspectable copy (SQLite integrity check + VACUUM INTO, with the WAL when one was anchored), sealed by a manifest. A failed
+// anchor keeps the source (remove:false); nothing here ever deletes a file; the retained directory survives every outcome, success included.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync } from "node:fs";
+import {
+  appendFileSync,
+  copyFileSync,
+  constants as fsConstants,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, request as httpRequest } from "node:http";
 import { createJournal } from "./causal-journal.mjs";
 import { createTap } from "./pair-tap.mjs";
@@ -724,6 +742,9 @@ export async function launchAttempt(
     ...(timeoutMs ? { timeoutMs } : {}),
     ...(readyTimeoutMs ? { readyTimeoutMs } : {}),
   });
+  // Revision 34 (design assessment C1): the launch intent (the owned process and the leaf it was told to create) is recorded BEFORE ready
+  // is awaited, so an attempt that never becomes ready is still attributable; it is an intent, never a verified receipt.
+  deps.onSpawn?.({ pid: child.pid ?? null, fixtureDir, args });
   const ready = await control.ready;
   const statOrNull = (path) => {
     try {
@@ -829,6 +850,367 @@ export function removeParentIfEmpty(deps, parent) {
   }
 }
 
+// ---- revision 34 (R34-RET): the owned fixture is anchored before its removal can be asked, and materialised after the exit ----------
+export const RETAINED_SCHEMA = "web09c-diagnostic-retained/1";
+/** SQLite's own state, materialised together for inspection (the shared-memory index is rebuilt by SQLite and is never needed). */
+export const MATERIALISED_FILES = Object.freeze([
+  "fixture.sqlite",
+  "fixture.sqlite-wal",
+  "fixture.sqlite-journal",
+]);
+/** The file-system operations of the retention (injected by the tests to produce the refusals). */
+export function retentionDeps() {
+  return {
+    realpath: realpathSync,
+    lstat: (path) => lstatSync(path, { bigint: true }),
+    link: linkSync,
+    mkdir: (path) => mkdirSync(path, { mode: 0o700 }),
+    readFile: readFileSync,
+    writeExclusive: (path, data) =>
+      writeFileSync(path, data, { flag: "wx", mode: 0o600 }),
+    copyExclusive: (from, to) =>
+      copyFileSync(from, to, fsConstants.COPYFILE_EXCL),
+    openDatabase: async (path, options) => {
+      const { DatabaseSync } = await import("node:sqlite");
+      return options === undefined
+        ? new DatabaseSync(path)
+        : new DatabaseSync(path, options);
+    },
+  };
+}
+const identityOf = (s) => ({ dev: String(s.dev), ino: String(s.ino) });
+const sameIdentity = (a, b) => a?.dev === b?.dev && a?.ino === b?.ino;
+const codeOf = (error) => String(error?.code ?? error?.message ?? error);
+const within = (path, dir) => path === dir || path.startsWith(`${dir}/`);
+
+/**
+ * Anchors the attempt's owned files BEFORE the sequenced shutdown (the executable's `remove` unlinks names; an anchored inode keeps the
+ * bytes, and every later write of the still-running executable — WAL frames, the checkpoint at its pool close — lands in that same inode).
+ * `retainedParent` is the attempt's own private directory: outside the fixture's parent (so a clean `removeParentIfEmpty` still works) and
+ * outside every recursively removed tree. Creates `<retainedParent>/retained-<attempt>` (it must not exist) and hard-links each owned name
+ * that is a regular file into it. Ownership is bound first and again after: the directory and database identities are the receipt's and
+ * receipt.json hashes to the ready event's hash; a replaced, linked or unknown file is never anchored as the fixture. `ready` only when the
+ * database and receipt are anchored and nothing was refused; otherwise the caller must not ask for removal (the source then stays). Never
+ * removes anything (a partial anchor stays, labelled by its problems).
+ */
+export function preserveFixture(
+  deps,
+  { fixtureDir, receipt, receiptSha256, retainedParent, attempt },
+) {
+  const out = {
+    schema: RETAINED_SCHEMA,
+    attempt,
+    ready: false,
+    dir: null,
+    source: fixtureDir ?? null,
+    anchors: [],
+    absent: [],
+    problems: [],
+  };
+  const bad = (p) => {
+    out.problems.push(p);
+    return out;
+  };
+  if (!ATTEMPT_PATTERN.test(String(attempt ?? "")))
+    return bad(`the attempt id ${JSON.stringify(attempt)} is not one`);
+  if (!receipt?.fixture_dir || !receipt?.database || !receiptSha256)
+    return bad("no ready receipt: nothing can be attributed to this attempt");
+  if (!FIXTURE_PATH_PATTERN.test(String(fixtureDir ?? "")))
+    return bad(`the fixture path ${fixtureDir} is not a safe absolute path`);
+  let parent;
+  try {
+    parent = deps.realpath(retainedParent);
+  } catch (error) {
+    return bad(`the retained parent ${retainedParent}: ${codeOf(error)}`);
+  }
+  const fixtureParent = fixtureDir.slice(0, fixtureDir.lastIndexOf("/"));
+  if (within(parent, fixtureParent) || within(fixtureParent, parent))
+    return bad(
+      `the retained parent ${parent} and the fixture's parent ${fixtureParent} nest`,
+    );
+  const dir = `${parent}/retained-${attempt}`;
+  if (!FIXTURE_PATH_PATTERN.test(dir))
+    return bad(`the retained path ${dir} is not a safe absolute path`);
+  try {
+    deps.mkdir(dir);
+  } catch (error) {
+    return bad(`creating ${dir} (it must not exist): ${codeOf(error)}`);
+  }
+  out.dir = dir;
+  const owned = () => {
+    try {
+      const s = deps.lstat(fixtureDir);
+      return (
+        s.isDirectory() && sameIdentity(identityOf(s), receipt.fixture_dir)
+      );
+    } catch {
+      return false;
+    }
+  };
+  if (!owned())
+    return bad("the fixture directory is not the receipt's: nothing anchored");
+  for (const name of OWNED_FILES) {
+    const from = `${fixtureDir}/${name}`;
+    let source;
+    try {
+      source = deps.lstat(from);
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        out.absent.push(name);
+        continue;
+      }
+      bad(`${name}: ${codeOf(error)}`);
+      continue;
+    }
+    if (!source.isFile()) {
+      bad(`${name} is not a regular file: not anchored`);
+      continue;
+    }
+    const id = identityOf(source);
+    if (name === "fixture.sqlite" && !sameIdentity(id, receipt.database)) {
+      bad("the fixture database is not the receipt's: not anchored");
+      continue;
+    }
+    if (name === "receipt.json") {
+      let bytes = null;
+      try {
+        bytes = deps.readFile(from);
+      } catch (error) {
+        bad(`receipt.json cannot be read: ${codeOf(error)}`);
+        continue;
+      }
+      if (sha256(bytes) !== receiptSha256) {
+        bad("receipt.json is not the ready receipt: not anchored");
+        continue;
+      }
+    }
+    const to = `${dir}/${name}`;
+    try {
+      deps.link(from, to);
+    } catch (error) {
+      // A companion SQLite removed between the look and the link (its last connection closed) is absent, not a failure.
+      if (
+        error?.code === "ENOENT" &&
+        !["fixture.sqlite", "receipt.json"].includes(name)
+      ) {
+        out.absent.push(name);
+        continue;
+      }
+      bad(`anchoring ${name}: ${codeOf(error)}`);
+      continue;
+    }
+    let anchored = null;
+    try {
+      anchored = identityOf(deps.lstat(to));
+    } catch (error) {
+      bad(`the anchor of ${name} cannot be read: ${codeOf(error)}`);
+      continue;
+    }
+    if (!sameIdentity(anchored, id)) {
+      bad(`the anchor of ${name} is not the owned file`);
+      continue;
+    }
+    out.anchors.push({ name, ...id, size: String(source.size) });
+  }
+  if (!owned()) bad("the fixture directory changed while it was anchored");
+  for (const name of ["fixture.sqlite", "receipt.json"])
+    if (!out.anchors.some((a) => a.name === name))
+      bad(`${name} is not anchored`);
+  out.ready = out.problems.length === 0;
+  return out;
+}
+
+const quoteIdentifier = (name) => `"${String(name).replaceAll('"', '""')}"`;
+const integrityOf = (db) =>
+  db
+    .prepare("PRAGMA integrity_check")
+    .all()
+    .map((r) => r.integrity_check);
+const tablesOf = (db) =>
+  Object.fromEntries(
+    db
+      .prepare(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name",
+      )
+      .all()
+      .map(({ name }) => [
+        name,
+        Number(
+          db.prepare(`SELECT count(*) AS n FROM ${quoteIdentifier(name)}`).get()
+            .n,
+        ),
+      ]),
+  );
+
+/**
+ * After the shutdown: the anchored bytes made inspectable. Only once the executable's EXIT was observed (no writer is left) are the final
+ * anchored bytes hashed and copied (database with its WAL/journal when anchored) to `work/`, checked by SQLite's integrity check, and
+ * materialised by VACUUM INTO as one self-contained `inspect.sqlite`, checked again read-only; a manifest binding the attempt, receipt,
+ * identities, final hashes, quiescence and inspection is then written exclusively and read back. `status`: `verified`; `anchored_unverified`
+ * (exit not observed: the anchors are kept, never judged); `unavailable` (nothing anchored); `failed` (an anchor or the materialisation was
+ * refused: the anchors stay). The anchors are never opened, only read; nothing is removed.
+ */
+export async function materialiseRetained(
+  deps,
+  preservation,
+  { exit = null, stopped = null, receipt = null, receiptSha256 = null } = {},
+) {
+  const out = {
+    schema: RETAINED_SCHEMA,
+    attempt: preservation?.attempt ?? null,
+    status: "unavailable",
+    dir: preservation?.dir ?? null,
+    source: preservation?.source ?? null,
+    anchors: [],
+    quiescence: {
+      exit,
+      stopped_seq: stopped?.seq ?? null,
+      removed: stopped?.removed ?? null,
+    },
+    inspect: null,
+    manifest: null,
+    problems: [],
+  };
+  const fail = (p) => {
+    out.status = "failed";
+    out.problems.push(p);
+    return out;
+  };
+  if (!preservation?.dir || (preservation.anchors ?? []).length === 0) {
+    out.problems.push("nothing was anchored: no retained representation");
+    return out;
+  }
+  out.status = "anchored_unverified";
+  if (
+    preservation.ready !== true ||
+    !preservation.anchors.some((a) => a.name === "fixture.sqlite")
+  ) {
+    // A refused anchor (the source was then kept) is never materialised: what is anchored may be partial or not the fixture's own.
+    out.problems.push(
+      `the anchor was refused, so it is kept and never materialised: ${(preservation.problems ?? []).join("; ") || "the database is not anchored"}`,
+    );
+    return out;
+  }
+  if (exit === null || exit === undefined) {
+    out.problems.push(
+      "the executable's exit was not observed: the anchored files may still change; they are kept, not verified",
+    );
+    return out;
+  }
+  const { dir } = preservation;
+  for (const anchor of preservation.anchors) {
+    const path = `${dir}/${anchor.name}`;
+    try {
+      const s = deps.lstat(path);
+      if (!s.isFile() || !sameIdentity(identityOf(s), anchor))
+        return fail(`the anchor of ${anchor.name} was replaced`);
+      out.anchors.push({
+        ...anchor,
+        size: String(s.size),
+        sha256: sha256(deps.readFile(path)),
+      });
+    } catch (error) {
+      return fail(`the anchor of ${anchor.name}: ${codeOf(error)}`);
+    }
+  }
+  const work = `${dir}/work`;
+  const inspect = `${dir}/inspect.sqlite`;
+  try {
+    deps.mkdir(work);
+    for (const anchor of out.anchors)
+      if (MATERIALISED_FILES.includes(anchor.name))
+        deps.copyExclusive(`${dir}/${anchor.name}`, `${work}/${anchor.name}`);
+  } catch (error) {
+    return fail(`copying the anchors for inspection: ${codeOf(error)}`);
+  }
+  let db = null;
+  try {
+    db = await deps.openDatabase(`${work}/fixture.sqlite`);
+    const integrity = integrityOf(db);
+    if (integrity.join() !== "ok")
+      return fail(
+        `the anchored database is not intact: ${integrity.join("; ")}`,
+      );
+    db.exec(`VACUUM INTO '${inspect}'`);
+  } catch (error) {
+    return fail(`materialising the anchored database: ${codeOf(error)}`);
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // the copy is ours; a close failure is not the evidence
+    }
+  }
+  try {
+    const view = await deps.openDatabase(inspect, { readOnly: true });
+    try {
+      const integrity = integrityOf(view);
+      if (integrity.join() !== "ok")
+        return fail(
+          `the inspectable copy is not intact: ${integrity.join("; ")}`,
+        );
+      out.inspect = {
+        file: "inspect.sqlite",
+        sha256: sha256(deps.readFile(inspect)),
+        integrity: "ok",
+        tables: tablesOf(view),
+      };
+    } finally {
+      view.close();
+    }
+  } catch (error) {
+    return fail(`reading the inspectable copy: ${codeOf(error)}`);
+  }
+  const manifest = {
+    schema: RETAINED_SCHEMA,
+    kind: "atlas-diagnostic-retained-fixture",
+    attempt: out.attempt,
+    source: out.source,
+    receipt_sha256: receiptSha256,
+    fixture_dir: receipt?.fixture_dir
+      ? { dev: receipt.fixture_dir.dev, ino: receipt.fixture_dir.ino }
+      : null,
+    database: receipt?.database
+      ? { dev: receipt.database.dev, ino: receipt.database.ino }
+      : null,
+    anchors: out.anchors,
+    quiescence: out.quiescence,
+    inspect: out.inspect,
+  };
+  const text = `${JSON.stringify(manifest, null, 2)}\n`;
+  try {
+    deps.writeExclusive(`${dir}/manifest.json`, text);
+    const back = deps.readFile(`${dir}/manifest.json`);
+    if (String(back) !== text) return fail("the manifest did not read back");
+    out.manifest = { file: "manifest.json", sha256: sha256(back) };
+  } catch (error) {
+    return fail(`writing the manifest: ${codeOf(error)}`);
+  }
+  out.status = "verified";
+  return out;
+}
+
+/** Re-reads a `verified` retention from disk (manifest and inspectable copy, by hash) and returns its problems (none: still retained). */
+export function verifyRetained(deps, retention) {
+  if (retention?.status !== "verified")
+    return [
+      `the fixture is not retained verified (${retention?.status ?? "no retention"}): ${(retention?.problems ?? []).join("; ")}`,
+    ];
+  const problems = [];
+  for (const [what, file, want] of [
+    ["manifest", retention.manifest?.file, retention.manifest?.sha256],
+    ["inspectable copy", retention.inspect?.file, retention.inspect?.sha256],
+    ...retention.anchors.map((a) => [`anchor ${a.name}`, a.name, a.sha256]),
+  ])
+    try {
+      if (sha256(deps.readFile(`${retention.dir}/${file}`)) !== want)
+        problems.push(`the retained ${what} changed`);
+    } catch (error) {
+      problems.push(`the retained ${what} cannot be re-read: ${codeOf(error)}`);
+    }
+  return problems;
+}
+
 /**
  * Revision 27 (DA-DIAG-F, design assessment C5): the end of one attempt, in an order that cannot remove the fixture of a failed attempt.
  *   1. `stopTransports()` — the browser is gone; the proxy, the tap and the bridge stop, so every stream is settled. Its problems are kept.
@@ -839,12 +1221,21 @@ export function removeParentIfEmpty(deps, parent) {
  *      keep them: `finishAttempt` sends `remove:false`, or EOF when an answer is outstanding). Nothing here removes anything itself.
  *   4. `terminal(finished)` — the complete validation after the shutdown (its stopped event, served:true, the removal, the exit).
  * Every step runs even after an earlier failure (so the evidence of a failure is complete); a thrown step is a problem of that step.
+ *
+ * Revision 34 (R34-RET): the terminal judgement follows the executable's removal, so step 3's eligibility alone cannot authorise it.
+ *   3a. `preserve()` — the owned files are anchored (`preserveFixture`) for EVERY attempt; removal is asked only when the attempt is
+ *       eligible AND the anchor is ready. Without a `preserve` step, or when it throws or refuses, removal is never asked (the source stays).
+ *   3b. `finish(remove)` as before, with that conjunction.
+ *   3c. `materialise(preservation, finished)` — after the exit, the verified inspectable representation (`materialiseRetained`).
+ *   4.  `terminal(finished, retention)` judges the retention too. A late failure therefore leaves the anchored fixture, not an empty parent.
  */
 export async function concludeAttempt({
   stopTransports,
   preliminary,
   latched,
+  preserve = null,
   finish,
+  materialise = null,
   terminal,
 }) {
   const run = async (step, ...args) => {
@@ -866,15 +1257,44 @@ export async function concludeAttempt({
   const latch = latched();
   const eligible =
     transport.length === 0 && before.length === 0 && latch === null;
-  const done = await run(finish, eligible);
-  const end = await run(terminal, done.value);
+  const kept = preserve
+    ? await run(preserve)
+    : {
+        value: null,
+        problems: [
+          "no preservation step: the fixture's removal is never asked",
+        ],
+      };
+  const preservationProblems = [
+    ...kept.problems,
+    ...(kept.value?.problems ?? []),
+  ];
+  const preserved =
+    kept.value?.ready === true && preservationProblems.length === 0;
+  if (!preserved && preservationProblems.length === 0)
+    preservationProblems.push("the fixture's anchor is not ready");
+  const remove = eligible && preserved;
+  const done = await run(finish, remove);
+  const retained = materialise
+    ? await run(materialise, kept.value, done.value)
+    : { value: null, problems: [] };
+  const end = await run(terminal, done.value, retained.value);
   return {
     transport,
     preliminary: before,
     latched_at_decision: latch,
     eligible,
+    preservation: kept.value,
+    preservation_problems: preservationProblems,
+    preserved,
+    remove_requested: remove,
     finished: done.value,
     finish_problems: done.problems,
+    retention: retained.value,
+    retention_problems: [
+      ...retained.problems,
+      ...(retained.value?.problems ?? []),
+    ],
     terminal: [...(end.value ?? []), ...end.problems],
   };
 }

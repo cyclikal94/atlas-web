@@ -6,6 +6,10 @@
 // `sync_now`, `rejected` lines that consume nothing, setup-only commands, forward-only clock, `shutdown {remove}` answered by `stopped`
 // and removal of only the owned files. It serves NO HTTP and has no database: it is never evidence about the backend, and backend
 // branch coverage is never inferred from it. `--fake-mode` selects one injected deviation.
+// Revision 34 (R34-RET): a `sqlite:` prefix on the mode makes the database REAL (node:sqlite, WAL mode, automatic checkpoints off, so the
+// committed rows stay in the WAL until the close): each add_account commits a row, and every stop closes the database (its checkpoint and
+// WAL deletion) BEFORE the owned removal, as the executable's pool close does; `sqlite:unclosed` removes without closing (the rows then
+// exist only in the WAL). Still never evidence about the backend's own SQLite use.
 import { createHash } from "node:crypto";
 import {
   closeSync,
@@ -36,6 +40,13 @@ for (let i = 0; i < argv.length; i += 2) {
   if (argv[i] === "--fake-mode") mode = argv[i + 1];
   else flags[argv[i]] = argv[i + 1];
 }
+const sqlite = mode.startsWith("sqlite:");
+if (sqlite) mode = mode.slice("sqlite:".length);
+let database = null;
+const closeDatabase = () => {
+  if (database !== null && mode !== "unclosed") database.close();
+  database = null;
+};
 const fail = (error) => {
   out({ event: "failed", error });
   process.exit(2);
@@ -60,6 +71,13 @@ else {
     fail(`creating ${dir} (it must not exist): ${e.code}`);
   }
   closeSync(openSync(join(dir, "fixture.sqlite"), "wx", 0o600));
+  if (sqlite) {
+    const { DatabaseSync } = await import("node:sqlite");
+    database = new DatabaseSync(join(dir, "fixture.sqlite"));
+    database.exec(
+      "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE accounts (id TEXT PRIMARY KEY, username TEXT NOT NULL)",
+    );
+  }
   const id = (p) => {
     const s = statSync(p, { bigint: true });
     return { dev: s.dev, ino: s.ino };
@@ -135,6 +153,7 @@ else {
   const stop = (seq, remove) => {
     let removed = null;
     let cleanup = null;
+    closeDatabase();
     if (remove) {
       removed = [];
       try {
@@ -290,14 +309,17 @@ else {
               error: "add_account is a setup command",
               effect: "none",
             });
-          else
+          else {
+            const account = `00000000-0000-4000-8000-${String(++accounts).padStart(12, "0")}`;
+            database
+              ?.prepare("INSERT INTO accounts (id, username) VALUES (?, ?)")
+              .run(account, String(args.username));
             answer(cmd, {
               ok: true,
-              result: {
-                account: `00000000-0000-4000-8000-${String(++accounts).padStart(12, "0")}`,
-              },
+              result: { account },
               effect: "applied",
             });
+          }
           break;
         case "age_history":
           if (!setup || aged)
@@ -369,6 +391,7 @@ else {
     }
   });
   process.stdin.on("end", () => {
+    closeDatabase();
     out({
       event: "stopped",
       attempt,

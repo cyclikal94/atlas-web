@@ -1,11 +1,12 @@
 // WEB-09c revision 26 (R26-DIAG; design assessment C5): the INDEPENDENT reader of diagnostic evidence. Two records, both re-derived from
 // retained bytes, never from a producer's success flag:
 //
-//   - the ATTEMPT envelope (`web09c-diagnostic-attempt/1`, written by the runner): one fixture attempt's selection, launch, ready receipt,
+//   - the ATTEMPT envelope (`web09c-diagnostic-attempt/1`, now /3: `ATTEMPT_SCHEMA`; written by the runner): one fixture attempt's selection, launch, ready receipt,
 //     complete stdin/stdout/stderr transcript (a JSON-lines file, re-read and re-hashed here), accounts, the spec's bridge calls and the
 //     owned termination. Valid only when every command we sent was answered exactly once, in order, `ok` with its operation's effect;
 //     nothing was rejected, lost, partial or unknown; no HTTP admission was refused; the sequenced shutdown was answered by its `stopped`
-//     with `served: true`, the owned files removed and no clean-up error; the process exited 0; and the fixture is gone.
+//     with `served: true`, the owned files removed and no clean-up error; the process exited 0; and the fixture is gone — and (revision
+//     34, R34-RET) its anchored representation is retained VERIFIED (`retentionProblems`).
 //   - the case's causal PROOF (`web09c-diagnostic-proof/2`, written by the spec) for PAIR-X0 (real continuation EXPIRY) or PAIR-X2 (real
 //     PRUNING), and their revision-27 variants (PAIR-XR0/XR2: the fenced RECOVERY caller; PAIR-XL0: X0 with named admitted local work and a
 //     reload), checked against that transcript (the control answers it names, by sequence number) and the interval's tap records (the
@@ -27,10 +28,12 @@ import {
   continuationOf,
   OWNED_FILES,
   parseLine,
+  RETAINED_SCHEMA,
   SUCCESS_EFFECT,
 } from "./diagnostic-fixture.mjs";
 
-export const ATTEMPT_SCHEMA = "web09c-diagnostic-attempt/2";
+// Revision 34 (R34-RET): /3 adds the attempt's `retention` (the anchored, materialised fixture) and `launch` intent; /2 is refused.
+export const ATTEMPT_SCHEMA = "web09c-diagnostic-attempt/3";
 export const PROOF_SCHEMA = "web09c-diagnostic-proof/2";
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 /** Key-order-independent equality of JSON values. */
@@ -161,6 +164,64 @@ function transcriptBindingProblems(entries, events) {
       problems.push(`transcript entry ${e.n} is out of the journal's order`);
     if (Number.isInteger(e.j)) previous = e.j;
   }
+  return problems;
+}
+
+const HEX64 = /^[0-9a-f]{64}$/;
+/**
+ * Revision 34 (R34-RET): the attempt's retained fixture as its envelope records it (diagnostic-fixture.mjs `materialiseRetained`). A
+ * complete attempt needs a VERIFIED retention: anchored after ownership was bound, materialised only after the executable's exit, the
+ * database anchor being the receipt's file and the receipt anchor the ready receipt's bytes, a sealed manifest and an intact inspectable
+ * copy. (The runner re-reads the retained files themselves by hash: `verifyRetained`.)
+ */
+export function retentionProblems(
+  retention,
+  { attempt, receipt, receiptSha256 },
+) {
+  if (retention === null || typeof retention !== "object")
+    return ["the attempt records no retained fixture"];
+  const problems = [];
+  const bad = (p) => problems.push(p);
+  if (retention.schema !== RETAINED_SCHEMA)
+    bad(
+      `retention schema ${JSON.stringify(retention.schema)}, expected ${RETAINED_SCHEMA}`,
+    );
+  if (retention.attempt !== attempt)
+    bad("the retained fixture names another attempt");
+  if (retention.status !== "verified")
+    bad(
+      `the fixture is not retained verified (${retention.status}): ${(retention.problems ?? []).join("; ")}`,
+    );
+  const anchors = Array.isArray(retention.anchors) ? retention.anchors : [];
+  const names = anchors.map((a) => a?.name);
+  if (new Set(names).size !== names.length)
+    bad("a retained file is anchored twice");
+  for (const name of names)
+    if (!OWNED_FILES.includes(name))
+      bad(`${name} is retained, but the fixture does not own it`);
+  for (const a of anchors)
+    if (!HEX64.test(String(a?.sha256)))
+      bad(`the retained ${a?.name} has no final hash`);
+  const database = anchors.find((a) => a.name === "fixture.sqlite");
+  if (
+    !database ||
+    database.dev !== receipt?.database?.dev ||
+    database.ino !== receipt?.database?.ino
+  )
+    bad("the retained database is not the receipt's file");
+  const kept = anchors.find((a) => a.name === "receipt.json");
+  if (!kept || kept.sha256 !== receiptSha256)
+    bad("the retained receipt is not the ready receipt");
+  const exit = retention.quiescence?.exit;
+  if (exit === null || exit === undefined)
+    bad("the retained fixture was judged before the executable's exit");
+  if (
+    retention.inspect?.integrity !== "ok" ||
+    !HEX64.test(String(retention.inspect?.sha256))
+  )
+    bad("the retained fixture has no intact inspectable copy");
+  if (!HEX64.test(String(retention.manifest?.sha256)))
+    bad("the retained fixture's manifest is not sealed");
   return problems;
 }
 
@@ -398,8 +459,18 @@ export function attemptProblems(
       bad(`the executable exited ${JSON.stringify(envelope.exit)}`);
     if (envelope.fixture_after?.leaf_exists !== false)
       bad("the fixture directory still exists after the shutdown");
-  } else if (envelope.shutdown !== null && envelope.shutdown !== undefined)
-    bad("a preliminary attempt already records a shutdown");
+    for (const p of retentionProblems(envelope.retention, {
+      attempt: envelope.attempt,
+      receipt,
+      receiptSha256: x.ready?.event?.receipt_sha256,
+    }))
+      bad(`retention: ${p}`);
+  } else {
+    if (envelope.shutdown !== null && envelope.shutdown !== undefined)
+      bad("a preliminary attempt already records a shutdown");
+    if (envelope.retention !== null && envelope.retention !== undefined)
+      bad("a preliminary attempt already records a retention");
+  }
   return problems;
 }
 

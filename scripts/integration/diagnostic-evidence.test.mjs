@@ -21,6 +21,7 @@ import {
   x0Problems,
   x2Problems,
 } from "./diagnostic-evidence.mjs";
+import { RETAINED_SCHEMA } from "./diagnostic-fixture.mjs";
 import { assembleInterval, CAUSAL_FIELDS } from "./pair-evidence.mjs";
 
 const sha = (b) => createHash("sha256").update(b).digest("hex");
@@ -156,6 +157,50 @@ const ctxOf = (w) => ({
 const ready = (w) => (w.frozen ? w : finalise(w));
 
 /**
+ * Revision 34 (R34-RET): the record a VERIFIED materialisation writes (diagnostic-fixture.mjs `materialiseRetained`), for these synthetic
+ * envelopes (database identity 1/3 as the transcript's receipt parses it). Its real production from anchored SQLite files is qualified in
+ * diagnostic-fixture.test.mjs; here only the reader is judged.
+ */
+function retainedRecord(attempt, receiptSha256) {
+  return {
+    schema: RETAINED_SCHEMA,
+    attempt,
+    status: "verified",
+    dir: `/retained/retained-${attempt}`,
+    source: `/t/fixture-${attempt}`,
+    anchors: [
+      {
+        name: "fixture.sqlite",
+        dev: "1",
+        ino: "3",
+        size: "8192",
+        sha256: "a".repeat(64),
+      },
+      {
+        name: "receipt.json",
+        dev: "1",
+        ino: "4",
+        size: "700",
+        sha256: receiptSha256,
+      },
+    ],
+    quiescence: {
+      exit: { code: 0, signal: null },
+      stopped_seq: 9,
+      removed: ["fixture.sqlite", "receipt.json"],
+    },
+    inspect: {
+      file: "inspect.sqlite",
+      sha256: "b".repeat(64),
+      integrity: "ok",
+      tables: { accounts: 2 },
+    },
+    manifest: { file: "manifest.json", sha256: "c".repeat(64) },
+    problems: [],
+  };
+}
+
+/**
  * One attempt: `commands` are [op, args, answer-fields, sentAt, answeredAt]; answers default to ok with the operation's effect. Returns the
  * files map, the envelope and the transcript entries, consistent with each other.
  */
@@ -279,6 +324,7 @@ function attemptWorld(commands, { attempt = "att-1", stderr = [] } = {}) {
     exit: { code: 0, signal: null },
     latched: null,
     fixture_after: { leaf_exists: false },
+    retention: retainedRecord(attempt, sha(receiptBytes)),
   };
   const w = {
     files,
@@ -1267,6 +1313,124 @@ for (const [name, edit, expected] of [
   });
 }
 
+// ---- revision 34 (R34-RET): a complete attempt's fixture is retained VERIFIED -------------------------------------------------------
+test("R34-RET: a complete attempt with its verified retention is accepted (positive control)", () => {
+  attemptOk(x0World());
+});
+for (const [name, edit, expected] of [
+  [
+    "no retention recorded",
+    (w) => delete w.envelope.retention,
+    /retention: the attempt records no retained fixture/,
+  ],
+  [
+    "a retention anchored but not verified (the exit not observed)",
+    (w) => {
+      w.envelope.retention.status = "anchored_unverified";
+      w.envelope.retention.quiescence.exit = null;
+    },
+    /retention: the fixture is not retained verified \(anchored_unverified\)/,
+  ],
+  [
+    "a retention judged before the executable's exit",
+    (w) => (w.envelope.retention.quiescence.exit = null),
+    /retention: the retained fixture was judged before the executable's exit/,
+  ],
+  [
+    "a failed materialisation",
+    (w) => {
+      w.envelope.retention.status = "failed";
+      w.envelope.retention.problems = ["writing the manifest: ENOSPC"];
+    },
+    /retention: the fixture is not retained verified \(failed\): writing the manifest: ENOSPC/,
+  ],
+  [
+    "a retained database that is not the receipt's file",
+    (w) => (w.envelope.retention.anchors[0].ino = "99"),
+    /retention: the retained database is not the receipt's file/,
+  ],
+  [
+    "no retained database",
+    (w) => w.envelope.retention.anchors.shift(),
+    /retention: the retained database is not the receipt's file/,
+  ],
+  [
+    "a retained receipt that is not the ready receipt",
+    (w) => (w.envelope.retention.anchors[1].sha256 = "d".repeat(64)),
+    /retention: the retained receipt is not the ready receipt/,
+  ],
+  [
+    "a retained file the fixture does not own",
+    (w) =>
+      w.envelope.retention.anchors.push({
+        name: "other.db",
+        dev: "1",
+        ino: "5",
+        size: "1",
+        sha256: "e".repeat(64),
+      }),
+    /retention: other\.db is retained, but the fixture does not own it/,
+  ],
+  [
+    "a file anchored twice",
+    (w) =>
+      w.envelope.retention.anchors.push({ ...w.envelope.retention.anchors[0] }),
+    /retention: a retained file is anchored twice/,
+  ],
+  [
+    "an anchor with no final hash",
+    (w) => delete w.envelope.retention.anchors[0].sha256,
+    /retention: the retained fixture\.sqlite has no final hash/,
+  ],
+  [
+    "no intact inspectable copy",
+    (w) => (w.envelope.retention.inspect = null),
+    /retention: the retained fixture has no intact inspectable copy/,
+  ],
+  [
+    "an unsealed manifest",
+    (w) => (w.envelope.retention.manifest = null),
+    /retention: the retained fixture's manifest is not sealed/,
+  ],
+  [
+    "another retention schema",
+    (w) => (w.envelope.retention.schema = "web09c-diagnostic-retained/0"),
+    /retention: retention schema/,
+  ],
+  [
+    "a retention naming another attempt",
+    (w) => (w.envelope.retention.attempt = "att-2"),
+    /retention: the retained fixture names another attempt/,
+  ],
+  [
+    "a revision-33 envelope (schema /2, no retention)",
+    (w) => {
+      w.envelope.schema = "web09c-diagnostic-attempt/2";
+      delete w.envelope.retention;
+    },
+    /never upgraded/,
+  ],
+])
+  test(`R34-RET attempt refused: ${name}`, () => {
+    const w = x0World();
+    edit(w);
+    attemptRefused(w, expected);
+  });
+test("R34-RET: a preliminary attempt may not already record a retention (it is made after the removal decision)", () => {
+  const w = x0World();
+  ready(w);
+  const envelope = { ...w.envelope, shutdown: null };
+  const found = attemptProblems(envelope, {
+    readFile: w.readFile,
+    expected: EXPECTED,
+    stage: "preliminary",
+  });
+  assert.ok(
+    found.includes("a preliminary attempt already records a retention"),
+    JSON.stringify(found),
+  );
+});
+
 // ---- revision 27 (R27-DIAG.a): the journal is the order; raw timestamps are diagnosis only ------------------------------------------
 /** Rewrites the finalised journal file through `edit(lines)` (parsed events), re-hashing it unless `keepHash`; the world is frozen. */
 function rejournal(w, edit, { keepHash = false, count = true } = {}) {
@@ -1507,6 +1671,8 @@ test("DA-DIAG-F: the attempt before its shutdown is valid at the preliminary sta
   w.envelope.shutdown = null;
   w.envelope.exit = null;
   w.envelope.fixture_after = null;
+  // Revision 34: before the removal decision the runner has made no retention yet (it follows the shutdown).
+  w.envelope.retention = null;
   finalise(w).frozen = true;
   assert.deepEqual(
     attemptProblems(w.envelope, {

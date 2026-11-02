@@ -317,9 +317,16 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   the leader's restart notice, the ordinary leader unfenced) are judged on every capture before any re-read; the saved reader also requires both readers'
   recovery fence and a serial row floor at every recorded held page, and checks the recorded progress against the samples. The observer's re-read captures and
   settlement polls are not persisted, so the reader can judge only the recorded samples; the live observer's first failure, with its predicate, endpoint,
-  expectations and both transactions, is kept in the incomplete interval (`observation_failure`). The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
-  are qualified with stand-ins, and the rendering adapter against the fixture DOM, only; the approved executable has NOT been launched and no diagnostic case
-  has run in a browser.** The approval requires an independent review of the exact client source, selection and
+  expectations and both transactions, is kept in the incomplete interval (`observation_failure`). Removal is asked only for an attempt whose preliminary evidence was
+  validated (DA-DIAG-F) AND whose owned files were first anchored (revision 34, R34-RET): the terminal judgement (the `stopped` event, `served:true`, the
+  exit, the saved evidence) follows the executable's own removal, so before the sequenced shutdown every attempt's database, WAL/journal and receipt are
+  hard-linked into a private `atlas-diagnostic-retained-*/retained-<attempt>` directory beside (never inside) the fixture's parent, bound to the receipt's
+  identities; after the exit the final bytes are hashed and materialised as one intact, self-contained `inspect.sqlite` with a sealed `manifest.json`.
+  A refused anchor keeps the source (`remove:false`); a complete attempt needs that retention verified; nothing removes the retained directory, on any outcome
+  (it survives the outer driver only under the reviewed retention wrapper, whose TMPDIR is outside the shared driver's purge). A startup failure before
+  `ready` is removed by the executable itself and is NOT covered (design assessment D2, owner decision open). **Status: the adapter and the five cases
+  are qualified with stand-ins (the retention with a real-SQLite stand-in), and the rendering adapter against the fixture DOM, only; the approved executable
+  was launched once (Q7, 2 Nov 2026: P0 complete, X0 failed its saved-evidence validation, sixteen attempts unrun) and no diagnostic case has passed.** The approval requires an independent review of the exact client source, selection and
   recipe BEFORE any execution (design assessment Q6), then the three-engine qualification (Q7). Nothing here is expiry/pruning evidence yet.
 * **Qualified so far (revision 23):** the selection, matrix accounting, tap and validator with doubles (`scripts/integration/pair-*.test.mjs`); real
   discovery of the matrix; the released-backend control (P0, W1) in Chromium, Firefox and WebKit; targeted mutants of the seam and of the spec's precondition
