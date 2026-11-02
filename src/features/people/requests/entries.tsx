@@ -14,9 +14,9 @@ import { currentOf, useIncoming, usePersonSummary } from "./reads";
 /**
  * WEB-11b's entry points, in the people chunk (`screens.tsx` imports this module):
  *
- *  - `RequestsEntry`: People 01's header "Requests" with the waiting count (desktop), and the mobile "N requests waiting for you →"
- *    banner (drawn only when N ≥ 1). The count is the latest successful read of the incoming requests: "99+" above 99, and NOTHING while
- *    unknown, offline or failed ("0" is never claimed without a read).
+ *  - `RequestsEntry`: People 01's header "Requests" with the waiting count, on EVERY layout; below 1280 px also the "N requests waiting
+ *    for you →" banner (drawn only when N ≥ 1). The count is the latest successful read of the incoming requests: "99+" above 99, and
+ *    NOTHING while unknown, offline or failed ("0" is never claimed without a read); the entry never depends on it (R3 of review 1).
  *  - `fillPeopleSlots()`: the detail's `headerActions` ("Ask to link…", only for a person known to be unlinked and known to be the reader's
  *    own; disabled with the reason while either is unknown; absent when linked; never inferred), the merged alias's note (D-11b-12), and
  *    the duplicates' `duplicateActions` ("Compare & merge"). Filled ONCE, when this module is evaluated: before any people screen renders
@@ -29,18 +29,9 @@ export function RequestsEntry() {
   const shown =
     currentOf(view) ?? (view.status === "loading" ? view.previous : null);
   const count = shown?.value.ok ? shown.value.value.length : null;
-  if (mode !== "desktop")
-    return count === null || count < 1 ? null : (
-      <Link
-        to="/people/requests"
-        data-requests-banner=""
-        className="atlas-transition flex min-h-11 items-center justify-between gap-2 rounded-row border border-hairline-strong bg-panel px-3 text-[13.5px] text-ink-1 hover:bg-row-hover"
-      >
-        <span>{copy.REQUESTS_WAITING(count)}</span>
-        <span aria-hidden="true">→</span>
-      </Link>
-    );
-  return (
+  // The entry itself is PERSISTENT on every layout (R3 of review 1: People 01 reaches Sent and New request directly, without a person's
+  // detail first), whatever the count says: unknown, offline, failed or none waiting. Below 1280 px the banner is added when requests wait.
+  const entry = (
     <Link
       to="/people/requests"
       data-people-action="requests"
@@ -53,6 +44,20 @@ export function RequestsEntry() {
         </span>
       )}
     </Link>
+  );
+  if (mode === "desktop" || count === null || count < 1) return entry;
+  return (
+    <>
+      {entry}
+      <Link
+        to="/people/requests"
+        data-requests-banner=""
+        className="atlas-transition flex min-h-11 w-full items-center justify-between gap-2 rounded-row border border-hairline-strong bg-panel px-3 text-[13.5px] text-ink-1 hover:bg-row-hover"
+      >
+        <span>{copy.REQUESTS_WAITING(count)}</span>
+        <span aria-hidden="true">→</span>
+      </Link>
+    </>
   );
 }
 

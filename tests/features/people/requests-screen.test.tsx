@@ -26,7 +26,7 @@ import { peopleWorld, person } from "../../support/people/world";
  * WF-PEOPLE-06 at the component level (A1–A5, A8, A10, A13), with the production providers and routes (`/people/requests`) over the
  * people world's fake server. FIXTURE evidence: what the screen does with each answer, never what the backend answers.
  */
-installMatchMedia({ width: 1440 });
+const media = installMatchMedia({ width: 1440 });
 beforeEach(() => {
   forgetAllPeopleMemory();
   forgetRefusedPolicies();
@@ -742,5 +742,413 @@ describe("identity (A10)", () => {
       "loading",
     );
     expect(row(R1)).toBeNull();
+  });
+});
+
+// ---- review 1 (2 November 2026): R1–R4 -------------------------------------------------------------------------------------------
+/** Every exact lookup finds one account: "mo" is MO, any other username is STRANGER. */
+function lookupAll(w: ReturnType<typeof peopleWorld>) {
+  w.sharing.defaults.lookup = (username: string) => ({
+    ok: true,
+    value: [{ id: username === "mo" ? MO : STRANGER, username }],
+  });
+}
+async function chooseRecipient(username: string) {
+  const exact = await screen.findByLabelText("Exact username");
+  fireEvent.change(exact, { target: { value: username } });
+  fireEvent.submit(exact.closest("form") as HTMLFormElement);
+  fireEvent.click(
+    await within(await present("[data-lookup=exact]")).findByRole("button", {
+      name: /choose/i,
+    }),
+  );
+  await present(`[data-link-recipient="${username}"]`);
+}
+/** Ada asked of "mo", ready to send. */
+async function linkReady(w: ReturnType<typeof peopleWorld>) {
+  await w.mount("/people/requests");
+  fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+  fireEvent.click(await present(`[data-pick-person="${ADA}"]`));
+  fireEvent.click(screen.getByRole("button", { name: copy.SEARCH_DIRECTORY }));
+  await chooseRecipient("mo");
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: copy.SEND_REQUEST }),
+    ).toHaveProperty("disabled", false),
+  );
+}
+/** The element `selector` finds, once it is there; its absence fails an ASSERTION (a mutant that removes it is caught, not crashed). */
+const present = async (selector: string, timeout = 1_000) => {
+  await waitFor(() => expect(document.querySelector(selector)).not.toBeNull(), {
+    timeout,
+  });
+  return document.querySelector(selector) as HTMLElement;
+};
+const said = (text: string) => document.body.textContent?.includes(text);
+
+describe("R1: a replayed link request completes as the attempt it replays", () => {
+  test("control, nothing changed: Try again resends it exactly; its success names its recipient and clears the form", async () => {
+    const w = world();
+    lookupAll(w);
+    await linkReady(w);
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
+    );
+    expect(document.querySelector("[data-retry-sends]")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
+    await waitFor(() => expect(w.people.memory.attempts.size).toBe(0));
+    await waitFor(() => expect(said(copy.REQUEST_SENT("mo"))).toBe(true));
+    await waitFor(() =>
+      expect(document.querySelector("[data-link-recipient]")).toBeNull(),
+    );
+    expect(document.querySelector("[data-link-person]")).toBeNull();
+  });
+
+  test("the recipient changed between attempts: Try again says and sends the EARLIER request exactly, names its recipient, and keeps the newer one", async () => {
+    const w = world();
+    lookupAll(w);
+    await linkReady(w);
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
+    );
+    fireEvent.click(await present('[data-people-action="change-recipient"]'));
+    await chooseRecipient("other");
+    expect((await present("[data-retry-sends]")).textContent).toBe(
+      copy.RETRY_SENDS_EARLIER("mo"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
+    await waitFor(() => expect(w.people.memory.attempts.size).toBe(0));
+    await waitFor(() => expect(said(copy.REQUEST_SENT("mo"))).toBe(true));
+    expect(said(copy.REQUEST_SENT("other"))).toBe(false);
+    // The newer input stays: the request that succeeded was not made of it.
+    expect(
+      document.querySelector('[data-link-recipient="other"]'),
+    ).not.toBeNull();
+    expect(
+      document.querySelector(`[data-link-person="${ADA}"]`),
+    ).not.toBeNull();
+  });
+
+  test("the person changed after an uncertain send: the earlier request stays reachable, is resent exactly, and the newer form stays", async () => {
+    const w = world();
+    lookupAll(w);
+    await linkReady(w);
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
+    );
+    fireEvent.click(await present('[data-people-action="change-person"]'));
+    fireEvent.click(await present(`[data-pick-person="${BEA}"]`));
+    await present(`[data-link-person="${BEA}"]`);
+    const earlier = await present(`[data-earlier-link="${ADA}"]`);
+    expect(earlier.textContent).toContain(copy.EARLIER_LINK("Ada", "mo"));
+    fireEvent.click(
+      within(earlier).getByRole("button", { name: copy.TRY_AGAIN }),
+    );
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
+    await waitFor(() =>
+      expect(document.querySelector("[data-earlier-link]")).toBeNull(),
+    );
+    await waitFor(() => expect(said(copy.REQUEST_SENT("mo"))).toBe(true));
+    expect(
+      document.querySelector(`[data-link-person="${BEA}"]`),
+    ).not.toBeNull();
+    expect(document.querySelector('[data-link-recipient="mo"]')).not.toBeNull();
+  });
+});
+
+describe("R2: the picker reaches every person, a bounded window at a time", () => {
+  const pid = (n: number) =>
+    `20000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const people = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      person({ id: pid(i + 1), label: `Person ${i + 1}` }),
+    );
+  const shownRows = () =>
+    document.querySelectorAll("[data-pick-person]").length;
+  /** A row of a window of up to 300 people: jsdom draws them slowly under load, so this waits longer than `found` (a test wait only). */
+  const picked = (n: number) =>
+    present(`[data-pick-person="${pid(n)}"]`, 10_000);
+  const filterTo = (text: string) =>
+    fireEvent.change(screen.getByLabelText(copy.FILTER_PEOPLE), {
+      target: { value: text },
+    });
+
+  test("control, 200 people: the whole list in one window; a filter with no match says nobody matches", async () => {
+    const w = world();
+    w.setCache(people(200));
+    await w.mount("/people/requests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+    await picked(100);
+    fireEvent.click(await present('[data-people-action="picker-more"]'));
+    await picked(200);
+    // Two full pages have not yet SEEN the end (the server answers a cursor after a full page): one more read finds it.
+    fireEvent.click(await present('[data-people-action="picker-more"]'));
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-people-action="picker-more"]'),
+      ).toBeNull(),
+    );
+    expect(shownRows()).toBe(200);
+    expect(
+      document.querySelector('[data-people-action="picker-next"]'),
+    ).toBeNull();
+    filterTo("nobody here");
+    expect((await present("[data-picker-empty]")).textContent).toBe(
+      copy.NO_MATCHES,
+    );
+    expect(document.querySelector("[data-picker-partial]")).toBeNull();
+  });
+
+  test("301 people: three pages kept, then the next window reaches the 301st (the earlier one is not kept) and Show earlier people returns; a filter says it searched only what is shown", async () => {
+    const w = world();
+    w.setCache(people(301));
+    await w.mount("/people/requests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+    await picked(100);
+    fireEvent.click(await present('[data-people-action="picker-more"]'));
+    await picked(200);
+    fireEvent.click(await present('[data-people-action="picker-more"]'));
+    await picked(300);
+    expect(shownRows()).toBe(300);
+    expect(
+      document.querySelector('[data-people-action="picker-more"]'),
+    ).toBeNull();
+    filterTo("Person 301");
+    expect((await present("[data-picker-empty]")).textContent).toBe(
+      copy.NO_MATCHES_SHOWN,
+    );
+    expect((await present("[data-picker-partial]")).textContent).toBe(
+      copy.FILTER_SHOWN_ONLY,
+    );
+    fireEvent.click(await present('[data-people-action="picker-next"]'));
+    const last = await picked(301);
+    expect(shownRows()).toBe(1);
+    expect(document.querySelector(`[data-pick-person="${pid(1)}"]`)).toBeNull();
+    filterTo("");
+    fireEvent.click(await present('[data-people-action="picker-earlier"]'));
+    await picked(300);
+    fireEvent.click(await present('[data-people-action="picker-next"]'));
+    fireEvent.click(await picked(301));
+    expect(last).toBeTruthy();
+    expect(
+      document.querySelector(`[data-link-person="${pid(301)}"]`),
+    ).not.toBeNull();
+  }, 30_000);
+
+  test("a page whose rows are all filtered out is not 'none can be offered': Show more reads on and finds them", async () => {
+    const w = world();
+    const all = people(150);
+    w.setCache(all);
+    // The first hundred are other people's (seen, never offered to Ask to link).
+    for (let n = 1; n <= 100; n += 1)
+      w.api.summary.persons.set(pid(n), {
+        your_access: "view",
+        added_by_you: "no",
+        owner: { account_id: MO, username: "mo", you: false, person: null },
+        audience: {
+          disclosure: "partial",
+          in_home: false,
+          households: [],
+          your_direct_grant: { can_edit: false },
+          direct_grant_count: null,
+          excluded_count: null,
+        },
+      });
+    await w.mount("/people/requests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+    expect((await present("[data-picker-empty]")).textContent).toBe(
+      copy.NONE_OFFERED_SHOWN,
+    );
+    fireEvent.click(await present('[data-people-action="picker-more"]'));
+    await picked(150);
+    expect(shownRows()).toBe(50);
+    expect(document.querySelector(`[data-pick-person="${pid(1)}"]`)).toBeNull();
+  });
+});
+
+describe("R3: People 01's Requests entry below 1280 px", () => {
+  const entry = () =>
+    document.querySelector(
+      'a[href="/people/requests"][data-people-action="requests"]',
+    );
+
+  test("control, one waiting: the entry and the banner", async () => {
+    media.set({ width: 390 });
+    const w = world();
+    w.api.requests.incoming = [linkRequest()];
+    await w.mount("/people");
+    await present("[data-requests-banner]");
+    expect(entry()).not.toBeNull();
+  });
+
+  test("none waiting, unknown and offline: the entry stays, with no banner and no claimed count", async () => {
+    media.set({ width: 390 });
+    const w = world();
+    let release: (value: PeopleResult<IncomingRequest[]>) => void = () => {};
+    w.api.next.requests.push(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await w.mount("/people");
+    // Unknown: the read is held.
+    await waitFor(() => expect(entry()).not.toBeNull());
+    expect(document.querySelector("[data-requests-count]")).toBeNull();
+    await act(async () => release({ ok: true, value: [] }));
+    await waitFor(() =>
+      expect(
+        w.people.memory.summaries.get("requests:incoming")?.state.kind,
+      ).toBe("ready"),
+    );
+    // None waiting: the entry (to Sent and New request), no banner.
+    expect(entry()).not.toBeNull();
+    expect(document.querySelector("[data-requests-banner]")).toBeNull();
+    act(() => w.setOnline(false));
+    await waitFor(() =>
+      expect(document.querySelector("[data-requests-count]")).toBeNull(),
+    );
+    expect(entry()).not.toBeNull();
+  });
+});
+
+describe("R4: a retained uncertain answer or cancel stays reachable, and its Try again sends what was kept", () => {
+  const cancelled = (w: ReturnType<typeof peopleWorld>, commit: boolean) => {
+    const pending = sent(R1, "pending");
+    w.api.requests.sent = [pending];
+    w.api.next.people.push(async () => {
+      if (commit) w.api.requests.sent = [{ ...pending, state: "cancelled" }];
+      return { ok: false, kind: "uncertain" } as Receipt;
+    });
+  };
+  for (const commit of [false, true])
+    test(`an uncertain cancel ${commit ? "that committed (the row now says Cancelled)" : "that did not commit (control)"}: Try again on the row resends it exactly, and a definite answer ends it`, async () => {
+      const w = world();
+      cancelled(w, commit);
+      await w.mount("/people/requests");
+      fireEvent.click(
+        within(await present(`[data-sent-request="${R1}"]`)).getByRole(
+          "button",
+          {
+            name: copy.CANCEL_REQUEST_TO("mo"),
+          },
+        ),
+      );
+      await waitFor(() =>
+        expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
+      );
+      await waitFor(() =>
+        expect(sentRow(R1).getAttribute("data-sent-state")).toBe(
+          commit ? "cancelled" : "pending",
+        ),
+      );
+      const retry = within(sentRow(R1)).queryByRole("button", {
+        name: copy.CANCEL_REQUEST_TO("mo"),
+      }) as HTMLElement;
+      expect(retry, "the kept cancel's Try again on its row").not.toBeNull();
+      expect(retry.textContent).toBe(copy.TRY_AGAIN);
+      fireEvent.click(retry);
+      await waitFor(() => expect(commands(w)).toHaveLength(2));
+      expect(commands(w)[1]).toEqual(commands(w)[0]);
+      await waitFor(() => expect(w.people.memory.attempts.size).toBe(0));
+      if (commit)
+        await waitFor(() =>
+          expect(
+            within(sentRow(R1)).queryByRole("button", {
+              name: copy.CANCEL_REQUEST_TO("mo"),
+            }),
+          ).toBeNull(),
+        );
+    });
+
+  test("an uncertain Decline whose row is still listed: the row's Try again resends the DECLINE exactly; a different answer is refused", async () => {
+    const w = world();
+    w.api.requests.incoming = [linkRequest()];
+    await w.mount("/people/requests");
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    fireEvent.click(
+      within(await present(`[data-incoming-request="${R1}"]`)).getByRole(
+        "button",
+        { name: copy.DECLINE },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
+    );
+    // No accept consequence is shown for a kept decline; Accept, then Confirm accept, is refused and sends nothing.
+    expect(row(R1).querySelector("[data-link-consequence]")).toBeNull();
+    fireEvent.click(within(row(R1)).getByRole("button", { name: copy.ACCEPT }));
+    fireEvent.click(
+      within(row(R1)).getByRole("button", { name: copy.CONFIRM_ACCEPT }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.ANSWER_UNCERTAIN_FIRST).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(commands(w)).toHaveLength(1);
+    const retry = row(R1).querySelector(
+      '[data-people-action="decline-request"]',
+    ) as HTMLElement;
+    expect(retry.textContent).toBe(copy.TRY_AGAIN);
+    fireEvent.click(retry);
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
+    expect(
+      (bodyAt(commands(w), 1) as { command: { accept: boolean } }).command
+        .accept,
+    ).toBe(false);
+    await waitFor(() => expect(w.people.memory.attempts.size).toBe(0));
+  });
+
+  test("an uncertain Decline that committed (the row is gone): the kept answer cannot be closed away while unresolved; Try again resends it and then it ends", async () => {
+    const w = world();
+    w.api.requests.incoming = [linkRequest()];
+    await w.mount("/people/requests");
+    w.api.next.people.push(async () => {
+      w.api.requests.incoming = [];
+      return { ok: false, kind: "uncertain" } as Receipt;
+    });
+    fireEvent.click(
+      within(await present(`[data-incoming-request="${R1}"]`)).getByRole(
+        "button",
+        { name: copy.DECLINE },
+      ),
+    );
+    await waitFor(() => expect(row(R1)).toBeNull());
+    const retry = await present('[data-people-action="retry-answer"]');
+    expect(screen.queryByRole("button", { name: copy.CLOSE })).toBeNull();
+    // Its report gone too (another view, a remount): the kept attempt alone still offers Try again.
+    act(() => {
+      w.people.memory.requestReports.clear();
+      w.people.memory.touch();
+    });
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-people-action="retry-answer"]'),
+      ).not.toBeNull(),
+    );
+    expect(retry).toBeTruthy();
+    fireEvent.click(
+      document.querySelector(
+        '[data-people-action="retry-answer"]',
+      ) as HTMLElement,
+    );
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-people-action="retry-answer"]'),
+      ).toBeNull(),
+    );
+    expect(w.people.memory.attempts.size).toBe(0);
   });
 });

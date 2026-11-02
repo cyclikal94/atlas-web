@@ -321,6 +321,39 @@ describe("the sender's merge (A6)", () => {
     expect(commands(w)[1]).toEqual(first);
   });
 
+  test("R1: a replayed merge completes as ITS attempt: the name it carried is said, not the name chosen since", async () => {
+    const w = world();
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    const { router } = await w.mount(COMPARE);
+    await waitFor(() =>
+      expect(action(copy.MERGE_THEM)).toHaveProperty("disabled", false),
+    );
+    fireEvent.click(
+      within(dialog()).getByRole("radio", { name: "Mohammed A." }),
+    );
+    fireEvent.click(action(copy.MERGE_THEM));
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
+    );
+    expect(
+      (bodyAt(commands(w), 0) as { command: { name: string } }).command.name,
+    ).toBe("Mohammed A.");
+    // The choice changes before Try again: the replay still sends, and completes as, the earlier attempt.
+    fireEvent.click(within(dialog()).getByRole("radio", { name: "Mo" }));
+    fireEvent.click(action(copy.TRY_AGAIN));
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
+    await waitFor(() =>
+      expect(document.body.textContent).toContain(
+        copy.MERGED_INTO("Mohammed A."),
+      ),
+    );
+    expect(document.body.textContent).not.toContain(copy.MERGED_INTO("Mo"));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(`/people/${MOPERSON}`),
+    );
+  });
+
   test("Cancel sends nothing and returns to the duplicates", async () => {
     const w = world();
     const { router } = await w.mount(COMPARE);

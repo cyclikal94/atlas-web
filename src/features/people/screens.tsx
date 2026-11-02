@@ -35,7 +35,7 @@ function ListHeader() {
           <PageHeading>{copy.PAGE_TITLE}</PageHeading>
           <p className="text-[13.5px] text-ink-2">{copy.PAGE_SUBHEAD}</p>
         </div>
-        {/* WEB-11b: "Requests" with the waiting count (desktop), or the "N requests waiting for you" banner (below 1280 px). */}
+        {/* WEB-11b: "Requests" with the waiting count (every layout), and the "N requests waiting for you" banner (below 1280 px). */}
         <RequestsEntry />
       </div>
     </div>

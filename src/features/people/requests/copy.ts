@@ -100,6 +100,14 @@ export const FILTER_PEOPLE = "Filter by name"; // provisional
 export const SHOW_MORE = "Show more"; // provisional
 export const NO_PEOPLE_TO_OFFER = "None of your people can be offered."; // provisional
 export const NO_MATCHES = "No one matches."; // provisional
+/** R2 of review 1: the picker's window is one bounded part of the whole list; the filter searches only what is shown. */
+export const SHOW_NEXT_PEOPLE = "Show the next people"; // provisional
+export const SHOW_EARLIER_PEOPLE = "Show earlier people"; // provisional
+export const NO_MATCHES_SHOWN =
+  "No one shown here matches. Show other people to look further."; // provisional
+export const NONE_OFFERED_SHOWN =
+  "None of the people shown here can be offered. Show other people to look further."; // provisional
+export const FILTER_SHOWN_ONLY = "The filter searches the people shown here."; // provisional
 export const PEOPLE_OFFLINE = "Choosing people needs a connection."; // provisional
 export const PEOPLE_FAILED = "Atlas couldn't load your people."; // provisional
 export const CHOOSE_PERSON_FIRST = "Choose a person first."; // provisional
@@ -113,6 +121,11 @@ export const REQUEST_SENT = (username: string): string =>
   `Request sent to ${username}. It expires in 7 days.`; // provisional
 export const ACCOUNT_GONE = "That account no longer exists."; // provisional (D-11b-11)
 export const LOOKUP_FAILED = "Atlas couldn't check that account. Try again."; // provisional
+/** R1 of review 1: Try again sends the EARLIER request as it was, whatever the form shows now. */
+export const RETRY_SENDS_EARLIER = (username: string): string =>
+  `Try again sends your earlier request to ${username}, as it was.`; // provisional
+export const EARLIER_LINK = (person: string, username: string): string =>
+  `Your earlier request to ${username} to link ${person}.`; // provisional
 
 // ---- the merge dialog (WF-PEOPLE-05) ---------------------------------------------------------------------------------------------
 export const MERGE_TITLE = (source: string, target: string): string =>

@@ -44,6 +44,38 @@ export async function runCommand(
   key: string,
   prepare: () => unknown | null | Promise<unknown | null>,
 ): Promise<PeopleResult<Receipt> | null> {
+  const sent = await runCommandFrom<null>(env, key, () => {
+    const prepared = prepare();
+    return prepared instanceof Promise
+      ? prepared.then((body) => (body === null ? null : { body, origin: null }))
+      : prepared === null
+        ? null
+        : { body: prepared, origin: null };
+  });
+  return sent === null ? null : sent.result;
+}
+
+/** Where the origin of the attempt kept under `key` is kept (page memory, beside the attempt; never written to storage). */
+const originKey = (key: string): string => `request-origin:${key}`;
+
+/** What the attempt kept under `key` was made from (null: none kept). */
+export const originOf = <Origin>(env: PeopleEnv, key: string): Origin | null =>
+  (env.memory.drafts.get(originKey(key)) as Origin | undefined) ?? null;
+
+/**
+ * `runCommand` for a command whose COMPLETION depends on the input it was made from (R1 of review 1: the form as captured, the recipient
+ * it was addressed to). `prepare` answers the body and its `origin`; the origin is kept beside the attempt for as long as the attempt is
+ * kept, and a replay answers the ORIGINAL attempt's origin, never what the form shows now. So a success of an earlier attempt says who it
+ * actually went to, and clears only the input it was made of.
+ */
+export async function runCommandFrom<Origin>(
+  env: PeopleEnv,
+  key: string,
+  prepare: () =>
+    | { body: unknown; origin: Origin }
+    | null
+    | Promise<{ body: unknown; origin: Origin } | null>,
+): Promise<{ result: PeopleResult<Receipt>; origin: Origin | null } | null> {
   const memory = env.memory;
   if (!isCurrentMemory(memory)) return null;
   const retained = memory.attempts.get(key) ?? null;
@@ -52,18 +84,32 @@ export async function runCommand(
   const send = (attempt: CommandAttempt) => env.api.peopleCommand(attempt);
   try {
     const prepared = retained === null ? prepare() : null;
-    const body = prepared instanceof Promise ? await prepared : prepared;
-    if (retained === null && (body === null || !isCurrentMemory(memory)))
+    const made = prepared instanceof Promise ? await prepared : prepared;
+    if (retained === null && (made === null || !isCurrentMemory(memory)))
       return null;
+    const origin =
+      retained !== null ? originOf<Origin>(env, key) : (made?.origin ?? null);
+    if (retained === null) memory.drafts.set(originKey(key), origin);
     memory.requestReports.delete(key);
     memory.touch();
-    return retained !== null
-      ? await replayOnline(env, key, retained, send)
-      : await sendOnline(env, key, body, send);
+    const result =
+      retained !== null
+        ? await replayOnline(env, key, retained, send)
+        : await sendOnline(env, key, made?.body, send);
+    // The origin lives exactly as long as the attempt it describes (a definite answer ends both).
+    if (isCurrentMemory(memory) && !memory.attempts.has(key)) {
+      memory.drafts.delete(originKey(key));
+      memory.touch();
+    }
+    return { result, origin };
   } finally {
     settle(admission);
   }
 }
+
+/** The keys of every uncertain attempt kept under `prefix` (each is still reachable from the view that lists them). */
+export const retainedKeys = (env: PeopleEnv, prefix: string): string[] =>
+  [...env.memory.attempts.keys()].filter((key) => key.startsWith(prefix));
 
 /** What a request command's answer says to the row or dialog that shows its key now (D-11b-9), and keeps it for a later mount. */
 export function reportOutcome(

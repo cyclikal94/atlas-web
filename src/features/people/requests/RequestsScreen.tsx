@@ -24,14 +24,17 @@ import {
   commonFailure,
   reportOutcome,
   reportUnder,
+  retainedKeys,
   retainedUnder,
   runCommand,
 } from "./commands";
 import * as copy from "./copy";
 import {
   answerRequest,
+  RESPOND_PREFIX,
   respondFailure,
   respondKey,
+  retainedAnswer,
   timeLeftText,
 } from "./MergeDialog";
 import { NewRequest } from "./NewRequest";
@@ -250,16 +253,23 @@ function Incoming({
         (a, b) => a.expires_at - b.expires_at || (a.id < b.id ? -1 : 1),
       )
     : null;
-  // Reports of answers whose rows are gone (answered elsewhere, expired): still said, with their reference, until dismissed.
+  // Answers whose rows are gone (answered elsewhere, expired, or an uncertain answer that committed): every report, until dismissed, and
+  // every RETAINED attempt, until a definite answer ends it (R4 of review 1: the attempt, not its report, keeps it reachable).
   const listed = new Set(rows?.map((row) => row.id) ?? []);
-  const orphans = [...env.memory.requestReports.entries()].filter(
-    ([key]) =>
-      key.startsWith("respond:") && !listed.has(key.slice("respond:".length)),
+  const orphans = [
+    ...new Set([
+      ...env.memory.requestReports.keys(),
+      ...retainedKeys(env, RESPOND_PREFIX),
+    ]),
+  ].filter(
+    (key) =>
+      key.startsWith(RESPOND_PREFIX) &&
+      !listed.has(key.slice(RESPOND_PREFIX.length)),
   );
   return (
     <div className="flex flex-col gap-2" data-requests-incoming={view.status}>
-      {orphans.map(([key, report]) => (
-        <OrphanReport key={key} env={env} reportKey={key} report={report} />
+      {orphans.map((key) => (
+        <OrphanReport key={key} env={env} reportKey={key} />
       ))}
       {view.status === "offline" ? (
         <p className="text-[13.5px] text-ink-1" data-requests-state="offline">
@@ -297,13 +307,12 @@ function Incoming({
 function OrphanReport({
   env,
   reportKey,
-  report,
 }: {
   env: PeopleEnv;
   reportKey: string;
-  report: NonNullable<ReturnType<typeof reportUnder>>;
 }) {
   const announcer = useAnnouncer();
+  const report = reportUnder(env, reportKey);
   const retained = retainedUnder(env, reportKey);
   const blocked = blockedReason(env, reportKey);
   const replay = async () => {
@@ -320,8 +329,8 @@ function OrphanReport({
   };
   return (
     <Banner
-      message={report.text}
-      requestId={report.requestId}
+      message={report?.text ?? copy.UNCERTAIN}
+      requestId={report?.requestId}
       action={
         <span className="flex flex-wrap gap-2">
           {retained ? (
@@ -337,16 +346,18 @@ function OrphanReport({
                 {copy.TRY_AGAIN}
               </Button>
             )
-          ) : null}
-          <Button
-            variant="quiet"
-            onClick={() => {
-              env.memory.requestReports.delete(reportKey);
-              env.memory.touch();
-            }}
-          >
-            {copy.CLOSE}
-          </Button>
+          ) : (
+            // Closed only once nothing is left to resolve: closing never hides an attempt whose outcome is still unknown.
+            <Button
+              variant="quiet"
+              onClick={() => {
+                env.memory.requestReports.delete(reportKey);
+                env.memory.touch();
+              }}
+            >
+              {copy.CLOSE}
+            </Button>
+          )}
         </span>
       }
     />
@@ -367,7 +378,9 @@ function IncomingRow({
   const senderText = sender ?? copy.SOMEONE;
   const key = respondKey(request.id);
   const report = reportUnder(env, key);
-  const retained = retainedUnder(env, key);
+  // The answer an uncertain attempt kept for this request carried (null: none): its Try again sends THAT answer (R4 of review 1), and it is
+  // offered on that answer's own action.
+  const kept = retainedAnswer(env, key);
   const blocked = blockedReason(env, key);
   const proposal = request.proposal;
   // "Accept" on a link only reveals the consequence and "Confirm accept" (nothing is sent by it); kept across a remount.
@@ -408,7 +421,7 @@ function IncomingRow({
           data-people-action="decline-request"
           onClick={() => void answer(false)}
         >
-          {copy.DECLINE}
+          {kept === false ? copy.TRY_AGAIN : copy.DECLINE}
         </Button>
       ) : (
         <Button disabled reason={blocked}>
@@ -424,7 +437,7 @@ function IncomingRow({
         >
           {copy.SEE_WHAT_CHANGES}
         </Link>
-      ) : accept === "accept" && !retained ? (
+      ) : accept === "accept" && kept !== true ? (
         <Button
           variant="primary"
           data-people-action="accept-request"
@@ -438,7 +451,7 @@ function IncomingRow({
           data-people-action="confirm-accept"
           onClick={() => void answer(true)}
         >
-          {retained ? copy.TRY_AGAIN : copy.CONFIRM_ACCEPT}
+          {kept === true ? copy.TRY_AGAIN : copy.CONFIRM_ACCEPT}
         </Button>
       ) : (
         <Button variant="primary" disabled reason={blocked}>
@@ -477,7 +490,7 @@ function IncomingRow({
           {copy.UNNAMED_CAUTION}
         </p>
       ) : null}
-      {proposal.kind === "link" && (accepting || retained) ? (
+      {proposal.kind === "link" && (accepting || kept === true) ? (
         <div
           className="flex flex-col gap-2 rounded-row border border-hairline bg-canvas p-3"
           data-link-consequence=""
@@ -599,6 +612,21 @@ function SentRow({ env, request }: { env: PeopleEnv; request: SentRequest }) {
         : commonFailure(failure),
     );
   };
+  const action =
+    blocked === null ? (
+      <Button
+        variant="quiet"
+        data-people-action="cancel-request"
+        aria-label={copy.CANCEL_REQUEST_TO(request.recipient_username)}
+        onClick={() => void cancel()}
+      >
+        {retained ? copy.TRY_AGAIN : copy.CANCEL_REQUEST}
+      </Button>
+    ) : (
+      <Button variant="quiet" disabled reason={blocked}>
+        {retained ? copy.TRY_AGAIN : copy.CANCEL_REQUEST}
+      </Button>
+    );
   return (
     <li
       className="flex list-none flex-col gap-2 rounded-row border border-hairline-strong bg-panel p-3"
@@ -612,27 +640,19 @@ function SentRow({ env, request }: { env: PeopleEnv; request: SentRequest }) {
             <span className="text-[12.5px] text-ink-2">
               {timeLeftText(timeLeft(request.expires_at, env.now()))}
             </span>
-            {blocked === null ? (
-              <Button
-                variant="quiet"
-                data-people-action="cancel-request"
-                aria-label={copy.CANCEL_REQUEST_TO(request.recipient_username)}
-                onClick={() => void cancel()}
-              >
-                {retained ? copy.TRY_AGAIN : copy.CANCEL_REQUEST}
-              </Button>
-            ) : (
-              <Button variant="quiet" disabled reason={blocked}>
-                {copy.CANCEL_REQUEST}
-              </Button>
-            )}
+            {action}
           </span>
         ) : (
-          <span
-            className="text-[12.5px] font-medium text-ink-2"
-            data-sent-label=""
-          >
-            {copy.STATE[request.state]}
+          <span className="flex flex-wrap items-center gap-2">
+            <span
+              className="text-[12.5px] font-medium text-ink-2"
+              data-sent-label=""
+            >
+              {copy.STATE[request.state]}
+            </span>
+            {/* A retained uncertain cancel stays reachable whatever the row says now (R4 of review 1): a cancel that committed is no
+                longer pending, and only its Try again learns its answer. */}
+            {retained ? action : null}
           </span>
         )}
       </div>

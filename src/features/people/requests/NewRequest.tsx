@@ -6,6 +6,7 @@ import { Input } from "../../../components/ui/input";
 import { List } from "../../../components/ui/list";
 import { untilSent } from "../../sharing";
 import { DirectoryLookup } from "../../sharing/DirectoryLookup";
+import type { PeopleResult } from "../api";
 import { type PeopleEnv, usePeopleEnv } from "../env";
 import { isCurrentMemory, useMemoryRevision } from "../memory";
 import { requestLinkBody } from "../model/requests";
@@ -16,10 +17,13 @@ import { useSummary, type WalkedPages, walkPages } from "../summaries";
 import {
   blockedReason,
   commonFailure,
+  originOf,
+  type Receipt,
   reportOutcome,
   reportUnder,
+  retainedKeys,
   retainedUnder,
-  runCommand,
+  runCommandFrom,
   sendingUnder,
 } from "./commands";
 import * as copy from "./copy";
@@ -117,10 +121,114 @@ export function NewRequest({ bare = false }: { bare?: boolean }) {
 }
 
 // ---- Ask to link -------------------------------------------------------------------------------------------------------------------
+/** What an Ask to link send was made of: the form's revision at the press, and the person and recipient it was addressed to. */
+interface LinkOrigin {
+  revision: number;
+  person: { id: string; label: string };
+  recipient: { id: string; username: string };
+}
+const LINK_PREFIX = "request-link:";
+type LinkSent = {
+  result: PeopleResult<Receipt>;
+  origin: LinkOrigin | null;
+} | null;
+
+/**
+ * What a link request's answer does, for the attempt it answers (R1 of review 1): a success names the recipient THAT attempt was addressed
+ * to and clears the form only when nothing was typed after that attempt was captured; anything else is said under its key.
+ */
+function completeLink(
+  env: PeopleEnv,
+  key: string,
+  sent: LinkSent,
+  announce: (text: string) => void,
+): void {
+  if (sent === null) return;
+  const { result, origin } = sent;
+  readLinkage(env, key.slice(LINK_PREFIX.length), { force: true });
+  if (result.ok) {
+    if (origin === null) return;
+    announce(copy.REQUEST_SENT(origin.recipient.username));
+    // Cleared only when nothing was typed after the capture (a newer edit stays).
+    const draft = draftOf(env);
+    if (draft.revision === origin.revision) {
+      env.memory.drafts.set(NEW_REQUEST_KEY, {
+        ...draft,
+        link: { person: null, recipient: null },
+      });
+      env.memory.touch();
+    }
+    return;
+  }
+  reportOutcome(env, key, result, (failure) =>
+    failure.kind === "capacity"
+      ? copy.CAPACITY(origin?.recipient.username ?? copy.THE_OTHER_OWNER)
+      : failure.kind === "conflict"
+        ? copy.PERSON_CHANGED
+        : failure.kind === "not_found"
+          ? copy.PREVIEW_NOT_FOUND
+          : commonFailure(failure),
+  );
+}
+
+/**
+ * An uncertain link request kept for a person the form no longer shows (the person was changed after it): still said, with Try again,
+ * which sends it again exactly as it was. It ends only with a definite answer, never by editing the form.
+ */
+function EarlierLink({
+  attemptKey,
+  onSent,
+}: {
+  attemptKey: string;
+  onSent(sent: LinkSent): void;
+}) {
+  const env = usePeopleEnv();
+  const origin = originOf<LinkOrigin>(env, attemptKey);
+  const report = reportUnder(env, attemptKey);
+  const blocked = blockedReason(env, attemptKey);
+  return (
+    <div
+      className="flex flex-col gap-1"
+      data-earlier-link={attemptKey.slice(LINK_PREFIX.length)}
+    >
+      <Banner
+        message={report?.text ?? copy.UNCERTAIN}
+        requestId={report?.requestId}
+        action={
+          blocked === null ? (
+            <Button
+              data-people-action="retry-earlier-link"
+              onClick={() =>
+                void runCommandFrom<LinkOrigin>(
+                  env,
+                  attemptKey,
+                  () => null,
+                ).then(onSent)
+              }
+            >
+              {copy.TRY_AGAIN}
+            </Button>
+          ) : (
+            <Button disabled reason={blocked}>
+              {copy.TRY_AGAIN}
+            </Button>
+          )
+        }
+      />
+      {origin !== null ? (
+        <p className="text-[12.5px] text-ink-2">
+          {copy.EARLIER_LINK(origin.person.label, origin.recipient.username)}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function AskToLink() {
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
   const announcer = useAnnouncer();
+  const announce = (text: string) => announcer.announce(text, "polite");
   const [draft, update] = useDraft(env);
   const [view, setView] = useState<"form" | "person" | "lookup">("form");
   const person = draft.link.person;
@@ -169,10 +277,15 @@ function AskToLink() {
 
   const send = async () => {
     if (person === null || recipient === null || key === null) return;
-    // The input this send is made of, captured at the press: only it is cleared by a success (later edits stay).
-    const captured = draftOf(env).revision;
+    // The input this send is made of, captured at the press: only it is cleared by a success (later edits stay). A retained attempt is
+    // sent again as it was, and completes with ITS origin (the recipient it was addressed to, the input it was made of).
+    const capture: LinkOrigin = {
+      revision: draftOf(env).revision,
+      person,
+      recipient,
+    };
     const memory = env.memory;
-    const result = await runCommand(env, key, async () => {
+    const sent = await runCommandFrom<LinkOrigin>(env, key, async () => {
       // Who controls the person, judged AT THE PRESS: only a known unlinked person is offered, at the version that answer read.
       const now = linkageIn(env, person.id);
       if (!now.known || now.kind !== "unlinked") return null;
@@ -203,34 +316,28 @@ function AskToLink() {
         memory.touch();
         return null;
       }
-      return requestLinkBody({
-        requestId: env.newId(),
-        personId: person.id,
-        accountId: recipient.id,
-        version: now.version,
-      });
+      return {
+        body: requestLinkBody({
+          requestId: env.newId(),
+          personId: person.id,
+          accountId: recipient.id,
+          version: now.version,
+        }),
+        origin: capture,
+      };
     });
-    if (result === null) return;
-    readLinkage(env, person.id, { force: true });
-    if (result.ok) {
-      announcer.announce(copy.REQUEST_SENT(recipient.username), "polite");
-      // Cleared only when nothing was typed after the capture (a newer edit stays).
-      if (draftOf(env).revision === captured)
-        update((d) => ({ ...d, link: { person: null, recipient: null } }));
-      return;
-    }
-    reportOutcome(env, key, result, (failure) =>
-      failure.kind === "capacity"
-        ? copy.CAPACITY(recipient.username)
-        : failure.kind === "conflict"
-          ? copy.PERSON_CHANGED
-          : failure.kind === "not_found"
-            ? copy.PREVIEW_NOT_FOUND
-            : commonFailure(failure),
-    );
+    completeLink(env, key, sent, announce);
   };
 
   const sending = key !== null && sendingUnder(env, key);
+  // What Try again sends when an attempt is kept: the EARLIER request, as it was (said when the form now names someone else).
+  const origin = key !== null ? originOf<LinkOrigin>(env, key) : null;
+  const sendsEarlier =
+    retained && origin !== null && origin.recipient.id !== recipient?.id;
+  // Uncertain requests for OTHER people of this form (the person was changed since): each stays reachable here.
+  const others = retainedKeys(env, LINK_PREFIX).filter(
+    (other) => other !== key,
+  );
   const reason =
     person === null
       ? copy.CHOOSE_PERSON_FIRST
@@ -248,6 +355,13 @@ function AskToLink() {
                   : null));
   return (
     <div className="flex flex-col gap-4" data-ask-to-link="">
+      {others.map((other) => (
+        <EarlierLink
+          key={other}
+          attemptKey={other}
+          onSent={(sent) => completeLink(env, other, sent, announce)}
+        />
+      ))}
       <p className="text-[13px] leading-[1.6] text-ink-2">{copy.LINK_INTRO}</p>
       <div className="flex flex-col gap-1.5">
         <span className="text-[12.5px] font-medium text-ink-1">
@@ -312,6 +426,11 @@ function AskToLink() {
         <Banner message={report.text} requestId={report.requestId} />
       ) : null}
       <span className="flex flex-col items-start gap-1">
+        {sendsEarlier ? (
+          <span className="text-[12.5px] text-ink-2" data-retry-sends="">
+            {copy.RETRY_SENDS_EARLIER(origin.recipient.username)}
+          </span>
+        ) : null}
         {reason === null ? (
           <Button
             variant="primary"
@@ -436,7 +555,13 @@ function AskToMerge() {
 }
 
 // ---- choosing a person -----------------------------------------------------------------------------------------------------------
-/** 100-row pages, at most three kept (Q9); "Show more" reads the next one. The filter applies to what was read. */
+/**
+ * The picker reads 100-row pages and keeps at most three of them (Q9's retained pages), and every further person stays reachable (R2 of
+ * review 1: Q9's "keep further records accessible through pagination"). A WINDOW is one bounded walk from its start: "Show more" reads its
+ * next page while it has fewer than three; once it has three, "Show the next people" starts a new window where it ended (the earlier one is
+ * no longer kept), and "Show earlier people" goes back to the window before. The filter applies to the window shown; until the whole list
+ * fits in one window from its first person, the picker says so, and an empty answer is never claimed for people it has not read.
+ */
 const PICKER_PAGE = 100;
 const PICKER_PAGES = 3;
 
@@ -462,11 +587,14 @@ function PersonPicker({
   onBack(): void;
 }) {
   const env = usePeopleEnv();
+  // The starts of the windows walked so far (the first is the list's beginning); the last is shown.
+  const [starts, setStarts] = useState<(string | null)[]>([null]);
   const [pages, setPages] = useState(1);
   const [filter, setFilter] = useState("");
   const heading = useId();
+  const start = starts.at(-1) ?? null;
   const view = useSummary<WalkedPages<PersonSummary>>(
-    `picker:${scope}:${purpose}:${pages}`,
+    `picker:${scope}:${purpose}:${start ?? ""}:${pages}`,
     (current) =>
       walkPages(
         (after) =>
@@ -475,7 +603,9 @@ function PersonPicker({
             limit: PICKER_PAGE,
             archived: false,
           }),
-        { start: null, keep: offer, limit: PICKER_PAGE * PICKER_PAGES, pages },
+        // Bounded by its pages (at most 300 rows read): a limit of exactly 300 kept would stop on a window's last row before its page
+        // said whether it is the end.
+        { start, keep: offer, limit: PICKER_PAGE * PICKER_PAGES + 1, pages },
         current,
       ),
   );
@@ -490,11 +620,15 @@ function PersonPicker({
     (summary) =>
       needle === "" || summary.label.toLocaleLowerCase().includes(needle),
   );
+  // The window holds the whole list: it starts at the first person and reached the last page.
+  const whole = starts.length === 1 && shown !== null && shown.end;
+  const more = shown !== null && !shown.end && shown.next !== null;
   return (
     <section
       aria-labelledby={heading}
       className="flex flex-col gap-3"
       data-person-picker={scope}
+      data-picker-window={starts.length}
     >
       <div className="flex items-center gap-3">
         <Button variant="quiet" onClick={onBack}>
@@ -510,6 +644,11 @@ function PersonPicker({
         onChange={(event) => setFilter(event.target.value)}
         autoComplete="off"
       />
+      {shown !== null && !whole && needle !== "" ? (
+        <p className="text-[12.5px] text-ink-2" data-picker-partial="">
+          {copy.FILTER_SHOWN_ONLY}
+        </p>
+      ) : null}
       {view.status === "offline" ? (
         <p className="text-[13px] text-ink-2">{copy.PEOPLE_OFFLINE}</p>
       ) : view.status === "failed" ? (
@@ -520,8 +659,14 @@ function PersonPicker({
       ) : shown === null ? (
         <p className="text-[13px] text-ink-2">{copy.REQUESTS_CHECKING}</p>
       ) : rows.length === 0 ? (
-        <p className="text-[13px] text-ink-1">
-          {shown.kept.length === 0 ? empty : copy.NO_MATCHES}
+        <p className="text-[13px] text-ink-1" data-picker-empty="">
+          {whole
+            ? shown.kept.length === 0
+              ? empty
+              : copy.NO_MATCHES
+            : shown.kept.length === 0
+              ? copy.NONE_OFFERED_SHOWN
+              : copy.NO_MATCHES_SHOWN}
         </p>
       ) : (
         <List className="flex flex-col gap-1">
@@ -542,13 +687,38 @@ function PersonPicker({
           ))}
         </List>
       )}
-      {shown !== null && !shown.end && pages < PICKER_PAGES ? (
-        <Button
-          data-people-action="picker-more"
-          onClick={() => setPages(pages + 1)}
-        >
-          {copy.SHOW_MORE}
-        </Button>
+      {shown !== null && (more || starts.length > 1) ? (
+        <span className="flex flex-wrap gap-2">
+          {starts.length > 1 ? (
+            <Button
+              data-people-action="picker-earlier"
+              onClick={() => {
+                setStarts(starts.slice(0, -1));
+                setPages(PICKER_PAGES);
+              }}
+            >
+              {copy.SHOW_EARLIER_PEOPLE}
+            </Button>
+          ) : null}
+          {more && pages < PICKER_PAGES ? (
+            <Button
+              data-people-action="picker-more"
+              onClick={() => setPages(pages + 1)}
+            >
+              {copy.SHOW_MORE}
+            </Button>
+          ) : more ? (
+            <Button
+              data-people-action="picker-next"
+              onClick={() => {
+                setStarts([...starts, shown.next]);
+                setPages(1);
+              }}
+            >
+              {copy.SHOW_NEXT_PEOPLE}
+            </Button>
+          ) : null}
+        </span>
       ) : null}
     </section>
   );

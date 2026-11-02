@@ -67,8 +67,8 @@ export const UNIT_WEB11B = [
     patch: (t) =>
       sub(
         t,
-        "      return drawnPreview.requires_approval\n        ? requestMergeBody({",
-        "      return false\n        ? requestMergeBody({",
+        "        body: drawnPreview.requires_approval\n          ? requestMergeBody({",
+        "        body: false\n          ? requestMergeBody({",
       ),
   },
   {
@@ -81,8 +81,8 @@ export const UNIT_WEB11B = [
     patch: (t) =>
       sub(
         t,
-        "      return drawnPreview.requires_approval\n        ? requestMergeBody({",
-        "      return true\n        ? requestMergeBody({",
+        "        body: drawnPreview.requires_approval\n          ? requestMergeBody({",
+        "        body: true\n          ? requestMergeBody({",
       ),
   },
   {
@@ -338,8 +338,8 @@ export const UNIT_WEB11B = [
           "    const prepared = retained === null ? prepare() : null;\n",
           "    const prepared = prepare();\n",
         ),
-        "    return retained !== null\n      ? await replayOnline(env, key, retained, send)\n      : await sendOnline(env, key, body, send);\n",
-        "    void replayOnline;\n    memory.attempts.delete(key);\n    return await sendOnline(env, key, body, send);\n",
+        "    const result =\n      retained !== null\n        ? await replayOnline(env, key, retained, send)\n        : await sendOnline(env, key, made?.body, send);\n",
+        "    void replayOnline;\n    memory.attempts.delete(key);\n    const result = await sendOnline(env, key, made?.body, send);\n",
       ),
   },
   {
@@ -388,8 +388,8 @@ export const UNIT_WEB11B = [
     patch: (t) =>
       sub(
         t,
-        "      if (draftOf(env).revision === captured)\n",
-        "      if (captured === captured)\n",
+        "    if (draft.revision === origin.revision) {\n",
+        "    if (origin.revision === origin.revision) {\n",
       ),
   },
   {
@@ -402,9 +402,127 @@ export const UNIT_WEB11B = [
     patch: (t) =>
       sub(
         t,
-        "    `picker:${scope}:${purpose}:${pages}`,\n",
-        "    `picker:${scope}:${pages}`,\n",
+        '    `picker:${scope}:${purpose}:${start ?? ""}:${pages}`,\n',
+        '    `picker:${scope}:${start ?? ""}:${pages}`,\n',
       ),
+  },
+  // ---- revision 1 (review 1 of 2 November 2026, R1–R4): one mutant per corrected mechanism ----
+  {
+    id: "MU-4136",
+    title:
+      "WEB-11b R1: a replayed link request completes with the form shown at Try again (announces the newer recipient, clears the newer input)",
+    file: "src/features/people/requests/NewRequest.tsx",
+    tests: [SCREEN],
+    expect: /the recipient changed between attempts/,
+    patch: (t) =>
+      sub(
+        t,
+        "    completeLink(env, key, sent, announce);\n",
+        "    completeLink(\n      env,\n      key,\n      sent === null ? null : { ...sent, origin: capture },\n      announce,\n    );\n",
+      ),
+  },
+  {
+    id: "MU-4137",
+    title:
+      "WEB-11b R1: a replayed merge announces the name chosen at Try again, not the name its attempt carried",
+    file: "src/features/people/requests/MergeDialog.tsx",
+    tests: [DIALOG],
+    expect: /R1: a replayed merge completes as ITS attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        '          announcer.announce(copy.MERGED_INTO(origin.name), "polite");\n',
+        '          announcer.announce(\n            copy.MERGED_INTO(preview ? nameOf(preview, chosen) : origin.name),\n            "polite",\n          );\n',
+      ),
+  },
+  {
+    id: "MU-4138",
+    title:
+      "WEB-11b R1: an uncertain link request for a person the form no longer shows is not offered (unreachable once the person changes)",
+    file: "src/features/people/requests/NewRequest.tsx",
+    tests: [SCREEN],
+    expect: /the person changed after an uncertain send/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const others = retainedKeys(env, LINK_PREFIX).filter(\n",
+        "  const others = ([] as string[]).filter(\n",
+      ),
+  },
+  {
+    id: "MU-4139",
+    title:
+      "WEB-11b R2: the picker offers no continuation after three pages (people after the 300th are unreachable)",
+    file: "src/features/people/requests/NewRequest.tsx",
+    tests: [SCREEN],
+    expect: /301 people/,
+    patch: (t) =>
+      sub(t, "          ) : more ? (\n", "          ) : false ? (\n"),
+  },
+  {
+    id: "MU-4140",
+    title:
+      "WEB-11b R2: a partly read list is treated as exhausted (no match / none offered claimed for people never read)",
+    file: "src/features/people/requests/NewRequest.tsx",
+    tests: [SCREEN],
+    expect: /301 people|all filtered out/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const whole = starts.length === 1 && shown !== null && shown.end;\n",
+        "  const whole = shown !== null;\n",
+      ),
+  },
+  {
+    id: "MU-4141",
+    title:
+      "WEB-11b R3: below 1280 px the Requests entry exists only while requests wait (Sent and New request unreachable from People)",
+    file: "src/features/people/requests/entries.tsx",
+    tests: [SCREEN],
+    expect: /none waiting, unknown and offline/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (mode === "desktop" || count === null || count < 1) return entry;\n',
+        '  if (mode === "desktop") return entry;\n  if (count === null || count < 1) return null;\n',
+      ),
+  },
+  {
+    id: "MU-4142",
+    title:
+      "WEB-11b R4: a retained uncertain cancel loses its Try again once the row is no longer pending",
+    file: "src/features/people/requests/RequestsScreen.tsx",
+    tests: [SCREEN],
+    expect: /that committed \(the row now says Cancelled\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "            {retained ? action : null}\n",
+        "            {null}\n",
+      ),
+  },
+  {
+    id: "MU-4143",
+    title:
+      "WEB-11b R4: a row's Try again after an uncertain Decline is wired to Accept (the kept answer is not what it dispatches)",
+    file: "src/features/people/requests/RequestsScreen.tsx",
+    tests: [SCREEN],
+    expect: /an uncertain Decline whose row is still listed/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const kept = retainedAnswer(env, key);\n",
+        "  const kept = retainedAnswer(env, key) === null ? null : true;\n",
+      ),
+  },
+  {
+    id: "MU-4144",
+    title:
+      "WEB-11b R4: an unlisted request's retained answer is offered only while its report is kept (dismissing the report hides it)",
+    file: "src/features/people/requests/RequestsScreen.tsx",
+    tests: [SCREEN],
+    expect: /that committed \(the row is gone\)/,
+    patch: (t) => sub(t, "      ...retainedKeys(env, RESPOND_PREFIX),\n", ""),
   },
 ];
 

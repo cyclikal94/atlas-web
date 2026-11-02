@@ -32,6 +32,7 @@ import {
   reportUnder,
   retainedUnder,
   runCommand,
+  runCommandFrom,
 } from "./commands";
 import * as copy from "./copy";
 import {
@@ -58,7 +59,9 @@ import { useSenderName } from "./sender";
  */
 export const mergeKey = (sourceId: string, targetId: string): string =>
   `merge:${sourceId}:${targetId}`;
-export const respondKey = (requestId: string): string => `respond:${requestId}`;
+export const RESPOND_PREFIX = "respond:";
+export const respondKey = (requestId: string): string =>
+  `${RESPOND_PREFIX}${requestId}`;
 const nameDraftKey = (sourceId: string, targetId: string): string =>
   `merge-name:${sourceId}:${targetId}`;
 
@@ -106,16 +109,21 @@ function Comparison({
   const targetName = preview.target?.label ?? copy.NOT_VISIBLE;
   const sourceName = preview.source?.label ?? copy.NOT_VISIBLE;
   return (
-    <table className="w-full text-left" data-merge-comparison="">
+    // FIXED columns (R5 of review 1): a long value (a 500-character word is a valid text field) wraps inside its column instead of
+    // widening the table past the dialog, so both sides stay side by side and nothing is clipped.
+    <table
+      className="w-full table-fixed text-left [overflow-wrap:anywhere]"
+      data-merge-comparison=""
+    >
       <thead>
         <tr className="border-b border-hairline text-[12px] text-ink-2">
-          <th scope="col" className="py-2 font-medium">
+          <th scope="col" className="w-[28%] py-2 pr-2 align-top font-medium">
             {copy.FIELD}
           </th>
-          <th scope="col" className="py-2 font-medium">
+          <th scope="col" className="w-[36%] py-2 pr-2 align-top font-medium">
             {copy.KEPT(targetName)}
           </th>
-          <th scope="col" className="py-2 font-medium">
+          <th scope="col" className="w-[36%] py-2 align-top font-medium">
             {sourceName}
           </th>
         </tr>
@@ -127,13 +135,16 @@ function Comparison({
             className="border-b border-hairline"
             data-comparison-row={row.key}
           >
-            <th scope="row" className="py-2 text-[13px] font-medium text-ink-1">
+            <th
+              scope="row"
+              className="py-2 pr-2 align-top text-[13px] font-medium text-ink-1"
+            >
               {row.label}
             </th>
-            <td className="py-2">
+            <td className="min-w-0 py-2 pr-2 align-top">
               <Cell cell={row.target} hidden={preview.target === null} />
             </td>
-            <td className="py-2">
+            <td className="min-w-0 py-2 align-top">
               <Cell cell={row.source} hidden={preview.source === null} />
             </td>
           </tr>
@@ -225,6 +236,13 @@ function previewRefusal(failure: Refusable<unknown> & { ok: false }): string {
 }
 
 // ---- the sender ------------------------------------------------------------------------------------------------------------------
+/** What a sender's merge attempt was made of: a request (and whom it asks) or a direct merge, and the name it carries. */
+interface MergeOrigin {
+  approval: boolean;
+  name: string;
+  owner: string;
+}
+
 export function SenderMerge({
   sourceId,
   targetId,
@@ -279,7 +297,7 @@ export function SenderMerge({
   const press = async () => {
     // The comparison this render drew, and only while it is still the current read (never a token of an earlier render).
     const drawnPreview = preview;
-    const result = await runCommand(env, key, () => {
+    const sent = await runCommandFrom<MergeOrigin>(env, key, () => {
       const current = currentOf(view);
       if (drawnPreview === null || current === null || !current.value.ok)
         return null;
@@ -297,29 +315,38 @@ export function SenderMerge({
         return null;
       const name =
         naming.kind === "fixed" ? naming.name : nameOf(drawnPreview, chosen);
-      return drawnPreview.requires_approval
-        ? requestMergeBody({
-            requestId: env.newId(),
-            sourceId,
-            targetId,
-            token: drawnPreview.token,
-            name,
-          })
-        : mergeBody({ sourceId, targetId, token: drawnPreview.token, name });
+      // What this attempt is made of, kept beside it: a replay completes as THIS attempt (R1 of review 1), never as the comparison or
+      // the choice shown when Try again is pressed.
+      const origin: MergeOrigin = {
+        approval: drawnPreview.requires_approval,
+        name,
+        owner,
+      };
+      return {
+        body: drawnPreview.requires_approval
+          ? requestMergeBody({
+              requestId: env.newId(),
+              sourceId,
+              targetId,
+              token: drawnPreview.token,
+              name,
+            })
+          : mergeBody({ sourceId, targetId, token: drawnPreview.token, name }),
+        origin,
+      };
     });
-    if (result === null) return;
+    if (sent === null) return;
+    const { result, origin } = sent;
     readLinkage(env, sourceId, { force: true });
     readLinkage(env, targetId, { force: true });
     if (result.ok) {
       env.memory.drafts.delete(nameDraftKey(sourceId, targetId));
-      if (drawnPreview?.requires_approval) {
-        announcer.announce(copy.MERGE_REQUESTED(owner), "polite");
+      if (origin?.approval) {
+        announcer.announce(copy.MERGE_REQUESTED(origin.owner), "polite");
         if (shown()) onClose();
       } else {
-        announcer.announce(
-          copy.MERGED_INTO(drawnPreview ? nameOf(drawnPreview, chosen) : ""),
-          "polite",
-        );
+        if (origin !== null)
+          announcer.announce(copy.MERGED_INTO(origin.name), "polite");
         if (shown())
           void navigate({
             to: "/people/$personId",
@@ -512,8 +539,8 @@ export function SenderMerge({
 }
 
 // ---- the recipient ---------------------------------------------------------------------------------------------------------------
-/** The answer a retained uncertain respond attempt carried (null: none kept). */
-function retainedAnswer(env: PeopleEnv, key: string): boolean | null {
+/** The answer a retained uncertain respond attempt carried (null: none kept): its Try again sends THAT answer again. */
+export function retainedAnswer(env: PeopleEnv, key: string): boolean | null {
   const attempt = env.memory.attempts.get(key);
   if (attempt === undefined) return null;
   try {
