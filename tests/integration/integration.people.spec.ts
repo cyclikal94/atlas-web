@@ -1866,3 +1866,627 @@ test.describe("I-PPL15 and I-PPL16: the viewer-safe summaries (finding 8, API 0.
     }
   });
 });
+
+// ---- WEB-11b: merges, links and requests (I-PPL17 to I-PPL23) -----------------------------------------------------------------------
+// The UI's commands against the released `v0.29.0-rc.1` (Q16's reads included). FOCUSED CONSUMER EVIDENCE for a fixture-stage task, not
+// BE-Q16's acceptance and not integration acceptance. Every name is unique per run (the accounts are shared with the earlier cases).
+// Not run here: a 7-day expiry (the released backend has no clock control; fixture E-R5/E-R6 and the backend's own tests cover it).
+const unique = (label: string) => `${label} ${crypto.randomUUID().slice(0, 8)}`;
+const HOME_VIEW_OF = (household: string) => ({
+  grants: [{ kind: "household", id: household, edit: false }],
+  exclude_accounts: [],
+});
+/** WEB-11b's request rows and lists. */
+const incoming = (page: Page, text: string) =>
+  page.locator("[data-incoming-request]").filter({ hasText: text });
+const sentRow = (page: Page, text: string) =>
+  page.locator("[data-sent-request]").filter({ hasText: text });
+/** Picks `person` in the open picker: filtered by its name, with "Show more" while it is not among the people read (Q9: 100 a page). */
+async function pick(page: Page, person: string, label: string) {
+  await page.getByRole("textbox", { name: "Filter by name" }).fill(label);
+  const row = page.locator(`[data-pick-person="${person}"]`);
+  for (let i = 0; i < 3; i += 1) {
+    if (await row.isVisible()) break;
+    const more = page.getByRole("button", { name: "Show more" });
+    await expect(row.or(more)).toBeVisible({ timeout: 30_000 });
+    if (await row.isVisible()) break;
+    await more.click();
+  }
+  await row.click({ timeout: 30_000 });
+}
+/** Choose a person in the open picker of "New request" (Ask to link). */
+async function askToLink(
+  page: Page,
+  person: string,
+  username: string,
+  label: string,
+) {
+  await page.getByRole("button", { name: "Ask to link", exact: true }).click();
+  await page.getByRole("button", { name: "Choose", exact: true }).click();
+  await pick(page, person, label);
+  await page.getByRole("button", { name: "Search the directory" }).click();
+  const exact = page.locator('[data-lookup="exact"]');
+  await exact.getByRole("textbox", { name: "Exact username" }).fill(username);
+  await exact.getByRole("textbox", { name: "Exact username" }).press("Enter");
+  await exact
+    .getByRole("button", { name: /choose/i })
+    .click({ timeout: 30_000 });
+  await expect(
+    page.locator(`[data-link-recipient="${username}"]`),
+  ).toBeVisible();
+}
+/** The `/people-commands` and `/directory` requests a page makes, in order. */
+function requestsOf(
+  page: Page,
+): Array<{ path: string; key: string | null; body: string }> {
+  const seen: Array<{ path: string; key: string | null; body: string }> = [];
+  page.on("request", (r) => {
+    const url = new URL(r.url());
+    if (
+      url.pathname.endsWith("/people-commands") ||
+      url.pathname.endsWith("/directory")
+    )
+      seen.push({
+        path: `${r.method()} ${url.pathname.replace(API, "")}${url.search}`,
+        key: r.headers()["idempotency-key"] ?? null,
+        body: r.postData() ?? "",
+      });
+  });
+  return seen;
+}
+const kindOf = (body: string) =>
+  (JSON.parse(body || "{}") as { command?: { kind?: string } }).command?.kind;
+
+test.describe("I-PPL17 to I-PPL23: merges, links and requests (WEB-11b A2-A9, A16)", () => {
+  test("I-PPL17 A asks B to link a person in the UI (lookup re-checked first); B, named from their household, confirms; the person is B's; a fresh A context shows Accepted", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "pete", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "quinn");
+      await household(a, aId, b, bId);
+      const name = unique("I-R Link");
+      const { person } = await seedPerson(a, aId, name);
+      await reopenBound(a, aId.account_id, "/people/requests");
+      const seen = requestsOf(a);
+      await askToLink(a, person, ACCOUNTS.quinn.username, name);
+      const mark = seen.length;
+      await a.getByRole("button", { name: "Send request" }).click();
+      await expect(sentRow(a, name)).toBeVisible({ timeout: 30_000 });
+      const after = seen
+        .slice(mark)
+        .map((r) =>
+          r.path.startsWith("POST") ? `POST ${kindOf(r.body)}` : r.path,
+        );
+      expect(
+        after.indexOf(`GET /directory?username=${ACCOUNTS.quinn.username}`),
+      ).toBeGreaterThanOrEqual(0);
+      expect(after.indexOf("POST request_link")).toBeGreaterThan(
+        after.indexOf(`GET /directory?username=${ACCOUNTS.quinn.username}`),
+      );
+      await leader(b, bId.account_id);
+      await reopenBound(b, bId.account_id, "/people/requests");
+      await defaultsLoaded(b, bId);
+      const row = incoming(b, name);
+      await expect(row).toBeVisible({ timeout: 30_000 });
+      await expect(row.locator('[data-request-sender="known"]')).toHaveText(
+        ACCOUNTS.pete.username,
+      );
+      await row.getByRole("button", { name: "Accept", exact: true }).click();
+      await row.getByRole("button", { name: "Confirm accept" }).click();
+      await expect(row).toHaveCount(0, { timeout: 30_000 });
+      await expect
+        .poll(
+          async () => (await personOf(b, bId, person)).body.linked_account_id,
+          { timeout: 30_000 },
+        )
+        .toBe(bId.account_id);
+      // Q16: the history is the server's, so a fresh browser context of A shows the authoritative state.
+      const fresh = await browser.newContext();
+      try {
+        const { page: again } = await boot(fresh, "pete", "/people/requests");
+        await expect(
+          sentRow(again, name).locator("[data-sent-label]"),
+        ).toHaveText("Accepted", { timeout: 30_000 });
+      } finally {
+        await fresh.close();
+      }
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ person, requests: after }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL18 B declines in the UI and A's Sent says Declined; A cancels another and it says Cancelled; B's answer to it is a 404 with its reference", async ({
+    browser,
+    provokes,
+  }) => {
+    provokes(404);
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "olga", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "nora");
+      const first = unique("I-R Decline");
+      const second = unique("I-R Cancel");
+      const ask = async (label: string) => {
+        const { person } = await seedPerson(a, aId, label);
+        const version = (await personOf(a, aId, person)).body.person.version;
+        const asked = await peopleCommand(a, aId, {
+          kind: "request_link",
+          id: crypto.randomUUID(),
+          person_id: person,
+          account_id: bId.account_id,
+          expected_version: version,
+        });
+        expect(asked.status).toBe(200);
+      };
+      await ask(first);
+      await ask(second);
+      await leader(b, bId.account_id);
+      await reopenBound(b, bId.account_id, "/people/requests");
+      await expect(incoming(b, second)).toBeVisible({ timeout: 30_000 });
+      await incoming(b, first).getByRole("button", { name: "Decline" }).click();
+      await expect(incoming(b, first)).toHaveCount(0, { timeout: 30_000 });
+      await reopenBound(a, aId.account_id, "/people/requests");
+      await expect(sentRow(a, first).locator("[data-sent-label]")).toHaveText(
+        "Declined",
+        { timeout: 30_000 },
+      );
+      await sentRow(a, second)
+        .getByRole("button", { name: /Cancel request/ })
+        .click();
+      await expect(sentRow(a, second).locator("[data-sent-label]")).toHaveText(
+        "Cancelled",
+        { timeout: 30_000 },
+      );
+      // B's list still shows the cancelled request (nothing has asked again since): answering it is refused 404.
+      await incoming(b, second)
+        .getByRole("button", { name: "Decline" })
+        .click();
+      await expect(
+        b
+          .locator("main")
+          .getByText(
+            "This request was already answered, cancelled or has expired.",
+          ),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(b.locator("main").getByText(/^Reference: /)).toBeVisible();
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL19 and I-PPL20 cross-owner: A asks B in the UI; B's review hides A's person; B's first Accept on a stale token is a 409 and is read again; the second merges", async ({
+    browser,
+    provokes,
+  }, info) => {
+    provokes(409);
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "mia", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "liam");
+      const home = await household(b, bId, a, aId);
+      // B's cache is open before B's person is made (seedPerson waits for it to sync).
+      await leader(b, bId.account_id);
+      const mine = unique("I-R Mine");
+      const theirs = unique("I-R Theirs");
+      const { person: x } = await seedPerson(a, aId, mine);
+      const {
+        person: y,
+        fields: [secret],
+      } = await seedPerson(b, bId, theirs, [
+        { label: "Secret", text: "only B" },
+      ]);
+      // HARNESS: made private, then shared with B's household (a content create carries no household grant).
+      const created = await policyOf(b, bId, y);
+      expect(
+        (
+          await management(b, bId, [
+            {
+              kind: "replace_policy",
+              id: y,
+              expected_version: created.body.version,
+              policy: HOME_VIEW_OF(home),
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      await reopenBound(a, aId.account_id, "/people/requests");
+      await a.getByRole("button", { name: "Ask to merge" }).click();
+      await a
+        .getByRole("button", { name: "Choose", exact: true })
+        .first()
+        .click();
+      await pick(a, x, mine);
+      await a.getByRole("button", { name: "Choose", exact: true }).click();
+      await pick(a, y, theirs);
+      await a.getByRole("button", { name: "Compare" }).click();
+      const dialog = a.getByRole("dialog");
+      const ask = dialog.getByRole("button", {
+        name: `Ask ${ACCOUNTS.liam.username} to merge`,
+      });
+      await expect(ask).toBeEnabled({ timeout: 30_000 });
+      await ask.click();
+      await expect(dialog).toBeHidden({ timeout: 30_000 });
+      await leader(b, bId.account_id);
+      await reopenBound(b, bId.account_id, "/people/requests");
+      const row = b
+        .locator('[data-incoming-request][data-request-kind="merge"]')
+        .filter({ hasText: "wants to merge" });
+      await expect(row.first()).toBeVisible({ timeout: 30_000 });
+      const ids = await b
+        .locator('[data-incoming-request][data-request-kind="merge"]')
+        .evaluateAll((els) =>
+          els.map((el) => el.getAttribute("data-incoming-request")),
+        );
+      // The request of this run is the one whose recipient preview names Y.
+      let request: string | null = null;
+      for (const id of ids)
+        if (
+          id &&
+          JSON.stringify(
+            (await raw(b, bId, "GET", `/people/requests/${id}/merge-preview`))
+              .body,
+          ).includes(y)
+        )
+          request = id;
+      expect(request).not.toBeNull();
+      await go(b, `/people/requests/${request}`);
+      const review = b.getByRole("dialog");
+      await expect(review.locator("[data-merge-partial]")).toContainText(
+        "Comparison unavailable",
+        { timeout: 30_000 },
+      );
+      await expect(review.locator("[data-merge-comparison]")).toContainText(
+        "Not visible to you",
+      );
+      // I-PPL20: B changes what only B can see (A's view, and so the sender's token, is unchanged).
+      const field = (await fieldsOf(b, bId, y)).find(
+        (f) => f.id === secret,
+      ) as Projection;
+      expect(
+        (
+          await taskCommand(b, bId, {
+            kind: "put_field",
+            id: secret,
+            parent_id: y,
+            expected_version: field.version,
+            expected_policy_version: field.policy_version,
+            label: "Secret",
+            value: { kind: "text", text: "only B, changed" },
+          })
+        ).status,
+      ).toBe(200);
+      const commands = requestsOf(b);
+      await review.getByRole("button", { name: "Accept", exact: true }).click();
+      await expect(review).toContainText(
+        "This merge changed since you opened it.",
+        { timeout: 30_000 },
+      );
+      await expect(
+        review.getByRole("button", { name: "Accept", exact: true }),
+      ).toBeEnabled({ timeout: 30_000 });
+      await review.getByRole("button", { name: "Accept", exact: true }).click();
+      await expect(b).toHaveURL(/\/people\/[0-9a-f-]{36}$/, {
+        timeout: 30_000,
+      });
+      const tokens = commands
+        .filter((c) => kindOf(c.body) === "respond_request")
+        .map(
+          (c) =>
+            (
+              JSON.parse(c.body) as {
+                command: { recipient_preview_token: string };
+              }
+            ).command.recipient_preview_token,
+        );
+      expect(tokens).toHaveLength(2);
+      expect(tokens[0]).not.toBe(tokens[1]);
+      // Y merged into X: Y's field is now under X.
+      await expect
+        .poll(
+          async () =>
+            (await fieldsOf(a, aId, x)).some((f) => f.id === secret) ||
+            (await fieldsOf(b, bId, x)).some((f) => f.id === secret),
+          {
+            timeout: 30_000,
+          },
+        )
+        .toBe(true);
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ x, y, request, tokens }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL21 a direct merge in the UI from the duplicates: ONE merge; the source becomes an alias resolving to the target, and its detail says so", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    try {
+      const stem = unique("I-R Dup");
+      const { page: a, id: aId } = await boot(aContext, "judy", "/today");
+      const { person: target } = await seedPerson(a, aId, stem);
+      const { person: source } = await seedPerson(a, aId, stem);
+      await reopenBound(a, aId.account_id, `/people/${target}/duplicates`);
+      const seen = requestsOf(a);
+      const hint = a.locator(`[data-duplicate-hint="${source}"]`);
+      // Pages of 50 in the server's order (I-PPL10): each "Check more" only once the previous read answered.
+      const checkMore = a.getByRole("button", { name: "Check more" });
+      const settled = () =>
+        expect
+          .poll(
+            () =>
+              a.evaluate(() => {
+                const button = [...document.querySelectorAll("button")].find(
+                  (b) => b.textContent?.trim() === "Check more",
+                );
+                return (
+                  document.querySelector("[data-duplicates-state]") !== null ||
+                  button === undefined ||
+                  !button.disabled
+                );
+              }),
+            { timeout: 30_000 },
+          )
+          .toBe(true);
+      await expect(
+        hint.or(checkMore).or(a.locator("[data-duplicates-state]")).first(),
+      ).toBeVisible({ timeout: 30_000 });
+      for (let i = 0; i < 25 && (await hint.count()) === 0; i += 1) {
+        await settled();
+        if ((await hint.count()) > 0 || (await checkMore.count()) === 0) break;
+        await checkMore.click();
+      }
+      await hint
+        .getByRole("link", { name: "Compare & merge" })
+        .click({ timeout: 30_000 });
+      const dialog = a.getByRole("dialog");
+      await dialog
+        .getByRole("button", { name: "Merge them" })
+        .click({ timeout: 30_000 });
+      await expect(a).toHaveURL(new RegExp(`/people/${target}$`), {
+        timeout: 30_000,
+      });
+      expect(seen.filter((c) => kindOf(c.body) === "merge")).toHaveLength(1);
+      await expect
+        .poll(async () => (await personOf(a, aId, source)).body.person.id, {
+          timeout: 30_000,
+        })
+        .toBe(target);
+      await expect
+        .poll(async () => (await cacheRow(a, aId, source))?.archived, {
+          timeout: 60_000,
+        })
+        .toBe(true);
+      await go(a, `/people/${source}`);
+      await expect(a.locator(`[data-merged-alias="${target}"]`)).toBeVisible({
+        timeout: 30_000,
+      });
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ source, target }),
+      });
+    } finally {
+      await aContext.close();
+    }
+  });
+
+  test("I-PPL22 request_link refusals from the UI: a person changed since it was read is a 409; a recipient with 100 waiting is a 503 and nothing is made", async ({
+    browser,
+    provokes,
+  }) => {
+    provokes(409, 503);
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "grace", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "frank");
+      const name = unique("I-R Stale");
+      const { person } = await seedPerson(a, aId, name);
+      await reopenBound(a, aId.account_id, "/people/requests");
+      await askToLink(a, person, ACCOUNTS.frank.username, name);
+      // HARNESS: renamed on the server after the page read it (not synced yet): the UI's request carries the old version.
+      const now = (await personOf(a, aId, person)).body.person;
+      expect(
+        (
+          await content(a, aId, [
+            {
+              kind: "edit",
+              id: person,
+              expected_version: now.version,
+              expected_policy_version: now.policy_version,
+              label: `${name} 2`,
+              value: "",
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      await a.getByRole("button", { name: "Send request" }).click();
+      await expect(
+        a
+          .locator("main")
+          .getByText(
+            "This person changed since you chose them. Check and send again.",
+          ),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      // HARNESS: 100 pending requests for B (duplicates of one pair are accepted).
+      const { person: filler } = await seedPerson(a, aId, unique("I-R Filler"));
+      const version = (await personOf(a, aId, filler)).body.person.version;
+      for (let i = 0; i < 100; i += 1) {
+        const asked = await peopleCommand(a, aId, {
+          kind: "request_link",
+          id: crypto.randomUUID(),
+          person_id: filler,
+          account_id: bId.account_id,
+          expected_version: version,
+        });
+        if (asked.status === 503) break;
+        expect(asked.status).toBe(200);
+      }
+      const full = unique("I-R Full");
+      const { person: refused } = await seedPerson(a, aId, full);
+      await reopenBound(a, aId.account_id, "/people/requests");
+      await askToLink(a, refused, ACCOUNTS.frank.username, full);
+      await a.getByRole("button", { name: "Send request" }).click();
+      await expect(
+        a
+          .locator("main")
+          .getByText(
+            `${ACCOUNTS.frank.username} has too many requests waiting. Try again later.`,
+          ),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      const sent = (await raw(a, aId, "GET", "/people/requests/sent?limit=200"))
+        .body as {
+        items: Array<{ proposal: { person_id?: string } }>;
+      };
+      expect(
+        sent.items.filter((item) => item.proposal.person_id === refused),
+      ).toHaveLength(0);
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL23 lost responses: request_link, merge and respond_request dropped after commit; Try again resends the same key and body; each happened once", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "erin", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "dave");
+      const seenA = requestsOf(a);
+      const drop = (id: string) =>
+        proxy.addRule({
+          id,
+          method: "POST",
+          path: `${API}/people-commands`,
+          ordinal: 1,
+          action: "drop_after_forward",
+        });
+      const same = async (list: typeof seenA, kind: string) => {
+        // The resend is asynchronous to the press: wait for it before comparing.
+        await expect
+          .poll(() => list.filter((c) => kindOf(c.body) === kind).length, {
+            timeout: 30_000,
+          })
+          .toBe(2);
+        const sent = list.filter((c) => kindOf(c.body) === kind);
+        expect(sent).toHaveLength(2);
+        expect(sent[1]?.key).toBe(sent[0]?.key);
+        expect(sent[1]?.body).toBe(sent[0]?.body);
+      };
+      // request_link
+      const name = unique("I-R Lost link");
+      const { person } = await seedPerson(a, aId, name);
+      await reopenBound(a, aId.account_id, "/people/requests");
+      await askToLink(a, person, ACCOUNTS.dave.username, name);
+      await drop("drop-request-link");
+      await a.getByRole("button", { name: "Send request" }).click();
+      await expect(
+        a
+          .locator("main")
+          .getByText(
+            "Atlas couldn't confirm this. It may already have happened.",
+          ),
+      ).toBeVisible({ timeout: 30_000 });
+      await a.getByRole("button", { name: "Try again" }).click();
+      await expect(sentRow(a, name)).toHaveCount(1, { timeout: 30_000 });
+      await same(seenA, "request_link");
+      // respond_request
+      await leader(b, bId.account_id);
+      await reopenBound(b, bId.account_id, "/people/requests");
+      const seenB = requestsOf(b);
+      const row = incoming(b, name);
+      await expect(row).toBeVisible({ timeout: 30_000 });
+      await drop("drop-respond");
+      await row.getByRole("button", { name: "Accept", exact: true }).click();
+      await row.getByRole("button", { name: "Confirm accept" }).click();
+      // It committed: the list read again no longer holds it, and its uncertain answer is kept above the list with Try again.
+      await expect(
+        b
+          .locator("main")
+          .getByText(
+            "Atlas couldn't confirm this. It may already have happened.",
+          )
+          .first(),
+      ).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(
+        b.locator('[data-people-action="retry-answer"]'),
+      ).toBeVisible({ timeout: 30_000 });
+      await b.locator('[data-people-action="retry-answer"]').click();
+      await expect
+        .poll(
+          async () => (await personOf(b, bId, person)).body.linked_account_id,
+          { timeout: 30_000 },
+        )
+        .toBe(bId.account_id);
+      await same(seenB, "respond_request");
+      // merge
+      const stem = unique("I-R Lost merge");
+      const { person: target } = await seedPerson(a, aId, stem);
+      const { person: source } = await seedPerson(a, aId, `${stem}a`);
+      await reopenBound(
+        a,
+        aId.account_id,
+        `/people/${target}/duplicates/${source}`,
+      );
+      const merge = a
+        .getByRole("dialog")
+        .getByRole("button", { name: "Merge them" });
+      await expect(merge).toBeEnabled({ timeout: 30_000 });
+      await drop("drop-merge");
+      await merge.click();
+      await expect(a.getByRole("dialog")).toContainText(
+        "Atlas couldn't confirm this. It may already have happened.",
+        {
+          timeout: 30_000,
+        },
+      );
+      await a
+        .getByRole("dialog")
+        .getByRole("button", { name: "Try again" })
+        .click();
+      await expect(a).toHaveURL(new RegExp(`/people/${target}$`), {
+        timeout: 30_000,
+      });
+      await same(seenA, "merge");
+      expect((await personOf(a, aId, source)).body.person.id).toBe(target);
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ person, source, target }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+});

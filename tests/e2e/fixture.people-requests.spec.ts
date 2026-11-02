@@ -142,9 +142,13 @@ test.describe("E-R1: Waiting for you (A1)", () => {
     ).length;
     await connectivity(context, page, true);
     await expect(incomingRow(page, R1)).toBeVisible();
-    expect(
-      served.requestLog.filter((l) => l === "GET /people/requests").length,
-    ).toBeGreaterThan(before);
+    // The reconnection's invalidation reads again asynchronously (the earlier answer may be drawn first): wait for the new read.
+    await expect
+      .poll(
+        () =>
+          served.requestLog.filter((l) => l === "GET /people/requests").length,
+      )
+      .toBeGreaterThan(before);
     recordEvidence(info, "e-r1", { requestLog: served.requestLog });
   });
 });

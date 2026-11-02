@@ -259,22 +259,7 @@ function Incoming({
   return (
     <div className="flex flex-col gap-2" data-requests-incoming={view.status}>
       {orphans.map(([key, report]) => (
-        <Banner
-          key={key}
-          message={report.text}
-          requestId={report.requestId}
-          action={
-            <Button
-              variant="quiet"
-              onClick={() => {
-                env.memory.requestReports.delete(key);
-                env.memory.touch();
-              }}
-            >
-              {copy.CLOSE}
-            </Button>
-          }
-        />
+        <OrphanReport key={key} env={env} reportKey={key} report={report} />
       ))}
       {view.status === "offline" ? (
         <p className="text-[13.5px] text-ink-1" data-requests-state="offline">
@@ -301,6 +286,70 @@ function Incoming({
         </List>
       )}
     </div>
+  );
+}
+
+/**
+ * What an answer said whose request is no longer listed (answered or withdrawn since; an uncertain answer that committed is no longer
+ * pending either): kept above the list with its reference until closed. An UNCERTAIN answer is still tried again from here, exactly as it
+ * was sent (its original receipt if it committed, a definite refusal otherwise), so the person learns what happened.
+ */
+function OrphanReport({
+  env,
+  reportKey,
+  report,
+}: {
+  env: PeopleEnv;
+  reportKey: string;
+  report: NonNullable<ReturnType<typeof reportUnder>>;
+}) {
+  const announcer = useAnnouncer();
+  const retained = retainedUnder(env, reportKey);
+  const blocked = blockedReason(env, reportKey);
+  const replay = async () => {
+    // A retained attempt is the only thing this key sends (`runCommand` replays it); nothing new is prepared.
+    const result = await runCommand(env, reportKey, () => null);
+    if (result === null) return;
+    if (result.ok) {
+      env.memory.requestReports.delete(reportKey);
+      env.memory.touch();
+      announcer.announce(copy.ANSWER_RECORDED, "polite");
+      return;
+    }
+    reportOutcome(env, reportKey, result, commonFailure);
+  };
+  return (
+    <Banner
+      message={report.text}
+      requestId={report.requestId}
+      action={
+        <span className="flex flex-wrap gap-2">
+          {retained ? (
+            blocked === null ? (
+              <Button
+                data-people-action="retry-answer"
+                onClick={() => void replay()}
+              >
+                {copy.TRY_AGAIN}
+              </Button>
+            ) : (
+              <Button disabled reason={blocked}>
+                {copy.TRY_AGAIN}
+              </Button>
+            )
+          ) : null}
+          <Button
+            variant="quiet"
+            onClick={() => {
+              env.memory.requestReports.delete(reportKey);
+              env.memory.touch();
+            }}
+          >
+            {copy.CLOSE}
+          </Button>
+        </span>
+      }
+    />
   );
 }
 

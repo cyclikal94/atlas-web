@@ -585,6 +585,10 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
   lookup (the shared sharing client's `lookup`, not a second people client): only exactly one entry with the same id sends. Ask to merge:
   "One of your people" (owner) and "The same person" (any visible, not the first); "Compare" opens the sender's dialog. The two forms keep
   their values while the other is shown (PRODUCT-DECISIONS item 2); a success clears only the input it sent.
+- **Pickers.** Each picker's read is keyed by its purpose (`picker:<scope>:<purpose>:<pages>`): Ask to merge's two pickers read the same
+  scope but keep different people (found by I-PPL19 against the released backend; MU-4135).
+- **An answer whose request is no longer listed** (answered elsewhere, withdrawn, or an uncertain answer that committed) stays said above
+  the list with its reference until closed; an UNCERTAIN one also offers Try again, which resends it exactly (found by I-PPL23).
 - **D-11b-12 aliases.** An archived person whose value names `canonical_person_id` says "Merged into {name}" (a link when this device
   holds that person, else "another person"); WEB-11a's Archive/Restore is disabled for it with "This person was merged into another;
   restore isn't available." (the backend redirects `archive` of an alias to its canonical person).
@@ -634,4 +638,5 @@ Collected for WEB-15's sign-off; none is approved by being listed. Strings marke
 | Outcome copy of D-11b-9 (capacity, out of date, already answered, couldn't confirm, answer uncertain first, account no longer exists) | all | E-R3, E-R5, E-R7, E-R8, E-R13 |
 | People 01: "Requests" with its count beside the list header (desktop); "N requests waiting for you →" banner below 1280 px | `/people` | E-R1 |
 | The merge dialog uses the shared 440 px dialog (the drawn comparison is wider) | `/people/$id/duplicates/$other` | E-R15 |
+| "Your answer was recorded." after an uncertain answer is tried again from above the list | `/people/requests` | `requests-screen.test.tsx`, I-PPL23 |
 | Not built: self-link, `reference_account` UI, a "Swap" of the kept person | — | — |

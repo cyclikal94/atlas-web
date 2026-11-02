@@ -431,7 +431,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         i14d: 4,
         data: 32,
         calendar: 13,
-        people: 16,
+        // WEB-11b: I-PPL17..I-PPL23 (six tests) join WEB-11a's 16 People cases.
+        people: 22,
         traces: 16,
         registration: 20,
         oidc: 10,
@@ -446,7 +447,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(271);
+      expect(inBrowser(whole, browser)).toHaveLength(277); // WEB-11b: +6 People cases (I-PPL17..I-PPL23)
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -499,13 +500,13 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       expect(was).toBe("base");
       moved[name] = (moved[name] ?? 0) + 1;
     }
-    // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 16.
+    // Per engine: sharing 7, snapshot 6, pages 18 (including five I-13 premise controls), password-path 8, and People 22 (WEB-11b: +6).
     expect(moved).toEqual({
       sharing: 21,
       snapshot: 18,
       pages: 54,
       "password-path": 24,
-      people: 48,
+      people: 66,
       tasks: 66,
       labels: 45,
       lists: 24,
@@ -513,7 +514,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
     expect([...before.keys()].every((k) => after.has(k))).toBe(true);
   }, 120_000);
 
-  test("omitting the People stack refuses all 48 unassigned cases before any backend starts", async () => {
+  test("omitting the People stack refuses all 66 unassigned cases before any backend starts", async () => {
     const w = await world({
       stacks: STACKS.filter((s) => s.name !== "people"),
     });
@@ -523,7 +524,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       readFileSync(join(w.evidence, "discovery/discovery.json"), "utf8"),
     );
     expect(discovery.assignment.ok).toBe(false);
-    expect(discovery.assignment.problems).toHaveLength(48);
+    expect(discovery.assignment.problems).toHaveLength(66);
     for (const problem of discovery.assignment.problems)
       expect(problem).toMatch(
         /in no stack: integration-.*integration\.people\.spec\.ts/,
@@ -637,8 +638,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 271,
-        passed: 265,
+        planned_cases: 277,
+        passed: 271,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,

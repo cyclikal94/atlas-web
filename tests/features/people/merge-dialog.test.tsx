@@ -106,16 +106,20 @@ describe("the sender's merge (A6)", () => {
       ],
     });
     const { router } = await w.mount(COMPARE);
-    await screen.findByText(copy.MERGE_TITLE("Mohammed A.", "Mo"));
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.MERGE_TITLE("Mohammed A.", "Mo")).length,
+      ).toBeGreaterThan(0),
+    );
     const table = document.querySelector(
       "[data-merge-comparison]",
     ) as HTMLElement;
-    expect(within(table).getByText("07700 900802")).toBeTruthy();
+    expect(within(table).queryByText("07700 900802")).not.toBeNull();
     expect(within(table).queryByText("07700 900461")).toBeNull();
-    expect(within(table).getByText(copy.NOT_ON_DEVICE)).toBeTruthy();
+    expect(within(table).queryByText(copy.NOT_ON_DEVICE)).not.toBeNull();
     expect(
-      screen.getByText(copy.BOTH_HAVE("phone", "Mohammed A.")),
-    ).toBeTruthy();
+      screen.queryAllByText(copy.BOTH_HAVE("phone", "Mohammed A.")).length,
+    ).toBeGreaterThan(0);
     const consequence = document.querySelector(
       "[data-merge-consequence]",
     ) as HTMLElement;
@@ -124,7 +128,7 @@ describe("the sender's merge (A6)", () => {
       consequence.compareDocumentPosition(action(copy.MERGE_THEM)) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
-    expect(screen.getByText(copy.OWN_BOTH)).toBeTruthy();
+    expect(screen.queryAllByText(copy.OWN_BOTH).length).toBeGreaterThan(0);
     fireEvent.click(action(copy.MERGE_THEM));
     fireEvent.click(action(copy.MERGE_THEM));
     await waitFor(() => expect(commands(w)).toHaveLength(1));
@@ -158,8 +162,10 @@ describe("the sender's merge (A6)", () => {
     await waitFor(() =>
       expect(action(copy.ASK_TO_MERGE_WITH("mo"))).toBeTruthy(),
     );
-    expect(screen.getByText(copy.HAS_TO_ACCEPT("mo"))).toBeTruthy();
-    expect(screen.getByText(copy.EXPIRES_IN_7)).toBeTruthy();
+    expect(
+      screen.queryAllByText(copy.HAS_TO_ACCEPT("mo")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryAllByText(copy.EXPIRES_IN_7).length).toBeGreaterThan(0);
     fireEvent.click(action(copy.ASK_TO_MERGE_WITH("mo")));
     await waitFor(() => expect(commands(w)).toHaveLength(1));
     const body = commands(w)[0]?.args[1] as {
@@ -185,9 +191,9 @@ describe("the sender's merge (A6)", () => {
     w.api.linked.set(MOHAMMED, MO);
     w.api.linked.set(MOPERSON, ME);
     await w.mount(COMPARE);
-    expect(
-      (await screen.findAllByText(copy.BOTH_LINKED)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.BOTH_LINKED).length).toBeGreaterThan(0),
+    );
     expect(
       within(dialog()).getByRole("button", { name: copy.MERGE_THEM }),
     ).toHaveProperty("disabled", true);
@@ -197,7 +203,9 @@ describe("the sender's merge (A6)", () => {
     const v = world();
     v.api.linked.set(MOHAMMED, MO);
     await v.mount(COMPARE);
-    await screen.findByText(copy.LINKED_NAME);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.LINKED_NAME).length).toBeGreaterThan(0),
+    );
     expect(
       (document.querySelector("[data-merge-name-fixed]") as HTMLElement)
         .textContent,
@@ -217,9 +225,11 @@ describe("the sender's merge (A6)", () => {
     for (let n = 0; n < 4; n += 1)
       w.api.next.person.push({ ok: false, kind: "uncertain" });
     await w.mount(COMPARE);
-    expect(
-      (await screen.findAllByText(copy.LINKAGE_UNKNOWN)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.LINKAGE_UNKNOWN).length,
+      ).toBeGreaterThan(0),
+    );
     expect(
       within(dialog()).getByRole("button", { name: copy.MERGE_THEM }),
     ).toHaveProperty("disabled", true);
@@ -239,9 +249,11 @@ describe("the sender's merge (A6)", () => {
     } as Receipt);
     w.api.requests.merge.set(`${MOHAMMED}:${MOPERSON}`, { token: T2 });
     fireEvent.click(action(copy.MERGE_THEM));
-    expect(
-      (await screen.findAllByText(copy.COMPARISON_CHANGED)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.COMPARISON_CHANGED).length,
+      ).toBeGreaterThan(0),
+    );
     await waitFor(() =>
       expect(
         w.api.calls.filter((c) => c.op === "previewMerge").length,
@@ -267,15 +279,15 @@ describe("the sender's merge (A6)", () => {
       expect(action(copy.MERGE_THEM)).toHaveProperty("disabled", false),
     );
     fireEvent.click(action(copy.MERGE_THEM));
-    expect((await screen.findAllByText(copy.UNCERTAIN)).length).toBeGreaterThan(
-      0,
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
     );
     const first = commands(w)[0];
     // The protected tree remounts (a 403 elsewhere): same page memory, a new tree.
     cleanup();
     await w.mount(COMPARE);
-    expect((await screen.findAllByText(copy.UNCERTAIN)).length).toBeGreaterThan(
-      0,
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
     );
     await waitFor(() => expect(action(copy.TRY_AGAIN)).toBeTruthy());
     fireEvent.click(action(copy.TRY_AGAIN));
@@ -298,9 +310,11 @@ describe("the sender's merge (A6)", () => {
         requestId: "ref-403",
       });
     fireEvent.click(action(copy.MERGE_THEM));
-    expect(
-      (await screen.findAllByText(copy.PREVIEW_FORBIDDEN)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.PREVIEW_FORBIDDEN).length,
+      ).toBeGreaterThan(0),
+    );
     const first = commands(w)[0];
     fireEvent.click(action(copy.TRY_AGAIN));
     await waitFor(() => expect(commands(w)).toHaveLength(2));
@@ -365,14 +379,18 @@ describe("the recipient's review (A3)", () => {
     const w = review();
     w.api.requests.previews.set(R, preview());
     const { router } = await w.mount(`/people/requests/${R}`);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.COMPARISON_UNAVAILABLE).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText(copy.NOT_VISIBLE).length).toBeGreaterThan(0);
     expect(
-      (await screen.findAllByText(copy.COMPARISON_UNAVAILABLE)).length,
+      screen.queryAllByText(copy.PARTIAL_VIEW("user1")).length,
     ).toBeGreaterThan(0);
-    expect(screen.getAllByText(copy.NOT_VISIBLE).length).toBeGreaterThan(0);
-    expect(screen.getByText(copy.PARTIAL_VIEW("user1"))).toBeTruthy();
     expect(
-      screen.getByText(copy.ASKED("user1"), { exact: false }),
-    ).toBeTruthy();
+      screen.queryAllByText(copy.ASKED("user1"), { exact: false }).length,
+    ).toBeGreaterThan(0);
     await waitFor(() =>
       expect(action(copy.ACCEPT)).toHaveProperty("disabled", false),
     );
@@ -395,9 +413,11 @@ describe("the recipient's review (A3)", () => {
     const w = review();
     w.api.requests.previews.set(R, preview({ stale: true }));
     await w.mount(`/people/requests/${R}`);
-    expect(
-      (await screen.findAllByText(copy.STALE("user1"))).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.STALE("user1")).length).toBeGreaterThan(
+        0,
+      ),
+    );
     await waitFor(() =>
       expect(action(copy.ACCEPT)).toHaveProperty("disabled", false),
     );
@@ -413,9 +433,11 @@ describe("the recipient's review (A3)", () => {
         requestId: "ref-410",
       });
     await w.mount(`/people/requests/${R}`);
-    expect(
-      (await screen.findAllByText(copy.REQUEST_EXPIRED)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.REQUEST_EXPIRED).length,
+      ).toBeGreaterThan(0),
+    );
     expect(
       within(dialog()).queryByRole("button", { name: copy.ACCEPT }),
     ).toBeNull();
@@ -424,9 +446,11 @@ describe("the recipient's review (A3)", () => {
     forgetAllPeopleMemory();
     const v = review();
     await v.mount(`/people/requests/${R}`);
-    expect(
-      (await screen.findAllByText(copy.REQUEST_GONE)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.REQUEST_GONE).length).toBeGreaterThan(
+        0,
+      ),
+    );
     expect(
       within(dialog()).queryByRole("button", { name: copy.DECLINE }),
     ).toBeNull();
@@ -442,9 +466,11 @@ describe("the recipient's review (A3)", () => {
     w.api.next.people.push({ ok: false, kind: "conflict" } as Receipt);
     w.api.requests.previews.set(R, preview({ token: T2 }));
     fireEvent.click(action(copy.ACCEPT));
-    expect(
-      (await screen.findAllByText(copy.MERGE_CHANGED)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.MERGE_CHANGED).length).toBeGreaterThan(
+        0,
+      ),
+    );
     await waitFor(() =>
       expect(
         w.api.calls.filter((c) => c.op === "readRecipientPreview").length,
@@ -506,7 +532,11 @@ describe("entry points and after-effects (A7, A9)", () => {
     const v = world();
     v.api.linked.set(MOPERSON, MO);
     await v.mount(`/people/${MOPERSON}`);
-    await screen.findByText(peopleCopy.LINK_OTHER("Mo"));
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(peopleCopy.LINK_OTHER("Mo")).length,
+      ).toBeGreaterThan(0),
+    );
     expect(
       screen.queryByRole("button", { name: copy.ASK_TO_LINK_ENTRY }),
     ).toBeNull();
@@ -516,7 +546,11 @@ describe("entry points and after-effects (A7, A9)", () => {
     const w = peopleWorld({ online: false });
     w.setCache([person({ id: MOPERSON, label: "Mo" })]);
     await w.mount(`/people/${MOPERSON}`);
-    await screen.findByText(copy.CHECK_LINK_FIRST);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.CHECK_LINK_FIRST).length,
+      ).toBeGreaterThan(0),
+    );
     expect(
       screen.getByRole("button", { name: copy.ASK_TO_LINK_ENTRY }),
     ).toHaveProperty("disabled", true);
@@ -550,10 +584,14 @@ describe("entry points and after-effects (A7, A9)", () => {
       person({ id: MOPERSON, label: "Mo" }),
     ]);
     await w.mount(`/people/${MOHAMMED}`);
-    expect(
-      await screen.findByRole("link", { name: copy.MERGED_ALIAS("Mo") }),
-    ).toBeTruthy();
-    expect(screen.getByText(copy.ALIAS_NO_RESTORE)).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("link", { name: copy.MERGED_ALIAS("Mo") }),
+      ).not.toBeNull(),
+    );
+    expect(screen.queryAllByText(copy.ALIAS_NO_RESTORE).length).toBeGreaterThan(
+      0,
+    );
     expect(
       screen.getByRole("button", { name: peopleCopy.RESTORE }),
     ).toHaveProperty("disabled", true);

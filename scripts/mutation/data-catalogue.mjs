@@ -19,6 +19,7 @@ import { UNIT_R24 } from "./catalogue-web10a-r24.mjs";
 import { UNIT_R25 } from "./catalogue-web10a-r25.mjs";
 import { UNIT_R26 } from "./catalogue-web10a-r26.mjs";
 import { ENGINE_WEB10B, UNIT_WEB10B } from "./catalogue-web10b.mjs";
+import { ENGINE_WEB11B, UNIT_WEB11B } from "./catalogue-web11b.mjs";
 
 export class PatchError extends Error {}
 
@@ -22438,8 +22439,9 @@ export const UNIT = [
     patch: (t) =>
       sub(
         t,
-        "    <DuplicatesView\n      key={personId}\n",
-        "    <DuplicatesView\n",
+        // WEB-11b re-anchor (the view is now inside a fragment beside its "Compare & merge" Outlet: two more spaces); same patch.
+        "      <DuplicatesView\n        key={personId}\n",
+        "      <DuplicatesView\n",
       ),
   },
   {
@@ -27503,6 +27505,7 @@ export const UNIT = [
   },
   ...UNIT_LABELS,
   ...UNIT_WEB10B,
+  ...UNIT_WEB11B,
 ];
 
 /**
@@ -31610,4 +31613,5 @@ export const ENGINE = [
 
   ...ENGINE_LABELS,
   ...ENGINE_WEB10B,
+  ...ENGINE_WEB11B,
 ];

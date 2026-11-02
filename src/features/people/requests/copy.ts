@@ -56,6 +56,7 @@ export const LINKED = (name: string): string =>
   `Linked. ${name} is now part of your profile.`; // provisional
 export const DECLINED = "Request declined."; // provisional
 export const MERGE_ACCEPTED = "Merged."; // provisional
+export const ANSWER_RECORDED = "Your answer was recorded."; // provisional
 
 // Sent rows (Q16: authoritative state, every state, no device caveat).
 export const SENT_LINK = (username: string, name: string): string =>

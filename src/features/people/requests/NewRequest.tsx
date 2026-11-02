@@ -152,6 +152,7 @@ function AskToLink() {
       <PersonPicker
         label={copy.WHICH_OF_YOUR_PEOPLE}
         scope="not_linked"
+        purpose="link"
         offer={(summary) =>
           summary.your_access === "owner" &&
           !summary.archived &&
@@ -346,6 +347,9 @@ function AskToMerge() {
         label={
           view === "first" ? copy.ONE_OF_YOUR_PEOPLE : copy.THE_SAME_PERSON
         }
+        purpose={
+          view === "first" ? "merge-first" : `merge-second:${first?.id ?? ""}`
+        }
         scope="all"
         offer={(summary) =>
           !summary.archived &&
@@ -439,6 +443,7 @@ const PICKER_PAGES = 3;
 function PersonPicker({
   label,
   scope,
+  purpose,
   offer,
   empty,
   onChoose,
@@ -446,6 +451,11 @@ function PersonPicker({
 }: {
   label: string;
   scope: SummaryScope;
+  /**
+   * What the picker is for: part of its read's key, because the rows it KEEPS depend on `offer` (Ask to merge's two pickers read the same
+   * scope and keep different people; one key would hand the second picker the first one's rows).
+   */
+  purpose: string;
   offer(summary: PersonSummary): boolean;
   empty: string;
   onChoose(summary: PersonSummary): void;
@@ -456,7 +466,7 @@ function PersonPicker({
   const [filter, setFilter] = useState("");
   const heading = useId();
   const view = useSummary<WalkedPages<PersonSummary>>(
-    `picker:${scope}:${pages}`,
+    `picker:${scope}:${purpose}:${pages}`,
     (current) =>
       walkPages(
         (after) =>

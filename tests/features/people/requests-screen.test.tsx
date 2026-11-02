@@ -118,7 +118,9 @@ describe("Waiting for you (A1, A13)", () => {
     expect(
       incoming.map((li) => li.getAttribute("data-incoming-request")),
     ).toEqual([R2, R1]);
-    expect(within(row(R1)).getByText("user1", { exact: false })).toBeTruthy();
+    expect(
+      within(row(R1)).queryByText("user1", { exact: false }),
+    ).not.toBeNull();
     expect(row(R1).textContent).toContain(copy.WANTS_TO_LINK("Ada"));
     expect(row(R1).textContent).toContain(copy.TIME_LEFT.days(5));
     expect(row(R2).textContent).toContain(copy.SOMEONE);
@@ -130,9 +132,9 @@ describe("Waiting for you (A1, A13)", () => {
   test("no requests: the empty state; offline: unavailable, nothing kept from an earlier read; reconnecting reads again", async () => {
     const w = world();
     await w.mount("/people/requests");
-    expect(
-      (await screen.findAllByText(copy.NO_REQUESTS)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.NO_REQUESTS).length).toBeGreaterThan(0),
+    );
     w.api.requests.incoming = [linkRequest()];
     act(() => w.setOnline(false));
     await waitFor(() =>
@@ -155,14 +157,16 @@ describe("Waiting for you (A1, A13)", () => {
     const w = world();
     w.api.next.requests.push({ ok: false, kind: "uncertain" });
     await w.mount("/people/requests");
-    expect(
-      (await screen.findAllByText(copy.REQUESTS_FAILED)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.REQUESTS_FAILED).length,
+      ).toBeGreaterThan(0),
+    );
     expect(screen.queryByText(copy.NO_REQUESTS)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
-    expect(
-      (await screen.findAllByText(copy.NO_REQUESTS)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.NO_REQUESTS).length).toBeGreaterThan(0),
+    );
   });
 });
 
@@ -214,10 +218,14 @@ describe("answering a link request (A2)", () => {
       (bodyAt(commands(w), 0) as { command: { accept: boolean } }).command
         .accept,
     ).toBe(false);
-    expect(
-      (await screen.findAllByText(copy.ANSWERED_ELSEWHERE)).length,
-    ).toBeGreaterThan(0);
-    expect(screen.getByText("Reference: ref-404")).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.ANSWERED_ELSEWHERE).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(screen.queryAllByText("Reference: ref-404").length).toBeGreaterThan(
+      0,
+    );
     await waitFor(() => expect(row(R1)).toBeNull());
     expect(screen.getAllByText(copy.ANSWERED_ELSEWHERE).length).toBeGreaterThan(
       0,
@@ -234,9 +242,11 @@ describe("answering a link request (A2)", () => {
     fireEvent.click(
       within(row(R1)).getByRole("button", { name: copy.CONFIRM_ACCEPT }),
     );
-    expect(
-      (await screen.findAllByText(copy.LINK_OUT_OF_DATE("user1"))).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.LINK_OUT_OF_DATE("user1")).length,
+      ).toBeGreaterThan(0),
+    );
   });
 
   test("an uncertain accept is tried again exactly; a Decline meanwhile is refused and sends nothing (A8)", async () => {
@@ -249,22 +259,59 @@ describe("answering a link request (A2)", () => {
     fireEvent.click(
       within(row(R1)).getByRole("button", { name: copy.CONFIRM_ACCEPT }),
     );
-    expect((await screen.findAllByText(copy.UNCERTAIN)).length).toBeGreaterThan(
-      0,
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
     );
     const first = commands(w)[0];
     fireEvent.click(
       within(row(R1)).getByRole("button", { name: copy.DECLINE }),
     );
-    expect(
-      (await screen.findAllByText(copy.ANSWER_UNCERTAIN_FIRST)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.ANSWER_UNCERTAIN_FIRST).length,
+      ).toBeGreaterThan(0),
+    );
     expect(commands(w)).toHaveLength(1);
     fireEvent.click(
       within(row(R1)).getByRole("button", { name: copy.TRY_AGAIN }),
     );
     await waitFor(() => expect(commands(w)).toHaveLength(2));
     expect(commands(w)[1]).toEqual(first);
+  });
+});
+
+describe("an uncertain answer whose request is no longer listed (A8)", () => {
+  test("its report stays above the list with Try again, which resends the same key and body", async () => {
+    const w = world();
+    w.api.requests.incoming = [linkRequest()];
+    await w.mount("/people/requests");
+    await waitFor(() => expect(row(R1)).not.toBeNull());
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    // It committed: the list read again no longer has it.
+    w.api.requests.incoming = [];
+    fireEvent.click(within(row(R1)).getByRole("button", { name: copy.ACCEPT }));
+    fireEvent.click(
+      within(row(R1)).getByRole("button", { name: copy.CONFIRM_ACCEPT }),
+    );
+    await waitFor(() => expect(row(R1)).toBeNull());
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-people-action="retry-answer"]'),
+      ).not.toBeNull(),
+    );
+    expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0);
+    fireEvent.click(
+      document.querySelector(
+        '[data-people-action="retry-answer"]',
+      ) as HTMLElement,
+    );
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-people-action="retry-answer"]'),
+      ).toBeNull(),
+    );
   });
 });
 
@@ -321,8 +368,8 @@ describe("Sent (A4)", () => {
       expect(document.querySelectorAll("[data-sent-request]")).toHaveLength(50),
     );
     fireEvent.click(screen.getByRole("button", { name: copy.NEXT }));
-    expect((await screen.findAllByText(copy.PAGE_MORE)).length).toBeGreaterThan(
-      0,
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.PAGE_MORE).length).toBeGreaterThan(0),
     );
     expect(screen.queryByText(copy.NO_SENT)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: copy.NEXT }));
@@ -356,17 +403,19 @@ describe("Sent (A4)", () => {
     expect(commands(w)[0]?.args[1]).toEqual({
       command: { kind: "cancel_request", id: R1 },
     });
-    expect(
-      await within(sentRow(R1)).findByText(copy.ANSWERED_ELSEWHERE),
-    ).toBeTruthy();
-    expect(within(sentRow(R1)).getByText("Reference: ref-c")).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        within(sentRow(R1)).queryByText(copy.ANSWERED_ELSEWHERE),
+      ).not.toBeNull(),
+    );
+    expect(within(sentRow(R1)).queryByText("Reference: ref-c")).not.toBeNull();
   });
 
   test("no sent requests: the empty state needs the first page's end", async () => {
     const w = world();
     await w.mount("/people/requests");
-    expect((await screen.findAllByText(copy.NO_SENT)).length).toBeGreaterThan(
-      0,
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.NO_SENT).length).toBeGreaterThan(0),
     );
   });
 });
@@ -375,10 +424,16 @@ describe("Ask to link (A5)", () => {
   const lookups = (w: ReturnType<typeof peopleWorld>) =>
     w.sharing.calls.filter((call) => call.op === "lookup");
 
-  async function chooseAndSend(w: ReturnType<typeof peopleWorld>) {
+  async function chooseAndSend(
+    w: ReturnType<typeof peopleWorld>,
+    inPicker: () => void = () => {},
+  ) {
     await w.mount("/people/requests");
     fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
-    fireEvent.click(await found(`[data-pick-person="${ADA}"]`));
+    const ada = await found(`[data-pick-person="${ADA}"]`);
+    // What the picker offers, judged while it is open (the whole page of summaries has been read by then).
+    inPicker();
+    fireEvent.click(ada);
     fireEvent.click(
       screen.getByRole("button", { name: copy.SEARCH_DIRECTORY }),
     );
@@ -420,8 +475,9 @@ describe("Ask to link (A5)", () => {
       ok: true,
       value: username === "mo" ? [{ id: MO, username: "mo" }] : [],
     });
-    await chooseAndSend(w);
-    expect(document.querySelector(`[data-pick-person="${BEA}"]`)).toBeNull();
+    await chooseAndSend(w, () =>
+      expect(document.querySelector(`[data-pick-person="${BEA}"]`)).toBeNull(),
+    );
     const send = await screen.findByRole("button", { name: copy.SEND_REQUEST });
     const before = lookups(w).length;
     fireEvent.click(send);
@@ -443,7 +499,9 @@ describe("Ask to link (A5)", () => {
       "kind",
       "person_id",
     ]);
-    expect((await screen.findAllByText(copy.CHOOSE)).length).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.CHOOSE).length).toBeGreaterThan(0),
+    );
   });
 
   test("an account that no longer exists sends nothing", async () => {
@@ -458,9 +516,11 @@ describe("Ask to link (A5)", () => {
     };
     await chooseAndSend(w);
     fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
-    expect(
-      (await screen.findAllByText(copy.ACCOUNT_GONE)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.ACCOUNT_GONE).length).toBeGreaterThan(
+        0,
+      ),
+    );
     expect(commands(w)).toHaveLength(0);
   });
 
@@ -473,9 +533,11 @@ describe("Ask to link (A5)", () => {
     await chooseAndSend(w);
     w.api.next.people.push({ ok: false, kind: "capacity" } as Receipt);
     fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
-    expect(
-      (await screen.findAllByText(copy.CAPACITY("mo"))).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.CAPACITY("mo")).length).toBeGreaterThan(
+        0,
+      ),
+    );
     expect(document.querySelector('[data-link-recipient="mo"]')).not.toBeNull();
   });
 
@@ -488,8 +550,8 @@ describe("Ask to link (A5)", () => {
     await chooseAndSend(w);
     w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
     fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
-    expect((await screen.findAllByText(copy.UNCERTAIN)).length).toBeGreaterThan(
-      0,
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
     );
     fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
     await waitFor(() => expect(commands(w)).toHaveLength(2));
@@ -500,9 +562,11 @@ describe("Ask to link (A5)", () => {
     const w = world();
     await w.mount("/people/requests");
     act(() => w.setOnline(false));
-    expect(
-      (await screen.findAllByText(copy.CHOOSE_PERSON_FIRST)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.CHOOSE_PERSON_FIRST).length,
+      ).toBeGreaterThan(0),
+    );
     expect(screen.getByRole("button", { name: copy.CHOOSE })).toBeTruthy();
   });
 
@@ -514,14 +578,151 @@ describe("Ask to link (A5)", () => {
     });
     await chooseAndSend(w);
     fireEvent.click(screen.getByRole("button", { name: copy.ASK_TO_MERGE }));
-    expect(
-      (await screen.findAllByText(copy.MERGE_INTRO)).length,
-    ).toBeGreaterThan(0);
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.MERGE_INTRO).length).toBeGreaterThan(0),
+    );
     fireEvent.click(screen.getByRole("button", { name: copy.ASK_TO_LINK }));
     expect(document.querySelector('[data-link-recipient="mo"]')).not.toBeNull();
     expect(
       document.querySelector(`[data-link-person="${ADA}"]`),
     ).not.toBeNull();
+  });
+});
+
+describe("People 01's entry (A7)", () => {
+  test("no count before a successful read (never '0'); the count after it; nothing while offline", async () => {
+    const w = world();
+    let release: (value: PeopleResult<IncomingRequest[]>) => void = () => {};
+    w.api.next.requests.push(
+      () => new Promise((resolve) => (release = resolve)),
+    );
+    await w.mount("/people");
+    await waitFor(() =>
+      expect(
+        document.querySelector('[data-people-action="requests"]'),
+      ).not.toBeNull(),
+    );
+    expect(document.querySelector("[data-requests-count]")).toBeNull();
+    await act(async () =>
+      release({ ok: true, value: [linkRequest(), mergeRequest()] }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector("[data-requests-count]")?.textContent).toBe(
+        "2",
+      ),
+    );
+    act(() => w.setOnline(false));
+    await waitFor(() =>
+      expect(document.querySelector("[data-requests-count]")).toBeNull(),
+    );
+  });
+});
+
+describe("Ask to link: what the press is judged on (A5)", () => {
+  async function ready(w: ReturnType<typeof peopleWorld>) {
+    await w.mount("/people/requests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+    fireEvent.click(await found(`[data-pick-person="${ADA}"]`));
+    fireEvent.click(
+      screen.getByRole("button", { name: copy.SEARCH_DIRECTORY }),
+    );
+    const exact = await screen.findByLabelText("Exact username");
+    fireEvent.change(exact, { target: { value: "mo" } });
+    fireEvent.submit(exact.closest("form") as HTMLFormElement);
+    fireEvent.click(
+      await within(
+        document.querySelector("[data-lookup=exact]") as HTMLElement,
+      ).findByRole("button", { name: /choose/i }),
+    );
+    await found('[data-link-recipient="mo"]');
+  }
+
+  test("the same username now naming ANOTHER account sends nothing", async () => {
+    const w = world();
+    let asked = 0;
+    w.sharing.defaults.lookup = () => {
+      asked += 1;
+      return {
+        ok: true,
+        value: [{ id: asked === 1 ? MO : STRANGER, username: "mo" }],
+      };
+    };
+    await ready(w);
+    fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.ACCOUNT_GONE).length).toBeGreaterThan(
+        0,
+      ),
+    );
+    expect(commands(w)).toHaveLength(0);
+  });
+
+  test("a success clears only what it sent: a person chosen while it was sending stays", async () => {
+    const w = world();
+    w.sharing.defaults.lookup = () => ({
+      ok: true,
+      value: [{ id: MO, username: "mo" }],
+    });
+    let release: (value: Receipt) => void = () => {};
+    w.api.next.people.push(() => new Promise((resolve) => (release = resolve)));
+    await ready(w);
+    fireEvent.click(screen.getByRole("button", { name: copy.SEND_REQUEST }));
+    await waitFor(() => expect(commands(w)).toHaveLength(1));
+    fireEvent.click(await found('[data-people-action="change-person"]'));
+    fireEvent.click(await found(`[data-pick-person="${BEA}"]`));
+    await found(`[data-link-person="${BEA}"]`);
+    await act(async () =>
+      release({ ok: true, value: { revision: 1, person_id: ADA } }),
+    );
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-link-person="${BEA}"]`),
+      ).not.toBeNull(),
+    );
+    expect(document.querySelector('[data-link-recipient="mo"]')).not.toBeNull();
+  });
+});
+
+describe("Ask to merge (A6, A7)", () => {
+  test("'One of your people' offers the reader's own; 'The same person' then offers anyone visible but the first, another owner's included", async () => {
+    const w = world();
+    w.api.summary.persons.set(BEA, {
+      your_access: "view",
+      added_by_you: "no",
+      owner: { account_id: MO, username: "mo", you: false, person: null },
+      audience: {
+        disclosure: "partial",
+        in_home: false,
+        households: [],
+        your_direct_grant: { can_edit: false },
+        direct_grant_count: null,
+        excluded_count: null,
+      },
+    });
+    const { router } = await w.mount("/people/requests");
+    fireEvent.click(
+      await screen.findByRole("button", { name: copy.ASK_TO_MERGE }),
+    );
+    fireEvent.click(await found('[data-people-action="choose-first"]'));
+    fireEvent.click(await found(`[data-pick-person="${ADA}"]`));
+    expect(document.querySelector(`[data-pick-person="${BEA}"]`)).toBeNull();
+    fireEvent.click(await found('[data-people-action="choose-second"]'));
+    await waitFor(() =>
+      expect(
+        document.querySelector(`[data-pick-person="${BEA}"]`),
+      ).not.toBeNull(),
+    );
+    const bea = document.querySelector(
+      `[data-pick-person="${BEA}"]`,
+    ) as HTMLElement;
+    expect(document.querySelector(`[data-pick-person="${ADA}"]`)).toBeNull();
+    fireEvent.click(bea);
+    fireEvent.click(await found('[data-people-action="compare"]'));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe(
+        `/people/requests/merge/${BEA}/${ADA}`,
+      ),
+    );
   });
 });
 
