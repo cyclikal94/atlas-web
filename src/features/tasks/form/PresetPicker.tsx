@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
+import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
-import { useKeptInput } from "../kept-input";
+import { type KeptRecovery, useKeptInput } from "../kept-input";
 import { noteIfRefused, refusalOf } from "../memory";
 import type { TaskDefinition, TaskPreset } from "../model/contract";
+import { decodePresetChoice, encodePresetChoice } from "../model/recovery";
 import { todayIn } from "../model/time";
 
 const PRESETS = "presets";
@@ -57,7 +60,17 @@ export function describeDefinition(definition: TaskDefinition): string {
  * opened again shows it (while that preset is still offered). Escape and the close icon leave for the task list, which discards it. The
  * in-dialog sync control goes to the sync screens STRAIGHT from the picker (revision 22, `visit.ts`): passing through the task list first
  * would be a departure that ends the visit owning the choice, and Back from the queue would not find the picker.
+ *
+ * Revision 38 (design assessment DA-R40-E): the choice's recovery is shown as every recoverable editor's is (`RecoveryNotice`): a restored
+ * choice with "Discard instead", the other copies to choose from, a look that could not read the store. While an update reload is being
+ * prepared the footer opens no form (a stage chosen then would be input after the last save).
  */
+const PICK_RECOVERY: KeptRecovery<string> = {
+  context: "task-form:new:preset",
+  encode: encodePresetChoice,
+  decode: decodePresetChoice,
+};
+
 export function PresetPicker({
   zone,
   keptAs,
@@ -78,8 +91,10 @@ export function PresetPicker({
     | { kind: "failed"; requestId?: string }
     | { kind: "offline" }
   >(env.online ? { kind: "loading" } : { kind: "offline" });
+  // Revision 37 (WEB-14a R40): the choice is recoverable around an app-update reload (Q4), as the picker's own versioned text.
   const choice = useKeptInput<string>(keptAs, env.identity, () => "", {
     consumed: () => null,
+    recover: PICK_RECOVERY,
   });
   // Set by the in-dialog sync control just before it closes the dialog and opens the sync screens: that close is not leaving for the list.
   const toSync = useRef(false);
@@ -114,6 +129,7 @@ export function PresetPicker({
       live = false;
     };
   }, [env.api, env.online, zone, env]);
+  const locked = choice.recovery?.locked === true;
   // The person's choice while it is offered, else the first preset.
   const chosen =
     state.kind !== "ready"
@@ -138,19 +154,41 @@ export function PresetPicker({
       title={PRESET_COPY.title}
       description={PRESET_COPY.description}
       footer={
-        <div className="flex flex-wrap justify-end gap-2">
-          <Button variant="quiet" onClick={onScratch}>
-            {PRESET_COPY.scratch}
-          </Button>
-          {preset !== undefined ? (
-            <Button variant="primary" onClick={() => onUse(preset)}>
-              {PRESET_COPY.use}
+        locked ? (
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button
+              variant="quiet"
+              disabled
+              reason={UNAVAILABLE_WHILE_RELOADING}
+            >
+              {PRESET_COPY.scratch}
             </Button>
-          ) : null}
-        </div>
+            {preset !== undefined ? (
+              <Button
+                variant="primary"
+                disabled
+                reason={UNAVAILABLE_WHILE_RELOADING}
+              >
+                {PRESET_COPY.use}
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="quiet" onClick={onScratch}>
+              {PRESET_COPY.scratch}
+            </Button>
+            {preset !== undefined ? (
+              <Button variant="primary" onClick={() => onUse(preset)}>
+                {PRESET_COPY.use}
+              </Button>
+            ) : null}
+          </div>
+        )
       }
     >
       <div data-preset-picker={state.kind}>
+        {choice.recovery ? <RecoveryNotice recovery={choice.recovery} /> : null}
         {state.kind === "loading" ? (
           <div aria-busy="true" className="flex flex-col gap-2">
             <span className="sr-only">{PRESET_COPY.loading}</span>

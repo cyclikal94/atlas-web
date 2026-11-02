@@ -262,21 +262,87 @@ export function createSessionWithKernel(
     },
   };
 
-  // The API-version check (D-08). A page that KNOWS it is offline does not send a request that is certain to fail: it reports
-  // `unreachable` (which offers nothing new and hides nothing) and asks again when connectivity returns. One check in flight.
+  // The API-version check (D-08), asked at boot and again at every reconnect (WEB-14a, D-P9; WEB-03 3.9a), on a return to the page once
+  // `compatRecheckMinIntervalMs` has passed, and on a paced timer while the answer is anything but `supported`. A page that KNOWS it is
+  // offline does not send a request that is certain to fail: it reports `unreachable` (which offers nothing new and hides nothing) and
+  // asks again when connectivity returns. One check is in flight; a trigger that arrives meanwhile asks for exactly one more after it,
+  // so an answer asked for before a reconnect is always followed by one asked for after it, and answers land in the order asked.
+  //
+  // A RECONNECT CLOSES ADMISSION AT ONCE (WEB-14a revision 1, R1). The server may have been upgraded while this page could not reach it, so
+  // a `supported` answer from before the reconnect says nothing about it: in the same synchronous step as the `online` event (before any
+  // dispatcher can run) the fact becomes `unknown`, which holds queued writes quietly (`compat_unconfirmed`), and only an answer to a check
+  // ASKED AFTER the latest reconnect is ever applied. An answer to a check asked before it (in flight when the page came back, or queued
+  // behind one that was) is dropped: the check asked again after it is the one that decides.
   let checking = false;
+  /** How many reconnects this page has seen: an answer is applied only by the check that was asked after the latest one. */
+  let reconnects = 0;
+  let again = false;
+  let lastAnswerAt = Number.NEGATIVE_INFINITY;
+  let retryTimer: number | null = null;
+  let retryStep = 0;
+  const cancelRetry = () => {
+    if (retryTimer !== null) ports.clock.clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+  const answered = (result: ApiCompatibility) => {
+    const before = compat.get().status;
+    lastAnswerAt = ports.clock.now();
+    compat.set(result);
+    // The pace starts again whenever the answer changes; `supported` needs no timer (the events above still ask).
+    if (result.status !== before) retryStep = 0;
+    cancelRetry();
+    if (k.disposed || result.status === "supported") return;
+    const wait = Math.min(
+      config.compatRetryMaxMs,
+      config.compatRetryInitialMs * 2 ** retryStep,
+    );
+    retryStep += 1;
+    retryTimer = ports.clock.setTimeout(() => {
+      retryTimer = null;
+      checkCompatibility();
+    }, wait);
+  };
   const checkCompatibility = () => {
-    if (checking || k.disposed) return;
+    if (k.disposed) return;
+    if (checking) {
+      again = true;
+      return;
+    }
     if (!ports.page.isOnline()) {
-      compat.set({ status: "unreachable" });
+      answered({ status: "unreachable" });
       return;
     }
     checking = true;
+    const asked = reconnects;
     void checkApiCompatibility(k, options.supportedRange)
-      .then((result) => compat.set(result))
+      .then((result) => {
+        // Asked before the latest reconnect: it answers for a server this page may no longer be talking to (the rerun decides).
+        if (!k.disposed && asked === reconnects) answered(result);
+      })
       .finally(() => {
         checking = false;
+        if (again) {
+          again = false;
+          checkCompatibility();
+        }
       });
+  };
+  /**
+   * A reconnect: the last `supported` answer no longer admits a write (the fact is `unknown` until a check asked from now on answers), and
+   * that check is asked. A pause (`unsupported`, `missing`) or `unreachable` already admits nothing and stays as it is until the answer.
+   */
+  const revalidate = () => {
+    if (k.disposed) return;
+    reconnects += 1;
+    if (compat.get().status === "supported") compat.set({ status: "unknown" });
+    checkCompatibility();
+  };
+  /** A return to the page asks again only when the last answer is old enough (a focus is not a reason to ask on its own). */
+  const recheckIfStale = () => {
+    // An answer on its way is a fresh one: a return to the page during it asks for nothing more.
+    if (checking) return;
+    if (ports.clock.now() - lastAnswerAt >= config.compatRecheckMinIntervalMs)
+      checkCompatibility();
   };
 
   let started = false;
@@ -300,19 +366,34 @@ export function createSessionWithKernel(
           applyLevel0Gate(k);
           attempts.abortActivation();
         }),
-        page.on("visible", () => void evaluate(k, "visible")),
-        page.on("pageshow", () => void evaluate(k, "pageshow")),
-        page.on("focus", () => void evaluate(k, "focus")),
-        page.on("resume", () => void evaluate(k, "resume")),
+        page.on("visible", () => {
+          recheckIfStale();
+          void evaluate(k, "visible");
+        }),
+        page.on("pageshow", () => {
+          recheckIfStale();
+          void evaluate(k, "pageshow");
+        }),
+        page.on("focus", () => {
+          recheckIfStale();
+          void evaluate(k, "focus");
+        }),
+        page.on("resume", () => {
+          recheckIfStale();
+          void evaluate(k, "resume");
+        }),
         page.on("online", () => {
           k.nudge();
-          if (compat.get().status === "unreachable") checkCompatibility();
+          // Every reconnect asks again (WEB-03 3.9a), and admits no queued write until it has its answer: the server may have been upgraded
+          // while this page could not reach it. FIRST, before anything below can wake a sender.
+          revalidate();
           void evaluate(k, "online");
           void attempts.resolve();
           operations.resume();
         }),
         page.on("offline", () => void evaluate(k, "offline")),
         ports.hints.subscribe(onHint),
+        cancelRetry,
         k.view.subscribe(() => {
           if (k.view.get().kind === "displaying") resumeVerification();
         }),
@@ -352,6 +433,7 @@ export function createSessionWithKernel(
     recovery: recovery as Recovery,
     wipe: wipe as Wipe,
     compat,
+    recheckCompatibility: () => checkCompatibility(),
     actions,
     persistence: {
       hold: (account, epoch) => holdForPersistence(k, account, epoch),

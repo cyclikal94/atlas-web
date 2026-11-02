@@ -1,8 +1,8 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2235;
-export const EXPECTED_ENGINE = 296;
+export const EXPECTED_UNIT = 2556;
+export const EXPECTED_ENGINE = 301;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
 // WEB-10b revision 2 (review 2 R1/R2): +10 unit (MU-2551..MU-2559, MU-2562) and +2 real-engine (MU-2560, MU-2561 over E-LS11); MU-2534 re-anchored.
@@ -21,3 +21,7 @@ export const EXPECTED_ENGINE = 296;
 // WEB-11a revision 25 (review 25, R25.1): +15 unit (MU-2923..MU-2937).
 // WEB-11a revision 26 (review 26, R26.1/R26.2): +16 unit (MU-2938..MU-2953); MU-2933 and MU-2936 re-anchored.
 // WEB-11a revision 27 (review 28, R28.1): +4 real-engine (MU-2954..MU-2957) over S-GATE "R28.1" and "visible: the gate STAYS UP".
+// Accepted WEB-10b merge: retain WEB-14a's 321 unit / 5 engine additions and WEB-10b's 73 unit / 11 engine additions over the common base.
+// Accepted WEB-08d merge: another 105 unit and 5 engine entries, combined 2163 unit / 265 engine.
+
+// WEB-14a integration with accepted WEB-11a: 2235 + 321 unit; 296 + 5 engine. Both complete parent catalogues retained.

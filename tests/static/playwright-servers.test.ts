@@ -2,6 +2,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { neededTargets, projectFilters, TARGETS } from "../e2e/targets";
+import {
+  playwrightInvocations,
+  type ShellInvocation,
+} from "./shell-invocations";
 
 const ROOT = resolve(__dirname, "../..");
 const NAMES = [
@@ -161,17 +165,31 @@ describe("the real playwright.config.ts", () => {
   });
 });
 
+/**
+ * The servers a run selects but does not supply by URL: each would need its build (dist/ or dist-fixture/) to start a preview.
+ * Only the run's own assignments count (see tests/static/shell-invocations.ts).
+ */
+function unsupplied({ assignments, args }: ShellInvocation) {
+  const supplied = TARGETS.filter((target) =>
+    Boolean(assignments.get(`ATLAS_${target.toUpperCase()}_URL`)),
+  );
+  return {
+    supplied,
+    missing: [...neededTargets(cli(...args), NAMES)].filter(
+      (target) => !supplied.includes(target),
+    ),
+  };
+}
+
 describe("the smoke scripts' browser runs need no build they do not have", () => {
   const scripts = readdirSync(resolve(ROOT, "scripts")).filter((file) =>
     file.endsWith(".sh"),
   );
   const invocations = scripts.flatMap((file) =>
-    readFileSync(resolve(ROOT, "scripts", file), "utf8")
-      // A command continued over several lines (a `\` at the end) is ONE command: its environment can be on the line before.
-      .replace(/\\\n/g, " ")
-      .split("\n")
-      .filter((line) => /playwright test/.test(line))
-      .map((line) => ({ file, line })),
+    playwrightInvocations(
+      file,
+      readFileSync(resolve(ROOT, "scripts", file), "utf8"),
+    ),
   );
 
   test("there are browser runs to check", () => {
@@ -184,25 +202,150 @@ describe("the smoke scripts' browser runs need no build they do not have", () =>
     );
   });
 
-  test.each(invocations)(
-    "$file: every server the run selects is one it supplies by URL",
-    ({ line }) => {
-      const args = line
-        .slice(line.indexOf("playwright test") + "playwright test".length)
-        .split(/\s+/)
-        .filter(Boolean)
-        .map((word) => word.replace(/^["']|["']$/g, ""));
-      const supplied = new Set(
-        TARGETS.filter((target) =>
-          line.includes(`ATLAS_${target.toUpperCase()}_URL=`),
-        ),
+  test("the image smoke's inventory and browser runs are both found, each with the composed origin and the same cases (R36)", () => {
+    const image = invocations.filter(({ file }) => file === "smoke-image.sh");
+    expect(image.map(({ line, endLine }) => endLine > line)).toEqual([
+      true,
+      true,
+    ]);
+    const [inventory, run] = image;
+    expect(inventory?.args).toContain("--list");
+    expect(run?.args).not.toContain("--list");
+    for (const invocation of image) {
+      expect(invocation.assignments.get("ATLAS_PRODUCTION_URL")).toBe(
+        "$ORIGIN",
       );
-      expect(supplied.size).toBeGreaterThan(0);
-      for (const target of neededTargets(cli(...args), NAMES))
-        expect(
-          supplied,
+      expect(invocation.args.slice(0, 7)).toEqual([
+        "--project=production-chromium",
+        "production.neutral",
+        "production.csp",
+        "--workers=1",
+        "--retries=0",
+        "--repeat-each=1",
+        "--forbid-only",
+      ]);
+    }
+  });
+
+  test.each(invocations)(
+    "$file:$line: every server the run selects is one it supplies by URL",
+    (invocation) => {
+      const { supplied, missing } = unsupplied(invocation);
+      expect(supplied.length).toBeGreaterThan(0);
+      for (const target of missing)
+        expect.fail(
           `the ${target} preview would need dist${target === "fixture" ? "-fixture" : ""} to be built`,
-        ).toContain(target);
+        );
     },
   );
+});
+
+describe("reading a script's Playwright runs (R36's controls)", () => {
+  const runs = (source: string) => playwrightInvocations("probe.sh", source);
+  const missing = (source: string) =>
+    runs(source).map((run) => unsupplied(run));
+  const imageLayout = (inventoryUrl: string, runUrl: string) =>
+    [
+      'if compose_up "$tag"; then',
+      `  ${inventoryUrl}PLAYWRIGHT_JSON_OUTPUT_FILE="$EVIDENCE/inventory.json" \\`,
+      "    pnpm exec playwright test --project=production-chromium production.neutral \\",
+      '    --workers=1 --list --reporter=json > "$EVIDENCE/inventory.log" 2>&1',
+      `  if ${runUrl}PLAYWRIGHT_JSON_OUTPUT_FILE="$EVIDENCE/run.json" \\`,
+      "    pnpm exec playwright test --project=production-chromium production.neutral \\",
+      '    --workers=1 --reporter=list,json > "$EVIDENCE/run.log" 2>&1; then ok "passes"; else fail "fails"; fi',
+      "fi",
+    ].join("\n");
+  const url = 'ATLAS_PRODUCTION_URL="$ORIGIN" ';
+
+  test("a continued command keeps its assignments, attribution and arguments, and stops at redirections and separators", () => {
+    const [inventory, run] = runs(imageLayout(url, url));
+    expect(inventory).toMatchObject({ line: 2, endLine: 4 });
+    expect(run).toMatchObject({ line: 5, endLine: 7 });
+    expect(inventory?.args).toEqual([
+      "--project=production-chromium",
+      "production.neutral",
+      "--workers=1",
+      "--list",
+      "--reporter=json",
+    ]);
+    expect(run?.args).toEqual([
+      "--project=production-chromium",
+      "production.neutral",
+      "--workers=1",
+      "--reporter=list,json",
+    ]);
+    expect([...(run?.assignments.keys() ?? [])]).toEqual([
+      "ATLAS_PRODUCTION_URL",
+      "PLAYWRIGHT_JSON_OUTPUT_FILE",
+    ]);
+    expect(missing(imageLayout(url, url))).toEqual([
+      { supplied: ["production"], missing: [] },
+      { supplied: ["production"], missing: [] },
+    ]);
+  });
+
+  test("the existing single-line forms are still read", () => {
+    expect(
+      missing(
+        'if ATLAS_FIXTURE_URL="$base" pnpm exec playwright test --project=fixture-chromium >"$EVIDENCE/x.log" 2>&1; then',
+      ),
+    ).toEqual([{ supplied: ["fixture"], missing: [] }]);
+    expect(
+      runs(
+        "ATLAS_PRODUCTION_URL=$ORIGIN npx playwright test --project production-webkit fixture-webkit --workers=1",
+      )[0]?.args,
+    ).toEqual([
+      "--project",
+      "production-webkit",
+      "fixture-webkit",
+      "--workers=1",
+    ]);
+  });
+
+  test("removing the URL from only the inventory, or only the run, is caught for that command", () => {
+    expect(
+      missing(imageLayout("", url)).map(({ supplied }) => supplied),
+    ).toEqual([[], ["production"]]);
+    expect(
+      missing(imageLayout(url, "")).map(({ supplied }) => supplied),
+    ).toEqual([["production"], []]);
+  });
+
+  test("a URL supplied elsewhere never counts: another command, a separate statement, a comment or an empty value", () => {
+    for (const source of [
+      'ATLAS_PRODUCTION_URL="$ORIGIN" true; pnpm exec playwright test --project=production-chromium',
+      'ATLAS_PRODUCTION_URL="$ORIGIN" check && pnpm exec playwright test --project=production-chromium',
+      'ATLAS_PRODUCTION_URL="$ORIGIN"\npnpm exec playwright test --project=production-chromium',
+      '# ATLAS_PRODUCTION_URL="$ORIGIN" \\\npnpm exec playwright test --project=production-chromium',
+      'pnpm exec playwright test --project=production-chromium # ATLAS_PRODUCTION_URL="$ORIGIN"',
+      'echo ATLAS_PRODUCTION_URL="$ORIGIN" | pnpm exec playwright test --project=production-chromium',
+      'ATLAS_PRODUCTION_URL="" pnpm exec playwright test --project=production-chromium',
+    ])
+      expect(missing(source), source).toEqual([
+        { supplied: [], missing: ["production"] },
+      ]);
+  });
+
+  test("the wrong target, or an unsupplied extra project, is missing", () => {
+    expect(
+      missing(
+        'ATLAS_FIXTURE_URL="$base" pnpm exec playwright test --project=production-chromium',
+      ),
+    ).toEqual([{ supplied: ["fixture"], missing: ["production"] }]);
+    expect(
+      missing(
+        'ATLAS_PRODUCTION_URL="$ORIGIN" pnpm exec playwright test \\\n  --project=production-chromium --project=fixture-chromium',
+      ),
+    ).toEqual([{ supplied: ["production"], missing: ["fixture"] }]);
+  });
+
+  test("a mention it cannot attribute to a run is refused with its location, not guessed", () => {
+    for (const source of [
+      'echo "now: playwright test"',
+      "out=`pnpm exec playwright test --list`",
+      "pnpm exec playwright test <<EOF\nEOF",
+      'ATLAS_PRODUCTION_URL="$ORIGIN pnpm exec playwright test',
+    ])
+      expect(() => runs(`true\n${source}`), source).toThrow(/^probe\.sh:2: /);
+  });
 });

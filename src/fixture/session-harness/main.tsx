@@ -13,6 +13,7 @@ import {
   openAuthStore,
   runAuthCanary,
 } from "../../session";
+import { FixtureRecoveryForm } from "../recovery-form";
 
 /**
  * FIXTURE ONLY. The session harness: it runs the PRODUCTION composition (`src/app/boot.tsx`, the real IndexedDB store, Web Locks,
@@ -50,6 +51,8 @@ export interface SessionHarness {
   /** Write any of the `atlas-auth` records directly (for example a `pending_deletions` entry another visit left behind). */
   seedRecords(records: Record<string, unknown>): Promise<void>;
   readRecords(): Promise<unknown>;
+  /** WEB-14a: imports a lazy chunk nothing else loads, and answers its build label (src/fixture/pwa-probe-chunk.ts). */
+  lazyBuildLabel(): Promise<string>;
   /**
    * FIXTURE ONLY (WEB-09b): what the PRODUCTION leader of this page is doing (`?leader=production`), read from the page host the
    * provider also reads: the election's role, the attachment, the engine's and the recovery job's states, the job's exclusivity and its
@@ -85,16 +88,25 @@ export interface SessionHarness {
   enqueue(spec: unknown): Promise<unknown>;
 }
 
-const params = new URLSearchParams(location.search);
+// WEB-14a: `?sticky=1` keeps this tab the harness across reloads (src/fixture/main.tsx), with the parameters it was opened with; a reload
+// shows the route the page is on.
+const entered = location.pathname === "/__session";
+const stored = sessionStorage.getItem("atlas-fixture-session");
+const params = new URLSearchParams(
+  entered ? location.search : (stored ?? location.search),
+);
+if (entered && params.get("sticky") === "1")
+  sessionStorage.setItem("atlas-fixture-session", params.toString());
 const off = params.get("boot") === "off";
 const manual = params.get("boot") === "manual";
 // The protected tree routes on the browser location; start it on the route the test asks for (default: Today). The URL fragment
 // is KEPT: boot's first statement reads and strips it (an OIDC grant, an invitation token), exactly as in production.
-history.replaceState(
-  null,
-  "",
-  (params.get("route") ?? "/today") + location.hash,
-);
+if (entered || location.hash.includes("atlas_grant="))
+  history.replaceState(
+    null,
+    "",
+    (params.get("route") ?? "/today") + location.hash,
+  );
 const neutralRoot = document.getElementById("neutral-root");
 if (!neutralRoot) throw new Error("Missing neutral root");
 
@@ -132,6 +144,8 @@ const harness: SessionHarness = {
       { durability: "strict", label: "seed" },
     ).complete;
   },
+  lazyBuildLabel: () =>
+    import("../pwa-probe-chunk").then((chunk) => chunk.label),
   async readRecords() {
     const store: OpenedAuthStore =
       harness.booted?.store ?? (await openAuthStore());
@@ -294,6 +308,10 @@ const productionLeader = params.get("leader") === "production";
 let startedByTest: Promise<Booted | null> | null = null;
 const startBoot = (): Promise<Booted | null> => {
   harness.ready = boot({
+    // WEB-14a: `?form=1` adds the recoverable test form to the protected tree.
+    ...(params.get("form") === "1"
+      ? { protectedExtra: () => <FixtureRecoveryForm /> }
+      : {}),
     ...(Number.isFinite(scaledLockWait) && scaledLockWait > 0
       ? { config: { lockWaitMs: scaledLockWait } }
       : {}),

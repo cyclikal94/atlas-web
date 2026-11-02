@@ -3,6 +3,8 @@ import { type Session, useSession } from "../../session";
 import { signIn, startSso } from "./controller";
 import { authFeedback } from "./feedback";
 import { FeedbackBanners, PublicCard } from "./PublicCard";
+// WEB-14a revision 40 (R40-GATE; C2): the page memory's update holds follow it from now on (`held-memory.ts`).
+import "./held-memory";
 import { SignInForm } from "./SignInForm";
 import { signInRequest } from "./sign-in-request";
 import { useNeutralTitle } from "./use-neutral-title";
@@ -51,6 +53,8 @@ export function SignInSurface({
     authFeedback.carriedFailure,
     authFeedback.carriedFailure,
   );
+  // WEB-14a revision 39 (design assessment DA-AUTH-HOSTS, C1): a username carried here from another step (the one chosen when joining)
+  // lives in page memory only: an app update does not reload over it. Revision 40 (R40-GATE; C2): held as the request changes (`held-memory.ts`).
   return (
     <PublicCard
       surface="sign-in"
@@ -59,11 +63,17 @@ export function SignInSurface({
       banners={<FeedbackBanners items={feedback} />}
     >
       <SignInForm
+        // WEB-14a revision 40 (R40-GATE): one form per host: a neutral state's form never hands its typed state to the public page's.
+        key={mode}
         online={online}
         initialUsername={request.username}
         onSubmit={(credentials) => signIn(session, credentials)}
         onSso={() => startSso(session, { link: false }, { navigate })}
         onBack={mode === "reauthenticate" ? onBack : undefined}
+        // Revision 39 (DA-AUTH-HOSTS): a neutral state's sign-in is not the public page's.
+        recoveryContext={
+          mode === "reauthenticate" ? "sign-in:again" : "sign-in"
+        }
         carried={carried}
         onCarriedShown={() => authFeedback.takeFailure()}
       />

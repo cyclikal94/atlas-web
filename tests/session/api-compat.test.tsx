@@ -158,7 +158,12 @@ describe("a page that knows it is offline (row 6: no network call)", () => {
     );
   });
 
-  test("a check that finds the server supported is not repeated by later online events", async () => {
+  // ADAPTATION (WEB-14a, A-1, for the reviewer to accept or reject). The original assertion was "a check that finds the server supported
+  // is not repeated by later online events": one `/health` after an offline/online pair. WEB-03 3.9a and delivery-slices case 3 require
+  // the check "on every bootstrap and reconnect", so a reconnect now asks once more by design. The original intent (a supported answer is
+  // not asked again needlessly) is kept as: exactly ONE more request per reconnect, and none for a return to the page within
+  // `compatRecheckMinIntervalMs` (tests/session/compat-recheck.test.ts covers every trigger).
+  test("a check that finds the server supported is asked again once per reconnect, and not by a return to the page", async () => {
     const f = new Fixture();
     const page = f.addPage();
     await f.boot(page);
@@ -167,7 +172,14 @@ describe("a page that knows it is offline (row 6: no network call)", () => {
     page.goOnline();
     await f.settle();
     expect(f.server.requests.filter((r) => r.path === "/health")).toHaveLength(
-      1,
+      2,
+    );
+    page.hide();
+    page.show();
+    page.env.emit("focus");
+    await f.settle();
+    expect(f.server.requests.filter((r) => r.path === "/health")).toHaveLength(
+      2,
     );
   });
 });

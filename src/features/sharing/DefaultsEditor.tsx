@@ -5,11 +5,15 @@ import { Dialog } from "../../components/ui/dialog";
 import { List } from "../../components/ui/list";
 import {
   type DefaultTemplate,
+  type Policy,
+  parsePolicy,
   type RefreshOutcome,
   TEMPLATE_KINDS,
   type TemplateKind,
   useSharingDefaults,
 } from "../../data";
+import { useRecoverableEditor } from "../../lib/form-recovery/editor";
+import { RecoveryNotice } from "../../lib/form-recovery/RecoveryNotice";
 import {
   type DirectoryEntry,
   type ManagementCommand,
@@ -29,6 +33,7 @@ import {
   reducePolicy,
   toWirePolicy,
 } from "./model/policy-draft";
+import { defaultsFormContext } from "./model/recovery-fields";
 import { type Attempt, canonicalBody, nextAttempt } from "./model/submission";
 import {
   APPLICATION_DEFAULTS,
@@ -639,6 +644,55 @@ interface FormKeeper {
   keep(): void;
 }
 
+/** Revision 37 (WEB-14a R40): one layer form's recoverable input (`model/recovery-fields.ts`). */
+type LayerInput = {
+  choice: ChoiceValue;
+  policy: Policy;
+  learnt: Array<[string, string]>;
+  base: number;
+};
+const CHOICES: readonly ChoiceValue[] = [
+  "inherit",
+  "private",
+  "read",
+  "edit",
+  "explicit",
+];
+const encodeLayer = (input: LayerInput): string =>
+  JSON.stringify({
+    v: 1,
+    choice: input.choice,
+    policy: input.policy,
+    learnt: input.learnt,
+    base: input.base,
+  });
+function decodeLayer(text: string): LayerInput | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    if (raw === null || typeof raw !== "object" || raw.v !== 1) return null;
+    const choice = raw.choice as ChoiceValue;
+    if (!CHOICES.includes(choice)) return null;
+    if (typeof raw.base !== "number" || !Number.isInteger(raw.base))
+      return null;
+    const policy = parsePolicy(raw.policy);
+    if (policy === null || !Array.isArray(raw.learnt)) return null;
+    const learnt: Array<[string, string]> = [];
+    for (const pair of raw.learnt as unknown[]) {
+      if (
+        !Array.isArray(pair) ||
+        pair.length !== 2 ||
+        typeof pair[0] !== "string" ||
+        typeof pair[1] !== "string"
+      )
+        return null;
+      learnt.push([pair[0], pair[1]]);
+    }
+    return { choice, policy, learnt, base: raw.base };
+  } catch {
+    return null;
+  }
+}
+
 /** What the sync control keeps of one form (R5): restored only for the same identity, layer, household and kind. */
 interface RetainedForm {
   choice: ChoiceValue;
@@ -707,8 +761,70 @@ function LayerForm({
   const [busy, setBusy] = useState(false);
   // Held synchronously while a save is being sent: a second click or a Try again cannot send it twice at once.
   const sending = useRef(false);
-  // The version these choices were composed against: the record's, or the one a kept draft was composed against.
-  const base = kept?.base ?? record.version;
+  // Revision 37 (WEB-14a R40): the version a draft restored after an app-update reload was composed against.
+  const [restoredBase, setRestoredBase] = useState<number | null>(null);
+  // The version these choices were composed against: the record's, or the one a kept or restored draft was composed against.
+  const base = restoredBase ?? kept?.base ?? record.version;
+  // Revision 37 (WEB-14a R40): this layer's choices are recoverable around an app-update reload (Q4), with that version (Save stays
+  // guarded by it). Every change reaches the form's model first (refused while an update reload is prepared).
+  const touched = useRef(false);
+  const now = useRef<LayerInput>({
+    choice,
+    policy: explicit.policy,
+    learnt,
+    base,
+  });
+  now.current = { choice, policy: explicit.policy, learnt, base };
+  const recovery = useRecoverableEditor<LayerInput>({
+    identity: env.identity,
+    context: defaultsFormContext(target),
+    encode: encodeLayer,
+    decode: decodeLayer,
+    start: () => ({
+      choice: choiceOf(record),
+      policy:
+        record.template?.kind === "explicit"
+          ? record.template.policy
+          : emptyPolicy(),
+      learnt: [],
+      base: record.version,
+    }),
+    untouched: () => !touched.current && kept === undefined,
+    restored: (input) => {
+      setChoice(input.choice);
+      setExplicit({ policy: input.policy, refused: null });
+      setLearnt(input.learnt);
+      setRestoredBase(input.base);
+      uncertain.current = null;
+      setOutcome(null);
+    },
+    // "Discard instead" (revision 38, R40-A): the layer as recorded now, at the gesture (`start`), never when the copies' removal completes.
+    reset: (input) => {
+      touched.current = false;
+      setChoice(input.choice);
+      setExplicit({ policy: input.policy, refused: null });
+      setLearnt(input.learnt);
+      setRestoredBase(null);
+    },
+  });
+  /** A change of the person's: the model first, then the form. */
+  const change = (next: Partial<LayerInput>): boolean => {
+    if (!recovery.edit({ ...now.current, ...next })) return false;
+    touched.current = true;
+    now.current = { ...now.current, ...next };
+    return true;
+  };
+  // A draft the sync control kept is unsaved input of this session: the record is its start, the draft an edit of it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: once, when the form opens on a kept draft
+  useEffect(() => {
+    if (kept !== undefined)
+      recovery.edit({
+        choice: kept.choice,
+        policy: kept.explicit.policy,
+        learnt: kept.learnt,
+        base: kept.base,
+      });
+  }, []);
   const uncertain = useRef<Attempt | null>(kept?.attempt ?? null);
   const mounted = useRef(true);
   useEffect(
@@ -755,6 +871,8 @@ function LayerForm({
         keep: () => {
           if (latest.current === null) session.forget(target);
           else session.retain(target, latest.current);
+          // Kept by the sync control (R40): the form's unmount is not a dismissal.
+          if (latest.current !== null) recovery.keep();
         },
       }),
     [],
@@ -765,8 +883,14 @@ function LayerForm({
     setOutcome(null);
   };
   const dispatch = (action: PolicyAction) => {
+    const next = reducePolicy(
+      { policy: now.current.policy, refused: explicit.refused },
+      action,
+      env.accountId,
+    );
+    if (!change({ policy: next.policy })) return;
     edited();
-    setExplicit((state) => reducePolicy(state, action, env.accountId));
+    setExplicit(next);
   };
 
   const commands: ManagementCommand[] = [
@@ -793,6 +917,9 @@ function LayerForm({
     // Admitted at the action as well as shown on the buttons: offline, unsupported, already sending or unresolved, nothing is sent
     // and the outcome on screen (an uncertain attempt's Try again) stays as it is.
     if (sending.current || !env.online || !env.writable || unresolved) return;
+    // Its ticket first (R40): none while an update reload is prepared.
+    const ticket = recovery.submitting();
+    if (ticket === null) return;
     const attempt = nextAttempt(uncertain.current, commands, env.newId);
     uncertain.current = attempt;
     const shown = outcome;
@@ -804,6 +931,9 @@ function LayerForm({
       { isCurrent: () => mounted.current },
     );
     sending.current = false;
+    // Only a confirmed save covers what was sent; an uncertain or refused one keeps the choices (never replayed by recovery).
+    if (result.ok) void ticket.succeeded();
+    else ticket.failed();
     if (!mounted.current) return;
     setBusy(false);
     if (result.ok) {
@@ -850,7 +980,12 @@ function LayerForm({
         }
         onBack={() => setLookup(null)}
         onChoose={(entry: DirectoryEntry) => {
-          setLearnt((known) => [...known, [entry.id, entry.username]]);
+          const known: Array<[string, string]> = [
+            ...now.current.learnt,
+            [entry.id, entry.username],
+          ];
+          if (!change({ learnt: known })) return;
+          setLearnt(known);
           dispatch(
             lookup === "grant"
               ? { type: "add_account", id: entry.id }
@@ -890,6 +1025,7 @@ function LayerForm({
   const household = layer === "household";
   return (
     <div className="flex flex-col gap-3" data-layer-form={layer}>
+      <RecoveryNotice recovery={recovery} />
       {kept !== undefined ? (
         <p className="text-[12.5px] text-ink-1" data-layer-restored="">
           {copy.RESTORED_UNSAVED}
@@ -901,6 +1037,7 @@ function LayerForm({
         orientation="vertical"
         disabled={busy}
         onChange={(next) => {
+          if (!change({ choice: next })) return;
           edited();
           setChoice(next);
         }}

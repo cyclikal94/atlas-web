@@ -19,11 +19,13 @@ describe("the production composition starts the sync leader", () => {
     const boot = read("src/app/boot.tsx");
     expect(boot).toMatch(/const leads = options\.dataLeader !== false;/);
     const announce = boot.indexOf("dataLeader.announce()");
-    const start = boot.indexOf("await session.start(");
+    const start = boot.indexOf("const started = session.start(");
+    const settled = boot.indexOf("await started;");
     const lead = boot.indexOf("dataLeader.start(session");
     expect(announce).toBeGreaterThan(-1);
     expect(start).toBeGreaterThan(announce);
-    expect(lead).toBeGreaterThan(start);
+    expect(settled).toBeGreaterThan(start);
+    expect(lead).toBeGreaterThan(settled);
   });
 
   it("main.tsx never turns it off; only the fixture session harness may, and only when the page does not ask for it", () => {

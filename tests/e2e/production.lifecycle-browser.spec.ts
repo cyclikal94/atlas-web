@@ -1,8 +1,8 @@
 import { writeFileSync } from "node:fs";
 import type { BrowserContext, Page } from "@playwright/test";
-import { test } from "./auth-helpers";
 import { AuthStub } from "./auth-stub";
 import { evidencePath, expect } from "./helpers";
+import { INTERCEPTED_AUTH_SERVICE_WORKERS, test } from "./intercepted-auth";
 import {
   allowFreeze,
   displayedAs,
@@ -22,6 +22,10 @@ import {
  * cache is probed, never assumed. Mobile, real Safari and native backgrounding are WEB-09d's (a Q12 release blocker), with this script.
  * Measurements (`@measure`) are recorded, never asserted against a threshold. The product's own 20 s lock-wait message is the released-
  * backend I-23d (cited); here the lock itself is shown held, never stolen.
+ *
+ * Intercepted authentication (R37, WEB-14a revision 34): the stubbed API is a `context.route`, which a worker-controlled WebKit page's
+ * requests bypass, so `test` from ./intercepted-auth blocks service worker registration for this file's contexts. Its peer pages,
+ * navigations and reloads are therefore never worker-controlled; the shipped worker is covered by the PWA and offline suites.
  */
 const ACTIVATE = "/browser-sessions/activate";
 const _isActivate = (r: { method: string; path: string }) =>
@@ -399,7 +403,10 @@ test.describe("@measure P-lock-b (a measurement, not a threshold)", () => {
     test.setTimeout(180_000);
     const samples: number[] = [];
     for (let i = 0; i < 5; i += 1) {
-      const context = await browser.newContext();
+      // A context this test owns: stated explicitly rather than relying on Playwright copying the fixture's option (./intercepted-auth).
+      const context = await browser.newContext({
+        serviceWorkers: INTERCEPTED_AUTH_SERVICE_WORKERS,
+      });
       const a = newMarker(`plb${i}`);
       const stub = await newStub(context, a);
       const page = await context.newPage();

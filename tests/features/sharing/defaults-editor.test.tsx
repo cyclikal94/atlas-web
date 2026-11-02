@@ -909,6 +909,9 @@ describe("R8 (review 3): a defaults Try again is admitted like Save, and one not
     );
     await act(async () => {});
     expect(screen.queryByText(copy.UNCERTAIN)).not.toBeNull();
+    expect(
+      screen.queryByRole("button", { name: copy.TRY_AGAIN }),
+    ).not.toBeNull();
     fireEvent.click(screen.getByRole("button", { name: copy.TRY_AGAIN }));
     await waitFor(() => expect(t.api.sent).toHaveLength(3));
     expect(t.api.sent[2]).toEqual(first);
@@ -1167,6 +1170,7 @@ describe("R11: an explicit default can grant any household you are in (the compl
     await flush();
     const failed = () =>
       form.querySelector<HTMLElement>('[data-membership="failed"]');
+    expect(failed()).not.toBeNull();
     expect(failed()?.textContent).toContain(copy.HOUSEHOLDS_FAILED);
     expect(grantName(form, FLAT)).toBe(copy.HOUSEHOLD_UNCHECKED);
     expect(form.textContent).not.toContain(copy.HOUSEHOLD_UNKNOWN);

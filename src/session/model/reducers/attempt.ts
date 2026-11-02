@@ -212,11 +212,13 @@ export function markIndeterminate(
 
 /**
  * 3.4.3 / O7: clear a non-gating attempt. Refuses any gating phase, always, whatever `expires_at` says. With
- * `expiredBefore` it clears only an attempt whose `expires_at` has passed (phase-specific expiry).
+ * `expiredAt` it clears only an attempt whose `expires_at` has passed by then (phase-specific expiry); with `phase`, only an
+ * attempt still in that phase (an orphaned `exchanging` one, R39: a redirect in between makes its free owner lock normal).
+ * Without either it is the owner's own clear (a cancellation or a failed exchange), which needs no further reason.
  */
 export function clearNonGating(
   records: Readonly<AuthRecords>,
-  input: { epoch: Epoch; expiredAt?: number },
+  input: { epoch: Epoch; expiredAt?: number; phase?: "exchanging" },
 ): Rmw<"CLEARED" | "NOT_ALLOWED" | "SUPERSEDED"> {
   const state = draft(records);
   const attempt = state.attempt;
@@ -224,8 +226,9 @@ export function clearNonGating(
     return { write: null, result: "SUPERSEDED" };
   if (isGating(attempt)) return { write: null, result: "NOT_ALLOWED" };
   if (
-    input.expiredAt !== undefined &&
-    Date.parse(attempt.expires_at) > input.expiredAt
+    (input.expiredAt !== undefined &&
+      Date.parse(attempt.expires_at) > input.expiredAt) ||
+    (input.phase !== undefined && attempt.phase !== input.phase)
   )
     return { write: null, result: "NOT_ALLOWED" };
   state.attempt = null;

@@ -184,6 +184,20 @@ export interface FormRecoveryRow {
   writer_gen?: number;
   terminal: boolean;
   content_digest: string;
+  /**
+   * WEB-14a revision 8 (R16, R17): what the form's code writes with a capture besides its texts, exactly as it gives it (the store never
+   * interprets it): the capture's identity (`capture`, what a conditional discard compares in its transaction), the control state of fields
+   * that are not one text (`controls`, versioned; in `content_digest`) and an update hand-off's lineage (`lineage`, versioned). Absent on a
+   * row written before revision 8.
+   */
+  meta?: FormRecoveryMeta;
+}
+
+/** WEB-14a revision 8: the optional, versioned records the form's code writes with a capture (`FormRecoveryRow.meta`). */
+export interface FormRecoveryMeta {
+  capture?: string;
+  controls?: { version: number; entries: unknown };
+  lineage?: { version: number; entries: unknown };
 }
 
 export interface DraftFence {

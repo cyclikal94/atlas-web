@@ -109,6 +109,7 @@ export async function engineWorld(
   const listeners = new Set<() => void>();
   const onlineListeners = new Set<() => void>();
   const cancelled = new Set<number>();
+  const scheduled = new Map<number, number>();
   let timerSeq = 0;
   const abort = new AbortController();
   const ownership = {
@@ -186,19 +187,26 @@ export async function engineWorld(
       setTimeout: (fn, ms) => {
         timerSeq += 1;
         const id = timerSeq;
-        world.schedule(
-          "timer",
-          "A",
-          { timer: id },
-          () => {
-            if (!cancelled.has(id)) fn();
-          },
-          ms,
+        scheduled.set(
+          id,
+          world.schedule(
+            "timer",
+            "A",
+            { timer: id },
+            () => {
+              scheduled.delete(id);
+              if (!cancelled.has(id)) fn();
+            },
+            ms,
+          ),
         );
         return id;
       },
       clearTimeout: (handle) => {
         cancelled.add(handle as number);
+        // Withdrawn from the world, as `clearTimeout` removes a timer (R30/DA-H1, revision 25): not delivered later as a no-op.
+        world.cancel(scheduled.get(handle as number) ?? 0);
+        scheduled.delete(handle as number);
       },
     },
     yield: () => {

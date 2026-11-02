@@ -107,6 +107,11 @@ export const D_INDEX_NAMES: Readonly<Record<string, string>> = Object.freeze({
 export const SCHEMA_VERSION = 3;
 /** The version that moved the command bodies to `draft_commands` (its upgrade runs for a version-1 database). */
 export const SPLIT_BODIES_VERSION = 2;
+/**
+ * The IndexedDB version this build's schema occupies: Dexie stores a declared version `n` as `n * 10` (asserted in a real engine by the
+ * WEB-14a qualification probe Q-P1 and the declared-then-probe specs). An installed version above it is a newer build's (D-P8).
+ */
+export const DECLARED_IDB_VERSION = SCHEMA_VERSION * 10;
 
 /** The version 1 schema, kept so a database created by it is upgraded (the command bodies move to `draft_commands`). */
 export const DEXIE_SCHEMA_V1: Readonly<Record<string, string>> = Object.freeze({

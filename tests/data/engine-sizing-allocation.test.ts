@@ -92,6 +92,11 @@ const DECODER = /src\/data\/scan\/validate\.ts/;
  * Settles the world and asserts that it SETTLED: an engine that asks again at once, without bound, never lets the world reach idle (the
  * world says so with an error). That is a finding of these cases (the failure is bounded, or it is not), so it is recorded and
  * asserted, not left to end the test by an error.
+ *
+ * The automatic driver of the store double drains the same world, so such an engine makes ITS drain reach the world's step bound as
+ * well, and the test's teardown would report that again as a plain error beside this assertion (WEB-14a revision 27,
+ * WEB14A-UNIT-MUTATION-SELECTION-20261023, MU-731). That one failure is this finding, so it is consumed here, where the finding is
+ * asserted; any other failure of the driver still stands.
  */
 const settleBounded = async (w: World): Promise<void> => {
   let reached = true;
@@ -100,6 +105,17 @@ const settleBounded = async (w: World): Promise<void> => {
   } catch {
     reached = false;
   }
+  if (!reached)
+    try {
+      await w.env.idb.disposeAndWait();
+    } catch (error) {
+      if (
+        !(
+          error instanceof Error && error.message === "world did not reach idle"
+        )
+      )
+        throw error;
+    }
   expect(
     reached,
     "the engine reaches a terminal state: it does not ask again at once without bound",

@@ -33,6 +33,7 @@ export {
   nextAttempt,
 } from "./model/submission";
 export {
+  PolicyEditorRecoveryHost,
   ResourcePolicyEditor,
   type ResourcePolicyEditorProps,
 } from "./ResourcePolicyEditor";

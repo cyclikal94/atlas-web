@@ -170,3 +170,54 @@ export function restoreCorrection(
     return null;
   }
 }
+
+/**
+ * Revision 37 (WEB-14a R40): the task form's editing session as ONE recoverable text (version 1): the values it began from (a locked
+ * repeat or participation choice is judged against them) and what is typed now, raw (invalid text, hidden fields and the checklist's ids
+ * and order included), each checked as `restoreTaskForm` checks a form. A text of another version, or one that does not parse, is null:
+ * offered, never restored in part. No secrets: a task form has none.
+ */
+export const TASK_INPUT_VERSION = 1;
+
+export interface TaskFormInput {
+  initial: TaskFormState;
+  state: TaskFormState;
+}
+
+export function encodeTaskFormInput(input: TaskFormInput): string {
+  return JSON.stringify({
+    v: TASK_INPUT_VERSION,
+    initial: input.initial,
+    state: input.state,
+  });
+}
+
+export function decodeTaskFormInput(text: string): TaskFormInput | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    if (raw === null || typeof raw !== "object" || raw.v !== TASK_INPUT_VERSION)
+      return null;
+    const initial = restoreTaskForm({ form: JSON.stringify(raw.initial) });
+    const state = restoreTaskForm({ form: JSON.stringify(raw.state) });
+    return initial === null || state === null ? null : { initial, state };
+  } catch {
+    return null;
+  }
+}
+
+/** Revision 37 (R40): the preset picker's choice (a preset id, or "" for none chosen), version 1. */
+export const encodePresetChoice = (id: string): string =>
+  JSON.stringify({ v: TASK_INPUT_VERSION, preset: id });
+export function decodePresetChoice(text: string): string | null {
+  try {
+    const raw = JSON.parse(text) as Record<string, unknown> | null;
+    return raw !== null &&
+      typeof raw === "object" &&
+      raw.v === TASK_INPUT_VERSION &&
+      typeof raw.preset === "string"
+      ? raw.preset
+      : null;
+  } catch {
+    return null;
+  }
+}

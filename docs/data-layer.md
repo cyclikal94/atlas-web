@@ -77,6 +77,16 @@ may-create predicate holds, inside the session's own per-account `atlas-delete:`
 facts read synchronously, and both fail closed. No code path creates a database after a confirmed wipe (`tests/e2e/fixture.data-wipe.spec.ts`, E-W5, which holds a stale store
 handle and fires a late strict write, a draft write and a form-recovery save at the wiped account in three engines). A caller that has gone (`abandoned`, above) starts none either, and `tests/data/runtime-disposal.test.ts` shows it at each phase of an open, over the double of IndexedDB. **The predicate is read at the creating boundary, not only when the call is made (R36, revision 21):** after the wait for the lock, after the listing made under it, in the step that starts the creating open, and once more inside the creating upgrade itself (`permit`, asked by the opener's `populate` hook in the versionchange transaction that would create the database), so a fact that changed while a listing was pending or the request was queued in the engine creates nothing; a refused creation leaves no database and deletes none (removing a database is the wipe's decision), and the answer names the reason (`identity`, `operation_pending`, `closed`, `abandoned`).
 
+### A newer schema in another tab (WEB-14a, declared-then-probe)
+
+`createDexieOpener` reads the version the engine actually opened (`IDBDatabase.version`). Dexie 4 opens a database that a newer build raised past this build's
+declared version (`DECLARED_IDB_VERSION`, schema version 2 = IndexedDB 20) without an error, so the adapter checks: a newer one makes the open fail
+`StoreFailure("closed")` before anything is read (the callers answer `refused: closed`), latches the account `upgrade_pending`, reports `upgraded` once to
+`onVersionChange` (the browser runtime raises the app-update coordinator's `data_superseded`), and every later open of that account on the page (per registry)
+is refused the same way. An upgrading `versionchange` while the page holds the database does the same. The test double mirrors it (`FakeIdb.upgradeTo`);
+`tests/data/schema-probe.test.ts` and `tests/e2e/fixture.data-schema-probe.spec.ts` (real engines, with mutants MU-1817 and MU-1818) test it. No migration ships
+with WEB-14a; the first card that raises `SCHEMA_VERSION` owns the migration-failure handling (`docs/pwa.md`, OD-P1).
+
 ## The store port and the plans
 
 Every read and write goes through a **plan**: a read phase that may await only `Reader` methods, a pure `decide`, and an apply phase, all in **one** transaction. A plan
@@ -94,7 +104,7 @@ The registered writers (`src/data/plans/*`; `tests/data/plan-inventory.test.ts` 
 | W6 | `admitReceipt` | INC, CLS, EPO |
 | W7 | `recordOutcome` | INC, CLS, EPO |
 | W8 | `recordFailureOfSend`, `resumeDrafts` | INC |
-| W9 | `saveFormRecovery`, `claimFormWriter`, `saveFormOperation` (WEB-11a review 4: several conditional copies, all or none) | INC, CLS |
+| W9 | `saveFormRecovery`, `claimFormWriter`, `saveFormOperation` (People conditional copies remain atomic) (and the readonly `loadFormRecovery` and, since WEB-14a, `listFormRecovery`: every non-terminal copy of one form, newest first, walked in pages of 50 index rows inside one readonly transaction (revision 1, R5: complete, no answer bound), read through `FormRecoveryPort.list` and the public `useFormRecoveryPort()`; since WEB-14a revision 8 (R16), `saveFormRecovery` with `expect`: the removal of ONE capture another page wrote, only while the row still holds it (`capture_id`), compared and decided in one strict transaction before anything of the row changes (no claim of its writer first), the terminal row's generation issued as a claim's would be, never creating a row (`FormRecoveryPort.discard(form, tab, capture)`; answers `resolved` or `changed` and writes nothing otherwise); a row also carries, optionally and versioned, its control state (`controls`, R17: in `content_digest` when present, so a row without it digests as before), its capture's identity (`capture_id`) and an update hand-off's lineage (`lineage`, the exact copies its page owed the removal of), the last two metadata that move only with the order record; after another tab's newer build upgraded the database, the four W9 plans, and only they, also run through the recovery connection `store/recovery-store.ts`, revision 1, R7) | INC, CLS |
 | W10 | the draft fence: `summariseWork`, `readBaseline`, `setDraftFence`, `setClosing`, `releaseFence`, `reconcileStaleFence` | INC |
 | W11 | the retry state: `recordReadOutcome`, `resumeReadCaller`, `resumeReadCallerOnOnline`, `resumeAllReadCallers`, `recordLocalWriteOutcome` | INC (the first also CLS, EPO) |
 | W12 | `writeProfile` | INC, CLS, EPO |

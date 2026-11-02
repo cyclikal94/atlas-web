@@ -62,8 +62,21 @@ Recorded honestly, with what each result does and does not prove.
 - **Playwright Firefox and Radix's radio group.** Playwright's Firefox does not run a microtask between a keydown listener and Tab's default action (a plain-DOM control page
   reproduces it with no React or Radix). Radix's roving-focus group leaves by Shift+Tab through a React state update committed in that gap, so the Shift+Tab traversal out of the
   Appearance radio group is checked in full on Chromium and WebKit and only for the wrap from the first control on Firefox. Real Firefox has **not** been checked (WEB-15).
-- **Offline in WebKit is not verified here.** Playwright's WebKit cannot emulate offline for service-worker navigations, so the offline deep-link test is skipped
-  there. Real Safari offline behaviour is WEB-14a and WEB-15 evidence.
+- **Offline in WebKit (WEB-14a).** Playwright's WebKit fails a service-worker-served navigation under `context.setOffline(true)` ("WebKit encountered an internal
+  error"; qualification probe Q-P0, `.agtx/evidence/WEB-14a/qualification/q-p0.json`), so the PWA specs take the network away there by making the test server destroy
+  every connection and telling the pages they are offline (`navigator.onLine` false). With that method the offline reload, cold start and unvisited deep link pass in
+  WebKit too; real Safari and iOS (including the installed app) remain WEB-15 evidence. Playwright WebKit also ignores `context.route` for a request the worker passes
+  on, so those specs stub the backend in their own server. In Chromium and Firefox `setOffline` does not cover the worker's own script check or a request the worker
+  passes on: the specs make the server unreachable as well.
+- **Playwright Firefox and `Cross-Origin-Opener-Policy` (WEB-14a revision 1, R9).** With the production `Cross-Origin-Opener-Policy: same-origin`, Playwright's
+  Firefox (155) sometimes never reports a navigation of a FRESH page (from `about:blank`, a browsing-context group switch): `page.goto` times out although the page
+  loaded within 0.1 s (status 200, `readyState` complete, the app running). Measured on the PWA test server: 4, 6 and 10 stalls in 80 fresh-page `goto`s with COOP, none
+  without it, none in 234 same-origin reloads with it, and none in 160 navigations the page made itself (`.agtx/evidence/WEB-14a/revision-1/firefox-coop.md`). The PWA
+  specs keep every production header in every engine and make a fresh Firefox page's first navigation with `location.assign`, finished when the page's own navigation
+  entry names the URL with status 200 and the document is complete. Real Firefox behaviour is WEB-15 evidence.
+- **Chromium and Firefox console notes with a service worker (WEB-14a).** Chromium 153 intermittently discards static HTML `modulepreload` hints for modules the worker
+  answers from its cache ("a cross-world service worker resource mismatch"); the production build has none, and the PWA test build omits them. Firefox warns, several
+  seconds after a worker controller change, that the shell's preloaded font "was not used" (finding F-2; the PWA specs allow exactly that message and attach it).
 - **WEB-08a, the session module** (`docs/session.md`). Real Chromium, Firefox and WebKit (one Playwright version each) ran: the production `atlas-auth` IndexedDB store (creation-order visibility across two pages, atomic abort,
   `versionchange`, a malformed record failing closed), Web Locks (FIFO per name, grant only after release, release when the holder closes, abort before grant, `query()` never called), `BroadcastChannel` hints,
   and the level-0 gate with real `inert` and the real top layer; the screens in both themes at 320, 390, 768 and 1280 px with axe including contrast; and the integration set against the released backend

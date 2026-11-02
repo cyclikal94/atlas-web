@@ -60,6 +60,7 @@ export function identityReadWorld(
   const onlineListeners = new Set<() => void>();
   const serviceListeners = new Set<() => void>();
   const cancelled = new Set<number>();
+  const scheduled = new Map<number, number>();
   const pending = new Set<number>();
   let seq = 0;
   return {
@@ -89,20 +90,27 @@ export function identityReadWorld(
         seq += 1;
         const id = seq;
         pending.add(id);
-        world.schedule(
-          "timer",
-          "A",
-          { timer: id },
-          () => {
-            pending.delete(id);
-            if (!cancelled.has(id)) fn();
-          },
-          ms,
+        scheduled.set(
+          id,
+          world.schedule(
+            "timer",
+            "A",
+            { timer: id },
+            () => {
+              pending.delete(id);
+              scheduled.delete(id);
+              if (!cancelled.has(id)) fn();
+            },
+            ms,
+          ),
         );
         return id;
       },
       clearTimeout(handle) {
         cancelled.add(handle as number);
+        // Withdrawn from the world, as `clearTimeout` removes a timer (R30/DA-H1, revision 25): not delivered later as a no-op.
+        world.cancel(scheduled.get(handle as number) ?? 0);
+        scheduled.delete(handle as number);
         pending.delete(handle as number);
       },
     },

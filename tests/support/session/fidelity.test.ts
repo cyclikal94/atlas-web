@@ -185,6 +185,82 @@ describe("F-FID locks", () => {
     expect(await failure).toBe("boom");
     expect(manager.isFree("L")).toBe(true);
   });
+
+  // WEB-14a revision 36 (R39): the two stages a gate holds are the platform's own; the gate only delays them.
+  const probe = async (
+    world: World,
+    port: ReturnType<typeof createWebLocksPort>,
+  ) => {
+    const p = port.probe("L");
+    await world.runUntilIdle();
+    return p;
+  };
+
+  test("an admission gate holds a request before the queue: the name stays free (ifAvailable is granted) until release, then it is granted", async () => {
+    const { world, manager, port } = locksWorld();
+    const gate = manager.gate(
+      "admission",
+      (page, name) => page === "p1" && name === "L",
+    );
+    const owner = port("p1").acquire("L");
+    await world.runUntilIdle();
+    expect(gate.held()).toBe(1);
+    expect(await probe(world, port("p2"))).toBe(true);
+    gate.release();
+    await world.runUntilIdle();
+    const handle = await owner;
+    expect(handle).not.toBeNull();
+    expect(await probe(world, port("p2"))).toBe(false);
+    handle?.release();
+    await world.runUntilIdle();
+    expect(manager.isFree("L")).toBe(true);
+  });
+
+  test("a callback gate holds a GRANTED request's callback: the lock is held (ifAvailable is null) before the page knows", async () => {
+    const { world, manager, port } = locksWorld();
+    const gate = manager.gate("callback", (page) => page === "p1");
+    let delivered = false;
+    const owner = port("p1").acquire("L");
+    void owner.then(() => {
+      delivered = true;
+    });
+    await world.runUntilIdle();
+    expect(gate.held()).toBe(1);
+    expect(delivered).toBe(false);
+    expect(manager.heldNames("p1")).toEqual(["L"]);
+    expect(await probe(world, port("p2"))).toBe(false);
+    gate.release();
+    await world.runUntilIdle();
+    expect(delivered).toBe(true);
+    (await owner)?.release();
+    await world.runUntilIdle();
+    expect(manager.isFree("L")).toBe(true);
+  });
+
+  test("a failed admission rejects the request (the port answers null), and a destroyed page's held request is dropped", async () => {
+    const { world, manager, port } = locksWorld();
+    const refused = manager.gate("admission", (page) => page === "p1");
+    const owner = port("p1").acquire("L");
+    await world.runUntilIdle();
+    refused.fail();
+    await world.runUntilIdle();
+    expect(await owner).toBeNull();
+    expect(manager.isFree("L")).toBe(true);
+    const dropped = manager.gate("admission", (page) => page === "p2");
+    let settled = false;
+    void port("p2")
+      .acquire("L")
+      .then(() => {
+        settled = true;
+      });
+    await world.runUntilIdle();
+    world.markDestroyed("p2");
+    manager.destroyPage("p2");
+    dropped.release();
+    await world.runUntilIdle();
+    expect(settled).toBe(false);
+    expect(manager.isFree("L")).toBe(true);
+  });
 });
 
 function storeWorld() {

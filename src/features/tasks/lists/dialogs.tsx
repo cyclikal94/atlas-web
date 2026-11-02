@@ -4,12 +4,14 @@ import { useAnnouncer } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
 import { useSharingDefaults } from "../../../data";
+import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import type { SaveOutcome } from "../actions";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import {
   completeKept,
   disownKept,
+  type KeptRecovery,
   type KeptTicket,
   keptEntry,
   keptKey,
@@ -20,8 +22,12 @@ import {
   createList,
   editList,
   type ListNameProblem,
+  listFormContext,
+  listFormRecoveryValues,
   listNameProblem,
+  newListFormContext,
   renameQueuedCreate,
+  restoreListForm,
 } from "../model/lists";
 import { type Evidence, type Issued, useListActions } from "./actions";
 import { CREATE, DETAIL, NAME_PROBLEM, RENAME } from "./copy";
@@ -50,6 +56,52 @@ export const holdsInput = (key: string): boolean => {
   return entry !== null && (entry.revision > 0 || entry.submitting !== null);
 };
 export const renameEditor = (listId: string) => `list-rename:${listId}`;
+
+/**
+ * APP-UPDATE RECOVERY of the create and rename dialogs (WEB-14a revision 38; design assessment DA-R40-D, C5; Q4). Only the name as typed is
+ * kept (`listFormRecoveryValues`, WEB-10b's raw form helpers), under a context the next page finds again: the new list's is one stable
+ * context (never a form id made per load), a rename's is its list's. Ids, the queued create first seen and any save whose outcome is not
+ * known are NOT kept (docs/lists.md: page memory only; no attempt history across a reload): a restored name is a new save, with the ids and
+ * the read of NOW (`start`), and saving it stays the person's act. The screens that open these dialogs look for a copy and open the dialog
+ * on it (`ListsLayout`, `ListDetail`).
+ */
+export const CREATE_RECOVERY: KeptRecovery<CreateInput> = {
+  context: newListFormContext("dialog"),
+  encode: (value) => listFormRecoveryValues(value.name).list ?? "",
+  decode: (text, start) => {
+    const found = restoreListForm({ list: text });
+    return found === null
+      ? null
+      : { ...start, name: found.name, attempt: null };
+  },
+};
+export const renameRecovery = (listId: string): KeptRecovery<RenameInput> => ({
+  context: listFormContext(listId),
+  encode: (value) => listFormRecoveryValues(value.name).list ?? "",
+  decode: (text, start) => {
+    const found = restoreListForm({ list: text });
+    return found === null
+      ? null
+      : { ...start, name: found.name, attempt: null };
+  },
+});
+/** What a new create dialog starts from: no name, new ids (each opening, and each restore, is a new save). */
+export const createStart = (newId: () => string): CreateInput => ({
+  name: "",
+  listId: newId(),
+  localId: newId(),
+  attempt: null,
+});
+/** What a rename dialog starts from: the list's name and its queued create as read now, a new id. */
+export const renameStart = (
+  list: ComposedList | null,
+  newId: () => string,
+): RenameInput => ({
+  name: list?.row.label ?? "",
+  localId: newId(),
+  seen: list?.create?.status === "queued" ? list.create.command_digest : null,
+  attempt: null,
+});
 
 /**
  * An issued save of the session whose outcome is not known (D1): the name it saved and its exact request as sent (to recognise it, never
@@ -222,13 +274,9 @@ export function CreateListDialog({
   const kept = useKeptInput<CreateInput>(
     key,
     env.identity,
-    () => ({
-      name: "",
-      listId: env.newId(),
-      localId: env.newId(),
-      attempt: null,
-    }),
+    () => createStart(env.newId),
     {
+      recover: CREATE_RECOVERY,
       // Told only while the dialog presents: it closes onto the new list, shown projected ("Not sent yet").
       consumed: (value, made) => {
         close.current();
@@ -350,6 +398,7 @@ export function CreateListDialog({
           void save();
         }}
       >
+        {kept.recovery ? <RecoveryNotice recovery={kept.recovery} /> : null}
         <fieldset disabled={kept.busy} className="flex flex-col gap-3">
           <NameField
             id={field}
@@ -418,14 +467,9 @@ export function RenameListDialog({
   const kept = useKeptInput<RenameInput>(
     key,
     env.identity,
-    () => ({
-      name: list?.row.label ?? "",
-      localId: env.newId(),
-      seen:
-        list?.create?.status === "queued" ? list.create.command_digest : null,
-      attempt: null,
-    }),
+    () => renameStart(list, env.newId),
     {
+      recover: renameRecovery(listId),
       consumed: () => {
         close.current();
         return null;
@@ -624,6 +668,7 @@ export function RenameListDialog({
           void save();
         }}
       >
+        {kept.recovery ? <RecoveryNotice recovery={kept.recovery} /> : null}
         <fieldset disabled={kept.busy} className="flex flex-col gap-3">
           <NameField
             id={field}

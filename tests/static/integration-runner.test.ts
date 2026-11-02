@@ -404,8 +404,9 @@ const endsCleanly = (events: string[]) => {
 };
 
 describe("R22: every discovered integration case is in exactly one stack (Playwright's own listing)", () => {
-  test("the default stacks cover the whole listing once, in every engine (no separate obligation on this branch)", async () => {
+  test("the default stacks and the separate I-U2 obligation cover the whole listing once, in every engine", async () => {
     const whole = await keysOf([]);
+    const pwa = await keysOf(["tests/integration/integration.pwa.spec.ts"]);
     const stacks = STACKS.map((s) => ({
       name: s.name,
       keys: planned.get(s.name) ?? [],
@@ -414,7 +415,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
       assignCases({
         all: whole,
         stacks,
-        separate: [],
+        separate: [{ name: "pwa", keys: pwa }],
         browsers: BROWSERS,
       }),
     ).toEqual({ ok: true, problems: [] });
@@ -424,12 +425,12 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
           stacks.map((s) => [s.name, inBrowser(s.keys, browser).length]),
         ),
       ).toEqual({
-        base: 28,
+        base: 33,
         pages: 18,
         "password-path": 8,
         i14e: 4,
         i14d: 4,
-        data: 32,
+        data: 37,
         calendar: 13,
         people: 16,
         traces: 16,
@@ -446,7 +447,9 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(271);
+      // 281 default-stack cases plus two separately scheduled PWA cases.
+      expect(inBrowser(pwa, browser)).toHaveLength(2);
+      expect(inBrowser(whole, browser)).toHaveLength(283);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -462,7 +465,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         "base",
         [
           "--grep-invert",
-          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|L)[0-9]|I-CAL|I-2[0-9]|I-30",
+          "I-14e|I-14d \\(revision 11\\)|I-(P|O|C|S|W|L|U)[0-9]|I-CAL|I-2[0-9]|I-30",
         ],
       ],
       ["i14e", ["--grep", "I-14e"]],
@@ -637,8 +640,8 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 271,
-        passed: 265,
+        planned_cases: 281,
+        passed: 275,
         designed_skips: 6,
         failed: 0,
         interrupted: 0,
@@ -652,7 +655,12 @@ describe("R23: the next stack or browser starts only after the previous one pass
       evidence: { complete: true, errors: [] },
     });
     expect(existsSync(join(w.evidence, OWNER))).toBe(true);
-    expect(summary.separate_obligations).toEqual([]);
+    expect(summary.separate_obligations).toEqual([
+      expect.objectContaining({
+        name: "pwa",
+        state: "not run by this command",
+      }),
+    ]);
   }, 120_000);
 
   const failAt =

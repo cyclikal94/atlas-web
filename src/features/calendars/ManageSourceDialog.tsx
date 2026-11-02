@@ -8,6 +8,8 @@ import {
   useOptionalDataEnv,
   useResourceView,
 } from "../../data";
+import { useRecoverableEditor } from "../../lib/form-recovery/editor";
+import { RecoveryNotice } from "../../lib/form-recovery/RecoveryNotice";
 import { refusalMessage } from "./AddSourceDialog";
 import type { CalendarApi } from "./api";
 import type { AwaitingSync, Dialog as DialogState } from "./CalendarSources";
@@ -77,6 +79,13 @@ import {
   urlError,
 } from "./model/validation";
 import { sourceAuthority } from "./model/visibility";
+import {
+  decodeManage,
+  encodeManage,
+  type ManageInput,
+  manageContext,
+  useCalendarRecoveryIdentity,
+} from "./recovery";
 import { projectSourceCreate } from "./register";
 
 type Panel = "replace" | "remove";
@@ -171,6 +180,47 @@ export function ManageSourceDialog({
   const timezone =
     editedTimezone ?? sourceValue(asked.value).timezone ?? defaultTimezone();
   const enabled = editedEnabled ?? !asked.archived;
+  // Revision 37 (WEB-14a R40): the edited settings reach the form's recoverable model first (refused while an update reload is prepared);
+  // a field not edited follows the source after a restore too. The connection panel's secrets are never part of it.
+  const identity = useCalendarRecoveryIdentity();
+  const touched = useRef(false);
+  const timezoneRef = useRef<HTMLInputElement>(null);
+  const edited = useRef<ManageInput>({
+    timezone: editedTimezone,
+    enabled: editedEnabled,
+  });
+  edited.current = { timezone: editedTimezone, enabled: editedEnabled };
+  const recovery = useRecoverableEditor<ManageInput>({
+    identity: identity ?? "-",
+    context: manageContext(id),
+    encode: encodeManage,
+    decode: decodeManage,
+    start: () => ({
+      timezone: null,
+      enabled: dialog.enable === true ? true : null,
+    }),
+    untouched: () => !touched.current,
+    restored: (input) => {
+      setTimezone(input.timezone);
+      setEnabled(input.enabled);
+      saves.current.invalidate();
+    },
+    // "Discard instead" (revision 38, R40-A): at the gesture, never when the copies' removal completes (a later save stays valid).
+    reset: (input) => {
+      touched.current = false;
+      setTimezone(input.timezone);
+      setEnabled(input.enabled);
+      saves.current.invalidate();
+    },
+  });
+  const changeSettings = (next: ManageInput): boolean => {
+    if (!recovery.edit(next)) return false;
+    touched.current = true;
+    setTimezone(next.timezone);
+    setEnabled(next.enabled);
+    saves.current.invalidate();
+    return true;
+  };
   const [timezoneProblem, setTimezoneProblem] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -266,6 +316,9 @@ export function ManageSourceDialog({
         onClose();
         return;
       }
+      // Its ticket first (R40): none while an update reload is prepared.
+      const ticket = recovery.submitting();
+      if (ticket === null) return;
       const pair = saves.current.attempt(settings);
       const request = configureSourceRequest(
         current,
@@ -280,6 +333,9 @@ export function ManageSourceDialog({
           dialog.supersede === undefined
             ? await outbox.enqueue(request)
             : await outbox.supersede(dialog.supersede, request);
+        if (outcome.kind === "queued" || outcome.kind === "superseded")
+          void ticket.succeeded();
+        else ticket.failed();
         if (outcome.kind === "queued" || outcome.kind === "superseded") {
           announcer.announce(SETTINGS_SAVED);
           // A save that finished after Manage closed closes nothing: another dialog may be open by now.
@@ -288,6 +344,7 @@ export function ManageSourceDialog({
         }
         setMessage(refusalMessage(outcome.reason));
       } catch {
+        ticket.failed();
         setMessage(NOT_SAVED);
       } finally {
         setBusy(false);
@@ -336,17 +393,21 @@ export function ManageSourceDialog({
             <span className="text-[12px] text-ink-2">{LABEL_READ_ONLY}</span>
           </p>
         </div>
+        <RecoveryNotice recovery={recovery} firstFieldRef={timezoneRef} />
         <Field
+          ref={timezoneRef}
           label={TIMEZONE}
           name="timezone"
           value={timezone}
           list={zonesId}
           autoComplete="off"
           error={timezoneProblem}
-          onChange={(event) => {
-            setTimezone(event.target.value);
-            saves.current.invalidate();
-          }}
+          onChange={(event) =>
+            changeSettings({
+              ...edited.current,
+              timezone: event.target.value,
+            })
+          }
         />
         <TimezoneSuggestions id={zonesId} />
       </form>
@@ -406,10 +467,12 @@ export function ManageSourceDialog({
             name="enabled"
             form={formId}
             checked={enabled}
-            onChange={(event) => {
-              setEnabled(event.target.checked);
-              saves.current.invalidate();
-            }}
+            onChange={(event) =>
+              changeSettings({
+                ...edited.current,
+                enabled: event.target.checked,
+              })
+            }
             className="size-5"
           />
           {ENABLED}
