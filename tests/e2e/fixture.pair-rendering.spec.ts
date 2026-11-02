@@ -2,10 +2,14 @@ import type { BrowserContext, Page } from "@playwright/test";
 import { recoverySample } from "../../scripts/integration/pair-capture.mjs";
 import {
   admissibilityProblems,
+  advanceProgress,
   captureProblems,
   establishedProblems,
+  fixedBarrierProblems,
   hiddenProblems,
   holdsComplete,
+  NO_PROGRESS,
+  progressProblems,
   type RecoveryReader,
   renderingProblems,
   resolved,
@@ -657,6 +661,129 @@ test.describe("WEB-09c r31: both coherent stored transactions judged across a RE
       );
       expect(corrupt === 1 ? second : first).toEqual([]);
     });
+});
+
+/**
+ * WEB-09c revision 32 (R32-DIAG.a/b; design assessment Q6b): the fixed-barrier fence predicate and the observation's validated progress on
+ * REAL captures. The capture's storage bracket really changes (the follower's admitted W2 enqueue, committed on its own connection between
+ * the two raw transactions); its auth bracket stays stable. Labelled: the held BARRIER a capture is judged at is the test's (this fixture
+ * holds no recovery answer), and `fence: true` is the existing intervention reporting the fence in both auth reads; nothing written by the
+ * product is altered. The full observer over held real snapshot answers stays the diagnostic qualification's (Q7).
+ */
+const realSample = (page: Page, reader: "leader" | "follower") =>
+  recoverySample(
+    {
+      stored: (rows: boolean, local: string[] | null) =>
+        stored(page, ACCOUNT, rows, local),
+      rendering: () => renderingOf(page, ACCOUNT),
+    },
+    { reader, page: `${reader}-page`, account: ACCOUNT },
+  ) as unknown as Promise<RecoveryReader>;
+const endsOf = (out: RecoveryReader) =>
+  [
+    ["first", out],
+    [
+      "second",
+      (out as unknown as { stored_after: RecoveryReader }).stored_after,
+    ],
+  ] as Array<["first" | "second", Record<string, unknown>]>;
+test.describe("WEB-09c r32: fixed-barrier fence and validated progress on REAL captures across a second-connection write (Q6b)", () => {
+  test("lawful: a stable standing fence (intervention) with the real write inside the bracket — no fixed-barrier problem at a held staged page, for either reader", async ({
+    context,
+  }) => {
+    const { leader, follower } = await shownPair(context);
+    const out = await capturedAcrossWrite(leader, follower, { fence: true });
+    expect(out.capture.auth).toEqual({ status: "stable" });
+    expect(out.fenced).toBe(true);
+    for (const reader of ["leader", "follower"] as const)
+      expect(
+        fixedBarrierProblems(
+          { ...out, reader },
+          { caller: "recovery", barrier: "staged" },
+        ),
+      ).toEqual([]);
+    expect(
+      fixedBarrierProblems(
+        { ...out, reader: "follower" },
+        { caller: "recovery", barrier: "invalidated" },
+      ),
+    ).toEqual([]);
+  });
+  test("refused: the SAME real schedule with the page's real (absent) fence, judged at held barriers — the stable cleared fence decided despite the real storage change", async ({
+    context,
+  }) => {
+    const { leader, follower } = await shownPair(context);
+    const out = await capturedAcrossWrite(leader, follower, {});
+    expect(out.capture.auth).toEqual({ status: "stable" });
+    expect(out.fenced).toBe(false);
+    for (const reader of ["leader", "follower"] as const)
+      expect(
+        fixedBarrierProblems(
+          { ...out, reader },
+          { caller: "recovery", barrier: "staged" },
+        ),
+      ).toEqual(["the fence was cleared before the snapshot was complete"]);
+    expect(
+      fixedBarrierProblems(
+        { ...out, reader: "follower" },
+        { caller: "recovery", barrier: "invalidated" },
+      ),
+    ).toEqual(["the recovery caller's follower is no longer fenced"]);
+    // The real data is complete: an activation poll with a complete transaction leaves the fence's release order open.
+    expect(holdsComplete(out)).toBe(true);
+    expect(
+      fixedBarrierProblems(out, { caller: "recovery", barrier: "activation" }),
+    ).toEqual([]);
+  });
+  test("progress: bound from a REAL unresolved capture, carried to the next real capture of the leader and to the follower; a regressed generation (intervention) refused", async ({
+    context,
+  }) => {
+    const { leader, follower } = await shownPair(context);
+    const first = await capturedAcrossWrite(leader, follower, {});
+    const progress = advanceProgress(NO_PROGRESS, endsOf(first), {
+      barrier: "invalidated",
+      origin: {
+        reader: "leader",
+        read: 1,
+        ordinal: 1,
+        barrier: "invalidated",
+        held_seq: 1,
+      },
+    });
+    expect(progress.generation?.value).toBe(first.recovery_generation);
+    expect(progress.generation?.origin.endpoint).toBe("first");
+    for (const [page, reader] of [
+      [leader, "leader"],
+      [follower, "follower"],
+    ] as const) {
+      const next = await realSample(page, reader);
+      expect(captureProblems(next), JSON.stringify(next)).toEqual([]);
+      for (const [, e] of endsOf(next))
+        expect(
+          progressProblems(e, {
+            who: reader,
+            barrier: "invalidated",
+            progress,
+          }),
+        ).toEqual([]);
+      const regressed = {
+        ...next,
+        recovery_generation:
+          ((next.recovery_generation as number | null) ?? 0) + 1,
+      };
+      expect(
+        progressProblems(regressed, {
+          who: reader,
+          barrier: "invalidated",
+          progress,
+        }).join(),
+      ).toMatch(
+        new RegExp(
+          `${reader} reads recovery generation \\d+, not the generation ${first.recovery_generation} validated at leader capture 1`,
+        ),
+      );
+    }
+  });
 });
 
 test.describe("WEB-09c r30: the maintained capture composition across a REAL second-connection write (Q6b)", () => {

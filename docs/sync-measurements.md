@@ -306,7 +306,12 @@ opt-in (`segmentedMinApiVersion: null`) are unchanged.
   checked against the barrier's frozen expectations — the invalidated tuple, the staged generation/row floor/old live cache, the wholly-staged-or-wholly-
   complete activation (never backwards once a complete cache was validated), the activated cache at the follower, row-bearing and settlement reads, and the
   caller's oracle on the requested rows — BEFORE any re-read, so a composition write, an auth change or a legal activation around a capture never discards
-  an already invalid transaction; only the rendering's association with the data still needs a stable bracket. The observer's re-read captures and
+  an already invalid transaction; only the rendering's association with the data still needs a stable bracket. Since revision 32 (R32-DIAG; contract
+  `/6`) the progress one observation has validated — the bound recovery generation and the staged-row floor, each with its origin — persists across
+  captures, reads, both readers, held pages and activation polls (an unresolved capture's validated facts are not forgotten; only a new observation starts
+  empty), and the notice and fence facts a held barrier decides on its own (the recovery fence standing for BOTH readers before the complete data commit,
+  the leader's restart notice, the ordinary leader unfenced) are judged on every capture before any re-read; the saved reader also requires both readers'
+  recovery fence and a serial row floor at every recorded held page, and checks the recorded progress against the samples. The observer's re-read captures and
   settlement polls are not persisted, so the reader can judge only the recorded samples; the live observer's first failure, with its predicate, endpoint,
   expectations and both transactions, is kept in the incomplete interval (`observation_failure`). The fixture is removed only after the attempt's evidence was validated (DA-DIAG-F). **Status: the adapter and the five cases
   are qualified with stand-ins, and the rendering adapter against the fixture DOM, only; the approved executable has NOT been launched and no diagnostic case

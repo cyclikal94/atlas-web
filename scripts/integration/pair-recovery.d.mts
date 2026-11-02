@@ -181,6 +181,46 @@ export function storedProblemsAt(
   ctx: Record<string, unknown>,
   o: { who: string; rowsAtLeast?: number; witness?: string | null },
 ): string[];
+// Revision 32 (R32-DIAG.a/b; design assessment C1-C4): the fixed-barrier notice/fence predicates and the observation's validated progress.
+export function fixedBarrierProblems(
+  r: RecoveryReader,
+  o: { caller: string; barrier: "invalidated" | "staged" | "activation" },
+): string[];
+export function fixedBarrierPredicate(
+  barrier: "invalidated" | "staged" | "activation",
+): "rendering.invalidated" | "rendering.staged";
+/** Where a validated progress fact came from. */
+export interface ProgressOrigin {
+  reader: "leader" | "follower";
+  /** The capture's number within its read. */
+  read: number;
+  /** The capture's number within the observation. */
+  ordinal: number;
+  barrier: string;
+  held_seq: number;
+  endpoint: "first" | "second";
+}
+/** The observation's validated progress (frozen; each fact null until a validated capture establishes it). */
+export interface RecoveryProgress {
+  readonly generation: {
+    readonly value: number;
+    readonly origin: ProgressOrigin;
+  } | null;
+  readonly rows: {
+    readonly value: number;
+    readonly origin: ProgressOrigin;
+  } | null;
+}
+export const NO_PROGRESS: RecoveryProgress;
+export function progressProblems(
+  s: StoredEndpoint,
+  o: { who: string; barrier: string; progress: RecoveryProgress },
+): string[];
+export function advanceProgress(
+  progress: RecoveryProgress,
+  ends: Array<[endpoint: "first" | "second", transaction: StoredEndpoint]>,
+  o: { barrier: string; origin: Omit<ProgressOrigin, "endpoint"> },
+): RecoveryProgress;
 export function observeRecovery(
   io: {
     held(ruleId: string): Promise<number[]>;

@@ -917,7 +917,14 @@ export const RECOVERY_KINDS = Object.freeze([
 // SECOND coherent stored transaction (`stored_after`), of the same database incarnation; its storage bracket being stable, that transaction
 // agrees with the first on every stored field this reader judges. A /4 record was made by an observer that judged only the first
 // transaction of a resolved capture: incomplete for /5, never upgraded. (A discarded capture still cannot be replayed from these records.)
-export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/5";
+// Revision 32 (R32-DIAG.a/b; design assessment C5, written independently of pair-recovery.mjs): /6 — the recovery caller's fence stands for
+// BOTH readers (one durable account-wide record) at the invalidation and at EVERY recorded held page, not only the leader's top-level
+// samples; the staged rows never go backwards through the recorded held pages in their serial order (leader then follower at each page,
+// either reader's maximum carried to the next); and the invalidated/staged/final-held records carry the observer's validated `progress`
+// (the bound generation and the staged-row floor, each with its origin), which must agree with the recorded samples. /5 records were made
+// by an observer that forgot progress between captures: incomplete for /6, never upgraded. The records still cannot replay a discarded
+// capture; the live observer refuses those as they occur.
+export const RECOVERY_OBSERVATION_SCHEMA = "web09c-recovery-observation/6";
 /** The stored fields of a recorded sample this reader judges (every one of them is in both coherent transactions of a sample). */
 const SAMPLE_STORED_FIELDS = Object.freeze([
   "composition_seq",
@@ -933,6 +940,34 @@ const SAMPLE_STORED_FIELDS = Object.freeze([
   "applied_revision",
 ]);
 const isCount = (n) => Number.isInteger(n) && n >= 0;
+/** Why a recorded progress fact's origin is not a capture of this observation at or before `atSeq` (none: it is one). */
+function originProblems(origin, { barrier, atSeq, afterSeq }) {
+  if (!origin || typeof origin !== "object") return ["names no origin"];
+  const p = [];
+  if (!["leader", "follower"].includes(origin.reader))
+    p.push(`names no reader (${JSON.stringify(origin.reader ?? null)})`);
+  if (!(Number.isInteger(origin.read) && origin.read >= 1))
+    p.push("names no capture of its read");
+  if (!(Number.isInteger(origin.ordinal) && origin.ordinal >= origin.read))
+    p.push("names no capture of the observation");
+  if (!["first", "second"].includes(origin.endpoint))
+    p.push("names no stored transaction");
+  if (origin.barrier !== barrier)
+    p.push(
+      `was made at ${JSON.stringify(origin.barrier ?? null)}, not ${barrier}`,
+    );
+  if (
+    !(
+      Number.isInteger(origin.held_seq) &&
+      origin.held_seq <= atSeq &&
+      origin.held_seq > afterSeq
+    )
+  )
+    p.push(
+      `names a held answer ${JSON.stringify(origin.held_seq ?? null)} outside this observation's`,
+    );
+  return p;
+}
 /** Why a reader's sample is not a complete observation of its page (the same account `account`); none: it is one. */
 function sampleProblems(r, account) {
   const g = r?.rendering;
@@ -1116,6 +1151,58 @@ function recoveryObservationProblems(kind, o, ctx) {
       bad(`${r.reader}'s page shows account content ${what}`);
   };
 
+  // Revision 32 (/6): the observer's recorded validated progress agrees with the recorded samples (a generation bound at the invalidation;
+  // a row floor equal to the highest staged rows recorded by then: every validated capture of a read is followed by its resolved one).
+  if (
+    kind === "recovery_invalidated" ||
+    kind === "recovery_staged_hidden" ||
+    kind === "recovery_final_held"
+  ) {
+    const pr = o.detail?.progress;
+    const invAt = invalidated?.at_seq ?? Number.NEGATIVE_INFINITY;
+    if (!pr || typeof pr !== "object")
+      bad("the observer's validated progress is not recorded");
+    else {
+      if (!(pr.generation && pr.generation.value === gen))
+        bad(
+          `the recorded progress binds generation ${JSON.stringify(pr.generation?.value ?? null)}, not the invalidation's ${gen}`,
+        );
+      else
+        for (const x of originProblems(pr.generation.origin, {
+          barrier: "invalidated",
+          atSeq: invAt,
+          afterSeq: handOff?.at_seq ?? Number.POSITIVE_INFINITY,
+        }))
+          bad(`the recorded generation's origin ${x}`);
+      const recorded = [
+        leader,
+        follower,
+        ...(kind === "recovery_final_held" && Array.isArray(o.detail?.pages)
+          ? o.detail.pages.flatMap((x) => [x?.leader, x?.follower])
+          : []),
+      ]
+        .map((x) => x?.staging_rows)
+        .filter(Number.isInteger);
+      if (kind === "recovery_invalidated") {
+        if (pr.rows !== null)
+          bad("the recorded progress has a row floor before any staged page");
+      } else {
+        const highest = recorded.length > 0 ? Math.max(...recorded) : null;
+        if (!(pr.rows && pr.rows.value === highest))
+          bad(
+            `the recorded row floor ${JSON.stringify(pr.rows?.value ?? null)} is not the highest staged rows recorded (${highest})`,
+          );
+        else
+          for (const x of originProblems(pr.rows.origin, {
+            barrier: "staged",
+            atSeq: at.seq,
+            afterSeq: invAt,
+          }))
+            bad(`the recorded row floor's origin ${x}`);
+      }
+    }
+  }
+
   if (kind === "recovery_invalidated") {
     for (const r of readers) {
       if (r.cache_status === "valid")
@@ -1147,6 +1234,9 @@ function recoveryObservationProblems(kind, o, ctx) {
         );
       if (leader?.fenced !== true)
         bad("the recovery caller is no longer fenced");
+      // Revision 32 (/6): the fence is account-wide; the follower reads the same durable record.
+      if (follower?.fenced !== true)
+        bad("the recovery caller's follower is no longer fenced");
     } else if (leader?.fenced === true) bad("an ordinary caller is fenced");
   } else if (
     kind === "recovery_staged_hidden" ||
@@ -1173,12 +1263,11 @@ function recoveryObservationProblems(kind, o, ctx) {
       if (r.cache_status === "valid")
         bad(`${r.reader} shows a valid cache before the last page`);
       hiddenOf(r, "while the snapshot is staged");
-      if (
-        record.caller === "recovery" &&
-        r.reader === "leader" &&
-        r.fenced !== true
-      )
-        bad("the fence was cleared before the snapshot was complete");
+      // Revision 32 (/6): either reader (the account-wide fence), not only the leader.
+      if (record.caller === "recovery" && r.fenced !== true)
+        bad(
+          `the fence was cleared before the snapshot was complete (${r.reader})`,
+        );
     }
     if (kind === "recovery_final_held") {
       if (at.has_more !== false)
@@ -1203,6 +1292,9 @@ function recoveryObservationProblems(kind, o, ctx) {
           bad(
             `the held pages recorded ${seqs} are not the snapshot pages ${JSON.stringify(expected)}`,
           );
+        // Revision 32 (/6): the serial row floor through every recorded pair (leader then follower at each page), either reader's
+        // maximum carried to the next sample.
+        let floor = 0;
         for (const page of held) {
           if (
             page?.leader?.reader !== "leader" ||
@@ -1213,6 +1305,17 @@ function recoveryObservationProblems(kind, o, ctx) {
           }
           for (const r of [page.leader, page.follower]) {
             if (!sampled(r)) continue;
+            if (Number.isInteger(r.staging_rows)) {
+              if (r.staging_rows < floor)
+                bad(
+                  `${r.reader}'s staged rows went backwards at page ${page.seq} (${r.staging_rows} after ${floor})`,
+                );
+              floor = Math.max(floor, r.staging_rows);
+            }
+            if (record.caller === "recovery" && r.fenced !== true)
+              bad(
+                `${r.reader}'s recovery fence was cleared at page ${page.seq}, before the snapshot was complete`,
+              );
             if (!renderedHidden(r, record.caller))
               bad(
                 `${r.reader}'s page shows account content at page ${page.seq}`,

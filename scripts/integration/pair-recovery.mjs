@@ -26,6 +26,9 @@
 //   Revision 31 (R31-DIAG): every stored predicate a coherent transaction can decide on its own — with the barrier's immutable read context
 //      — is judged on BOTH stored transactions of every capture (the first read and the bracket's second read), before any re-read
 //      (`storedProblemsAt`). Only the association of the rendering with the data still needs a stable bracket.
+//   Revision 32 (R32-DIAG.a/b): the observation's VALIDATED progress (generation, staged-row floor) persists across captures, reads, readers
+//      and sites (`progressProblems`, `advanceProgress`), and the notice/fence facts a fixed held barrier decides are judged on every
+//      capture before any re-read (`fixedBarrierProblems`).
 // Network barriers show the state BETWEEN transactions; they cannot look inside one. Atomicity inside the W22/W23 transaction remains the
 // existing native transaction controls' (qualified separately); this observer requires the evidence a split would leave between them.
 import { createHash } from "node:crypto";
@@ -67,7 +70,12 @@ const sha256 = (text) => createHash("sha256").update(text).digest("hex");
 // transaction (`stored_after`, pair-capture.mjs `ENDPOINT_FIELDS`), of the same incarnation and, its storage bracket being stable, equal to
 // the first on every stamp field; the live observer judged both endpoints' data before recording it. /4 records were made by an observer
 // that judged only the first endpoint, and only on a resolved capture: incomplete for /5, never upgraded.
-export const OBSERVATION_SCHEMA = "web09c-recovery-observation/5";
+// Revision 32 (R32-DIAG.a/b; design assessment C1-C5): /6 — the observer also carried the observation's VALIDATED progress (the bound
+// generation and the staged-row floor, each with its origin) across every capture, read, reader and site, and judged the fixed-barrier
+// notice/fence facts on every capture before any re-read; each invalidated/staged/final-held record carries that `progress`. /5 records were
+// made by an observer that forgot progress between captures and judged the fence only on a resolved capture: incomplete for /6, never
+// upgraded.
+export const OBSERVATION_SCHEMA = "web09c-recovery-observation/6";
 /**
  * The most consecutive UNRESOLVED samples (a changed auth or storage bracket, nothing independently established against them) one read
  * re-reads before it fails; each is counted by cause in the sample that ends them. A count, not a clock: a hung IO call is bounded only by
@@ -427,17 +435,56 @@ export function storedInvalidatedProblems(
     p.push("the recovery caller's refusal did not restart the snapshot");
   return p;
 }
-/** What the pages show and the auth/notice facts at the invalidation (judged on a resolved capture: they need its stable brackets). */
-export function invalidatedRenderingProblems(r, { caller }) {
-  const p = hiddenProblems(r, { caller, what: "while the cache is invalid" });
-  if (r.reader === "leader") {
+// Revision 32 (R32-DIAG.b, family `segmented-sync-development-pairing`, incomplete_fix of R31-DIAG; design assessment C3/C4): the notice
+// and fence requirements a FIXED held barrier decides on its own. Revision 31 judged them only on a RESOLVED capture after `read()`
+// returned, so a stable cleared recovery fence (both auth reads false, the page hidden and neutral) was discarded whenever an unrelated
+// composition write moved the storage bracket, and a later healthy capture passed. At a held snapshot answer the activation has not been
+// released: nothing the storage did can explain a cleared fence there, so a STABLE auth bracket decides it, whatever the storage bracket
+// says. Approved lifecycle §3.7.3 keeps the recovery fence until the complete data commit. The fence is account-wide (both pages read the
+// same durable atlas-auth record), so it binds BOTH readers of the recovery caller; the notice is the leader's own (its job records it) and
+// is read with the page, outside both brackets. A CHANGED auth bracket stays ambiguous here (the fence was one of true/false): it is left to
+// the interpretations and the bounded re-read. At an activation poll the phase is decided by the two coherent transactions: only when BOTH
+// are staged is the fence still required (staged then complete leaves the order of the auth release open; complete permits a cleared
+// fence). The ordinary caller's leader must not be fenced (its existing rule; an ordinary follower's own fence is not this caller's).
+/**
+ * The problems of a capture `r` decidable from its known barrier and its stable auth/page facts, independent of its storage bracket.
+ * `barrier`: "invalidated" | "staged" | "activation" (the activated barrier fixes nothing about the fence).
+ */
+export function fixedBarrierProblems(r, { caller, barrier }) {
+  const p = [];
+  const stable = r?.capture?.auth?.status === "stable";
+  if (barrier === "invalidated") {
     if (caller === "recovery") {
-      if (r.notice?.reason !== "resync_required")
+      if (r.reader === "leader" && r.notice?.reason !== "resync_required")
         p.push("the recovery job did not record its server restart");
-      if (r.fenced !== true) p.push("the recovery caller is no longer fenced");
-    } else if (r.fenced === true) p.push("an ordinary caller is fenced");
+      if (stable && r.fenced !== true)
+        p.push(
+          r.reader === "leader"
+            ? "the recovery caller is no longer fenced"
+            : "the recovery caller's follower is no longer fenced",
+        );
+    } else if (stable && r.reader === "leader" && r.fenced === true)
+      p.push("an ordinary caller is fenced");
+    return p;
   }
+  const staged =
+    barrier === "staged" ||
+    (barrier === "activation" &&
+      !holdsComplete(r) &&
+      !(r?.stored_after && holdsComplete(r.stored_after)));
+  if (caller === "recovery" && staged && stable && r.fenced !== true)
+    p.push("the fence was cleared before the snapshot was complete");
   return p;
+}
+/** The fixed-barrier predicates' failure predicate name at a barrier (the names revision 31's resolved-only checks reported). */
+export const fixedBarrierPredicate = (barrier) =>
+  barrier === "invalidated" ? "rendering.invalidated" : "rendering.staged";
+/** What the pages show and the auth/notice facts at the invalidation, for a resolved capture (the observer judges every capture in `read`). */
+export function invalidatedRenderingProblems(r, { caller }) {
+  return [
+    ...hiddenProblems(r, { caller, what: "while the cache is invalid" }),
+    ...fixedBarrierProblems(r, { caller, barrier: "invalidated" }),
+  ];
 }
 /** The problems of a reader's state right after the refusal was processed (`recovery_invalidated`): stored and rendered. */
 export function invalidatedProblems(r, o) {
@@ -472,12 +519,12 @@ export function storedStagedProblems(
     p.push(`${who} shows a valid cache before the last page`);
   return p;
 }
-/** What the pages show and the fence while the snapshot is staged (judged on a resolved capture). */
+/** What the pages show and the fence while the snapshot is staged, for a resolved capture (the observer judges every capture in `read`). */
 export function stagedRenderingProblems(r, { caller }) {
-  const p = hiddenProblems(r, { caller, what: "while the snapshot is staged" });
-  if (caller === "recovery" && r.reader === "leader" && r.fenced !== true)
-    p.push("the fence was cleared before the snapshot was complete");
-  return p;
+  return [
+    ...hiddenProblems(r, { caller, what: "while the snapshot is staged" }),
+    ...fixedBarrierProblems(r, { caller, barrier: "staged" }),
+  ];
 }
 /** The problems of a reader's state while the snapshot is staged (`recovery_staged_hidden`, `recovery_final_held`, every later page). */
 export function stagedProblems(r, o) {
@@ -548,8 +595,8 @@ export function activationProblems(
 
 /**
  * The stored problems of ONE coherent transaction `s` of the `who` reader at the read context `ctx` (its `barrier` and expectations) —
- * everything the transaction decides on its own. `rowsAtLeast` (the staged barrier) may be raised within a capture by its validated first
- * transaction; `witness` (the activation) is the validated complete digest so far.
+ * everything the transaction decides on its own. `rowsAtLeast` (the staged barrier, and the staged alternative of an activation poll) may be
+ * raised within a capture by its validated first transaction; `witness` (the activation) is the validated complete digest so far.
  */
 export function storedProblemsAt(s, ctx, { who, rowsAtLeast, witness }) {
   switch (ctx.barrier) {
@@ -558,13 +605,80 @@ export function storedProblemsAt(s, ctx, { who, rowsAtLeast, witness }) {
     case "staged":
       return storedStagedProblems(s, { ...ctx, who, rowsAtLeast });
     case "activation":
-      return activationProblems(s, { ...ctx, who, witness });
+      return activationProblems(s, { ...ctx, who, witness, rowsAtLeast });
     case "activated":
       return storedActivatedProblems(s, { ...ctx, who });
     default:
       throw new Error(`unknown stored barrier ${ctx.barrier}`);
   }
 }
+
+// Revision 32 (R32-DIAG.a, family `segmented-sync-development-pairing`, incomplete_fix of R31-DIAG; design assessment C1/C2, invariants 1,
+// 3, 4): the PROGRESS one observation has validated. Revision 31 raised the row floor only inside one capture (`rowsAtLeast` reset from the
+// frozen context at every retry) and bound the generation only after the leader's read RESOLVED: a valid capture reading generation 7 or
+// nine staged rows, retried only because an unrelated composition write moved its bracket, could be followed by a capture at generation 6
+// or with six rows that still satisfied the frozen context — accepted through the rendered settlement. Validated progress is the
+// observation's, not one capture's or one read's: it persists across retries, readers, held pages and activation polls, separately from
+// the frozen per-read expectations and from the unresolved rendering association. Only an explicitly new observation (another
+// `observeRecovery` call) starts empty; nothing here resets it. It is raised ONLY from a capture whose envelope, identity, both stored
+// transactions, pairwise and fixed-barrier checks have all passed, never from an unchecked or failed one.
+//   - generation: bound from the first validated transaction at the invalidation (either reader; the leader reads first); every later
+//     invalidated transaction must read exactly it — forward or backward, a restart within one observation is never a new baseline. The
+//     staged barriers' frozen context already requires the generation bound from it.
+//   - rows: the highest staged-row count validated at a held staged page or in a staged activation poll, by either reader and either
+//     endpoint; every later staged transaction (staged page or staged activation poll) holds at least as many. The snapshot journey is
+//     monotone at its held barriers; a COMPLETE transaction (staging atomically emptied by the activation) is not a regression, and once a
+//     complete one is witnessed the activation witness alone governs (complete with that cache thereafter).
+/** Where a validated progress fact came from (as a failure reports it). */
+const originText = (o) =>
+  `${o.reader} capture ${o.read} (observation capture ${o.ordinal}, ${o.endpoint} stored read) at ${o.barrier} ${o.held_seq}`;
+/**
+ * The problems of ONE coherent transaction `s` against the observation's validated `progress` ({generation, rows}: each null or
+ * {value, origin}) at a `barrier`. Pure: the caller raises the progress only after the whole capture is validated.
+ */
+export function progressProblems(s, { who, barrier, progress }) {
+  const p = [];
+  const g = progress?.generation ?? null;
+  if (
+    g !== null &&
+    barrier === "invalidated" &&
+    s.recovery_generation !== g.value
+  )
+    p.push(
+      `${who} reads recovery generation ${s.recovery_generation}, not the generation ${g.value} validated at ${originText(g.origin)}`,
+    );
+  const f = progress?.rows ?? null;
+  const staged =
+    barrier === "staged" || (barrier === "activation" && !holdsComplete(s));
+  if (
+    f !== null &&
+    staged &&
+    !(Number.isInteger(s.staging_rows) && s.staging_rows >= f.value)
+  )
+    p.push(
+      `${who} holds ${s.staging_rows} staged rows, fewer than the ${f.value} validated at ${originText(f.origin)}`,
+    );
+  return p;
+}
+/**
+ * The progress after a VALIDATED capture's two transactions (`ends`: [[endpoint, transaction], …] in read order) at `barrier`; `origin`
+ * {reader, read (the capture's number in its read), ordinal (its number in the observation), barrier, held_seq}. Returns a new frozen value (the old one is never mutated).
+ */
+export function advanceProgress(progress, ends, { barrier, origin }) {
+  let { generation, rows } = progress;
+  for (const [endpoint, e] of ends) {
+    const at = Object.freeze({ ...origin, endpoint });
+    if (barrier === "invalidated" && generation === null)
+      generation = Object.freeze({ value: e.recovery_generation, origin: at });
+    const staged =
+      barrier === "staged" || (barrier === "activation" && !holdsComplete(e));
+    if (staged && (rows === null || e.staging_rows > rows.value))
+      rows = Object.freeze({ value: e.staging_rows, origin: at });
+  }
+  return Object.freeze({ generation, rows });
+}
+/** The empty progress of a new observation. */
+export const NO_PROGRESS = Object.freeze({ generation: null, rows: null });
 
 /**
  * Observes one recovery to its rendered exposure. `io`: held(ruleId) → proxy ids; records() → the interval's tap /sync records;
@@ -583,6 +697,8 @@ export function storedProblemsAt(s, ctx, { who, rowsAtLeast, witness }) {
  * Revision 30 (R30-DIAG): each read's samples carry separate capture brackets (pair-capture.mjs); independently established failures are
  * refused on the capture that establishes them, before any re-read of an unresolved bracket. `io.failed?({reason, capture})` receives the
  * first failure's facts before the throw (the owner keeps them in the incomplete interval).
+ * Revision 32 (R32-DIAG.a/b): the observation's validated progress persists across captures, reads, readers and sites; the fixed-barrier
+ * notice/fence predicates are judged on every capture before any re-read; every failure's facts carry the progress before its capture.
  * Resolves with {pages, final, rendered}; throws with a diagnosis on the first violation (the interval is then kept incomplete by its
  * owner). A read that throws is a failed observation, never a hidden one.
  */
@@ -645,6 +761,7 @@ export async function observeRecovery(io, o) {
     held_seq: ctx?.seq ?? null,
     phase: ctx?.phase ?? null,
     read: n,
+    ordinal: captures,
     rereads: rereads ? { ...rereads } : null,
     predicate: extra.predicate ?? null,
     endpoint: extra.endpoint ?? null,
@@ -658,6 +775,8 @@ export async function observeRecovery(io, o) {
     stored: endpointOf(r),
     stored_after: r?.stored_after ? endpointOf(r.stored_after) : null,
     rows: extra.rows ?? null,
+    // Revision 32 (C4): the observation's validated progress BEFORE this capture, with each fact's origin (frozen values, never live).
+    progress,
   });
   /** The facts of a failure made of a RESOLVED sample after its read (its number and re-reads as the read returned them). */
   const factsOfSample = (r, ctx, predicate) =>
@@ -667,6 +786,11 @@ export async function observeRecovery(io, o) {
   // Revision 31 (R31-DIAG, C4): the digest of the first COMPLETE stored transaction validated at the activation (null before). Set only
   // from a validated endpoint, never from an unchecked capture; every later transaction must hold that very cache.
   let witness = null;
+  // Revision 32 (R32-DIAG.a, C1): the observation's validated progress (`advanceProgress`), raised only by validated captures and never
+  // reset within this observation; read by every reader at every site.
+  let progress = NO_PROGRESS;
+  // The observation-wide number of the capture being judged (every capture of every read, counted from 1): a progress fact's provenance.
+  let captures = 0;
   // Revision 30 (R30-DIAG; design assessment C2) and revision 31 (R31-DIAG; C1/C2): every capture of a read — including each one later
   // re-read — is checked IN THIS ORDER, all before any re-read:
   //   1. the IO (a read that throws fails), the reader's role, the capture envelope (malformed/missing brackets, unreadable fences, a
@@ -689,6 +813,7 @@ export async function observeRecovery(io, o) {
     const what = `at ${phase.replace("_", " ")}`;
     const rereads = { total: 0, auth: 0, storage: 0 };
     for (let n = 1; ; n += 1) {
+      captures += 1;
       let r;
       try {
         r = await io.read(who, opts);
@@ -727,12 +852,14 @@ export async function observeRecovery(io, o) {
           `the ${who} reads another account database incarnation (${r.incarnation}, not ${incarnation}): replaced during the observation`,
           facts("identity.incarnation"),
         );
-      // 2. Both coherent stored transactions, each on its own (revision 31).
-      let rowsAtLeast = at.rowsAtLeast;
-      for (const [endpoint, e] of [
+      // 2. Both coherent stored transactions, each on its own (revision 31), then against the observation's validated progress (revision
+      //    32: across captures, reads, readers and sites, not only within this capture).
+      const ends = [
         ["first", r],
         ["second", r.stored_after],
-      ]) {
+      ];
+      let rowsAtLeast = at.rowsAtLeast;
+      for (const [endpoint, e] of ends) {
         const problems = storedProblemsAt(e, at, { who, rowsAtLeast, witness });
         if (problems.length > 0)
           fail(
@@ -742,7 +869,33 @@ export async function observeRecovery(io, o) {
               expected: { rowsAtLeast, witness },
             }),
           );
-        if (at.barrier === "staged")
+        const behind = progressProblems(e, {
+          who,
+          barrier: at.barrier,
+          progress,
+        });
+        if (behind.length > 0)
+          fail(
+            `${at.label}: ${behind.join("; ")} [the ${endpoint} stored read of capture ${n}]`,
+            facts(
+              at.barrier === "invalidated"
+                ? "progress.generation"
+                : "progress.rows",
+              {
+                endpoint,
+                expected: {
+                  rowsAtLeast,
+                  witness,
+                  progress_generation: progress.generation?.value ?? null,
+                  progress_rows: progress.rows?.value ?? null,
+                },
+              },
+            ),
+          );
+        if (
+          at.barrier === "staged" ||
+          (at.barrier === "activation" && !holdsComplete(e))
+        )
           rowsAtLeast = Math.max(rowsAtLeast, e.staging_rows);
         if (at.barrier === "activation" && witness === null && holdsComplete(e))
           witness = e.cache_digest;
@@ -774,12 +927,29 @@ export async function observeRecovery(io, o) {
             }),
           );
       }
-      // 3. What the rendering establishes.
+      // 3. What the rendering establishes, then what the known barrier decides from the stable auth and page facts (revision 32; both
+      //    before any re-read, so a capture both refuse reports its rendering first, as revision 31 did).
       require(establishedProblems(r, {
         caller,
         phase,
         what,
       }), `the ${who}'s page is not admissible`, facts("rendering.admissible"));
+      if (at.barrier !== "activated")
+        require(fixedBarrierProblems(r, {
+          caller,
+          barrier: at.barrier,
+        }), at.label, facts(fixedBarrierPredicate(at.barrier)));
+      // 4. The capture is validated: its progress is the observation's, resolved or not.
+      progress = advanceProgress(progress, ends, {
+        barrier: at.barrier,
+        origin: {
+          reader: who,
+          read: n,
+          ordinal: captures,
+          barrier: at.barrier,
+          held_seq: at.seq,
+        },
+      });
       if (resolved(r)) {
         r.read = n;
         r.rereads = { ...rereads };
@@ -799,7 +969,6 @@ export async function observeRecovery(io, o) {
   const pages = [];
   const heldPages = [];
   let generation = null;
-  let rows = 0;
   let stagedSeen = false;
   const nextHeld = async () => {
     const deadline = io.now() + heldTimeoutMs;
@@ -862,20 +1031,13 @@ export async function observeRecovery(io, o) {
         refusalGeneration: refusal.generation,
         generation: null,
       };
+      // Revision 32: the notice and fence are judged in the read on every capture (`fixedBarrierProblems`), not on the resolved one only.
       const leader = await read("leader", "before_activation", first);
       const follower = await read("follower", "before_activation", {
         ...first,
-        generation: leader.recovery_generation,
+        generation: progress.generation.value,
       });
-      for (const r of [leader, follower])
-        require(invalidatedRenderingProblems(r, {
-          caller,
-        }), `at the first snapshot page ${record.seq}`, factsOfSample(
-          r,
-          first,
-          "rendering.invalidated",
-        ));
-      generation = leader.recovery_generation;
+      generation = progress.generation.value;
       await io.observe(
         "recovery_invalidated",
         record.seq,
@@ -884,6 +1046,7 @@ export async function observeRecovery(io, o) {
           leader,
           follower,
           generation_at_refusal: refusal.generation,
+          progress,
         }),
       );
       await io.onPage?.("recovery_invalidated", record, leader);
@@ -893,31 +1056,23 @@ export async function observeRecovery(io, o) {
           barrierFacts({ predicate: "held.pages", held_seq: record.seq }),
         );
     } else {
-      // Both pages at EVERY held page (C4): an intermediate follower fault is never unobserved. The row floor comes from the last
-      // validated leader sample (rows never go backwards); the follower's from the leader's at this page.
+      // Both pages at EVERY held page (C4): an intermediate follower fault is never unobserved. Revision 32: each read's frozen floor is
+      // the observation's validated floor when the read begins (either reader's, any earlier capture's, rows never go backwards), and the
+      // progress check carries it across this read's own captures; the fence is judged in the read on every capture.
       const staged = {
         barrier: "staged",
         seq: record.seq,
         label: `at snapshot page ${record.seq}`,
         oldDigest,
         generation,
-        rowsAtLeast: Math.max(1, rows),
+        rowsAtLeast: Math.max(1, progress.rows?.value ?? 0),
       };
       const leader = await read("leader", "before_activation", staged);
       const follower = await read("follower", "before_activation", {
         ...staged,
         label: `the follower at snapshot page ${record.seq}`,
-        rowsAtLeast: leader.staging_rows,
+        rowsAtLeast: progress.rows.value,
       });
-      for (const r of [leader, follower])
-        require(stagedRenderingProblems(r, { caller }), r === leader
-          ? `at snapshot page ${record.seq}`
-          : `the follower at snapshot page ${record.seq}`, factsOfSample(
-          r,
-          staged,
-          "rendering.staged",
-        ));
-      rows = leader.staging_rows;
       heldPages.push({ seq: record.seq, leader, follower });
       if (!stagedSeen) {
         stagedSeen = true;
@@ -925,7 +1080,7 @@ export async function observeRecovery(io, o) {
           "recovery_staged_hidden",
           record.seq,
           leader.cache_digest,
-          detail({ leader, follower }),
+          detail({ leader, follower, progress }),
         );
         await io.onPage?.("recovery_staged_hidden", record, leader);
       }
@@ -934,7 +1089,7 @@ export async function observeRecovery(io, o) {
           "recovery_final_held",
           record.seq,
           leader.cache_digest,
-          detail({ leader, follower, pages: heldPages }),
+          detail({ leader, follower, pages: heldPages, progress }),
         );
         await io.onPage?.("recovery_final_held", record, leader);
       }
@@ -955,7 +1110,7 @@ export async function observeRecovery(io, o) {
       label: "after the last snapshot page",
       oldDigest,
       generation,
-      rowsAtLeast: rows,
+      rowsAtLeast: progress.rows.value,
     };
     const deadline = io.now() + settleTimeoutMs;
     let final = null;

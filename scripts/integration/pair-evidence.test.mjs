@@ -1673,7 +1673,35 @@ const pair = (extra = {}, follower = {}) => ({
   leader: readerState("leader", extra),
   follower: readerState("follower", { ...extra, ...follower }),
 });
-const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/5" };
+const SCHEMA_DETAIL = { schema: "web09c-recovery-observation/6" };
+/** Revision 32 (/6): the observer's validated progress as it records it (the bound generation, the row floor, each with its origin). */
+const progressAt = ({ p1, rows = null, rowsSeq = null, ordinal = 4 }) => ({
+  generation: {
+    value: 6,
+    origin: {
+      reader: "leader",
+      read: 1,
+      ordinal: 1,
+      barrier: "invalidated",
+      held_seq: p1,
+      endpoint: "first",
+    },
+  },
+  rows:
+    rows === null
+      ? null
+      : {
+          value: rows,
+          origin: {
+            reader: "follower",
+            read: 1,
+            ordinal,
+            barrier: "staged",
+            held_seq: rowsSeq,
+            endpoint: "first",
+          },
+        },
+});
 /** X0's real 410 at 13 (the hand-off), then three snapshot pages 14, 15, 16, each held and released by a recorded release. */
 function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
   const w = world();
@@ -1744,13 +1772,22 @@ function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
       kind: "recovery_invalidated",
       at_seq: p1,
       cache_digest: "old-cache",
-      detail: { ...SCHEMA_DETAIL, ...pair(fence), generation_at_refusal: 5 },
+      detail: {
+        ...SCHEMA_DETAIL,
+        ...pair(fence),
+        generation_at_refusal: 5,
+        progress: progressAt({ p1 }),
+      },
     },
     {
       kind: "recovery_staged_hidden",
       at_seq: p2,
       cache_digest: "old-cache",
-      detail: { ...SCHEMA_DETAIL, ...pair(staged) },
+      detail: {
+        ...SCHEMA_DETAIL,
+        ...pair(staged),
+        progress: progressAt({ p1, rows: 4, rowsSeq: p2 }),
+      },
     },
     {
       kind: "recovery_final_held",
@@ -1764,6 +1801,7 @@ function observedRecovery({ caller = "ordinary", rearmed = false } = {}) {
           { seq: p2, ...pair(staged) },
           { seq: p3, ...pair({ ...staged, staging_rows: 8 }) },
         ],
+        progress: progressAt({ p1, rows: 8, rowsSeq: p3, ordinal: 6 }),
       },
     },
     {
@@ -2504,3 +2542,140 @@ test("accepted (revision 31, /5): a saved sample whose second stored transaction
   );
   accept(r);
 });
+
+// Revision 32 (R32-DIAG.a/b; contract /6, design assessment C5/Q5): the account-wide recovery fence at every recorded held page and for
+// both readers, the serial row floor through the recorded pairs, and the observer's recorded validated progress.
+test("refused (revision 32): an observation of the earlier contract web09c-recovery-observation/5 is incomplete, never upgraded", () => {
+  const r = observedRecovery();
+  obs(r, "recovery_final_held").detail.schema = "web09c-recovery-observation/5";
+  refuse(
+    r,
+    /recovery_final_held: made under the observation contract "web09c-recovery-observation\/5"/,
+    "/5",
+  );
+});
+for (const who of ["leader", "follower"])
+  for (const page of [0, 1])
+    test(`refused (revision 32, recovery caller): the ${who}'s fence cleared at ONE recorded held page (${page === 0 ? "intermediate" : "last"}), hidden, its top-level samples fenced`, () => {
+      const r = observedRecovery({ caller: "recovery", rearmed: true });
+      const held = obs(r, "recovery_final_held").detail.pages[page];
+      held[who].fenced = false;
+      refuse(
+        r,
+        new RegExp(
+          `recovery_final_held: ${who}'s recovery fence was cleared at page ${held.seq}, before the snapshot was complete`,
+        ),
+        `${who} page ${page}`,
+      );
+    });
+test("refused (revision 32, recovery caller): the follower unfenced at the invalidation (the fence is account-wide)", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  obs(r, "recovery_invalidated").detail.follower.fenced = false;
+  refuse(
+    r,
+    /recovery_invalidated: the recovery caller's follower is no longer fenced/,
+    "follower at the invalidation",
+  );
+});
+test("refused (revision 32, recovery caller): the follower unfenced in the staged-hidden record", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  obs(r, "recovery_staged_hidden").detail.follower.fenced = false;
+  refuse(
+    r,
+    /recovery_staged_hidden: the fence was cleared before the snapshot was complete \(follower\)/,
+    "follower staged",
+  );
+});
+test("accepted (revision 32, ordinary caller): an unfenced follower at every held page (the ordinary caller is never fenced)", () => {
+  const r = observedRecovery();
+  for (const p of obs(r, "recovery_final_held").detail.pages)
+    p.follower.fenced = false;
+  accept(r);
+});
+test("refused (revision 32): the follower's recorded maximum at an intermediate page, then a lower leader at the next", () => {
+  const r = observedRecovery();
+  const final = obs(r, "recovery_final_held");
+  final.detail.pages[0].follower.staging_rows = 9;
+  refuse(
+    r,
+    new RegExp(
+      `recovery_final_held: leader's staged rows went backwards at page ${final.detail.pages[1].seq} \\(8 after 9\\)`,
+    ),
+    "follower max then lower leader",
+  );
+});
+test("refused (revision 32): the follower below its own page's leader in a recorded pair", () => {
+  const r = observedRecovery();
+  const final = obs(r, "recovery_final_held");
+  final.detail.pages[1].follower.staging_rows = 7;
+  refuse(
+    r,
+    new RegExp(
+      `recovery_final_held: follower's staged rows went backwards at page ${final.detail.pages[1].seq} \\(7 after 8\\)`,
+    ),
+    "follower below leader",
+  );
+});
+test("accepted (revision 32): the follower raising the floor at the last page, recorded as the observer's progress", () => {
+  const r = observedRecovery({ caller: "recovery", rearmed: true });
+  const final = obs(r, "recovery_final_held");
+  final.detail.pages[1].follower.staging_rows = 9;
+  final.detail.follower.staging_rows = 9;
+  final.detail.progress.rows.value = 9;
+  accept(r);
+});
+for (const [name, kind, edit, expected] of [
+  [
+    "no recorded progress",
+    "recovery_staged_hidden",
+    (d) => delete d.progress,
+    /recovery_staged_hidden: the observer's validated progress is not recorded/,
+  ],
+  [
+    "a recorded generation other than the invalidation's",
+    "recovery_final_held",
+    (d) => (d.progress.generation.value = 7),
+    /recovery_final_held: the recorded progress binds generation 7, not the invalidation's 6/,
+  ],
+  [
+    "a recorded row floor below the highest recorded staged rows",
+    "recovery_final_held",
+    (d) => (d.progress.rows.value = 4),
+    /recovery_final_held: the recorded row floor 4 is not the highest staged rows recorded \(8\)/,
+  ],
+  [
+    "a recorded row floor above every recorded sample",
+    "recovery_staged_hidden",
+    (d) => (d.progress.rows.value = 9),
+    /recovery_staged_hidden: the recorded row floor 9 is not the highest staged rows recorded \(4\)/,
+  ],
+  [
+    "a row floor before any staged page",
+    "recovery_invalidated",
+    (d) => (d.progress.rows = { ...d.progress.generation, value: 1 }),
+    /recovery_invalidated: the recorded progress has a row floor before any staged page/,
+  ],
+  [
+    "a row floor's origin at a held answer after the record",
+    "recovery_staged_hidden",
+    (d) => (d.progress.rows.origin.held_seq += 5),
+    /recovery_staged_hidden: the recorded row floor's origin names a held answer \d+ outside this observation's/,
+  ],
+  [
+    "a generation's origin naming no reader",
+    "recovery_invalidated",
+    (d) => (d.progress.generation.origin.reader = "observer"),
+    /recovery_invalidated: the recorded generation's origin names no reader/,
+  ],
+  [
+    "a row floor's origin naming no stored transaction",
+    "recovery_final_held",
+    (d) => (d.progress.rows.origin.endpoint = "third"),
+    /recovery_final_held: the recorded row floor's origin names no stored transaction/,
+  ],
+])
+  test(`refused (revision 32, /6): ${name}`, () => {
+    const r = observedRecovery();
+    edit(obs(r, kind).detail);
+    refuse(r, expected, name);
+  });

@@ -21,14 +21,19 @@ import {
 import {
   activationProblems,
   admissibilityProblems,
+  advanceProgress,
   captureProblems,
+  fixedBarrierPredicate,
+  fixedBarrierProblems,
   hiddenProblems,
   holdsComplete,
   interpretations,
   MAX_UNRESOLVED_REREADS,
+  NO_PROGRESS,
   OBSERVATION_SCHEMA,
   observationProblems,
   observeRecovery,
+  progressProblems,
   shownProblems,
   storedActivatedProblems,
   storedInvalidatedProblems,
@@ -2888,4 +2893,666 @@ test("R31 Q4 refused: the follower reads a NEWER generation than the leader's at
     /follower does not read the leader's generation 6 \(7\) \[the first stored read of capture 1\]/,
   );
   assert.equal(f.expected.generation, 6);
+});
+
+// ---- Revision 32 (R32-DIAG.a/b, family `segmented-sync-development-pairing`, incomplete_fix of R31-DIAG; design assessment Q1-Q5) ----
+// Q1: the review's preserved stimuli (review-r31-20261102/progress-probe.mjs and barrier-probe.mjs) carried through the MAINTAINED
+// composition with the corrected expectations: the cross-capture regressions and the moving early fence clears are refused at their first
+// decisive capture; the same-capture and stable negatives stay refused; the healthy moving controls settle.
+for (const caller of ["ordinary", "recovery"])
+  for (const kind of ["generation", "rows-leader", "rows-follower"])
+    for (const variant of [
+      "healthy-moving",
+      "same-capture-regression",
+      "across-capture-regression",
+    ])
+      test(`R32 Q1 composed (${caller}, progress): ${kind}, ${variant}`, async () => {
+        const w = world({ caller, pages: 4, fencedReadsAfter: 10 });
+        const who = kind === "rows-follower" ? "follower" : "leader";
+        const barrier = kind === "generation" ? "invalidated" : "intermediate";
+        const field =
+          kind === "generation" ? "recovery_generation" : "staging_rows";
+        let inject = null;
+        const { log, failures } = composed(w, (c) => {
+          if (inject || c.who !== who || c.barrier !== barrier) return null;
+          inject = c;
+          const old = c.sample[field];
+          const raised = old + (kind === "generation" ? 1 : 3);
+          if (variant === "healthy-moving")
+            return { storageAfter: { composition_seq: 11 } };
+          return {
+            storageBefore: { [field]: raised },
+            storageAfter: {
+              [field]: variant === "same-capture-regression" ? old : raised,
+              composition_seq: 11,
+            },
+          };
+        });
+        const r = await run(w, { caller });
+        assert.ok(inject, "the site was read");
+        const reached = w.observations.some(
+          (o) => o.kind === "recovery_rendered",
+        );
+        const i = log.findIndex((x) => x.who === who && x.n === inject.n);
+        if (variant === "healthy-moving") {
+          assert.equal(r.error?.message, undefined);
+          assert.equal(reached, true);
+          assert.deepEqual(failures, []);
+          return;
+        }
+        assert.equal(reached, false, "no rendered settlement");
+        assert.equal(failures.length, 1, "one first failure, recorded once");
+        assert.ok(failures[0]?.capture, "the failure carries its facts");
+        const f = failures[0].capture;
+        if (variant === "same-capture-regression") {
+          assert.equal(log.length, i + 1, "refused AT the injected capture");
+          assert.match(
+            String(r.error?.message),
+            kind === "generation" ? /generation moved/ : /staged rows/,
+          );
+          assert.equal(f.endpoint, kind === "generation" ? null : "second");
+          return;
+        }
+        assert.equal(log.length, i + 2, "refused AT the next capture");
+        assert.equal(log[i + 1].who, who);
+        assert.equal(
+          f.predicate,
+          kind === "generation" ? "progress.generation" : "progress.rows",
+        );
+        assert.equal(f.reader, who);
+        assert.equal(f.read, 2, "the second capture of the same read");
+        assert.equal(f.endpoint, "first");
+        const fact =
+          kind === "generation" ? f.progress?.generation : f.progress?.rows;
+        assert.ok(fact, "the validated progress travels with the failure");
+        assert.equal(
+          fact.value,
+          log[i].sample[field] + (kind === "generation" ? 1 : 3),
+        );
+        assert.deepEqual(
+          [
+            fact.origin.reader,
+            fact.origin.read,
+            fact.origin.ordinal,
+            fact.origin.barrier,
+          ],
+          [
+            who,
+            1,
+            kind === "generation" ? 1 : who === "leader" ? 5 : 6,
+            kind === "generation" ? "invalidated" : "staged",
+          ],
+        );
+        assert.equal(log[i].out.capture.storage.status, "changed");
+        assert.match(
+          String(r.error?.message),
+          kind === "generation"
+            ? /leader reads recovery generation 6, not the generation 7 validated at leader capture 1 \(observation capture 1, first stored read\) at invalidated 41 \[the first stored read of capture 2\]/
+            : new RegExp(
+                `${who} holds 6 staged rows, fewer than the 9 validated at ${who} capture 1 \\(observation capture ${who === "leader" ? 5 : 6}, first stored read\\) at staged 43 \\[the first stored read of capture 2\\]`,
+              ),
+        );
+      });
+for (const who of ["leader", "follower"])
+  for (const barrier of ["invalidated", "staged", "intermediate", "final"])
+    for (const variant of [
+      "healthy-moving",
+      "early-fence-stable",
+      "early-fence-moving",
+    ])
+      test(`R32 Q1 composed (recovery, fixed barrier): the ${who} at ${barrier}, ${variant}`, async () => {
+        const w = world({ caller: "recovery", pages: 4, fencedReadsAfter: 10 });
+        let injected = null;
+        const { log, failures } = composed(w, (c) => {
+          if (injected || c.who !== who || c.barrier !== barrier) return null;
+          injected = c;
+          return {
+            fences:
+              variant === "healthy-moving" ? [true, true] : [false, false],
+            storageAfter: {
+              composition_seq: variant === "early-fence-stable" ? 10 : 11,
+            },
+          };
+        });
+        const r = await run(w, { caller: "recovery" });
+        assert.ok(injected, "the site was read");
+        const reached = w.observations.some(
+          (o) => o.kind === "recovery_rendered",
+        );
+        if (variant === "healthy-moving") {
+          assert.equal(r.error?.message, undefined);
+          assert.equal(reached, true);
+          assert.deepEqual(failures, []);
+          return;
+        }
+        const at = log.find((x) => x.who === who && x.n === injected.n);
+        assert.equal(
+          at.out.rendering.view.kind,
+          "neutral",
+          "the page stays the hidden neutral state: no exposure proves the clear",
+        );
+        const f = refusedAt(
+          r,
+          log,
+          failures,
+          at,
+          w.observations.length,
+          w,
+          barrier === "invalidated"
+            ? who === "leader"
+              ? /the recovery caller is no longer fenced/
+              : /the recovery caller's follower is no longer fenced/
+            : /the fence was cleared before the snapshot was complete/,
+        );
+        assert.equal(reached, false);
+        assert.equal(
+          f.predicate,
+          barrier === "invalidated"
+            ? "rendering.invalidated"
+            : "rendering.staged",
+        );
+        assert.equal(f.fenced, false);
+        assert.equal(f.capture.auth.status, "stable");
+        assert.equal(
+          f.capture.storage.status,
+          variant === "early-fence-moving" ? "changed" : "stable",
+        );
+      });
+
+// Q2: progress across reads, readers and sites — the maximum placed in a resolved capture of ANOTHER read or reader, then a lower one.
+test("R32 Q2 refused: a forward generation replacement across two captures of the leader's invalidation read (progress, not the refusal floor)", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 9 });
+  let n = 0;
+  const { log, failures } = composed(w, (c) => {
+    if (c.who !== "leader" || c.barrier !== "invalidated") return null;
+    n += 1;
+    if (n === 1) return { storageAfter: { composition_seq: 11 } };
+    if (n === 2)
+      return {
+        storageBefore: { recovery_generation: 7 },
+        storageAfter: { recovery_generation: 7 },
+      };
+    return null;
+  });
+  const r = await run(w, { caller: "recovery" });
+  const f = refusedAt(
+    r,
+    log,
+    failures,
+    log[1],
+    0,
+    w,
+    /leader reads recovery generation 7, not the generation 6 validated at leader capture 1/,
+  );
+  assert.equal(f.predicate, "progress.generation");
+  assert.equal(f.progress?.generation?.value, 6);
+});
+test("R32 Q2 control: the generation unchanged across moving captures of both readers at the invalidation", async () => {
+  const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 9 });
+  const moved = new Set();
+  composed(w, (c) => {
+    if (c.barrier !== "invalidated" || moved.has(c.who)) return null;
+    moved.add(c.who);
+    return { storageAfter: { composition_seq: 11 } };
+  });
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  const inv = w.observations.find((o) => o.kind === "recovery_invalidated");
+  assert.equal(inv.detail.progress?.generation?.value, 6);
+  assert.deepEqual(
+    [
+      inv.detail.progress?.generation?.origin.reader,
+      inv.detail.progress?.generation?.origin.read,
+    ],
+    ["leader", 1],
+    "bound from the leader's FIRST (unresolved) validated capture",
+  );
+});
+for (const caller of ["ordinary", "recovery"]) {
+  test(`R32 Q2 refused (${caller}): the follower's validated maximum, then a lower next leader page (rows were bound to the leader's alone)`, async () => {
+    const w = world({ caller, pages: 4, fencedReadsAfter: 10 });
+    let injected = null;
+    const { log, failures } = composed(w, (c) => {
+      if (injected || c.who !== "follower" || c.barrier !== "intermediate")
+        return null;
+      injected = c;
+      return {
+        storageBefore: { staging_rows: 12 },
+        storageAfter: { staging_rows: 12 },
+      };
+    });
+    const r = await run(w, { caller });
+    assert.ok(injected);
+    const at = log.find((x) => x.who === "leader" && x.barrier === "final");
+    const f = refusedAt(
+      r,
+      log,
+      failures,
+      at,
+      2,
+      w,
+      /at snapshot page 44: leader holds 9 staged rows, expected at least 12 \[the first stored read of capture 1\]/,
+    );
+    assert.equal(f.predicate, "stored.staged");
+    assert.equal(f.expected.rowsAtLeast, 12);
+    assert.equal(f.progress?.rows?.value, 12);
+    assert.equal(f.progress?.rows?.origin.reader, "follower");
+  });
+  test(`R32 Q2 refused (${caller}): the final follower's validated maximum, then a staged activation poll below it`, async () => {
+    const w = world({ caller, pages: 3, fencedReadsAfter: 12 });
+    let injected = null;
+    const { log, failures } = composed(w, (c) => {
+      if (c.who === "follower" && c.barrier === "final" && !injected) {
+        injected = c;
+        return {
+          storageBefore: { staging_rows: 9 },
+          storageAfter: { staging_rows: 9 },
+        };
+      }
+      return c.who === "leader" && c.after === 1
+        ? { storageBefore: STAGED_END }
+        : null;
+    });
+    const r = await run(w, { caller });
+    const at = log.find((x) => x.who === "leader" && x.after === 1);
+    const f = refusedAt(
+      r,
+      log,
+      failures,
+      at,
+      3,
+      w,
+      /a split activation: neither the staged nor the complete state \(staged: leader holds 6 staged rows, expected at least 9 \| complete: .*\[the first stored read of capture 1\]/,
+    );
+    assert.equal(f.predicate, "stored.activation");
+    assert.equal(f.progress?.rows?.origin.reader, "follower");
+  });
+  test(`R32 Q2 refused (${caller}): a staged activation poll, then a later poll with fewer staged rows (the floor carried between polls)`, async () => {
+    const w = world({ caller, pages: 3, fencedReadsAfter: 12 });
+    const { log, failures } = composed(w, (c) => {
+      if (c.who !== "leader" || c.after < 1 || c.after > 2) return null;
+      const s = c.after === 1 ? { ...STAGED_END, staging_rows: 9 } : STAGED_END;
+      // Still staged: the page hidden as before the activation.
+      return {
+        storageBefore: s,
+        storageAfter: s,
+        rendering: NEUTRAL_AS(c.sample.rendering),
+      };
+    });
+    const r = await run(w, { caller });
+    const at = log.find((x) => x.who === "leader" && x.after === 2);
+    const f = refusedAt(
+      r,
+      log,
+      failures,
+      at,
+      3,
+      w,
+      /leader holds 6 staged rows, fewer than the 9 validated at leader capture 1 \(observation capture 7, first stored read\) at activation 43 \[the first stored read of capture 1\]/,
+    );
+    assert.equal(f.predicate, "progress.rows");
+    assert.equal(f.barrier, "activation");
+  });
+  test(`R32 Q2 control (${caller}): staged activation polls holding the floor, then the complete cache (lawful; complete is no row regression)`, async () => {
+    const w = world({ caller, pages: 3, fencedReadsAfter: 12 });
+    composed(w, (c) =>
+      c.who === "leader" && c.after >= 1 && c.after <= 2
+        ? {
+            storageBefore: STAGED_END,
+            storageAfter: {
+              ...STAGED_END,
+              composition_seq: c.after === 1 ? 11 : 10,
+            },
+            rendering: NEUTRAL_AS(c.sample.rendering),
+          }
+        : null,
+    );
+    const r = await run(w, { caller });
+    assert.equal(r.error?.message, undefined);
+    assert.ok(w.observations.some((o) => o.kind === "recovery_rendered"));
+  });
+}
+test("R32 Q2: a capture whose second stored read fails seeds no progress (its failure reports the progress before it)", async () => {
+  const w = world({ caller: "recovery", pages: 3 });
+  const { failures } = composed(w, (c) =>
+    c.who === "leader" && c.n === 1
+      ? { storageBefore: { recovery_generation: 7 }, storageThrows: "closed" }
+      : null,
+  );
+  const r = await run(w, { caller: "recovery" });
+  assert.ok(r.error);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0]?.capture?.predicate, "envelope");
+  assert.deepEqual(failures[0].capture.progress, {
+    generation: null,
+    rows: null,
+  });
+});
+test("R32 Q2 control: progress belongs to ONE observation — a second observation with fewer rows starts empty (no leakage)", async () => {
+  const first = world({ pages: 4, rows: 5 });
+  composed(first);
+  assert.equal((await run(first)).error?.message, undefined);
+  const final = first.observations.find(
+    (o) => o.kind === "recovery_final_held",
+  );
+  assert.equal(final.detail.progress?.rows?.value, 15);
+  const second = world({ pages: 3, rows: 2 });
+  composed(second);
+  assert.equal((await run(second)).error?.message, undefined);
+  const inv = second.observations.find(
+    (o) => o.kind === "recovery_invalidated",
+  );
+  assert.equal(inv.detail.progress?.rows, null);
+  const held = second.observations.find(
+    (o) => o.kind === "recovery_final_held",
+  );
+  assert.equal(held.detail.progress?.rows?.value, 4);
+});
+
+// Q3: the other fixed-barrier predicates decided before any re-read, with their controls.
+test("R32 Q3 refused (recovery caller): the leader's missing restart notice at the invalidation while the storage moves — refused at that capture", async () => {
+  const w = world({ caller: "recovery", pages: 3, fault: "no-notice" });
+  const { log, failures } = composed(w, (c) =>
+    c.who === "leader" && c.n === 1
+      ? { storageAfter: { composition_seq: 11 } }
+      : null,
+  );
+  const r = await run(w, { caller: "recovery" });
+  const f = refusedAt(
+    r,
+    log,
+    failures,
+    log[0],
+    0,
+    w,
+    /at the first snapshot page 41: the recovery job did not record its server restart/,
+  );
+  assert.equal(f.predicate, "rendering.invalidated");
+  assert.equal(f.capture.storage.status, "changed");
+});
+for (const moving of [false, true])
+  test(`R32 Q3 refused (ordinary caller): the leader stably fenced at the invalidation, hidden in the fence's lawful shape${moving ? ", the storage moving" : ""}`, async () => {
+    const w = world({ pages: 3 });
+    const { log, failures } = composed(w, (c) =>
+      c.who === "leader" && c.n === 1
+        ? {
+            fences: [true, true],
+            rendering: NEUTRAL_AS(c.sample.rendering),
+            storageAfter: { composition_seq: moving ? 11 : 10 },
+          }
+        : null,
+    );
+    const r = await run(w);
+    const f = refusedAt(
+      r,
+      log,
+      failures,
+      log[0],
+      0,
+      w,
+      /at the first snapshot page 41: an ordinary caller is fenced/,
+    );
+    assert.equal(f.predicate, "rendering.invalidated");
+  });
+test("R32 Q3 control (ordinary caller): a FOLLOWER fenced at the invalidation is not the ordinary caller's rule (lawful hidden shape)", async () => {
+  const w = world({ pages: 3 });
+  composed(w, (c) =>
+    c.who === "follower" && c.n === 1
+      ? { fences: [true, true], rendering: NEUTRAL_AS(c.sample.rendering) }
+      : null,
+  );
+  assert.equal((await run(w)).error?.message, undefined);
+});
+for (const moving of [false, true])
+  test(`R32 Q3 refused (recovery caller): an activation poll with BOTH transactions staged and a stable cleared fence (hidden)${moving ? ", composition moving" : ""}`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 12 });
+    const { log, failures } = composed(w, (c) =>
+      c.who === "leader" && c.after === 1
+        ? {
+            storageBefore: STAGED_END,
+            storageAfter: { ...STAGED_END, composition_seq: moving ? 11 : 10 },
+            fences: [false, false],
+          }
+        : null,
+    );
+    const r = await run(w, { caller: "recovery" });
+    const at = log.find((x) => x.after === 1);
+    const f = refusedAt(
+      r,
+      log,
+      failures,
+      at,
+      3,
+      w,
+      /after the last snapshot page: the fence was cleared before the snapshot was complete/,
+    );
+    assert.equal(f.predicate, "rendering.staged");
+    assert.equal(f.barrier, "activation");
+  });
+for (const [name, first, second] of [
+  [
+    "staged then complete (the auth release's order open)",
+    STAGED_END,
+    COMPLETE_END,
+  ],
+  [
+    "complete in both (the release may precede the reads)",
+    COMPLETE_END,
+    COMPLETE_END,
+  ],
+])
+  test(`R32 Q3 control (recovery caller): an activation poll ${name} with a stable cleared fence, hidden — lawful`, async () => {
+    const w = world({ caller: "recovery", pages: 3, fencedReadsAfter: 12 });
+    composed(w, (c) =>
+      c.who === "leader" && c.after === 1
+        ? {
+            storageBefore: first,
+            storageAfter: { ...second, composition_seq: 11 },
+            fences: [false, false],
+          }
+        : null,
+    );
+    const r = await run(w, { caller: "recovery" });
+    assert.equal(r.error?.message, undefined);
+  });
+test("R32 Q3 control (recovery caller): a CHANGED auth bracket at a held staged page stays ambiguous — re-read, then lawful", async () => {
+  const w = world({ caller: "recovery", pages: 4, fencedReadsAfter: 10 });
+  let injected = null;
+  const { log } = composed(w, (c) => {
+    if (injected || c.who !== "follower" || c.barrier !== "intermediate")
+      return null;
+    injected = c;
+    return { fences: [true, false], storageAfter: { composition_seq: 11 } };
+  });
+  const r = await run(w, { caller: "recovery" });
+  assert.equal(r.error?.message, undefined);
+  const i = log.findIndex((x) => x.who === "follower" && x.n === injected.n);
+  assert.equal(log[i].out.capture.auth.status, "changed");
+  assert.equal(log[i + 1].who, "follower", "re-read");
+});
+test("R32 Q1: the pure fixed-barrier and progress predicates", () => {
+  const sample = (reader, fenced, auth = "stable", extra = {}) => ({
+    reader,
+    fenced: auth === "stable" ? fenced : null,
+    notice: { reason: "resync_required" },
+    capture: { auth: { status: auth }, storage: { status: "changed" } },
+    ...STAGED_END,
+    stored_after: { ...STAGED_END },
+    ...extra,
+  });
+  assert.deepEqual(
+    fixedBarrierProblems(sample("leader", true), {
+      caller: "recovery",
+      barrier: "staged",
+    }),
+    [],
+  );
+  assert.deepEqual(
+    fixedBarrierProblems(sample("follower", false), {
+      caller: "recovery",
+      barrier: "staged",
+    }),
+    ["the fence was cleared before the snapshot was complete"],
+  );
+  assert.deepEqual(
+    fixedBarrierProblems(sample("leader", null, "changed"), {
+      caller: "recovery",
+      barrier: "staged",
+    }),
+    [],
+    "a changed auth bracket decides nothing here",
+  );
+  assert.deepEqual(
+    fixedBarrierProblems(sample("leader", false, "stable", { notice: null }), {
+      caller: "recovery",
+      barrier: "invalidated",
+    }),
+    [
+      "the recovery job did not record its server restart",
+      "the recovery caller is no longer fenced",
+    ],
+  );
+  assert.deepEqual(
+    fixedBarrierProblems(
+      sample("leader", false, "stable", { stored_after: { ...COMPLETE_END } }),
+      {
+        caller: "recovery",
+        barrier: "activation",
+      },
+    ),
+    [],
+  );
+  assert.deepEqual(
+    fixedBarrierProblems(sample("leader", false), {
+      caller: "ordinary",
+      barrier: "staged",
+    }),
+    [],
+  );
+  assert.equal(fixedBarrierPredicate("invalidated"), "rendering.invalidated");
+  assert.equal(fixedBarrierPredicate("activation"), "rendering.staged");
+  const origin = {
+    reader: "follower",
+    read: 2,
+    ordinal: 4,
+    barrier: "staged",
+    held_seq: 43,
+  };
+  const p = advanceProgress(
+    NO_PROGRESS,
+    [
+      ["first", { ...STAGED_END, staging_rows: 9 }],
+      ["second", { ...STAGED_END, staging_rows: 9 }],
+    ],
+    {
+      barrier: "staged",
+      origin,
+    },
+  );
+  assert.deepEqual(p.rows, {
+    value: 9,
+    origin: { ...origin, endpoint: "first" },
+  });
+  assert.equal(
+    p.generation,
+    null,
+    "only the invalidation binds the generation",
+  );
+  assert.ok(Object.isFrozen(p) && Object.isFrozen(p.rows));
+  assert.deepEqual(
+    advanceProgress(p, [["first", COMPLETE_END]], {
+      barrier: "activation",
+      origin,
+    }).rows.value,
+    9,
+    "a complete transaction never lowers or raises the floor",
+  );
+  assert.deepEqual(
+    progressProblems(COMPLETE_END, {
+      who: "leader",
+      barrier: "activation",
+      progress: p,
+    }),
+    [],
+  );
+  assert.match(
+    progressProblems(STAGED_END, {
+      who: "leader",
+      barrier: "activation",
+      progress: p,
+    })[0],
+    /leader holds 6 staged rows, fewer than the 9 validated at follower capture 2 \(observation capture 4, first stored read\) at staged 43/,
+  );
+  const g = advanceProgress(
+    NO_PROGRESS,
+    [["first", { recovery_generation: 7 }]],
+    {
+      barrier: "invalidated",
+      origin: { ...origin, barrier: "invalidated", held_seq: 41 },
+    },
+  );
+  assert.equal(g.generation.value, 7);
+  assert.equal(
+    progressProblems(
+      { recovery_generation: 7 },
+      { who: "x", barrier: "invalidated", progress: g },
+    ).length,
+    0,
+  );
+  assert.equal(
+    progressProblems(
+      { recovery_generation: 8 },
+      { who: "x", barrier: "invalidated", progress: g },
+    ).length,
+    1,
+  );
+});
+test("R32 Q2 refused: the floor validated in the SECOND transaction of an unresolved capture binds the next capture", async () => {
+  const w = world({ pages: 4 });
+  let n = 0;
+  const { log, failures } = composed(w, (c) => {
+    if (c.who !== "leader" || c.barrier !== "intermediate") return null;
+    n += 1;
+    // The first transaction holds the world's six rows, the second nine (lawful: rows never fall within the capture).
+    return n === 1
+      ? { storageAfter: { staging_rows: 9, composition_seq: 11 } }
+      : null;
+  });
+  const r = await run(w);
+  const f = refusedAt(
+    r,
+    log,
+    failures,
+    log.at(-1),
+    2,
+    w,
+    /leader holds 6 staged rows, fewer than the 9 validated at leader capture 1 \(observation capture 5, second stored read\) at staged 43 \[the first stored read of capture 2\]/,
+  );
+  assert.equal(f.predicate, "progress.rows");
+  assert.equal(f.progress?.rows?.origin?.endpoint, "second");
+});
+test("R32 Q2 refused: the staged rows go backwards between the two transactions of ONE activation poll (the in-capture floor at the activation)", async () => {
+  const w = world({ pages: 3, fencedReadsAfter: 12 });
+  const { log, failures } = composed(w, (c) =>
+    c.who === "leader" && c.after === 1
+      ? {
+          storageBefore: { ...STAGED_END, staging_rows: 9 },
+          storageAfter: { ...STAGED_END, composition_seq: 11 },
+          rendering: NEUTRAL_AS(c.sample.rendering),
+        }
+      : null,
+  );
+  const r = await run(w);
+  const at = log.find((x) => x.after === 1);
+  const f = refusedAt(
+    r,
+    log,
+    failures,
+    at,
+    3,
+    w,
+    /a split activation: neither the staged nor the complete state \(staged: leader holds 6 staged rows, expected at least 9 \| .*\[the second stored read of capture 1\]/,
+  );
+  assert.equal(f.predicate, "stored.activation");
+  assert.equal(f.endpoint, "second");
 });
