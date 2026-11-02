@@ -1344,38 +1344,45 @@ async function realAttempt(
   if (mode.startsWith("no-ack"))
     await within(running.control.send("inspect", {}), 2000);
   await beforePreserve?.(running, parent);
-  const out = await concludeAttempt({
-    stopTransports: async () => [],
-    preliminary: async () => preliminary,
-    latched: () => running.control.latched(),
-    preserve: async () => {
-      const kept = preserveOf(running, retained, deps);
-      if (kill) {
-        running.child.kill("SIGKILL");
-        await running.exited;
-      }
-      return kept;
-    },
-    finish: (remove) => finishAttempt(running, { remove }),
-    materialise: (kept, finished) =>
-      materialiseRetained(deps, kept, {
-        exit: finished?.exit ?? null,
-        stopped: finished?.stopped ?? null,
-        receipt: running.ready.receipt,
-        receiptSha256: running.ready.receipt_sha256,
-      }),
-    terminal: async (finished, retention) => {
-      if (terminalThrows)
-        throw new Error("the saved evidence cannot be re-read");
-      const problems = [];
-      if (finished?.stopped?.served !== true)
-        problems.push("stopped with served:false");
-      if (finished?.exit?.code !== 0)
-        problems.push(`exited ${JSON.stringify(finished?.exit)}`);
-      problems.push(...verifyRetained(retentionDeps(), retention));
-      return problems;
-    },
-  });
+  // Bounded (as every lifecycle test here): a mutant that leaves the conclusion unsettled fails this assertion, never hangs the file.
+  const settledConclusion = await within(
+    concludeAttempt({
+      stopTransports: async () => [],
+      preliminary: async () => preliminary,
+      latched: () => running.control.latched(),
+      preserve: async () => {
+        const kept = preserveOf(running, retained, deps);
+        if (kill) {
+          running.child.kill("SIGKILL");
+          await running.exited;
+        }
+        return kept;
+      },
+      finish: (remove) => finishAttempt(running, { remove }),
+      materialise: (kept, finished) =>
+        materialiseRetained(deps, kept, {
+          exit: finished?.exit ?? null,
+          stopped: finished?.stopped ?? null,
+          receipt: running.ready.receipt,
+          receiptSha256: running.ready.receipt_sha256,
+        }),
+      terminal: async (finished, retention) => {
+        if (terminalThrows)
+          throw new Error("the saved evidence cannot be re-read");
+        const problems = [];
+        if (finished?.stopped?.served !== true)
+          problems.push("stopped with served:false");
+        if (finished?.exit?.code !== 0)
+          problems.push(`exited ${JSON.stringify(finished?.exit)}`);
+        problems.push(...verifyRetained(retentionDeps(), retention));
+        return problems;
+      },
+    }),
+    10_000,
+  );
+  assert.equal(settledConclusion.timedOut, undefined, "the conclusion settles");
+  if (settledConclusion.error) throw settledConclusion.error;
+  const out = settledConclusion.value;
   return { out, running, parent, retained };
 }
 const sourceRows = (running) =>
