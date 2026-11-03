@@ -80,7 +80,7 @@ import {
  * Revision 26 (Review 31 F31-1, family native-transport-console-attribution, harness incomplete_fix; design assessment token
  * 37c3b6402c…, C1–C5, invariants 1–7): revision 19 advanced a page's document at a main-frame navigation's RESPONSE, while the request
  * kept the document it was issued from; a declared navigation's own HTTP-status message (Chromium logs it after the commit) was then
- * the next document's and matched no request. Now (`recordPage`) the document moves on at the main frame's COMMIT of the pending
+ * the next document's and matched no request. Now (`recordPage`; since revision 28 `recordContext`) the document moves on at the main frame's COMMIT of the pending
  * navigation, the request keeps its initiating document and records the document it committed, and the classifier admits an HTTP-status
  * message in that committed document for that navigation alone (`Relation`), in an engine that logs such statuses. Every other
  * exclusion is unchanged: page, initiating document, URL, request before message, its own terminal and front record, the declaration
@@ -94,6 +94,16 @@ import {
  * (`observeNavigations`, pinned to playwright-core 1.63.0 and shape-checked): `new-document` (with the request it links, by identity),
  * `same-document`, or `aborted`. No URL, response, failure or public event moves a document; the classifier's commit relation also
  * requires that recorded new-document event; any unavailable, unreadable or contradicting provenance is a named lane violation.
+ *
+ * Revision 28 (Review 33; design assessment token 98d2410c…, C1–C6, invariants 1–8). F33-1 (same family, harness incomplete_fix): pages
+ * were recorded from Playwright's announcement of them, which a native popup's first request, response and commit precede, so the popup's
+ * first document went unrecorded and its declared status matched nothing. Capture is now the CONTEXT's (`recordContext`), attached as the
+ * context arrives: one canonical path per network fact, each request attributed by its frame's identity, each page numbered and its
+ * navigation provenance subscribed when the recorder first meets its main frame (for a popup, at its first request, through the pinned
+ * client initializer frame: `frameOfRequest`). A page first met already showing a document, an unidentifiable frame, and a response,
+ * failure or end of an unseen request are named failures. F33-2 (family native-transport-ui-initialisation, harness new): the UI stimulus
+ * installer is repeat-safe in a global it already installed (WebKit runs init scripts twice in a popup's reused Window) and keeps its state
+ * per DOCUMENT (`installUiStimulus`).
  */
 
 export interface TransportLaneOptions {
@@ -584,40 +594,102 @@ export type ScriptedOrigin = ReturnType<typeof createScriptedOrigin>;
  * The UI connectivity stimulus, installed before any document of the lane boots: `navigator.onLine` reads the stimulus when one is set
  * and the engine's own value otherwise. Each document has its own id and starts with NO stimulus; setting it dispatches the
  * `online`/`offline` event the application listens for. A stimulus never outlives its document, and never blocks HTTP.
+ *
+ * Revision 28 (Review 33 F33-2, family native-transport-ui-initialisation, harness new; design assessment token 98d2410c…, C4,
+ * invariant 5): every engine reuses a popup's initial about:blank Window for its first same-origin document, and WebKit runs the lane's
+ * init script in BOTH (diag popup-order-1). Revision 27 then wrapped its own getter as if it were the engine's and redefined the
+ * protected API slot, which throws a page error. Now the state is the DOCUMENT's: an installation records the engine's original getter,
+ * its own getter and its API (under a brand), and a later run in the same global recognises that installation BEFORE changing anything
+ * and only adopts the current document. The stimulus and id belong to the document they were made in: any other document of the global
+ * (a reused Window's new document, whether or not the engine re-ran the script) starts with a new id and no stimulus. A slot or getter
+ * that is not this installation's is a named, visible error, never caught. The API slot is defined before the getter, so a failed
+ * definition changes nothing; the slot stays protected (non-configurable, read-only) from the application.
  */
-function installUiStimulus() {
+export function installUiStimulus() {
+  const KEY = "__atlasUiConnectivity";
+  const BRAND = Symbol.for("atlas.native-transport.ui-connectivity");
   const proto = Navigator.prototype;
   const descriptor = Object.getOwnPropertyDescriptor(proto, "onLine");
+  const slot = Object.getOwnPropertyDescriptor(window, KEY);
+  if (slot !== undefined) {
+    const installation = (
+      slot.value as Record<symbol, unknown> | null | undefined
+    )?.[BRAND] as
+      | { version?: unknown; getter?: unknown; adopt?: unknown }
+      | undefined;
+    if (
+      typeof installation !== "object" ||
+      installation === null ||
+      installation.version !== 1 ||
+      typeof installation.adopt !== "function" ||
+      descriptor?.get === undefined ||
+      descriptor.get !== installation.getter
+    )
+      throw new Error(
+        `native transport lane: window.${KEY} exists but is not the lane's UI stimulus installation over navigator.onLine; refusing to install over it`,
+      );
+    (installation.adopt as () => void)();
+    return;
+  }
   const native = descriptor?.get;
-  if (native === undefined) throw new Error("no navigator.onLine getter");
-  let stimulus: boolean | null = null;
-  const doc =
+  if (native === undefined || descriptor?.configurable !== true)
+    throw new Error(
+      "native transport lane: navigator.onLine has no configurable getter; the UI stimulus cannot be installed",
+    );
+  if ((native as unknown as Record<symbol, unknown>)[BRAND] === true)
+    throw new Error(
+      `native transport lane: navigator.onLine already has the lane's getter but window.${KEY} is missing; refusing to wrap it again`,
+    );
+  const newId = () =>
     typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `doc-${Math.random()}`;
-  Object.defineProperty(proto, "onLine", {
-    configurable: true,
-    get() {
-      return stimulus === null ? native.call(this) : stimulus;
+  let state: { document: Document; id: string; stimulus: boolean | null } = {
+    document,
+    id: newId(),
+    stimulus: null,
+  };
+  const current = () => {
+    if (state.document !== document)
+      state = { document, id: newId(), stimulus: null };
+    return state;
+  };
+  const getter = function (this: Navigator) {
+    const s = current();
+    return s.stimulus === null ? native.call(this) : s.stimulus;
+  };
+  Object.defineProperty(getter, BRAND, { value: true });
+  const read = () => {
+    const s = current();
+    return {
+      document: s.id,
+      native: native.call(navigator) as boolean,
+      ui: navigator.onLine,
+      stimulus: s.stimulus,
+    };
+  };
+  const api = {
+    read,
+    set(online: boolean) {
+      current().stimulus = online;
+      window.dispatchEvent(new Event(online ? "online" : "offline"));
+      return read();
     },
-  });
-  const read = () => ({
-    document: doc,
-    native: native.call(navigator) as boolean,
-    ui: navigator.onLine,
-    stimulus,
-  });
-  Object.defineProperty(window, "__atlasUiConnectivity", {
-    configurable: false,
+  };
+  Object.defineProperty(api, BRAND, {
     value: Object.freeze({
-      read,
-      set(online: boolean) {
-        stimulus = online;
-        window.dispatchEvent(new Event(online ? "online" : "offline"));
-        return read();
+      version: 1,
+      getter,
+      adopt: () => {
+        current();
       },
     }),
   });
+  Object.defineProperty(window, KEY, {
+    configurable: false,
+    value: Object.freeze(api),
+  });
+  Object.defineProperty(proto, "onLine", { configurable: true, get: getter });
 }
 
 type UiApi = {
@@ -721,6 +793,11 @@ export interface RequestRecord {
    */
   commit?: { seq: number; document: number } | null;
   commitReason?: string;
+  /**
+   * Revision 28 (F33-1), `journal.unattributedRequests` only: why the request is no page's (a service worker's, one without any frame, or
+   * an unidentifiable frame, which is also a named provenance failure). Its `page` and `document` are then -1; it is never classified.
+   */
+  unattributed?: string;
 }
 
 /**
@@ -782,6 +859,12 @@ export interface Journal {
   engine?: string;
   /** Revision 26: problems delivered by the ingestion seam AFTER the journal was sealed for classification (never classified). */
   late?: Problem[];
+  /** Revision 28 (F33-1): each lane page, numbered when the recorder first met its main frame (`recordContext`). */
+  pages?: PageAssociation[];
+  /** Revision 28 (F33-1): requests of no page (a service worker's, one without a frame); recorded, never classified or credited. */
+  unattributedRequests?: RequestRecord[];
+  /** Revision 28 (F33-1): browser events delivered after the recorder was detached (never recorded). */
+  lateEvents?: string[];
 }
 
 /**
@@ -1175,6 +1258,8 @@ export interface RecordedRequest {
   frame(): unknown;
   failure(): { errorText: string } | null;
   redirectedFrom(): RecordedRequest | null;
+  /** Revision 28: the service worker that issued it (then it has no frame), when the request reports one. */
+  serviceWorker?(): unknown;
 }
 /**
  * The parts of a Playwright page the recorder reads (a static test drives it with an event sequence an engine was observed to emit):
@@ -1372,53 +1457,196 @@ export function readNavigated(value: unknown): ReadNavigation {
   };
 }
 
+// ---- Revision 28: the context's capture registry (Review 33 F33-1) ------------------------------------------------------------------
+
+/** The parts of a Playwright client frame the recorder reads (its `_eventEmitter`, the navigation provenance, is read by `observeNavigations`). */
+export interface RecordedFrame {
+  url(): string;
+  parentFrame(): unknown;
+}
+/** The parts of a Playwright browser context the recorder reads (a static test drives it with an event sequence an engine was observed to emit). */
+export interface RecordedContext {
+  on(event: string, listener: (value: never) => void): unknown;
+}
+
 /**
- * Records one lane page's requests, document transitions and problems in the journal (revision 26, Review 31 F31-1; revision 27, Review
- * 32 F32-1, design assessment token f0a2dd0e6c…, C1–C4).
+ * Revision 28 (F33-1): a lane page as the recorder identifies it, from its FIRST observation, never renumbered. `via`: how the recorder
+ * first met the page's main frame: a request of it (a popup's first navigation, which Playwright delivers before it announces the page:
+ * diag popup-order-1), the context's `page` event, or a problem of a page not yet announced. `firstUrl`: the main frame's URL then ("" or
+ * about:blank, its initial empty document; anything else is a named gap). `announced`: whether the context announced the page.
+ */
+export interface PageAssociation {
+  page: number;
+  via: "request" | "page" | "problem";
+  firstUrl: string;
+  announced: boolean;
+}
+
+/** Where a request was issued: a frame (`early`: one Playwright has not announced the page of yet), none (a service worker's), or unknown. */
+export type RequestFrame =
+  | { ok: true; frame: unknown; early: boolean }
+  | { ok: true; frame: null; reason: string }
+  | { ok: false; reason: string };
+
+const firstLine = (error: unknown) => String(error).split("\n")[0] ?? "";
+
+/**
+ * The frame that issued `request`. Playwright's public `Request.frame()` refuses a frame whose page it has not announced yet (a popup's
+ * first navigation request: "Frame for this navigation request is not available") although its client frame already exists: it is the
+ * request's initializer frame, it already receives that frame's `navigated` events, and it becomes the announced page's main frame (diag
+ * popup-order-1, all three engines). Only for that refusal, and only under the pinned `playwright-core` (NAVIGATION_PROVENANCE_PIN), the
+ * recorder reads the initializer frame; anything else unreadable is a named failure, never a guess.
+ */
+export function frameOfRequest(
+  request: RecordedRequest,
+  installed: InstalledPlaywrightCore = installedPlaywrightCore(),
+): RequestFrame {
+  let worker: unknown = null;
+  try {
+    worker = request.serviceWorker?.() ?? null;
+  } catch {
+    worker = null;
+  }
+  if (worker !== null)
+    return {
+      ok: true,
+      frame: null,
+      reason: "a service worker's request (it has no frame)",
+    };
+  try {
+    return { ok: true, frame: request.frame(), early: false };
+  } catch (error) {
+    if (installed.version !== NAVIGATION_PROVENANCE_PIN.version)
+      return {
+        ok: false,
+        reason: `Request.frame() refused (${firstLine(error)}); the client initializer frame is read only under ${NAVIGATION_PROVENANCE_PIN.package} ${NAVIGATION_PROVENANCE_PIN.version} (installed: ${installed.version ?? `unknown (${installed.error})`})`,
+      };
+    const initializer = (
+      request as {
+        _initializer?: { frame?: { _object?: unknown } | null } | null;
+      }
+    )._initializer;
+    if (typeof initializer !== "object" || initializer === null)
+      return {
+        ok: false,
+        reason: `Request.frame() refused (${firstLine(error)}) and the request has no readable client initializer`,
+      };
+    // No frame at all (as Playwright's own page delivery never had one): browser traffic outside any page, recorded apart.
+    if (initializer.frame === undefined || initializer.frame === null)
+      return {
+        ok: true,
+        frame: null,
+        reason: `a request without a frame (${firstLine(error)})`,
+      };
+    const early = initializer.frame._object;
+    if (typeof early !== "object" || early === null)
+      return {
+        ok: false,
+        reason: `Request.frame() refused (${firstLine(error)}) and its client initializer frame has no object`,
+      };
+    return { ok: true, frame: early, early: true };
+  }
+}
+
+/** The top frame above `frame` (a page's main frame), through the public `parentFrame()`; an unreadable chain is a named failure. */
+function rootOf(
+  frame: unknown,
+): { ok: true; root: unknown } | { ok: false; reason: string } {
+  let current = frame;
+  for (let depth = 0; depth < 64; depth += 1) {
+    const parent = (current as { parentFrame?: unknown } | null)?.parentFrame;
+    if (typeof parent !== "function")
+      return { ok: false, reason: "a frame without parentFrame()" };
+    let up: unknown;
+    try {
+      up = parent.call(current);
+    } catch (error) {
+      return { ok: false, reason: `parentFrame() threw: ${firstLine(error)}` };
+    }
+    if (up === null || up === undefined) return { ok: true, root: current };
+    current = up;
+  }
+  return { ok: false, reason: "frames nested deeper than 64" };
+}
+
+/**
+ * Records a lane context's requests, its pages' document transitions and their problems in the journal (revision 26, Review 31 F31-1;
+ * revision 27, Review 32 F32-1; revision 28, Review 33 F33-1, design assessment token 98d2410c…, C1–C3/C5, invariants 1–4/7–8).
  *
- * The page's DOCUMENT moves on only at a `new-document` event of its main frame's navigation provenance (`observeNavigations`), never at a
- * response, a failure, a request's end, a public `framenavigated` or a URL: a redirect hop, a 204 and a download have a navigation
- * response but commit nothing; a history change (even to a pending or cancelled navigation's URL) is a `same-document` event; a stopped,
- * failed or refused navigation is an `aborted` event and leaves the old document. A `new-document` event that names a navigation request
- * the recorder holds is THAT request's commit (the request keeps its initiating `document` and records `commit`); one naming no request
- * (an engine's error page, a requestless commit) is a new, unattributed document. Request lifecycle facts stay separate: a later
- * navigation request supersedes the latest (Playwright then links no commit to it), a redirect hop is "redirected", an abort names its
- * error. A `new-document` or abort naming a request the recorder never saw or had already ended, an unreadable event, and an unavailable
- * provenance source are each a named failure (`journal.provenanceFailures`), with the document never guessed.
+ * Revision 28 (F33-1): capture is the CONTEXT's, attached when the context arrives (before any page exists, and before the lane or its
+ * context reaches a caller). Revision 27 recorded a page from Playwright's announcement of it, but a native popup's first navigation
+ * request, its response and its commit all precede that announcement (Playwright then delivers them to the context only): the popup's
+ * first document was invisible, and its declared status matched nothing. Now there is ONE canonical path per fact: the context's
+ * `request`, `response`, `requestfailed` and `requestfinished` events (never a page's as well), each request attributed to its page by
+ * the IDENTITY of its frame's top frame (`frameOfRequest`, `rootOf`); a page is numbered when the recorder first meets its main frame
+ * (`journal.pages`), and its navigation provenance (`observeNavigations`) is subscribed synchronously in that same listener, before
+ * Playwright can deliver the frame's next event, so the popup's first commit is seen and linked to its request. The context's later
+ * `page` event binds the page object to that SAME record (no new number, nothing re-stamped). A page first met already showing a real
+ * document (its main frame's URL neither "" nor about:blank) had an activation the recorder did not see: a named failure, never an
+ * invented commit. A request whose frame cannot be identified is a named failure; one without any frame (a service worker's, as
+ * Playwright never delivered to a page) is recorded apart (`journal.unattributedRequests`) and never attributed to a page. A response, failure or end of a request the recorder never saw, and a
+ * navigation event naming another page's request, are named failures.
+ *
+ * The page's DOCUMENT moves on only at a `new-document` event of its main frame's navigation provenance, never at a response, a failure,
+ * a request's end, a public `framenavigated` or a URL: a redirect hop, a 204 and a download have a navigation response but commit nothing;
+ * a history change (even to a pending or cancelled navigation's URL) is a `same-document` event; a stopped, failed or refused navigation
+ * is an `aborted` event and leaves the old document. A `new-document` event that names a navigation request the page holds is THAT
+ * request's commit (the request keeps its initiating `document` and records `commit`); one naming no request (an engine's error page, a
+ * requestless commit) is a new, unattributed document. Request lifecycle facts stay separate: a later navigation request supersedes the
+ * latest (Playwright then links no commit to it), a redirect hop is "redirected", an abort names its error. A `new-document` or abort
+ * naming a request the page never saw or had already ended, an unreadable event, and an unavailable provenance source are each a named
+ * failure (`journal.provenanceFailures`), with the document never guessed.
  *
  * Each problem is an immutable ENVELOPE taken synchronously in the native listener (sequence, page, document and transport stamp of that
- * moment) and only then handed to `ingest`. A hold downstream of the listener (the qualification seam) therefore cannot change its
- * provenance; an event the engine delivers to the listener only after a later commit is that later document's, and can only be
- * attributed as such (an unknown is never guessed into the earlier document).
+ * moment) and only then handed to `ingest`. An announced page's console messages and page errors come from its own listeners, as before
+ * (a service worker's messages keep Playwright's per-page delivery). A problem Playwright delivers for a page it has NOT announced yet
+ * reaches only the context: the recorder takes it there, with that page's number and document, so it cannot be lost either.
  *
- * Returns the subscription's disposer: the lane detaches it when it seals the journal (after its context closed, so a final event of the
- * close is still recorded).
+ * Returns the disposer: it detaches every navigation-provenance subscription once, returning each detachment failure by name (the lane
+ * calls it after its context closed, so a final event of the close is still recorded, including when an open fails after its context
+ * arrived). An event arriving after it is a `journal.lateEvents` line, never recorded.
  */
-export function recordPage(
-  page: RecordedPage,
-  index: number,
+export function recordContext(
+  context: RecordedContext,
   sink: RecorderSink,
-): { dispose: () => void } {
+  installed: InstalledPlaywrightCore = installedPlaywrightCore(),
+): { dispose: () => string[] } {
   const { journal, next, stamp } = sink;
   journal.navigations ??= [];
   journal.navigationProvenance ??= [];
   journal.provenanceFailures ??= [];
+  journal.pages ??= [];
   const navigations = journal.navigations;
   const failures = journal.provenanceFailures;
-  let documentNo = 0;
-  let latest: RequestRecord | null = null;
+  const pages = journal.pages;
+  interface PageRecord {
+    index: number;
+    root: unknown;
+    documentNo: number;
+    latest: RequestRecord | null;
+    association: PageAssociation;
+    dispose: () => void;
+  }
+  const byRoot = new Map<unknown, PageRecord>();
+  const byPage = new Map<unknown, PageRecord>();
   const records = new Map<unknown, RequestRecord>();
-  const on = page.on.bind(page) as (
+  const owners = new Map<RequestRecord, PageRecord>();
+  let disposed = false;
+  const late = (what: string) => {
+    journal.lateEvents ??= [];
+    journal.lateEvents.push(
+      `${what} delivered after the recorder was detached; not recorded`,
+    );
+  };
+  const on = context.on.bind(context) as (
     event: string,
     listener: (value: never) => void,
   ) => unknown;
-  const mainFrameNavigation = (request: RecordedRequest) => {
+  const describe = (request: RecordedRequest) => {
     try {
-      return (
-        request.isNavigationRequest() && request.frame() === page.mainFrame()
-      );
-    } catch {
-      return false;
+      return `${request.method()} ${request.url()}`;
+    } catch (error) {
+      return `<unreadable request: ${firstLine(error)}>`;
     }
   };
   const end = (record: RequestRecord, reason: string) => {
@@ -1426,11 +1654,14 @@ export function recordPage(
       record.commit = null;
       record.commitReason = reason;
     }
-    if (latest === record) latest = null;
+    const owner = owners.get(record);
+    if (owner !== undefined && owner.latest === record) owner.latest = null;
   };
-  const onNavigated = (value: unknown) => {
+  const onNavigated = (page: PageRecord, value: unknown) => {
+    if (disposed) return late(`page ${page.index}: a navigation event`);
+    const index = page.index;
     const seq = next();
-    const from = documentNo;
+    const from = page.documentNo;
     const read = readNavigated(value);
     if (!read.ok) {
       failures.push(
@@ -1442,24 +1673,27 @@ export function recordPage(
         url: "",
         kind: "unreadable",
         from,
-        document: documentNo,
+        document: page.documentNo,
         request: null,
         reason: read.reason,
       });
       return;
     }
+    const named = read.request === null ? undefined : records.get(read.request);
     const record =
-      read.request === null ? undefined : records.get(read.request);
+      named !== undefined && owners.get(named) === page ? named : undefined;
     if (read.request !== null && record === undefined)
       failures.push(
-        `page ${index}: navigation event #${seq} (${read.kind}) names a request this page's recorder never saw`,
+        named === undefined
+          ? `page ${index}: navigation event #${seq} (${read.kind}) names a request this page's recorder never saw`
+          : `page ${index}: navigation event #${seq} (${read.kind}) names request #${named.seq}, which is ${named.page < 0 ? "not attributed to a page" : `page ${named.page}'s`}`,
       );
     const base = { seq, page: index, url: read.url, from };
     if (read.kind === "same-document") {
       navigations.push({
         ...base,
         kind: "same-document",
-        document: documentNo,
+        document: page.documentNo,
         request: null,
         reason:
           "a same-document change (fragment or history API): no new document",
@@ -1477,21 +1711,21 @@ export function recordPage(
       navigations.push({
         ...base,
         kind: "aborted",
-        document: documentNo,
+        document: page.documentNo,
         request: record?.seq ?? null,
         error: read.error,
         reason: `a navigation aborted (${read.error}): the document stays`,
       });
       return;
     }
-    documentNo += 1;
+    page.documentNo += 1;
     let request: number | null = null;
     let reason =
       "a new document no navigation request is linked to (unattributed)";
     if (record !== undefined) {
       if (record.commit === undefined) {
-        record.commit = { seq, document: documentNo };
-        if (latest === record) latest = null;
+        record.commit = { seq, document: page.documentNo };
+        if (page.latest === record) page.latest = null;
         request = record.seq;
         reason = `committed by navigation #${record.seq}`;
       } else {
@@ -1504,38 +1738,112 @@ export function recordPage(
     navigations.push({
       ...base,
       kind: "new-document",
-      document: documentNo,
+      document: page.documentNo,
       request,
       reason,
     });
   };
-  // Subscribed BEFORE the page's other listeners, at the page's first delivery to the lane (no navigation of it is unobserved).
-  const subscription = observeNavigations(page.mainFrame(), onNavigated);
-  if (subscription.ok)
-    journal.navigationProvenance.push({
+  /** The page whose main frame is `root`: the existing record (identity), or a new one, numbered and subscribed NOW. */
+  const pageOf = (root: unknown, via: PageAssociation["via"]): PageRecord => {
+    const known = byRoot.get(root);
+    if (known !== undefined) return known;
+    const index = pages.length;
+    let firstUrl: string;
+    try {
+      firstUrl = String((root as RecordedFrame).url());
+    } catch (error) {
+      firstUrl = `<url() threw: ${firstLine(error)}>`;
+    }
+    const association: PageAssociation = {
       page: index,
-      ...subscription.provenance,
-    });
-  else {
-    journal.navigationProvenance.push({
-      page: index,
-      unavailable: subscription.reason,
-    });
-    failures.push(
-      `page ${index}: navigation provenance unavailable (${subscription.reason}); its documents cannot be attributed`,
+      via,
+      firstUrl,
+      announced: false,
+    };
+    pages.push(association);
+    const page: PageRecord = {
+      index,
+      root,
+      documentNo: 0,
+      latest: null,
+      association,
+      dispose: () => undefined,
+    };
+    byRoot.set(root, page);
+    // Subscribed in the listener that first met the frame, before Playwright can deliver its next event: no navigation of it is unobserved.
+    const subscription = observeNavigations(
+      root,
+      (event) => onNavigated(page, event),
+      installed,
     );
-  }
+    if (subscription.ok) {
+      page.dispose = subscription.dispose;
+      journal.navigationProvenance?.push({
+        page: index,
+        ...subscription.provenance,
+      });
+    } else {
+      journal.navigationProvenance?.push({
+        page: index,
+        unavailable: subscription.reason,
+      });
+      failures.push(
+        `page ${index}: navigation provenance unavailable (${subscription.reason}); its documents cannot be attributed`,
+      );
+    }
+    if (firstUrl !== "" && firstUrl !== "about:blank")
+      failures.push(
+        `page ${index}: first met (${via === "request" ? "at a request of its main frame" : via === "page" ? "at its announcement" : "at a problem before its announcement"}) already showing ${firstUrl}: an earlier document activation was not observed, so its documents cannot be attributed`,
+      );
+    return page;
+  };
+  const unattributed = (record: RequestRecord) => {
+    journal.unattributedRequests ??= [];
+    journal.unattributedRequests.push(record);
+  };
   on("request", (request: RecordedRequest) => {
+    if (disposed) return late(`a request (${describe(request)})`);
+    const found = frameOfRequest(request, installed);
+    let owner: PageRecord | null = null;
+    let why = "";
+    if (!found.ok) why = found.reason;
+    else if (found.frame === null) why = "reason" in found ? found.reason : "";
+    else {
+      const top = rootOf(found.frame);
+      if (top.ok) owner = pageOf(top.root, "request");
+      else why = top.reason;
+    }
+    let navigation = false;
+    try {
+      navigation =
+        owner !== null &&
+        found.ok &&
+        found.frame === owner.root &&
+        request.isNavigationRequest();
+    } catch {
+      navigation = false;
+    }
     const record: RequestRecord = {
       seq: next(),
-      page: index,
-      document: documentNo,
+      page: owner?.index ?? -1,
+      document: owner?.documentNo ?? -1,
       method: request.method(),
       url: request.url(),
-      navigation: mainFrameNavigation(request),
+      navigation,
       observed: stamp(),
       terminal: null,
     };
+    records.set(request, record);
+    if (owner === null) {
+      record.unattributed = why;
+      unattributed(record);
+      if (!found.ok || found.frame !== null)
+        failures.push(
+          `request #${record.seq} ${record.method} ${record.url}: its page cannot be identified (${why}); it is not attributed`,
+        );
+      return;
+    }
+    owners.set(record, owner);
     let hop: RequestRecord | undefined;
     try {
       const from = request.redirectedFrom();
@@ -1547,31 +1855,43 @@ export function recordPage(
       record.redirectedFrom = hop.seq;
       if (hop.navigation) end(hop, `redirected to #${record.seq}`);
     }
-    records.set(request, record);
     journal.requests.push(record);
     if (record.navigation) {
       // Playwright links a commit only to the frame's latest navigation request (its pending document's), so an earlier one that has not
       // committed cannot any more; a commit naming it is a named failure above, never re-attributed.
-      if (latest !== null)
-        end(latest, `superseded by navigation #${record.seq}`);
-      latest = record;
+      if (owner.latest !== null)
+        end(owner.latest, `superseded by navigation #${record.seq}`);
+      owner.latest = record;
     }
   });
   on(
     "response",
     (response: { request(): RecordedRequest; status(): number }) => {
+      if (disposed) return late("a response");
       const seq = next();
-      const record = records.get(response.request());
-      if (record === undefined) return;
+      const request = response.request();
+      const record = records.get(request);
+      if (record === undefined) {
+        failures.push(
+          `a response (journal #${seq}, status ${response.status()}) to a request the recorder never saw: ${describe(request)}`,
+        );
+        return;
+      }
       // A response is not a commit: the document changes only at a new-document event (above).
       if (record.terminal === null)
         record.terminal = { seq, kind: "response", status: response.status() };
     },
   );
   on("requestfailed", (request: RecordedRequest) => {
+    if (disposed) return late(`a request failure (${describe(request)})`);
     const seq = next();
     const record = records.get(request);
-    if (record === undefined) return;
+    if (record === undefined) {
+      failures.push(
+        `a request failure (journal #${seq}) of a request the recorder never saw: ${describe(request)}`,
+      );
+      return;
+    }
     const errorText = request.failure()?.errorText ?? "";
     // A failure is not a document fact either: an abort (or an engine's error document) arrives as its own navigation event.
     if (record.terminal === null)
@@ -1579,18 +1899,30 @@ export function recordPage(
     else record.failedAfterResponse = { seq, errorText };
   });
   on("requestfinished", (request: RecordedRequest) => {
+    if (disposed) return late(`a request end (${describe(request)})`);
     const seq = next();
     const record = records.get(request);
-    if (record !== undefined) record.finishedSeq = seq;
+    if (record === undefined) {
+      failures.push(
+        `a request end (journal #${seq}) of a request the recorder never saw: ${describe(request)}`,
+      );
+      return;
+    }
+    record.finishedSeq = seq;
   });
-  const problem = (type: string, text: string, location: string) => {
+  const problem = (
+    page: PageRecord,
+    type: string,
+    text: string,
+    location: string,
+  ) => {
     const { category, url, status } = categorise(type, text, location);
     // The envelope: everything that attributes it is taken HERE, in the native listener, and frozen before anything can hold it.
     sink.ingest(
       Object.freeze({
         seq: next(),
-        page: index,
-        document: documentNo,
+        page: page.index,
+        document: page.documentNo,
         type,
         text,
         url,
@@ -1600,12 +1932,98 @@ export function recordPage(
       }),
     );
   };
-  on("console", (message: ConsoleMessage) => {
-    if (message.type() === "error" || message.type() === "warning")
-      problem(message.type(), message.text(), message.location().url ?? "");
+  /** The record of a page object Playwright delivered (announced or not), by its main frame's identity; null when unreadable. */
+  const recordOfPage = (
+    page: RecordedPage,
+    via: PageAssociation["via"],
+  ): PageRecord | null => {
+    let root: unknown;
+    try {
+      root = page.mainFrame();
+    } catch (error) {
+      failures.push(
+        `a page (${via}) without a readable main frame (${firstLine(error)}); not recorded`,
+      );
+      return null;
+    }
+    return pageOf(root, via);
+  };
+  on("page", (page: RecordedPage) => {
+    if (disposed) return late("a page announcement");
+    const record = recordOfPage(page, "page");
+    if (record === null) return;
+    if (record.association.announced)
+      failures.push(`page ${record.index}: announced twice`);
+    record.association.announced = true;
+    byPage.set(page, record);
+    const own = page.on.bind(page) as (
+      event: string,
+      listener: (value: never) => void,
+    ) => unknown;
+    own("console", (message: ConsoleMessage) => {
+      if (message.type() === "error" || message.type() === "warning")
+        problem(
+          record,
+          message.type(),
+          message.text(),
+          message.location().url ?? "",
+        );
+    });
+    own("pageerror", (error: Error) =>
+      problem(record, "pageerror", error.message, ""),
+    );
   });
-  on("pageerror", (error: Error) => problem("pageerror", error.message, ""));
-  return { dispose: subscription.ok ? subscription.dispose : () => undefined };
+  // A page's problem Playwright delivers before it announced the page reaches only the context (its page has no listener of ours yet).
+  const unannounced = (page: unknown): PageRecord | null => {
+    if (page === null || page === undefined || byPage.has(page)) return null;
+    return recordOfPage(page as RecordedPage, "problem");
+  };
+  on("console", (message: ConsoleMessage) => {
+    if (disposed) return;
+    if (message.type() !== "error" && message.type() !== "warning") return;
+    let page: unknown = null;
+    try {
+      page = message.page();
+    } catch {
+      page = null;
+    }
+    const record = unannounced(page);
+    if (record !== null)
+      problem(
+        record,
+        message.type(),
+        message.text(),
+        message.location().url ?? "",
+      );
+  });
+  on("weberror", (webError: { page(): unknown; error(): Error }) => {
+    if (disposed) return;
+    let page: unknown = null;
+    try {
+      page = webError.page();
+    } catch {
+      page = null;
+    }
+    const record = unannounced(page);
+    if (record !== null)
+      problem(record, "pageerror", webError.error().message, "");
+  });
+  return {
+    dispose: () => {
+      if (disposed) return [];
+      disposed = true;
+      const errors: string[] = [];
+      for (const page of byRoot.values())
+        try {
+          page.dispose();
+        } catch (error) {
+          errors.push(
+            `page ${page.index}: detaching its navigation provenance failed: ${String(error)}`,
+          );
+        }
+      return errors;
+    },
+  };
 }
 
 export interface TransportLane {
@@ -2249,10 +2667,27 @@ async function openLane(
   contextOptions.baseURL = front;
   // Owned BEFORE `newContext` is called: a context that arrives after settlement began is closed, never published (F24-1); owned when it
   // arrives, before the qualification wrapper sees it, so a wrapper failing after it arrived cannot leave it open (revision 21, F25-1).
+  // Revision 28 (F33-1, C1/C5): the context's capture registry attaches in the acquisition's own turn, before the scope, a wrapper or a
+  // caller can use the context (so before any page of it exists), and its disposer is the context's: it detaches after the context
+  // closed, also when the open fails or the context arrives late (each detachment failure fails that disposal by name).
+  let capture: { dispose: () => string[] } | null = null;
   const context = await scope.acquire(
     "context",
-    () => browser.newContext(contextOptions),
-    (c) => c.close(),
+    async () => {
+      const made = await browser.newContext(contextOptions);
+      capture = recordContext(made as unknown as RecordedContext, {
+        journal,
+        next,
+        stamp,
+        ingest,
+      });
+      return made;
+    },
+    (c) =>
+      c.close().finally(() => {
+        const errors = capture?.dispose() ?? [];
+        if (errors.length > 0) throw new Error(errors.join("; "));
+      }),
   );
   journal.engine = engineOf(context);
   // Playwright's own `trace: retain-on-failure` instrumentation already records every context a test creates, this one included.
@@ -2280,21 +2715,11 @@ async function openLane(
   ownContext.setOffline = refuse(
     "context.setOffline (WebKit's emulation fails File reads)",
   );
-  let pageIndex = 0;
-  // Revision 27 (F32-1, C4): each page's navigation-provenance subscription, owned by the lane and detached when it seals the journal.
-  const recorders: Array<{ dispose: () => void }> = [];
+  // Revision 28 (F33-1): pages are recorded by the context's capture registry (above); this only refuses a page's own routes.
   context.on("page", (page) => {
     const own = page as unknown as Record<string, unknown>;
     own.route = refuse("page.route");
     own.routeFromHAR = refuse("page.routeFromHAR");
-    recorders.push(
-      recordPage(page as unknown as RecordedPage, pageIndex++, {
-        journal,
-        next,
-        stamp,
-        ingest,
-      }),
-    );
   });
   const routeHost =
     origin === null
@@ -2475,15 +2900,14 @@ async function openLane(
     heldProblems: () => [...held],
     seal: () => {
       sealed = true;
-      const detached: string[] = [];
-      for (const [i, recorder] of recorders.splice(0).entries())
-        try {
-          recorder.dispose();
-        } catch (error) {
-          detached.push(
-            `page ${i}: detaching its navigation provenance failed: ${String(error)}`,
-          );
-        }
+      // Normally already detached by the context's disposal (it closed first); a disposer that already ran returns nothing.
+      let detached: string[];
+      try {
+        detached =
+          (capture as { dispose: () => string[] } | null)?.dispose() ?? [];
+      } catch (error) {
+        detached = [`detaching the capture registry failed: ${String(error)}`];
+      }
       return [
         ...detached,
         ...[...held].map(
@@ -2520,6 +2944,9 @@ async function openLane(
       navigations: journal.navigations ?? [],
       navigationProvenance: journal.navigationProvenance ?? [],
       provenanceFailures: journal.provenanceFailures ?? [],
+      pages: journal.pages ?? [],
+      unattributedRequests: journal.unattributedRequests ?? [],
+      lateEvents: journal.lateEvents ?? [],
       engine: journal.engine ?? null,
       late: journal.late ?? [],
       held: [...held],

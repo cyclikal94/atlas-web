@@ -1795,3 +1795,479 @@ test.describe("native transport lane manager (revision 20 qualification in real 
     expect(contextsOf(browser)).toEqual(baseline);
   });
 });
+
+// ---- Revision 28 (Review 33 F33-1/F33-2; design assessment token 98d2410c…, CAP1–CAP4, CAP6, UI1–UI2) ----------------------------------
+
+/** A NATIVE popup: the opener's own window.open (the review's stimulus); resolves with Playwright's page for it. */
+async function popupOf(opener: Page, url: string, target = "_blank") {
+  const created = opener.waitForEvent("popup");
+  await opener.evaluate(
+    ({ u, t }) => {
+      window.open(u, t);
+    },
+    { u: url, t: target },
+  );
+  return created;
+}
+const pagesOf = (lane: TransportLane) =>
+  (lane.journal.pages ?? []).map((p) => [p.page, p.via, p.announced]);
+const requestsOf = (lane: TransportLane, page: number) =>
+  lane.journal.requests
+    .filter((r) => r.page === page)
+    .map((r) => [
+      path(r.url),
+      r.document,
+      r.navigation,
+      r.terminal?.kind === "response" ? r.terminal.status : r.terminal?.kind,
+      r.commit === undefined
+        ? "pending"
+        : r.commit === null
+          ? (r.commitReason ?? "").replace(/#\d+/, "#n")
+          : r.commit.document,
+    ]);
+const uiOf = (page: Page) =>
+  page.evaluate(() =>
+    (
+      window as unknown as {
+        __atlasUiConnectivity: {
+          read(): {
+            document: string;
+            native: boolean;
+            ui: boolean;
+            stimulus: boolean | null;
+          };
+        };
+      }
+    ).__atlasUiConnectivity.read(),
+  );
+
+test.describe("native transport popups and UI installation (revision 28 qualification in real engines)", () => {
+  for (const opening of ["explicit-page", "popup"] as const)
+    test(`POP1 Review 33's schedule, ${opening === "popup" ? "a NATIVE popup (window.open) whose first navigation is a declared 503" : "its control: an explicit page whose first navigation is the same declared 503"}: exactly one child request, its own commit, the declaration met once, nothing unexpected`, async ({
+      browser,
+      browserName,
+    }) => {
+      const lanes = openTransportLanes(browser, test.info());
+      try {
+        const lane = await guardLane(lanes);
+        await lane.routes.route(`**${GUARD}/pop1/503`, (route) =>
+          (route as unknown as OriginRoute).fulfill({
+            status: 503,
+            contentType: "text/html",
+            headers: { "cache-control": "no-store" },
+            body: SENTINEL("pop1"),
+          }),
+        );
+        const opener = await open(lane);
+        lane.expectHttp({
+          method: "GET",
+          path: `${GUARD}/pop1/503`,
+          status: 503,
+          count: 1,
+          reason: "POP1 the child's first navigation",
+        });
+        let child: Page;
+        if (opening === "popup")
+          child = await popupOf(opener, `${GUARD}/pop1/503`);
+        else {
+          child = await lane.context.newPage();
+          expect((await child.goto(`${GUARD}/pop1/503`))?.status()).toBe(503);
+        }
+        await child.waitForLoadState("load");
+        expect(await identityOf(child)).toBe("pop1");
+        await quiet(lane);
+        const { report, verdict } = await settle(lanes, lane);
+        // The behaviour first (Review 33's oracle), then revision 28's association table.
+        expect(
+          requestsOf(lane, 1),
+          "the child's first navigation is recorded once",
+        ).toEqual([[`${GUARD}/pop1/503`, 0, true, 503, 1]]);
+        expect(transitionsOf(lane, 1)).toEqual([
+          ["new-document", 1, "request"],
+        ]);
+        expect(lane.journal.provenanceFailures).toEqual([]);
+        expect(verdict.violations).toEqual([]);
+        expect(verdict.unexpected).toEqual([]);
+        expect(report.failures).toEqual([]);
+        expect(verdict.expectations.map((e) => e.matched.length)).toEqual([1]);
+        expect(verdict.expected.map((p) => [p.page, p.status])).toEqual(
+          logsHttp(browserName) ? [[1, 503]] : [],
+        );
+        expect(pagesOf(lane)).toEqual([
+          [0, "page", true],
+          [1, opening === "popup" ? "request" : "page", true],
+        ]);
+      } finally {
+        await lanes.settle();
+      }
+    });
+
+  test("POP2 a native popup's first navigation HELD at the origin: captured as page 1's request before its response; released, it commits once and its declared 503 is met once", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    const holds: Array<{ release: () => void }> = [];
+    try {
+      const lane = await guardLane(lanes);
+      const held = await heldRoute(lane, `**${GUARD}/pop2/held`, {
+        status: 503,
+        contentType: "text/html",
+        body: SENTINEL("pop2"),
+      });
+      holds.push(held);
+      const opener = await open(lane);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/pop2/held`,
+        status: 503,
+        count: 1,
+        reason: "POP2 the popup's held first navigation",
+      });
+      const created = popupOf(opener, `${GUARD}/pop2/held`);
+      await held.arrived();
+      expect(
+        requestsOf(lane, 1),
+        "captured before Playwright could announce the page",
+      ).toEqual([[`${GUARD}/pop2/held`, 0, true, undefined, "pending"]]);
+      held.release();
+      const child = await created;
+      await child.waitForLoadState("load");
+      expect(await identityOf(child)).toBe("pop2");
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(requestsOf(lane, 1)).toEqual([
+        [`${GUARD}/pop2/held`, 0, true, 503, 1],
+      ]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(verdict.expected.map((p) => [p.page, p.status])).toEqual(
+        logsHttp(browserName) ? [[1, 503]] : [],
+      );
+    } finally {
+      for (const h of holds) h.release();
+      await lanes.settle();
+    }
+  });
+
+  test("POP3 a native popup whose first navigation redirects to a declared 503, then reloads: the hop is redirected, the final request commits document 1, the reload commits document 2, the declaration (count 2) is met exactly", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await guardLane(lanes);
+      await lane.routes.route(`**${GUARD}/pop3/redirect`, (route) =>
+        (route as unknown as OriginRoute).fulfill({
+          status: 302,
+          headers: {
+            location: `${GUARD}/pop3/final`,
+            "cache-control": "no-store",
+          },
+          body: "",
+        }),
+      );
+      await lane.routes.route(`**${GUARD}/pop3/final`, (route) =>
+        (route as unknown as OriginRoute).fulfill({
+          status: 503,
+          contentType: "text/html",
+          headers: { "cache-control": "no-store" },
+          body: SENTINEL("pop3"),
+        }),
+      );
+      const opener = await open(lane);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/pop3/final`,
+        status: 503,
+        count: 2,
+        reason: "POP3 the popup's redirected first navigation and its reload",
+      });
+      const child = await popupOf(opener, `${GUARD}/pop3/redirect`);
+      await child.waitForLoadState("load");
+      expect(await identityOf(child)).toBe("pop3");
+      await child.reload();
+      expect(await identityOf(child)).toBe("pop3");
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(requestsOf(lane, 1)).toEqual([
+        [`${GUARD}/pop3/redirect`, 0, true, 302, "redirected to #n"],
+        [`${GUARD}/pop3/final`, 0, true, 503, 1],
+        [`${GUARD}/pop3/final`, 1, true, 503, 2],
+      ]);
+      expect(transitionsOf(lane, 1)).toEqual([
+        ["new-document", 1, "request"],
+        ["new-document", 2, "request"],
+      ]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(verdict.expectations.map((e) => e.matched.length)).toEqual([2]);
+      // Each engine message is credited through its OWN final request (never the hop's, never twice); the document an engine logs it in
+      // is the classifier's existing engine rule (NAV1), not re-asserted here.
+      const finals = lane.journal.requests
+        .filter((r) => r.page === 1 && path(r.url) === `${GUARD}/pop3/final`)
+        .map((r) => r.seq);
+      expect(
+        verdict.expected.map((p) => [p.page, p.status, p.evidence?.request]),
+      ).toEqual(
+        logsHttp(browserName) ? finals.map((seq) => [1, 503, seq]) : [],
+      );
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  test("POP4 a blank named popup, then two navigations into the SAME named window by the opener: one page (announced at about:blank), two commits each linked to its own request", async ({
+    browser,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await guardLane(lanes);
+      for (const name of ["a", "b"])
+        await lane.routes.route(`**${GUARD}/pop4/${name}`, (route) =>
+          (route as unknown as OriginRoute).fulfill({
+            status: 200,
+            contentType: "text/html",
+            headers: { "cache-control": "no-store" },
+            body: SENTINEL(`pop4-${name}`),
+          }),
+        );
+      const opener = await open(lane);
+      const child = await popupOf(opener, "", "atlas-pop4");
+      for (const name of ["a", "b"]) {
+        await opener.evaluate((u) => {
+          window.open(u, "atlas-pop4");
+        }, `${GUARD}/pop4/${name}`);
+        await expect
+          .poll(() => identityOf(child).catch(() => null))
+          .toBe(`pop4-${name}`);
+      }
+      expect(lane.context.pages()).toHaveLength(2);
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(pagesOf(lane)).toEqual([
+        [0, "page", true],
+        [1, "page", true],
+      ]);
+      expect(lane.journal.pages?.[1]?.firstUrl).toBe("about:blank");
+      expect(requestsOf(lane, 1)).toEqual([
+        [`${GUARD}/pop4/a`, 0, true, 200, 1],
+        [`${GUARD}/pop4/b`, 1, true, 200, 2],
+      ]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  test("POP5 the opener closes while its popup's declared first navigation is held: the popup's request stays page 1's; released, it commits and is met once; nothing is unexpected", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    const holds: Array<{ release: () => void }> = [];
+    try {
+      const lane = await guardLane(lanes);
+      const held = await heldRoute(lane, `**${GUARD}/pop5/held`, {
+        status: 503,
+        contentType: "text/html",
+        body: SENTINEL("pop5"),
+      });
+      holds.push(held);
+      const opener = await open(lane);
+      lane.expectHttp({
+        method: "GET",
+        path: `${GUARD}/pop5/held`,
+        status: 503,
+        count: 1,
+        reason: "POP5 the popup's held first navigation",
+      });
+      // The CONTEXT's page event (an opener's `popup` wait ends when the opener closes).
+      const created = lane.context.waitForEvent("page");
+      await opener.evaluate((u) => {
+        window.open(u, "_blank");
+      }, `${GUARD}/pop5/held`);
+      await held.arrived();
+      await opener.close();
+      held.release();
+      const child = await created;
+      await child.waitForLoadState("load");
+      expect(await identityOf(child)).toBe("pop5");
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(requestsOf(lane, 1)).toEqual([
+        [`${GUARD}/pop5/held`, 0, true, 503, 1],
+      ]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(verdict.expected.map((p) => [p.page, p.status])).toEqual(
+        logsHttp(browserName) ? [[1, 503]] : [],
+      );
+    } finally {
+      for (const h of holds) h.release();
+      await lanes.settle();
+    }
+  });
+
+  test("POP6 the consequence control: an UNDECLARED status of a popup's first navigation is now recorded, and its engine message stays unexpected", async ({
+    browser,
+    browserName,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await guardLane(lanes);
+      await lane.routes.route(`**${GUARD}/pop6/503`, (route) =>
+        (route as unknown as OriginRoute).fulfill({
+          status: 503,
+          contentType: "text/html",
+          headers: { "cache-control": "no-store" },
+          body: SENTINEL("pop6"),
+        }),
+      );
+      const opener = await open(lane);
+      const child = await popupOf(opener, `${GUARD}/pop6/503`);
+      await child.waitForLoadState("load");
+      expect(await identityOf(child)).toBe("pop6");
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(requestsOf(lane, 1)).toEqual([
+        [`${GUARD}/pop6/503`, 0, true, 503, 1],
+      ]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(
+        verdict.unexpected.map((p) => [p.page, p.category, p.status]),
+      ).toEqual(logsHttp(browserName) ? [[1, "http", 503]] : []);
+      expect(report.failures).toHaveLength(logsHttp(browserName) ? 1 : 0);
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  test("UI1 a plain HTTP 200 native popup (Review 33 F33-2's WebKit schedule) in every engine: no page error; child and opener have their own documents; the child's stimulus drives only the child's navigator.onLine; the native reading stays genuine", async ({
+    browser,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await guardLane(lanes);
+      await lane.routes.route(`**${GUARD}/ui1/page`, (route) =>
+        (route as unknown as OriginRoute).fulfill({
+          status: 200,
+          contentType: "text/html",
+          headers: { "cache-control": "no-store" },
+          body: SENTINEL("ui1"),
+        }),
+      );
+      const opener = await open(lane);
+      const child = await popupOf(opener, `${GUARD}/ui1/page`);
+      await child.waitForLoadState("load");
+      expect(await identityOf(child)).toBe("ui1");
+      const before = { opener: await uiOf(opener), child: await uiOf(child) };
+      expect(before.child.document).not.toBe(before.opener.document);
+      expect(before.child).toMatchObject({
+        native: true,
+        ui: true,
+        stimulus: null,
+      });
+      expect(await lane.ui.set(child, false)).toMatchObject({
+        document: before.child.document,
+        native: true,
+        ui: false,
+        stimulus: false,
+      });
+      expect(await child.evaluate(() => navigator.onLine)).toBe(false);
+      expect(await uiOf(opener)).toEqual(before.opener);
+      expect(await opener.evaluate(() => navigator.onLine)).toBe(true);
+      expect(await lane.ui.set(child, true)).toMatchObject({ ui: true });
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(
+        verdict.unexpected,
+        "no page error from the lane's installation",
+      ).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(lane.journal.provenanceFailures).toEqual([]);
+    } finally {
+      await lanes.settle();
+    }
+  });
+
+  test("UI2 the stimulus is its document's: kept across same-document history, gone at a reload and at a new document (new id, no stimulus); a same-origin iframe has its own", async ({
+    browser,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await guardLane(lanes);
+      await lane.routes.route(`**${GUARD}/ui2/*`, (route) =>
+        (route as unknown as OriginRoute).fulfill({
+          status: 200,
+          contentType: "text/html; charset=utf-8",
+          headers: { "cache-control": "no-store" },
+          body: route.request().url().endsWith("/framed")
+            ? `${SENTINEL("ui2-framed")}<iframe src="${GUARD}/ui2/inner"></iframe>`
+            : SENTINEL("ui2"),
+        }),
+      );
+      const page = await lane.context.newPage();
+      await page.goto(`${GUARD}/ui2/first`);
+      const first = await lane.ui.set(page, false);
+      expect(first).toMatchObject({ ui: false, stimulus: false });
+      await page.evaluate(() =>
+        history.pushState({}, "", "/api/__guard/ui2/moved"),
+      );
+      expect(await uiOf(page), "same document, same stimulus").toEqual(first);
+      await page.reload();
+      const reloaded = await uiOf(page);
+      expect(reloaded.document).not.toBe(first.document);
+      expect(reloaded).toMatchObject({
+        native: true,
+        ui: true,
+        stimulus: null,
+      });
+      await lane.ui.set(page, false);
+      await page.goto(`${GUARD}/ui2/framed`);
+      const framed = await uiOf(page);
+      expect(framed.document).not.toBe(reloaded.document);
+      expect(framed).toMatchObject({ ui: true, stimulus: null });
+      await lane.ui.set(page, false);
+      const inner = page.frames().find((f) => f !== page.mainFrame());
+      expect(inner).toBeDefined();
+      await expect
+        .poll(() =>
+          inner?.evaluate(() => document.readyState).catch(() => null),
+        )
+        .toBe("complete");
+      const innerUi = await inner?.evaluate(() =>
+        (
+          window as unknown as {
+            __atlasUiConnectivity: {
+              read(): {
+                document: string;
+                ui: boolean;
+                stimulus: boolean | null;
+              };
+            };
+          }
+        ).__atlasUiConnectivity.read(),
+      );
+      expect(innerUi?.document).not.toBe(framed.document);
+      expect(innerUi).toMatchObject({ ui: true, stimulus: null });
+      expect(await uiOf(page)).toMatchObject({ ui: false, stimulus: false });
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+    } finally {
+      await lanes.settle();
+    }
+  });
+});

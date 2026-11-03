@@ -8,6 +8,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { connect, type Socket } from "node:net";
+import { createContext, runInContext } from "node:vm";
 import type { Browser, TestInfo } from "@playwright/test";
 import { describe, expect, it } from "vitest";
 import type { TransportAttempt } from "../../scripts/integration/http-transport-loss.mjs";
@@ -17,9 +18,11 @@ import {
   categorise,
   classifyJournal,
   createScriptedOrigin,
+  frameOfRequest,
   globRegExp,
   type Interpose,
   installedPlaywrightCore,
+  installUiStimulus,
   type Journal,
   LaneCancelled,
   LaneSeamMisuse,
@@ -31,7 +34,7 @@ import {
   type RecordedRequest,
   type RequestRecord,
   readNavigated,
-  recordPage,
+  recordContext,
   runCleanup,
   runTransportLaneFixture,
   settleLanes,
@@ -2671,18 +2674,50 @@ describe("F32-1 classifyJournal C3: a commit admits a message only with its own 
 });
 
 /**
- * A page double emitting exactly the event sequence an engine was observed to emit (revision-26 diag/order-1; revision-27 diag/order-2
- * and order-3, which also record Playwright's internal frame events). Its main frame carries a Playwright-shaped client emitter
- * (`_eventEmitter`) on which each navigation is delivered as Playwright's own `navigated` event (`FrameNavigatedEvent`: `newDocument`
- * with the linked request's CHANNEL, whose `_object` is the public request; `error` for an abort); a commit or a same-document change is
- * followed, as in Playwright's client, by the public `framenavigated` (an abort has none). `publicOnly` emits a public `framenavigated`
- * WITHOUT the internal event (the recorder must not move on it).
+ * Revision 28 (F33-1): a CONTEXT double, as the recorder now listens (`recordContext`): its listeners receive what a Playwright client
+ * context emits (network events, page announcements, and console/web errors after the page's own delivery, as Playwright's client does).
+ * Each page double below is one of its pages.
  */
-function recorderPage() {
+function recorderContext() {
   const listeners = new Map<string, Array<(value: unknown) => void>>();
-  let mainUrl = "about:blank";
+  const context = {
+    on(event: string, listener: (value: never) => void) {
+      listeners.set(event, [
+        ...(listeners.get(event) ?? []),
+        listener as (v: unknown) => void,
+      ]);
+    },
+  };
+  const emit = (event: string, value: unknown) => {
+    for (const l of listeners.get(event) ?? []) l(value);
+  };
+  return { context, emit, listeners };
+}
+
+/**
+ * A page double emitting exactly the event sequence an engine was observed to emit (revision-26 diag/order-1; revision-27 diag/order-2
+ * and order-3, which also record Playwright's internal frame events; revision-28 diag popup-order-1). Its main frame carries a
+ * Playwright-shaped client emitter (`_eventEmitter`) on which each navigation is delivered as Playwright's own `navigated` event
+ * (`FrameNavigatedEvent`: `newDocument` with the linked request's CHANNEL, whose `_object` is the public request; `error` for an abort); a
+ * commit or a same-document change is followed, as in Playwright's client, by the public `framenavigated` (an abort has none).
+ * `publicOnly` emits a public `framenavigated` WITHOUT the internal event (the recorder must not move on it).
+ *
+ * Revision 28: its network events reach the CONTEXT's listeners (Playwright delivers them to the context, and to a page only once it
+ * announced it). `announce: false` makes a POPUP not yet announced: its requests' public `frame()` throws Playwright's own refusal, their
+ * client initializer still names the main frame, and `announce()` later emits the context's `page` event.
+ */
+function recorderPage(
+  ctx: ReturnType<typeof recorderContext> = recorderContext(),
+  options: { announce?: boolean; url?: string } = {},
+) {
+  const listeners = new Map<string, Array<(value: unknown) => void>>();
+  let mainUrl = options.url ?? "about:blank";
   const internal = new EventEmitter();
-  const main = { url: () => mainUrl, _eventEmitter: internal };
+  const main = {
+    url: () => mainUrl,
+    parentFrame: () => null,
+    _eventEmitter: internal,
+  };
   const page = {
     mainFrame: () => main,
     on(event: string, listener: (value: never) => void) {
@@ -2695,34 +2730,58 @@ function recorderPage() {
   const emit = (event: string, value: unknown) => {
     for (const l of listeners.get(event) ?? []) l(value);
   };
+  let announced = false;
+  const announce = () => {
+    announced = true;
+    ctx.emit("page", page);
+  };
+  if (options.announce !== false) announce();
   const channel = (r: RecordedRequest | undefined) =>
     r === undefined ? undefined : { _object: r };
   const request = (
     url: string,
-    options: { nav?: boolean; from?: RecordedRequest; failure?: string } = {},
+    options: {
+      nav?: boolean;
+      from?: RecordedRequest;
+      failure?: string;
+      frame?: unknown;
+    } = {},
   ) => {
-    const r: RecordedRequest & { failed?: string } = {
+    const frame = options.frame ?? main;
+    const r: RecordedRequest & {
+      failed?: string;
+      _initializer: { frame: { _object: unknown } };
+    } = {
       method: () => "GET",
       url: () => url,
       isNavigationRequest: () => options.nav ?? true,
-      frame: () => main,
+      frame: () => {
+        if (!announced)
+          throw new Error(
+            "Frame for this navigation request is not available, because the request\nwas issued before the frame is created.",
+          );
+        return frame;
+      },
       failure: () => (r.failed === undefined ? null : { errorText: r.failed }),
       redirectedFrom: () => options.from ?? null,
+      _initializer: { frame: { _object: frame } },
     };
-    emit("request", r);
+    ctx.emit("request", r);
     return r;
   };
   return {
     page,
+    main,
     internal,
+    announce,
     request,
     respond: (r: RecordedRequest, status: number) =>
-      emit("response", { request: () => r, status: () => status }),
+      ctx.emit("response", { request: () => r, status: () => status }),
     fail: (r: RecordedRequest & { failed?: string }, errorText: string) => {
       r.failed = errorText;
-      emit("requestfailed", r);
+      ctx.emit("requestfailed", r);
     },
-    finish: (r: RecordedRequest) => emit("requestfinished", r),
+    finish: (r: RecordedRequest) => ctx.emit("requestfinished", r),
     /** Playwright's `frameCommittedNewDocumentNavigation`: a new document, linked to `request` when Playwright linked one. */
     newDocument: (url: string, request?: RecordedRequest) => {
       mainUrl = url;
@@ -2756,20 +2815,36 @@ function recorderPage() {
     raw: (value: unknown) => internal.emit("navigated", value),
     /** Another frame's navigation: its own emitter (never the main frame's) and its public framenavigated. */
     subframe: (url: string) => {
-      const frame = { url: () => url, _eventEmitter: new EventEmitter() };
+      const frame = {
+        url: () => url,
+        parentFrame: () => main,
+        _eventEmitter: new EventEmitter(),
+      };
       frame._eventEmitter.emit("navigated", {
         url,
         name: "",
         newDocument: {},
       });
       emit("framenavigated", frame);
+      return frame;
     },
-    console: (type: string, text: string, url: string) =>
-      emit("console", {
+    /** A console message, delivered as Playwright's client does: to the page's listeners, then to the context's (`page()` names it). */
+    console: (type: string, text: string, url: string) => {
+      const message = {
         type: () => type,
         text: () => text,
         location: () => ({ url }),
-      }),
+        page: () => page,
+      };
+      emit("console", message);
+      ctx.emit("console", message);
+    },
+    /** A page error, delivered as Playwright's client does: to the context first (`weberror`), then to the page's listeners. */
+    pageerror: (message: string) => {
+      const error = new Error(message);
+      ctx.emit("weberror", { page: () => page, error: () => error });
+      emit("pageerror", error);
+    },
   };
 }
 function recorded(engine: string, hold?: (p: Readonly<Problem>) => boolean) {
@@ -2782,16 +2857,18 @@ function recorded(engine: string, hold?: (p: Readonly<Problem>) => boolean) {
     engine,
   };
   const held: Array<Readonly<Problem>> = [];
-  const d = recorderPage();
-  const recorder = recordPage(d.page, 0, {
+  const ctx = recorderContext();
+  const recorder = recordContext(ctx.context, {
     journal: j,
     next: () => {
       seq += 1;
       return seq;
     },
     stamp,
-    ingest: (p) => (hold?.(p) ? held.push(p) : j.problems.push(p)),
+    ingest: (p: Readonly<Problem>) =>
+      hold?.(p) ? held.push(p) : j.problems.push(p),
   });
+  const d = recorderPage(ctx);
   /** The front's record of a forwarded answer (as the transport's observer journals it, before the browser's response). */
   const forwarded = (url: string, status: number) => {
     seq += 1;
@@ -2822,7 +2899,7 @@ function recorded(engine: string, hold?: (p: Readonly<Problem>) => boolean) {
       reason: "test",
     });
   };
-  return { j, d, held, forwarded, declare, recorder };
+  return { j, d, ctx, held, forwarded, declare, recorder };
 }
 const docs = (j: Journal) =>
   j.requests.map((r) => [
@@ -3151,10 +3228,10 @@ describe("F32-1 recordPage: the document moves on only at a new-document event o
       stamp,
       ingest: (p: Readonly<Problem>) => void j.problems.push(p),
     };
-    const a = recorderPage();
-    const b = recorderPage();
-    recordPage(a.page, 0, sink);
-    recordPage(b.page, 1, sink);
+    const ctx = recorderContext();
+    recordContext(ctx.context, sink);
+    const a = recorderPage(ctx);
+    const b = recorderPage(ctx);
     const ra = a.request(P);
     a.respond(ra, 200);
     a.newDocument(P, ra);
@@ -3250,25 +3327,25 @@ describe("F32-1 navigation provenance: unavailable, unreadable or contradicting 
       expectations: [],
     };
     const listeners = new Map<string, (v: unknown) => void>();
-    const main = { url: () => P };
-    recordPage(
-      {
-        mainFrame: () => main,
-        on: (event: string, listener: (value: never) => void) => {
-          listeners.set(event, listener as (v: unknown) => void);
-        },
+    // Revision 28 adaptation (F33-1): announced as an explicit page is (about:blank, its initial empty document; revision 27 used P, which
+    // is now ALSO the named "first met already showing a document" gap, qualified separately below). The intent is unchanged.
+    const main = { url: () => "about:blank", parentFrame: () => null };
+    const ctx = recorderContext();
+    recordContext(ctx.context, {
+      journal: j,
+      next: () => {
+        seq += 1;
+        return seq;
       },
-      0,
-      {
-        journal: j,
-        next: () => {
-          seq += 1;
-          return seq;
-        },
-        stamp,
-        ingest: (p) => void j.problems.push(p),
+      stamp,
+      ingest: (p) => void j.problems.push(p),
+    });
+    ctx.emit("page", {
+      mainFrame: () => main,
+      on: (event: string, listener: (value: never) => void) => {
+        listeners.set(event, listener as (v: unknown) => void);
       },
-    );
+    });
     listeners.get("framenavigated")?.(main);
     expect(j.navigationProvenance).toEqual([
       {
@@ -3461,29 +3538,32 @@ describe("F32-1 navigation provenance: unavailable, unreadable or contradicting 
 describe("F31-1 the ingestion seam and the seal (C4)", () => {
   /** A browser double whose context reports its engine and gives the lane one page double (driven by the case). */
   function seamBrowser() {
-    let pageListener: ((page: unknown) => void) | null = null;
+    // Revision 28: the context double receives ALL of the lane's context listeners (its capture registry's, attached as it arrives).
+    const ctx = recorderContext();
     const pages: Array<ReturnType<typeof recorderPage>> = [];
+    let front = "";
     const browser = {
-      newContext: (async () => ({
-        on: (event: string, listener: (page: unknown) => void) => {
-          if (event === "page") pageListener = listener;
-        },
-        addInitScript: async () => undefined,
-        close: async () => undefined,
-        browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
-      })) as unknown as Browser["newContext"],
+      newContext: (async (options?: { baseURL?: string }) => {
+        front = options?.baseURL ?? "";
+        return {
+          on: ctx.context.on,
+          addInitScript: async () => undefined,
+          close: async () => undefined,
+          browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
+        };
+      }) as unknown as Browser["newContext"],
     };
     const page = () => {
-      const d = recorderPage();
+      const d = recorderPage(ctx);
       pages.push(d);
-      pageListener?.(d.page);
       return d;
     };
-    return { browser, page, pages };
+    // The lane's REAL front origin (its context's baseURL): the lane's own foreign-origin guard now sees every request of the context.
+    return { browser, page, pages, front: () => front };
   }
   const P = `${FRONT}/api/__guard/page`;
   it("held then released before settlement: classified with its listener-time document; the engine is the context's", async () => {
-    const { browser, page } = seamBrowser();
+    const { browser, page, front } = seamBrowser();
     const { info } = fakeInfo();
     const holds: Array<() => void> = [];
     const lanes = openTransportLanes(browser, info, {
@@ -3492,10 +3572,12 @@ describe("F31-1 the ingestion seam and the seal (C4)", () => {
     const lane = await lanes.open({ mode: "fixture" });
     expect(lane.journal.engine).toBe("chromium");
     const d = page();
-    const r = d.request(P);
+    // Revision 28 adaptation: the page's URL is on the lane's real front (its context's requests now reach the lane's foreign guard).
+    const Q = `${front()}/api/__guard/page`;
+    const r = d.request(Q);
     d.respond(r, 200);
-    d.newDocument(P, r);
-    d.console("warning", "held warning", P);
+    d.newDocument(Q, r);
+    d.console("warning", "held warning", Q);
     d.newDocument(`${FRONT}/elsewhere`);
     expect(lane.heldProblems()).toHaveLength(1);
     expect(lane.journal.problems).toEqual([]);
@@ -3595,5 +3677,577 @@ describe("F31-1 the ingestion seam and the seal (C4)", () => {
     expect(lane.journal.problems).toHaveLength(1);
     expect(lane.heldProblems()).toEqual([]);
     await lanes.settle();
+  });
+});
+
+// ---- Revision 28 (Review 33 F33-1, family native-transport-console-attribution; design assessment token 98d2410c…, C1–C3/C5, CAP1–CAP7) ---
+
+describe("F33-1 recordContext: a popup's first request, response and commit precede its announcement and are still its own", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  /** An opener (page 0, announced as an explicit page is) and a popup Playwright has NOT announced yet (diag popup-order-1). */
+  function withPopup(engine: string) {
+    const r = recorded(engine);
+    const opened = r.d.request(P);
+    r.d.respond(opened, 200);
+    r.d.newDocument(P, opened);
+    const popup = recorderPage(r.ctx, { announce: false, url: "" });
+    return { ...r, popup };
+  }
+  it("CAP1 Chromium's observed popup order (request, response 503, commit, THEN the page, then its status message): one request of page 1, its commit, its message credited once", () => {
+    const { j, popup, forwarded, declare } = withPopup("chromium");
+    declare("/api/__guard/status/503", 503);
+    const nav = popup.request(N);
+    forwarded(N, 503);
+    popup.respond(nav, 503);
+    popup.newDocument(N, nav);
+    popup.announce();
+    popup.console("error", S503, N);
+    expect(j.pages).toEqual([
+      { page: 0, via: "page", firstUrl: "about:blank", announced: true },
+      { page: 1, via: "request", firstUrl: "", announced: true },
+    ]);
+    expect(
+      j.requests.map((r) => [r.page, r.document, r.navigation, r.commit]),
+    ).toEqual([
+      [0, 0, true, { seq: 3, document: 1 }],
+      [1, 0, true, { seq: 8, document: 1 }],
+    ]);
+    expect(j.navigations?.map((n) => [n.page, n.kind, n.document])).toEqual([
+      [0, "new-document", 1],
+      [1, "new-document", 1],
+    ]);
+    expect(j.navigationProvenance?.map((p) => p.page)).toEqual([0, 1]);
+    expect(j.provenanceFailures).toEqual([]);
+    const v = classifyJournal(j);
+    expect(v.violations).toEqual([]);
+    expect(v.unexpected).toEqual([]);
+    expect(
+      v.expected.map((p) => [p.page, p.document, p.evidence?.relation]),
+    ).toEqual([[1, 1, "committed-by-navigation"]]);
+    expect(v.expectations.map((e) => e.matched.length)).toEqual([1]);
+  });
+  it("CAP1 the page announced while its request is still held: the announcement binds the SAME record (no second page, nothing renumbered or re-stamped)", () => {
+    const { j, popup } = withPopup("webkit");
+    const nav = popup.request(N);
+    const before = structuredClone(j.requests[1]);
+    popup.announce();
+    popup.respond(nav, 503);
+    popup.newDocument(N, nav);
+    expect(j.pages?.map((p) => [p.page, p.via, p.announced])).toEqual([
+      [0, "page", true],
+      [1, "request", true],
+    ]);
+    expect(j.requests).toHaveLength(2);
+    expect(j.requests[1]).toMatchObject({
+      seq: before?.seq,
+      page: 1,
+      document: 0,
+      observed: before?.observed,
+      commit: { document: 1 },
+    });
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("CAP2 a popup's redirect chain and a later reload: only the final hop commits, the hop is redirected, the reload commits document 2", () => {
+    const { j, popup } = withPopup("chromium");
+    const hop = popup.request(`${FRONT}/api/__guard/redirect`);
+    popup.respond(hop, 302);
+    const final = popup.request(N, { from: hop });
+    popup.respond(final, 503);
+    popup.newDocument(N, final);
+    popup.announce();
+    const reload = popup.request(N);
+    popup.respond(reload, 503);
+    popup.newDocument(N, reload);
+    expect(
+      j.requests
+        .filter((r) => r.page === 1)
+        .map((r) => [
+          r.document,
+          r.commit === null ? r.commitReason : r.commit?.document,
+        ]),
+    ).toEqual([
+      [0, expect.stringMatching(/^redirected to #\d+$/)],
+      [0, 1],
+      [1, 2],
+    ]);
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("CAP4 the opener and the popup fetch the same URL: two records, one per page by frame identity; neither is credited to the other", () => {
+    const { j, d, popup } = withPopup("chromium");
+    const mine = d.request(N, { nav: false });
+    const theirs = popup.request(N);
+    popup.respond(theirs, 503);
+    d.respond(mine, 503);
+    popup.newDocument(N, theirs);
+    popup.announce();
+    expect(
+      j.requests.slice(1).map((r) => [r.page, r.document, r.navigation]),
+    ).toEqual([
+      [0, 1, false],
+      [1, 0, true],
+    ]);
+    expect(j.requests[1]?.commit).toBeUndefined();
+    expect(j.requests[2]?.commit).toMatchObject({ document: 1 });
+  });
+  it("CAP4 a subframe's request belongs to its page (by its frame's top frame) and is never a main-frame navigation", () => {
+    const { j, d } = recorded("chromium");
+    const sub = d.subframe(`${FRONT}/frame`);
+    const r = d.request(`${FRONT}/frame`, { frame: sub });
+    d.respond(r, 200);
+    expect(j.requests.map((x) => [x.page, x.navigation])).toEqual([[0, false]]);
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("CAP6 a page error and a console error Playwright delivers BEFORE it announces the page reach only the context: recorded once, with that page and its document; after the announcement, once each through the page", () => {
+    const { j, popup } = withPopup("webkit");
+    const nav = popup.request(P);
+    popup.respond(nav, 200);
+    popup.newDocument(P, nav);
+    popup.pageerror("early page error");
+    popup.console("error", "early console error", P);
+    popup.announce();
+    popup.pageerror("later page error");
+    popup.console("warning", "later warning", P);
+    expect(j.problems.map((p) => [p.page, p.document, p.type, p.text])).toEqual(
+      [
+        [1, 1, "pageerror", "early page error"],
+        [1, 1, "error", "early console error"],
+        [1, 1, "pageerror", "later page error"],
+        [1, 1, "warning", "later warning"],
+      ],
+    );
+    expect(j.pages?.map((p) => [p.page, p.via])).toEqual([
+      [0, "page"],
+      [1, "request"],
+    ]);
+  });
+  it("CAP6 a problem of a page met first through that problem: numbered then, bound to the same record at its announcement", () => {
+    const { j } = recorded("webkit");
+    const ctx2 = recorderContext();
+    const j2: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+    };
+    let seq = 0;
+    recordContext(ctx2.context, {
+      journal: j2,
+      next: () => {
+        seq += 1;
+        return seq;
+      },
+      stamp,
+      ingest: (p) => void j2.problems.push(p),
+    });
+    const quiet = recorderPage(ctx2, { announce: false });
+    quiet.pageerror("before announcement");
+    quiet.announce();
+    quiet.pageerror("after announcement");
+    expect(j2.problems.map((p) => [p.page, p.document, p.text])).toEqual([
+      [0, 0, "before announcement"],
+      [0, 0, "after announcement"],
+    ]);
+    expect(j2.pages).toEqual([
+      { page: 0, via: "problem", firstUrl: "about:blank", announced: true },
+    ]);
+    expect(j.pages).toHaveLength(1);
+  });
+});
+
+describe("F33-1 recordContext: missing, contradictory or unidentifiable provenance fails by name; nothing is invented", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  it("CAP7 a page first met already showing a document (an activation the recorder did not see): a named failure, and no commit is invented", () => {
+    const { j, ctx } = recorded("chromium");
+    recorderPage(ctx, { url: P });
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 1: first met \(at its announcement\) already showing http:\/\/127\.0\.0\.1:9\/api\/__guard\/page: an earlier document activation was not observed/,
+      ),
+    ]);
+    expect(j.navigations).toEqual([]);
+    expect(classifyJournal(j).violations).toEqual([
+      expect.stringMatching(/^navigation provenance: page 1: first met/),
+    ]);
+  });
+  it("CAP7 a response, a failure and an end of a request the recorder never saw are named failures, never silently dropped", () => {
+    const { j, ctx } = recorded("chromium");
+    const ghost: RecordedRequest = {
+      method: () => "GET",
+      url: () => `${FRONT}/ghost`,
+      isNavigationRequest: () => false,
+      frame: () => null,
+      failure: () => ({ errorText: "net::ERR_FAILED" }),
+      redirectedFrom: () => null,
+    };
+    ctx.emit("response", { request: () => ghost, status: () => 200 });
+    ctx.emit("requestfailed", ghost);
+    ctx.emit("requestfinished", ghost);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^a response \(journal #\d+, status 200\) to a request the recorder never saw: GET http:\/\/127\.0\.0\.1:9\/ghost$/,
+      ),
+      expect.stringMatching(
+        /^a request failure \(journal #\d+\) of a request the recorder never saw: GET /,
+      ),
+      expect.stringMatching(
+        /^a request end \(journal #\d+\) of a request the recorder never saw: GET /,
+      ),
+    ]);
+    expect(j.requests).toEqual([]);
+  });
+  it("CAP7 a navigation event naming ANOTHER page's request: a named failure; the request is not committed by it", () => {
+    const { j, d, ctx } = recorded("chromium");
+    const other = recorderPage(ctx);
+    const r = d.request(P);
+    other.newDocument(P, r);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 1: navigation event #\d+ \(new-document\) names request #\d+, which is page 0's$/,
+      ),
+    ]);
+    expect(j.requests[0]?.commit).toBeUndefined();
+    expect(kinds(j)).toEqual([["new-document", 1, null]]);
+  });
+  it("CAP7 a request whose frame cannot be identified fails by name; a service worker's request (no frame) is recorded apart, unclassified, with no failure", () => {
+    const { j, ctx } = recorded("chromium");
+    const base = {
+      method: () => "GET",
+      isNavigationRequest: () => false,
+      failure: () => null,
+      redirectedFrom: () => null,
+    };
+    ctx.emit("request", {
+      ...base,
+      url: () => `${FRONT}/sw`,
+      frame: () => {
+        throw new Error(
+          "Service Worker requests do not have an associated frame.",
+        );
+      },
+      serviceWorker: () => ({}),
+    });
+    ctx.emit("request", {
+      ...base,
+      url: () => `${FRONT}/lost`,
+      frame: () => {
+        throw new Error("Frame for this navigation request is not available");
+      },
+    });
+    ctx.emit("request", {
+      ...base,
+      url: () => `${FRONT}/orphan`,
+      frame: () => ({ url: () => "" }),
+    });
+    expect(j.requests).toEqual([]);
+    expect(
+      j.unattributedRequests?.map((r) => [
+        new URL(r.url).pathname,
+        r.page,
+        r.unattributed,
+      ]),
+    ).toEqual([
+      ["/sw", -1, "a service worker's request (it has no frame)"],
+      ["/lost", -1, expect.stringMatching(/no readable client initializer/)],
+      ["/orphan", -1, "a frame without parentFrame()"],
+    ]);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^request #\d+ GET http:\/\/127\.0\.0\.1:9\/lost: its page cannot be identified/,
+      ),
+      expect.stringMatching(
+        /^request #\d+ GET http:\/\/127\.0\.0\.1:9\/orphan: its page cannot be identified \(a frame without parentFrame\(\)\)/,
+      ),
+    ]);
+  });
+  it("frameOfRequest reads the client initializer frame only for Playwright's own refusal and only under the pinned version", () => {
+    const frame = { url: () => "", parentFrame: () => null };
+    const early = {
+      method: () => "GET",
+      url: () => P,
+      isNavigationRequest: () => true,
+      frame: () => {
+        throw new Error("Frame for this navigation request is not available");
+      },
+      failure: () => null,
+      redirectedFrom: () => null,
+      _initializer: { frame: { _object: frame } },
+    };
+    expect(frameOfRequest(early)).toEqual({ ok: true, frame, early: true });
+    expect(
+      frameOfRequest(early, {
+        version: "1.62.0",
+        bundleSha256: null,
+        error: null,
+      }),
+    ).toEqual({
+      ok: false,
+      reason: expect.stringMatching(
+        /read only under playwright-core 1\.63\.0 \(installed: 1\.62\.0\)$/,
+      ),
+    });
+    expect(frameOfRequest({ ...early, frame: () => frame })).toEqual({
+      ok: true,
+      frame,
+      early: false,
+    });
+  });
+  it("the disposer detaches every page's provenance once and reports a failing detachment by name; later events are late, never recorded", () => {
+    const { j, d, ctx, recorder } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.request(N);
+    expect(d.internal.listenerCount("navigated")).toBe(1);
+    expect(popup.internal.listenerCount("navigated")).toBe(1);
+    popup.main._eventEmitter.off = () => {
+      throw new Error("detach refused");
+    };
+    expect(recorder.dispose()).toEqual([
+      expect.stringMatching(
+        /^page 1: detaching its navigation provenance failed: Error: detach refused$/,
+      ),
+    ]);
+    expect(d.internal.listenerCount("navigated")).toBe(0);
+    expect(recorder.dispose(), "single use").toEqual([]);
+    const requests = j.requests.length;
+    d.request(P);
+    popup.announce();
+    expect(j.requests).toHaveLength(requests);
+    expect(j.lateEvents).toEqual([
+      `a request (GET ${P}) delivered after the recorder was detached; not recorded`,
+      "a page announcement delivered after the recorder was detached; not recorded",
+    ]);
+  });
+});
+
+describe("F33-1 C5 the capture registry is owned with its context", () => {
+  it("C5 an open failing after its context arrived: the open's own disposal of the context detaches the capture it attached (nothing published, no seal)", async () => {
+    const ctx = recorderContext();
+    let popup: ReturnType<typeof recorderPage> | undefined;
+    let closed = 0;
+    const browser = {
+      newContext: (async () => ({
+        on: ctx.context.on,
+        addInitScript: async () => {
+          // A page of the context already met (its first request) when the open fails.
+          popup = recorderPage(ctx, { announce: false, url: "" });
+          popup.request(`${FRONT}/early`);
+          throw new Error("init script failed");
+        },
+        close: async () => {
+          closed += 1;
+        },
+        browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
+      })) as unknown as Browser["newContext"],
+    };
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(browser, info);
+    await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
+      /init script failed/,
+    );
+    const report = await lanes.settle();
+    expect(closed, "the context was closed once").toBe(1);
+    expect(report.closeErrors).toEqual([]);
+    expect(
+      popup?.internal.listenerCount("navigated"),
+      "detached by the context's own disposal",
+    ).toBe(0);
+  });
+});
+
+// ---- Revision 28 (Review 33 F33-2, family native-transport-ui-initialisation; design assessment token 98d2410c…, C4, UI1–UI3) ---------
+
+describe("F33-2 installUiStimulus: document-scoped, repeat-safe in a global it already installed (Playwright's own serialised script)", () => {
+  /**
+   * A JavaScript realm with an engine-shaped Navigator (a configurable prototype getter reading the realm's native connectivity), a
+   * window that is the global, a document object and event dispatch. `install()` evaluates the SAME serialised function Playwright's
+   * addInitScript sends; `newDocument()` replaces the global's document as a reused Window's next document does.
+   */
+  function realm() {
+    const sandbox = createContext({});
+    runInContext(
+      `
+      globalThis.window = globalThis;
+      globalThis.nativeOnline = true;
+      globalThis.events = [];
+      class Navigator { get onLine() { return globalThis.nativeOnline; } }
+      globalThis.Navigator = Navigator;
+      globalThis.navigator = new Navigator();
+      globalThis.document = { n: 1 };
+      let ids = 0;
+      globalThis.crypto = { randomUUID: () => "id-" + (++ids) };
+      globalThis.Event = class Event { constructor(type) { this.type = type; } };
+      globalThis.dispatchEvent = (e) => { globalThis.events.push(e.type); return true; };
+      `,
+      sandbox,
+    );
+    const run = (code: string) => runInContext(code, sandbox);
+    return {
+      install: () => run(`(${installUiStimulus.toString()})()`),
+      read: () => run("window.__atlasUiConnectivity.read()"),
+      set: (online: boolean) =>
+        run(`window.__atlasUiConnectivity.set(${online})`),
+      events: () => run("events.slice()") as string[],
+      getter: () =>
+        run(
+          'Object.getOwnPropertyDescriptor(Navigator.prototype, "onLine").get',
+        ),
+      newDocument: () => run("document = { n: document.n + 1 }"),
+      run,
+    };
+  }
+  it("UI1 one installation: the document's id, no stimulus, the native reading; set() drives the getter the application reads and dispatches its event", () => {
+    const r = realm();
+    r.install();
+    expect(r.read()).toEqual({
+      document: "id-1",
+      native: true,
+      ui: true,
+      stimulus: null,
+    });
+    expect(r.set(false)).toEqual({
+      document: "id-1",
+      native: true,
+      ui: false,
+      stimulus: false,
+    });
+    expect(r.run("navigator.onLine")).toBe(false);
+    r.run("nativeOnline = false");
+    expect(r.set(true)).toMatchObject({ native: false, ui: true });
+    expect(r.events()).toEqual(["offline", "online"]);
+    expect(
+      r.run('Object.getOwnPropertyDescriptor(window, "__atlasUiConnectivity")'),
+    ).toMatchObject({
+      configurable: false,
+      writable: false,
+    });
+  });
+  it("UI2 a repeated installation for the SAME document: no error, its id and stimulus kept, no getter wrapped over the lane's own, no extra event", () => {
+    const r = realm();
+    r.install();
+    r.set(false);
+    const getter = r.getter();
+    expect(() => r.install()).not.toThrow();
+    expect(r.getter(), "the lane's getter is not wrapped again").toBe(getter);
+    expect(r.read()).toEqual({
+      document: "id-1",
+      native: true,
+      ui: false,
+      stimulus: false,
+    });
+    r.run("nativeOnline = false");
+    expect(r.set(true)).toMatchObject({ native: false, ui: true });
+    expect(r.set(false)).toMatchObject({ native: false, ui: false });
+    expect(r.events()).toEqual(["offline", "online", "offline"]);
+  });
+  it("UI2 a reused global's NEW document (WebKit's popup: the script runs again): a new id and no stimulus; the native reading stays genuine", () => {
+    const r = realm();
+    r.install();
+    r.set(false);
+    r.newDocument();
+    expect(() => r.install()).not.toThrow();
+    expect(r.read()).toEqual({
+      document: "id-2",
+      native: true,
+      ui: true,
+      stimulus: null,
+    });
+    r.run("nativeOnline = false");
+    expect(r.read()).toMatchObject({
+      native: false,
+      ui: false,
+      stimulus: null,
+    });
+  });
+  it("UI2 a reused global's new document WITHOUT another run (Chromium and Firefox run the script once): still a new id and no stimulus", () => {
+    const r = realm();
+    r.install();
+    r.set(false);
+    r.newDocument();
+    expect(
+      r.run("navigator.onLine"),
+      "the old document's stimulus does not outlive it",
+    ).toBe(true);
+    expect(r.read()).toEqual({
+      document: "id-2",
+      native: true,
+      ui: true,
+      stimulus: null,
+    });
+  });
+  it("UI3 a slot that is not the lane's installation: a named error, and navigator.onLine is left as the engine's", () => {
+    const r = realm();
+    const native = r.getter();
+    r.run(
+      'Object.defineProperty(window, "__atlasUiConnectivity", { value: { read() {} } })',
+    );
+    expect(() => r.install()).toThrow(
+      /window\.__atlasUiConnectivity exists but is not the lane's UI stimulus installation over navigator\.onLine/,
+    );
+    expect(r.getter()).toBe(native);
+  });
+  it("UI3 a branded installation of another version or shape (a stale or foreign installer): a named error, never adopted", () => {
+    for (const shape of ["version: 2, adopt() {}", "version: 1"]) {
+      const r = realm();
+      const native = r.getter();
+      r.run(
+        `Object.defineProperty(window, "__atlasUiConnectivity", { value: { [Symbol.for("atlas.native-transport.ui-connectivity")]: { ${shape}, getter: Object.getOwnPropertyDescriptor(Navigator.prototype, "onLine").get } } })`,
+      );
+      expect(() => r.install(), shape).toThrow(
+        /window\.__atlasUiConnectivity exists but is not the lane's UI stimulus installation/,
+      );
+      expect(r.getter()).toBe(native);
+    }
+  });
+  it("UI3 the lane's slot whose getter was replaced since: a named error, never a getter wrapped over a stranger's", () => {
+    const r = realm();
+    r.install();
+    r.run(
+      'Object.defineProperty(Navigator.prototype, "onLine", { configurable: true, get() { return 42; } })',
+    );
+    expect(() => r.install()).toThrow(
+      /is not the lane's UI stimulus installation/,
+    );
+    expect(r.run("navigator.onLine")).toBe(42);
+  });
+  it("UI3 the lane's getter without its slot (a partial installation): a named error, never wrapped again", () => {
+    const r = realm();
+    r.install();
+    const other = realm();
+    other.run(
+      `Object.defineProperty(Navigator.prototype, "onLine", { configurable: true, get: (${(
+        () => {
+          const g = () => true;
+          Object.defineProperty(
+            g,
+            Symbol.for("atlas.native-transport.ui-connectivity"),
+            { value: true },
+          );
+          return g;
+        }
+      ).toString()})() })`,
+    );
+    expect(() => other.install()).toThrow(
+      /already has the lane's getter but window\.__atlasUiConnectivity is missing/,
+    );
+  });
+  it("UI3 an engine without a configurable getter: a named error before anything is defined", () => {
+    const r = realm();
+    r.run(
+      'Object.defineProperty(Navigator.prototype, "onLine", { configurable: false, get() { return true; } })',
+    );
+    expect(() => r.install()).toThrow(
+      /navigator\.onLine has no configurable getter/,
+    );
+    expect(
+      r.run('Object.getOwnPropertyDescriptor(window, "__atlasUiConnectivity")'),
+    ).toBeUndefined();
+  });
+  it("UI1 separate globals (opener and child, two contexts) share no stimulus", () => {
+    const opener = realm();
+    const child = realm();
+    opener.install();
+    child.install();
+    child.set(false);
+    expect(opener.read()).toMatchObject({ ui: true, stimulus: null });
+    expect(child.read()).toMatchObject({ ui: false, stimulus: false });
   });
 });

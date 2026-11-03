@@ -374,6 +374,25 @@ or an event naming a request the lane did not record (or had already ended) fail
 it seals the journal. Qualified on macOS in Chromium, Firefox and WebKit: stops by the page's `window.stop()` in all three engines and by
 the browser's Stop in Chromium, history while a navigation is still pending, same-URL supersession and two pages.
 
+Revision 28 records from the lane's context, not from each page. A popup that a page opens itself (`window.open`) sends its first request,
+receives the response and commits its first document before Playwright announces the page. Revision 27 listened only from that
+announcement, so the popup's first document went unrecorded and a status declared for it matched nothing. The lane now attaches its
+recorder as soon as the context exists. It attributes every request to its page by the identity of the request's top frame, numbers a page
+when it first meets that frame, and listens for that frame's navigation events from that moment. For a popup's first request this reads
+the request's client frame, which Playwright's public `frame()` does not yet expose (pinned to Playwright 1.63.0, like the navigation
+event). The later announcement joins the same record. These fail the case by name, and nothing is invented for them:
+- a page first met already showing a document;
+- a request whose frame cannot be identified;
+- a response, failure or end of a request the lane never saw;
+- a navigation event naming another page's request.
+
+A service worker's request has no frame and is recorded apart, never credited to a page. A page error or console message that arrives
+before its page is announced is still recorded with that page. Every engine reuses a popup's initial blank window for its first
+same-origin document, and WebKit runs the lane's start-up script in both. The UI connectivity stimulus now recognises its own earlier
+installation instead of failing, and keeps its value per document, so a new document starts with a new id and no stimulus. A conflicting
+installation fails visibly. Qualified on macOS in all three engines: Review 33's popup with a declared 503 (immediate and held at the
+origin), a redirect and reload, a named window reused twice, an opener closed first, an undeclared status, and a plain popup's UI state.
+
 The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
 origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
 once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins
