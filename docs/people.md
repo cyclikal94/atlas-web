@@ -558,7 +558,10 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
   is the view's failure with Try again. The page says "Checked at {time}" with Refresh. The count in People 01's header is the latest
   successful read ("99+" above 99; nothing while unknown, offline or failed). Sent: 50 a page in the server's id order, Next/Previous over a
   cursor stack, "Nothing on this page — there are more to check" for an empty page with a cursor, "No sent requests yet" only for a first
-  page that is also the last; each state verbatim; Cancel only on pending; no device caveat (§4c, Q16 landed).
+  page that is also the last; each state verbatim; Cancel only on pending; no device caveat (§4c, Q16 landed). Only the page SHOWN is
+  kept (review 2's design assessment, DA-N1; Q9 allows three): Next or Previous lets go of it (`releaseSummary`), and Previous reads the
+  earlier page again by its kept cursor (the cursors, not the pages, survive a remount). A retained uncertain cancel is kept apart from
+  the page and is offered again when its row is shown again.
 - **D-11b-5 sender.** From the B5 snapshot's household members, then the summaries this page read; otherwise "Someone outside your
   households" with "Atlas can't show who sent this request. Only accept it if you were expecting it." An account id is never shown.
 - **D-11b-6 comparison.** The kept person's column first. A field's value only from a synced row with the same id at the preview's
@@ -584,15 +587,19 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
   into `not_found`) and `capacity` (a people command's `503 slice_capacity`, `classifyPeopleAnswer(…, { capacity: true })`).
 - **D-11b-10/11 New request.** Ask to link: a picker over `GET /people/summaries?scope=not_linked` (owner, not archived), 100 a page, at most
   three pages KEPT (Q9) and every later person reachable (revision 1, R2): "Show more" reads the window's next page while it has fewer
-  than three, "Show the next people" starts a new window where it ended (the earlier one is no longer kept) and "Show earlier people"
-  returns; the name filter applies to the window shown and says so while the window is not the whole list, and "none can be offered" or
+  than three, "Show the next people" starts a new window where it ended and "Show earlier people" returns (it reads that window
+  again); the name filter applies to the window shown and says so while the window is not the whole list, and "none can be offered" or
   "no one matches" is claimed only for a whole list; the recipient from the shared `DirectoryLookup` as a view; at the
   press the person's linkage must be known unlinked, its version is `expected_version`, and the recipient is checked again with the exact
   lookup (the shared sharing client's `lookup`, not a second people client): only exactly one entry with the same id sends. Ask to merge:
   "One of your people" (owner) and "The same person" (any visible, not the first); "Compare" opens the sender's dialog. The two forms keep
   their values while the other is shown (PRODUCT-DECISIONS item 2); a success clears only the input it sent.
-- **Pickers.** Each picker's read is keyed by its purpose and window (`picker:<scope>:<purpose>:<start>:<pages>`): Ask to merge's two
-  pickers read the same scope but keep different people (found by I-PPL19 against the released backend; MU-4135).
+- **Pickers.** Each picker's read is keyed by its purpose, its mounted picker and its window
+  (`picker:<scope>:<purpose>:<owner>:<start>:<pages>`): Ask to merge's two pickers read the same scope but keep different people (found by
+  I-PPL19 against the released backend; MU-4135). The picker OWNS its read (review 2, R2; `useOwnedSummary`): only the current window's
+  walk is kept, at most three pages of rows (every row read, kept or not), and a step to another window, Show more, a change of purpose
+  or closing the picker releases the earlier walk; a page of it still on its way applies nothing and reads no further. `useSummary` lets go
+  of a previous answer once its view shows another key.
 - **An answer whose request is no longer listed** (answered elsewhere, withdrawn, or an uncertain answer that committed) stays said above
   the list with its reference until closed; an UNCERTAIN one also offers Try again, which resends it exactly (found by I-PPL23). The list
   above the requests is built from the reports AND the retained attempts, and Close is offered only once nothing is left to resolve, so
@@ -608,7 +615,15 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
 - **A read refused `403` is remembered** for the page (revision 1, N1; D-12a-13): an ordinary `403` re-evaluates the session, which
   remounts the protected tree and reads the summaries again, so a preview that asked again by itself did so without end (found by
   I-PPL21 against the released backend: about 4,500 `POST /people/merge-preview` in 30 seconds for a pair the reader owns neither of).
-  It is asked again only by the refusal's Reload; the recipient's review reads the lists again only for a `404` or `410`.
+  It is asked again only by the refusal's Reload (or a failed list's Try again); the recipient's review reads the lists again only for a
+  `404` or `410`. The refusal is kept in `memory.requestRefusals` (display suppression for this page and identity, never a permission).
+  **Only the key's newest answer counts** (review 2, R7): each dispatch of a key is numbered (`memory.requestReads`); an answer is obsolete
+  once a later dispatch of the key has answered or the person asked again after it was sent, and an obsolete answer has no effect, so a
+  late `403` never refuses a newer comparison or list. A newer definite answer ends a refusal an earlier dispatch remembered, and a read
+  that finds a refusal while a newer dispatch is on its way waits for that answer. Answers that are not the server's (uncertain, not sent,
+  offline, closed) change nothing. The owner is the newest answer rather than the summaries' generation because the `403` itself
+  re-evaluates the session (and so invalidates every summary) BEFORE it reaches the read (`ordinaryCall`): a generation-owned refusal
+  could be superseded by its own consequence, every time (the storm-ordering test; MU-4152). The value shown still obeys the generation.
 - **D-11b-12 aliases.** An archived person whose value names `canonical_person_id` says "Merged into {name}" (a link when this device
   holds that person, else "another person"); WEB-11a's Archive/Restore is disabled for it with "This person was merged into another;
   restore isn't available." (the backend redirects `archive` of an alias to its canonical person).
@@ -654,7 +669,8 @@ Collected for WEB-15's sign-off; none is approved by being listed. Strings marke
 | "Note (optional)" removed from Ask to link (the contract has no note) | `/people/requests` | E-R8 |
 | Pickers ("Which of your people", "One of your people", "The same person", "Filter by name", "Show more", "Show the next people", "Show earlier people", the partial-window and partial-filter sentences), "Choose", "Compare"; the Ask to merge intro sentence | `/people/requests` | E-R8 |
 | "Try again sends your earlier request to {username}, as it was."; "Your earlier request to {username} to link {person}." | `/people/requests` | requests-screen R1 |
-| A refused comparison's "Reload" | `/people/$id/duplicates/$other`, `/people/requests/$id` | E-R17 |
+| A refused comparison's "Reload" | `/people/$id/duplicates/$other`, `/people/requests/$id` | E-R17, E-R18, E-R19 |
+| Sent's Previous and the picker's "Show earlier people" read the earlier page or window again ("Checking for requests…" meanwhile) | `/people/requests` | `requests-screen.test.tsx` (review 2) |
 | Both-linked banner; fixed linked name with its sentence; "Not on this device yet"; "Loading the comparison…"; "Load the comparison first." | `/people/$id/duplicates/$other` | E-R9, E-R11 |
 | Merged-alias note "Merged into {name}" and disabled Archive/Restore with its reason | `/people/$alias` | E-R10 |
 | Outcome copy of D-11b-9 (capacity, out of date, already answered, couldn't confirm, answer uncertain first, account no longer exists) | all | E-R3, E-R5, E-R7, E-R8, E-R13 |

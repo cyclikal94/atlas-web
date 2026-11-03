@@ -7,6 +7,7 @@ import { pressTab, runAxe } from "./helpers";
 import {
   API,
   atlas,
+  bootAt,
   connectivity,
   fieldP,
   json,
@@ -30,7 +31,8 @@ import {
  * request_merge and a merged alias; E-R11 linkage pre-checks; E-R12 the detail's "Ask to link…"; E-R13 an uncertain merge across a 403
  * remount, and Decline after an uncertain Accept; E-R15 viewports, themes and axe (browser emulation, not devices); E-R15b the comparison's
  * internal geometry with long supported values (R5 of review 1); E-R16 keyboard only; E-R17 a refused (403) comparison not asked again by itself through
- * the production session's re-evaluation and remount (N1 of revision 1).
+ * the production session's re-evaluation and remount (N1 of revision 1); E-R18 a superseded (late) 403 never refuses a newer comparison
+ * (R7 of review 2); E-R19 two tabs of one account, the 403 remembered in its own tab only (S10 of review 2's design assessment).
  * E-R14 (review 1, R6): the incoming read held for the displayed account across an ACTUAL account switch (another tab settles another
  * account through the production store and posts the auth hint, as `settleElsewhere` does for E-T10), with the new account's own read
  * shown and the old answer, delivered late, never shown; its control releases the held read with no switch. E-R1b (R3): People 01's
@@ -1130,6 +1132,133 @@ test.describe("E-R17: a refused (403) comparison is not asked again by itself (N
         .map((e) => (e as PerformanceEntry).name)
         .filter((name) => name.endsWith("/people-commands")),
     ).toEqual([]);
+  });
+});
+
+/**
+ * Settled, then quiet: the requests in flight settle (none for a second, within 15 s), and then NOTHING is asked over the following three
+ * seconds (the observation window is the requirement; nothing is shortened). Returns how many were asked.
+ */
+async function settledThenQuiet(page: Page, asked: unknown[], what: string) {
+  await expect
+    .poll(
+      async () => {
+        const at = asked.length;
+        await page.waitForTimeout(1_000);
+        return asked.length - at;
+      },
+      { timeout: 15_000, message: `${what}: the reads in flight settle` },
+    )
+    .toBe(0);
+  const settledAt = asked.length;
+  await page.waitForTimeout(3_000);
+  expect(asked.length, `${what}: asked again by itself`).toBe(settledAt);
+  return settledAt;
+}
+/** A production freshness signal: the page becoming visible again invalidates every summary (`useSummaryFreshness`). */
+const becomesVisible = (page: Page) =>
+  page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+
+test.describe("E-R18: a superseded 403 never refuses a newer comparison (R7 of review 2)", () => {
+  test("the first comparison held; the page becomes visible (a newer read succeeds); the first answers 403 late: its session re-evaluation and remount do not bring the refusal back, and the next read is asked and shown", async ({
+    context,
+  }) => {
+    const world = mergeWorld();
+    const { page } = await setup(
+      context,
+      "/people",
+      world.resources,
+      world.options,
+    );
+    const asked: number[] = [];
+    let releaseFirst: () => void = () => {};
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    await context.route(`**${API}/people/merge-preview`, async (route) => {
+      asked.push(Date.now());
+      if (asked.length === 1) {
+        await first;
+        // An ordinary Atlas 403, as the released backend answers a pair the reader owns neither of.
+        return route.fulfill(json(403, atlas("forbidden")));
+      }
+      return route.fallback();
+    });
+    await navigateInApp(page, COMPARE);
+    const dialog = page.getByRole("dialog");
+    await expect.poll(() => asked.length).toBe(1);
+    await becomesVisible(page);
+    await expect.poll(() => asked.length).toBeGreaterThanOrEqual(2);
+    await expect(dialog.locator("[data-merge-comparison]")).toBeVisible();
+    releaseFirst();
+    const after = await settledThenQuiet(page, asked, "the late 403");
+    await expect(dialog.locator("[data-merge-comparison]")).toBeVisible();
+    await expect(dialog.getByText(copy.PREVIEW_FORBIDDEN)).toHaveCount(0);
+    // Another freshness signal reads again (nothing remembered refuses it), and the comparison stays.
+    await becomesVisible(page);
+    await expect.poll(() => asked.length).toBeGreaterThan(after);
+    await settledThenQuiet(page, asked, "the next read");
+    await expect(dialog.locator("[data-merge-comparison]")).toBeVisible();
+    await expect(dialog.getByText(copy.PREVIEW_FORBIDDEN)).toHaveCount(0);
+  });
+});
+
+test.describe("E-R19: two tabs of one account (S10 of review 2's design assessment)", () => {
+  test("one tab's 403 is remembered in that tab only: the other tab's comparison is read and shown; both settle; Reload asks again in its own tab", async ({
+    context,
+  }) => {
+    const world = mergeWorld();
+    const { page: refused } = await setup(
+      context,
+      "/people",
+      world.resources,
+      world.options,
+    );
+    const other = await bootAt(context, "/people");
+    const askedRefused: number[] = [];
+    const askedOther: number[] = [];
+    await refused.route(`**${API}/people/merge-preview`, (route) => {
+      askedRefused.push(Date.now());
+      return route.fulfill(json(403, atlas("forbidden")));
+    });
+    await other.route(`**${API}/people/merge-preview`, (route) => {
+      askedOther.push(Date.now());
+      return route.fallback();
+    });
+    await navigateInApp(other, COMPARE);
+    await expect(
+      other.getByRole("dialog").locator("[data-merge-comparison]"),
+    ).toBeVisible();
+    await navigateInApp(refused, COMPARE);
+    await expect(
+      refused.getByRole("dialog").getByText(copy.PREVIEW_FORBIDDEN),
+    ).toBeVisible();
+    // The 403 makes the refused tab's session evaluate again, and the other tab follows the session's hint: both settle, then are quiet.
+    const firstRefused = await settledThenQuiet(
+      refused,
+      askedRefused,
+      "the refused tab",
+    );
+    await settledThenQuiet(other, askedOther, "the other tab");
+    await expect(
+      other.getByRole("dialog").locator("[data-merge-comparison]"),
+    ).toBeVisible();
+    await expect(
+      other.getByRole("dialog").getByText(copy.PREVIEW_FORBIDDEN),
+    ).toHaveCount(0);
+    await expect(
+      refused.getByRole("dialog").getByText(copy.PREVIEW_FORBIDDEN),
+    ).toBeVisible();
+    // The refused tab's Reload asks in that tab, which is refused again and settles.
+    await refused
+      .getByRole("dialog")
+      .locator('[data-people-action="preview-again"]')
+      .click();
+    await expect.poll(() => askedRefused.length).toBeGreaterThan(firstRefused);
+    await settledThenQuiet(refused, askedRefused, "after Reload");
+    await expect(
+      other.getByRole("dialog").locator("[data-merge-comparison]"),
+    ).toBeVisible();
   });
 });
 

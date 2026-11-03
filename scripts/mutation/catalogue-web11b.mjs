@@ -399,10 +399,20 @@ export const UNIT_WEB11B = [
     file: "src/features/people/requests/NewRequest.tsx",
     tests: [SCREEN],
     expect: /'The same person' then offers anyone visible but the first/,
+    // Re-anchored in revision 2: the picker's read is now OWNED (released when it closes), which by itself keeps the two pickers apart; the
+    // same defect needs both its key without the purpose AND an unowned (shared, never released) read, as before revision 2.
     patch: (t) =>
       sub(
-        t,
-        '    `picker:${scope}:${purpose}:${start ?? ""}:${pages}`,\n',
+        sub(
+          sub(
+            t,
+            'import { useOwnedSummary, type WalkedPages, walkPages } from "../summaries";\n',
+            'import { useOwnedSummary, useSummary, type WalkedPages, walkPages } from "../summaries";\n',
+          ),
+          "  const view = useOwnedSummary<WalkedPages<PersonSummary>>(\n",
+          "  const view = useSummary<WalkedPages<PersonSummary>>(\n",
+        ),
+        '    `picker:${scope}:${purpose}:${owner}:${start ?? ""}:${pages}`,\n',
         '    `picker:${scope}:${start ?? ""}:${pages}`,\n',
       ),
   },
@@ -536,8 +546,9 @@ export const UNIT_WEB11B = [
     patch: (t) =>
       sub(
         t,
-        '      if (!result.ok && result.kind === "forbidden")\n        memory.drafts.set(refusedKey(key), result);\n',
-        "",
+        // Re-anchored in revision 2 (the refusal now has its own store and owner): the same defect, no 403 is remembered.
+        '  if (!result.ok && result.kind === "forbidden")\n    memory.requestRefusals.set(key, {\n      refusal: { ...result, kind: "forbidden" },\n      dispatch,\n    });\n',
+        '  if (!result.ok && result.kind === "forbidden") {\n  }\n',
       ),
   },
   {
@@ -553,6 +564,99 @@ export const UNIT_WEB11B = [
         '    !drawn.value.ok &&\n    (drawn.value.refusal.kind === "not_found" ||\n      drawn.value.refusal.kind === "expired")\n      ? drawn.value.refusal.kind\n',
         "    !drawn.value.ok\n      ? drawn.value.refusal.kind\n",
       ),
+  },
+  {
+    id: "MU-4151",
+    title:
+      "WEB-11b R7: an OBSOLETE answer counts (a 403 released after a newer dispatch answered is remembered and refuses the next read)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [DIALOG, SCREEN],
+    expect: /S1 sender|S1 recipient|incoming S1|Sent S1/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (ledger === undefined || dispatch <= ledger.answered) return;\n",
+        "  if (ledger === undefined) return;\n",
+      ),
+  },
+  {
+    id: "MU-4152",
+    title:
+      "WEB-11b R7/N1: a 403 is remembered only if no invalidation came since its dispatch (its own re-evaluation supersedes it: the storm returns)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [DIALOG],
+    expect: /storm ordering/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "  const dispatch = ledger.issued;\n",
+          "  const dispatch = ledger.issued;\n  const generation = memory.summaryGeneration;\n",
+        ),
+        "    noteAnswer(memory, key, dispatch, result);\n",
+        "    if (memory.summaryGeneration === generation)\n      noteAnswer(memory, key, dispatch, result);\n",
+      ),
+  },
+  {
+    id: "MU-4153",
+    title:
+      "WEB-11b R7: an explicit Try again does not retire the dispatches before it (a 403 sent before it is remembered afterwards)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [SCREEN],
+    expect: /incoming S4/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (ledger !== undefined) ledger.answered = ledger.issued;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-4154",
+    title:
+      "WEB-11b R7: a remembered refusal is shown while a NEWER dispatch of its key is still on its way",
+    file: "src/features/people/requests/reads.ts",
+    tests: [DIALOG],
+    expect: /S2 sender/,
+    patch: (t) =>
+      sub(
+        t,
+        "      latest.dispatch > refused.dispatch\n",
+        "      latest.dispatch < 0\n",
+      ),
+  },
+  {
+    id: "MU-4155",
+    title:
+      "WEB-11b R7: a newer success does not end the refusal an earlier dispatch remembered (it refuses the next read)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [DIALOG],
+    expect: /S2 sender/,
+    patch: (t) => sub(t, "  else memory.requestRefusals.delete(key);\n", ""),
+  },
+  {
+    id: "MU-4156",
+    title:
+      "WEB-11b R2: an owned summary is never released (every window, Show more and closed picker keeps its walk)",
+    file: "src/features/people/summaries.tsx",
+    tests: [SCREEN],
+    expect: /R2 \(review 2\)/,
+    patch: (t) =>
+      sub(
+        t,
+        "    return () => releaseSummary(memory, key);\n",
+        "    return;\n",
+      ),
+  },
+  {
+    id: "MU-4157",
+    title:
+      "WEB-11b DA-N1: Sent keeps every page visited (moving to another page does not let go of the one shown)",
+    file: "src/features/people/requests/RequestsScreen.tsx",
+    tests: [SCREEN],
+    expect: /seven pages forward|S9: an uncertain cancel/,
+    patch: (t) =>
+      sub(t, "    releaseSummary(env.memory, sentKey(after));\n", ""),
   },
 ];
 
@@ -679,8 +783,24 @@ export const ENGINE_WEB11B = [
     patch: (t) =>
       sub(
         t,
-        '      if (!result.ok && result.kind === "forbidden")\n        memory.drafts.set(refusedKey(key), result);\n',
-        "",
+        // Re-anchored in revision 2 (the refusal now has its own store and owner): the same defect, no 403 is remembered.
+        '  if (!result.ok && result.kind === "forbidden")\n    memory.requestRefusals.set(key, {\n      refusal: { ...result, kind: "forbidden" },\n      dispatch,\n    });\n',
+        '  if (!result.ok && result.kind === "forbidden") {\n  }\n',
+      ),
+  },
+  {
+    id: "MU-4158",
+    title:
+      "WEB-11b R7: (REAL ENGINE) an OBSOLETE 403 counts: released after a newer comparison was read, it is remembered and refuses the next read",
+    file: "src/features/people/requests/reads.ts",
+    spec: SPEC,
+    grep: "E-R18:",
+    expect: /E-R18: /,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (ledger === undefined || dispatch <= ledger.answered) return;\n",
+        "  if (ledger === undefined) return;\n",
       ),
   },
 ];

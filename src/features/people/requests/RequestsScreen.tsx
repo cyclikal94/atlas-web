@@ -18,6 +18,7 @@ import {
 } from "../model/requests";
 import { Avatar, Banner } from "../parts";
 import { readLinkage } from "../reads";
+import { releaseSummary } from "../summaries";
 import { timeOf } from "../summary-notes";
 import {
   blockedReason,
@@ -538,7 +539,10 @@ function Sent({ env }: { env: PeopleEnv }) {
     | (string | null)[]
     | undefined) ?? [null];
   const after = cursors.at(-1) ?? null;
+  // DA-N1 of review 2: the history keeps ONE page (Q9 allows three): moving to another page lets go of this one (a page read before is
+  // read again; only the cursors are kept, across a remount too).
   const setCursors = (next: (string | null)[]) => {
+    releaseSummary(env.memory, sentKey(after));
     env.memory.drafts.set(CURSORS_KEY, next);
     env.memory.touch();
   };

@@ -611,6 +611,241 @@ describe("N1 (revision 1): a refused (403) preview is remembered, never asked ag
   });
 });
 
+describe("R7 (review 2): only the key's newest answer remembers a 403 or ends one; a superseded 403 has no effect", () => {
+  const asked = (w: ReturnType<typeof peopleWorld>, op: string) =>
+    w.api.calls.filter((call) => call.op === op).length;
+  const FORBIDDEN = { ok: false, kind: "forbidden", requestId: "old-403" };
+  /** An answer held until the test releases it (the read is ISSUED when the fake is called, and recorded in `calls`). */
+  function held<T>() {
+    let release: (value: T) => void = () => {};
+    const answer = () =>
+      new Promise<T>((resolve) => {
+        release = resolve;
+      });
+    return { answer, release: (value: T) => release(value) };
+  }
+  const SENDER_KEY = `merge:${MOHAMMED}:${MOPERSON}`;
+  /** The fake server's successful comparison, made without recording a read (the test's own lookup, not the screen's). */
+  const success = async (w: ReturnType<typeof peopleWorld>) => {
+    const answer = await w.api.previewMerge(MOHAMMED, MOPERSON);
+    w.api.calls.pop();
+    return answer;
+  };
+  const comparison = () =>
+    document.querySelector("[data-merge-comparison]") as HTMLElement | null;
+  const refusalShown = () =>
+    screen.queryAllByText(copy.PREVIEW_FORBIDDEN).length > 0;
+
+  test("S1 sender: A held; an invalidation; B succeeds; A released 403; another invalidation: C reaches the server and the comparison stays", async () => {
+    const w = world();
+    const a = held<unknown>();
+    w.api.next.mergePreview.push(a.answer as never);
+    await w.mount(COMPARE);
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(1));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(2));
+    await waitFor(() => expect(comparison()).not.toBeNull());
+    await act(async () => a.release(FORBIDDEN));
+    expect(comparison(), "A's visible result is discarded").not.toBeNull();
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(3));
+    await waitFor(() =>
+      expect(w.people.memory.summaries.get(SENDER_KEY)?.state.kind).toBe(
+        "ready",
+      ),
+    );
+    expect(comparison(), "C succeeded and is shown").not.toBeNull();
+    expect(refusalShown()).toBe(false);
+    expect(
+      w.people.memory.requestRefusals.has(SENDER_KEY),
+      "the superseded 403 is not remembered",
+    ).toBe(false);
+  });
+
+  test("S2 sender: A released 403 while the newer B is held (and a read meanwhile waits for B, sending nothing); B succeeds: no refusal is shown or kept", async () => {
+    const w = world();
+    const a = held<unknown>();
+    const b = held<unknown>();
+    w.api.next.mergePreview.push(a.answer as never, b.answer as never);
+    await w.mount(COMPARE);
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(1));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(2));
+    await act(async () => a.release(FORBIDDEN));
+    // Another invalidation while B is on its way: the read waits for B (it is newer than A's answer) and shows no refusal meanwhile.
+    act(() => w.people.memory.invalidateSummaries());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(asked(w, "previewMerge")).toBe(2);
+    expect(refusalShown(), "no refusal while a newer answer is due").toBe(
+      false,
+    );
+    const ok = await success(w);
+    await act(async () => b.release(ok));
+    await waitFor(() => expect(comparison()).not.toBeNull());
+    expect(refusalShown()).toBe(false);
+    // The read that waited is of a LATER generation than B's dispatch: once B ended the refusal, it asks afresh (C).
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(3));
+    // B's success ENDED the refusal A's late answer had remembered: the next invalidation asks again and shows the comparison.
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(4));
+    await waitFor(() =>
+      expect(w.people.memory.summaries.get(SENDER_KEY)?.state.kind).toBe(
+        "ready",
+      ),
+    );
+    expect(comparison()).not.toBeNull();
+    expect(refusalShown()).toBe(false);
+    expect(w.people.memory.requestRefusals.has(SENDER_KEY)).toBe(false);
+  });
+
+  test("S2 reversed: B's current 403 is remembered; A's older success, released after it, changes nothing", async () => {
+    const w = world();
+    const a = held<unknown>();
+    w.api.next.mergePreview.push(a.answer as never, FORBIDDEN as never);
+    await w.mount(COMPARE);
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(1));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(refusalShown()).toBe(true));
+    const ok = await success(w);
+    const issued = asked(w, "previewMerge");
+    await act(async () => a.release(ok));
+    expect(w.people.memory.requestRefusals.has(SENDER_KEY)).toBe(true);
+    act(() => w.people.memory.invalidateSummaries());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(refusalShown()).toBe(true);
+    expect(asked(w, "previewMerge"), "not asked again by itself").toBe(issued);
+  });
+
+  for (const late of ["before", "after"] as const)
+    test(`S4: an explicit Reload cannot be undone by an older callback (A's 403 released ${late} C's success)`, async () => {
+      const w = world();
+      const a = held<unknown>();
+      const c = held<unknown>();
+      w.api.next.mergePreview.push(
+        a.answer as never,
+        FORBIDDEN as never,
+        c.answer as never,
+      );
+      await w.mount(COMPARE);
+      await waitFor(() => expect(asked(w, "previewMerge")).toBe(1));
+      act(() => w.people.memory.invalidateSummaries());
+      await waitFor(() => expect(refusalShown()).toBe(true));
+      fireEvent.click(
+        document.querySelector(
+          '[data-people-action="preview-again"]',
+        ) as HTMLElement,
+      );
+      await waitFor(() => expect(asked(w, "previewMerge")).toBe(3));
+      const ok = await success(w);
+      if (late === "before") await act(async () => a.release(FORBIDDEN));
+      await act(async () => c.release(ok));
+      if (late === "after") await act(async () => a.release(FORBIDDEN));
+      await waitFor(() => expect(comparison()).not.toBeNull());
+      act(() => w.people.memory.invalidateSummaries());
+      await waitFor(() =>
+        expect(w.people.memory.summaries.get(SENDER_KEY)?.state.kind).toBe(
+          "ready",
+        ),
+      );
+      expect(comparison()).not.toBeNull();
+      expect(w.people.memory.requestRefusals.has(SENDER_KEY)).toBe(false);
+    });
+
+  test("storm ordering (N1 kept): each 403's own consequence invalidates and the next read is issued BEFORE that 403 reaches the dialog; the reads still settle", async () => {
+    const w = world();
+    /**
+     * The production order on every hop (`ordinaryCall`): the 403 arrives after a round trip; the session evaluates again on it (the tree
+     * remounts, every summary is invalidated) BEFORE the answer is released to the read; the next read is issued; only then does the earlier
+     * read go on. Each answer here takes a 5 ms round trip, invalidates, and waits until the NEXT read is issued (or 30 ms pass with none)
+     * before it answers 403. A remembered refusal that had to be of the current generation is never kept under this order (each read is
+     * superseded by its own consequence): bounded at 25 here, so such a defect fails the count, not the test's time.
+     */
+    let invalidations = 0;
+    const answer = async () => {
+      const mine = asked(w, "previewMerge");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (invalidations < 25) {
+        invalidations += 1;
+        w.people.memory.invalidateSummaries();
+        const until = Date.now() + 30;
+        while (asked(w, "previewMerge") === mine && Date.now() < until)
+          await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      return FORBIDDEN;
+    };
+    for (let n = 0; n < 30; n += 1)
+      w.api.next.mergePreview.push(answer as never);
+    await w.mount(COMPARE);
+    await waitFor(() => expect(refusalShown()).toBe(true), { timeout: 3_000 });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const settled = asked(w, "previewMerge");
+    expect(
+      settled,
+      "settled: the first 403 and at most the one read its own consequence issued",
+    ).toBeLessThanOrEqual(2);
+    expect(w.people.memory.requestRefusals.has(SENDER_KEY)).toBe(true);
+    act(() => w.people.memory.invalidateSummaries());
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(asked(w, "previewMerge"), "then quiet").toBe(settled);
+    expect(refusalShown()).toBe(true);
+  });
+
+  test("S1 recipient: a superseded 403 of the review does not refuse the newer review", async () => {
+    const w = world();
+    w.api.requests.incoming = [
+      {
+        id: R,
+        sender_id: MO,
+        expires_at: Math.floor(Date.now() / 1000) + 86_400,
+        proposal: {
+          kind: "merge",
+          source_id: MOHAMMED,
+          target_id: MOPERSON,
+          name: "Mo",
+        },
+      },
+    ];
+    // Every later read answers this review (the fake server's fallback); A is held.
+    w.api.requests.previews.set(R, {
+      token: T1,
+      source: null,
+      target: {
+        id: MOPERSON,
+        kind: "person",
+        parent_id: null,
+        label: "Mo",
+        value: null,
+        version: 3,
+        can_edit: true,
+        archived: false,
+        policy_version: 2,
+      },
+      fields: [
+        { id: PHONE_T, parent_id: MOPERSON, label: "phone", version: 3 },
+      ],
+      requires_approval: true,
+      combines_identity_audiences: true,
+      freezes_field_policies: true,
+      stale: false,
+    });
+    const a = held<unknown>();
+    w.api.next.recipientPreview.push(a.answer as never);
+    await w.mount(`/people/requests/${R}`);
+    await waitFor(() => expect(asked(w, "readRecipientPreview")).toBe(1));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(asked(w, "readRecipientPreview")).toBe(2));
+    await waitFor(() => expect(comparison()).not.toBeNull());
+    await act(async () => a.release(FORBIDDEN));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(asked(w, "readRecipientPreview")).toBe(3));
+    await waitFor(() => expect(comparison()).not.toBeNull());
+    expect(refusalShown()).toBe(false);
+    expect(w.people.memory.requestRefusals.has(`requests:review:${R}`)).toBe(
+      false,
+    );
+  });
+});
+
 describe("entry points and after-effects (A7, A9)", () => {
   test("the slots are filled by the people chunk, and route.tsx imports nothing of WEB-11b's screens", async () => {
     const { peopleSlots } = await import("../../../src/features/people/slots");

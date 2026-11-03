@@ -13,7 +13,7 @@ import { requestLinkBody } from "../model/requests";
 import type { PersonSummary, SummaryScope } from "../model/summary";
 import { Avatar, Banner } from "../parts";
 import { linkageIn, readLinkage, usePersonLinkage } from "../reads";
-import { useSummary, type WalkedPages, walkPages } from "../summaries";
+import { useOwnedSummary, type WalkedPages, walkPages } from "../summaries";
 import {
   blockedReason,
   commonFailure,
@@ -558,9 +558,14 @@ function AskToMerge() {
 /**
  * The picker reads 100-row pages and keeps at most three of them (Q9's retained pages), and every further person stays reachable (R2 of
  * review 1: Q9's "keep further records accessible through pagination"). A WINDOW is one bounded walk from its start: "Show more" reads its
- * next page while it has fewer than three; once it has three, "Show the next people" starts a new window where it ended (the earlier one is
- * no longer kept), and "Show earlier people" goes back to the window before. The filter applies to the window shown; until the whole list
- * fits in one window from its first person, the picker says so, and an empty answer is never claimed for people it has not read.
+ * next page while it has fewer than three; once it has three, "Show the next people" starts a new window where it ended, and "Show earlier
+ * people" goes back to the window before (read again: only the starts of the windows are kept). The filter applies to the window shown;
+ * until the whole list fits in one window from its first person, the picker says so, and an empty answer is never claimed for people it
+ * has not read.
+ *
+ * RETAINED (R2 of review 2): the picker OWNS its read (`useOwnedSummary`, keyed by this mounted picker): only the current window's walk is
+ * kept, at most three pages of rows (every row it read, kept or not). A step to another window, Show more, a change of purpose and closing
+ * the picker each release the earlier walk, and a page of it still on its way applies nothing and reads no further.
  */
 const PICKER_PAGE = 100;
 const PICKER_PAGES = 3;
@@ -592,9 +597,10 @@ function PersonPicker({
   const [pages, setPages] = useState(1);
   const [filter, setFilter] = useState("");
   const heading = useId();
+  const owner = useId();
   const start = starts.at(-1) ?? null;
-  const view = useSummary<WalkedPages<PersonSummary>>(
-    `picker:${scope}:${purpose}:${start ?? ""}:${pages}`,
+  const view = useOwnedSummary<WalkedPages<PersonSummary>>(
+    `picker:${scope}:${purpose}:${owner}:${start ?? ""}:${pages}`,
     (current) =>
       walkPages(
         (after) =>

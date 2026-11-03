@@ -377,11 +377,29 @@ describe("Sent (A4)", () => {
       expect(screen.queryByRole("button", { name: copy.NEXT })).toBeNull(),
     );
     expect(screen.queryByText(copy.NO_SENT)).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: copy.PREVIOUS }));
-    fireEvent.click(screen.getByRole("button", { name: copy.PREVIOUS }));
+    /**
+     * ADAPTATION (DA-N1 of review 2's design assessment; Q9: at most three retained history pages): the history now keeps only the page
+     * shown, so Previous READS the earlier page again by its kept cursor (the fake server answers those reads below), and its buttons are
+     * offered once that page is shown, as after Next. The original intent stands: Previous returns to the page it came from, and shows it.
+     */
+    w.api.next.sent.push({ ok: true, value: { items: [], next_after: R3 } });
+    w.api.next.sent.push({
+      ok: true,
+      value: { items: page1, next_after: page1[49]?.id ?? null },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: copy.PREVIOUS }));
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.PAGE_MORE).length).toBeGreaterThan(0),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: copy.PREVIOUS }));
     await waitFor(() =>
       expect(document.querySelectorAll("[data-sent-request]")).toHaveLength(50),
     );
+    expect(
+      w.api.calls
+        .filter((call) => call.op === "readSentRequests")
+        .map((call) => (call.args[0] as { after: string | null }).after),
+    ).toEqual([null, page1[49]?.id, R3, page1[49]?.id, null]);
   });
 
   test("Cancel sends cancel_request; a 404 is said on the row with its reference", async () => {
@@ -1150,5 +1168,367 @@ describe("R4: a retained uncertain answer or cancel stays reachable, and its Try
       ).toBeNull(),
     );
     expect(w.people.memory.attempts.size).toBe(0);
+  });
+});
+
+// ---- review 2 (3 November 2026): R7, R2 and the design assessment's DA-N1 ---------------------------------------------------------
+/** An answer held until the test releases it (the read is ISSUED when the fake is called, and recorded in `calls`). */
+function held<T>() {
+  let release: (value: T) => void = () => {};
+  const answer = () =>
+    new Promise<T>((resolve) => {
+      release = resolve;
+    });
+  return { answer, release: (value: T) => release(value) };
+}
+const issued = (w: ReturnType<typeof peopleWorld>, op: string) =>
+  w.api.calls.filter((call) => call.op === op).length;
+const FORBIDDEN_403 = { ok: false, kind: "forbidden", requestId: "old-403" };
+
+describe("R7: a superseded 403 of a request list has no effect; a current one is remembered until Try again", () => {
+  test("incoming S1: A held; an invalidation; B lists the request; A released 403; another invalidation: C is asked and the request stays", async () => {
+    const w = world();
+    w.api.requests.incoming = [linkRequest()];
+    const a = held<unknown>();
+    w.api.next.requests.push(a.answer as never);
+    await w.mount("/people/requests");
+    await waitFor(() => expect(issued(w, "readRequests")).toBe(1));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(issued(w, "readRequests")).toBe(2));
+    await present(`[data-incoming-request="${R1}"]`);
+    await act(async () => a.release(FORBIDDEN_403));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(issued(w, "readRequests")).toBe(3));
+    await waitFor(() =>
+      expect(
+        w.people.memory.summaries.get("requests:incoming")?.state.kind,
+      ).toBe("ready"),
+    );
+    expect(row(R1)).not.toBeNull();
+    expect(screen.queryByText(copy.REQUESTS_FAILED)).toBeNull();
+    expect(w.people.memory.requestRefusals.has("requests:incoming")).toBe(
+      false,
+    );
+  });
+
+  test("incoming control: a CURRENT 403 is a failed list, not asked again by an invalidation; Try again asks and lists", async () => {
+    const w = world();
+    w.api.requests.incoming = [linkRequest()];
+    w.api.next.requests.push(FORBIDDEN_403 as never);
+    await w.mount("/people/requests");
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.REQUESTS_FAILED).length,
+      ).toBeGreaterThan(0),
+    );
+    const asked = issued(w, "readRequests");
+    act(() => w.people.memory.invalidateSummaries());
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(issued(w, "readRequests"), "not asked again by itself").toBe(asked);
+    fireEvent.click(
+      within(
+        document.querySelector("[data-requests-incoming]") as HTMLElement,
+      ).getByRole("button", { name: copy.TRY_AGAIN }),
+    );
+    await present(`[data-incoming-request="${R1}"]`);
+    expect(issued(w, "readRequests")).toBe(asked + 1);
+  });
+
+  test("incoming S4: A held; B fails (uncertain); Try again asks C; A then answers 403 and C is uncertain too: A, sent before the Try again, remembers nothing (an invalidation asks again)", async () => {
+    const w = world();
+    w.api.requests.incoming = [linkRequest()];
+    const a = held<unknown>();
+    const c = held<unknown>();
+    w.api.next.requests.push(
+      a.answer as never,
+      { ok: false, kind: "uncertain" } as never,
+      c.answer as never,
+    );
+    await w.mount("/people/requests");
+    await waitFor(() => expect(issued(w, "readRequests")).toBe(1));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.REQUESTS_FAILED).length,
+      ).toBeGreaterThan(0),
+    );
+    fireEvent.click(
+      within(
+        document.querySelector("[data-requests-incoming]") as HTMLElement,
+      ).getByRole("button", { name: copy.TRY_AGAIN }),
+    );
+    await waitFor(() => expect(issued(w, "readRequests")).toBe(3));
+    await act(async () => a.release(FORBIDDEN_403));
+    await act(async () => c.release({ ok: false, kind: "uncertain" }));
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.REQUESTS_FAILED).length,
+      ).toBeGreaterThan(0),
+    );
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(issued(w, "readRequests")).toBe(4));
+    await present(`[data-incoming-request="${R1}"]`);
+    expect(w.people.memory.requestRefusals.has("requests:incoming")).toBe(
+      false,
+    );
+  });
+
+  test("Sent S1: A held; an invalidation; B shows the page; A released 403; another invalidation: C is asked and the page stays", async () => {
+    const w = world();
+    w.api.requests.sent = [sent(R1, "pending")];
+    const a = held<unknown>();
+    w.api.next.sent.push(a.answer as never);
+    await w.mount("/people/requests");
+    await waitFor(() => expect(issued(w, "readSentRequests")).toBe(1));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(issued(w, "readSentRequests")).toBe(2));
+    await present(`[data-sent-request="${R1}"]`);
+    await act(async () => a.release(FORBIDDEN_403));
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() => expect(issued(w, "readSentRequests")).toBe(3));
+    await waitFor(() =>
+      expect(w.people.memory.summaries.get("requests:sent:")?.state.kind).toBe(
+        "ready",
+      ),
+    );
+    expect(sentRow(R1)).not.toBeNull();
+    expect(w.people.memory.requestRefusals.has("requests:sent:")).toBe(false);
+  });
+});
+
+describe("R2 (review 2): the picker OWNS one bounded walk: at most three pages of rows are kept while it traverses", () => {
+  const pid = (n: number) =>
+    `20000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const people = (n: number) =>
+    Array.from({ length: n }, (_, i) =>
+      person({ id: pid(i + 1), label: `Person ${i + 1}` }),
+    );
+  const picked = (n: number) =>
+    present(`[data-pick-person="${pid(n)}"]`, 10_000);
+  /**
+   * What the page memory keeps of the pickers' walks: the entries, and EVERY row held across them (each walk's `read`, which includes its
+   * `kept` rows; summed, not a union, so two copies of one aggregate count twice).
+   */
+  const retained = (w: ReturnType<typeof peopleWorld>) => {
+    const entries = [...w.people.memory.summaries].filter(([key]) =>
+      key.startsWith("picker:"),
+    );
+    let rows = 0;
+    for (const [, entry] of entries)
+      if (entry.state.kind === "ready")
+        rows += (entry.state.value as { read: Map<string, unknown> }).read.size;
+    return { entries: entries.length, rows };
+  };
+  const bounded = (w: ReturnType<typeof peopleWorld>, step: string) => {
+    const now = retained(w);
+    expect(now.entries, `${step}: one walk kept`).toBeLessThanOrEqual(1);
+    expect(
+      now.rows,
+      `${step}: at most three 100-row pages`,
+    ).toBeLessThanOrEqual(300);
+  };
+  const click = async (action: string) =>
+    fireEvent.click(await present(`[data-people-action="${action}"]`));
+
+  test("control, 100 people: one walk of 100 rows is kept", async () => {
+    const w = world();
+    w.setCache(people(100));
+    await w.mount("/people/requests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+    await picked(100);
+    expect(retained(w)).toEqual({ entries: 1, rows: 100 });
+  });
+
+  test("601 people: every window forward to the 601st and back to the first, never more than one walk of three pages kept", async () => {
+    const w = world();
+    w.setCache(people(601));
+    await w.mount("/people/requests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+    await picked(100);
+    bounded(w, "window 1, one page");
+    for (const [action, last] of [
+      ["picker-more", 200],
+      ["picker-more", 300],
+      ["picker-next", 400],
+      ["picker-more", 500],
+      ["picker-more", 600],
+      ["picker-next", 601],
+    ] as const) {
+      await click(action);
+      await picked(last);
+      bounded(w, `${action} to ${last}`);
+    }
+    expect(document.querySelectorAll("[data-pick-person]")).toHaveLength(1);
+    await click("picker-earlier");
+    await picked(600);
+    bounded(w, "back to window 2");
+    await click("picker-earlier");
+    await picked(1);
+    await picked(300);
+    bounded(w, "back to window 1");
+    expect(retained(w)).toEqual({ entries: 1, rows: 300 });
+  }, 60_000);
+
+  for (const purpose of ["link", "merge-first", "merge-second"] as const)
+    test(`${purpose}: the next window releases the earlier one, and Show earlier people reads it again`, async () => {
+      const w = world();
+      w.setCache(people(301));
+      await w.mount("/people/requests");
+      if (purpose === "link")
+        fireEvent.click(
+          await screen.findByRole("button", { name: copy.CHOOSE }),
+        );
+      else {
+        fireEvent.click(
+          await screen.findByRole("button", { name: copy.ASK_TO_MERGE }),
+        );
+        if (purpose === "merge-second") {
+          await click("choose-first");
+          fireEvent.click(await picked(1));
+          await click("choose-second");
+        } else await click("choose-first");
+      }
+      await picked(100);
+      await click("picker-more");
+      await picked(200);
+      await click("picker-more");
+      await picked(300);
+      bounded(w, "three pages");
+      const keyed =
+        [...w.people.memory.summaries.keys()].find((key) =>
+          key.startsWith("picker:"),
+        ) ?? "";
+      expect(keyed.startsWith(`picker:`)).toBe(true);
+      expect(keyed).toContain(
+        purpose === "merge-second" ? `merge-second:${pid(1)}` : purpose,
+      );
+      await click("picker-next");
+      await picked(301);
+      expect(retained(w)).toEqual({ entries: 1, rows: 1 });
+      const before = issued(w, "readSummaries");
+      await click("picker-earlier");
+      await picked(300);
+      expect(
+        issued(w, "readSummaries"),
+        "the earlier window is read again",
+      ).toBe(before + 3);
+      bounded(w, "back");
+      if (purpose === "merge-second")
+        expect(document.querySelector(`[data-pick-person="${pid(1)}"]`)).toBe(
+          null,
+        );
+      else await picked(1);
+    }, 30_000);
+
+  test("S8: a page held while the picker is closed and another opened: the old walk applies nothing and reads no further page; the incoming list is untouched", async () => {
+    const w = world();
+    w.setCache(people(150));
+    w.api.requests.incoming = [linkRequest()];
+    await w.mount("/people/requests");
+    await present(`[data-incoming-request="${R1}"]`);
+    const lists = issued(w, "readRequests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.CHOOSE }));
+    await picked(100);
+    // The next walk (two pages) reads its first page again: that read is held.
+    const first = await w.api.readSummaries("not_linked", {
+      after: null,
+      limit: 100,
+      archived: false,
+    });
+    w.api.calls.pop();
+    const page = held<unknown>();
+    w.api.next.summaries.push(page.answer as never);
+    await click("picker-more");
+    await waitFor(() => expect(w.api.next.summaries).toHaveLength(0));
+    fireEvent.click(screen.getByRole("button", { name: `‹ ${copy.CANCEL}` }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: copy.ASK_TO_MERGE }),
+    );
+    await click("choose-first");
+    await picked(100);
+    const reads = issued(w, "readSummaries");
+    await act(async () => page.release(first));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(issued(w, "readSummaries"), "no further page of the old walk").toBe(
+      reads,
+    );
+    const keys = [...w.people.memory.summaries.keys()].filter((key) =>
+      key.startsWith("picker:"),
+    );
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toContain("merge-first");
+    expect(w.people.memory.summaries.get("requests:incoming")?.state.kind).toBe(
+      "ready",
+    );
+    expect(issued(w, "readRequests")).toBe(lists);
+  });
+});
+
+describe("DA-N1 (review 2's design assessment): Sent keeps the page shown, not every page visited", () => {
+  const sid = (n: number) =>
+    `30000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const sentEntries = (w: ReturnType<typeof peopleWorld>) =>
+    [...w.people.memory.summaries].filter(([key]) =>
+      key.startsWith("requests:sent:"),
+    );
+
+  test("seven pages forward, then Previous: one page kept at each step, the earlier page read again by its cursor", async () => {
+    const w = world();
+    w.api.requests.sent = Array.from({ length: 350 }, (_, i) =>
+      sent(sid(i + 1), "declined"),
+    );
+    await w.mount("/people/requests");
+    await present(`[data-sent-request="${sid(50)}"]`);
+    for (let page = 2; page <= 7; page += 1) {
+      fireEvent.click(await screen.findByRole("button", { name: copy.NEXT }));
+      await present(`[data-sent-request="${sid(page * 50)}"]`);
+      const kept = sentEntries(w);
+      expect(kept, `page ${page}: one page kept`).toHaveLength(1);
+      const state = kept[0]?.[1].state;
+      expect(
+        state?.kind === "ready"
+          ? (state.value as { value: { items: unknown[] } }).value.items.length
+          : 0,
+      ).toBe(50);
+    }
+    const before = issued(w, "readSentRequests");
+    fireEvent.click(await screen.findByRole("button", { name: copy.PREVIOUS }));
+    await present(`[data-sent-request="${sid(300)}"]`);
+    expect(issued(w, "readSentRequests")).toBe(before + 1);
+    expect(sentEntries(w)).toHaveLength(1);
+  });
+
+  test("S9: an uncertain cancel whose page is let go stays retryable when its row is shown again (the same key and body)", async () => {
+    const w = world();
+    w.api.requests.sent = [
+      sent(sid(1), "pending"),
+      ...Array.from({ length: 59 }, (_, i) => sent(sid(i + 2), "declined")),
+    ];
+    await w.mount("/people/requests");
+    w.api.next.people.push({ ok: false, kind: "uncertain" } as Receipt);
+    fireEvent.click(
+      within(await present(`[data-sent-request="${sid(1)}"]`)).getByRole(
+        "button",
+        { name: copy.CANCEL_REQUEST_TO("mo") },
+      ),
+    );
+    await waitFor(() => expect(commands(w)).toHaveLength(1));
+    await waitFor(() =>
+      expect(screen.queryAllByText(copy.UNCERTAIN).length).toBeGreaterThan(0),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: copy.NEXT }));
+    await present(`[data-sent-request="${sid(60)}"]`);
+    expect(sentEntries(w).map(([key]) => key)).toEqual([
+      `requests:sent:${sid(50)}`,
+    ]);
+    expect(w.people.memory.attempts.size, "the attempt is kept").toBe(1);
+    fireEvent.click(await screen.findByRole("button", { name: copy.PREVIOUS }));
+    const retry = within(
+      await present(`[data-sent-request="${sid(1)}"]`),
+    ).getByRole("button", { name: copy.CANCEL_REQUEST_TO("mo") });
+    expect(retry.textContent).toBe(copy.TRY_AGAIN);
+    fireEvent.click(retry);
+    await waitFor(() => expect(commands(w)).toHaveLength(2));
+    expect(commands(w)[1]).toEqual(commands(w)[0]);
   });
 });
