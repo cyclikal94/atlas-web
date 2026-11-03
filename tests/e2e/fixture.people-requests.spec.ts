@@ -33,6 +33,7 @@ import {
  * internal geometry with long supported values (R5 of review 1); E-R16 keyboard only; E-R17 a refused (403) comparison not asked again by itself through
  * the production session's re-evaluation and remount (N1 of revision 1); E-R18 a superseded (late) 403 never refuses a newer comparison
  * (R7 of review 2); E-R19 two tabs of one account, the 403 remembered in its own tab only (S10 of review 2's design assessment).
+ * E-R20 a failed comparison's Try again retires every earlier answer, for the sender and the recipient (R7 of review 3).
  * E-R14 (review 1, R6): the incoming read held for the displayed account across an ACTUAL account switch (another tab settles another
  * account through the production store and posts the auth hint, as `settleElsewhere` does for E-T10), with the new account's own read
  * shown and the old answer, delivered late, never shown; its control releases the held read with no switch. E-R1b (R3): People 01's
@@ -1260,6 +1261,101 @@ test.describe("E-R19: two tabs of one account (S10 of review 2's design assessme
       other.getByRole("dialog").locator("[data-merge-comparison]"),
     ).toBeVisible();
   });
+});
+
+test.describe("E-R20: a failed comparison's Try again retires every earlier answer (R7 of review 3)", () => {
+  /**
+   * The production form of review 3's after-retry schedule, for the sender's comparison and the recipient's review: the first read is held;
+   * a freshness signal reads again and fails (an uncertain `503`), so the view offers Try again; Try again reads (uncertain again); only then
+   * does the first read answer `403`. Its session re-evaluation and remount read again (uncertain), and the reads settle. The `403` was
+   * dispatched BEFORE the person's explicit Try again: it is obsolete and refuses nothing. Once the server answers again, the next freshness
+   * signal reads and shows the comparison. Without the retry's boundary the late `403` is the newest definite answer (every later one was
+   * uncertain): it is remembered, and the next signal is refused without a request.
+   */
+  const variants = [
+    {
+      name: "the sender's comparison",
+      at: "/people",
+      open: COMPARE,
+      pattern: `**${API}/people/merge-preview`,
+      arrange: undefined as ((s: Served) => void) | undefined,
+    },
+    {
+      name: "the recipient's review",
+      at: "/people/requests",
+      open: `/people/requests/${R2}`,
+      pattern: `**${API}/people/requests/${R2}/merge-preview`,
+      arrange: (s: Served) => {
+        s.incoming = [mergeRequest()];
+        s.recipientPreviews.set(R2, recipientPreview());
+      },
+    },
+  ];
+  for (const variant of variants)
+    test(`${variant.name}: a 403 dispatched before Try again, answered after it, is never remembered; the next read is asked and shown`, async ({
+      context,
+    }) => {
+      const world = mergeWorld({ arrange: variant.arrange });
+      const { page } = await setup(
+        context,
+        variant.at,
+        world.resources,
+        world.options,
+      );
+      const asked: number[] = [];
+      let releaseFirst: () => void = () => {};
+      const first = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let answering = false;
+      await context.route(variant.pattern, async (route) => {
+        asked.push(Date.now());
+        if (asked.length === 1) {
+          await first;
+          // An ordinary Atlas 403, as the released backend answers a comparison the reader may not have.
+          return route.fulfill(json(403, atlas("forbidden")));
+        }
+        // Any other 5xx is uncertain: it says nothing about the refusal.
+        if (!answering) return route.fulfill(json(503, atlas("unavailable")));
+        return route.fallback();
+      });
+      await navigateInApp(page, variant.open);
+      const dialog = page.getByRole("dialog");
+      await expect.poll(() => asked.length).toBeGreaterThanOrEqual(1);
+      // A freshness signal reads again while the first read is held (a cold page's own first invalidations may have done so already).
+      if (asked.length === 1) await becomesVisible(page);
+      await expect(dialog.getByText(copy.PREVIEW_FAILED)).toBeVisible();
+      const failed = await settledThenQuiet(page, asked, "the failed read");
+      expect(
+        failed,
+        "the held read and at least one failed one",
+      ).toBeGreaterThanOrEqual(2);
+      await dialog.getByRole("button", { name: copy.TRY_AGAIN }).click();
+      await expect.poll(() => asked.length).toBeGreaterThan(failed);
+      const retried = await settledThenQuiet(page, asked, "Try again");
+      expect(retried, "Try again asked once").toBe(failed + 1);
+      await expect(dialog.getByText(copy.PREVIEW_FAILED)).toBeVisible();
+      releaseFirst();
+      const late = await settledThenQuiet(page, asked, "the late 403");
+      await expect(dialog.getByText(copy.PREVIEW_FORBIDDEN)).toHaveCount(0);
+      answering = true;
+      await becomesVisible(page);
+      await expect
+        .poll(() => asked.length, {
+          message:
+            "the next freshness signal is asked (nothing remembered refuses it)",
+        })
+        .toBeGreaterThan(late);
+      await settledThenQuiet(page, asked, "the next read");
+      await expect(dialog.locator("[data-merge-comparison]")).toBeVisible();
+      await expect(dialog.getByText(copy.PREVIEW_FORBIDDEN)).toHaveCount(0);
+      // Nothing was sent.
+      expect(
+        (await page.evaluate(() => performance.getEntriesByType("resource")))
+          .map((e) => (e as PerformanceEntry).name)
+          .filter((name) => name.endsWith("/people-commands")),
+      ).toEqual([]);
+    });
 });
 
 test.describe("E-R15: viewports, themes and axe (A12; browser emulation, not devices)", () => {

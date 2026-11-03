@@ -615,7 +615,7 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
 - **A read refused `403` is remembered** for the page (revision 1, N1; D-12a-13): an ordinary `403` re-evaluates the session, which
   remounts the protected tree and reads the summaries again, so a preview that asked again by itself did so without end (found by
   I-PPL21 against the released backend: about 4,500 `POST /people/merge-preview` in 30 seconds for a pair the reader owns neither of).
-  It is asked again only by the refusal's Reload (or a failed list's Try again); the recipient's review reads the lists again only for a
+  It is asked again only by the refusal's Reload (or a failed read's Try again); the recipient's review reads the lists again only for a
   `404` or `410`. The refusal is kept in `memory.requestRefusals` (display suppression for this page and identity, never a permission).
   **Only the key's newest answer counts** (review 2, R7): each dispatch of a key is numbered (`memory.requestReads`); an answer is obsolete
   once a later dispatch of the key has answered or the person asked again after it was sent, and an obsolete answer has no effect, so a
@@ -624,6 +624,12 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
   offline, closed) change nothing. The owner is the newest answer rather than the summaries' generation because the `403` itself
   re-evaluates the session (and so invalidates every summary) BEFORE it reaches the read (`ordinaryCall`): a generation-owned refusal
   could be superseded by its own consequence, every time (the storm-ordering test; MU-4152). The value shown still obeys the generation.
+  **Every explicit retry retires before it reads** (review 3, R7): a failed read's Try again is the request adapter's own `retry`
+  (`useRequestRead` → `retryRequestRead`) for the sender's comparison (both of its routes), the recipient's review, the incoming list and
+  every Sent page; it retires the key's refusal and every earlier dispatch and then makes the forced read, in one step, so a `403` sent
+  before it can neither refuse that read nor come back after it. It is admitted only while this identity's memory is current, the page is
+  online and the key's read is still failed: a second press of the same button does not make the first press's read (and its own `403`)
+  obsolete. Tests: `request-retry.test.tsx` (Q1/Q2/Q8 and controls for each adapter), E-R20 (production session, sender and recipient).
 - **D-11b-12 aliases.** An archived person whose value names `canonical_person_id` says "Merged into {name}" (a link when this device
   holds that person, else "another person"); WEB-11a's Archive/Restore is disabled for it with "This person was merged into another;
   restore isn't available." (the backend redirects `archive` of an alias to its canonical person).

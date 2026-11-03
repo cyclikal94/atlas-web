@@ -14,6 +14,7 @@ import { sub } from "./data-catalogue.mjs";
 const MODEL = "tests/features/people/requests-model.test.ts";
 const SCREEN = "tests/features/people/requests-screen.test.tsx";
 const DIALOG = "tests/features/people/merge-dialog.test.tsx";
+const RETRY = "tests/features/people/request-retry.test.tsx";
 
 export const UNIT_WEB11B = [
   {
@@ -658,6 +659,147 @@ export const UNIT_WEB11B = [
     patch: (t) =>
       sub(t, "    releaseSummary(env.memory, sentKey(after));\n", ""),
   },
+  // ---- revision 3 (review 3, R7: every failed request read's Try again retires before it reads) ----
+  {
+    id: "MU-4159",
+    title:
+      "WEB-11b R7 (review 3): the sender's comparison offers the bare forced read as its failed Try again (no retirement: an obsolete 403 refuses the retry or comes back after it)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q1 sender|Q2 sender/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return useRequestRead(\n    env,\n    previewKey(sourceId, targetId),\n",
+        "  return useSummary(previewKey(sourceId, targetId), (current) =>\n    asRead(\n      env,\n      previewKey(sourceId, targetId),\n      () => env.api.previewMerge(sourceId, targetId),\n      current,\n      true,\n    ),\n  );\n  return useRequestRead(\n    env,\n    previewKey(sourceId, targetId),\n",
+      ),
+  },
+  {
+    id: "MU-4160",
+    title:
+      "WEB-11b R7 (review 3): the recipient's review offers the bare forced read as its failed Try again",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q1 recipient|Q2 recipient/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return useRequestRead(\n    env,\n    reviewKey(requestId),\n",
+        "  return useSummary(reviewKey(requestId), (current) =>\n    asRead(\n      env,\n      reviewKey(requestId),\n      () => env.api.readRecipientPreview(requestId),\n      current,\n      true,\n    ),\n  );\n  return useRequestRead(\n    env,\n    reviewKey(requestId),\n",
+      ),
+  },
+  {
+    id: "MU-4161",
+    title:
+      "WEB-11b R7 (review 3): the incoming list offers the bare forced read as its failed Try again",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q1 incoming|Q2 incoming/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return useRequestRead(env, INCOMING_KEY, () => env.api.readRequests(), false);\n",
+        "  return useSummary(INCOMING_KEY, (current) =>\n    asRead(env, INCOMING_KEY, () => env.api.readRequests(), current, false),\n  );\n",
+      ),
+  },
+  {
+    id: "MU-4162",
+    title:
+      "WEB-11b R7 (review 3): a Sent page offers the bare forced read as its failed Try again (the first page and every later one)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q1 Sent|Q2 Sent/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return useRequestRead(\n    env,\n    sentKey(after),\n",
+        "  return useSummary(sentKey(after), (current) =>\n    asRead(\n      env,\n      sentKey(after),\n      () => env.api.readSentRequests({ after, limit: SENT_LIMIT }),\n      current,\n      false,\n    ),\n  );\n  return useRequestRead(\n    env,\n    sentKey(after),\n",
+      ),
+  },
+  {
+    id: "MU-4163",
+    title:
+      "WEB-11b R7 (review 3): the explicit retry is not bound to a failed entry (a second press of the same button retires the read the first press made: its own 403 is forgotten and asked again)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q8 |not failed/,
+    patch: (t) =>
+      sub(
+        t,
+        '    !env.online ||\n    memory.summaries.get(key)?.state.kind !== "failed"\n',
+        "    !env.online\n",
+      ),
+  },
+  {
+    id: "MU-4164",
+    title:
+      "WEB-11b R7 (review 3): a retry kept from before another identity was shown still retires and reads",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /another identity/,
+    patch: (t) =>
+      sub(
+        t,
+        "    !isCurrentMemory(memory) ||\n    !env.online ||\n",
+        "    !env.online ||\n",
+      ),
+  },
+  {
+    id: "MU-4165",
+    title:
+      "WEB-11b R7 (review 3): offline, the explicit retry still retires the refusal",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /offline: nothing is retired/,
+    patch: (t) =>
+      sub(
+        t,
+        "    !isCurrentMemory(memory) ||\n    !env.online ||\n",
+        "    !isCurrentMemory(memory) ||\n",
+      ),
+  },
+  {
+    id: "MU-4166",
+    title:
+      "WEB-11b R7 (review 3): the retry reads FIRST and retires after (the read finds the obsolete refusal; its own answer is made obsolete)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q1 |Q8 |BEFORE the forced read/,
+    patch: (t) =>
+      sub(
+        t,
+        "  retire(memory, key);\n  forced();\n",
+        "  forced();\n  retire(memory, key);\n",
+      ),
+  },
+  {
+    id: "MU-4167",
+    title:
+      "WEB-11b R7 (review 3): the retry retires another key (the incoming list's) instead of its own",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q1 sender|Q1 recipient|Q1 Sent/,
+    patch: (t) =>
+      sub(
+        t,
+        "  retire(memory, key);\n  forced();\n",
+        "  retire(memory, INCOMING_KEY);\n  forced();\n",
+      ),
+  },
+  {
+    id: "MU-4168",
+    title:
+      "WEB-11b R7 (review 3): an explicit retry keeps the remembered refusal (it only makes earlier dispatches obsolete)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [RETRY],
+    expect: /Q1 /,
+    patch: (t) =>
+      sub(
+        t,
+        "  memory.requestRefusals.delete(key);\n  const ledger",
+        "  const ledger",
+      ),
+  },
 ];
 
 const SPEC = "tests/e2e/fixture.people-requests.spec.ts";
@@ -801,6 +943,36 @@ export const ENGINE_WEB11B = [
         t,
         "  if (ledger === undefined || dispatch <= ledger.answered) return;\n",
         "  if (ledger === undefined) return;\n",
+      ),
+  },
+  {
+    id: "MU-4169",
+    title:
+      "WEB-11b R7 (review 3): (REAL ENGINE) the sender's comparison offers the bare forced read as its failed Try again: a 403 dispatched before it, answered after it, is remembered and refuses the next read",
+    file: "src/features/people/requests/reads.ts",
+    spec: SPEC,
+    grep: "E-R20:",
+    expect: /E-R20: .*the sender's comparison/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return useRequestRead(\n    env,\n    previewKey(sourceId, targetId),\n",
+        "  return useSummary(previewKey(sourceId, targetId), (current) =>\n    asRead(\n      env,\n      previewKey(sourceId, targetId),\n      () => env.api.previewMerge(sourceId, targetId),\n      current,\n      true,\n    ),\n  );\n  return useRequestRead(\n    env,\n    previewKey(sourceId, targetId),\n",
+      ),
+  },
+  {
+    id: "MU-4170",
+    title:
+      "WEB-11b R7 (review 3): (REAL ENGINE) the recipient's review offers the bare forced read as its failed Try again: a 403 dispatched before it, answered after it, is remembered and refuses the next read",
+    file: "src/features/people/requests/reads.ts",
+    spec: SPEC,
+    grep: "E-R20:",
+    expect: /E-R20: .*the recipient's review/,
+    patch: (t) =>
+      sub(
+        t,
+        "  return useRequestRead(\n    env,\n    reviewKey(requestId),\n",
+        "  return useSummary(reviewKey(requestId), (current) =>\n    asRead(\n      env,\n      reviewKey(requestId),\n      () => env.api.readRecipientPreview(requestId),\n      current,\n      true,\n    ),\n  );\n  return useRequestRead(\n    env,\n    reviewKey(requestId),\n",
       ),
   },
 ];

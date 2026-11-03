@@ -48,9 +48,10 @@ const EXPLAINED = new Set([
  * A read refused `403` is REMEMBERED for the page and not asked again by itself (D-12a-13, the WEB-13a lesson; finding N1 of revision 1):
  * an ordinary `403` makes the session evaluate again, which remounts the protected tree, and a remounted People screen reads its summaries
  * again; a read that asked again by itself would therefore ask for ever (the released backend refuses a preview of two people the reader
- * owns neither of: thousands of `POST /people/merge-preview` in half a minute). Only an explicit action asks again (`askAgain`,
- * `forgetRefusal`). The remembered refusal is display suppression for this page and identity (`memory.requestRefusals`), never a
- * permission; automatic signals (an invalidation, a remount) never end it.
+ * owns neither of: thousands of `POST /people/merge-preview` in half a minute). Only an explicit action asks again: a refused preview's
+ * Reload (`askAgain`) or a failed read's Try again (the adapter's own `retry`, `retryRequestRead`). The remembered refusal is display
+ * suppression for this page and identity (`memory.requestRefusals`), never a permission; automatic signals (an invalidation, a remount)
+ * never end it.
  *
  * WHICH ANSWER COUNTS (R7 of review 2): every dispatch of a key is numbered (`memory.requestReads`), and only the NEWEST definite answer
  * of the key may remember a refusal or end one. An answer is obsolete once a later dispatch of the key has answered, or once the person
@@ -134,7 +135,7 @@ async function dispatchRead<T>(
 }
 
 /**
- * The key's explicit retry (a preview's Reload, a failed list's Try again): its remembered refusal ends, and every answer of a dispatch made
+ * The key's explicit retry (a preview's Reload, a failed read's Try again): its remembered refusal ends, and every answer of a dispatch made
  * before it is obsolete (an older callback can neither remember a refusal again nor end the one a newer read finds).
  */
 function retire(memory: PeopleMemory, key: string): void {
@@ -148,9 +149,31 @@ export function askAgain(env: PeopleEnv, key: string): void {
   retire(env.memory, key);
   env.memory.invalidateSummaries();
 }
-/** For a failed read's own Try again (`readSummary`'s forced read): retires the key's refusal and earlier dispatches first. */
-export function forgetRefusal(env: PeopleEnv, key: string): void {
-  retire(env.memory, key);
+/**
+ * A failed request read's Try again (R7 of review 3): ONE operation that retires the key's refusal and every earlier dispatch and then
+ * makes the forced read (`forced`: the summaries' own Try again, `readSummary` with `force`), with nothing between the two. Every request
+ * adapter's failed view offers it as its `retry` (`useRequestRead`), so no screen can make the read without the boundary (review 3 found
+ * the sender's and the recipient's failed previews doing so: an obsolete `403` refused the retry, or came back after it).
+ *
+ * Admitted only as the retry of what failed: this identity's memory is still the one kept, the page is online, and the key's entry is
+ * still failed. Otherwise nothing is retired and nothing is read, as `forced` would read nothing: a second press of the same rendered
+ * button (the read installs its loading entry without re-rendering first), or a press kept from before another identity, must not
+ * make the admitted read's own answer obsolete (a current `403` would then be asked again by every invalidation: the storm).
+ */
+export function retryRequestRead(
+  env: Pick<PeopleEnv, "memory" | "online">,
+  key: string,
+  forced: () => void,
+): void {
+  const memory = env.memory;
+  if (
+    !isCurrentMemory(memory) ||
+    !env.online ||
+    memory.summaries.get(key)?.state.kind !== "failed"
+  )
+    return;
+  retire(memory, key);
+  forced();
 }
 
 /** One read, as an outcome the summaries' machinery applies (no preferences version, no rows to compare). */
@@ -205,14 +228,30 @@ async function asRead<T>(
   }
 }
 
+/**
+ * A request read's view (`key`, read by `read`): the summaries' machinery (`useSummary`), with the failed view's `retry` being the key's
+ * explicit retry (`retryRequestRead`), never the bare forced read.
+ */
+function useRequestRead<T>(
+  env: PeopleEnv,
+  key: string,
+  read: () => Promise<PeopleResult<T>>,
+  explain: boolean,
+): SummaryView<Refusable<T>> {
+  const view = useSummary(key, (current) =>
+    asRead(env, key, read, current, explain),
+  );
+  if (view.status !== "failed") return view;
+  const forced = view.retry;
+  return { ...view, retry: () => retryRequestRead(env, key, forced) };
+}
+
 /** `GET /people/requests` (D-11b-3): once per mount of a screen that shows it, and again on every invalidation. */
 export const INCOMING_KEY = "requests:incoming";
 export function useIncoming(
   env: PeopleEnv,
 ): SummaryView<Refusable<IncomingRequest[]>> {
-  return useSummary(INCOMING_KEY, (current) =>
-    asRead(env, INCOMING_KEY, () => env.api.readRequests(), current, false),
-  );
+  return useRequestRead(env, INCOMING_KEY, () => env.api.readRequests(), false);
 }
 
 /** The sent history's page size (D-11b-4). */
@@ -224,15 +263,11 @@ export function useSentPage(
   env: PeopleEnv,
   after: string | null,
 ): SummaryView<Refusable<SentPage>> {
-  const key = sentKey(after);
-  return useSummary(key, (current) =>
-    asRead(
-      env,
-      key,
-      () => env.api.readSentRequests({ after, limit: SENT_LIMIT }),
-      current,
-      false,
-    ),
+  return useRequestRead(
+    env,
+    sentKey(after),
+    () => env.api.readSentRequests({ after, limit: SENT_LIMIT }),
+    false,
   );
 }
 
@@ -243,15 +278,11 @@ export function useRecipientPreview(
   env: PeopleEnv,
   requestId: string,
 ): SummaryView<Refusable<RecipientPreview>> {
-  const key = reviewKey(requestId);
-  return useSummary(key, (current) =>
-    asRead(
-      env,
-      key,
-      () => env.api.readRecipientPreview(requestId),
-      current,
-      true,
-    ),
+  return useRequestRead(
+    env,
+    reviewKey(requestId),
+    () => env.api.readRecipientPreview(requestId),
+    true,
   );
 }
 
@@ -263,15 +294,11 @@ export function useMergePreview(
   sourceId: string,
   targetId: string,
 ): SummaryView<Refusable<MergePreview>> {
-  const key = previewKey(sourceId, targetId);
-  return useSummary(key, (current) =>
-    asRead(
-      env,
-      key,
-      () => env.api.previewMerge(sourceId, targetId),
-      current,
-      true,
-    ),
+  return useRequestRead(
+    env,
+    previewKey(sourceId, targetId),
+    () => env.api.previewMerge(sourceId, targetId),
+    true,
   );
 }
 
