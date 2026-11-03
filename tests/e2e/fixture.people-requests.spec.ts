@@ -879,16 +879,24 @@ test.describe("E-R13: uncertain outcomes across a 403 remount (A8, A11)", () => 
     await dialog.getByRole("button", { name: copy.MERGE_THEM }).click();
     await expect(page.getByRole("dialog")).toContainText(copy.UNCERTAIN);
     await expect(page.locator("[data-e-r13-before]")).toHaveCount(0);
-    // Pressed once the remounted dialog has settled (its comparison read again): a press while the remount replaces the dialog lands
-    // outside the new one, which the shared non-modal Dialog treats as a dismissal (harness timing, recorded in the hand-off).
+    // Pressed once the remounted dialog has settled: a press while the remount replaces the dialog lands outside the new one, which the
+    // shared non-modal Dialog treats as a dismissal (harness timing, recorded in the hand-off). ADAPTATION (revision 1, N1): the settled
+    // dialog used to be recognised by its comparison read AGAIN; the 403 is now remembered for the page (D-12a-13) and not asked again by
+    // itself, so the remounted dialog shows the refusal, and the retained merge stays reachable beside it.
     const remounted = page.getByRole("dialog");
-    await expect(remounted.locator("[data-merge-comparison]")).toBeVisible();
+    await expect(remounted).toContainText(copy.PREVIEW_FORBIDDEN);
     await expect(remounted).toContainText(copy.UNCERTAIN);
+    const previews = () =>
+      served.requestLog.filter((line) => line === "POST /people/merge-preview")
+        .length;
+    const asked = previews();
     // The retained merge is offered again (an assertion, so a missing Try again is caught as such, never as a click timeout).
     const again = remounted.getByRole("button", { name: copy.TRY_AGAIN });
     await expect(again).toBeVisible();
     await again.click();
     await expect.poll(() => served.peopleCommands.length).toBe(2);
+    // The refused comparison was not asked again by itself through the remount.
+    expect(previews()).toBe(asked);
     expect(served.peopleCommands[1]?.key).toBe(served.peopleCommands[0]?.key);
     expect(JSON.stringify(served.peopleCommands[1]?.body)).toBe(
       JSON.stringify(served.peopleCommands[0]?.body),
