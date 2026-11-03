@@ -2271,3 +2271,175 @@ test.describe("native transport popups and UI installation (revision 28 qualific
     }
   });
 });
+
+// ---- Revision 29 (Review 34 F34-1; design assessment token 5b499855…, CAP3-F34, CAP3-blank, Q2) ----------------------------------------
+
+/** Every activation of `page` as [kind, url, dispatched, request link], in server order (the url without its origin). */
+const activationsOf = (lane: TransportLane, page: number) =>
+  (lane.journal.activations ?? [])
+    .filter((a) => a.page === page)
+    .map((a) => [a.kind, path(a.url), a.dispatched, a.request]);
+/** The lane-wide hand-off invariant: every activation belongs to a lane page, and every dispatched one was paired with its client event. */
+const handedOff = (lane: TransportLane) => ({
+  unowned: (lane.journal.activations ?? []).filter((a) => a.page < 0).length,
+  unpaired: (lane.journal.activations ?? []).filter(
+    (a) => a.dispatched && a.pairedWith === undefined,
+  ).length,
+});
+const BLOB_BODY =
+  '<!doctype html><meta charset="utf-8"><title>cap3</title><script>window.documentIdentity = "cap3-blob";</script><body>native blob document</body>';
+
+test.describe("native transport requestless activation (revision 29 qualification in real engines)", () => {
+  for (const opening of ["explicit-page", "popup"] as const)
+    test(`CAP3-F34 Review 34's schedule, ${opening === "popup" ? "a NATIVE popup (window.open) of a same-origin blob document (Firefox: no request, committed before Playwright dispatches the frame)" : "its control: an explicit page navigated to the opener's same-origin blob document"}: the child's document actually loads, its activation is observed exactly once (requestless where the engine has no request), nothing is missing or invented`, async ({
+      browser,
+      browserName,
+    }) => {
+      const lanes = openTransportLanes(browser, test.info());
+      try {
+        const lane = await guardLane(lanes);
+        const opener = await open(lane);
+        // Native Blob and URL.createObjectURL in the opener; nothing of the browser is replaced.
+        const target = await opener.evaluate(
+          (body) =>
+            URL.createObjectURL(new Blob([body], { type: "text/html" })),
+          BLOB_BODY,
+        );
+        let child: Page;
+        if (opening === "popup") {
+          child = await popupOf(opener, target);
+          await child.waitForLoadState("load");
+        } else {
+          child = await lane.context.newPage();
+          // WebKit refuses an opener-owned blob in a page without that origin (Review 34's documented control): establish it first.
+          if (browserName === "webkit") await child.goto(`${GUARD}/page?cap3`);
+          await child.goto(target);
+        }
+        expect(await child.locator("body").textContent()).toBe(
+          "native blob document",
+        );
+        expect(await identityOf(child)).toBe("cap3-blob");
+        const ui = { opener: await uiOf(opener), child: await uiOf(child) };
+        expect(ui.child.document).not.toBe(ui.opener.document);
+        expect(ui.child).toMatchObject({ native: true, stimulus: null });
+        await quiet(lane);
+        const { report, verdict } = await settle(lanes, lane);
+        // The behaviour first: exactly one observed activation of the blob document, a new document of page 1.
+        const blob = (lane.journal.navigations ?? []).filter(
+          (n) => n.page === 1 && n.url === target,
+        );
+        expect(blob, "the blob document's activation is observed once").toEqual(
+          [expect.objectContaining({ kind: "new-document" })],
+        );
+        const blobActivation = (lane.journal.activations ?? []).filter(
+          (a) => a.page === 1 && a.url === target,
+        );
+        expect(blobActivation).toHaveLength(1);
+        if (browserName === "firefox" && opening === "popup") {
+          // The F34-1 schedule itself (diag activation-boundary-1): Playwright never dispatched this commit to its client.
+          expect(blobActivation[0]).toMatchObject({
+            kind: "new-document",
+            dispatched: false,
+            request: "none",
+          });
+          expect(blob[0]).toMatchObject({
+            request: null,
+            seq: blobActivation[0]?.seq,
+          });
+        } else {
+          expect(blobActivation[0]).toMatchObject({
+            dispatched: true,
+            pairedWith: blob[0]?.seq,
+          });
+          // A request exists exactly where the engine issued one (Chromium and WebKit; Firefox's explicit page has none).
+          expect(blob[0]?.request === null).toBe(browserName === "firefox");
+          expect(blobActivation[0]?.request).toBe(
+            browserName === "firefox" ? "none" : "linked",
+          );
+        }
+        // Page 1's activations, apart from an initial about:blank document, are exactly its new documents, in order.
+        const kinds = activationsOf(lane, 1);
+        const initial = kinds.filter((k) => k[0] === "initial-document");
+        expect(initial).toEqual(
+          initial.length === 0
+            ? []
+            : [["initial-document", "about:blank", false, "none"]],
+        );
+        expect(kinds.slice(initial.length).map((k) => k[1])).toEqual(
+          (lane.journal.navigations ?? [])
+            .filter((n) => n.page === 1 && n.kind === "new-document")
+            .map((n) => path(n.url)),
+        );
+        expect(handedOff(lane)).toEqual({ unowned: 0, unpaired: 0 });
+        expect(lane.journal.activationSource).toMatchObject({
+          source: "playwright-server-context",
+          pagesAtAttach: 0,
+        });
+        expect(lane.journal.provenanceFailures).toEqual([]);
+        expect(verdict.violations).toEqual([]);
+        expect(verdict.unexpected).toEqual([]);
+        expect(report.failures).toEqual([]);
+        expect(
+          lane.journal.requests.some((r) => r.page === 1 && r.url === target),
+        ).toBe(browserName !== "firefox");
+        expect(pagesOf(lane)).toEqual([
+          [0, "page", true],
+          [
+            1,
+            opening === "popup" && browserName !== "firefox"
+              ? "request"
+              : "page",
+            true,
+          ],
+        ]);
+      } finally {
+        await lanes.settle();
+      }
+    });
+
+  test('CAP3-blank a named blank popup window.open("", name), then the opener navigates it: its initial about:blank activation is document 0 (never a new document), the navigation commits document 1 linked to its own request', async ({
+    browser,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    try {
+      const lane = await guardLane(lanes);
+      await lane.routes.route(`**${GUARD}/cap3/named`, (route) =>
+        (route as unknown as OriginRoute).fulfill({
+          status: 200,
+          contentType: "text/html",
+          headers: { "cache-control": "no-store" },
+          body: SENTINEL("cap3-named"),
+        }),
+      );
+      const opener = await open(lane);
+      const child = await popupOf(opener, "", "cap3named");
+      await opener.evaluate(() => {
+        window.open("/api/__guard/cap3/named", "cap3named");
+      });
+      await child.waitForURL(/cap3\/named/);
+      await child.waitForLoadState("load");
+      expect(await identityOf(child)).toBe("cap3-named");
+      await quiet(lane);
+      const { report, verdict } = await settle(lanes, lane);
+      expect(activationsOf(lane, 1)).toEqual([
+        ["initial-document", "about:blank", false, "none"],
+        ["new-document", `${GUARD}/cap3/named`, true, "linked"],
+      ]);
+      expect(transitionsOf(lane, 1)).toEqual([["new-document", 1, "request"]]);
+      expect(requestsOf(lane, 1)).toEqual([
+        [`${GUARD}/cap3/named`, 0, true, 200, 1],
+      ]);
+      expect(handedOff(lane)).toEqual({ unowned: 0, unpaired: 0 });
+      expect(lane.journal.provenanceFailures).toEqual([]);
+      expect(verdict.violations).toEqual([]);
+      expect(verdict.unexpected).toEqual([]);
+      expect(report.failures).toEqual([]);
+      expect(pagesOf(lane)).toEqual([
+        [0, "page", true],
+        [1, "page", true],
+      ]);
+    } finally {
+      await lanes.settle();
+    }
+  });
+});

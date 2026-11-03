@@ -104,6 +104,12 @@ import {
  * failure or end of an unseen request are named failures. F33-2 (family native-transport-ui-initialisation, harness new): the UI stimulus
  * installer is repeat-safe in a global it already installed (WebKit runs init scripts twice in a popup's reused Window) and keeps its state
  * per DOCUMENT (`installUiStimulus`).
+ *
+ * Revision 29 (Review 34 F34-1, same family, harness incomplete_fix; design assessment token 5b499855…): an activation without any request
+ * before the page's announcement (Firefox's native same-origin `blob:` popup) never reaches Playwright's client. The recorder also observes
+ * the lane context's in-process SERVER commits (`observeActivations`, pinned and shape-checked, attached before any page exists) and hands
+ * off between the two streams by Playwright's own dispatch: undispatched activations are applied when the frame is first met, dispatched
+ * ones are paired with the client's events by request identity, and the native document id checks the chain (`journal.activations`).
  */
 
 export interface TransportLaneOptions {
@@ -865,6 +871,17 @@ export interface Journal {
   unattributedRequests?: RequestRecord[];
   /** Revision 28 (F33-1): browser events delivered after the recorder was detached (never recorded). */
   lateEvents?: string[];
+  /** Revision 29 (F34-1): every main-frame activation Playwright's server observed, in server receipt order (`ActivationRecord`). */
+  activations?: ActivationRecord[];
+  /** Revision 29 (F34-1): the activation source (its pin and bundle hash), or why it is unavailable. */
+  activationSource?:
+    | {
+        source: "playwright-server-context";
+        version: string;
+        bundleSha256: string | null;
+        pagesAtAttach: number;
+      }
+    | { unavailable: string };
 }
 
 /**
@@ -1457,6 +1474,282 @@ export function readNavigated(value: unknown): ReadNavigation {
   };
 }
 
+// ---- Revision 29: the activation source (Review 34 F34-1) ---------------------------------------------------------------------------
+
+/**
+ * Revision 29 (Review 34 F34-1, family native-transport-console-attribution, harness incomplete_fix; design assessment token
+ * 5b499855…, C1–C5, invariants 1–8): the source of every main-frame document ACTIVATION of a lane context, including one Playwright never
+ * delivers to its client.
+ *
+ * Q0 (`revision-29/diag/activation-boundary-1`, all three engines): Playwright's server sends a frame's `navigated` events to the client
+ * only once that frame has a dispatcher, which a request of the frame or the page's announcement creates. Firefox opens a same-origin
+ * `blob:` popup WITHOUT a request: its document commits while the frame has no dispatcher, so the client never receives that commit and
+ * first meets the page already showing the blob (Review 34's F34-1). A client-side subscription at frame creation therefore cannot see
+ * it: the event does not exist on the client. Playwright's in-process SERVER browser context, however, emits
+ * `internalframenavigatedtonewdocument` for every non-initial new-document commit of any frame of the context, from the moment its server
+ * page exists (before its announcement), and its DispatcherConnection knows whether the frame had a dispatcher then, i.e. whether the
+ * client was sent that commit. The adapter listens there, passively (an ordinary emitter listener on the lane's own server context; no
+ * hook, factory or method is replaced, no navigation added), and reads each commit synchronously: the server frame (identity), whether it
+ * is a main frame, its URL, its NATIVE document id, whether a server request is linked, and whether it was dispatched.
+ *
+ * It is a private interface of one pinned version (`ACTIVATION_SOURCE_PIN`, the same pin as the navigation provenance), reachable only
+ * through the in-process client connection's `toImpl`: a different version, a remote (connected) client without `toImpl`, or any part of
+ * an unexpected shape is a NAMED unavailability (`ok: false`), never a fallback. The adapter never throws; its disposer detaches its one
+ * listener once.
+ */
+export const ACTIVATION_SOURCE_PIN = {
+  package: "playwright-core",
+  version: "1.63.0",
+  event: "internalframenavigatedtonewdocument",
+} as const;
+
+/** One server-observed commit, as the adapter read it in the server's own listener. */
+export type ServerCommit =
+  | {
+      ok: true;
+      /** The server frame (identity only). */
+      frame: object;
+      main: boolean;
+      url: string;
+      /** The engine's own id of the committed document (`documentId`; WebKit's initial document has ""). */
+      nativeDocument: string | null;
+      /** The server request linked to the commit (identity only), or null: none. */
+      request: object | null;
+      /** Whether the frame had a dispatcher, i.e. whether Playwright sent the client this commit as `navigated`. */
+      dispatched: boolean;
+    }
+  | { ok: false; reason: string };
+
+export type ActivationSource =
+  | {
+      ok: true;
+      /** The server context's pages (initialised or not) when the listener attached: 0 proves it attached before any page existed. */
+      pagesAtAttach: number;
+      /** The server frame behind a client frame (identity), and its current native document. */
+      serverFrameOf: (
+        clientFrame: unknown,
+      ) =>
+        | { ok: true; frame: object; currentDocument: string | null }
+        | { ok: false; reason: string };
+      /** The server object behind a client request (identity), or null when Playwright holds none. */
+      serverRequestOf: (clientRequest: unknown) => object | null;
+      dispose: () => void;
+    }
+  | { ok: false; reason: string };
+
+type ServerFrameShape = {
+  parentFrame?: () => unknown;
+  url?: () => unknown;
+  _currentDocument?: { documentId?: unknown; request?: unknown } | null;
+};
+const readDocument = (
+  frame: ServerFrameShape,
+):
+  | { ok: true; nativeDocument: string | null; request: object | null }
+  | { ok: false; reason: string } => {
+  const current = frame._currentDocument;
+  if (typeof current !== "object" || current === null)
+    return { ok: false, reason: "a server frame without `_currentDocument`" };
+  const id = current.documentId;
+  if (id !== undefined && typeof id !== "string")
+    return { ok: false, reason: "a non-string native document id" };
+  const request = current.request;
+  if (
+    request !== undefined &&
+    (typeof request !== "object" || request === null)
+  )
+    return {
+      ok: false,
+      reason: "a server document request that is not an object",
+    };
+  return {
+    ok: true,
+    nativeDocument: id ?? null,
+    request: (request as object | undefined) ?? null,
+  };
+};
+
+/**
+ * Attaches `listener` to the lane context's server-side commits (above). Returns the source, or why it is unavailable (nothing attached).
+ */
+export function observeActivations(
+  context: unknown,
+  listener: (commit: ServerCommit) => void,
+  installed: InstalledPlaywrightCore = installedPlaywrightCore(),
+): ActivationSource {
+  try {
+    if (installed.version !== ACTIVATION_SOURCE_PIN.version)
+      return {
+        ok: false,
+        reason: `the activation source is qualified for ${ACTIVATION_SOURCE_PIN.package} ${ACTIVATION_SOURCE_PIN.version} only; installed: ${installed.version ?? `unknown (${installed.error})`}`,
+      };
+    const connection = (context as { _connection?: unknown } | null)
+      ?._connection as { toImpl?: unknown } | undefined;
+    const toImpl = connection?.toImpl;
+    if (typeof toImpl !== "function")
+      return {
+        ok: false,
+        reason:
+          "the client connection has no in-process `toImpl` (a remote or connected Playwright client): Playwright's server context is not reachable",
+      };
+    const impl = (x: unknown): unknown => toImpl.call(connection, x);
+    const server = impl(context) as {
+      on?: unknown;
+      off?: unknown;
+      possiblyUninitializedPages?: unknown;
+    } | null;
+    if (
+      typeof server?.on !== "function" ||
+      typeof server.off !== "function" ||
+      typeof server.possiblyUninitializedPages !== "function"
+    )
+      return {
+        ok: false,
+        reason:
+          "the server context has no on/off/possiblyUninitializedPages of the pinned shape",
+      };
+    const dispatchers = impl(connection) as {
+      existingDispatcher?: unknown;
+    } | null;
+    if (typeof dispatchers?.existingDispatcher !== "function")
+      return {
+        ok: false,
+        reason:
+          "the in-process dispatcher connection has no existingDispatcher of the pinned shape",
+      };
+    const existing = dispatchers.existingDispatcher as (o: unknown) => unknown;
+    const pages = (server.possiblyUninitializedPages as () => unknown).call(
+      server,
+    );
+    if (!Array.isArray(pages))
+      return {
+        ok: false,
+        reason: "possiblyUninitializedPages() did not return an array",
+      };
+    const onCommit = (frame: unknown) => {
+      let commit: ServerCommit;
+      try {
+        const f = frame as ServerFrameShape | null;
+        if (
+          typeof f !== "object" ||
+          f === null ||
+          typeof f.parentFrame !== "function" ||
+          typeof f.url !== "function"
+        )
+          commit = {
+            ok: false,
+            reason: "a committed server frame without parentFrame()/url()",
+          };
+        else {
+          const document = readDocument(f);
+          const url = f.url.call(f);
+          if (!document.ok) commit = document;
+          else if (typeof url !== "string")
+            commit = {
+              ok: false,
+              reason: "a server frame url that is not a string",
+            };
+          else
+            commit = {
+              ok: true,
+              frame: f,
+              main: f.parentFrame.call(f) === null,
+              url,
+              nativeDocument: document.nativeDocument,
+              request: document.request,
+              dispatched: existing.call(dispatchers, f) !== undefined,
+            };
+        }
+      } catch (error) {
+        commit = {
+          ok: false,
+          reason: `reading a server commit threw: ${firstLine(error)}`,
+        };
+      }
+      listener(commit);
+    };
+    (server.on as (e: string, l: (f: unknown) => void) => unknown).call(
+      server,
+      ACTIVATION_SOURCE_PIN.event,
+      onCommit,
+    );
+    let attached = true;
+    return {
+      ok: true,
+      pagesAtAttach: pages.length,
+      serverFrameOf: (clientFrame) => {
+        let frame: unknown;
+        try {
+          frame = impl(clientFrame);
+        } catch (error) {
+          return {
+            ok: false,
+            reason: `the client frame's server frame is unreadable (${firstLine(error)})`,
+          };
+        }
+        if (typeof frame !== "object" || frame === null)
+          return { ok: false, reason: "the client frame has no server frame" };
+        const document = readDocument(frame as ServerFrameShape);
+        if (!document.ok) return document;
+        return {
+          ok: true,
+          frame,
+          currentDocument: document.nativeDocument,
+        };
+      },
+      serverRequestOf: (clientRequest) => {
+        try {
+          const r = impl(clientRequest);
+          return typeof r === "object" && r !== null ? r : null;
+        } catch {
+          return null;
+        }
+      },
+      dispose: () => {
+        if (!attached) return;
+        attached = false;
+        (server.off as (e: string, l: (f: unknown) => void) => unknown).call(
+          server,
+          ACTIVATION_SOURCE_PIN.event,
+          onCommit,
+        );
+      },
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `attaching the activation source threw: ${firstLine(error)}`,
+    };
+  }
+}
+
+/**
+ * Revision 29 (F34-1): one main-frame document activation of a lane context, as its server observed it (`observeActivations`), in server
+ * receipt order (`journal.activations`). Immutable once recorded, except `page` (-1 until the recorder first meets the frame: the identity
+ * reference resolved, never renumbered) and `pairedWith`.
+ *  - `kind`: `initial-document`, the browsing context's initial empty document (the frame's FIRST commit, undispatched, requestless,
+ *    `about:blank`: every engine creates a new top-level context with one, and some report its commit: Firefox for an explicit page,
+ *    every engine for a named `window.open("", name)`). It is the page's document 0, as an unreported initial document always was.
+ *    `new-document`: any other commit; it is a new lane document.
+ *  - `dispatched`: Playwright sent the client this commit as `navigated`. A dispatched activation is PAIRED with the client's
+ *    `new-document` event of that page (`pairedWith`: its navigation's sequence; the client's named request must be this commit's server
+ *    request, by identity). An undispatched one never reaches the client: the recorder applies it to the page when it first meets the
+ *    frame (a requestless `new-document` navigation at the activation's own sequence; `request` "unresolved" when the server linked one).
+ */
+export interface ActivationRecord {
+  seq: number;
+  page: number;
+  /** The server frame, numbered in order of its first commit (identity only). */
+  frame: number;
+  kind: "initial-document" | "new-document";
+  url: string;
+  nativeDocument: string | null;
+  request: "none" | "linked" | "unresolved";
+  dispatched: boolean;
+  observed: TransportStamp;
+  pairedWith?: number;
+}
+
 // ---- Revision 28: the context's capture registry (Review 33 F33-1) ------------------------------------------------------------------
 
 /** The parts of a Playwright client frame the recorder reads (its `_eventEmitter`, the navigation provenance, is read by `observeNavigations`). */
@@ -1602,6 +1895,20 @@ function rootOf(
  * (a service worker's messages keep Playwright's per-page delivery). A problem Playwright delivers for a page it has NOT announced yet
  * reaches only the context: the recorder takes it there, with that page's number and document, so it cannot be lost either.
  *
+ * Revision 29 (Review 34 F34-1, design assessment token 5b499855…, C1–C5): the request-based bootstrap still missed an activation with
+ * NO request before the page's announcement (Firefox's native same-origin `blob:` popup): its commit never reaches the client at all.
+ * The recorder therefore also attaches the ACTIVATION SOURCE (`observeActivations`: the lane context's in-process server commits),
+ * first, before any page exists (`pagesAtAttach` 0, else a named failure), and records every main-frame activation it reports
+ * (`journal.activations`, server receipt order, never re-stamped). The two streams have one explicit hand-off, decided by Playwright's
+ * own dispatch, never by URL or time: an activation Playwright did NOT dispatch to the client is applied to its page when the recorder
+ * first meets the frame (by server-frame identity), at its own sequence: a requestless new document (or, as the browsing context's
+ * first undispatched requestless about:blank commit, its initial document 0); one naming a server request is "unresolved", never
+ * requestless. A DISPATCHED activation is paired with the page's next client `new-document` event, whose named request must be the
+ * activation's server request (identity). At the first meeting the server frame must show the native document of its last observed
+ * activation; with none observed, the old rule stands (an empty initial document, else the named gap). After the context closed, a
+ * dispatched activation never delivered (a late subscription, whatever URL the page shows) and an undispatched one no lane page owns are
+ * named failures. The first-URL gap is now only the guard for a page with no observed activation; it never clears one.
+ *
  * Returns the disposer: it detaches every navigation-provenance subscription once, returning each detachment failure by name (the lane
  * calls it after its context closed, so a final event of the close is still recorded, including when an open fails after its context
  * arrived). An event arriving after it is a `journal.lateEvents` line, never recorded.
@@ -1619,6 +1926,17 @@ export function recordContext(
   const navigations = journal.navigations;
   const failures = journal.provenanceFailures;
   const pages = journal.pages;
+  /** Revision 29 (F34-1): one server main frame's activations: those not yet applied (undispatched) or not yet paired (dispatched). */
+  interface ServerFrameState {
+    ordinal: number;
+    page: PageRecord | null;
+    /** Every activation of the frame, in server order. */
+    all: ActivationRecord[];
+    /** Undispatched activations the recorder has not met the frame for yet (applied at that meeting). */
+    unapplied: ActivationRecord[];
+    /** Dispatched activations whose client `new-document` event has not arrived yet, with their server request (identity). */
+    unpaired: Array<{ record: ActivationRecord; request: object | null }>;
+  }
   interface PageRecord {
     index: number;
     root: unknown;
@@ -1626,6 +1944,7 @@ export function recordContext(
     latest: RequestRecord | null;
     association: PageAssociation;
     dispose: () => void;
+    server: ServerFrameState | null;
   }
   const byRoot = new Map<unknown, PageRecord>();
   const byPage = new Map<unknown, PageRecord>();
@@ -1638,6 +1957,117 @@ export function recordContext(
       `${what} delivered after the recorder was detached; not recorded`,
     );
   };
+  // Revision 29 (F34-1): the activation source, attached FIRST (the recorder runs as the context arrives, before any page of it exists;
+  // `pagesAtAttach` proves it). Unavailable is a named failure: then nothing undispatched can be observed, and the first-URL gap rule below
+  // remains the only guard.
+  journal.activations ??= [];
+  const activations = journal.activations;
+  const serverFrames = new Map<object, ServerFrameState>();
+  const stateOf = (frame: object): ServerFrameState => {
+    let state = serverFrames.get(frame);
+    if (state === undefined) {
+      state = {
+        ordinal: serverFrames.size,
+        page: null,
+        all: [],
+        unapplied: [],
+        unpaired: [],
+      };
+      serverFrames.set(frame, state);
+    }
+    return state;
+  };
+  const onServerCommit = (commit: ServerCommit) => {
+    if (disposed) return late("a server-observed document activation");
+    if (!commit.ok) {
+      failures.push(
+        `a document activation Playwright's server observed is unreadable (${commit.reason}); its page's documents cannot be attributed`,
+      );
+      return;
+    }
+    // A subframe's commit never changes its page's document (its client events never reach the main frame's provenance either).
+    if (!commit.main) return;
+    const state = stateOf(commit.frame);
+    const record: ActivationRecord = {
+      seq: next(),
+      page: state.page?.index ?? -1,
+      frame: state.ordinal,
+      kind:
+        state.all.length === 0 &&
+        !commit.dispatched &&
+        commit.request === null &&
+        commit.url === "about:blank"
+          ? "initial-document"
+          : "new-document",
+      url: commit.url,
+      nativeDocument: commit.nativeDocument,
+      request:
+        commit.request === null
+          ? "none"
+          : commit.dispatched
+            ? "linked"
+            : "unresolved",
+      dispatched: commit.dispatched,
+      observed: stamp(),
+    };
+    activations.push(record);
+    state.all.push(record);
+    if (commit.dispatched) {
+      state.unpaired.push({ record, request: commit.request });
+      return;
+    }
+    if (state.page === null) {
+      state.unapplied.push(record);
+      return;
+    }
+    // A frame the recorder already met has a dispatcher (its client frame exists): an undispatched commit of it contradicts that.
+    failures.push(
+      `page ${state.page.index}: an activation of its main frame (journal #${record.seq}, ${record.url}) was not dispatched although the recorder already met the frame; its documents cannot be attributed`,
+    );
+    applyActivation(state.page, record);
+  };
+  /** An undispatched activation, applied to its page at its OWN sequence (never re-stamped): a requestless new document, or document 0. */
+  const applyActivation = (page: PageRecord, record: ActivationRecord) => {
+    record.page = page.index;
+    if (record.kind === "initial-document") return;
+    if (record.request === "unresolved")
+      failures.push(
+        `page ${page.index}: activation #${record.seq} (${record.url}) names a request Playwright never delivered: unresolved, never treated as requestless`,
+      );
+    const from = page.documentNo;
+    page.documentNo += 1;
+    navigations.push({
+      seq: record.seq,
+      page: page.index,
+      url: record.url,
+      kind: "new-document",
+      from,
+      document: page.documentNo,
+      request: null,
+      reason:
+        record.request === "unresolved"
+          ? "a new document whose request Playwright never delivered (unresolved; unattributed)"
+          : "a requestless new document, committed before Playwright dispatched its frame (observed at the server context)",
+    });
+  };
+  const source = observeActivations(context, onServerCommit, installed);
+  if (source.ok) {
+    journal.activationSource = {
+      source: "playwright-server-context",
+      version: installed.version as string,
+      bundleSha256: installed.bundleSha256,
+      pagesAtAttach: source.pagesAtAttach,
+    };
+    if (source.pagesAtAttach !== 0)
+      failures.push(
+        `the activation source attached after ${source.pagesAtAttach} page(s) of its context existed: their earlier activations cannot have been observed`,
+      );
+  } else {
+    journal.activationSource = { unavailable: source.reason };
+    failures.push(
+      `activation source unavailable (${source.reason}): an activation before Playwright dispatches a page's frame cannot be observed`,
+    );
+  }
   const on = context.on.bind(context) as (
     event: string,
     listener: (value: never) => void,
@@ -1718,6 +2148,29 @@ export function recordContext(
       });
       return;
     }
+    // Revision 29 (F34-1): the hand-off. Each client new-document event is the page's oldest dispatched server activation not yet paired,
+    // and names that activation's own server request (identity), or none when it has none. Anything else is a named failure.
+    if (page.server !== null && source.ok) {
+      const pair = page.server.unpaired.shift();
+      if (pair === undefined)
+        failures.push(
+          `page ${index}: navigation event #${seq} (new-document, ${read.url}) has no activation observed at Playwright's server`,
+        );
+      else {
+        pair.record.pairedWith = seq;
+        pair.record.page = index;
+        const named =
+          read.request === null ? null : source.serverRequestOf(read.request);
+        if (read.request !== null && named === null)
+          failures.push(
+            `page ${index}: navigation event #${seq} (new-document) names a request whose server request is unreadable; it cannot be paired with server activation #${pair.record.seq}`,
+          );
+        else if (named !== pair.request)
+          failures.push(
+            `page ${index}: navigation event #${seq} (new-document) ${read.request === null ? "names no request" : "names a request"} but its server activation #${pair.record.seq} ${pair.request === null ? "has none" : read.request === null ? "has one" : "has another"}`,
+          );
+      }
+    }
     page.documentNo += 1;
     let request: number | null = null;
     let reason =
@@ -1768,6 +2221,7 @@ export function recordContext(
       latest: null,
       association,
       dispose: () => undefined,
+      server: null,
     };
     byRoot.set(root, page);
     // Subscribed in the listener that first met the frame, before Playwright can deliver its next event: no navigation of it is unobserved.
@@ -1791,7 +2245,40 @@ export function recordContext(
         `page ${index}: navigation provenance unavailable (${subscription.reason}); its documents cannot be attributed`,
       );
     }
-    if (firstUrl !== "" && firstUrl !== "about:blank")
+    // Revision 29 (F34-1): the frame's activations before this meeting. Undispatched ones never reach the client: they are applied now, at
+    // their own sequences. The chain is checked by NATIVE document identity: the server frame must now show the last activation observed
+    // of it. With none observed, the page still shows its unreported initial document, which must be empty ("" or about:blank).
+    let observed: ActivationRecord | undefined;
+    if (source.ok) {
+      const found = source.serverFrameOf(root);
+      if (!found.ok)
+        failures.push(
+          `page ${index}: its server frame cannot be identified (${found.reason}); its activations cannot be attributed`,
+        );
+      else {
+        const state = stateOf(found.frame);
+        if (state.page !== null)
+          failures.push(
+            `page ${index}: its server frame is already page ${state.page.index}'s`,
+          );
+        else {
+          state.page = page;
+          page.server = state;
+          for (const record of state.all) record.page = index;
+          for (const record of state.unapplied.splice(0))
+            applyActivation(page, record);
+          observed = state.all.at(-1);
+          if (
+            observed !== undefined &&
+            found.currentDocument !== observed.nativeDocument
+          )
+            failures.push(
+              `page ${index}: first met showing native document ${JSON.stringify(found.currentDocument)}, not its last observed activation #${observed.seq} (${JSON.stringify(observed.nativeDocument)}): an activation was not observed, so its documents cannot be attributed`,
+            );
+        }
+      }
+    }
+    if (observed === undefined && firstUrl !== "" && firstUrl !== "about:blank")
       failures.push(
         `page ${index}: first met (${via === "request" ? "at a request of its main frame" : via === "page" ? "at its announcement" : "at a problem before its announcement"}) already showing ${firstUrl}: an earlier document activation was not observed, so its documents cannot be attributed`,
       );
@@ -2021,6 +2508,31 @@ export function recordContext(
             `page ${page.index}: detaching its navigation provenance failed: ${String(error)}`,
           );
         }
+      if (source.ok)
+        try {
+          source.dispose();
+        } catch (error) {
+          errors.push(
+            `detaching the activation source failed: ${String(error)}`,
+          );
+        }
+      // Revision 29 (F34-1): the lane's context has closed, so every commit Playwright dispatched has been delivered. A dispatched
+      // activation without its client event was missed by a late subscription (whatever URL the page ended on); an undispatched one whose
+      // frame the recorder never met belongs to no lane page. Both are named failures, never dropped.
+      for (const state of serverFrames.values()) {
+        const where =
+          state.page === null
+            ? `a main frame the recorder never met (server frame ${state.ordinal})`
+            : `page ${state.page.index}`;
+        for (const { record } of state.unpaired)
+          failures.push(
+            `${where}: activation #${record.seq} (${record.url}) was dispatched to Playwright's client but the recorder never received its navigation event; its documents cannot be attributed`,
+          );
+        for (const record of state.unapplied)
+          failures.push(
+            `${where}: activation #${record.seq} (${record.url}) was never attributed to a lane page`,
+          );
+      }
       return errors;
     },
   };
@@ -2675,12 +3187,27 @@ async function openLane(
     "context",
     async () => {
       const made = await browser.newContext(contextOptions);
-      capture = recordContext(made as unknown as RecordedContext, {
-        journal,
-        next,
-        stamp,
-        ingest,
-      });
+      // Revision 29 (F34-1, C4, OWN-install): the capture registry and its activation source are attached here, after `newContext`
+      // returned. Should attaching throw, the acquisition would reject with the context never handed to the scope: close it here first,
+      // keeping both failures.
+      try {
+        capture = recordContext(made as unknown as RecordedContext, {
+          journal,
+          next,
+          stamp,
+          ingest,
+        });
+      } catch (error) {
+        let closing = "";
+        try {
+          await made.close();
+        } catch (closeError) {
+          closing = `; closing its context also failed: ${String(closeError)}`;
+        }
+        throw new Error(
+          `attaching the context's capture registry failed: ${String(error)}${closing}`,
+        );
+      }
       return made;
     },
     (c) =>
@@ -2947,6 +3474,8 @@ async function openLane(
       pages: journal.pages ?? [],
       unattributedRequests: journal.unattributedRequests ?? [],
       lateEvents: journal.lateEvents ?? [],
+      activations: journal.activations ?? [],
+      activationSource: journal.activationSource ?? null,
       engine: journal.engine ?? null,
       late: journal.late ?? [],
       held: [...held],

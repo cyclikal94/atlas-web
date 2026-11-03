@@ -13,6 +13,7 @@ import type { Browser, TestInfo } from "@playwright/test";
 import { describe, expect, it } from "vitest";
 import type { TransportAttempt } from "../../scripts/integration/http-transport-loss.mjs";
 import {
+  ACTIVATION_SOURCE_PIN,
   type AttemptRecord,
   type CleanupStep,
   categorise,
@@ -28,6 +29,7 @@ import {
   LaneSeamMisuse,
   type OpenStage,
   type OriginRoute,
+  observeActivations,
   observeNavigations,
   openTransportLanes,
   type Problem,
@@ -1155,6 +1157,49 @@ describe("D10: start, close and the fixture's teardown", () => {
  * A browser double whose contexts are counted (every context it ever made, and which are still open); the lane's listeners are REAL
  * loopback servers, observed independently (a refused connection). The real-engine counterpart is the guard spec's L cases.
  */
+/**
+ * Revision 29 (F34-1): Playwright's in-process SERVER side of a context double, as `observeActivations` reads it through the client
+ * connection's `toImpl`: the server context (an emitter of `internalframenavigatedtonewdocument` with `possiblyUninitializedPages()`), the
+ * dispatcher connection (`existingDispatcher`) and each bound client object's server object. A client object never bound throws, as
+ * Playwright's `toImpl` does for an object without a dispatcher.
+ */
+function serverSide(pagesAtAttach = 0) {
+  const server = Object.assign(new EventEmitter(), {
+    possiblyUninitializedPages: () => Array.from({ length: pagesAtAttach }),
+  });
+  const dispatched = new WeakSet<object>();
+  const impls = new WeakMap<object, unknown>();
+  const dispatchers = {
+    existingDispatcher: (o: object) => (dispatched.has(o) ? {} : undefined),
+  };
+  const connection: { toImpl: (x: unknown) => unknown } = {
+    toImpl(x: unknown) {
+      if (x === connection) return dispatchers;
+      if (typeof x !== "object" || x === null || !impls.has(x))
+        throw new TypeError(
+          "Cannot read properties of undefined (reading '_object')",
+        );
+      return impls.get(x);
+    },
+  };
+  return {
+    server,
+    connection,
+    bind: (client: object, impl: unknown) => {
+      impls.set(client, impl);
+    },
+    implOf: (client: object) => impls.get(client),
+    /** Playwright creates a frame's dispatcher at its first request or its page's announcement; from then on it dispatches its commits. */
+    dispatch: (frame: object) => {
+      dispatched.add(frame);
+    },
+    isDispatched: (frame: object) => dispatched.has(frame),
+    /** Playwright's `frameCommittedNewDocumentNavigation` → `frameNavigatedToNewDocument`: the context event, emitted before any client delivery. */
+    commit: (frame: object) =>
+      server.emit("internalframenavigatedtonewdocument", frame),
+  };
+}
+
 function fakeBrowser() {
   type FakeContext = {
     id: number;
@@ -1190,6 +1235,10 @@ function fakeBrowser() {
           live.delete(c);
         },
       };
+      // Revision 29: its in-process server side (no page, no commit), so the lane's activation source attaches as in Playwright.
+      const side = serverSide();
+      side.bind(c, side.server);
+      (c as unknown as { _connection: unknown })._connection = side.connection;
       made.push(c);
       live.add(c);
       const deliver = hooks.deliver;
@@ -2678,9 +2727,12 @@ describe("F32-1 classifyJournal C3: a commit admits a message only with its own 
  * context emits (network events, page announcements, and console/web errors after the page's own delivery, as Playwright's client does).
  * Each page double below is one of its pages.
  */
-function recorderContext() {
+function recorderContext(options: { pagesAtAttach?: number } = {}) {
   const listeners = new Map<string, Array<(value: unknown) => void>>();
+  // Revision 29 (F34-1): with Playwright's in-process server side (`serverSide`), as a real lane context has.
+  const side = serverSide(options.pagesAtAttach ?? 0);
   const context = {
+    _connection: side.connection,
     on(event: string, listener: (value: never) => void) {
       listeners.set(event, [
         ...(listeners.get(event) ?? []),
@@ -2688,10 +2740,11 @@ function recorderContext() {
       ]);
     },
   };
+  side.bind(context, side.server);
   const emit = (event: string, value: unknown) => {
     for (const l of listeners.get(event) ?? []) l(value);
   };
-  return { context, emit, listeners };
+  return { context, emit, listeners, side };
 }
 
 /**
@@ -2708,7 +2761,7 @@ function recorderContext() {
  */
 function recorderPage(
   ctx: ReturnType<typeof recorderContext> = recorderContext(),
-  options: { announce?: boolean; url?: string } = {},
+  options: { announce?: boolean; url?: string; nativeDocument?: string } = {},
 ) {
   const listeners = new Map<string, Array<(value: unknown) => void>>();
   let mainUrl = options.url ?? "about:blank";
@@ -2718,6 +2771,19 @@ function recorderPage(
     parentFrame: () => null,
     _eventEmitter: internal,
   };
+  // Revision 29 (F34-1): the main frame's SERVER frame (Playwright's): its URL, its current native document and that document's server
+  // request. Its commits reach the server context first; the client is sent one only once the frame has a dispatcher (its first request
+  // or the page's announcement), as in Playwright.
+  let nativeNo = 0;
+  const serverMain = {
+    url: () => mainUrl,
+    parentFrame: () => null,
+    _currentDocument: {
+      documentId: options.nativeDocument as string | undefined,
+      request: undefined as unknown,
+    },
+  };
+  ctx.side.bind(main, serverMain);
   const page = {
     mainFrame: () => main,
     on(event: string, listener: (value: never) => void) {
@@ -2733,11 +2799,39 @@ function recorderPage(
   let announced = false;
   const announce = () => {
     announced = true;
+    ctx.side.dispatch(serverMain);
     ctx.emit("page", page);
   };
   if (options.announce !== false) announce();
   const channel = (r: RecordedRequest | undefined) =>
     r === undefined ? undefined : { _object: r };
+  const serverCommit = (
+    url: string,
+    request?: RecordedRequest,
+    nativeDocument?: string,
+  ) => {
+    mainUrl = url;
+    nativeNo += 1;
+    // Playwright's server holds every request a commit links (also one whose client event the recorder never received).
+    if (request !== undefined && ctx.side.implOf(request) === undefined)
+      ctx.side.bind(request, { request: request.url() });
+    serverMain._currentDocument = {
+      documentId: nativeDocument ?? `native-${nativeNo}`,
+      request: request === undefined ? undefined : ctx.side.implOf(request),
+    };
+    const dispatched = ctx.side.isDispatched(serverMain);
+    ctx.side.commit(serverMain);
+    return dispatched;
+  };
+  const clientNavigated = (url: string, request?: RecordedRequest) => {
+    mainUrl = url;
+    internal.emit("navigated", {
+      url,
+      name: "",
+      newDocument: { request: channel(request) },
+    });
+    emit("framenavigated", main);
+  };
   const request = (
     url: string,
     options: {
@@ -2766,6 +2860,9 @@ function recorderPage(
       redirectedFrom: () => options.from ?? null,
       _initializer: { frame: { _object: frame } },
     };
+    // Revision 29: its server request (identity); the request's dispatcher creates its frame's, and its parent's.
+    ctx.side.bind(r, { request: url });
+    ctx.side.dispatch(serverMain);
     ctx.emit("request", r);
     return r;
   };
@@ -2782,16 +2879,19 @@ function recorderPage(
       ctx.emit("requestfailed", r);
     },
     finish: (r: RecordedRequest) => ctx.emit("requestfinished", r),
-    /** Playwright's `frameCommittedNewDocumentNavigation`: a new document, linked to `request` when Playwright linked one. */
+    /**
+     * Playwright's `frameCommittedNewDocumentNavigation`: a new document, linked to `request` when Playwright linked one. Revision 29: the
+     * server context observes it first; the client is sent it only if the frame has a dispatcher (Firefox's requestless popup: not).
+     */
     newDocument: (url: string, request?: RecordedRequest) => {
-      mainUrl = url;
-      internal.emit("navigated", {
-        url,
-        name: "",
-        newDocument: { request: channel(request) },
-      });
-      emit("framenavigated", main);
+      const dispatched = serverCommit(url, request);
+      if (dispatched) clientNavigated(url, request);
     },
+    /** Revision 29: ONLY the server's commit (the context event), returning whether the frame had a dispatcher (would be sent it). */
+    serverCommit,
+    /** Revision 29: ONLY the client's `navigated` new-document event and public framenavigated (no server commit). */
+    clientNavigated,
+    serverMain,
     /** Playwright's `frameCommittedSameDocumentNavigation`: a fragment or history-API change. */
     sameDocument: (url: string) => {
       mainUrl = url;
@@ -3331,6 +3431,12 @@ describe("F32-1 navigation provenance: unavailable, unreadable or contradicting 
     // is now ALSO the named "first met already showing a document" gap, qualified separately below). The intent is unchanged.
     const main = { url: () => "about:blank", parentFrame: () => null };
     const ctx = recorderContext();
+    // Revision 29 adaptation (F34-1): its server frame exists (Playwright's), showing its initial document; only the CLIENT emitter is missing.
+    ctx.side.bind(main, {
+      url: () => "about:blank",
+      parentFrame: () => null,
+      _currentDocument: { documentId: undefined, request: undefined },
+    });
     recordContext(ctx.context, {
       journal: j,
       next: () => {
@@ -3545,12 +3651,16 @@ describe("F31-1 the ingestion seam and the seal (C4)", () => {
     const browser = {
       newContext: (async (options?: { baseURL?: string }) => {
         front = options?.baseURL ?? "";
-        return {
+        // Revision 29 adaptation (F34-1): with the in-process server side every real lane context has.
+        const made = {
+          _connection: ctx.context._connection,
           on: ctx.context.on,
           addInitScript: async () => undefined,
           close: async () => undefined,
           browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
         };
+        ctx.side.bind(made, ctx.side.server);
+        return made;
       }) as unknown as Browser["newContext"],
     };
     const page = () => {
@@ -3706,11 +3816,25 @@ describe("F33-1 recordContext: a popup's first request, response and commit prec
       { page: 0, via: "page", firstUrl: "about:blank", announced: true },
       { page: 1, via: "request", firstUrl: "", announced: true },
     ]);
+    // Revision 29 adaptation (F34-1): each server-observed activation now takes its own journal sequence just before the client's
+    // commit event (opener: activation #3, commit #4; popup: activation #9, commit #10). Same commits, documents and order.
     expect(
       j.requests.map((r) => [r.page, r.document, r.navigation, r.commit]),
     ).toEqual([
-      [0, 0, true, { seq: 3, document: 1 }],
-      [1, 0, true, { seq: 8, document: 1 }],
+      [0, 0, true, { seq: 4, document: 1 }],
+      [1, 0, true, { seq: 10, document: 1 }],
+    ]);
+    expect(
+      j.activations?.map((a) => [
+        a.seq,
+        a.page,
+        a.kind,
+        a.dispatched,
+        a.pairedWith,
+      ]),
+    ).toEqual([
+      [3, 0, "new-document", true, 4],
+      [9, 1, "new-document", true, 10],
     ]);
     expect(j.navigations?.map((n) => [n.page, n.kind, n.document])).toEqual([
       [0, "new-document", 1],
@@ -4050,6 +4174,444 @@ describe("F33-1 C5 the capture registry is owned with its context", () => {
       popup?.internal.listenerCount("navigated"),
       "detached by the context's own disposal",
     ).toBe(0);
+  });
+});
+
+// ---- Revision 29 (Review 34 F34-1, family native-transport-console-attribution; design assessment token 5b499855…, C1–C5, Q1) --------
+
+describe("F34-1 the activation source: an activation Playwright never dispatched is still the page's (observed orders, revision-29 diag/activation-boundary-1)", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  const B = "blob:http://127.0.0.1:9/0a6f2c1e-0000-4000-8000-000000000034";
+  /** An opener (page 0) with its HTTP document, and a popup double Playwright has not announced and holds no dispatcher for. */
+  function withOpener(engine: string) {
+    const r = recorded(engine);
+    const opened = r.d.request(P);
+    r.d.respond(opened, 200);
+    r.d.newDocument(P, opened);
+    const popup = recorderPage(r.ctx, { announce: false, url: "" });
+    return { ...r, popup };
+  }
+  const page1 = (j: Journal) => ({
+    activations: (j.activations ?? [])
+      .filter((a) => a.page === 1)
+      .map((a) => [
+        a.kind,
+        a.url,
+        a.request,
+        a.dispatched,
+        a.pairedWith ?? null,
+      ]),
+    navigations: (j.navigations ?? [])
+      .filter((n) => n.page === 1)
+      .map((n) => [n.kind, n.from, n.document, n.request, n.url]),
+  });
+
+  it("CAP3-F34 Firefox's native blob popup (requestless commit BEFORE the page exists for the client, then the page announced at the blob): one requestless activation of page 1, document 1, nothing missing", () => {
+    const { j, popup } = withOpener("firefox");
+    const before = j.activations?.length ?? 0;
+    expect(
+      popup.serverCommit(B),
+      "undispatched: Playwright sends the client nothing",
+    ).toBe(false);
+    expect(j.activations?.slice(before)).toEqual([
+      expect.objectContaining({
+        page: -1,
+        kind: "new-document",
+        url: B,
+        request: "none",
+        dispatched: false,
+      }),
+    ]);
+    const activation = j.activations?.at(-1);
+    popup.announce();
+    popup.console("error", "a genuine error of the blob document", B);
+    expect(j.pages?.[1]).toEqual({
+      page: 1,
+      via: "page",
+      firstUrl: B,
+      announced: true,
+    });
+    expect(page1(j)).toEqual({
+      activations: [["new-document", B, "none", false, null]],
+      navigations: [["new-document", 0, 1, null, B]],
+    });
+    const navigation = j.navigations?.find((n) => n.page === 1);
+    expect(
+      navigation?.seq,
+      "applied at its OWN server sequence, never re-stamped",
+    ).toBe(activation?.seq);
+    expect(navigation?.reason).toMatch(
+      /^a requestless new document, committed before Playwright dispatched its frame/,
+    );
+    expect(
+      j.requests.filter((r) => r.page === 1),
+      "no request invented",
+    ).toEqual([]);
+    expect(j.problems.at(-1)).toMatchObject({ page: 1, document: 1 });
+    expect(j.provenanceFailures).toEqual([]);
+    expect(j.activationSource).toMatchObject({
+      source: "playwright-server-context",
+      pagesAtAttach: 0,
+    });
+  });
+  it("CAP3-F34 control, Firefox's explicit page: its initial about:blank commit (undispatched) is document 0, the blob commit (dispatched, requestless) is paired with the client's event as document 1", () => {
+    const { j, popup } = withOpener("firefox");
+    popup.serverCommit("about:blank");
+    popup.announce();
+    popup.newDocument(B);
+    expect(j.pages?.[1]).toEqual({
+      page: 1,
+      via: "page",
+      firstUrl: "about:blank",
+      announced: true,
+    });
+    const nav = j.navigations?.find((n) => n.page === 1);
+    expect(page1(j)).toEqual({
+      activations: [
+        ["initial-document", "about:blank", "none", false, null],
+        ["new-document", B, "none", true, nav?.seq],
+      ],
+      navigations: [["new-document", 0, 1, null, B]],
+    });
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it('CAP3-blank a named window.open("", name): WebKit\'s initial about:blank (native document "") is document 0; the opener\'s later navigation of it commits document 1, linked to its request', () => {
+    const { j, popup } = withOpener("webkit");
+    popup.serverCommit("about:blank", undefined, "");
+    popup.announce();
+    const nav = popup.request(N);
+    popup.respond(nav, 200);
+    popup.newDocument(N, nav);
+    expect(page1(j)).toEqual({
+      activations: [
+        ["initial-document", "about:blank", "none", false, null],
+        ["new-document", N, "linked", true, j.navigations?.at(-1)?.seq],
+      ],
+      navigations: [["new-document", 0, 1, j.requests.at(-1)?.seq, N]],
+    });
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("a second undispatched about:blank commit is a NEW document (only the frame's first is its initial document)", () => {
+    const { j, popup } = withOpener("chromium");
+    popup.serverCommit("about:blank");
+    popup.serverCommit("about:blank");
+    popup.announce();
+    expect(page1(j)).toEqual({
+      activations: [
+        ["initial-document", "about:blank", "none", false, null],
+        ["new-document", "about:blank", "none", false, null],
+      ],
+      navigations: [["new-document", 0, 1, null, "about:blank"]],
+    });
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("Chromium's HTTP popup (dispatched at its request, before the announcement): the activation is paired with the client's commit, linked to the same request by identity", () => {
+    const { j, popup } = withOpener("chromium");
+    const nav = popup.request(N);
+    popup.respond(nav, 503);
+    popup.newDocument(N, nav);
+    popup.announce();
+    const commit = j.navigations?.find((n) => n.page === 1);
+    expect(page1(j).activations).toEqual([
+      ["new-document", N, "linked", true, commit?.seq],
+    ]);
+    expect(commit?.request).toBe(j.requests.at(-1)?.seq);
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("a subframe's server commit is no activation of its page", () => {
+    const { j, ctx } = withOpener("chromium");
+    const before = j.activations?.length;
+    ctx.side.commit({
+      url: () => `${FRONT}/frame`,
+      parentFrame: () => ({}),
+      _currentDocument: { documentId: "f", request: undefined },
+    });
+    expect(j.activations).toHaveLength(before ?? 0);
+    expect(j.provenanceFailures).toEqual([]);
+  });
+});
+
+describe("F34-1 the hand-off and the source fail by name; nothing is inferred from a URL", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  const B = "blob:http://127.0.0.1:9/0a6f2c1e-0000-4000-8000-000000000034";
+  function withOpener(
+    engine: string,
+    options: { pagesAtAttach?: number } = {},
+  ) {
+    let seq = 0;
+    const j: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+      engine,
+    };
+    const ctx = recorderContext(options);
+    const recorder = recordContext(ctx.context, {
+      journal: j,
+      next: () => {
+        seq += 1;
+        return seq;
+      },
+      stamp,
+      ingest: (p) => void j.problems.push(p),
+    });
+    const d = recorderPage(ctx);
+    const opened = d.request(P);
+    d.respond(opened, 200);
+    d.newDocument(P, opened);
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    return { j, d, ctx, popup, recorder };
+  }
+  it("CAP7 a DISPATCHED activation whose client event the recorder never received (a late subscription) fails at settlement, even when the page ends at about:blank", () => {
+    const { j, d, recorder } = withOpener("chromium");
+    expect(d.serverCommit("about:blank"), "dispatched").toBe(true);
+    expect(j.provenanceFailures).toEqual([]);
+    expect(recorder.dispose()).toEqual([]);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 0: activation #\d+ \(about:blank\) was dispatched to Playwright's client but the recorder never received its navigation event/,
+      ),
+    ]);
+  });
+  it("CAP7 a client new-document event with no server activation is a named failure", () => {
+    const { j, d } = withOpener("chromium");
+    d.clientNavigated(`${FRONT}/requestless`);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 0: navigation event #\d+ \(new-document, http:\/\/127\.0\.0\.1:9\/requestless\) has no activation observed at Playwright's server$/,
+      ),
+    ]);
+  });
+  it("CAP7 a client event naming a request other than its server activation's (by identity, whatever the URL) is a named failure", () => {
+    const { j, d } = withOpener("chromium");
+    const first = d.request(N);
+    const second = d.request(N);
+    d.serverCommit(N, first);
+    d.clientNavigated(N, second);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 0: navigation event #\d+ \(new-document\) names a request but its server activation #\d+ has another$/,
+      ),
+    ]);
+    d.serverCommit(N);
+    d.clientNavigated(N, first);
+    expect(j.provenanceFailures).toContainEqual(
+      expect.stringMatching(
+        /names a request but its server activation #\d+ has none$/,
+      ),
+    );
+    d.serverCommit(N, second);
+    d.clientNavigated(N);
+    expect(j.provenanceFailures).toContainEqual(
+      expect.stringMatching(
+        /names no request but its server activation #\d+ has one$/,
+      ),
+    );
+  });
+  it("CAP7 an undispatched activation naming a server request is UNRESOLVED: a named failure, never credited as requestless", () => {
+    const { j, popup } = withOpener("firefox");
+    const unseen = {
+      method: () => "GET",
+      url: () => B,
+      isNavigationRequest: () => true,
+      frame: () => popup.main,
+      failure: () => null,
+      redirectedFrom: () => null,
+    };
+    popup.serverCommit(B, unseen);
+    popup.announce();
+    expect(j.activations?.at(-1)).toMatchObject({
+      page: 1,
+      request: "unresolved",
+      dispatched: false,
+    });
+    expect(j.navigations?.at(-1)).toMatchObject({
+      page: 1,
+      kind: "new-document",
+      request: null,
+      reason: expect.stringMatching(/unresolved/),
+    });
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 1: activation #\d+ \(blob:.*\) names a request Playwright never delivered: unresolved, never treated as requestless$/,
+      ),
+    ]);
+  });
+  it("CAP7 a page first met showing a native document that is not its last observed activation (one escaped observation) fails by name, whatever its URL", () => {
+    const { j, popup } = withOpener("firefox");
+    popup.serverCommit(B);
+    popup.serverMain._currentDocument = {
+      documentId: "not-observed",
+      request: undefined,
+    };
+    popup.announce();
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 1: first met showing native document "not-observed", not its last observed activation #\d+ \("native-1"\)/,
+      ),
+    ]);
+  });
+  it("CAP7 an undispatched activation of a frame the recorder never meets fails at settlement (never dropped)", () => {
+    const { j, popup, recorder } = withOpener("firefox");
+    popup.serverCommit(B);
+    expect(recorder.dispose()).toEqual([]);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^a main frame the recorder never met \(server frame \d+\): activation #\d+ \(blob:.*\) was never attributed to a lane page$/,
+      ),
+    ]);
+  });
+  it("CAP7 a source attached after a page of its context existed fails by name", () => {
+    const { j } = withOpener("chromium", { pagesAtAttach: 1 });
+    expect(j.provenanceFailures).toEqual([
+      "the activation source attached after 1 page(s) of its context existed: their earlier activations cannot have been observed",
+    ]);
+  });
+  it("CAP7 an unavailable source (no in-process toImpl: a connected client) fails by name; the first-URL gap still fails a page first met showing a document", () => {
+    let seq = 0;
+    const j: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+      engine: "firefox",
+    };
+    const ctx = recorderContext();
+    (ctx.context as { _connection?: unknown })._connection = {};
+    recordContext(ctx.context, {
+      journal: j,
+      next: () => {
+        seq += 1;
+        return seq;
+      },
+      stamp,
+      ingest: (p) => void j.problems.push(p),
+    });
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.serverCommit(B);
+    popup.announce();
+    expect(j.activationSource).toEqual({
+      unavailable: expect.stringMatching(/no in-process `toImpl`/),
+    });
+    expect(j.activations).toEqual([]);
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^activation source unavailable \(the client connection has no in-process `toImpl`/,
+      ),
+      expect.stringMatching(
+        /^page 0: first met \(at its announcement\) already showing blob:.*: an earlier document activation was not observed/,
+      ),
+    ]);
+  });
+  it("CAP7 the source refuses another installed Playwright version and an unexpected shape, attaching nothing", () => {
+    const ctx = recorderContext();
+    const listener = () => undefined;
+    expect(
+      observeActivations(ctx.context, listener, {
+        version: "1.62.0",
+        bundleSha256: null,
+        error: null,
+      }),
+    ).toEqual({
+      ok: false,
+      reason:
+        "the activation source is qualified for playwright-core 1.63.0 only; installed: 1.62.0",
+    });
+    expect(ctx.side.server.listenerCount(ACTIVATION_SOURCE_PIN.event)).toBe(0);
+    const odd = recorderContext();
+    odd.side.bind(odd.context, { on: () => undefined });
+    expect(observeActivations(odd.context, listener)).toEqual({
+      ok: false,
+      reason:
+        "the server context has no on/off/possiblyUninitializedPages of the pinned shape",
+    });
+  });
+  it("CAP7 an unreadable server commit is a named failure", () => {
+    const { j, ctx } = withOpener("chromium");
+    ctx.side.commit({ url: () => "x", parentFrame: () => null });
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^a document activation Playwright's server observed is unreadable \(a server frame without `_currentDocument`\)/,
+      ),
+    ]);
+  });
+  it("the disposer detaches the source exactly once: a later server commit reaches nothing", () => {
+    const { j, d, ctx, recorder } = withOpener("chromium");
+    expect(ctx.side.server.listenerCount(ACTIVATION_SOURCE_PIN.event)).toBe(1);
+    expect(recorder.dispose()).toEqual([]);
+    expect(ctx.side.server.listenerCount(ACTIVATION_SOURCE_PIN.event)).toBe(0);
+    const recorded = j.activations?.length;
+    d.serverCommit(`${FRONT}/after`);
+    expect(j.activations).toHaveLength(recorded ?? 0);
+    expect(j.lateEvents).toBeUndefined();
+    expect(recorder.dispose(), "single use").toEqual([]);
+  });
+  it("a failing detachment of the source is reported by name; a commit still delivered after it is late, never recorded", () => {
+    const { j, d, ctx, recorder } = withOpener("chromium");
+    ctx.side.server.off = () => {
+      throw new Error("off refused");
+    };
+    expect(recorder.dispose()).toEqual([
+      "detaching the activation source failed: Error: off refused",
+    ]);
+    const recorded = j.activations?.length;
+    d.serverCommit(`${FRONT}/after`);
+    expect(j.activations).toHaveLength(recorded ?? 0);
+    expect(j.lateEvents).toEqual([
+      "a server-observed document activation delivered after the recorder was detached; not recorded",
+    ]);
+  });
+  it("two lane contexts: each source observes only its own context's activations", () => {
+    const a = withOpener("firefox");
+    const b = withOpener("firefox");
+    a.popup.serverCommit(B);
+    a.popup.announce();
+    expect(b.j.activations?.map((x) => x.url)).toEqual([P]);
+    expect(a.j.activations?.map((x) => x.url)).toEqual([P, B]);
+    expect(a.j.provenanceFailures).toEqual([]);
+    expect(b.j.provenanceFailures).toEqual([]);
+  });
+});
+
+describe("F34-1 OWN-install: attaching the capture registry fails after newContext returned", () => {
+  it("the open fails by name and its context is closed once, before the open's error is reported", async () => {
+    let closed = 0;
+    const browser = {
+      newContext: (async () => ({
+        // A context the recorder cannot attach to (no `on`): recordContext throws inside the acquisition.
+        _connection: undefined,
+        addInitScript: async () => undefined,
+        close: async () => {
+          closed += 1;
+        },
+        browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
+      })) as unknown as Browser["newContext"],
+    };
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(browser, info);
+    await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
+      /attaching the context's capture registry failed: TypeError/,
+    );
+    const report = await lanes.settle();
+    expect(closed, "the context was closed once").toBe(1);
+    expect(report.closeErrors).toEqual([]);
+  });
+  it("a failing close of that context is reported with the attachment's failure, neither masking the other", async () => {
+    const browser = {
+      newContext: (async () => ({
+        addInitScript: async () => undefined,
+        close: async () => {
+          throw new Error("close refused");
+        },
+      })) as unknown as Browser["newContext"],
+    };
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(browser, info);
+    await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
+      /attaching the context's capture registry failed: TypeError.*; closing its context also failed: Error: close refused/,
+    );
+    await lanes.settle();
   });
 });
 

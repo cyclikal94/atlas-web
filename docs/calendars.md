@@ -393,6 +393,28 @@ installation instead of failing, and keeps its value per document, so a new docu
 installation fails visibly. Qualified on macOS in all three engines: Review 33's popup with a declared 503 (immediate and held at the
 origin), a redirect and reload, a named window reused twice, an opener closed first, an undeclared status, and a plain popup's UI state.
 
+Revision 29 also records a document that starts without any request. Firefox opens a same-origin `blob:` popup without one, and commits it
+before the popup has any representation in Playwright's client. Playwright's client is therefore never told about that document, and the
+lane met the popup already showing it. The lane now also listens to Playwright's own in-process server context for the same lane. That
+listener attaches before the context has any page, and it hears every main-frame document commit. Playwright's own dispatch decides which
+record is authoritative, never a URL or a time:
+- **A commit Playwright did not send to its client:** it is applied to its page when the lane first meets that page, at its original
+  position in the journal. It is a requestless new document, or, for the window's first blank document, the page's initial document 0.
+- **A commit Playwright did send:** it is matched with the client's own navigation event, and both must name the same request.
+
+These fail the case by name:
+- a sent commit whose client event never arrived;
+- a client event without a server commit;
+- a mismatched request;
+- a commit naming a request the lane never saw;
+- a commit of a window the lane never met;
+- a source that attached late;
+- a page whose current document is not the last commit observed.
+
+This depends on Playwright running in-process with the tests (the default) and is pinned to Playwright 1.63.0. A remote or connected
+Playwright client, or another version, makes every lane fail by name until the source is requalified. Qualified on macOS in all three
+engines: Review 34's blob popup and an explicit-page control, a named blank popup, and every earlier guard case.
+
 The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
 origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
 once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins
