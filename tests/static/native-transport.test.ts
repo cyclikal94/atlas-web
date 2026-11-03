@@ -33,9 +33,11 @@ import {
   observeNavigations,
   openTransportLanes,
   type Problem,
+  RENDERER_CRASH_PIN,
   type RecordedRequest,
   type RequestRecord,
   readNavigated,
+  readServerPage,
   recordContext,
   runCleanup,
   runTransportLaneFixture,
@@ -1200,6 +1202,20 @@ function serverSide(pagesAtAttach = 0) {
       server.emit("internalframenavigatedtonewdocument", frame),
   };
 }
+
+/**
+ * Revision 31 (F36-1): Playwright's SERVER Page of a main frame (`frame._page`): an emitter of its own `crash`, with the lifecycle
+ * `Page._didCrash` sets BEFORE it emits (`open` → `crashed`). Every real lane page has one; revision 31 adaptation: the server-frame
+ * doubles below carry it, as Playwright's frames do.
+ */
+function serverPageDouble(lifecycle = "open") {
+  return Object.assign(new EventEmitter(), { _lifecycle: lifecycle });
+}
+const didCrash = (page: ReturnType<typeof serverPageDouble>) => {
+  if (page._lifecycle !== "open") return;
+  page._lifecycle = "crashed";
+  page.emit("crash");
+};
 
 function fakeBrowser() {
   type FakeContext = {
@@ -2786,9 +2802,12 @@ function recorderPage(
   // request. Its commits reach the server context first; the client is sent one only once the frame has a dispatcher (its first request
   // or the page's announcement), as in Playwright.
   let nativeNo = 0;
+  // Revision 31 adaptation (F36-1): its server Page (Playwright's frame `_page`), as every real lane page has.
+  const serverPage = serverPageDouble();
   const serverMain = {
     url: () => mainUrl,
     parentFrame: () => null,
+    _page: serverPage,
     _currentDocument: {
       documentId: options.nativeDocument as string | undefined,
       request: undefined as unknown,
@@ -2890,6 +2909,20 @@ function recorderPage(
     internal,
     announce,
     request,
+    serverPage,
+    /**
+     * Revision 31 (F36-1): a native renderer crash as Playwright 1.63.0 delivers it: the server Page's `Page._didCrash` (lifecycle, then
+     * its own `crash`), then (only for a page the client was announced: it has a dispatcher) the client Page's `crash`.
+     */
+    crash: () => {
+      didCrash(serverPage);
+      if (announced) emit("crash", page);
+    },
+    /** A healthy close: no crash at the server or the client (Playwright's `_didClose` path). */
+    close: () => {
+      serverPage._lifecycle = "closed";
+      emit("close", page);
+    },
     respond: (r: RecordedRequest, status: number) =>
       ctx.emit("response", { request: () => r, status: () => status }),
     fail: (r: RecordedRequest & { failed?: string }, errorText: string) => {
@@ -3453,6 +3486,8 @@ describe("F32-1 navigation provenance: unavailable, unreadable or contradicting 
     ctx.side.bind(main, {
       url: () => "about:blank",
       parentFrame: () => null,
+      // Revision 31 adaptation (F36-1): its server Page, as Playwright's frame has.
+      _page: serverPageDouble(),
       _currentDocument: { documentId: undefined, request: undefined },
     });
     recordContext(ctx.context, {
@@ -5265,6 +5300,8 @@ describe("F35-1/F35-2 OWN-4/OWN-5/OWN-9: one context disposal, every cause kept 
     const frame = {
       url: () => "http://127.0.0.1:9/x",
       parentFrame: () => null,
+      // Revision 31 adaptation (F36-1): its server Page, as Playwright's frame has.
+      _page: serverPageDouble(),
       _currentDocument: { documentId: "n-1", request: undefined },
     };
     c.side.dispatch(frame);
@@ -5645,5 +5682,544 @@ describe("F33-2 installUiStimulus: document-scoped, repeat-safe in a global it a
     child.set(false);
     expect(opener.read()).toMatchObject({ ui: true, stimulus: null });
     expect(child.read()).toMatchObject({ ui: false, stimulus: false });
+  });
+});
+
+// ---- Revision 31 (Review 36 F36-1 and design assessment DA-1; token 7c961068…, CR1–CR14): a renderer crash, and late callbacks -------
+
+/**
+ * A lane browser whose one context is the recorder double (`recorderContext`) with its in-process server side, so `openTransportLanes`,
+ * `settleLanes` and the public `runTransportLaneFixture` run their production paths over page doubles that crash as Playwright delivers
+ * a crash (`recorderPage().crash()`: the server Page first, then an announced page's client Page). `close` decides the context's close.
+ */
+function crashBrowser(close: "healthy" | "reject" = "healthy") {
+  const ctx = recorderContext();
+  const pages: Array<ReturnType<typeof recorderPage>> = [];
+  const browser = {
+    newContext: (async () => {
+      const made = {
+        _connection: ctx.context._connection,
+        on: ctx.context.on,
+        off: ctx.context.off,
+        addInitScript: async () => undefined,
+        close: async () => {
+          if (close === "reject") throw new Error("CONTEXT_CLOSE_SENTINEL");
+        },
+        browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
+      };
+      ctx.side.bind(made, ctx.side.server);
+      return made;
+    }) as unknown as Browser["newContext"],
+  };
+  const page = (options?: Parameters<typeof recorderPage>[1]) => {
+    const d = recorderPage(ctx, options);
+    pages.push(d);
+    return d;
+  };
+  return { browser, ctx, page, pages };
+}
+const crashes = (j: Journal) =>
+  j.problems
+    .filter((p) => p.type === "crash")
+    .map((p) => [p.page, p.document, p.category]);
+const B31 = "blob:http://127.0.0.1:9/0a6f2c1e-0000-4000-8000-000000000031";
+
+describe("F36-1 CR1/CR3/CR4: a native renderer crash is its page's one unconditional failure; a healthy close is none", () => {
+  it("CR1 categorise and classifyJournal: a crash is its own category, unexpected before any request matching, whatever was declared", () => {
+    expect(categorise("crash", "native renderer crash (x)", "")).toEqual({
+      category: "crash",
+      url: "",
+    });
+    const { j, d, declare } = recorded("chromium");
+    const r = d.request(`${FRONT}/api/x`, { nav: false });
+    d.fail(r as RecordedRequest & { failed?: string }, "net::ERR_FAILED");
+    declare("/api/x", 503);
+    d.crash();
+    const v = classifyJournal(j);
+    expect(v.unexpected.map((p) => [p.type, p.category, p.reason])).toEqual([
+      [
+        "crash",
+        "crash",
+        "a native renderer crash always fails: its page's evidence after it is incomplete, whatever the case did",
+      ],
+    ]);
+    expect(v.expected).toEqual([]);
+    expect(classifyJournal(j), "classification stays pure").toEqual(v);
+  });
+  it("CR1 an announced ordinary page: exactly one crash of its page and document, taken at the server page; the client's crash is the same fact, never a second", () => {
+    const { j, d } = recorded("chromium");
+    const r = d.request(`${FRONT}/page`);
+    d.respond(r, 200);
+    d.newDocument(`${FRONT}/page`, r);
+    d.crash();
+    expect(crashes(j)).toEqual([[0, 1, "crash"]]);
+    expect(j.problems[0]).toMatchObject({
+      type: "crash",
+      text: "native renderer crash (Playwright's server page reported that the renderer crashed)",
+      url: `${FRONT}/page`,
+      observed: stamp(),
+    });
+    expect(Object.isFrozen(j.problems[0])).toBe(true);
+    expect(j.crashWatches).toEqual([
+      {
+        page: 0,
+        frame: 0,
+        source: "server-page",
+        at: "page-met",
+        announced: false,
+        lifecycle: "open",
+      },
+    ]);
+    expect(
+      j.requests.map((x) => x.terminal?.kind),
+      "a crash is no request terminal",
+    ).toEqual(["response"]);
+    expect(
+      j.navigations?.map((n) => n.document),
+      "a crash commits no document",
+    ).toEqual([1]);
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("CR1 healthy close control: no crash, no failure, nothing invented", () => {
+    const { j, d } = recorded("chromium");
+    d.close();
+    expect(j.problems).toEqual([]);
+    expect(classifyJournal(j).unexpected).toEqual([]);
+    expect(classifyJournal(j).violations).toEqual([]);
+  });
+  it("CR4 a requestless popup committed BEFORE dispatch (Firefox's blob:) and crashed before its announcement: subscribed at that server commit, the crash is frozen then and attributed at the meeting to the document it had", () => {
+    const { j, ctx } = recorded("firefox");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    expect(popup.serverCommit(B31), "undispatched").toBe(false);
+    expect(j.crashWatches?.slice(1), "after page 0's own").toEqual([
+      {
+        page: -1,
+        frame: 1,
+        source: "server-page",
+        at: "server-commit",
+        announced: false,
+        lifecycle: "open",
+      },
+    ]);
+    popup.crash();
+    const crashSeq = j.activations?.at(-1)?.seq ?? 0;
+    expect(j.problems, "no page yet: frozen, not ingested").toEqual([]);
+    popup.announce();
+    expect(crashes(j)).toEqual([[1, 1, "crash"]]);
+    expect(j.problems[0]?.seq, "its observation's own sequence").toBe(
+      crashSeq + 1,
+    );
+    expect(j.crashWatches?.[1]?.page).toBe(1);
+    expect(
+      j.crashWatches,
+      "subscribed once per frame: the meeting adds none",
+    ).toHaveLength(2);
+    expect(j.provenanceFailures).toEqual([]);
+  });
+  it("CR4 a page that had already crashed when the recorder first reached its server page: recorded at once, from the server lifecycle (the event is never replayed)", () => {
+    const { j, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.serverPage._lifecycle = "crashed";
+    popup.announce();
+    expect(crashes(j)).toEqual([[1, 0, "crash"]]);
+    expect(j.problems[0]?.text).toBe(
+      "native renderer crash (the page had already crashed when the recorder subscribed at Playwright's server page)",
+    );
+    expect(j.crashWatches?.[1]?.lifecycle).toBe("crashed");
+  });
+  it("CR4 a crash of a main frame no lane page ever owns fails by name at disposal; after an incomplete close it says so", () => {
+    for (const status of ["closed", "failed"] as const) {
+      const { j, ctx, recorder } = recorded("firefox");
+      const popup = recorderPage(ctx, { announce: false, url: "" });
+      popup.serverCommit(B31);
+      popup.crash();
+      recorder.dispose(status);
+      expect(j.provenanceFailures).toEqual([
+        expect.stringMatching(
+          /^a main frame the recorder never met \(server frame 1\): activation #1 \(blob:.*\) was never attributed to a lane page/,
+        ),
+        status === "closed"
+          ? "a main frame the recorder never met (server frame 1): a native renderer crash observed at journal #2 was never attributed to a lane page; the lane's capture of it is incomplete"
+          : "a main frame the recorder never met (server frame 1): a native renderer crash observed at journal #2 was never attributed to a lane page (the context's close failed when the recorder was finalised, so its delivery is incomplete); the lane's capture of it is incomplete",
+      ]);
+      expect(j.problems).toEqual([]);
+    }
+  });
+  it("CR3 early Page exposure without the server source: the client Page's crash is subscribed at its first problem before the announcement, once; the early problem stays; one crash", () => {
+    // Its own context, source-less (a connected client has no in-process toImpl), before the recorder attaches.
+    const ctx = recorderContext();
+    (ctx.context as { _connection?: unknown })._connection = {};
+    const k: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+    };
+    let seq = 0;
+    recordContext(ctx.context, {
+      journal: k,
+      next: () => {
+        seq += 1;
+        return seq;
+      },
+      stamp,
+      ingest: (p) => void k.problems.push(p),
+    });
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.console("warning", "early", "");
+    expect(k.crashWatches).toEqual([
+      {
+        page: 0,
+        frame: null,
+        source: "client-page",
+        at: "early-problem",
+        announced: false,
+      },
+    ]);
+    popup.announce();
+    expect(k.crashWatches, "subscribed once").toHaveLength(1);
+    popup.crash();
+    expect(k.problems.map((p) => [p.page, p.type])).toEqual([
+      [0, "warning"],
+      [0, "crash"],
+    ]);
+    expect(k.problems[1]?.text).toBe(
+      "native renderer crash (Playwright's client page reported that the renderer crashed)",
+    );
+    expect(k.provenanceFailures).toEqual([
+      expect.stringMatching(/^activation source unavailable/),
+    ]);
+  });
+});
+
+describe("F36-1 CR5/CR6/CR7: identity, documents and held envelopes", () => {
+  it("CR5 two tabs at the same URL: only the crashed page has the crash; the other's declared HTTP attribution is unchanged; a replacement is a new page", () => {
+    const { j, ctx, declare, forwarded } = recorded("chromium");
+    const a = recorderPage(ctx);
+    const b = recorderPage(ctx);
+    const U = `${FRONT}/same`;
+    for (const t of [a, b]) {
+      const r = t.request(U);
+      t.respond(r, 200);
+      t.newDocument(U, r);
+    }
+    declare("/api/held", 503);
+    forwarded(`${FRONT}/api/held`, 503);
+    const held = b.request(`${FRONT}/api/held`, { nav: false });
+    b.respond(held, 503);
+    b.console("error", httpText(503), `${FRONT}/api/held`);
+    a.crash();
+    const c = recorderPage(ctx);
+    const v = classifyJournal(j);
+    expect(crashes(j)).toEqual([[1, 1, "crash"]]);
+    expect(v.expected.map((p) => p.page)).toEqual([2]);
+    expect(v.unexpected.map((p) => [p.page, p.type])).toEqual([[1, "crash"]]);
+    expect(j.pages?.map((p) => p.page)).toEqual([0, 1, 2, 3]);
+    c.crash();
+    expect(crashes(j)).toEqual([
+      [1, 1, "crash"],
+      [3, 0, "crash"],
+    ]);
+  });
+  it("CR6 a held crash envelope keeps its observation's page, document and stamp across another page's new document; a crash after a reload belongs to the new document", () => {
+    const { j, d, ctx, held } = recorded("chromium", (p) => p.type === "crash");
+    const other = recorderPage(ctx);
+    d.crash();
+    other.newDocument(`${FRONT}/elsewhere`);
+    expect(held.map((p) => [p.page, p.document, p.type])).toEqual([
+      [0, 0, "crash"],
+    ]);
+    expect(Object.isFrozen(held[0])).toBe(true);
+    const fresh = recorded("chromium");
+    const r = fresh.d.request(`${FRONT}/page`);
+    fresh.d.respond(r, 200);
+    fresh.d.newDocument(`${FRONT}/page`, r);
+    const reload = fresh.d.request(`${FRONT}/page`);
+    fresh.d.respond(reload, 200);
+    fresh.d.newDocument(`${FRONT}/page`, reload);
+    fresh.d.crash();
+    expect(crashes(fresh.j)).toEqual([[0, 2, "crash"]]);
+    expect(j.problems).toEqual([]);
+  });
+  it("CR7 a pending navigation aborted, then a crash: the surviving document has it; no commit is invented", () => {
+    const { j, d } = recorded("chromium");
+    const first = d.request(`${FRONT}/a`);
+    d.respond(first, 200);
+    d.newDocument(`${FRONT}/a`, first);
+    const pending = d.request(`${FRONT}/b`);
+    d.aborted(pending, "net::ERR_ABORTED");
+    d.sameDocument(`${FRONT}/b`);
+    d.crash();
+    expect(crashes(j)).toEqual([[0, 1, "crash"]]);
+    expect(j.requests[1]?.commit).toEqual(null);
+  });
+});
+
+describe("F36-1 CR9/CR10 (DA-1): crash subscriptions are owned; callbacks after disposal or rollback are late, never recorded", () => {
+  it("CR9 the server page's crash `on` throws before or after attaching: rolled back alone, named; the page's other capture stays", () => {
+    for (const attach of [false, true]) {
+      const { j, ctx } = recorded("chromium");
+      const popup = recorderPage(ctx, { announce: false, url: "" });
+      const on = popup.serverPage.on.bind(popup.serverPage);
+      popup.serverPage.on = ((event: string, l: () => void) => {
+        if (attach) on(event, l);
+        throw new Error("CRASH_ATTACH_SENTINEL");
+      }) as unknown as typeof popup.serverPage.on;
+      popup.announce();
+      expect(popup.serverPage.listenerCount("crash")).toBe(0);
+      expect(j.provenanceFailures).toEqual([
+        "page 1: installing its renderer-crash listener failed (Error: CRASH_ATTACH_SENTINEL); a crash of it is not captured",
+      ]);
+      // The fallback: the client page's crash (its server page cannot be subscribed), and its own problem listeners.
+      expect(j.crashWatches?.map((w) => w.source)).toEqual([
+        "server-page",
+        "client-page",
+      ]);
+      popup.console("warning", "kept", "");
+      popup.crash();
+      expect(j.problems.map((p) => [p.page, p.type])).toEqual([
+        [1, "warning"],
+        [1, "crash"],
+      ]);
+    }
+  });
+  it("CR9 a crash subscription whose rollback also fails is named with its installation's cause", () => {
+    const { j, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.serverPage.on = (() => {
+      throw new Error("CRASH_ATTACH_SENTINEL");
+    }) as unknown as typeof popup.serverPage.on;
+    popup.serverPage.off = (() => {
+      throw new Error("CRASH_DETACH_SENTINEL");
+    }) as unknown as typeof popup.serverPage.off;
+    popup.announce();
+    expect(j.provenanceFailures).toEqual([
+      "page 1: installing its renderer-crash listener failed (Error: CRASH_ATTACH_SENTINEL); a crash of it is not captured; rolling back its partial listener also failed: page 1: detaching its renderer-crash listener failed: Error: CRASH_DETACH_SENTINEL",
+    ]);
+  });
+  it("CR9 a server page of another shape is a named gap, never a guess (readServerPage)", () => {
+    expect(readServerPage(null)).toEqual({
+      ok: false,
+      reason: "no server Page",
+    });
+    expect(readServerPage({ on() {}, off() {}, _lifecycle: "zombie" })).toEqual(
+      {
+        ok: false,
+        reason: expect.stringMatching(
+          /lifecycle outside the pinned open\/closing\/closed\/crashed/,
+        ),
+      },
+    );
+    expect(RENDERER_CRASH_PIN).toMatchObject({
+      version: "1.63.0",
+      event: "crash",
+    });
+    const { j, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    (popup.serverMain as { _page?: unknown })._page = undefined;
+    popup.announce();
+    expect(j.provenanceFailures).toEqual([
+      "page 1: its renderer crash cannot be observed at Playwright's server page (no server Page); a crash before its announcement is not captured",
+    ]);
+  });
+  it("CR10 DA-1 healthy control: every listener is removed at disposal; later events reach nothing", () => {
+    const { j, d, recorder } = recorded("chromium");
+    d.console("warning", "w", "");
+    d.pageerror("e");
+    expect(recorder.dispose()).toEqual([]);
+    expect(d.serverPage.listenerCount("crash")).toBe(0);
+    d.console("warning", "w2", "");
+    d.pageerror("e2");
+    d.crash();
+    expect(j.problems).toHaveLength(2);
+    expect(j.lateEvents ?? []).toEqual([]);
+  });
+  it("CR10 DA-1: page console/pageerror and server crash listeners whose removal throws still fire after disposal: named late lines, never journal entries; every removal cause kept", () => {
+    const { j, d, ctx, recorder } = recorded("chromium");
+    d.page.off = ((event: string) => {
+      throw new Error(`DETACH_${event}`);
+    }) as typeof d.page.off;
+    d.serverPage.off = (() => {
+      throw new Error("DETACH_crash");
+    }) as unknown as typeof d.serverPage.off;
+    d.console("warning", "w", "");
+    d.pageerror("e");
+    expect(j.problems).toHaveLength(2);
+    const errors = recorder.dispose("failed");
+    expect(errors).toEqual([
+      "page 0: detaching its pageerror listener failed: Error: DETACH_pageerror",
+      "page 0: detaching its console listener failed: Error: DETACH_console",
+      "page 0: detaching its renderer-crash listener failed: Error: DETACH_crash",
+    ]);
+    d.console("warning", "w2", "");
+    d.pageerror("e2");
+    d.crash();
+    expect(j.problems, "no fresh envelope after disposal").toHaveLength(2);
+    expect(j.lateEvents).toEqual([
+      "page 0: a console message delivered after the recorder was detached; not recorded",
+      "page 0: a page error delivered after the recorder was detached; not recorded",
+      "page 0: a renderer crash delivered after the recorder was detached; not recorded",
+    ]);
+    expect(ctx.listeners.get("console") ?? []).toHaveLength(0);
+  });
+  it("CR10 DA-1: a callback re-entered during a throwing removal already sees the disposed recorder", () => {
+    const { j, d, recorder } = recorded("chromium");
+    d.page.off = ((event: string) => {
+      if (event === "console") d.console("warning", "re-entered", "");
+      throw new Error(`DETACH_${event}`);
+    }) as typeof d.page.off;
+    recorder.dispose();
+    expect(j.problems).toEqual([]);
+    expect(j.lateEvents).toContain(
+      "page 0: a console message delivered after the recorder was detached; not recorded",
+    );
+  });
+  it("CR10 DA-1 local rollback: a page listener that survived its own failed rollback is admitted nowhere; the recorder stays live for others", () => {
+    const { j, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    const on = popup.page.on.bind(popup.page);
+    popup.page.on = ((event: string, l: (v: never) => void) => {
+      if (event === "pageerror") throw new Error("PAGE_ATTACH_SENTINEL");
+      on(event, l);
+    }) as typeof popup.page.on;
+    popup.page.off = ((event: string) => {
+      throw new Error(`DETACH_${event}`);
+    }) as typeof popup.page.off;
+    popup.announce();
+    expect(j.provenanceFailures).toEqual([
+      expect.stringMatching(
+        /^page 1: installing its own problem listeners failed \(Error: PAGE_ATTACH_SENTINEL\).*rolling back its partial listeners also failed: page 1: detaching its pageerror listener failed: Error: DETACH_pageerror; page 1: detaching its console listener failed: Error: DETACH_console$/,
+      ),
+    ]);
+    popup.console("warning", "after rollback", "");
+    expect(j.problems).toEqual([]);
+    expect(j.lateEvents).toEqual([
+      "page 1: a console message delivered after its listener's subscription was rolled back; not recorded",
+    ]);
+    // Another page of the same recorder is still captured.
+    const other = recorderPage(ctx);
+    other.console("warning", "live", "");
+    expect(j.problems.map((p) => [p.page, p.text])).toEqual([[2, "live"]]);
+  });
+  it("CR10 the context's fallback console/weberror after disposal are named late lines too (revision 30 dropped them silently)", () => {
+    const { j, ctx, recorder } = recorded("chromium");
+    ctx.context.off = () => {
+      throw new Error("DETACH_context");
+    };
+    recorder.dispose();
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.console("warning", "late", "");
+    popup.pageerror("late");
+    expect(j.problems).toEqual([]);
+    expect(j.lateEvents).toEqual(
+      expect.arrayContaining([
+        "a console message delivered after the recorder was detached; not recorded",
+        "a page error delivered after the recorder was detached; not recorded",
+      ]),
+    );
+  });
+});
+
+describe("F36-1 CR2/CR8/CR11/CR12/CR13: the manager, the seal and the public fixture fail on a crash; a healthy close passes", () => {
+  it("CR2 the public fixture rejects a crash after the body's last action, with the crash as its content; its healthy sibling resolves", async () => {
+    for (const crash of [true, false]) {
+      const { browser, page } = crashBrowser();
+      const { info, attached } = fakeInfo();
+      const outcome = await runTransportLaneFixture(
+        browser,
+        async (open) => {
+          await open({ mode: "fixture" });
+          const d = page();
+          if (crash) d.crash();
+          d.close();
+        },
+        info,
+      ).then(
+        () => "resolved",
+        (error: unknown) => String(error),
+      );
+      if (!crash) {
+        expect(outcome).toBe("resolved");
+        continue;
+      }
+      expect(outcome).toMatch(
+        /lane 0 page 0 document 0 crash \[crash\]: native renderer crash \(Playwright's server page reported that the renderer crashed\) \(a native renderer crash always fails/,
+      );
+      const ledger = attached.get("transport-ledger-0") as {
+        console: { unexpected: Array<{ type: string }> };
+        crashWatches: unknown[];
+      };
+      expect(ledger.console.unexpected.map((p) => p.type)).toEqual(["crash"]);
+      expect(ledger.crashWatches).toHaveLength(1);
+    }
+  });
+  it("CR8 a crash envelope held by the seam: released before settlement it fails normally; held at the seal it fails by name; released after the seal it is late and never classified", async () => {
+    for (const when of ["before", "held"] as const) {
+      const { browser, page } = crashBrowser();
+      const { info } = fakeInfo();
+      const holds: Array<() => void> = [];
+      const lanes = openTransportLanes(browser, info, {
+        ingest: (_p, deliver) => void holds.push(deliver),
+      });
+      const lane = await lanes.open({ mode: "fixture" });
+      page().crash();
+      if (when === "before") for (const deliver of holds.splice(0)) deliver();
+      const report = await lanes.settle();
+      if (when === "before") {
+        expect(report.failures).toEqual([
+          expect.stringMatching(/^lane 0 page 0 document 0 crash \[crash\]/),
+        ]);
+        continue;
+      }
+      expect(report.failures).toEqual([
+        expect.stringMatching(
+          /^lane 0: a console problem captured at journal #\d+ \(page 0 document 0 crash\) was still held by the ingestion seam/,
+        ),
+      ]);
+      holds[0]?.();
+      expect(lane.journal.problems).toEqual([]);
+      expect(lane.journal.late?.map((p) => p.type)).toEqual(["crash"]);
+      expect(lanes.late).toEqual([
+        expect.stringMatching(
+          /\(page 0 document 0 crash\) delivered after the lane's journal was classified/,
+        ),
+      ]);
+    }
+  });
+  it("CR11/CR12 a crash and a failed close: both kept, by their own owners (the close in closeErrors, the crash in failures); the body's error stays the cause", async () => {
+    const { browser, page } = crashBrowser("reject");
+    const { info } = fakeInfo();
+    const body = new Error("BODY_SENTINEL");
+    const outcome = await runTransportLaneFixture(
+      browser,
+      async (open) => {
+        await open({ mode: "fixture" });
+        page().crash();
+        throw body;
+      },
+      info,
+    ).then(
+      () => null,
+      (error: unknown) => error as Error,
+    );
+    expect(outcome?.cause).toBe(body);
+    expect(String(outcome)).toMatch(/CONTEXT_CLOSE_SENTINEL/);
+    expect(String(outcome)).toMatch(
+      /document 0 crash \[crash\]: native renderer crash/,
+    );
+  });
+  it("CR13 two managers: a crash in one lane never reaches the other; each report is its own", async () => {
+    const one = crashBrowser();
+    const two = crashBrowser();
+    const lanesOne = openTransportLanes(one.browser, fakeInfo().info);
+    const lanesTwo = openTransportLanes(two.browser, fakeInfo().info);
+    await lanesOne.open({ mode: "fixture" });
+    await lanesTwo.open({ mode: "fixture" });
+    one.page().crash();
+    two.page().close();
+    const [r1, r2] = await Promise.all([lanesOne.settle(), lanesTwo.settle()]);
+    expect(r1.failures).toEqual([expect.stringMatching(/crash \[crash\]/)]);
+    expect(r2.failures).toEqual([]);
+    expect(await lanesOne.settle(), "settlement is shared").toBe(r1);
   });
 });

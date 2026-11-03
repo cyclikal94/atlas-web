@@ -708,13 +708,15 @@ type UiApi = {
 
 /**
  * A problem's category, from its type and the engine's exact wording (nothing else): a page error (`exception`); a `warning`; an engine's
- * HTTP-status message (`http`); an engine's network-failure message (`network`); `other`.
+ * HTTP-status message (`http`); an engine's network-failure message (`network`); `other`. Revision 31 (Review 36 F36-1): a native
+ * renderer `crash` of the page (type `crash`, from Playwright's own crash signal, never a fabricated page error or network message).
  */
 export type ProblemCategory =
   | "exception"
   | "warning"
   | "http"
   | "network"
+  | "crash"
   | "other";
 
 /** Chromium and WebKit: "Failed to load resource: the server responded with a status of 422 (…)", located at the resource. */
@@ -739,6 +741,7 @@ export function categorise(
   location: string,
 ): { category: ProblemCategory; url: string; status?: number } {
   if (type === "pageerror") return { category: "exception", url: location };
+  if (type === "crash") return { category: "crash", url: location };
   if (type === "warning") return { category: "warning", url: location };
   if (type !== "error") return { category: "other", url: location };
   const http = HTTP_STATUS.exec(text);
@@ -874,6 +877,8 @@ export interface Journal {
   lateEvents?: string[];
   /** Revision 29 (F34-1): every main-frame activation Playwright's server observed, in server receipt order (`ActivationRecord`). */
   activations?: ActivationRecord[];
+  /** Revision 31 (F36-1): how each page's renderer crash is observed (one canonical source per page; `CrashWatch`). */
+  crashWatches?: CrashWatch[];
   /** Revision 29 (F34-1): the activation source (its pin and bundle hash), or why it is unavailable. */
   activationSource?:
     | {
@@ -1177,6 +1182,15 @@ export function classifyJournal(journal: Journal): LaneVerdict {
       });
     if (p.category === "exception") {
       out("unexpected", "a page error always fails, whatever it names");
+      continue;
+    }
+    // Revision 31 (Review 36 F36-1, C1): judged before any request matching; nothing (a loss, a restoration, a declaration, a clean close)
+    // can excuse it.
+    if (p.category === "crash") {
+      out(
+        "unexpected",
+        "a native renderer crash always fails: its page's evidence after it is incomplete, whatever the case did",
+      );
       continue;
     }
     if (p.category === "warning") {
@@ -1549,9 +1563,72 @@ export type ActivationSource =
         | { ok: false; reason: string };
       /** The server object behind a client request (identity), or null when Playwright holds none. */
       serverRequestOf: (clientRequest: unknown) => object | null;
+      /** Revision 31 (F36-1): the server Page of a server frame (`RENDERER_CRASH_PIN`), or why it cannot be read. */
+      serverPageOfFrame: (serverFrame: unknown) => ServerPageRead;
       dispose: () => void;
     }
   | { ok: false; reason: string };
+
+/**
+ * Revision 31 (Review 36 F36-1, family native-transport-console-attribution, harness new; design assessment token 7c961068…, C1/C2/C6,
+ * invariants 1–4/10): Playwright's SERVER Page emits its own `crash` event synchronously when its engine reports the renderer crashed
+ * (`Page._didCrash`: Chromium `Inspector.targetCrashed`, Firefox `Page.crashed`, WebKit a crashed target), and its lifecycle becomes
+ * `crashed`; its client Page is sent `crash` only once the page has a dispatcher, so a crash before Playwright announced the page never
+ * reaches the client at all, and the server does not replay it (unlike console messages and page errors). The recorder therefore takes
+ * the crash at the server Page, subscribed at the earliest server boundary it sees (the page's first main-frame commit, possibly before
+ * dispatch, or the recorder's first meeting with the page), and reads the server lifecycle there: a page already `crashed` crashed
+ * before the subscription. Same pin and in-process requirement as the activation source; anything of another shape is a NAMED gap.
+ */
+export const RENDERER_CRASH_PIN = {
+  package: "playwright-core",
+  version: "1.63.0",
+  event: "crash",
+  lifecycles: ["open", "closing", "closed", "crashed"],
+} as const;
+
+export type ServerPageRead =
+  | {
+      ok: true;
+      /** The server Page (identity; an emitter of `crash`). */
+      page: object;
+      /** Its lifecycle now (`open`, `closing`, `closed` or `crashed`), read again whenever called. */
+      lifecycle: () => string;
+    }
+  | { ok: false; reason: string };
+
+/** Reads a server Page of the pinned shape: `on`/`off` and a `_lifecycle` Playwright 1.63.0 defines. Never throws. */
+export function readServerPage(value: unknown): ServerPageRead {
+  try {
+    const page = value as {
+      on?: unknown;
+      off?: unknown;
+      _lifecycle?: unknown;
+    } | null;
+    if (typeof page !== "object" || page === null)
+      return { ok: false, reason: "no server Page" };
+    if (typeof page.on !== "function" || typeof page.off !== "function")
+      return {
+        ok: false,
+        reason: "a server Page without on/off of the pinned shape",
+      };
+    const known: readonly string[] = RENDERER_CRASH_PIN.lifecycles;
+    const lifecycle = () => {
+      const now = page._lifecycle;
+      if (typeof now !== "string" || !known.includes(now))
+        throw new TypeError(
+          `a server Page lifecycle outside the pinned ${known.join("/")}: ${JSON.stringify(now)}`,
+        );
+      return now;
+    };
+    lifecycle();
+    return { ok: true, page, lifecycle };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `reading the server Page threw: ${firstLine(error)}`,
+    };
+  }
+}
 
 type ServerFrameShape = {
   parentFrame?: () => unknown;
@@ -1738,6 +1815,18 @@ export function observeActivations(
           return typeof r === "object" && r !== null ? r : null;
         } catch {
           return null;
+        }
+      },
+      serverPageOfFrame: (serverFrame) => {
+        try {
+          return readServerPage(
+            (serverFrame as { _page?: unknown } | null)?._page,
+          );
+        } catch (error) {
+          return {
+            ok: false,
+            reason: `reading the server frame's page threw: ${firstLine(error)}`,
+          };
         }
       },
       dispose: () => {
@@ -1943,6 +2032,24 @@ export interface PageAssociation {
   announced: boolean;
 }
 
+/**
+ * Revision 31 (F36-1, C2): one page's renderer-crash subscription. `source`: the SERVER Page's own `crash` (canonical whenever the
+ * activation source can read it: `RENDERER_CRASH_PIN`), or the public client Page's `crash` (only when it cannot: the source is
+ * unavailable or this page's server frame is unidentified; its pre-announcement window is then a named gap already). `at`: the boundary
+ * where it was subscribed (`server-commit`: the page's main-frame commit at the server, possibly before Playwright dispatched the frame;
+ * `page-met`: the recorder's first meeting with the page; `announcement`/`early-problem`: a client Page object). `announced`: whether
+ * the context had announced the page then. `page` is -1 until the recorder meets the frame (resolved by identity, never renumbered).
+ */
+export interface CrashWatch {
+  page: number;
+  frame: number | null;
+  source: "server-page" | "client-page";
+  at: "server-commit" | "page-met" | "announcement" | "early-problem";
+  announced: boolean;
+  /** The server lifecycle when subscribed (`crashed`: the crash preceded the subscription and is recorded at once). */
+  lifecycle?: string;
+}
+
 /** Where a request was issued: a frame (`early`: one Playwright has not announced the page of yet), none (a service worker's), or unknown. */
 export type RequestFrame =
   | { ok: true; frame: unknown; early: boolean }
@@ -2093,6 +2200,17 @@ function rootOf(
  * removal failed (named in the disposer's result); such an event is still a `journal.lateEvents` line, never recorded. `status` is how
  * the context's close ended: only after a completed close are an undelivered dispatched activation and an unowned undispatched one
  * reported as missed; otherwise they are reported as unattributable because the close did not complete (still failures, never dropped).
+ *
+ * Revision 31 (Review 36 F36-1, family native-transport-console-attribution, harness new; design assessment token 7c961068…, C1–C6,
+ * invariants 1–10): a native renderer CRASH of a lane page is one unconditional `crash` problem of its page and document, taken at ONE
+ * canonical source per page: the server Page's own `crash` (`RENDERER_CRASH_PIN`), subscribed in its own ledger scope at the earliest
+ * server boundary the recorder sees (the page's main-frame commit, possibly before dispatch, or the recorder's first meeting with it),
+ * with the server lifecycle read there (a page already crashed is recorded at once). A crash observed before the meeting is frozen then
+ * and attributed at the meeting; one of a frame no lane page owns fails at disposal. Only when the server Page cannot be read does the
+ * public client Page's `crash` stand in, at the earliest client Page object (announcement or an early problem), the gap already named.
+ * DA-1 (C3): every problem and crash callback is ADMITTED before it reads its payload: after disposal (a listener whose removal failed,
+ * or one re-entered during a throwing removal) or its own scope's rollback, it is a named `journal.lateEvents` line, never a fresh
+ * journal entry; the context's fallback console/weberror no longer drop such events silently. A held envelope keeps the seam's rules.
  */
 export function recordContext(
   context: RecordedContext,
@@ -2129,6 +2247,17 @@ export function recordContext(
     unapplied: ActivationRecord[];
     /** Dispatched activations whose client `new-document` event has not arrived yet, with their server request (identity). */
     unpaired: Array<{ record: ActivationRecord; request: object | null }>;
+    /** Revision 31 (F36-1): the server frame (identity), its crash subscription's state, and whether its crash was observed. */
+    frame: object;
+    crashSource: "server" | "unavailable" | "failed" | null;
+    crashWatch: CrashWatch | null;
+    crashObserved: boolean;
+    /** A crash observed before the recorder met the frame: frozen at observation, attributed at the meeting (else a named failure). */
+    pendingCrash: {
+      seq: number;
+      observed: TransportStamp;
+      text: string;
+    } | null;
   }
   interface PageRecord {
     index: number;
@@ -2137,6 +2266,9 @@ export function recordContext(
     latest: RequestRecord | null;
     association: PageAssociation;
     server: ServerFrameState | null;
+    /** Revision 31 (F36-1): the client-Page fallback crash subscription, when the server Page cannot be read (once per page). */
+    clientCrash: boolean;
+    crashRecorded: boolean;
   }
   const byRoot = new Map<unknown, PageRecord>();
   const byPage = new Map<unknown, PageRecord>();
@@ -2149,6 +2281,28 @@ export function recordContext(
       `${what} delivered after the recorder was detached; not recorded`,
     );
   };
+  /**
+   * Revision 31 (design assessment DA-1, C3, invariant 5): every native problem/crash callback is admitted HERE, before it reads its
+   * payload: after the recorder's disposal (also a callback whose removal failed, or one re-entered during a throwing `off`: `disposed`
+   * is set before any removal) and after its own scope was rolled back, it is a named late line and never a fresh journal entry. An
+   * envelope already captured and held by the ingestion seam is not a callback: its delivery keeps the seam's own rules (`put`).
+   */
+  const admit = (what: string, scope?: Subscriptions): boolean => {
+    if (disposed) {
+      late(what);
+      return false;
+    }
+    if (scope?.detached === true) {
+      journal.lateEvents ??= [];
+      journal.lateEvents.push(
+        `${what} delivered after its listener's subscription was rolled back; not recorded`,
+      );
+      return false;
+    }
+    return true;
+  };
+  journal.crashWatches ??= [];
+  const crashWatches = journal.crashWatches;
   // Revision 29 (F34-1): the activation source, attached FIRST (the recorder runs as the context arrives, before any page of it exists;
   // `pagesAtAttach` proves it). Unavailable is a named failure: then nothing undispatched can be observed, and the first-URL gap rule below
   // remains the only guard.
@@ -2164,6 +2318,11 @@ export function recordContext(
         all: [],
         unapplied: [],
         unpaired: [],
+        frame,
+        crashSource: null,
+        crashWatch: null,
+        crashObserved: false,
+        pendingCrash: null,
       };
       serverFrames.set(frame, state);
     }
@@ -2204,6 +2363,9 @@ export function recordContext(
     };
     activations.push(record);
     state.all.push(record);
+    // Revision 31 (F36-1, C2): the page's renderer crash, subscribed at its server Page at this, the earliest server boundary (possibly
+    // before Playwright dispatched the frame or announced the page).
+    watchServerCrash(state, "server-commit");
     if (commit.dispatched) {
       state.unpaired.push({ record, request: commit.request });
       return;
@@ -2419,6 +2581,8 @@ export function recordContext(
       latest: null,
       association,
       server: null,
+      clientCrash: false,
+      crashRecorded: false,
     };
     byRoot.set(root, page);
     // Subscribed in the listener that first met the frame, before Playwright can deliver its next event: no navigation of it is unobserved.
@@ -2469,6 +2633,16 @@ export function recordContext(
           for (const record of state.all) record.page = index;
           for (const record of state.unapplied.splice(0))
             applyActivation(page, record);
+          // Revision 31 (F36-1, C2): a crash observed before this meeting is the page's, at its own frozen sequence and stamp, in the
+          // document it had then (its earlier activations are applied above); then the page's crash subscription (once per frame).
+          if (state.crashWatch !== null) state.crashWatch.page = index;
+          const pending = state.pendingCrash;
+          if (pending !== null) {
+            state.pendingCrash = null;
+            page.crashRecorded = true;
+            problem(page, "crash", pending.text, urlOf(page), pending);
+          }
+          watchServerCrash(state, "page-met");
           observed = state.all.at(-1);
           if (
             observed !== undefined &&
@@ -2604,12 +2778,14 @@ export function recordContext(
     type: string,
     text: string,
     location: string,
+    /** Revision 31 (F36-1): a crash observed before the recorder met its page keeps the sequence and stamp of its observation. */
+    at?: { seq: number; observed: TransportStamp },
   ) => {
     const { category, url, status } = categorise(type, text, location);
     // The envelope: everything that attributes it is taken HERE, in the native listener, and frozen before anything can hold it.
     sink.ingest(
       Object.freeze({
-        seq: next(),
+        seq: at?.seq ?? next(),
         page: page.index,
         document: page.documentNo,
         type,
@@ -2617,7 +2793,7 @@ export function recordContext(
         url,
         category,
         ...(status !== undefined ? { status } : {}),
-        observed: Object.freeze(stamp()),
+        observed: Object.freeze(at?.observed ?? stamp()),
       }),
     );
   };
@@ -2637,6 +2813,153 @@ export function recordContext(
     }
     return pageOf(root, via);
   };
+  // ---- Revision 31 (Review 36 F36-1, family native-transport-console-attribution; design assessment token 7c961068…, C1–C3/C6) ----
+  // A native renderer crash is one unconditional failure of its page (`crash` problem), taken at ONE canonical source per page: the
+  // server Page's own `crash` (`RENDERER_CRASH_PIN`), subscribed at the earliest server boundary the recorder sees, with the server
+  // lifecycle read there (a page already crashed is recorded at once: its crash preceded the subscription and is never replayed). Only
+  // when the server Page cannot be read does the public client Page's `crash` stand in, at the earliest client Page object. Nothing is
+  // evaluated in the crashed renderer; its URL is optional diagnostic data. A crash moves no document and is no request terminal.
+  const CRASH = "native renderer crash";
+  const urlOf = (page: PageRecord) => {
+    try {
+      return String((page.root as RecordedFrame).url());
+    } catch {
+      return "";
+    }
+  };
+  /** A crash observed at `state`'s server Page: its page's problem now, or frozen until the recorder meets the frame. Once per frame. */
+  const serverCrash = (state: ServerFrameState, how: string) => {
+    if (state.crashObserved) return;
+    state.crashObserved = true;
+    const text = `${CRASH} (${how})`;
+    const page = state.page;
+    if (page === null) {
+      state.pendingCrash = {
+        seq: next(),
+        observed: Object.freeze(stamp()),
+        text,
+      };
+      return;
+    }
+    page.crashRecorded = true;
+    problem(page, "crash", text, urlOf(page));
+  };
+  function watchServerCrash(
+    state: ServerFrameState,
+    at: "server-commit" | "page-met",
+  ): void {
+    if (state.crashSource !== null || !source.ok) return;
+    const where = () =>
+      state.page === null
+        ? `server frame ${state.ordinal} (a main frame the recorder has not met)`
+        : `page ${state.page.index}`;
+    const read = source.serverPageOfFrame(state.frame);
+    if (!read.ok) {
+      state.crashSource = "unavailable";
+      failures.push(
+        `${where()}: its renderer crash cannot be observed at Playwright's server page (${read.reason}); a crash before its announcement is not captured`,
+      );
+      return;
+    }
+    // Its own nested scope: a failure here rolls back this subscription alone, and the page's other evidence stays.
+    const scope = subscriptions.child();
+    const onCrash = () => {
+      if (!admit(`${where()}: a renderer crash`, scope)) return;
+      // Inside Playwright's own server listener: nothing may throw back into it.
+      try {
+        serverCrash(
+          state,
+          "Playwright's server page reported that the renderer crashed",
+        );
+      } catch (error) {
+        failures.push(
+          `${where()}: recording its renderer crash threw (${firstLine(error)}); the crash is not attributed`,
+        );
+      }
+    };
+    try {
+      scope.add(
+        `${where()}: detaching its renderer-crash listener`,
+        read.page,
+        RENDERER_CRASH_PIN.event,
+        onCrash as (value: never) => void,
+      );
+    } catch (error) {
+      const rollback = scope.detach();
+      state.crashSource = "failed";
+      failures.push(
+        `${where()}: installing its renderer-crash listener failed (${String(error)}); a crash of it is not captured${rollback.length === 0 ? "" : `; rolling back its partial listener also failed: ${rollback.join("; ")}`}`,
+      );
+      return;
+    }
+    state.crashSource = "server";
+    const watch: CrashWatch = {
+      page: state.page?.index ?? -1,
+      frame: state.ordinal,
+      source: "server-page",
+      at,
+      announced: state.page?.association.announced ?? false,
+    };
+    state.crashWatch = watch;
+    crashWatches.push(watch);
+    let lifecycle: string;
+    try {
+      lifecycle = read.lifecycle();
+    } catch (error) {
+      failures.push(
+        `${where()}: its server page's lifecycle is unreadable (${firstLine(error)}); a crash before its subscription cannot be known`,
+      );
+      return;
+    }
+    watch.lifecycle = lifecycle;
+    if (lifecycle === "crashed")
+      serverCrash(
+        state,
+        "the page had already crashed when the recorder subscribed at Playwright's server page",
+      );
+  }
+  /** The fallback: the public client Page's `crash`, only for a page whose server Page could not be subscribed (named above). */
+  const watchClientCrash = (
+    pageObject: unknown,
+    record: PageRecord,
+    at: "announcement" | "early-problem",
+  ) => {
+    if (record.clientCrash || record.server?.crashSource === "server") return;
+    record.clientCrash = true;
+    const scope = subscriptions.child();
+    const onCrash = () => {
+      if (!admit(`page ${record.index}: a renderer crash`, scope)) return;
+      if (record.crashRecorded) return;
+      record.crashRecorded = true;
+      problem(
+        record,
+        "crash",
+        `${CRASH} (Playwright's client page reported that the renderer crashed)`,
+        urlOf(record),
+      );
+    };
+    try {
+      scope.add(
+        `page ${record.index}: detaching its client renderer-crash listener`,
+        pageObject,
+        "crash",
+        onCrash as (value: never) => void,
+      );
+    } catch (error) {
+      const rollback = scope.detach();
+      failures.push(
+        `page ${record.index}: installing its client renderer-crash listener failed (${String(error)}); a crash of it is not captured${rollback.length === 0 ? "" : `; rolling back its partial listener also failed: ${rollback.join("; ")}`}`,
+      );
+      return;
+    }
+    crashWatches.push({
+      page: record.index,
+      frame: record.server?.ordinal ?? null,
+      source: "client-page",
+      at,
+      announced: record.association.announced,
+    });
+  };
   on("page", (page: RecordedPage) => {
     if (disposed) return late("a page announcement");
     const record = recordOfPage(page, "page");
@@ -2645,9 +2968,13 @@ export function recordContext(
       failures.push(`page ${record.index}: announced twice`);
     record.association.announced = true;
     byPage.set(page, record);
+    watchClientCrash(page, record, "announcement");
     // Revision 30 (F35-1, C2, OWN-3): the page's own listeners are a nested scope of the ledger. If one fails, the page's partial
     // registrations are rolled back alone, and its uncaptured problems are a named failure; the page and its evidence so far stay.
+    // Revision 31 (DA-1, C3): each callback is admitted first (recorder disposal, and this scope's own rollback).
+    const own = subscriptions.child();
     const onConsole = (message: ConsoleMessage) => {
+      if (!admit(`page ${record.index}: a console message`, own)) return;
       if (message.type() === "error" || message.type() === "warning")
         problem(
           record,
@@ -2656,9 +2983,10 @@ export function recordContext(
           message.location().url ?? "",
         );
     };
-    const onPageError = (error: Error) =>
+    const onPageError = (error: Error) => {
+      if (!admit(`page ${record.index}: a page error`, own)) return;
       problem(record, "pageerror", error.message, "");
-    const own = subscriptions.child();
+    };
     try {
       own.add(
         `page ${record.index}: detaching its console listener`,
@@ -2682,10 +3010,14 @@ export function recordContext(
   // A page's problem Playwright delivers before it announced the page reaches only the context (its page has no listener of ours yet).
   const unannounced = (page: unknown): PageRecord | null => {
     if (page === null || page === undefined || byPage.has(page)) return null;
-    return recordOfPage(page as RecordedPage, "problem");
+    const record = recordOfPage(page as RecordedPage, "problem");
+    // Revision 31 (F36-1, C2): a Page object exposed before its announcement gets its crash subscription now, not at the announcement.
+    if (record !== null) watchClientCrash(page, record, "early-problem");
+    return record;
   };
+  // Revision 31 (DA-1, C3): after disposal these are named late lines too (revision 30 dropped them silently).
   on("console", (message: ConsoleMessage) => {
-    if (disposed) return;
+    if (!admit("a console message")) return;
     if (message.type() !== "error" && message.type() !== "warning") return;
     let page: unknown = null;
     try {
@@ -2703,7 +3035,7 @@ export function recordContext(
       );
   });
   on("weberror", (webError: { page(): unknown; error(): Error }) => {
-    if (disposed) return;
+    if (!admit("a page error")) return;
     let page: unknown = null;
     try {
       page = webError.page();
@@ -2756,6 +3088,11 @@ export function recordContext(
         for (const record of state.unapplied)
           failures.push(
             `${where}: activation #${record.seq} (${record.url}) was never attributed to a lane page${incomplete}`,
+          );
+        // Revision 31 (F36-1): a crash of a frame no lane page owns is still the lane's failure, never dropped.
+        if (state.pendingCrash !== null)
+          failures.push(
+            `${where}: a native renderer crash observed at journal #${state.pendingCrash.seq} was never attributed to a lane page${incomplete}; the lane's capture of it is incomplete`,
           );
       }
       return errors;
@@ -3829,6 +4166,7 @@ async function openLane(
       unattributedRequests: journal.unattributedRequests ?? [],
       lateEvents: journal.lateEvents ?? [],
       activations: journal.activations ?? [],
+      crashWatches: journal.crashWatches ?? [],
       activationSource: journal.activationSource ?? null,
       engine: journal.engine ?? null,
       late: journal.late ?? [],

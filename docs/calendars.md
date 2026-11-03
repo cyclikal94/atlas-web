@@ -432,6 +432,24 @@ Revision 30 makes the lane's own listeners and its context cleanup complete.
   the case's error.
 - **A late context is only closed.** One that arrives after settlement began gets no listeners.
 
+Revision 31 makes a renderer crash fail the case. Before it, a lane page whose renderer crashed left no trace, and a case could pass.
+- **A crash is its page's failure.** It is recorded with its page and document and always fails, whatever was declared or lost. A healthy
+  close is not a crash.
+- **It is taken from Playwright's server page.** Playwright tells its client about a crash only once it has announced the page, and does
+  not repeat it later. The lane therefore listens on the server page, from the page's first document commit or the lane's first meeting
+  with it, whichever comes first. Firefox's requestless popup is covered before Playwright announces it. A page that had already crashed
+  when the lane reached it is recorded at once. A crash of a window the lane never met fails by name.
+- **One source per page.** Playwright's public client crash event is used only when the server page cannot be read, and that gap already
+  fails by name. The crash is never inferred from a closed page, a URL or a page error.
+- **A crash can kill more than one page.** A same-origin popup shares its opener's renderer, so crashing one crashes both, and each is
+  recorded on its own page.
+- **Late callbacks are refused.** A listener that fires after cleanup, because its removal failed or it was rolled back, is recorded as a
+  late line and never as a new problem. Revision 30 dropped late context console messages silently.
+
+Qualified on macOS in all three engines with each engine's own crash command and a healthy close beside it, through the lane manager and
+the case fixture itself. The engines report the crash after the announcement even when the command is sent at the popup's first commit,
+so a genuine crash before Playwright announces a page has not been reproduced. That boundary is covered by the static tests only.
+
 The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
 origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
 once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins

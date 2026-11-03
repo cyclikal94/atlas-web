@@ -10,6 +10,7 @@ import {
   type OpenStage,
   type OriginRoute,
   openTransportLanes,
+  runTransportLaneFixture,
   type TransportLane,
 } from "./native-transport";
 
@@ -2442,4 +2443,230 @@ test.describe("native transport requestless activation (revision 29 qualificatio
       await lanes.settle();
     }
   });
+});
+
+/**
+ * Revision 31 (Review 36 F36-1, family native-transport-console-attribution; design assessment token 7c961068…, CR1/CR2/CR4, Q0/Q2):
+ * a GENUINE renderer crash of a lane page, by the engine's own crash command (revision-31 diag/crash-stimulus-2, every engine: the
+ * server Page and the client Page each report exactly one crash, and a healthy close reports none): Chromium's DevTools `Page.crash`
+ * through Playwright's public CDP session; Firefox's and WebKit's own `Page.crash` through the page's protocol session in Playwright's
+ * in-process server (a test stimulus of the pinned 1.63.0 only; the harness under test never reads it). The renderer dies before it can
+ * answer, so the command is not awaited: the independent observer (the client Page's `crash`, registered before the stimulus and
+ * disposed by `waitForEvent`) is the barrier. Nothing is evaluated in the crashed page.
+ */
+function crashRenderer(context: BrowserContext, page: Page, engine: string) {
+  const observed = page.waitForEvent("crash", { timeout: 15_000 });
+  const send =
+    engine === "chromium"
+      ? context
+          .newCDPSession(page)
+          .then((session) => session.send("Page.crash"))
+      : (
+          page as unknown as {
+            _connection: {
+              toImpl(o: unknown): {
+                delegate: {
+                  _session: {
+                    send(method: string, params: object): Promise<unknown>;
+                  };
+                };
+              };
+            };
+          }
+        )._connection
+          .toImpl(page)
+          .delegate._session.send("Page.crash", {});
+  void Promise.resolve(send).catch(() => undefined);
+  return observed;
+}
+/**
+ * Which of `pages` genuinely crashed, observed independently of the lane: a page whose renderer died cannot evaluate (its process is gone;
+ * a live page answers), and a crashed page's own client `crash` event is then awaited (registered before the stimulus by the caller). A
+ * same-origin popup shares its opener's renderer process in every engine (revision-31 focused crash-2: the engine's `Page.crash` killed
+ * both), so the set is observed, never assumed.
+ */
+async function crashedOf(
+  pages: Array<{ page: Page; index: number; crashed: Promise<unknown> }>,
+): Promise<number[]> {
+  const out: number[] = [];
+  for (const { page, index, crashed } of pages) {
+    const alive = await page
+      .evaluate(() => 1)
+      .then(
+        () => true,
+        () => false,
+      );
+    if (alive) continue;
+    await crashed;
+    out.push(index);
+  }
+  return out;
+}
+/** Independent observers of every lane page, registered before the stimulus (each a once-listener, gone with its page). */
+const observe = (pages: Array<{ page: Page; index: number }>) =>
+  pages.map((o) => ({
+    ...o,
+    crashed: new Promise<void>((resolve) => {
+      o.page.once("crash", () => resolve());
+    }),
+  }));
+const CRASH_FAILURE =
+  /^lane 0 page (\d+) document (\d+) crash \[crash\]: native renderer crash \(Playwright's server page reported that the renderer crashed\) \(a native renderer crash always fails: its page's evidence after it is incomplete, whatever the case did\)$/;
+const documentOf = (lane: TransportLane, page: number) =>
+  (lane.journal.navigations ?? [])
+    .filter((n) => n.page === page && n.kind === "new-document")
+    .at(-1)?.document ?? 0;
+
+test.describe("native transport renderer crash (revision 31 qualification in real engines)", () => {
+  for (const where of ["ordinary", "popup"] as const)
+    for (const crash of [true, false])
+      test(`CRASH1 ${where === "popup" ? "a requestless native blob popup (Firefox: committed before Playwright dispatches it)" : "an ordinary HTTP page"}, ${crash ? "a GENUINE renderer crash: exactly one unconditional crash failure of its page and document, taken at its server page" : "the healthy close control: no crash and no failure"}`, async ({
+        browser,
+        browserName,
+      }) => {
+        const lanes = openTransportLanes(browser, test.info());
+        try {
+          const lane = await guardLane(lanes);
+          const opener = await open(lane);
+          let target = opener;
+          let index = 0;
+          if (where === "popup") {
+            const blob = await target.evaluate(
+              (body) =>
+                URL.createObjectURL(new Blob([body], { type: "text/html" })),
+              BLOB_BODY,
+            );
+            target = await popupOf(target, blob);
+            await target.waitForLoadState("load");
+            expect(await target.locator("body").textContent()).toBe(
+              "native blob document",
+            );
+            index = 1;
+          } else
+            expect(await target.locator("body").textContent()).toBe("guard");
+          const observers = observe([
+            { page: opener, index: 0 },
+            ...(where === "popup" ? [{ page: target, index: 1 }] : []),
+          ]);
+          let crashed: number[] = [];
+          if (crash) {
+            await crashRenderer(lane.context, target, browserName);
+            crashed = await crashedOf(observers);
+            expect(crashed, "the stimulated page itself crashed").toContain(
+              index,
+            );
+          }
+          await target.close();
+          await quiet(lane);
+          const documents = crashed.map((i) => documentOf(lane, i));
+          const { report, verdict } = await settle(lanes, lane);
+          // The canonical source of every lane page is its server page; Firefox's requestless popup was subscribed at its server commit,
+          // BEFORE Playwright announced it (the earliest boundary; a genuine crash before the announcement is not reproducible: diag).
+          const watches = lane.journal.crashWatches ?? [];
+          expect(watches.map((w) => [w.page, w.source])).toEqual(
+            where === "popup"
+              ? [
+                  [0, "server-page"],
+                  [1, "server-page"],
+                ]
+              : [[0, "server-page"]],
+          );
+          if (where === "popup" && browserName === "firefox")
+            expect(watches[1]).toMatchObject({
+              at: "server-commit",
+              announced: false,
+            });
+          const crashes = lane.journal.problems.filter(
+            (p) => p.type === "crash",
+          );
+          if (!crash) {
+            expect(crashes).toEqual([]);
+            expect(report.failures).toEqual([]);
+            expect(verdict.unexpected).toEqual([]);
+            return;
+          }
+          // Exactly the independently observed crashed pages, each once, in its own current document; nothing else.
+          expect(
+            crashes
+              .map((p) => [p.page, p.document, p.category])
+              .sort((a, b) => Number(a[0]) - Number(b[0])),
+          ).toEqual(crashed.map((i, n) => [i, documents[n], "crash"]));
+          expect(report.failures).toEqual(
+            crashed.map(() => expect.stringMatching(CRASH_FAILURE)),
+          );
+          for (const [n, i] of crashed.entries())
+            expect(report.failures.join("\n")).toContain(
+              `lane 0 page ${i} document ${documents[n]} crash`,
+            );
+          expect(verdict.violations).toEqual([]);
+          expect(lane.journal.provenanceFailures).toEqual([]);
+        } finally {
+          await lanes.settle();
+        }
+      });
+
+  for (const where of ["ordinary", "popup"] as const)
+    for (const crash of [true, false])
+      test(`CRASH2 the ACTUAL public fixture (runTransportLaneFixture), ${where === "popup" ? "a requestless native blob popup" : "an ordinary HTTP page"}: ${crash ? "after a genuine renderer crash and the body's last action, it rejects with the crash as its content" : "after a healthy close, it resolves"}`, async ({
+        browser,
+        browserName,
+      }) => {
+        let crashed: number[] = [];
+        const outcome = await runTransportLaneFixture(
+          browser,
+          async (openLane) => {
+            const lanes = { open: openLane } as unknown as ReturnType<
+              typeof openTransportLanes
+            >;
+            const lane = await guardLane(lanes);
+            const opener = await open(lane);
+            let target = opener;
+            if (where === "popup") {
+              const blob = await target.evaluate(
+                (body) =>
+                  URL.createObjectURL(new Blob([body], { type: "text/html" })),
+                BLOB_BODY,
+              );
+              target = await popupOf(target, blob);
+              await target.waitForLoadState("load");
+            }
+            await expect(target.locator("body")).toHaveText(
+              where === "popup" ? "native blob document" : "guard",
+            );
+            const observers = observe([
+              { page: opener, index: 0 },
+              ...(where === "popup" ? [{ page: target, index: 1 }] : []),
+            ]);
+            if (crash) {
+              await crashRenderer(lane.context, target, browserName);
+              crashed = await crashedOf(observers);
+            }
+            await target.close();
+          },
+          test.info(),
+        ).then(
+          () => "resolved",
+          (error: unknown) => String(error),
+        );
+        if (crash) expect(crashed).toContain(where === "popup" ? 1 : 0);
+        else expect(crashed).toEqual([]);
+        if (!crash) {
+          expect(outcome).toBe("resolved");
+          return;
+        }
+        expect(outcome, "the crash is the fixture's failure").toMatch(
+          /transport lane teardown/,
+        );
+        expect(outcome).toMatch(
+          new RegExp(
+            `lane 0 page ${where === "popup" ? 1 : 0} document \\d+ crash \\[crash\\]: native renderer crash \\(Playwright's server page reported that the renderer crashed\\)`,
+          ),
+        );
+        expect(
+          outcome.match(/crash \[crash\]/g),
+          "each independently observed crashed page, once",
+        ).toHaveLength(crashed.length);
+        for (const i of crashed)
+          expect(outcome).toContain(`lane 0 page ${i} document`);
+      });
 });
