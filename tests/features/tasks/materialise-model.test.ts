@@ -9,6 +9,7 @@ import {
   materialiseCommand,
   onRead,
   onSent,
+  pausedBehind,
   recover,
   rediscover,
   type Sequence,
@@ -361,5 +362,114 @@ describe("REVISION17 R36-K: a row's lost answer rediscovered", () => {
       phase: "stopped",
       stop: { reason: "unreachable" },
     });
+  });
+});
+
+describe("REVISION18 R36-L: a row stopped on a lost call", () => {
+  test("a rediscovery past the window, or under a clock moved back, stops the row on a lost call: its attempt (key and body) or its read kept", () => {
+    const sending = submit(start(), newKey);
+    const command = rediscover(
+      { ...sending, schedule: issue(null, "command", T) },
+      T + WINDOW_MS,
+    ) as Sequence;
+    expect(command).toMatchObject({
+      phase: "stopped",
+      stop: { reason: "unreachable" },
+      attempt: sending.attempt,
+    });
+    expect(pausedBehind(command)).toBe(true);
+    const clocked = rediscover(
+      { ...sending, schedule: issue(null, "command", T) },
+      T - 1,
+    ) as Sequence;
+    expect(clocked.schedule).toMatchObject({ pause: "clock", failures: 0 });
+    expect(pausedBehind(clocked)).toBe(true);
+    const awaiting = onSent(submit(start(), newKey), { kind: "ok" }, T);
+    const position = rediscover(
+      { ...awaiting, schedule: issue(null, "position", T + 1) },
+      T + 1 + WINDOW_MS,
+    ) as Sequence;
+    expect(position).toMatchObject({
+      phase: "stopped",
+      attempt: null,
+      read_seq: awaiting.read_seq,
+    });
+    expect(pausedBehind(position)).toBe(true);
+    // The owner's own outcome of the lost command alike (transport, its episode's window ended).
+    const first = onSent(
+      { ...sending, schedule: issue(null, "command", T) },
+      { kind: "uncertain", retry: { cause: "transport" } },
+      T,
+    );
+    const own = onSent(
+      {
+        ...first,
+        schedule: issue(
+          first.schedule as never,
+          "command",
+          T + WINDOW_MS - 1_000,
+        ),
+      },
+      { kind: "uncertain", retry: { cause: "transport" } },
+      T + WINDOW_MS,
+    );
+    expect(own).toMatchObject({ phase: "stopped", attempt: sending.attempt });
+    expect(pausedBehind(own)).toBe(true);
+    // Its continuation after the person's Try again: the same attempt, or the row's own read.
+    expect(tryAgain(command, T + WINDOW_MS + 5).phase).toBe("submitting");
+    expect(tryAgain(command, T + WINDOW_MS + 5).attempt).toEqual(
+      sending.attempt,
+    );
+    expect(tryAgain(position, T + WINDOW_MS + 5).phase).toBe(
+      "awaiting_position_read",
+    );
+  });
+
+  test("no other row is: not stopped, any other stop, a received failure's window, an earlier build's row, another caller's schedule", () => {
+    const sending = submit(start(), newKey);
+    const command = rediscover(
+      { ...sending, schedule: issue(null, "command", T) },
+      T + WINDOW_MS,
+    ) as Sequence;
+    expect(pausedBehind({ ...command, phase: "submitting", stop: null })).toBe(
+      false,
+    );
+    expect(pausedBehind(onSent(sending, { kind: "capacity" }, T))).toBe(false);
+    expect(pausedBehind(onSent(sending, { kind: "rejected" }, T))).toBe(false);
+    expect(pausedBehind({ ...command, stop: { reason: "no_progress" } })).toBe(
+      false,
+    );
+    const earlier = onSent(
+      { ...sending, schedule: issue(null, "command", T) },
+      { kind: "uncertain", retry: { cause: "transient" } },
+      T,
+    );
+    const received = onSent(
+      {
+        ...earlier,
+        schedule: issue(
+          earlier.schedule as never,
+          "command",
+          T + WINDOW_MS - 1_000,
+        ),
+      },
+      { kind: "uncertain", retry: { cause: "transient" } },
+      T + WINDOW_MS,
+    );
+    expect(received.phase).toBe("stopped");
+    expect(pausedBehind(received), "a window after a received failure").toBe(
+      false,
+    );
+    const { schedule: _omitted, ...legacy } = command;
+    expect(pausedBehind(legacy as Sequence), "an earlier build's row").toBe(
+      false,
+    );
+    expect(
+      pausedBehind({ ...command, attempt: null }),
+      "the command's schedule read as the position read's",
+    ).toBe(false);
+    expect(pausedBehind({ ...command, schedule: { v: 9 } as never })).toBe(
+      false,
+    );
   });
 });

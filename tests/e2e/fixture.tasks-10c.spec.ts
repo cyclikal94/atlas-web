@@ -3582,3 +3582,325 @@ test.describe("E-M12i/j: a lost answer after a real reload under database conten
       .toHaveLength(0);
   });
 });
+
+test.describe("E-M12k: a lost call's committed pause whose fence outlived its page (revision 18: review 19's R36-L)", () => {
+  // Pages A (its call held, then a transport failure observed while another connection holds a valid readwrite transaction over the
+  // affected stores: its outcome write cannot land before A closes), B (rediscovers the lost call and commits its PAUSE: a window, by a
+  // scripted forward clock boundary that is NOT the real 180-second observation, or a clock moved back; its retirement of the fence is
+  // refused by the store for B's whole lifetime in the witnesses) and C (a healthy store). C shows the stop, sends nothing for it and
+  // ends the fence; the person's Try again resumes the same work once. `owner`: a live page holds the fence's own Web Lock: C ends
+  // nothing and its press is held until that page lets go. FIXTURE evidence (stubbed answers), REAL IndexedDB, localStorage and Web Locks.
+  type Caller = "discovery" | "command" | "position";
+  type Mode = "control" | "witness" | "clock" | "owner";
+  const label: Record<Mode, string> = {
+    control: "CONTROL (its fence retired by its page)",
+    witness: "WITNESS (the removal refused until its page closed)",
+    clock: "WITNESS (a clock pause; the removal refused until its page closed)",
+    owner: "SAFETY (a live page holds the fence's lock)",
+  };
+  for (const caller of ["discovery", "command", "position"] as Caller[])
+    for (const mode of ["control", "witness", "clock", "owner"] as Mode[])
+      test(`E-M12k ${caller} ${label[mode]}: the next page shows the paused stop and sends nothing for it; Try again resumes ${caller === "command" ? "the same key and body" : caller === "position" ? "the row's own read, no other materialise" : "the read"} once`, async ({
+        context,
+      }, info) => {
+        const task = repeating(481, "Recoverable fern");
+        const first = held<Answer>();
+        let reads = 0;
+        let sent = 0;
+        let holding = false;
+        let caughtUp = false;
+        const marker =
+          caller === "discovery"
+            ? `:materialise-lost:${task.taskId}#`
+            : `:materialise-lost:${task.taskId}:`;
+        await context.route("**/__r18-blank", (r) =>
+          r.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: "<!doctype html><title>transaction owner</title>",
+          }),
+        );
+        await context.addInitScript((key) => {
+          const now = Date.now;
+          const offset = Number(localStorage.getItem("__r18offset") ?? 0);
+          Date.now = () => now() + offset;
+          const remove = Storage.prototype.removeItem;
+          Storage.prototype.removeItem = function (this: Storage, k: string) {
+            if (
+              k.startsWith("atlas-write-failing:") &&
+              k.includes(key) &&
+              localStorage.getItem("__r18failRetire") === "yes"
+            )
+              throw new DOMException("removal refused", "SecurityError");
+            return remove.call(this, k);
+          };
+        }, marker);
+        const { page, r10c } = await setup(
+          context,
+          `/today?day=${TODAY}&tz=UTC`,
+          [task],
+          (q, r) => {
+            q.respond = (d) =>
+              dailyPage(
+                [view(task)],
+                d.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+              );
+            r.position = () => {
+              reads += 1;
+              if (caller === "discovery" && reads === 1) return first.promise;
+              if (caller === "position" && sent > 0 && !holding) {
+                holding = true;
+                return first.promise;
+              }
+              return detailOf(
+                task,
+                caller === "discovery" ||
+                  caughtUp ||
+                  (caller === "position" && sent > 0)
+                  ? { last_date: TODAY, pending: false }
+                  : { last_date: yesterday(20), pending: true },
+              );
+            };
+            r.materialise = () => {
+              sent += 1;
+              if (caller === "command" && sent === 1) return first.promise;
+              caughtUp = true;
+              return { status: 200, body: { revision: 9 } };
+            };
+          },
+        );
+        await expect
+          .poll(
+            () =>
+              caller === "discovery"
+                ? reads === 1
+                : caller === "command"
+                  ? sent === 1
+                  : holding,
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+        const helper = await context.newPage();
+        await helper.goto("/__r18-blank");
+        await helper.evaluate(async (account) => {
+          const w = window as unknown as Record<string, unknown>;
+          const db = await new Promise<IDBDatabase>((resolve, reject) => {
+            const r = indexedDB.open(`atlas-${account}`);
+            r.onsuccess = () => resolve(r.result);
+            r.onerror = () => reject(r.error);
+          });
+          w.__r18db = db;
+          w.__r18hold = true;
+          w.__r18done = false;
+          await new Promise<void>((resolve, reject) => {
+            const tx = db.transaction(
+              ["sync_state", "materialise_sequences"],
+              "readwrite",
+            );
+            let n = 0;
+            tx.oncomplete = () => {
+              w.__r18done = true;
+            };
+            tx.onerror = () => reject(tx.error);
+            const again = () => {
+              const r = tx.objectStore("sync_state").getAll();
+              r.onsuccess = () => {
+                n += 1;
+                if (n === 1) resolve();
+                if (w.__r18hold) again();
+              };
+              r.onerror = () => reject(r.error);
+            };
+            again();
+          });
+        }, ACCOUNT);
+        const marks = () =>
+          helper.evaluate(
+            (key) =>
+              Object.keys(localStorage).filter(
+                (k) => k.startsWith("atlas-write-failing:") && k.includes(key),
+              ),
+            marker,
+          );
+        const state = () =>
+          helper.evaluate(
+            async ({ id, caller }) => {
+              const db = (window as unknown as { __r18db: IDBDatabase })
+                .__r18db;
+              const store =
+                caller === "discovery" ? "sync_state" : "materialise_sequences";
+              const rows = await new Promise<Array<Record<string, unknown>>>(
+                (resolve, reject) => {
+                  const r = db.transaction(store).objectStore(store).getAll();
+                  r.onsuccess = () => resolve(r.result);
+                  r.onerror = () => reject(r.error);
+                },
+              );
+              return (
+                caller === "discovery"
+                  ? (
+                      rows[0]?.materialise_discovery as
+                        | Record<string, unknown>
+                        | undefined
+                    )?.[id]
+                  : rows.find((x) => x.task_id === id)
+              ) as Record<string, unknown> | undefined;
+            },
+            { id: task.taskId, caller },
+          );
+        // A observes the transport failure; its outcome write waits behind the held transaction while A closes.
+        first.release(ABORTED);
+        await expect.poll(marks, { timeout: 15_000 }).toHaveLength(1);
+        await page.close();
+        await helper.evaluate(() => {
+          (window as unknown as Record<string, unknown>).__r18hold = false;
+        });
+        await helper.waitForFunction(
+          () =>
+            (window as unknown as Record<string, unknown>).__r18done === true,
+        );
+        // A scripted clock: past the window (not a real elapsed-duration claim), or moved back before the call's issue.
+        await helper.evaluate((m) => {
+          localStorage.setItem(
+            "__r18offset",
+            m === "clock" ? "-120000" : "181000",
+          );
+          localStorage.setItem(
+            "__r18failRetire",
+            m === "control" ? "no" : "yes",
+          );
+        }, mode);
+        const second = await bootAt(context, `/today?day=${TODAY}&tz=UTC`);
+        await expect
+          .poll(
+            async () =>
+              ((await state())?.schedule as { pause?: string } | undefined)
+                ?.pause,
+            { timeout: 15_000 },
+          )
+          .toBe(mode === "clock" ? "clock" : "window");
+        await expect(
+          second.locator(
+            `[data-catch-up-task="${task.taskId}"][data-catch-up-stopped]`,
+          ),
+        ).toHaveCount(1);
+        expect(
+          await marks(),
+          "precondition: the fence after the rediscovering page",
+        ).toHaveLength(mode === "control" ? 0 : 1);
+        const paused = await state();
+        expect(
+          (paused?.schedule as { issued?: unknown } | undefined)?.issued,
+          "precondition: nothing outstanding",
+        ).toBeNull();
+        await second.close();
+        await helper.evaluate((m) => {
+          localStorage.setItem("__r18failRetire", "no");
+          if (m === "clock") localStorage.setItem("__r18offset", "0");
+        }, mode);
+        if (mode === "owner")
+          await helper.evaluate((key) => {
+            const k = Object.keys(localStorage).find(
+              (x) => x.startsWith("atlas-write-failing:") && x.includes(key),
+            ) as string;
+            const scope = (
+              k.slice("atlas-write-failing:".length).split("#")[0] as string
+            ).split(":");
+            const name = `atlas-materialise-fence:${decodeURIComponent(scope[0] as string)}:${decodeURIComponent(scope[1] as string)}:${scope.slice(2).join(":")}`;
+            const w = window as unknown as Record<string, unknown>;
+            w.__r18lock = name;
+            void navigator.locks.request(
+              name,
+              () =>
+                new Promise<void>((resolve) => {
+                  w.__r18letGo = resolve;
+                }),
+            );
+          }, marker);
+        if (mode === "owner")
+          await helper.waitForFunction(
+            () =>
+              typeof (window as unknown as Record<string, unknown>)
+                .__r18letGo === "function",
+          );
+        const third = await bootAt(context, `/today?day=${TODAY}&tz=UTC`);
+        const notice = third.locator(`[data-catch-up-task="${task.taskId}"]`);
+        await expect(notice).toHaveAttribute(
+          "data-catch-up-stopped",
+          "unreachable",
+          { timeout: 15_000 },
+        );
+        // A bounded observation that plain work sends nothing for the stop (no timer shortened).
+        await third.waitForTimeout(3_000);
+        expect(await state(), "the stop exactly as recorded").toEqual(paused);
+        expect(sent, "no other materialise").toBe(
+          caller === "discovery" ? 0 : 1,
+        );
+        if (caller === "discovery") expect(reads, "no discovery read").toBe(1);
+        expect(
+          await marks(),
+          mode === "owner" ? "a live owner's fence stands" : "the fence ended",
+        ).toHaveLength(mode === "owner" ? 1 : 0);
+        const before = { reads, sent };
+        if (mode === "owner") {
+          await notice.getByRole("button", { name: "Try again" }).click();
+          // Held: the recorded stop stays shown (it is shown before the page's own memory stop), with the same token.
+          await third.waitForTimeout(3_000);
+          await expect(notice).toHaveAttribute(
+            "data-catch-up-stopped",
+            "unreachable",
+          );
+          expect({ reads, sent }, "held: nothing sent").toEqual(before);
+          expect(await state()).toEqual(paused);
+          expect(await marks()).toHaveLength(1);
+          await helper.evaluate(() => {
+            (
+              (window as unknown as Record<string, unknown>)
+                .__r18letGo as () => void
+            )();
+          });
+        }
+        await notice.getByRole("button", { name: "Try again" }).click();
+        // The ordinary recovery observation (E-M2's 20 s bound).
+        await expect.poll(() => state(), { timeout: 20_000 }).toBeUndefined();
+        await info.attach("observations", {
+          body: JSON.stringify(
+            {
+              mode,
+              before,
+              after: { reads, sent },
+              paused,
+              marks: await marks(),
+              log: r10c.log.map(({ from: _, ...e }) => e),
+            },
+            null,
+            2,
+          ),
+          contentType: "application/json",
+        });
+        await helper.evaluate(() => {
+          (
+            (window as unknown as Record<string, unknown>)
+              .__r18db as IDBDatabase
+          ).close();
+        });
+        await helper.close();
+        if (caller === "command") {
+          expect(sent, "the held attempt resent once").toBe(before.sent + 1);
+          expect(posts(r10c)[1]?.key, "the same key").toBe(posts(r10c)[0]?.key);
+          expect(JSON.stringify(posts(r10c)[1]?.body), "the same body").toBe(
+            JSON.stringify(posts(r10c)[0]?.body),
+          );
+        }
+        if (caller === "discovery")
+          expect(reads, "the discovery read once").toBe(before.reads + 1);
+        if (caller === "position") {
+          expect(sent, "no other materialise after the known success").toBe(1);
+          expect(
+            reads - before.reads,
+            "the new discovery and the row's own position read",
+          ).toBe(2);
+        }
+        await expect(notice).toHaveCount(0);
+      });
+});

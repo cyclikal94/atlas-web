@@ -12,6 +12,7 @@ import {
   failed,
   gate,
   issue,
+  lostPause,
   paused,
   readSchedule,
   rediscovered,
@@ -559,6 +560,135 @@ describe("REVISION17 R36-K: a lost answer rediscovered", () => {
     });
     expect(rediscovered(issued, "discovery", T0 - 1)).toMatchObject({
       pause: "clock",
+    });
+  });
+});
+
+describe("REVISION18 R36-L: the stop a lost call's outcome or rediscovery leaves", () => {
+  test("a lost call counted past its window, or under a clock moved back (no failure, no cause), leaves a lost call's pause", () => {
+    for (const caller of ["discovery", "command", "position"] as const) {
+      const issued = issue(null, caller, T0);
+      const windowed = rediscovered(issued, caller, T0 + WINDOW_MS);
+      expect(windowed).toMatchObject({
+        issued: null,
+        pause: "window",
+        cause: "transport",
+        failures: 1,
+      });
+      expect(lostPause(windowed)).toBe(true);
+      // `failed` pauses an untrusted clock before it counts: no failure, the earlier cause (none).
+      const clocked = rediscovered(issued, caller, T0 - 1);
+      expect(clocked).toMatchObject({
+        issued: null,
+        pause: "clock",
+        failures: 0,
+        cause: null,
+      });
+      expect(lostPause(clocked)).toBe(true);
+      // The owner's own outcome of a lost call in an episode under way (no rediscovery) alike: its window ends.
+      const under = failed(null, caller, { cause: "transport" }, T0, false);
+      const own = failed(
+        issue(under, caller, T0 + WINDOW_MS - 1_000),
+        caller,
+        { cause: "transport" },
+        T0 + WINDOW_MS,
+        false,
+      );
+      expect(own).toMatchObject({ pause: "window", failures: 2 });
+      expect(lostPause(own)).toBe(true);
+      expect(
+        lostPause(
+          failed(issued, caller, { cause: "transport" }, Number.NaN, false),
+        ),
+      ).toBe(true);
+      // A clock pause keeps an earlier episode's facts (its count, a received cause): still the lost call's clock.
+      const earlier = failed(
+        null,
+        caller,
+        { cause: "transient" },
+        T0,
+        caller !== "command",
+      );
+      const later = rediscovered(
+        issue(earlier, caller, T0 + 5_000),
+        caller,
+        T0 + 4_000,
+      );
+      expect(later).toMatchObject({
+        pause: "clock",
+        failures: 1,
+        cause: "transient",
+      });
+      expect(lostPause(later)).toBe(true);
+    }
+  });
+
+  test("anything else is not: unpaused, outstanding, untrusted, an unrecognised streak, legacy, a window after received answers or with no failure", () => {
+    const issued = issue(null, "position", T0);
+    expect(lostPause(null)).toBe(false);
+    expect(lostPause("invalid")).toBe(false);
+    expect(lostPause(issued), "a call still outstanding").toBe(false);
+    expect(
+      lostPause(rediscovered(issued, "position", T0 + 1_000)),
+      "paced, not paused",
+    ).toBe(false);
+    const windowed = rediscovered(issued, "position", T0 + WINDOW_MS);
+    expect(
+      lostPause({ ...windowed, issued: T0 + WINDOW_MS }),
+      "issued again",
+    ).toBe(false);
+    expect(
+      lostPause({ ...windowed, cause: "transient" }),
+      "a window after received failures",
+    ).toBe(false);
+    expect(lostPause({ ...windowed, cause: "rate_limited" })).toBe(false);
+    expect(lostPause({ ...windowed, cause: "unrecognised" })).toBe(false);
+    expect(
+      lostPause({ ...windowed, failures: 0 }),
+      "a window with no failure",
+    ).toBe(false);
+    expect(lostPause({ ...windowed, pause: "unrecognised" })).toBe(false);
+    expect(
+      lostPause(paused(null, "position", "legacy", T0)),
+      "an earlier build's",
+    ).toBe(false);
+    let streak: Schedule | null = null;
+    for (let k = 0; k < 3; k += 1)
+      streak = failed(
+        streak,
+        "position",
+        { cause: "unrecognised" },
+        T0 + k,
+        true,
+      );
+    expect(streak?.pause).toBe("unrecognised");
+    expect(lostPause(streak)).toBe(false);
+  });
+
+  test("what a lift goes on from keeps nothing of a lost call: the person's reset and a reconnection keep only a server minimum and the unrecognised streak", () => {
+    const issued = issue(null, "command", T0);
+    const windowed = rediscovered(issued, "command", T0 + WINDOW_MS);
+    // Retiring a lost call's fence beside its stop therefore changes nothing a lift goes on from.
+    expect(reset(windowed, T0 + WINDOW_MS + 1, true)).toBeNull();
+    expect(reset(windowed, T0 + WINDOW_MS + 1, false)).toBeNull();
+    const limited = failed(
+      null,
+      "command",
+      { cause: "rate_limited", afterMs: 400_000 },
+      T0,
+      false,
+    );
+    const lost = rediscovered(
+      issue({ ...limited, next: T0 }, "command", T0 + 1),
+      "command",
+      T0 + WINDOW_MS,
+    );
+    expect(lost.pause).toBe("window");
+    expect(reset(lost, T0 + WINDOW_MS + 1, true)).toMatchObject({
+      server: T0 + 400_000,
+      failures: 0,
+      since: null,
+      unknown: 0,
     });
   });
 });

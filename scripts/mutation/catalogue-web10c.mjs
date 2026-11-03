@@ -150,11 +150,11 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '      if (stored.phase === "stopped") return DONE;\n',
-        '      if (stored.phase === "stopped") {\n' +
-          "        const again = await commit(service, captured, key, stored, freshBudget(stored));\n" +
+        // Revision 18 (R36-L): re-anchored after the stopped row's fence settling (the same fault: an ensure resumes the stop).
+        "        return owns(at) ? DONE : lost(at);\n      }\n",
+        "        const again = await commit(service, captured, key, stored, freshBudget(stored));\n" +
           "        if (again?.stored) await drive(at, again.stored, today);\n" +
-          "        return DONE;\n" +
+          "        return owns(at) ? DONE : lost(at);\n" +
           "      }\n",
       ),
   },
@@ -3088,8 +3088,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '      if (stored.phase === "stopped") return DONE;\n      return keyed(await drive(at, stored, today), throughDate);',
-        '      if (stored.phase === "stopped") return DONE;\n      if (answer !== null && stored.phase === "awaiting_position_read") {\n        const next = onRead(stored, answer, today(), deps.now());\n        const out = await commit(service, captured, key, stored, next);\n        if (out === null) return paused;\n        if (out.stored === null) return DONE;\n        return keyed(await drive(at, out.stored, today), throughDate);\n      }\n      return keyed(await drive(at, stored, today), throughDate);',
+        // Revision 18 (R36-L): re-anchored after the stopped row's fence settling (the same bypass).
+        "        return owns(at) ? DONE : lost(at);\n      }\n      return keyed(await drive(at, stored, today), throughDate);",
+        '        return owns(at) ? DONE : lost(at);\n      }\n      if (answer !== null && stored.phase === "awaiting_position_read") {\n        const next = onRead(stored, answer, today(), deps.now());\n        const out = await commit(service, captured, key, stored, next);\n        if (out === null) return paused;\n        if (out.stored === null) return DONE;\n        return keyed(await drive(at, out.stored, today), throughDate);\n      }\n      return keyed(await drive(at, stored, today), throughDate);',
       ),
   },
   {
@@ -4399,8 +4400,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "      (seen?.stop || stopped !== null || orphan(at, op) === null);",
-        "      true;",
+        // Revision 18 (R36-L): re-anchored over the per-caller rule (the same fault: any standing fence holds the press).
+        "      fenced(at, op) && (lifts || orphan(at, op) === null);",
+        "      fenced(at, op) && true;",
       ),
   },
   {
@@ -4509,6 +4511,207 @@ export const UNIT_10C = [
         t,
         '        if (!counted(s))\n          return end(stopInMemory(item.taskId, { reason: "storage" }));\n',
         "",
+      ),
+  },
+  {
+    id: "MU-3333",
+    title:
+      "R36-L: WEB-10c A19 (review 19): a discovery stop recorded on a lost call is shown without settling its standing lost-answer fence",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /REVISION18 R36-L discovery WITNESS \((crash|refused)\): a committed window pause/,
+    patch: (t) =>
+      sub(
+        t,
+        "      else if (orphaned !== null) {\n        await settleLost(at, op, discoveryStopped(at, item.taskId));\n        if (!owns(at)) return end(lost(at));\n      }\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3334",
+    title:
+      "R36-L: WEB-10c A19 (review 19): a stopped row adopted on a lost call keeps its standing lost-answer fence",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /REVISION18 R36-L (command|position) WITNESS \((crash|refused)\): a committed window pause/,
+    patch: (t) =>
+      sub(
+        t,
+        "        await settleLost(\n          at,\n          fenceOf(key.task_id, key.through_date),\n          sequenceStopped(at, key),\n        );\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3335",
+    title:
+      "R36-L: WEB-10c A19 (review 19): the person's Try again on a discovery stop does not settle its lost-answer fence before the lift",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /REVISION18 R36-L discovery WITNESS \(crash\): the person's Try again BEFORE/,
+    patch: (t) =>
+      sub(
+        t,
+        "      await settleLost(\n        at,\n        fenceOf(item.taskId),\n        discoveryStopped(at, item.taskId),\n      );\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3336",
+    title:
+      "R36-L: WEB-10c A19 (review 19): the person's Try again on a day's stop does not settle its lost-answer fence before the lift",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /REVISION18 R36-L (command|position) WITNESS \(crash\): the person's Try again BEFORE/,
+    patch: (t) =>
+      sub(
+        t,
+        "      await settleLost(\n        at,\n        fenceOf(stopped.task_id, stopped.through_date),\n        sequenceStopped(at, {\n          task_id: stopped.task_id,\n          through_date: stopped.through_date,\n        }),\n      );\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3337",
+    title:
+      "R36-L: WEB-10c A19 (review 19): a lost-answer fence is ended beside ANY record (the current record is not checked to be a lost call's stop)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /is NOT a lost call's stop/,
+    patch: (t) =>
+      sub(
+        t,
+        '          if (!(await stopped()) || !owns(at)) return "held";\n',
+        '          if (!owns(at)) return "held";\n',
+      ),
+  },
+  {
+    id: "MU-3338",
+    title:
+      "R36-L: WEB-10c A19 (review 19): the settling of a paused record's fence does not ask for the fence's lock (a live owner's fence is ended)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /a LIVE page holding the fence's lock keeps the fence beside the paused record/,
+    patch: (t) => sub(t, '          if (lock === null) return "held";\n', ""),
+  },
+  {
+    id: "MU-3339",
+    title:
+      "R36-L: WEB-10c A19 (review 19): the fence is witnessed again AFTER the record is read (a newer instance published meanwhile is ended)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /EXACT INSTANCES: a newer lost-answer instance published while the paused record is read/,
+    patch: (t) =>
+      sub(
+        t,
+        "          retireLost(at, op, seen);\n          return fenced(at, op)",
+        "          retireLost(at, op, orphan(at, op) ?? seen);\n          return fenced(at, op)",
+      ),
+  },
+  {
+    id: "MU-3340",
+    title:
+      "R36-L: WEB-10c A19 (review 19): a window pause after RECEIVED failures counts as a lost call's stop",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /anything else is not|RECEIVED failures \(503\)/,
+    patch: (t) =>
+      sub(
+        t,
+        '(s.pause === "window" && s.cause === "transport" && s.failures > 0)',
+        '(s.pause === "window" && s.failures > 0)',
+      ),
+  },
+  {
+    id: "MU-3341",
+    title:
+      "R36-L: WEB-10c A19 (review 19): a window pause with no failure recorded counts as a lost call's stop",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /anything else is not|a window pause with no failure recorded/,
+    patch: (t) =>
+      sub(
+        t,
+        '(s.pause === "window" && s.cause === "transport" && s.failures > 0)',
+        '(s.pause === "window" && s.cause === "transport")',
+      ),
+  },
+  {
+    id: "MU-3342",
+    title:
+      "R36-L: WEB-10c A19 (review 19): a lost call's CLOCK pause (no failure counted) is not recognised: its fence stands for good",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /CLOCK pause|under a clock moved back/,
+    patch: (t) => sub(t, '  (s.pause === "clock" ||\n', "  (false ||\n"),
+  },
+  {
+    id: "MU-3343",
+    title:
+      "R36-L: WEB-10c A19 (review 19): any stopped row (not only an unreachable one) with a lost call's schedule counts as a lost call's stop",
+    file: MODEL,
+    tests: RETRY_TESTS,
+    expect: /no other row is/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (row.phase !== "stopped" || row.stop?.reason !== "unreachable")\n    return false;\n',
+        '  if (row.phase !== "stopped") return false;\n',
+      ),
+  },
+  {
+    id: "MU-3344",
+    title:
+      "R36-L: WEB-10c A19 (review 19): a lift is held by another caller's lost-answer fence over a call still outstanding (revision 17's rule kept for both)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /is not held by the DAY's lost-answer fence/,
+    patch: (t) =>
+      sub(
+        t,
+        "      fenced(at, op) && (lifts || orphan(at, op) === null);",
+        "      fenced(at, op) &&\n      (lifts || Boolean(seen?.stop) || stopped !== null || orphan(at, op) === null);",
+      ),
+  },
+  {
+    id: "MU-3345",
+    title:
+      "R36-L: WEB-10c A19 (review 19): settling a discovery stop's fence counts its lost call again (the recorded stop is rewritten)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /REVISION18 R36-L discovery WITNESS \((crash|refused)\): a committed window pause/,
+    patch: (t) =>
+      sub(
+        t,
+        "      else if (orphaned !== null) {\n        await settleLost(at, op, discoveryStopped(at, item.taskId));\n",
+        "      else if (orphaned !== null) {\n        await commitMaterialiseDiscovery(at.service, at.service.capture(deps.epoch), {\n          task_id: item.taskId,\n          expected: entry,\n          next: { ...entry, failures: entry.failures + 1 },\n        });\n        await settleLost(at, op, discoveryStopped(at, item.taskId));\n",
+      ),
+  },
+  {
+    id: "MU-3346",
+    title:
+      "R36-L: WEB-10c A19 (review 19): the settling decision does not check its binding after its waits (a fence is ended in a gap of the binding)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /the binding goes while the decision reads the paused record/,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            t,
+            '          if (!(await stopped()) || !owns(at)) return "held";\n',
+            '          if (!(await stopped())) return "held";\n',
+          ),
+          "    if (entries === undefined || !owns(at)) return false;\n    const entry = entries[taskId] ?? null;\n",
+          "    if (entries === undefined) return false;\n    const entry = entries[taskId] ?? null;\n",
+        ),
+        "    if (row == null || !owns(at)) return false;\n",
+        "    if (row == null) return false;\n",
       ),
   },
 ];

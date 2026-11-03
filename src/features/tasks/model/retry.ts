@@ -220,6 +220,22 @@ export const counted = (s: Schedule | null): s is Schedule =>
   s !== null && s.issued === null && (s.failures > 0 || s.pause !== null);
 
 /**
+ * Revision 18 (review 19's R36-L; design assessment C1): the schedule of a caller its retry protocol PAUSED on a lost call, as a lost
+ * call's outcome (`failed` with `transport`, its own page's) or its rediscovery (`rediscovered`) leaves it: nothing issued is outstanding,
+ * and the pause is the window's after a recorded transport failure, or the clock's (`failed` pauses an untrusted clock BEFORE it counts,
+ * so a clock pause may show no failure and an earlier cause, even none). An unrecognised streak's pause, a record of an earlier build
+ * (`legacy`) and an untrusted schedule are never so. A lost-answer fence over such a stop guards nothing: the stop records the call, and
+ * what goes on from it is the person's Try again or an observed reconnection (`reset`), which keeps only a server minimum and the
+ * unrecognised streak, both of RECEIVED answers, never anything of a lost call. The stop itself stays.
+ */
+export const lostPause = (s: Schedule | null | "invalid"): s is Schedule =>
+  s !== null &&
+  s !== "invalid" &&
+  s.issued === null &&
+  (s.pause === "clock" ||
+    (s.pause === "window" && s.cause === "transport" && s.failures > 0));
+
+/**
  * A reset of a paused caller at `now`: the person's Try again (`manual`: a new episode, its unrecognised streak ended) or an observed
  * reconnection (only a `window` pause; the streak is kept). A still-future server deadline is kept either way. `null`: nothing remains.
  */

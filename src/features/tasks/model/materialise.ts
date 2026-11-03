@@ -10,6 +10,7 @@ import {
   failed,
   gate,
   issue,
+  lostPause,
   paused,
   readSchedule,
   rediscovered,
@@ -220,6 +221,20 @@ export function settledBehind(row: Sequence): boolean {
   if (row.phase === "stopped") return false;
   const s = readSchedule(row.schedule, callerOf(row));
   return s !== "invalid" && counted(s);
+}
+
+/**
+ * Revision 18 (review 19's R36-L; design assessment C1): the row is STOPPED by its caller's retry protocol on a lost call (`unreachable`,
+ * its schedule `retry.ts`'s `lostPause`, read for the caller its stop names: a held attempt is the command's, none the position read's).
+ * A lost-answer fence over it guards nothing; the stop, its revision, its attempt (key and body) and its phase stay as recorded, and only
+ * the person's Try again (or an observed reconnection, for a window pause) goes on from it. Any other stop, an earlier build's row (no
+ * schedule) or a schedule of another caller is never so.
+ */
+export function pausedBehind(row: Sequence): boolean {
+  if (row.phase !== "stopped" || row.stop?.reason !== "unreachable")
+    return false;
+  if (row.schedule === undefined) return false;
+  return lostPause(readSchedule(row.schedule, callerOf(row)));
 }
 
 /** The answer to the attempt held in `submitting`, observed at `now`. */

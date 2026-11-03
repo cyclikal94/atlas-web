@@ -3,7 +3,10 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { DataEnv } from "../../../src/data";
 import type { AccountService } from "../../../src/data/engine/account-service";
 import type { WriteFailureMarkers } from "../../../src/data/engine/write-failure-marker";
-import { createWriteFailureMarkers } from "../../../src/data/engine/write-failure-marker";
+import {
+  createWriteFailureMarkers,
+  markerKey,
+} from "../../../src/data/engine/write-failure-marker";
 import {
   createPageDataHost,
   resetPageDataHost,
@@ -5645,7 +5648,13 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
     const w = await setup();
     let received = 0;
     let observedAt = 0;
-    const calls: Array<{ caller: CallerName; at: number; key?: string }> = [];
+    const calls: Array<{
+      caller: CallerName;
+      at: number;
+      key?: string;
+      /** Revision 18 (R36-L): a command's body as sent (compared with the first one's). */
+      body?: string;
+    }> = [];
     const answer = async () => {
       if (++received === 1) {
         w.setNow(w.now() + 10_000);
@@ -5667,7 +5676,12 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
           : detail(TODAY, false);
       },
       materialise: async (_c: MaterialiseCommand, key: string) => {
-        calls.push({ caller: "command", at: w.now(), key });
+        calls.push({
+          caller: "command",
+          at: w.now(),
+          key,
+          body: JSON.stringify(_c),
+        });
         return caller === "command" ? answer() : OK;
       },
     } as unknown as TasksApi;
@@ -6993,6 +7007,617 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
       await w.idle(r);
       expect(w.sent()).toHaveLength(0);
       expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      r.dispose();
+    }
+  });
+
+  // ---- REVISION18 R36-L (review 19; design assessment of 3 November 2026, C1–C4 and Q1–Q4) -------------------------------------------
+  // A lost call's rediscovery commits its caller's PAUSE (its window after the transport failure, or a clock) BEFORE its fence is retired.
+  // The page goes before the retirement (`crash`: nothing after the commit happens, as REVISION17's CRASH CUT) or the store refuses that
+  // removal until the page goes (`refused`: the facade owes it and retries it on that page's reads, never on another's). A fresh page with
+  // a healthy store must end exactly that fence, keep the stop as recorded (nothing sent for it, its token unchanged), and let the person's
+  // Try again, or a reconnection for a window, go on from it: the same key AND body, or the row's own read. `none`: the retirement
+  // succeeded (the paired control). FIXTURE evidence: production runner, W27 plans, account service and marker facades over the doubles;
+  // scripted time (a scripted window boundary is not the real 180-second observation).
+  type Cut = "none" | "crash" | "refused";
+  const recordOf = (r: R16, caller: CallerName) =>
+    caller === "discovery" ? r.w.discovery() : r.w.stored();
+  const shownOf = (r: R16, caller: CallerName) =>
+    caller === "discovery"
+      ? seenDiscovery(r.w.discovery() as MaterialiseDiscovery)
+      : seenSequence(
+          r.w.stored() as MaterialiseSequenceRow,
+          r.w.discovery() ?? null,
+        );
+  const dayOf = (caller: CallerName) =>
+    caller === "discovery" ? undefined : TODAY;
+  const lostKeys = (r: R16, caller: CallerName) => {
+    const prefix = markerKey(scopeOf(r.w), lostOf(OP(caller)), "");
+    return (key: string) => key.startsWith(prefix);
+  };
+  const fenceLockOf = (r: R16, caller: CallerName) =>
+    `atlas-materialise-fence:${ACCOUNT}:${scopeOf(r.w).incarnationId}:${lostOf(OP(caller))}`;
+  /** A service whose record reads (`store.run` of a read plan) are reported to `onRead` first. */
+  const readsSeen = (
+    w: World,
+    onRead: (plan: string) => void,
+  ): AccountService => {
+    const real = w.t.env.service() as AccountService;
+    const store = new Proxy(real.store, {
+      get(target, key, receiver) {
+        if (key !== "run") return Reflect.get(target, key, receiver);
+        return (plan: { name: string }, input: unknown) => {
+          onRead(plan.name);
+          return target.run(plan as never, input as never);
+        };
+      },
+    });
+    return new Proxy(real, {
+      get(target, key, receiver) {
+        return key === "store" ? store : Reflect.get(target, key, receiver);
+      },
+    }) as AccountService;
+  };
+  /**
+   * Pages A (the owner: its transport failure observed, its first write lost when it goes) and B (the rediscovery, past the window, or
+   * with the clock moved back before the call's issue: it PAUSES and commits that, then its retirement is cut); B goes. Returns the world
+   * with the paused record as committed (`before`), checked: no call outstanding, the stop recorded, one call of the caller only.
+   */
+  const pausedCut = async (
+    caller: CallerName,
+    cut: Cut,
+    pause: "window" | "clock" = "window",
+  ) => {
+    const { l, r } = await lostWrite(caller);
+    await ownerGoes(
+      r,
+      pause === "window"
+        ? r.observedAt() + WINDOW_MS + 1_000
+        : r.observedAt() - 11_000,
+    );
+    const m = r.m.page("rediscoverer");
+    if (cut === "crash") m.retire = () => false;
+    if (cut === "refused") r.m.storage.failRemovesFor = lostKeys(r, caller);
+    const second = r.w.make({ markers: m, api: r.api, locks: l.locks });
+    second.ensure(TASK, "daily");
+    await r.w.idle(second);
+    second.dispose();
+    await r.w.settle();
+    r.m.storage.failRemovesFor = null;
+    const record = recordOf(r, caller);
+    expect(
+      record?.schedule,
+      "precondition: the rediscovery's pause is committed, nothing outstanding",
+    ).toMatchObject(
+      pause === "window"
+        ? { issued: null, cause: "transport", pause: "window", failures: 1 }
+        : { issued: null, pause: "clock", failures: 0 },
+    );
+    expect(
+      caller === "discovery"
+        ? (record as MaterialiseDiscovery | undefined)?.stop?.reason
+        : (record as MaterialiseSequenceRow | undefined)?.stop?.reason,
+      "precondition: the stop is recorded",
+    ).toBe("unreachable");
+    if (caller !== "discovery")
+      expect((record as MaterialiseSequenceRow).phase).toBe("stopped");
+    expect(
+      r.of(caller),
+      "precondition: nothing sent after the pause",
+    ).toHaveLength(1);
+    expect(
+      lostState(r, caller),
+      `precondition: the fence ${cut === "none" ? "was retired" : "stands"}`,
+    ).toBe(cut === "none" ? "unmarked" : "marked");
+    expect(ownState(r, caller)).toBe("unmarked");
+    if (pause === "clock") r.w.setNow(r.observedAt() + 60_000);
+    return { l, r, before: structuredClone(record) };
+  };
+  /** The person's Try again resumed the caller's recorded work, once: the same key and body, or the row's own read. */
+  const resumedOnce = (r: R16, caller: CallerName) => {
+    const selected = r.of(caller);
+    expect(selected, "the stop's work goes on, once").toHaveLength(2);
+    if (caller === "command") {
+      expect(selected[1]?.key, "the same key").toBe(selected[0]?.key);
+      expect(selected[1]?.body, "the same body").toBe(selected[0]?.body);
+    }
+    if (caller === "position")
+      expect(
+        r.of("command"),
+        "the row's own read, never another materialise",
+      ).toHaveLength(1);
+  };
+
+  for (const caller of CALLERS)
+    for (const cut of ["none", "crash", "refused"] as const) {
+      const label = cut === "none" ? "CONTROL" : `WITNESS (${cut})`;
+      test(`REVISION18 R36-L ${caller} ${label}: a committed window pause whose fence ${cut === "none" ? "was retired" : "outlived its page"}: a fresh page shows the stop, sends nothing and ends the fence; Try again then resumes the same work once`, async () => {
+        const { l, r, before } = await pausedCut(caller, cut);
+        let third: CatchUpRunner | undefined;
+        try {
+          third = pageOver(r, l, "third");
+          third.ensure(TASK, "daily");
+          await r.w.idle(third);
+          expect(
+            r.of(caller),
+            "plain work sends nothing for the stop",
+          ).toHaveLength(1);
+          expect(
+            recordOf(r, caller),
+            "the stop, its token and its counts exactly as recorded",
+          ).toEqual(before);
+          expect(lostState(r, caller), "the fence is ended").toBe("unmarked");
+          expect(third.get().unrecorded.get(TASK)).toBeUndefined();
+          third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+          await r.w.idle(third);
+          resumedOnce(r, caller);
+          expect(third.get().unrecorded.get(TASK)).toBeUndefined();
+        } finally {
+          r.owner.dispose();
+          third?.dispose();
+        }
+      });
+    }
+
+  for (const caller of CALLERS) {
+    test(`REVISION18 R36-L ${caller} WITNESS (crash): the person's Try again BEFORE any other work on the fresh page ends the fence and resumes the work once`, async () => {
+      const { l, r } = await pausedCut(caller, "crash");
+      let third: CatchUpRunner | undefined;
+      try {
+        third = pageOver(r, l, "third");
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        resumedOnce(r, caller);
+        expect(lostState(r, caller)).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+        third?.dispose();
+      }
+    });
+
+    test(`REVISION18 R36-L ${caller} WITNESS (crash): a CLOCK pause (no failure counted, no cause) committed before its fence's retirement: ended on the fresh page; a reconnection does not lift it; Try again does, once`, async () => {
+      const { l, r, before } = await pausedCut(caller, "crash", "clock");
+      let third: CatchUpRunner | undefined;
+      try {
+        third = pageOver(r, l, "third");
+        third.reconnected();
+        await r.w.idle(third);
+        expect(
+          r.of(caller),
+          "a clock pause is not resumed by a reconnection",
+        ).toHaveLength(1);
+        expect(recordOf(r, caller)).toEqual(before);
+        third.ensure(TASK, "daily");
+        await r.w.idle(third);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(lostState(r, caller)).toBe("unmarked");
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        resumedOnce(r, caller);
+      } finally {
+        r.owner.dispose();
+        third?.dispose();
+      }
+    });
+
+    test(`REVISION18 R36-L ${caller} WITNESS (crash): an observed reconnection on the fresh page ends the fence and resumes the window pause where it stopped, once`, async () => {
+      const { l, r } = await pausedCut(caller, "crash");
+      let third: CatchUpRunner | undefined;
+      try {
+        third = pageOver(r, l, "third");
+        third.kick();
+        await r.w.idle(third);
+        expect(r.of(caller), "a kick is not a reconnection").toHaveLength(1);
+        third.reconnected();
+        await r.w.idle(third);
+        resumedOnce(r, caller);
+        expect(lostState(r, caller)).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+        third?.dispose();
+      }
+    });
+
+    test(`REVISION18 R36-L ${caller}: the store still REFUSES the removal on the fresh page: the fence and the stop stay, nothing is sent (no spin); once it removes, the person's next Try again resumes the work once`, async () => {
+      const { l, r, before } = await pausedCut(caller, "crash");
+      let third: CatchUpRunner | undefined;
+      try {
+        r.m.storage.failRemovesFor = lostKeys(r, caller);
+        third = pageOver(r, l, "third");
+        third.ensure(TASK, "daily");
+        await r.w.idle(third);
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        expect(r.of(caller), "held: nothing sent").toHaveLength(1);
+        expect(recordOf(r, caller), "the stop as recorded").toEqual(before);
+        expect(lostState(r, caller)).toBe("marked");
+        const reads = r.m.storage.enumerations;
+        await r.w.settle();
+        expect(
+          r.m.storage.enumerations - reads,
+          "no loop retrying the removal",
+        ).toBeLessThan(20);
+        r.m.storage.failRemovesFor = null;
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        resumedOnce(r, caller);
+        expect(lostState(r, caller)).toBe("unmarked");
+      } finally {
+        r.m.storage.failRemovesFor = null;
+        r.owner.dispose();
+        third?.dispose();
+      }
+    });
+
+    test(`REVISION18 R36-L ${caller}: a LIVE page holding the fence's lock keeps the fence beside the paused record: nothing ended, Try again held; once that page goes, Try again resumes the work once`, async () => {
+      const { l, r, before } = await pausedCut(caller, "crash");
+      let third: CatchUpRunner | undefined;
+      let letGo: () => void = () => undefined;
+      try {
+        void l.locks.request(
+          fenceLockOf(r, caller),
+          () =>
+            new Promise<void>((resolve) => {
+              letGo = resolve;
+            }),
+        );
+        expect(l.heldNames()).toContain(fenceLockOf(r, caller));
+        third = pageOver(r, l, "third");
+        third.ensure(TASK, "daily");
+        await r.w.idle(third);
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        expect(r.of(caller), "no theft from a live owner").toHaveLength(1);
+        expect(lostState(r, caller)).toBe("marked");
+        expect(recordOf(r, caller)).toEqual(before);
+        letGo();
+        await r.w.settle();
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        resumedOnce(r, caller);
+      } finally {
+        letGo();
+        r.owner.dispose();
+        third?.dispose();
+      }
+    });
+
+    test(`REVISION18 R36-L ${caller}: EXACT INSTANCES: a newer lost-answer instance published while the paused record is read is not ended: the press is held and nothing is sent`, async () => {
+      const { l, r } = await pausedCut(caller, "crash");
+      let third: CatchUpRunner | undefined;
+      let published: string | null = null;
+      try {
+        const plan =
+          caller === "discovery"
+            ? "data.readMaterialiseDiscovery"
+            : "data.readMaterialiseSequence";
+        const service = readsSeen(r.w, (name) => {
+          if (
+            published === null &&
+            name === plan &&
+            l.heldNames().includes(fenceLockOf(r, caller))
+          ) {
+            const newer = r.m.page("newer");
+            newer.set(scopeOf(r.w), lostOf(OP(caller)));
+            const seen = newer.witness(scopeOf(r.w), lostOf(OP(caller)));
+            published =
+              seen.kind === "instance"
+                ? (seen.instances.find((i) => i.startsWith("newer")) ?? null)
+                : null;
+          }
+        });
+        third = pageOver(r, l, "third", service);
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        expect(
+          published,
+          "precondition: published while the decision read the record",
+        ).not.toBeNull();
+        expect(r.of(caller), "held by the newer fence").toHaveLength(1);
+        const left = r.m
+          .page("observer")
+          .witness(scopeOf(r.w), lostOf(OP(caller)));
+        expect(left, "only the newer instance stands").toEqual({
+          kind: "instance",
+          instances: [published],
+        });
+      } finally {
+        r.owner.dispose();
+        third?.dispose();
+      }
+    });
+
+    test(`REVISION18 R36-L ${caller}: the binding goes while the decision reads the paused record: nothing is ended in that gap; under the binding again, plain work ends the fence and Try again resumes the work once`, async () => {
+      const { l, r, before } = await pausedCut(caller, "crash");
+      let third: CatchUpRunner | undefined;
+      let gapped = false;
+      const real = r.w.t.env.service() as AccountService;
+      let current: AccountService | null = null;
+      try {
+        const plan =
+          caller === "discovery"
+            ? "data.readMaterialiseDiscovery"
+            : "data.readMaterialiseSequence";
+        const service = readsSeen(r.w, (name) => {
+          if (
+            !gapped &&
+            name === plan &&
+            l.heldNames().includes(fenceLockOf(r, caller))
+          ) {
+            gapped = true;
+            current = null;
+          }
+        });
+        current = service;
+        third = r.w.make({
+          markers: r.m.page("third"),
+          api: r.api,
+          locks: l.locks,
+          service: () => current,
+        });
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        expect(
+          gapped,
+          "precondition: the gap began during the decision's read",
+        ).toBe(true);
+        expect(lostState(r, caller), "nothing ended in the gap").toBe("marked");
+        expect(r.of(caller)).toHaveLength(1);
+        expect(recordOf(r, caller)).toEqual(before);
+        expect(real.live).toBe(true);
+        current = service;
+        third.ensure(TASK, "daily");
+        await r.w.idle(third);
+        expect(lostState(r, caller)).toBe("unmarked");
+        expect(r.of(caller)).toHaveLength(1);
+        third.tryAgain(TASK, dayOf(caller), shownOf(r, caller));
+        await r.w.idle(third);
+        resumedOnce(r, caller);
+      } finally {
+        r.owner.dispose();
+        third?.dispose();
+      }
+    });
+
+    test(`REVISION18 R36-L ${caller}: two pages press the same shown stop: one lift, one resumption (the other press is stale)`, async () => {
+      const { l, r } = await pausedCut(caller, "crash");
+      let third: CatchUpRunner | undefined;
+      let fourth: CatchUpRunner | undefined;
+      try {
+        third = pageOver(r, l, "third");
+        fourth = pageOver(r, l, "fourth");
+        const shown = shownOf(r, caller);
+        third.tryAgain(TASK, dayOf(caller), shown);
+        fourth.tryAgain(TASK, dayOf(caller), shown);
+        await r.w.idle(third);
+        await r.w.idle(fourth);
+        await r.w.idle(third);
+        resumedOnce(r, caller);
+      } finally {
+        r.owner.dispose();
+        third?.dispose();
+        fourth?.dispose();
+      }
+    });
+  }
+
+  /** A stop of the caller, as seeded, beside a lost-answer fence of an earlier page (no live owner). */
+  const seededStop = async (
+    caller: CallerName,
+    stop: { reason: string },
+    s: Partial<MaterialiseRetry> | null,
+  ) => {
+    const m = markerWorld();
+    const sched =
+      s === null
+        ? null
+        : schedule({ caller, issued: null, seen: NOW - 1_000, ...s });
+    const w = await setup(
+      caller === "discovery"
+        ? {
+            discovery: {
+              [TASK]: {
+                retry: 0,
+                failures: sched?.failures ?? 0,
+                stop: stop as MaterialiseDiscovery["stop"],
+                attempt: "claim-1",
+                schedule: sched,
+              },
+            },
+          }
+        : {
+            seed: [
+              row({
+                phase: "stopped",
+                stop: stop as MaterialiseSequenceRow["stop"],
+                attempt:
+                  caller === "command"
+                    ? { key: "held-key", body: attemptBody(TASK, TODAY) }
+                    : null,
+                read_seq: caller === "position" ? 1 : 0,
+                schedule: sched,
+              }),
+            ],
+            discovery: {},
+          },
+    );
+    const l = exclusiveLocks();
+    m.page("earlier").set(scopeOf(w), lostOf(OP(caller)));
+    return { m, w, l };
+  };
+  const seededTraffic = (w: World, caller: CallerName) =>
+    caller === "command"
+      ? w.sent()
+      : w.reads().slice(caller === "position" ? 1 : 0);
+  const seenOf = (w: World, caller: CallerName) =>
+    caller === "discovery"
+      ? seenDiscovery(w.discovery() as MaterialiseDiscovery)
+      : seenSequence(w.stored() as MaterialiseSequenceRow, null);
+
+  const INELIGIBLE: Array<
+    [string, { reason: string }, Partial<MaterialiseRetry> | null]
+  > = [
+    ["a refusal", { reason: "rejected" }, null],
+    [
+      "an unrecognised streak's pause",
+      { reason: "unreachable" },
+      {
+        pause: "unrecognised",
+        cause: "unrecognised",
+        failures: 3,
+        unknown: 3,
+        since: NOW - 5_000,
+        next: NOW,
+      },
+    ],
+    [
+      "an earlier build's (legacy) pause",
+      { reason: "unreachable" },
+      { pause: "legacy" },
+    ],
+    [
+      "a window pause after RECEIVED failures (503)",
+      { reason: "unreachable" },
+      {
+        pause: "window",
+        cause: "transient",
+        failures: 9,
+        since: NOW - WINDOW_MS,
+        next: NOW,
+      },
+    ],
+    [
+      "a window pause with no failure recorded",
+      { reason: "unreachable" },
+      {
+        pause: "window",
+        cause: "transport",
+        failures: 0,
+        since: NOW - WINDOW_MS,
+        next: NOW,
+      },
+    ],
+  ];
+  for (const caller of CALLERS)
+    for (const [what, stop, s] of INELIGIBLE)
+      test(`REVISION18 R36-L ${caller}: ${what} beside a lost-answer fence is NOT a lost call's stop: the fence stands, plain work and Try again send nothing`, async () => {
+        const { m, w, l } = await seededStop(caller, stop, s);
+        const before = structuredClone(
+          caller === "discovery" ? w.discovery() : w.stored(),
+        );
+        const r = w.make({ markers: m.page("fresh"), locks: l.locks });
+        try {
+          r.ensure(TASK, "daily");
+          await w.idle(r);
+          r.tryAgain(TASK, dayOf(caller), seenOf(w, caller));
+          await w.idle(r);
+          expect(seededTraffic(w, caller)).toHaveLength(0);
+          expect(caller === "discovery" ? w.discovery() : w.stored()).toEqual(
+            before,
+          );
+          expect(m.page("observer").probe(scopeOf(w), lostOf(OP(caller)))).toBe(
+            "marked",
+          );
+        } finally {
+          r.dispose();
+        }
+      });
+
+  for (const caller of CALLERS)
+    test(`REVISION18 R36-L ${caller} CONTROL (seeded): a lost call's window stop beside its fence: the fence ends on plain work, Try again resumes`, async () => {
+      const { m, w, l } = await seededStop(
+        caller,
+        { reason: "unreachable" },
+        {
+          pause: "window",
+          cause: "transport",
+          failures: 4,
+          since: NOW - WINDOW_MS,
+          next: NOW,
+        },
+      );
+      const r = w.make({ markers: m.page("fresh"), locks: l.locks });
+      try {
+        r.ensure(TASK, "daily");
+        await w.idle(r);
+        expect(seededTraffic(w, caller)).toHaveLength(0);
+        expect(m.page("observer").probe(scopeOf(w), lostOf(OP(caller)))).toBe(
+          "unmarked",
+        );
+        r.tryAgain(TASK, dayOf(caller), seenOf(w, caller));
+        await w.idle(r);
+        expect(seededTraffic(w, caller).length).toBeGreaterThanOrEqual(1);
+        if (caller === "command") {
+          expect(w.sent()[0]?.key).toBe("held-key");
+          expect(w.sent()[0]?.body).toBe(
+            JSON.stringify(JSON.parse(attemptBody(TASK, TODAY))),
+          );
+        }
+      } finally {
+        r.dispose();
+      }
+    });
+
+  test("REVISION18 R36-L: a press on a discovery stop is not held by the DAY's lost-answer fence over a call still outstanding: the discovery is read, and the day's call is rediscovered (counted, paced) before anything of it is sent", async () => {
+    const m = markerWorld();
+    const issuedAt = NOW - 30_000;
+    const w = await setup({
+      discovery: {
+        [TASK]: {
+          retry: 0,
+          failures: 9,
+          stop: { reason: "unreachable" },
+          attempt: "claim-1",
+          schedule: schedule({
+            caller: "discovery",
+            failures: 9,
+            cause: "transient",
+            since: NOW - WINDOW_MS,
+            next: NOW,
+            pause: "window",
+            seen: NOW - 1_000,
+          }),
+        },
+      },
+      seed: [
+        row({
+          phase: "submitting",
+          attempt: { key: "held-key", body: attemptBody(TASK, TODAY) },
+          schedule: schedule({
+            caller: "command",
+            issued: issuedAt,
+            seen: issuedAt,
+          }),
+        }),
+      ],
+      positions: [detail("2026-10-01", true)],
+    });
+    const l = exclusiveLocks();
+    m.page("earlier").set(scopeOf(w), lostOf(fenceOf(TASK, TODAY)));
+    const r = w.make({ markers: m.page("fresh"), locks: l.locks });
+    try {
+      r.tryAgain(
+        TASK,
+        TODAY,
+        seenDiscovery(w.discovery() as MaterialiseDiscovery),
+      );
+      await w.idle(r);
+      expect(
+        w.reads().length,
+        "the discovery stop was lifted and read",
+      ).toBeGreaterThanOrEqual(1);
+      expect(w.discovery()?.stop ?? null).toBeNull();
+      const sent = w.sent();
+      expect(sent.length).toBeGreaterThanOrEqual(1);
+      expect(sent[0]?.key, "the day's held attempt").toBe("held-key");
+      expect(
+        sent[0]?.at,
+        "the day's lost call counted first (paced from its rediscovery)",
+      ).toBeGreaterThanOrEqual(NOW + 1_000);
+      expect(
+        m.page("observer").probe(scopeOf(w), lostOf(fenceOf(TASK, TODAY))),
+      ).toBe("unmarked");
     } finally {
       r.dispose();
     }

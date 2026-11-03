@@ -26,6 +26,7 @@ import {
   onRead,
   onSent,
   type Position,
+  pausedBehind,
   type ReadAnswer,
   rediscover,
   resumeOnline,
@@ -40,6 +41,7 @@ import {
   failed,
   gate,
   issue,
+  lostPause,
   paused as pausedSchedule,
   readSchedule,
   rediscovered,
@@ -242,6 +244,25 @@ import type { PageLifecycle } from "./lifecycle";
  * - A PAGE THAT RECORDED ITS OUTCOME AND WENT BEFORE IT ENDED ITS FENCE (the commit landed, the page was destroyed before the next step;
  *   observed on Firefox): the record shows the call answered and counted, nothing outstanding (`counted`, `settledBehind`). The fence
  *   guards nothing; the page that finds it (its owner gone) ends the instances found and goes on from the record as written.
+ *
+ * REVISION 18 (review 19's R36-L, the same family; design assessment of 3 November 2026, C1–C6; within Kieran's R36-K decision, no new
+ * stored data or retention):
+ * - A LOST CALL'S OUTCOME OR ITS REDISCOVERY THAT PAUSED ITS CALLER (`unreachable`: a window after the transport failure, or a clock) is
+ *   committed BEFORE its fence is retired, and the two stores cannot commit together: a page that goes in between (or whose removal the
+ *   store refuses until it goes) leaves the stop and its lost-answer fence. Revision 17 recovered such a fence only beside a record with
+ *   nothing stopped, so the stop's Try again was held by it for good.
+ * - ONE DECISION FOR EVERY ENTRY TO SUCH A STOP (`settleLost`): the discovery before its stop is shown, a stopped row before it is adopted,
+ *   and the lift of the person's press or an observed reconnection before a fence may hold it. Under the account's lock and the fence's
+ *   own lock (`ifAvailable`: no live page keeps its outcome, and none takes it while the decision is made) the fence is witnessed, the
+ *   caller's CURRENT record read through the binding, and only when that record is such a stop (`pausedBehind`; the discovery's alike)
+ *   do the instances witnessed end (exactly, never `clear`). Nothing is written, lifted or transmitted: the stop, its claim or revision
+ *   (the token a press names), its counts, deadlines, attempt (key and body) and phase stay exactly as recorded. A lift then goes on through
+ *   its own compare-and-set and consent as before; plain work, a reload or a kick shows the stop and sends nothing.
+ * - A removal the store refuses keeps the fence and the stop (held, nothing sent; owed by this page as before); the next pass or page
+ *   reconstructs the same decision from the stored records, never from this page's memory. A live or newer owner, any other stop, a record
+ *   that cannot be read and an unreadable marker keep the fence.
+ * - A lift is held only by a fence of a stop it lifts, or by a fence that is not a lost-answer one with no outcome behind it (revision 17's
+ *   memory-stop rule, per caller): the work a lift admits rediscovers another caller's lost call before anything of it is sent.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -1043,6 +1064,55 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     return orphan(at, op);
   };
   /**
+   * Revision 18 (review 19's R36-L; design assessment C1–C4): the caller's lost-answer fence (`orphan`) beside its record STOPPED on that
+   * lost call. Asked by work that holds the account's lock; the fence's own lock is taken with `ifAvailable` (no live page keeps its outcome)
+   * and held while the fence is witnessed, the caller's CURRENT record read (`stopped`: through this binding, after the wait; false when it
+   * cannot be read, is missing or is any other record) and the instances witnessed end (`retireLost`), so no owner takes it meanwhile.
+   * Nothing is written, lifted or transmitted. `retired`: nothing fences `op` now; `held`: the fence stands (an owner holds its lock, another
+   * record, the binding ended, a removal the store refused); `none`: no lost-answer fence of `op` to settle (what fences it, as before).
+   */
+  const settleLost = async (
+    at: Binding,
+    op: string,
+    stopped: () => Promise<boolean>,
+  ): Promise<"none" | "retired" | "held"> => {
+    if (locks === null || orphan(at, op) === null) return "none";
+    try {
+      return (await locks.request(
+        fenceLock(at.service, lostOf(op)),
+        { ifAvailable: true },
+        async (lock) => {
+          if (lock === null) return "held";
+          // Witnessed once the lock is held, and kept: an instance published while the record is read is never ended by this decision.
+          const seen = orphan(at, op);
+          if (seen === null) return "none";
+          if (!(await stopped()) || !owns(at)) return "held";
+          retireLost(at, op, seen);
+          return fenced(at, op) ? "held" : "retired";
+        },
+      )) as "none" | "retired" | "held";
+    } catch {
+      return "held";
+    }
+  };
+  /** Revision 18 (R36-L): the task's discovery entry, read now through the binding, is stopped on a lost call (`lostPause`). */
+  const discoveryStopped = (at: Binding, taskId: string) => async () => {
+    const entries = await readMaterialiseDiscoveryNow(at.service);
+    if (entries === undefined || !owns(at)) return false;
+    const entry = entries[taskId] ?? null;
+    return (
+      entry?.stop?.reason === "unreachable" &&
+      entry.schedule !== undefined &&
+      lostPause(readSchedule(entry.schedule, "discovery"))
+    );
+  };
+  /** Revision 18 (R36-L): the day's row, read now through the binding, is stopped on a lost call (`pausedBehind`). */
+  const sequenceStopped = (at: Binding, key: SequenceKey) => async () => {
+    const row = await readMaterialiseSequenceNow(at.service, key);
+    if (row == null || !owns(at)) return false;
+    return pausedBehind(row);
+  };
+  /**
    * Revision 12 (R36-B, C2): fences `op` NOW, in this binding's lifetime only (`null`: that lifetime ended, nothing is written), and names
    * the failure instance published: the marker's new instance (the one its witness shows after the write and not before, in the same
    * synchronous step; none when that cannot be told), or this page's hold when no marker can be written.
@@ -1645,14 +1715,35 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         if (verdict !== "written" && verdict !== "landed") return held();
         reconcile(record);
       }
+    // Revision 18 (review 19's R36-L): a stop this lift lifts, recorded on a lost call whose fence its page could not end before it went:
+    // the fence's instances end first (`settleLost`), the stop and its token untouched; the lift below still compares and consents.
+    if (seen?.stop) {
+      await settleLost(
+        at,
+        fenceOf(item.taskId),
+        discoveryStopped(at, item.taskId),
+      );
+      if (!owns(at)) return "held";
+    }
+    if (stopped !== null) {
+      await settleLost(
+        at,
+        fenceOf(stopped.task_id, stopped.through_date),
+        sequenceStopped(at, {
+          task_id: stopped.task_id,
+          through_date: stopped.through_date,
+        }),
+      );
+      if (!owns(at)) return "held";
+    }
     // Revision 17 (R36-K): a press that lifts no stop (a page's memory stop, e.g. a rediscovery whose write failed) is not held by a
-    // lost-answer fence with no outcome behind it: the work it admits rediscovers the call before anything is sent (`orphan`).
-    const blocks = (op: string) =>
-      fenced(at, op) &&
-      (seen?.stop || stopped !== null || orphan(at, op) === null);
+    // lost-answer fence with no outcome behind it: the work it admits rediscovers the call before anything is sent (`orphan`). Revision
+    // 18 (R36-L): per caller: a fence holds the lift when it is of a stop the lift lifts, or not such a lost-answer fence.
+    const blocks = (op: string, lifts: boolean) =>
+      fenced(at, op) && (lifts || orphan(at, op) === null);
     if (
-      blocks(fenceOf(item.taskId)) ||
-      (day !== undefined && blocks(fenceOf(item.taskId, day)))
+      blocks(fenceOf(item.taskId), Boolean(seen?.stop)) ||
+      (day !== undefined && blocks(fenceOf(item.taskId, day), stopped !== null))
     )
       return held();
     const now = deps.now();
@@ -1745,6 +1836,12 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
             next: { ...entry, attempt: deps.newId() },
           },
         );
+      // Revision 18 (review 19's R36-L): a stop recorded on a lost call whose fence its page could not end: the fence's instances end
+      // (`settleLost`); the stop stays, shown, for the person's Try again (or a reconnection) only. Nothing is read.
+      else if (orphaned !== null) {
+        await settleLost(at, op, discoveryStopped(at, item.taskId));
+        if (!owns(at)) return end(lost(at));
+      }
       return end(DONE);
     }
     const quota = deps.quota?.() ?? null;
@@ -2160,7 +2257,16 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     if (stored !== null) {
       // Adopted: a sequence another page began, or one this page left on a reload. A stop is shown, never resumed automatically. A row
       // awaiting its position is read under its own admission (revision 10: one read, never another `materialise`; CM-440).
-      if (stored.phase === "stopped") return DONE;
+      if (stored.phase === "stopped") {
+        // Revision 18 (review 19's R36-L): a stop recorded on a lost call whose fence its page could not end: the fence's instances end
+        // (`settleLost`), the stop shown as recorded (its attempt, phase and revision kept); nothing is sent.
+        await settleLost(
+          at,
+          fenceOf(key.task_id, key.through_date),
+          sequenceStopped(at, key),
+        );
+        return owns(at) ? DONE : lost(at);
+      }
       return keyed(await drive(at, stored, today), throughDate);
     }
     if (answer === null) return DONE;
