@@ -636,8 +636,8 @@ export const ENGINE_WEB11B = [
     patch: (t) =>
       sub(
         t,
-        '    <div className="min-w-0 [&_*]:[overflow-wrap:anywhere]">\n',
-        '    <div className="min-w-0">\n',
+        "  return <FieldValueView raw={cell.row.value} anywhere />;\n",
+        "  return <FieldValueView raw={cell.row.value} />;\n",
       ),
   },
   {
@@ -649,23 +649,9 @@ export const ENGINE_WEB11B = [
     grep: "E-R15b:",
     expect: /E-R15b: /,
     patch: (t) =>
-      sub(
-        sub(
-          sub(
-            sub(
-              t,
-              '    <table className="w-full table-fixed text-left" data-merge-comparison="">\n',
-              '    <table className="w-full text-left" data-merge-comparison="">\n',
-            ),
-            'className="w-[28%] py-2 pr-2 align-top font-medium"',
-            'className="py-2 pr-2 align-top font-medium"',
-          ),
-          '          <th scope="col" className="w-[36%] py-2 pr-2 align-top font-medium">\n',
-          '          <th scope="col" className="py-2 pr-2 align-top font-medium">\n',
-        ),
-        'className="w-[36%] py-2 align-top font-medium"',
-        'className="py-2 align-top font-medium"',
-      ),
+      sub(t, '      style={{ tableLayout: "fixed" }}\n', "")
+        .replace('style={{ width: "28%" }}', "")
+        .replaceAll('style={{ width: "36%" }}', ""),
   },
   {
     id: "MU-4147",

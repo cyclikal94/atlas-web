@@ -88,13 +88,9 @@ function Cell({
       </span>
     );
   // R5 of review 1: every cell inherits the page's `overflow-wrap: anywhere` (`styles/base.css`), but the shared value renderer sets
-  // `break-words` on its text, whose MINIMUM width is still a whole unbroken word: a valid 500-character word then widened the automatic
-  // table far past the dialog. Inside the comparison its descendants may break anywhere again, so the value wraps within its column.
-  return (
-    <div className="min-w-0 [&_*]:[overflow-wrap:anywhere]">
-      <FieldValueView raw={cell.row.value} />
-    </div>
-  );
+  // `break-words` on its text, whose MINIMUM width is still a whole unbroken word: a valid 500-character word then widened the table far
+  // past the dialog. Here the value's text may break anywhere again, so it wraps within its column.
+  return <FieldValueView raw={cell.row.value} anywhere />;
 }
 
 /** The side-by-side table (D-11b-6): the kept person first. Values only from this device's synced rows at the preview's version. */
@@ -119,18 +115,23 @@ function Comparison({
   const targetName = preview.target?.label ?? copy.NOT_VISIBLE;
   const sourceName = preview.source?.label ?? copy.NOT_VISIBLE;
   return (
-    // BOUNDED columns (R5 of review 1): every cell may break anywhere (the page's `overflow-wrap`, and the values below), so an automatic
-    // layout squeezes a column to a character's width beside a long value. Fixed widths keep the field and both people readable.
-    <table className="w-full table-fixed text-left" data-merge-comparison="">
+    // BOUNDED columns (R5 of review 1): every cell may break anywhere (the page's `overflow-wrap`, and the values), so an automatic layout
+    // squeezes a column to a character's width beside a long value. Fixed widths keep the field and both people readable; set inline, so
+    // they add nothing to the production stylesheet (its budget).
+    <table
+      className="w-full text-left"
+      style={{ tableLayout: "fixed" }}
+      data-merge-comparison=""
+    >
       <thead>
         <tr className="border-b border-hairline text-[12px] text-ink-2">
-          <th scope="col" className="w-[28%] py-2 pr-2 align-top font-medium">
+          <th scope="col" className="py-2 font-medium" style={{ width: "28%" }}>
             {copy.FIELD}
           </th>
-          <th scope="col" className="w-[36%] py-2 pr-2 align-top font-medium">
+          <th scope="col" className="py-2 font-medium" style={{ width: "36%" }}>
             {copy.KEPT(targetName)}
           </th>
-          <th scope="col" className="w-[36%] py-2 align-top font-medium">
+          <th scope="col" className="py-2 font-medium" style={{ width: "36%" }}>
             {sourceName}
           </th>
         </tr>
@@ -142,16 +143,13 @@ function Comparison({
             className="border-b border-hairline"
             data-comparison-row={row.key}
           >
-            <th
-              scope="row"
-              className="py-2 pr-2 align-top text-[13px] font-medium text-ink-1"
-            >
+            <th scope="row" className="py-2 text-[13px] font-medium text-ink-1">
               {row.label}
             </th>
-            <td className="min-w-0 py-2 pr-2 align-top">
+            <td className="py-2">
               <Cell cell={row.target} hidden={preview.target === null} />
             </td>
-            <td className="min-w-0 py-2 align-top">
+            <td className="py-2">
               <Cell cell={row.source} hidden={preview.source === null} />
             </td>
           </tr>
