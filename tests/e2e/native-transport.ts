@@ -1387,13 +1387,63 @@ export type NavigationSubscription =
   | { ok: false; reason: string };
 
 /**
+ * Revision 32 (Review 39 F39-1, family native-transport-upstream-cleanup, harness incomplete_fix; design assessment token bde6ad2e…,
+ * C1/C2, invariants 2/3): why a native callback was refused before it read anything. `enclosing`: its owner (the recorder, the lane) was
+ * revoked; `local`: its own subscription was refused, rolled back or disposed; `installing`: it arrived while its own `on` was still
+ * running (a named gap: the owner is not ready to read it).
+ */
+export type Refusal = "enclosing" | "local" | "installing";
+
+/**
+ * Revision 32 (C2): what an adapter's owner supplies. `admits` is the owner's own authority, consulted at EVERY callback before the
+ * adapter touches its payload; `rejected` is told of each refused callback, payload-free (it must not throw; anything it throws is
+ * swallowed so nothing reaches the emitter). Without an owner the adapter's own state alone admits.
+ */
+export interface CallbackAdmission {
+  admits?: () => boolean;
+  rejected?: (refusal: Refusal) => void;
+}
+
+/** Revision 32 (C1/C2): an adapter's own callback state; `revoked` before any rollback or removal, never re-enabled. */
+type AdapterState = "installing" | "active" | "revoked";
+
+const adapterRefusal = (
+  state: AdapterState,
+  admission: CallbackAdmission,
+): Refusal | null => {
+  try {
+    if (admission.admits?.() === false) return "enclosing";
+  } catch {
+    return "enclosing";
+  }
+  return state === "revoked"
+    ? "local"
+    : state === "installing"
+      ? "installing"
+      : null;
+};
+
+const reportRefusal = (admission: CallbackAdmission, refusal: Refusal) => {
+  try {
+    admission.rejected?.(refusal);
+  } catch {
+    // Never thrown back into the emitter.
+  }
+};
+
+/**
  * Subscribes `listener` to a Playwright client frame's `navigated` events (the frame's own emitter, so a subframe's never arrive). A
  * different installed version, or a frame without the emitter, is refused by name (`ok: false`); nothing is subscribed then.
+ *
+ * Revision 32 (Review 39 F39-1, C2): the emitter receives the adapter's own exact GUARDED wrapper, never `listener` itself. The wrapper is
+ * admitted (owner first, then its own state) before the event is passed on; its state becomes `revoked` BEFORE a rollback or removal is
+ * attempted, so a listener a failed `off` left attached, or one re-entered during that `off`, reaches neither `listener` nor the payload.
  */
 export function observeNavigations(
   frame: unknown,
   listener: (event: unknown) => void,
   installed: InstalledPlaywrightCore = installedPlaywrightCore(),
+  admission: CallbackAdmission = {},
 ): NavigationSubscription {
   if (installed.version !== NAVIGATION_PROVENANCE_PIN.version)
     return {
@@ -1413,14 +1463,22 @@ export function observeNavigations(
       reason:
         "the main frame has no Playwright client navigation emitter (`_eventEmitter` with on/off)",
     };
+  let state: AdapterState = "installing";
+  const guarded = (event: unknown) => {
+    const refusal = adapterRefusal(state, admission);
+    if (refusal !== null) return reportRefusal(admission, refusal);
+    listener(event);
+  };
   // Revision 30 (Review 35 F35-1, C2, OWN-2): an `on` that attached and then threw is removed again here (exact callback), so a refused
   // subscription never leaves an undisclosed listener; a failing removal is named in the refusal.
+  // Revision 32 (F39-1): revoked first, so a listener that removal leaves attached (or re-enters) stays inert.
   try {
-    emitter.on(NAVIGATION_PROVENANCE_PIN.event, listener);
+    emitter.on(NAVIGATION_PROVENANCE_PIN.event, guarded);
   } catch (error) {
+    state = "revoked";
     let rollback = "its listener was removed again";
     try {
-      emitter.off(NAVIGATION_PROVENANCE_PIN.event, listener);
+      emitter.off(NAVIGATION_PROVENANCE_PIN.event, guarded);
     } catch (offError) {
       rollback = `removing its listener again also failed: ${String(offError)}`;
     }
@@ -1429,7 +1487,7 @@ export function observeNavigations(
       reason: `subscribing to the main frame's navigation events threw: ${String(error)}; ${rollback}`,
     };
   }
-  let attached = true;
+  state = "active";
   return {
     ok: true,
     provenance: {
@@ -1438,9 +1496,9 @@ export function observeNavigations(
       bundleSha256: installed.bundleSha256,
     },
     dispose: () => {
-      if (!attached) return;
-      attached = false;
-      emitter.off?.(NAVIGATION_PROVENANCE_PIN.event, listener);
+      if (state === "revoked") return;
+      state = "revoked";
+      emitter.off?.(NAVIGATION_PROVENANCE_PIN.event, guarded);
     },
   };
 }
@@ -1664,11 +1722,16 @@ const readDocument = (
 
 /**
  * Attaches `listener` to the lane context's server-side commits (above). Returns the source, or why it is unavailable (nothing attached).
+ *
+ * Revision 32 (Review 39 F39-1, C2, invariants 2/3): each server callback is admitted (owner first, then the adapter's own state) BEFORE
+ * it reads the frame, its document, url, parent or dispatcher; the state is `revoked` before a rollback or removal is attempted, so a
+ * listener a failed `off` left attached, or one re-entered during it, reads nothing and reports itself payload-free to `admission`.
  */
 export function observeActivations(
   context: unknown,
   listener: (commit: ServerCommit) => void,
   installed: InstalledPlaywrightCore = installedPlaywrightCore(),
+  admission: CallbackAdmission = {},
 ): ActivationSource {
   try {
     if (installed.version !== ACTIVATION_SOURCE_PIN.version)
@@ -1719,7 +1782,10 @@ export function observeActivations(
         ok: false,
         reason: "possiblyUninitializedPages() did not return an array",
       };
+    let state: AdapterState = "installing";
     const onCommit = (frame: unknown) => {
+      const refusal = adapterRefusal(state, admission);
+      if (refusal !== null) return reportRefusal(admission, refusal);
       let commit: ServerCommit;
       try {
         const f = frame as ServerFrameShape | null;
@@ -1770,6 +1836,7 @@ export function observeActivations(
         onCommit,
       );
     } catch (error) {
+      state = "revoked";
       let rollback = "its listener was detached again";
       try {
         (server.off as (e: string, l: (f: unknown) => void) => unknown).call(
@@ -1785,7 +1852,7 @@ export function observeActivations(
         reason: `attaching the activation source threw: ${String(error)}; ${rollback}`,
       };
     }
-    let attached = true;
+    state = "active";
     return {
       ok: true,
       pagesAtAttach: pages.length,
@@ -1830,8 +1897,8 @@ export function observeActivations(
         }
       },
       dispose: () => {
-        if (!attached) return;
-        attached = false;
+        if (state === "revoked") return;
+        state = "revoked";
         (server.off as (e: string, l: (f: unknown) => void) => unknown).call(
           server,
           ACTIVATION_SOURCE_PIN.event,
@@ -1896,13 +1963,30 @@ export class Subscriptions {
     { label: string; detach: () => void } | { child: Subscriptions }
   > = [];
   private done = false;
+  /** Revision 32: this scope's own callback authority was revoked (rollback, finalisation or detachment), apart from removal. */
+  private revokedHere = false;
+  /** Revision 32: callbacks refused without a caller's sink (`add` with no `rejected`), by label: never silent. */
+  readonly rejections: string[] = [];
 
-  /** Subscribes `listener` to `event` on `emitter`; the removal is owned first. Throws what `on` threw (the caller rolls back). */
+  /** Revision 32 (C1): a nested scope consults its enclosing scope's authority dynamically, at every callback. */
+  constructor(private readonly parent: Subscriptions | null = null) {}
+
+  /**
+   * Subscribes `listener` to `event` on `emitter`; the removal is owned first. Throws what `on` threw (the caller rolls back).
+   *
+   * Revision 32 (Review 39 F39-1 / design assessment DA39-2/DA39-3, family native-transport-upstream-cleanup, harness incomplete_fix;
+   * token bde6ad2e…, C1, invariants 2/3/5): what is registered (and removed) is the scope's own exact GUARDED wrapper of `listener`. The
+   * wrapper consults this scope's admission (`refusal`) before it calls `listener`, so a refused callback never reads its payload, forwards
+   * or mutates anything: it reports itself, payload-free, to `rejected` (or to `rejections`), and returns. A callback delivered while its
+   * own `on` is still running (installation re-entry) is refused as `installing`: a named gap for the caller, never silently lost and never
+   * run against a half-initialised owner. Nothing the wrapper or `rejected` throws reaches the emitter.
+   */
   add(
     label: string,
     emitter: unknown,
     event: string,
     listener: (value: never) => void,
+    rejected?: (refusal: Refusal) => void,
   ): void {
     if (this.done)
       throw new Error(
@@ -1914,6 +1998,21 @@ export class Subscriptions {
       throw new TypeError(
         `${label}: the emitter has no on/off of Playwright's shape (its listener could not be removed); refused before anything was attached`,
       );
+    let installing = true;
+    const guarded = (value: never) => {
+      const refusal = this.refusal() ?? (installing ? "installing" : null);
+      if (refusal !== null) {
+        try {
+          if (rejected !== undefined) rejected(refusal);
+          else
+            this.rejections.push(`${label}: a callback refused (${refusal})`);
+        } catch {
+          // A rejection sink failing must not throw back into the emitter.
+        }
+        return;
+      }
+      listener(value);
+    };
     // The removal is read from the emitter when it runs (as the source and frame adapters do), never cached: a replaced or missing `off`
     // is the emitter's own state then, and its failure is named.
     this.entries.push({
@@ -1922,10 +2021,34 @@ export class Subscriptions {
         const remove = (emitter as { off?: unknown }).off;
         if (typeof remove !== "function")
           throw new TypeError("its emitter no longer has off()");
-        remove.call(emitter, event, listener);
+        remove.call(emitter, event, guarded);
       },
     });
-    on.call(emitter, event, listener);
+    on.call(emitter, event, guarded);
+    installing = false;
+  }
+
+  /**
+   * Revision 32 (C1, invariant 3): why a callback of this scope is refused now, or null when it is admitted. The ENCLOSING scope's
+   * revocation is consulted first (dynamically: it applies to every descendant at once, before that descendant's own removal is
+   * visited), then this scope's own.
+   */
+  refusal(): Exclude<Refusal, "installing"> | null {
+    if (this.parent?.revoked === true) return "enclosing";
+    return this.revokedHere ? "local" : null;
+  }
+
+  /** Revision 32: this scope's callbacks are refused (it, or a scope enclosing it, was revoked). */
+  get revoked(): boolean {
+    return this.revokedHere || this.parent?.revoked === true;
+  }
+
+  /**
+   * Revision 32 (C1/C3, invariant 3): revokes this scope's callback authority, synchronously and WITHOUT removing anything (so it can
+   * precede any `off` that might throw or re-enter). Idempotent; a removal failure can never re-enable it. `detach` revokes first too.
+   */
+  revoke(): void {
+    this.revokedHere = true;
   }
 
   /** Owns an adapter's own disposer (the activation source, a navigation subscription), detached with the rest. */
@@ -1944,7 +2067,7 @@ export class Subscriptions {
       throw new Error(
         "a nested subscription scope was refused: its owner's subscriptions were already detached",
       );
-    const child = new Subscriptions();
+    const child = new Subscriptions(this);
     this.entries.push({ child });
     return child;
   }
@@ -1955,6 +2078,9 @@ export class Subscriptions {
 
   detach(): string[] {
     if (this.done) return [];
+    // Revision 32 (C1, invariant 3): authority is revoked BEFORE the first removal is attempted (a throwing or re-entrant `off` below
+    // meets refused callbacks only, here and in every nested scope).
+    this.revokedHere = true;
     this.done = true;
     const errors: string[] = [];
     for (const entry of [...this.entries].reverse()) {
@@ -2015,6 +2141,16 @@ export interface RecordedFrame {
  * emit). Revision 30 (F35-1): its `off` too, so each listener the recorder attached is removed by its exact callback.
  */
 export type RecordedContext = OwnedEmitter;
+
+/**
+ * The installed capture of one context (`recordContext`). Revision 32 (C3, invariant 6): `revoke` withdraws every callback's authority
+ * at once and removes nothing (the owner calls it after the context's close ended, before ANY removal); `dispose` finalises: it revokes
+ * too, detaches every subscription once and reports the undelivered/unattributed evidence with the close's status.
+ */
+export interface RecordedCapture {
+  revoke: () => void;
+  dispose: (status?: CloseStatus) => string[];
+}
 
 /** How the context's close ended when the recorder was finalised (revision 30, invariant 8): only "closed" means every event arrived. */
 export type CloseStatus = "closed" | "failed" | "pending" | "not attempted";
@@ -2216,7 +2352,7 @@ export function recordContext(
   context: RecordedContext,
   sink: RecorderSink,
   installed: InstalledPlaywrightCore = installedPlaywrightCore(),
-): { dispose: (status?: CloseStatus) => string[] } {
+): RecordedCapture {
   // Revision 30 (F35-1, C2): a shape refusal before anything is attached.
   if (
     typeof (context as { on?: unknown } | null)?.on !== "function" ||
@@ -2274,7 +2410,8 @@ export function recordContext(
   const byPage = new Map<unknown, PageRecord>();
   const records = new Map<unknown, RequestRecord>();
   const owners = new Map<RequestRecord, PageRecord>();
-  let disposed = false;
+  /** Revision 32: the recorder's finalisation ran (`dispose`); its callback authority is the root scope's (`subscriptions.revoked`). */
+  let finalised = false;
   const late = (what: string) => {
     journal.lateEvents ??= [];
     journal.lateEvents.push(
@@ -2282,24 +2419,33 @@ export function recordContext(
     );
   };
   /**
-   * Revision 31 (design assessment DA-1, C3, invariant 5): every native problem/crash callback is admitted HERE, before it reads its
-   * payload: after the recorder's disposal (also a callback whose removal failed, or one re-entered during a throwing `off`: `disposed`
-   * is set before any removal) and after its own scope was rolled back, it is a named late line and never a fresh journal entry. An
-   * envelope already captured and held by the ingestion seam is not a callback: its delivery keeps the seam's own rules (`put`).
+   * Revision 31 (design assessment DA-1, C3, invariant 5) and revision 32 (Review 39 F39-1, design assessment DA39-2/DA39-3, family
+   * native-transport-upstream-cleanup, harness incomplete_fix; token bde6ad2e…, C1–C4, invariants 2/3/9): EVERY native callback of the
+   * recorder (context, page, crash, and both adapters') is admitted by its subscription's guard BEFORE it reads its payload; a refused one
+   * reaches only this sink, with a static label (never a payload getter or method, also not to build the label). After the recorder was
+   * revoked (finalisation began, or the installation failed: before any removal, so also a callback whose removal failed or one
+   * re-entered during a throwing `off`) it is a named late line; after its own subscription was refused or rolled back, a named late
+   * line of that; while its own `on` was still running, a named capture gap (a failure: the recorder could not read it then). Never a
+   * fresh journal entry, document, request record or Page mutation. An envelope already captured and held by the ingestion seam is not a
+   * callback: its delivery keeps the seam's own rules (`put`).
    */
-  const admit = (what: string, scope?: Subscriptions): boolean => {
-    if (disposed) {
-      late(what);
-      return false;
-    }
-    if (scope?.detached === true) {
-      journal.lateEvents ??= [];
-      journal.lateEvents.push(
-        `${what} delivered after its listener's subscription was rolled back; not recorded`,
+  const refused = (
+    what: string,
+    refusal: Refusal,
+    /** The refused callback's ledger scope; null for an adapter's own (whose `local` refusal is its refusal or rollback). */
+    scope: Subscriptions | null,
+  ) => {
+    if (refusal === "installing") {
+      failures.push(
+        `${what} delivered while its listener was still being installed; not recorded, so the lane's capture of it is incomplete`,
       );
-      return false;
+      return;
     }
-    return true;
+    if (refusal === "enclosing" || scope === subscriptions) return late(what);
+    journal.lateEvents ??= [];
+    journal.lateEvents.push(
+      `${what} delivered after its listener's subscription was rolled back; not recorded`,
+    );
   };
   journal.crashWatches ??= [];
   const crashWatches = journal.crashWatches;
@@ -2329,7 +2475,8 @@ export function recordContext(
     return state;
   };
   const onServerCommit = (commit: ServerCommit) => {
-    if (disposed) return late("a server-observed document activation");
+    if (subscriptions.revoked)
+      return late("a server-observed document activation");
     if (!commit.ok) {
       failures.push(
         `a document activation Playwright's server observed is unreadable (${commit.reason}); its page's documents cannot be attributed`,
@@ -2404,7 +2551,12 @@ export function recordContext(
           : "a requestless new document, committed before Playwright dispatched its frame (observed at the server context)",
     });
   };
-  const source = observeActivations(context, onServerCommit, installed);
+  // Revision 32 (F39-1, C2): the source admits each commit by the recorder's authority before it reads it (its own state second).
+  const source = observeActivations(context, onServerCommit, installed, {
+    admits: () => !subscriptions.revoked,
+    rejected: (refusal) =>
+      refused("a server-observed document activation", refusal, null),
+  });
   // Revision 30 (F35-1, C2): owned at once, so a later failure of the installation rolls it back with the rest.
   if (source.ok)
     subscriptions.adopt("detaching the activation source", source.dispose);
@@ -2432,6 +2584,16 @@ export function recordContext(
   const on = <T>(event: string, listener: (value: T) => void) => {
     declared.push({ event, listener: listener as (value: never) => void });
   };
+  /** Revision 32 (DA39-2, C2): the static label a refused context callback is reported by (no payload is read to build it). */
+  const CONTEXT_EVENT_LABELS: Readonly<Record<string, string>> = {
+    request: "a request",
+    response: "a response",
+    requestfailed: "a request failure",
+    requestfinished: "a request end",
+    page: "a page announcement",
+    console: "a console message",
+    weberror: "a page error",
+  };
   const describe = (request: RecordedRequest) => {
     try {
       return `${request.method()} ${request.url()}`;
@@ -2448,7 +2610,8 @@ export function recordContext(
     if (owner !== undefined && owner.latest === record) owner.latest = null;
   };
   const onNavigated = (page: PageRecord, value: unknown) => {
-    if (disposed) return late(`page ${page.index}: a navigation event`);
+    if (subscriptions.revoked)
+      return late(`page ${page.index}: a navigation event`);
     const index = page.index;
     const seq = next();
     const from = page.documentNo;
@@ -2588,10 +2751,17 @@ export function recordContext(
     // Subscribed in the listener that first met the frame, before Playwright can deliver its next event: no navigation of it is unobserved.
     // Revision 30 (F35-1, C2, OWN-3): owned by the ledger; a subscription that attached and then threw was removed by the adapter and is
     // this page's named capture gap below (its number and earlier evidence stay).
+    // Revision 32 (F39-1, C2): admitted by the recorder's authority and the subscription's own state before the event is read; a
+    // subscription refused with its listener left attached (a failed rollback) stays inert.
     const subscription = observeNavigations(
       root,
       (event) => onNavigated(page, event),
       installed,
+      {
+        admits: () => !subscriptions.revoked,
+        rejected: (refusal) =>
+          refused(`page ${index}: a navigation event`, refusal, null),
+      },
     );
     if (subscription.ok) {
       subscriptions.adopt(
@@ -2665,7 +2835,6 @@ export function recordContext(
     journal.unattributedRequests.push(record);
   };
   on("request", (request: RecordedRequest) => {
-    if (disposed) return late(`a request (${describe(request)})`);
     const found = frameOfRequest(request, installed);
     let owner: PageRecord | null = null;
     let why = "";
@@ -2730,7 +2899,6 @@ export function recordContext(
   on(
     "response",
     (response: { request(): RecordedRequest; status(): number }) => {
-      if (disposed) return late("a response");
       const seq = next();
       const request = response.request();
       const record = records.get(request);
@@ -2746,7 +2914,6 @@ export function recordContext(
     },
   );
   on("requestfailed", (request: RecordedRequest) => {
-    if (disposed) return late(`a request failure (${describe(request)})`);
     const seq = next();
     const record = records.get(request);
     if (record === undefined) {
@@ -2762,7 +2929,6 @@ export function recordContext(
     else record.failedAfterResponse = { seq, errorText };
   });
   on("requestfinished", (request: RecordedRequest) => {
-    if (disposed) return late(`a request end (${describe(request)})`);
     const seq = next();
     const record = records.get(request);
     if (record === undefined) {
@@ -2864,7 +3030,7 @@ export function recordContext(
     // Its own nested scope: a failure here rolls back this subscription alone, and the page's other evidence stays.
     const scope = subscriptions.child();
     const onCrash = () => {
-      if (!admit(`${where()}: a renderer crash`, scope)) return;
+      // Revision 32: admitted by the scope's guard (`add` below) before this runs.
       // Inside Playwright's own server listener: nothing may throw back into it.
       try {
         serverCrash(
@@ -2883,6 +3049,7 @@ export function recordContext(
         read.page,
         RENDERER_CRASH_PIN.event,
         onCrash as (value: never) => void,
+        (refusal) => refused(`${where()}: a renderer crash`, refusal, scope),
       );
     } catch (error) {
       const rollback = scope.detach();
@@ -2928,7 +3095,6 @@ export function recordContext(
     record.clientCrash = true;
     const scope = subscriptions.child();
     const onCrash = () => {
-      if (!admit(`page ${record.index}: a renderer crash`, scope)) return;
       if (record.crashRecorded) return;
       record.crashRecorded = true;
       problem(
@@ -2944,6 +3110,8 @@ export function recordContext(
         pageObject,
         "crash",
         onCrash as (value: never) => void,
+        (refusal) =>
+          refused(`page ${record.index}: a renderer crash`, refusal, scope),
       );
     } catch (error) {
       const rollback = scope.detach();
@@ -2961,7 +3129,6 @@ export function recordContext(
     });
   };
   on("page", (page: RecordedPage) => {
-    if (disposed) return late("a page announcement");
     const record = recordOfPage(page, "page");
     if (record === null) return;
     if (record.association.announced)
@@ -2972,9 +3139,9 @@ export function recordContext(
     // Revision 30 (F35-1, C2, OWN-3): the page's own listeners are a nested scope of the ledger. If one fails, the page's partial
     // registrations are rolled back alone, and its uncaptured problems are a named failure; the page and its evidence so far stay.
     // Revision 31 (DA-1, C3): each callback is admitted first (recorder disposal, and this scope's own rollback).
+    // Revision 32 (C1): by the scope's guard, before the callback runs (the parent's revocation first).
     const own = subscriptions.child();
     const onConsole = (message: ConsoleMessage) => {
-      if (!admit(`page ${record.index}: a console message`, own)) return;
       if (message.type() === "error" || message.type() === "warning")
         problem(
           record,
@@ -2984,7 +3151,6 @@ export function recordContext(
         );
     };
     const onPageError = (error: Error) => {
-      if (!admit(`page ${record.index}: a page error`, own)) return;
       problem(record, "pageerror", error.message, "");
     };
     try {
@@ -2993,12 +3159,16 @@ export function recordContext(
         page,
         "console",
         onConsole as (value: never) => void,
+        (refusal) =>
+          refused(`page ${record.index}: a console message`, refusal, own),
       );
       own.add(
         `page ${record.index}: detaching its pageerror listener`,
         page,
         "pageerror",
         onPageError as (value: never) => void,
+        (refusal) =>
+          refused(`page ${record.index}: a page error`, refusal, own),
       );
     } catch (error) {
       const rollback = own.detach();
@@ -3016,8 +3186,8 @@ export function recordContext(
     return record;
   };
   // Revision 31 (DA-1, C3): after disposal these are named late lines too (revision 30 dropped them silently).
+  // Revision 32: refused by their guard (the installation below), before they run.
   on("console", (message: ConsoleMessage) => {
-    if (!admit("a console message")) return;
     if (message.type() !== "error" && message.type() !== "warning") return;
     let page: unknown = null;
     try {
@@ -3035,7 +3205,6 @@ export function recordContext(
       );
   });
   on("weberror", (webError: { page(): unknown; error(): Error }) => {
-    if (!admit("a page error")) return;
     let page: unknown = null;
     try {
       page = webError.page();
@@ -3055,15 +3224,24 @@ export function recordContext(
         context,
         event,
         listener,
+        (refusal) =>
+          refused(
+            CONTEXT_EVENT_LABELS[event] ?? `a context "${event}" event`,
+            refusal,
+            subscriptions,
+          ),
       );
   } catch (error) {
-    disposed = true;
+    finalised = true;
     throw new CaptureInstallError(error, subscriptions.detach());
   }
   return {
+    // Revision 32 (C3, invariant 6): the owner revokes the recorder's authority BEFORE its first removal of any listener (its own lane
+    // listeners included), once the context's close has ended; nothing is removed here.
+    revoke: () => subscriptions.revoke(),
     dispose: (status: CloseStatus = "closed") => {
-      if (disposed) return [];
-      disposed = true;
+      if (finalised) return [];
+      finalised = true;
       const errors = subscriptions.detach();
       // Revision 29 (F34-1): the lane's context has closed, so every commit Playwright dispatched has been delivered. A dispatched
       // activation without its client event was missed by a late subscription (whatever URL the page ended on); an undispatched one whose
@@ -3660,7 +3838,7 @@ class ContextOwner {
   handle: { close(): Promise<void> } | null = null;
   installation: "none" | "installed" | "failed" | "skipped" = "none";
   closeStatus: CloseStatus = "not attempted";
-  capture: { dispose: (status?: CloseStatus) => string[] } | null = null;
+  capture: RecordedCapture | null = null;
   /** The lane's own listeners on its context (foreign requests, the page route guard). */
   readonly lane = new Subscriptions();
   private run: Promise<string[]> | null = null;
@@ -3680,7 +3858,18 @@ class ContextOwner {
   finalise(): string[] {
     if (this.finalised) return [];
     this.finalised = true;
-    const causes = this.lane.detach();
+    // Revision 32 (Review 39 F39-1 / design assessment DA39-3, C3, invariants 3/4/6): the context's whole callback authority (the lane's
+    // own listeners AND the capture) is revoked together, synchronously, BEFORE the first removal: a lane listener's `off` that re-enters
+    // the capture, or a capture listener's `off` that re-enters the activation adapter, meets refused callbacks only. Capture stays valid
+    // while the close runs (this is reached after it ended, failed or overran its bound). Another context or manager is not touched.
+    this.lane.revoke();
+    const causes: string[] = [];
+    try {
+      this.capture?.revoke();
+    } catch (error) {
+      causes.push(`revoking the capture's callbacks threw: ${String(error)}`);
+    }
+    causes.push(...this.lane.detach());
     try {
       causes.push(...(this.capture?.dispose(this.closeStatus) ?? []));
     } catch (error) {
@@ -3904,6 +4093,23 @@ async function openLane(
   const foreign: string[] = [];
   const declaredForeign = new Set<string>();
   // Revision 30 (F35-1, C2): the lane's own context listeners are owned by the context's owner (exact callbacks), detached with it.
+  // Revision 32 (design assessment DA39-3, C3, invariants 2/3/9): each is admitted by the lane scope's guard before it reads its request
+  // or touches its Page. The owner revokes that scope together with the capture before any removal, so a listener a failed `off` left
+  // attached, or one re-entered during it, neither reads a request nor adds to `foreign` nor rewrites a Page's routes: it is a named,
+  // payload-free late line. One delivered while its own `on` was still running is a named capture gap (a provenance failure).
+  const laneRefused = (what: string) => (refusal: Refusal) => {
+    if (refusal === "installing") {
+      journal.provenanceFailures ??= [];
+      journal.provenanceFailures.push(
+        `the lane's ${what} was delivered while its listener was still being installed; not observed, so the lane's guard of it is incomplete`,
+      );
+      return;
+    }
+    journal.lateEvents ??= [];
+    journal.lateEvents.push(
+      `the lane's ${what} was delivered after the lane's own listeners were revoked; not observed`,
+    );
+  };
   owner.lane.add(
     "detaching the lane's foreign-request listener",
     context,
@@ -3914,6 +4120,7 @@ async function openLane(
       if (new URL(url).origin !== front)
         foreign.push(`${request.method()} ${url}`);
     }) as (value: never) => void,
+    laneRefused("foreign-request listener: a request"),
   );
   await scope.acquire(
     "init script",
@@ -3932,13 +4139,17 @@ async function openLane(
     "context.setOffline (WebKit's emulation fails File reads)",
   );
   // Revision 28 (F33-1): pages are recorded by the context's capture registry (above); this only refuses a page's own routes.
-  owner.lane.add("detaching the lane's page route guard", context, "page", ((
-    page: Page,
-  ) => {
-    const own = page as unknown as Record<string, unknown>;
-    own.route = refuse("page.route");
-    own.routeFromHAR = refuse("page.routeFromHAR");
-  }) as (value: never) => void);
+  owner.lane.add(
+    "detaching the lane's page route guard",
+    context,
+    "page",
+    ((page: Page) => {
+      const own = page as unknown as Record<string, unknown>;
+      own.route = refuse("page.route");
+      own.routeFromHAR = refuse("page.routeFromHAR");
+    }) as (value: never) => void,
+    laneRefused("page route guard: a page announcement"),
+  );
   const routeHost =
     origin === null
       ? context

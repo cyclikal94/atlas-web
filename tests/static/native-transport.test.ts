@@ -35,6 +35,7 @@ import {
   type Problem,
   RENDERER_CRASH_PIN,
   type RecordedRequest,
+  type Refusal,
   type RequestRecord,
   readNavigated,
   readServerPage,
@@ -4220,10 +4221,26 @@ describe("F33-1 recordContext: missing, contradictory or unidentifiable provenan
     expect(ctx.listeners.get("request")).toHaveLength(1);
     expect(ctx.listeners.get("page")).toEqual([]);
     const requests = j.requests.length;
-    d.request(P);
+    // Revision 32 labelled adaptation (Review 39 / design assessment DA39-2, invariant 2): the late line no longer names the request's
+    // method and URL, because building it read the refused payload (`method()`/`url()`), which DA39-2 identified as the defect. The old
+    // intent (the event is late, named by its kind, never recorded) is asserted unchanged; reading nothing is now asserted as well.
+    let reads = 0;
+    const counted = d.request(P);
+    const before = reads;
+    ctx.emit(
+      "request",
+      new Proxy(counted, {
+        get(target, key, receiver) {
+          reads += 1;
+          return Reflect.get(target, key, receiver);
+        },
+      }),
+    );
+    expect(reads - before, "no payload read on the refused path").toBe(0);
     expect(j.requests).toHaveLength(requests);
     expect(j.lateEvents).toEqual([
-      `a request (GET ${P}) delivered after the recorder was detached; not recorded`,
+      "a request delivered after the recorder was detached; not recorded",
+      "a request delivered after the recorder was detached; not recorded",
     ]);
   });
 });
@@ -6221,5 +6238,904 @@ describe("F36-1 CR2/CR8/CR11/CR12/CR13: the manager, the seal and the public fix
     expect(r1.failures).toEqual([expect.stringMatching(/crash \[crash\]/)]);
     expect(r2.failures).toEqual([]);
     expect(await lanesOne.settle(), "settlement is shared").toBe(r1);
+  });
+});
+
+// ---- Revision 32 (Review 39 F39-1, design assessment DA39-2/DA39-3; family native-transport-upstream-cleanup, harness incomplete_fix;
+// token bde6ad2e…, C1–C5, qualification Q1–Q6, Q8, Q10, installation re-entry). Every callback is ADMITTED before it reads its payload,
+// and revocation precedes every removal. Payloads below count every property read and write (a getter, a method lookup, a Page property
+// assignment): a refused callback must make none. Healthy controls show the same callbacks do read and record when admitted.
+
+/** A payload that counts every property read (`get`/`has`) and write (`set`) made through it. */
+function counting<T extends object>(target: T) {
+  const count = { reads: 0, writes: 0 };
+  const proxy = new Proxy(target, {
+    get(t, key, receiver) {
+      count.reads += 1;
+      return Reflect.get(t, key, receiver);
+    },
+    has(t, key) {
+      count.reads += 1;
+      return Reflect.has(t, key);
+    },
+    set(t, key, value, receiver) {
+      count.writes += 1;
+      return Reflect.set(t, key, value, receiver);
+    },
+  });
+  return { proxy, count };
+}
+/** A counted server frame of the pinned shape (a main frame committing `url`). */
+const countedServerFrame = (url = `${FRONT}/api/__guard/next`) =>
+  counting({
+    url: () => url,
+    parentFrame: () => null,
+    _currentDocument: { documentId: "native-x", request: undefined },
+  });
+/** A counted request of the recorder's shape. */
+const countedRequest = (url = `${FRONT}/api/__guard/counted`) =>
+  counting({
+    method: () => "GET",
+    url: () => url,
+    isNavigationRequest: () => false,
+    frame: () => null,
+    failure: () => null,
+    redirectedFrom: () => null,
+  });
+/** Keeps every listener registered on `emitter` (event, exact callback), so a test can deliver through a callback a failed `off` kept. */
+function retain(
+  saved: Array<{
+    where: string;
+    event: string;
+    listener: (v: unknown) => void;
+  }>,
+  where: string,
+  emitter: object,
+) {
+  const target = emitter as {
+    on: (event: string, listener: (v: unknown) => void) => unknown;
+  };
+  const on = target.on;
+  target.on = function (event: string, listener: (v: unknown) => void) {
+    saved.push({ where, event, listener });
+    return on.call(this, event, listener);
+  };
+}
+/** A recorder whose every registration (context, server context, each page's own, frame and server Page) is retained. */
+function retainedRecorder() {
+  const ctx = recorderContext();
+  const saved: Array<{
+    where: string;
+    event: string;
+    listener: (v: unknown) => void;
+  }> = [];
+  retain(saved, "context", ctx.context);
+  retain(saved, "server", ctx.side.server);
+  let seq = 0;
+  const j: Journal = {
+    problems: [],
+    requests: [],
+    attempts: [],
+    expectations: [],
+    engine: "chromium",
+  };
+  const recorder = recordContext(ctx.context, {
+    journal: j,
+    next: () => {
+      seq += 1;
+      return seq;
+    },
+    stamp,
+    ingest: (p) => void j.problems.push(p),
+  });
+  const page = (url = "") => {
+    const p = recorderPage(ctx, { announce: false, url });
+    retain(saved, "page", p.page);
+    retain(saved, "frame", p.internal);
+    retain(saved, "server page", p.serverPage);
+    p.announce();
+    return p;
+  };
+  const snapshot = () =>
+    JSON.stringify({
+      seq,
+      problems: j.problems,
+      requests: j.requests,
+      navigations: j.navigations,
+      activations: j.activations,
+      pages: j.pages,
+      unattributed: j.unattributedRequests,
+      failures: j.provenanceFailures,
+      watches: j.crashWatches,
+    });
+  return { ctx, j, recorder, saved, page, snapshot, seq: () => seq };
+}
+
+describe("F39-1 Q1/Q2 (revision 32): a refused adapter is inert; its callbacks read nothing before admission", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  it("Q1 observeNavigations healthy control: an admitted event is read and passed on once; after disposal nothing reaches the listener", () => {
+    const emitter = new EventEmitter();
+    const seen: string[] = [];
+    const refusals: Refusal[] = [];
+    const sub = observeNavigations(
+      { _eventEmitter: emitter },
+      (e) => void seen.push((e as { url: string }).url),
+      undefined,
+      { rejected: (r) => void refusals.push(r) },
+    );
+    expect(sub.ok).toBe(true);
+    const active = counting({ url: P, name: "" });
+    emitter.emit("navigated", active.proxy);
+    expect(seen).toEqual([P]);
+    expect(active.count.reads, "the admitted event is read").toBeGreaterThan(0);
+    if (sub.ok) sub.dispose();
+    const after = counting({ url: P, name: "" });
+    emitter.emit("navigated", after.proxy);
+    expect([after.count.reads, seen.length, refusals]).toEqual([0, 1, []]);
+  });
+  for (const schedule of [
+    "rollback fails",
+    "rollback re-enters, then fails",
+    "removal fails",
+    "removal re-enters, then fails",
+    "removal re-enters, then succeeds",
+  ] as const)
+    it(`Q1 observeNavigations, ${schedule}: the callback a failed or re-entrant removal leaves is refused ("local") before it reads anything; the listener never runs; another owner's listener is kept`, () => {
+      const emitter = new EventEmitter();
+      const other = () => undefined;
+      emitter.on("navigated", other);
+      const seen: unknown[] = [];
+      const refusals: Refusal[] = [];
+      const payloads: Array<ReturnType<typeof counting>> = [];
+      const deliver = () => {
+        const payload = counting({ url: P, name: "" });
+        payloads.push(payload);
+        emitter.emit("navigated", payload.proxy);
+      };
+      const rollback = schedule.startsWith("rollback");
+      if (rollback) {
+        const on = emitter.on.bind(emitter);
+        emitter.on = ((event: string, l: () => void) => {
+          on(event, l);
+          throw new Error("FRAME_ATTACH_SENTINEL");
+        }) as EventEmitter["on"];
+      }
+      const off = emitter.off.bind(emitter);
+      const installOff = () => {
+        emitter.off = ((event: string, l: () => void) => {
+          if (event === "navigated" && l !== other) {
+            if (schedule.includes("re-enters")) deliver();
+            if (schedule.endsWith("fails")) throw new Error("FRAME_OFF");
+          }
+          return off(event, l);
+        }) as EventEmitter["off"];
+      };
+      if (rollback) installOff();
+      const sub = observeNavigations(
+        { _eventEmitter: emitter },
+        (e) => void seen.push(e),
+        undefined,
+        { rejected: (r) => void refusals.push(r) },
+      );
+      if (rollback) {
+        expect(sub).toEqual({
+          ok: false,
+          reason: expect.stringMatching(
+            /^subscribing to the main frame's navigation events threw: Error: FRAME_ATTACH_SENTINEL; removing its listener again also failed: Error: FRAME_OFF$/,
+          ),
+        });
+      } else {
+        expect(sub.ok).toBe(true);
+        installOff();
+        if (sub.ok)
+          if (schedule.endsWith("fails"))
+            expect(() => sub.dispose()).toThrow(/FRAME_OFF/);
+          else sub.dispose();
+      }
+      deliver();
+      expect(
+        payloads.map((p) => p.count.reads),
+        "no payload read on a refused callback",
+      ).toEqual(payloads.map(() => 0));
+      expect(seen).toEqual([]);
+      const reentered = schedule.includes("re-enters") ? 1 : 0;
+      const retained = schedule.endsWith("fails") ? 1 : 0;
+      expect(refusals).toEqual(
+        Array.from({ length: reentered + retained }, () => "local"),
+      );
+      expect(emitter.listeners("navigated")).toContain(other);
+    });
+  it("Q1 observeNavigations: an event delivered while its own `on` runs is refused as `installing` (read nothing); the subscription then works; an owner that withdrew admission refuses as `enclosing`", () => {
+    const emitter = new EventEmitter();
+    const early = counting({ url: P, name: "" });
+    const on = emitter.on.bind(emitter);
+    emitter.on = ((event: string, l: (v: unknown) => void) => {
+      on(event, l);
+      l(early.proxy);
+      return emitter;
+    }) as EventEmitter["on"];
+    const seen: unknown[] = [];
+    const refusals: Refusal[] = [];
+    let admitted = true;
+    const sub = observeNavigations(
+      { _eventEmitter: emitter },
+      (e) => void seen.push((e as { url: string }).url),
+      undefined,
+      { admits: () => admitted, rejected: (r) => void refusals.push(r) },
+    );
+    expect(sub.ok).toBe(true);
+    expect([early.count.reads, seen, refusals]).toEqual([
+      0,
+      [],
+      ["installing"],
+    ]);
+    emitter.emit("navigated", { url: P, name: "" });
+    expect(seen).toEqual([P]);
+    admitted = false;
+    const late = counting({ url: P, name: "" });
+    emitter.emit("navigated", late.proxy);
+    expect([late.count.reads, seen.length, refusals]).toEqual([
+      0,
+      1,
+      ["installing", "enclosing"],
+    ]);
+  });
+  it("Q2 observeActivations healthy control: an admitted commit reads the frame and is passed on; after disposal nothing reaches the listener", () => {
+    const ctx = recorderContext();
+    const seen: unknown[] = [];
+    const source = observeActivations(
+      ctx.context,
+      (c) => void seen.push(c),
+      undefined,
+      { rejected: () => seen.push("refused") },
+    );
+    expect(source.ok).toBe(true);
+    const frame = countedServerFrame();
+    ctx.side.server.emit(ACTIVATION_SOURCE_PIN.event, frame.proxy);
+    expect(frame.count.reads).toBeGreaterThan(0);
+    expect(seen).toEqual([
+      expect.objectContaining({
+        ok: true,
+        main: true,
+        url: expect.any(String),
+      }),
+    ]);
+    if (source.ok) source.dispose();
+    const after = countedServerFrame();
+    ctx.side.server.emit(ACTIVATION_SOURCE_PIN.event, after.proxy);
+    expect([after.count.reads, seen.length]).toEqual([0, 1]);
+  });
+  for (const schedule of [
+    "rollback fails",
+    "rollback re-enters, then fails",
+    "removal fails",
+    "removal re-enters, then fails",
+    "removal re-enters, then succeeds",
+    "installation re-enters",
+    "owner withdrew admission",
+  ] as const)
+    it(`Q2 observeActivations, ${schedule}: the commit is refused before the frame, its document, url, parent or dispatcher is read; the listener never runs`, () => {
+      const ctx = recorderContext();
+      const server = ctx.side.server;
+      const other = () => undefined;
+      server.on(ACTIVATION_SOURCE_PIN.event, other);
+      const frames: Array<ReturnType<typeof countedServerFrame>> = [];
+      const deliver = (l?: (f: unknown) => void) => {
+        const frame = countedServerFrame();
+        frames.push(frame);
+        if (l === undefined)
+          server.emit(ACTIVATION_SOURCE_PIN.event, frame.proxy);
+        else l(frame.proxy);
+      };
+      let dispatcherReads = 0;
+      const toImpl = ctx.side.connection.toImpl;
+      ctx.side.connection.toImpl = (x: unknown) => {
+        const impl = toImpl.call(ctx.side.connection, x);
+        if (x !== ctx.side.connection) return impl;
+        const dispatchers = impl as {
+          existingDispatcher: (o: object) => unknown;
+        };
+        return {
+          existingDispatcher: (o: object) => {
+            dispatcherReads += 1;
+            return dispatchers.existingDispatcher(o);
+          },
+        };
+      };
+      const on = server.on.bind(server);
+      const off = server.off.bind(server);
+      if (schedule.startsWith("rollback"))
+        server.on = ((event: string, l: () => void) => {
+          on(event, l);
+          throw new Error("SOURCE_ATTACH_SENTINEL");
+        }) as typeof server.on;
+      if (schedule === "installation re-enters")
+        server.on = ((event: string, l: (f: unknown) => void) => {
+          on(event, l);
+          deliver(l);
+          return server;
+        }) as typeof server.on;
+      const installOff = () => {
+        server.off = ((event: string, l: () => void) => {
+          if (event === ACTIVATION_SOURCE_PIN.event && l !== other) {
+            if (schedule.includes("re-enters")) deliver();
+            if (schedule.endsWith("fails"))
+              throw new Error("SOURCE_DETACH_SENTINEL");
+          }
+          return off(event, l);
+        }) as typeof server.off;
+      };
+      if (schedule.startsWith("rollback")) installOff();
+      const seen: unknown[] = [];
+      const refusals: Refusal[] = [];
+      let admitted = true;
+      const source = observeActivations(
+        ctx.context,
+        (c) => void seen.push(c),
+        undefined,
+        { admits: () => admitted, rejected: (r) => void refusals.push(r) },
+      );
+      if (schedule.startsWith("rollback"))
+        expect(source).toEqual({
+          ok: false,
+          reason:
+            "attaching the activation source threw: Error: SOURCE_ATTACH_SENTINEL; detaching its listener again also failed: Error: SOURCE_DETACH_SENTINEL",
+        });
+      else if (source.ok && schedule.startsWith("removal")) {
+        installOff();
+        if (schedule.endsWith("fails"))
+          expect(() => source.dispose()).toThrow(/SOURCE_DETACH_SENTINEL/);
+        else source.dispose();
+      } else if (schedule === "owner withdrew admission") admitted = false;
+      if (schedule !== "installation re-enters") deliver();
+      expect(
+        frames.map((f) => f.count.reads),
+        "no frame read on a refused commit",
+      ).toEqual(frames.map(() => 0));
+      expect(dispatcherReads, "no dispatcher lookup").toBe(0);
+      expect(seen).toEqual([]);
+      expect(refusals).toEqual(
+        schedule === "installation re-enters"
+          ? ["installing"]
+          : schedule === "owner withdrew admission"
+            ? ["enclosing"]
+            : schedule.includes("re-enters") && schedule.endsWith("fails")
+              ? ["local", "local"]
+              : ["local"],
+      );
+      expect(server.listeners(ACTIVATION_SOURCE_PIN.event)).toContain(other);
+      if (schedule === "installation re-enters" && source.ok) {
+        deliver();
+        expect(seen).toHaveLength(1);
+      }
+    });
+  it("Q1 through the recorder: a page whose navigation subscription attached, threw and could not be rolled back is a named gap; its kept callback reads nothing and adds no navigation (a named late line); the sibling page is still captured", () => {
+    const { j, d, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    const on = popup.internal.on.bind(popup.internal);
+    popup.internal.on = ((event: string, l: () => void) => {
+      on(event, l);
+      throw new Error("FRAME_ATTACH_SENTINEL");
+    }) as typeof popup.internal.on;
+    popup.internal.off = (() => {
+      throw new Error("FRAME_OFF");
+    }) as typeof popup.internal.off;
+    popup.announce();
+    expect(j.provenanceFailures).toEqual([
+      "page 1: navigation provenance unavailable (subscribing to the main frame's navigation events threw: Error: FRAME_ATTACH_SENTINEL; removing its listener again also failed: Error: FRAME_OFF); its documents cannot be attributed",
+    ]);
+    expect(popup.internal.listenerCount("navigated")).toBe(1);
+    const navigations = j.navigations?.length;
+    const event = counting({ url: P, name: "", newDocument: {} });
+    popup.internal.emit("navigated", event.proxy);
+    expect(event.count.reads).toBe(0);
+    expect(j.navigations).toHaveLength(navigations ?? 0);
+    expect(j.lateEvents).toEqual([
+      "page 1: a navigation event delivered after its listener's subscription was rolled back; not recorded",
+    ]);
+    // Q8: the sibling tab is unaffected: still captured.
+    expect((j.pages ?? []).map((x) => x.page)).toEqual([0, 1]);
+    d.console("warning", "page 0 is still captured", "");
+    expect(j.problems.map((x) => [x.page, x.text])).toEqual([
+      [0, "page 0 is still captured"],
+    ]);
+  });
+  it("Q2 through the recorder: an activation source that attached, threw and could not be detached is a named gap; its kept callback reads nothing and adds no activation (a named late line); pages are still captured", () => {
+    const ctx = recorderContext();
+    const server = ctx.side.server;
+    const on = server.on.bind(server);
+    server.on = ((event: string, l: () => void) => {
+      on(event, l);
+      throw new Error("SOURCE_ATTACH_SENTINEL");
+    }) as typeof server.on;
+    server.off = (() => {
+      throw new Error("SOURCE_DETACH_SENTINEL");
+    }) as typeof server.off;
+    const j: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+    };
+    let seq = 0;
+    recordContext(ctx.context, {
+      journal: j,
+      next: () => {
+        seq += 1;
+        return seq;
+      },
+      stamp,
+      ingest: (p) => void j.problems.push(p),
+    });
+    expect(j.activationSource).toEqual({
+      unavailable:
+        "attaching the activation source threw: Error: SOURCE_ATTACH_SENTINEL; detaching its listener again also failed: Error: SOURCE_DETACH_SENTINEL",
+    });
+    expect(server.listenerCount(ACTIVATION_SOURCE_PIN.event)).toBe(1);
+    const before = seq;
+    const frame = countedServerFrame();
+    server.emit(ACTIVATION_SOURCE_PIN.event, frame.proxy);
+    expect([frame.count.reads, seq - before, j.activations]).toEqual([
+      0,
+      0,
+      [],
+    ]);
+    expect(j.lateEvents).toEqual([
+      "a server-observed document activation delivered after its listener's subscription was rolled back; not recorded",
+    ]);
+    const d = recorderPage(ctx);
+    d.console("warning", "the page is still captured", "");
+    expect(j.problems.map((p) => p.text)).toEqual([
+      "the page is still captured",
+    ]);
+  });
+});
+
+describe("F39-1/DA39-2 Q3/Q4/Q6 (revision 32): the recorder's whole callback inventory is refused from the start of its finalisation", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  it("C5 inventory healthy control: every retained callback of the recorder (context, server context, page, frame, server Page) is admitted and reads its payload while the recorder is live", () => {
+    const r = retainedRecorder();
+    const p = r.page(P);
+    expect(
+      [...new Set(r.saved.map((s) => `${s.where} ${s.event}`))].sort(),
+    ).toEqual([
+      "context console",
+      "context page",
+      "context request",
+      "context requestfailed",
+      "context requestfinished",
+      "context response",
+      "context weberror",
+      "frame navigated",
+      "page console",
+      "page pageerror",
+      "server internalframenavigatedtonewdocument",
+      "server page crash",
+    ]);
+    const message = counting({
+      type: () => "warning",
+      text: () => "admitted",
+      location: () => ({ url: "" }),
+      page: () => p.page,
+    });
+    for (const s of r.saved.filter(
+      (s) => s.where === "page" && s.event === "console",
+    ))
+      s.listener(message.proxy);
+    expect(message.count.reads).toBeGreaterThan(0);
+    expect(r.j.problems.map((x) => x.text)).toEqual(["admitted"]);
+  });
+  for (const how of ["revoke", "dispose"] as const)
+    it(`Q3/Q4/Q6 after ${how === "revoke" ? "revocation (before any removal)" : "disposal"}: EVERY retained callback, delivered again with a counting payload, reads nothing and records nothing; each is a named late line`, () => {
+      const r = retainedRecorder();
+      r.page(P);
+      if (how === "revoke") r.recorder.revoke();
+      else expect(r.recorder.dispose()).toEqual([]);
+      const before = r.snapshot();
+      const payloads = r.saved.map(() => counting({}));
+      for (const [i, s] of r.saved.entries()) s.listener(payloads[i]?.proxy);
+      expect(payloads.map((p) => p.count)).toEqual(
+        payloads.map(() => ({ reads: 0, writes: 0 })),
+      );
+      expect(r.snapshot()).toBe(before);
+      expect(r.j.lateEvents).toEqual(
+        expect.arrayContaining([
+          "a request delivered after the recorder was detached; not recorded",
+          "a response delivered after the recorder was detached; not recorded",
+          "a request failure delivered after the recorder was detached; not recorded",
+          "a request end delivered after the recorder was detached; not recorded",
+          "a page announcement delivered after the recorder was detached; not recorded",
+          "a console message delivered after the recorder was detached; not recorded",
+          "a page error delivered after the recorder was detached; not recorded",
+          "a server-observed document activation delivered after the recorder was detached; not recorded",
+          "page 0: a navigation event delivered after the recorder was detached; not recorded",
+          "page 0: a console message delivered after the recorder was detached; not recorded",
+          "page 0: a page error delivered after the recorder was detached; not recorded",
+          "page 0: a renderer crash delivered after the recorder was detached; not recorded",
+        ]),
+      );
+      expect(r.j.lateEvents).toHaveLength(r.saved.length);
+    });
+  it("Q3 global before local: while the recorder detaches, a LATER-visited listener's `off` re-enters an earlier page's console, a server activation and the four request events: none is read or recorded (the parent's revocation already applies to scopes not yet visited)", () => {
+    const r = retainedRecorder();
+    r.page(P);
+    const second = r.page(`${P}/2`);
+    const payloads: Array<ReturnType<typeof counting>> = [];
+    const send = (where: string, event: string) => {
+      for (const s of r.saved.filter(
+        (s) => s.where === where && s.event === event,
+      )) {
+        const payload = counting({});
+        payloads.push(payload);
+        s.listener(payload.proxy);
+      }
+    };
+    const off = second.page.off;
+    let reentered = false;
+    second.page.off = (event, listener) => {
+      if (!reentered) {
+        reentered = true;
+        // Page 1's own scope is detached first (newest); page 0's, the context's and the source's are not yet visited.
+        send("page", "console");
+        send("server", ACTIVATION_SOURCE_PIN.event);
+        for (const e of [
+          "request",
+          "response",
+          "requestfailed",
+          "requestfinished",
+        ])
+          send("context", e);
+      }
+      off(event, listener);
+    };
+    const before = r.snapshot();
+    expect(r.recorder.dispose()).toEqual([]);
+    expect(reentered).toBe(true);
+    expect(payloads.length).toBeGreaterThanOrEqual(7);
+    expect(payloads.map((p) => p.count.reads)).toEqual(payloads.map(() => 0));
+    expect(r.snapshot()).toBe(before);
+    expect(r.j.lateEvents).toEqual(
+      expect.arrayContaining([
+        "page 0: a console message delivered after the recorder was detached; not recorded",
+        "a server-observed document activation delivered after the recorder was detached; not recorded",
+        "a request delivered after the recorder was detached; not recorded",
+      ]),
+    );
+  });
+  for (const event of [
+    "request",
+    "response",
+    "requestfailed",
+    "requestfinished",
+  ] as const)
+    for (const fault of ["removal fails", "removal re-enters"] as const)
+      it(`Q4 DA39-2 "${event}", ${fault}: the rejected path reads no request (also not to build its label), takes no journal sequence and changes no record; the removal's cause is named`, () => {
+        const { j, d, ctx, recorder } = recorded("chromium");
+        const known = d.request(P);
+        const records = JSON.stringify(j.requests);
+        const payload =
+          event === "response"
+            ? counting({ request: () => known, status: () => 200 })
+            : countedRequest(P);
+        const off = ctx.context.off;
+        ctx.context.off = (e, listener) => {
+          if (e === event) {
+            if (fault === "removal re-enters") ctx.emit(event, payload.proxy);
+            else throw new Error("CONTEXT_OFF");
+          }
+          off(e, listener);
+        };
+        const errors = recorder.dispose();
+        if (fault === "removal fails") {
+          expect(errors).toEqual([
+            `detaching the recorder's context "${event}" listener failed: Error: CONTEXT_OFF`,
+          ]);
+          ctx.emit(event, payload.proxy);
+        } else expect(errors).toEqual([]);
+        expect(payload.count).toEqual({ reads: 0, writes: 0 });
+        expect(JSON.stringify(j.requests)).toBe(records);
+        const label = {
+          request: "a request",
+          response: "a response",
+          requestfailed: "a request failure",
+          requestfinished: "a request end",
+        }[event];
+        expect(j.lateEvents).toEqual([
+          `${label} delivered after the recorder was detached; not recorded`,
+        ]);
+      });
+  it("Q4 healthy control: the same four events, delivered to a live recorder, are read and recorded (journal sequence taken)", () => {
+    const { j, d, ctx } = recorded("chromium");
+    const r = d.request(P);
+    const request = countedRequest(`${P}/x`);
+    ctx.emit("request", request.proxy);
+    ctx.emit("response", { request: () => r, status: () => 200 });
+    d.finish(r);
+    expect(request.count.reads).toBeGreaterThan(0);
+    expect(j.requests.map((x) => new URL(x.url).pathname)).toEqual([
+      "/api/__guard/page",
+    ]);
+    expect(j.unattributedRequests?.map((x) => x.url)).toEqual([`${P}/x`]);
+    expect(j.requests[0]?.terminal).toMatchObject({ kind: "response" });
+    expect(j.requests[0]?.finishedSeq).toEqual(expect.any(Number));
+  });
+  it("C1 installation re-entry: a context `on` that delivers its own event while it registers is refused (nothing read) and is a named capture gap; the source's commit during its own `on` is refused without touching the half-built recorder; both then capture normally", () => {
+    const ctx = recorderContext();
+    const early = countedRequest(`${FRONT}/api/__guard/early`);
+    const earlyFrame = countedServerFrame();
+    const on = ctx.context.on;
+    ctx.context.on = (event, listener) => {
+      on(event, listener);
+      if (event === "request") (listener as (v: unknown) => void)(early.proxy);
+    };
+    const serverOn = ctx.side.server.on.bind(ctx.side.server);
+    ctx.side.server.on = ((event: string, l: (f: unknown) => void) => {
+      serverOn(event, l);
+      l(earlyFrame.proxy);
+      return ctx.side.server;
+    }) as typeof ctx.side.server.on;
+    const j: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+    };
+    let seq = 0;
+    recordContext(ctx.context, {
+      journal: j,
+      next: () => {
+        seq += 1;
+        return seq;
+      },
+      stamp,
+      ingest: (p) => void j.problems.push(p),
+    });
+    expect([early.count.reads, earlyFrame.count.reads, seq]).toEqual([0, 0, 0]);
+    expect(j.provenanceFailures).toEqual([
+      "a server-observed document activation delivered while its listener was still being installed; not recorded, so the lane's capture of it is incomplete",
+      "a request delivered while its listener was still being installed; not recorded, so the lane's capture of it is incomplete",
+    ]);
+    expect(j.activationSource).toMatchObject({ pagesAtAttach: 0 });
+    const d = recorderPage(ctx);
+    d.request(`${FRONT}/api/__guard/later`);
+    expect(j.requests.map((r) => new URL(r.url).pathname)).toEqual([
+      "/api/__guard/later",
+    ]);
+    expect(classifyJournal(j).violations).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/while its listener was still being installed/),
+      ]),
+    );
+  });
+  it("Q8 two tabs: page 1's refused navigation subscription (failed rollback) never moves page 0, whose identical-URL navigation is still recorded as its own", () => {
+    const { j, d, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    const on = popup.internal.on.bind(popup.internal);
+    popup.internal.on = ((event: string, l: () => void) => {
+      on(event, l);
+      throw new Error("FRAME_ATTACH_SENTINEL");
+    }) as typeof popup.internal.on;
+    popup.internal.off = (() => {
+      throw new Error("FRAME_OFF");
+    }) as typeof popup.internal.off;
+    popup.announce();
+    const r0 = d.request(P);
+    popup.internal.emit("navigated", {
+      url: P,
+      name: "",
+      newDocument: { request: { _object: r0 } },
+    });
+    d.newDocument(P, r0);
+    expect(
+      (j.navigations ?? [])
+        .filter((n) => n.kind === "new-document")
+        .map((n) => [n.page, n.document, n.request]),
+    ).toEqual([[0, 1, expect.any(Number)]]);
+    expect(j.lateEvents).toEqual([
+      "page 1: a navigation event delivered after its listener's subscription was rolled back; not recorded",
+    ]);
+  });
+});
+
+describe("DA39-3 Q3/Q5/Q10 (revision 32): the lane's own callbacks and the capture are revoked together before any removal; captured envelopes keep their delivery", () => {
+  const laneSaved = (c: ReturnType<typeof ownedContext>) => {
+    const saved: Array<{
+      where: string;
+      event: string;
+      listener: (v: unknown) => void;
+    }> = [];
+    retain(saved, "context", c.context);
+    retain(saved, "server", c.side.server);
+    /** The lane's own listeners are the LAST registrations of their events (after the capture's, in the context stage and later). */
+    const lane = (event: "request" | "page") =>
+      saved.filter((s) => s.where === "context" && s.event === event).at(-1)
+        ?.listener as (v: unknown) => void;
+    return { saved, lane };
+  };
+  it("Q5 healthy control: the live lane's foreign-request listener records a foreign request, and its page route guard replaces a page's route methods", async () => {
+    const c = ownedContext();
+    const { lane } = laneSaved(c);
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(ownedBrowser(c), info);
+    const opened = await lanes.open({ mode: "fixture" });
+    const request = counting({
+      url: () => "https://elsewhere.example/x",
+      method: () => "GET",
+    });
+    lane("request")(request.proxy);
+    expect(request.count.reads).toBeGreaterThan(0);
+    expect(opened.foreign).toEqual(["GET https://elsewhere.example/x"]);
+    const page = counting({ route: () => undefined } as Record<
+      string,
+      unknown
+    >);
+    lane("page")(page.proxy);
+    expect(page.count.writes).toBe(2);
+    opened.declareForeign("GET https://elsewhere.example/x");
+    const report = await lanes.settle();
+    expect(report).toMatchObject({ closeErrors: [], failures: [] });
+  });
+  for (const fault of ["kept", "re-entered"] as const)
+    it(`Q3/Q5 a lane listener's removal ${fault === "kept" ? "fails (its callback is kept)" : "re-enters the context"}: the lane's callbacks and the capture's read nothing, add no foreign request and rewrite no Page; the removal's cause stays in the report; another manager is unaffected`, async () => {
+      const c = ownedContext();
+      const { saved, lane } = laneSaved(c);
+      const other = ownedContext();
+      const otherSaved = laneSaved(other);
+      const { info } = fakeInfo();
+      const lanes = openTransportLanes(ownedBrowser(c), info);
+      const otherLanes = openTransportLanes(
+        ownedBrowser(other),
+        fakeInfo().info,
+      );
+      const opened = await lanes.open({ mode: "fixture" });
+      const otherOpened = await otherLanes.open({ mode: "fixture" });
+      const pageGuard = lane("page");
+      const payloads: Array<ReturnType<typeof counting>> = [];
+      const sweep = () => {
+        for (const s of saved) {
+          const payload = counting({} as Record<string, unknown>);
+          payloads.push(payload);
+          s.listener(payload.proxy);
+        }
+      };
+      const off = c.context.off.bind(c.context);
+      let reentered = 0;
+      c.context.off = ((event: string, l: (...a: unknown[]) => void) => {
+        if (l === pageGuard) {
+          // The FIRST removal (the lane's page guard, newest): the lane's request listener and the whole capture are still attached.
+          reentered += 1;
+          if (fault === "re-entered") sweep();
+          else throw new Error("LANE_OFF_SENTINEL");
+        }
+        return off(event, l);
+      }) as typeof c.context.off;
+      const journal = JSON.stringify({
+        problems: opened.journal.problems,
+        requests: opened.journal.requests,
+        activations: opened.journal.activations,
+        navigations: opened.journal.navigations,
+      });
+      const report = await lanes.settle();
+      if (fault === "kept") sweep();
+      expect(reentered).toBe(1);
+      expect(payloads.length).toBe(saved.length);
+      expect(payloads.map((p) => p.count)).toEqual(
+        payloads.map(() => ({ reads: 0, writes: 0 })),
+      );
+      expect(opened.foreign).toEqual([]);
+      expect(
+        JSON.stringify({
+          problems: opened.journal.problems,
+          requests: opened.journal.requests,
+          activations: opened.journal.activations,
+          navigations: opened.journal.navigations,
+        }),
+      ).toBe(journal);
+      expect(opened.journal.lateEvents).toEqual(
+        expect.arrayContaining([
+          "the lane's foreign-request listener: a request was delivered after the lane's own listeners were revoked; not observed",
+          "the lane's page route guard: a page announcement was delivered after the lane's own listeners were revoked; not observed",
+          "a request delivered after the recorder was detached; not recorded",
+          "a server-observed document activation delivered after the recorder was detached; not recorded",
+        ]),
+      );
+      if (fault === "kept")
+        expect(report.closeErrors).toEqual([
+          "open 1 context: CleanupFailures: 1 cause: [1] detaching the lane's page route guard failed: Error: LANE_OFF_SENTINEL",
+        ]);
+      else expect(report.closeErrors).toEqual([]);
+      // The other manager's lane is live: its own foreign-request listener still records, and it settles cleanly.
+      const request = counting({
+        url: () => "https://elsewhere.example/y",
+        method: () => "GET",
+      });
+      otherSaved.lane("request")(request.proxy);
+      expect(otherOpened.foreign).toEqual(["GET https://elsewhere.example/y"]);
+      otherOpened.declareForeign("GET https://elsewhere.example/y");
+      expect(await otherLanes.settle()).toMatchObject({
+        closeErrors: [],
+        failures: [],
+      });
+    });
+  it("Q5 a lane listener's `on` that delivers its own event while it registers is refused (nothing read, nothing added) and fails the lane by name", async () => {
+    const c = ownedContext();
+    const early = counting({
+      url: () => "https://elsewhere.example/early",
+      method: () => "GET",
+    });
+    const on = c.context.on;
+    let n = 0;
+    c.context.on = ((event: string, l: (v: unknown) => void) => {
+      const result = on.call(c.context, event, l);
+      if (event === "request") {
+        n += 1;
+        // The second "request" registration is the lane's own (the first is the capture's).
+        if (n === 2) l(early.proxy);
+      }
+      return result;
+    }) as typeof c.context.on;
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(ownedBrowser(c), info);
+    const opened = await lanes.open({ mode: "fixture" });
+    expect(early.count.reads).toBe(0);
+    expect(opened.foreign).toEqual([]);
+    const report = await lanes.settle();
+    expect(report.failures).toEqual([
+      "lane 0: navigation provenance: the lane's foreign-request listener: a request was delivered while its listener was still being installed; not observed, so the lane's guard of it is incomplete",
+    ]);
+  });
+  it("Q10 capture versus delivery: an envelope captured and held before finalisation is delivered once, with its original identity, AFTER the callbacks were revoked and before the seal; a fresh console callback at that moment is refused", async () => {
+    const c = ownedContext();
+    const { saved } = laneSaved(c);
+    const { info } = fakeInfo();
+    const holds: Array<() => void> = [];
+    const lanes = openTransportLanes(ownedBrowser(c), info, {
+      ingest: (_p, deliver) => void holds.push(deliver),
+    });
+    const opened = await lanes.open({ mode: "fixture" });
+    const consoleListener = saved.find(
+      (s) => s.where === "context" && s.event === "console",
+    )?.listener as (v: unknown) => void;
+    // A context-level console of an unannounced page object (the fallback) is captured and held.
+    const pageObject = {
+      mainFrame: () => ({ url: () => "", parentFrame: () => null }),
+    };
+    consoleListener({
+      type: () => "warning",
+      text: () => "held before finalisation",
+      location: () => ({ url: "" }),
+      page: () => pageObject,
+    });
+    expect(holds).toHaveLength(1);
+    const captured = { ...(opened.heldProblems()[0] as Problem) };
+    const fresh = counting({} as Record<string, unknown>);
+    const off = c.context.off.bind(c.context);
+    let once = false;
+    c.context.off = ((event: string, l: (...a: unknown[]) => void) => {
+      if (!once) {
+        once = true;
+        holds[0]?.();
+        consoleListener(fresh.proxy);
+      }
+      return off(event, l);
+    }) as typeof c.context.off;
+    const report = await lanes.settle();
+    expect(once).toBe(true);
+    expect(fresh.count).toEqual({ reads: 0, writes: 0 });
+    expect(opened.journal.problems).toEqual([captured]);
+    expect(opened.heldProblems()).toEqual([]);
+    expect(report.failures).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/held before finalisation/),
+      ]),
+    );
+    expect(report.failures).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/still held/)]),
+    );
+    expect(opened.journal.lateEvents).toEqual(
+      expect.arrayContaining([
+        "a console message delivered after the recorder was detached; not recorded",
+      ]),
+    );
   });
 });

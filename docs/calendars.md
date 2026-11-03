@@ -450,6 +450,26 @@ Qualified on macOS in all three engines with each engine's own crash command and
 the case fixture itself. The engines report the crash after the announcement even when the command is sent at the popup's first commit,
 so a genuine crash before Playwright announces a page has not been reproduced. That boundary is covered by the static tests only.
 
+Revision 32 makes every listener check its permission before it reads anything. Before it, two of the lane's own adapters (navigation
+and the server activation source) kept recording after a failed removal, and some refused callbacks still read their event to describe it.
+- **Every callback is checked first.** Each of the lane's listeners, on the context, its pages, the main frame and Playwright's server
+  context and pages, is wrapped. The wrapper checks permission before the event is read, recorded or used to change a page. This includes
+  the two lane listeners that watch for foreign requests and refuse page routes.
+- **Permission is withdrawn before anything is removed.** Once a context's close has finished (or failed, or run past its bound), all of
+  its listeners lose permission together, and only then are they removed. A removal that fails, or that sets off another event while it
+  runs, therefore meets refused listeners only. One that has not been removed yet is refused too, because its owner has already been
+  refused. A listener whose own setup failed is refused from that moment, even if undoing the setup also failed.
+- **A refused callback leaves a note, never evidence.** It reads nothing, not even to name the event. It writes a late line naming only
+  the kind of event and never adds a problem, request, navigation, document change, foreign request or page change. One that arrives
+  while its own listener is still being added fails the case by name.
+- **Captured problems are delivered separately.** A console problem the lane captured earlier, and is still holding, can still be
+  delivered once, with its original page and document, until the journal is sealed. Withdrawing permission from listeners does not
+  discard it. The sealing rules are unchanged.
+
+Qualified on macOS in all three engines on Playwright's real objects: every one of the lane's listeners is called again with a counting
+version of a real event, while the lane is open, during its first real removal and after cleanup. While open it reads; refused, it reads
+and records nothing, and the report stays clean.
+
 The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
 origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
 once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins

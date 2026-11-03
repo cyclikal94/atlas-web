@@ -2670,3 +2670,220 @@ test.describe("native transport renderer crash (revision 31 qualification in rea
           expect(outcome).toContain(`lane 0 page ${i} document`);
       });
 });
+
+/**
+ * WEB-13b revision 32 (Review 39 F39-1, design assessment DA39-2/DA39-3; family native-transport-upstream-cleanup, harness incomplete_fix;
+ * token bde6ad2e…, C1–C5, qualification Q3/Q5/Q12 in real engines): every native callback the lane and its capture registered on REAL
+ * Playwright emitters (the client context, the page, its main frame's provenance emitter, the server context and the server Page), found
+ * by its guarded wrapper, is delivered again with a counting proxy of a REAL payload: while the lane is live (the healthy control: it is
+ * admitted and reads), during the FIRST real removal of the lane's finalisation (the lane's page route guard: the lane's request listener
+ * and the whole capture are still attached), and after settlement (a retained callback). Refused, none reads its payload, nothing is added
+ * to the journal or the foreign list, and each is a named late line; the report stays clean.
+ */
+type Emitter = { listeners(event: string): Array<(value: unknown) => void> };
+const counted = (target: object) => {
+  const count = { reads: 0, writes: 0 };
+  const proxy = new Proxy(target, {
+    get(t, key) {
+      count.reads += 1;
+      return Reflect.get(t, key, t);
+    },
+    set(t, key, value) {
+      count.writes += 1;
+      return Reflect.set(t, key, value, t);
+    },
+  });
+  return { proxy, count };
+};
+const implOf = (owner: object, value: object): Emitter =>
+  (
+    owner as unknown as {
+      _connection: { toImpl(x: object): Emitter };
+    }
+  )._connection.toImpl(value);
+
+test.describe("native transport callback admission (revision 32 qualification in real engines)", () => {
+  test("ADM1 every callback of the lane and its capture on real Playwright emitters: admitted and read while live; refused before any payload read during the first real removal and after settlement; the journal, the foreign list and the report unchanged", async ({
+    browser,
+  }) => {
+    const lanes = openTransportLanes(browser, test.info());
+    let settled = false;
+    try {
+      const lane = await guardLane(lanes);
+      const requests: object[] = [];
+      const responses: object[] = [];
+      const messages: object[] = [];
+      lane.context.on("request", (r) => void requests.push(r));
+      lane.context.on("response", (r) => void responses.push(r));
+      lane.context.on("console", (m) => void messages.push(m));
+      const page = await open(lane);
+      await page.evaluate(() => console.log("ADM1 control"));
+      await expect.poll(() => messages.length).toBeGreaterThan(0);
+      await quiet(lane);
+      const serverContext = implOf(lane.context, lane.context);
+      const serverPage = implOf(lane.context, page);
+      const serverFrame = implOf(lane.context, page.mainFrame());
+      const frameEmitter = (
+        page.mainFrame() as unknown as { _eventEmitter: Emitter }
+      )._eventEmitter;
+      const owned = (emitter: Emitter, event: string) =>
+        emitter
+          .listeners(event)
+          .filter((l) => l.name === "guarded" || l.name === "onCommit");
+      const payloadOf: Record<string, object> = {
+        request: requests[0] as object,
+        response: responses[0] as object,
+        requestfailed: requests[0] as object,
+        requestfinished: requests[0] as object,
+        page,
+        console: messages[0] as object,
+        weberror: {},
+        pageerror: new Error("ADM1"),
+        navigated: {},
+        crash: {},
+        internalframenavigatedtonewdocument: serverFrame,
+      };
+      const retained = [
+        ...[
+          "request",
+          "response",
+          "requestfailed",
+          "requestfinished",
+          "page",
+          "console",
+          "weberror",
+        ].flatMap((event) =>
+          owned(lane.context as unknown as Emitter, event).map((listener) => ({
+            where: "context",
+            event,
+            listener,
+          })),
+        ),
+        ...["console", "pageerror"].flatMap((event) =>
+          owned(page as unknown as Emitter, event).map((listener) => ({
+            where: "page",
+            event,
+            listener,
+          })),
+        ),
+        ...owned(frameEmitter, "navigated").map((listener) => ({
+          where: "frame",
+          event: "navigated",
+          listener,
+        })),
+        ...owned(serverContext, "internalframenavigatedtonewdocument").map(
+          (listener) => ({
+            where: "server",
+            event: "internalframenavigatedtonewdocument",
+            listener,
+          }),
+        ),
+        ...owned(serverPage, "crash").map((listener) => ({
+          where: "server page",
+          event: "crash",
+          listener,
+        })),
+      ];
+      // The recorder's seven context listeners and the lane's two; the page's two; its navigation; the source; its server crash.
+      expect(
+        retained.map((r) => `${r.where} ${r.event}`).sort(),
+        "the complete callback inventory, on the real emitters",
+      ).toEqual(
+        [
+          "context console",
+          "context page",
+          "context page",
+          "context request",
+          "context request",
+          "context requestfailed",
+          "context requestfinished",
+          "context response",
+          "context weberror",
+          "frame navigated",
+          "page console",
+          "page pageerror",
+          "server internalframenavigatedtonewdocument",
+          "server page crash",
+        ].sort(),
+      );
+      // The healthy control: a live callback is admitted and reads its REAL payload (a console.log: read, not recorded).
+      const control = counted(messages[0] as object);
+      for (const r of retained.filter(
+        (r) => r.where === "page" && r.event === "console",
+      ))
+        r.listener(control.proxy);
+      expect(control.count.reads, "admitted while live").toBeGreaterThan(0);
+      await page.close();
+      await quiet(lane);
+      const counts: Array<{ reads: number; writes: number }> = [];
+      const deliverAll = () => {
+        for (const r of retained) {
+          const payload = counted(payloadOf[r.event] ?? {});
+          counts.push(payload.count);
+          r.listener(payload.proxy);
+        }
+      };
+      const journal = () =>
+        JSON.stringify({
+          problems: lane.journal.problems,
+          requests: lane.journal.requests,
+          navigations: lane.journal.navigations,
+          activations: lane.journal.activations,
+          pages: lane.journal.pages,
+          foreign: lane.foreign,
+        });
+      const pageGuard = owned(lane.context as unknown as Emitter, "page").at(
+        -1,
+      );
+      const context = lane.context as unknown as {
+        off: (event: string, listener: unknown) => unknown;
+      };
+      const off = context.off;
+      let reentry: { before: string; after: string } | null = null;
+      context.off = function (this: unknown, event, listener) {
+        if (reentry === null && listener === pageGuard) {
+          const before = journal();
+          deliverAll();
+          reentry = { before, after: journal() };
+        }
+        return off.call(this, event, listener);
+      };
+      const report = await lanes.settle();
+      settled = true;
+      expect(reentry, "the first real removal re-entered").not.toBeNull();
+      const during = reentry as unknown as { before: string; after: string };
+      expect(
+        during.after,
+        "nothing recorded by a refused callback during the first real removal",
+      ).toBe(during.before);
+      const afterSettlement = journal();
+      deliverAll();
+      expect(journal()).toBe(afterSettlement);
+      expect(counts).toHaveLength(retained.length * 2);
+      expect(
+        counts,
+        "no payload read or written by a refused callback",
+      ).toEqual(counts.map(() => ({ reads: 0, writes: 0 })));
+      expect(lane.journal.lateEvents).toEqual(
+        expect.arrayContaining([
+          "a request delivered after the recorder was detached; not recorded",
+          "a console message delivered after the recorder was detached; not recorded",
+          "a server-observed document activation delivered after the recorder was detached; not recorded",
+          "page 0: a navigation event delivered after the recorder was detached; not recorded",
+          "page 0: a renderer crash delivered after the recorder was detached; not recorded",
+          "the lane's foreign-request listener: a request was delivered after the lane's own listeners were revoked; not observed",
+          "the lane's page route guard: a page announcement was delivered after the lane's own listeners were revoked; not observed",
+        ]),
+      );
+      expect(lane.journal.lateEvents).toHaveLength(retained.length * 2);
+      expect(report).toMatchObject({
+        closeErrors: [],
+        reportErrors: [],
+        openErrors: [],
+        failures: [],
+      });
+    } finally {
+      if (!settled) await lanes.settle();
+    }
+  });
+});
