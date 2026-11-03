@@ -22,8 +22,20 @@ export async function withFixtureServer(root, run) {
     ],
     { cwd: root, stdio: "ignore", detached: true },
   );
+  // A server that exits before it answers (pnpm or vite could not start) fails here, rather than leaving the caller to run against nothing.
+  let exited = null;
+  server.once("exit", (code, signal) => {
+    exited = { code, signal };
+  });
+  server.once("error", (error) => {
+    exited = { error: String(error) };
+  });
   try {
     for (let i = 0; i < 100; i += 1) {
+      if (exited)
+        throw new Error(
+          `the fixture preview server exited before it answered (${JSON.stringify(exited)})`,
+        );
       try {
         const response = await fetch(`http://127.0.0.1:${port}/__data`);
         if (response.ok) break;

@@ -1,5 +1,12 @@
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import type { BrowserContext, Page } from "@playwright/test";
+import { createHash } from "node:crypto";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import type { Page } from "@playwright/test";
 import {
   allWorkloads,
   denseChecklistPage,
@@ -14,17 +21,21 @@ import {
   waitForState,
 } from "./data-sync-helpers";
 import { expect, test } from "./helpers";
+import { oneColdRun, unusableRuns } from "./profile-cold-run";
 import {
-  cdpHeap,
-  descendantsRssKb,
+  beginCollection,
+  browserMemory,
+  endCollection,
   engineOf,
   mib,
   PROFILE_OUT,
   record,
   recordValue,
-  sampler,
   sleep,
+  writeEvidence,
 } from "./profile-helpers";
+import { p2PortOf } from "./profile-p2-port";
+import { collectP2Iterations, P2_SAMPLE_METHOD } from "./profile-samples";
 
 /**
  * WEB-09a profiling, fixture layer (plan 7.2): P-2, P-3, P-5, P-11 and P-Q in real Chromium, Firefox and WebKit through the production
@@ -38,35 +49,24 @@ test.skip(
   "not run: measurements are taken by `pnpm profile:sync`",
 );
 test.describe.configure({ mode: "serial" });
+// Each test's collection window (review finding R1): every row carries it, and the collection log records how the test ended.
+test.beforeEach(({ browserName: _browserName }, info) => beginCollection(info));
+test.afterEach(({ browserName: _browserName }, info) => endCollection(info));
 
 // ATLAS_PROFILE_SAMPLES shortens a DEBUGGING run of this spec; the recorded measurements use the defaults (20 warm-ups, 300 samples).
 const QUICK = Number(process.env.ATLAS_PROFILE_SAMPLES ?? 0);
 const WARMUP = QUICK > 0 ? 2 : 20;
 const SAMPLES = QUICK > 0 ? QUICK : 300;
 
-interface Commit {
-  scan_ms?: number;
-  commit_ms?: number;
-  bytes?: number;
-  kind?: string;
-}
-const commitsOf = (trace: string[]): Commit[] =>
-  trace
-    .filter((line) => line.includes("data.sync_commit"))
-    .map((line) => {
-      const at = line.indexOf("{");
-      try {
-        return at < 0 ? {} : (JSON.parse(line.slice(at)) as Commit);
-      } catch {
-        return {};
-      }
-    });
-
 /** Installs a long-task observer (Chromium and some others; the figure is null where the engine has none). */
 const observeLongTasks = (page: Page) =>
   page.evaluate(() => {
     const w = window as unknown as { __long: number[] };
     w.__long = [];
+    // Revision 18: `observe` ignores an entry type the engine lacks without throwing (Firefox 155 and WebKit 26.6 do), which published
+    // an all-zero series for an observer that never ran; the engine's own list decides.
+    if (!PerformanceObserver.supportedEntryTypes?.includes("longtask"))
+      return false;
     try {
       new PerformanceObserver((list) => {
         for (const entry of list.getEntries()) w.__long.push(entry.duration);
@@ -130,60 +130,72 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
   const supportsLong = await observeLongTasks(page);
   await startLeader(page);
   await waitForState(page, "idle");
-  for (const shape of SHAPES) {
-    if (QUICK > 0) {
+  if (QUICK > 0)
+    for (const shape of SHAPES) {
       shape.samples = Math.min(shape.samples, QUICK);
       shape.warmup = Math.min(shape.warmup, 2);
     }
-    const wall: number[] = [];
-    const scan: number[] = [];
-    const commit: number[] = [];
-    const long: number[] = [];
-    let bytes = 0;
-    for (let i = 0; i < shape.warmup + shape.samples; i += 1) {
-      const body = shape.body(i);
-      bytes = new TextEncoder().encode(body).length;
-      net.script.push(() => ({ status: 200, body }));
-      const before = await page.evaluate(() => {
-        const w = window as unknown as { __long: number[] };
-        w.__long = [];
-        return (window.__atlasData?.engineTrace ?? []).length;
+  // Revision 18 (review 18 R18-P2, design assessment C1/C2): every iteration, warm-ups included, is validated as its own written page by
+  // the shared collector before a warm-up's timings are dropped; the first failure stops the collection. Wall time is unchanged (the
+  // nudge to the same idle wait); scan and commit are the engine's own monotonic timings of that iteration's first commit.
+  const port = p2PortOf(page, net);
+  const c = await collectP2Iterations(port, SHAPES, {
+    longTasks: supportsLong,
+    timeout: 30_000,
+    polling: 5,
+  });
+  // The whole collection is kept BEFORE anything is asserted: the raw engine trace of the run (create-once) and the stamped support
+  // (`p2-sample/4`: the schedule, every attempted iteration and the first failure, bound to that trace by its line count and SHA-256),
+  // from which the contract re-derives every iteration and the scan and commit series. A secondary error never replaces the failure.
+  const secondary: string[] = [];
+  let trace: string | null = null;
+  try {
+    trace = (
+      await page.evaluate(() => window.__atlasData?.engineTrace ?? [])
+    ).join("\n");
+  } catch (error) {
+    secondary.push(`the trace could not be read (${String(error)})`);
+  }
+  if (trace !== null)
+    try {
+      mkdirSync(`${PROFILE_OUT}/raw`, { recursive: true });
+      writeFileSync(`${PROFILE_OUT}/raw/P-2.trace.${engine}.txt`, trace, {
+        flag: "wx",
       });
-      const started = Date.now();
-      await page.evaluate(() => window.__atlasData?.nudgeSync());
-      await expect
-        .poll(
-          () =>
-            page.evaluate(
-              (n) =>
-                (window.__atlasData?.engineTrace ?? [])
-                  .slice(n)
-                  .some((line) => line.includes("data.sync_commit")) &&
-                window.__atlasData?.engineState()?.kind === "idle",
-              before,
-            ),
-          { timeout: 120_000, intervals: [5, 10, 25] },
-        )
-        .toBe(true);
-      const elapsed = Date.now() - started;
-      if (i < shape.warmup) continue;
-      const trace = await page.evaluate(
-        (n) => (window.__atlasData?.engineTrace ?? []).slice(n),
-        before,
-      );
-      const last = commitsOf(trace).at(-1);
-      wall.push(elapsed);
-      if (last?.scan_ms !== undefined) scan.push(last.scan_ms);
-      if (last?.commit_ms !== undefined) commit.push(last.commit_ms);
-      long.push(
-        await page.evaluate(() =>
-          (window as unknown as { __long: number[] }).__long.reduce(
-            (a, b) => a + b,
-            0,
-          ),
-        ),
-      );
+    } catch (error) {
+      secondary.push(`the trace could not be written (${String(error)})`);
     }
+  writeEvidence(`raw/P-2.samples.${engine}.json`, {
+    method: P2_SAMPLE_METHOD,
+    engine,
+    schedule: SHAPES.map((shape) => ({
+      shape: shape.name,
+      warmup: shape.warmup,
+      samples: shape.samples,
+    })),
+    iterations: c.iterations,
+    failure: c.failure,
+    trace:
+      trace === null
+        ? null
+        : {
+            lines: trace.split("\n").length,
+            sha256: createHash("sha256").update(trace).digest("hex"),
+          },
+    secondary,
+  });
+  expect(
+    c.failure,
+    "P-2: every iteration, warm-ups included, is its own written page",
+  ).toBeNull();
+  expect(secondary).toEqual([]);
+  // Only a complete collection publishes its series.
+  for (const shape of SHAPES) {
+    const v = c.series[shape.name];
+    if (!v) throw new Error(`P-2 ${shape.name}: no series`);
+    const bytes = new TextEncoder().encode(
+      shape.body(shape.warmup + shape.samples - 1),
+    ).length;
     const extra = {
       shape: shape.name,
       bytes,
@@ -192,23 +204,19 @@ test("P-2: the end-to-end cost of applying one page, by shape (fetchFor, scan, c
       method:
         "wall = nudge to idle through the stubbed network (includes the stub's own transfer); scan and commit are the engine's own monotonic timings",
     };
-    record(`P-2 ${shape.name} wall_ms`, engine, wall, extra);
-    record(`P-2 ${shape.name} scan_ms`, engine, scan, extra);
-    record(`P-2 ${shape.name} commit_ms`, engine, commit, extra);
+    record(`P-2 ${shape.name} wall_ms`, engine, v.wall, extra);
+    record(`P-2 ${shape.name} scan_ms`, engine, v.scan, extra);
+    record(`P-2 ${shape.name} commit_ms`, engine, v.commit, extra);
     if (supportsLong)
-      record(`P-2 ${shape.name} long_task_ms_per_page`, engine, long, extra);
+      record(`P-2 ${shape.name} long_task_ms_per_page`, engine, v.long, extra);
+    // A typed capability record: the engine has no long-task observer (the evidence contract accepts this, and only this, in place
+    // of the series; an omitted series is missing).
     else
       recordValue(`P-2 ${shape.name} long_task_ms_per_page`, engine, {
-        status: "not_run",
+        capability: "unavailable",
         reason: "this engine has no longtask observer",
       });
   }
-  // The raw engine trace of the whole run is kept.
-  const trace = await page.evaluate(
-    () => window.__atlasData?.engineTrace ?? [],
-  );
-  mkdirSync(`${PROFILE_OUT}/raw`, { recursive: true });
-  writeFileSync(`${PROFILE_OUT}/raw/P-2.trace.${engine}.txt`, trace.join("\n"));
 });
 
 // ---- P-3: durability ------------------------------------------------------------------------------------------------------------------
@@ -327,76 +335,6 @@ test("P-5: draining a 200-entry queue at maxInFlight 1 (the only value D-18 defi
 const VALID = ["W1", "W3", "W4", "W6"];
 const COLD_RUNS = QUICK > 0 ? 1 : 5;
 
-async function oneColdRun(
-  browser: import("@playwright/test").Browser,
-  baseURL: string | undefined,
-  engine: string,
-  body: string,
-) {
-  const context: BrowserContext = await browser.newContext({ baseURL });
-  try {
-    const net = await stubNetwork(context);
-    await seedSettled(context);
-    const page = await bootSession(context);
-    const heap = await cdpHeap(page, engine);
-    await heap.gc();
-    const baselineHeap = await heap.used();
-    const baselineRss = descendantsRssKb();
-    net.script.push(() => ({ status: 200, body }));
-    const heapSampler = sampler(() => heap.used(), 25);
-    const rssSampler = sampler(() => descendantsRssKb(), 100);
-    const started = Date.now();
-    let outcome = "admitted";
-    try {
-      await startLeader(page);
-      await page.waitForFunction(
-        () => {
-          const state = window.__atlasData?.engineState();
-          return (
-            state !== null &&
-            state?.kind !== "running" &&
-            state?.kind !== "not_started"
-          );
-        },
-        undefined,
-        { timeout: 240_000, polling: 25 },
-      );
-      const state = await page.evaluate(() =>
-        window.__atlasData?.engineState(),
-      );
-      outcome = state?.kind === "idle" ? "admitted" : "refused";
-    } catch {
-      outcome = "timeout";
-    }
-    const elapsed = Date.now() - started;
-    const heapSamples = await heapSampler.stop();
-    const rssSamples = await rssSampler.stop();
-    await heap.gc();
-    const afterHeap = await heap.used();
-    await sleep(200);
-    const afterRss = descendantsRssKb();
-    const trace = await page.evaluate(
-      () => window.__atlasData?.engineTrace ?? [],
-    );
-    const commit = commitsOf(trace).at(-1);
-    return {
-      outcome,
-      elapsed_ms: elapsed,
-      scan_ms: commit?.scan_ms ?? null,
-      commit_ms: commit?.commit_ms ?? null,
-      requests: net.requests.length,
-      heap_baseline_bytes: baselineHeap,
-      heap_peak_bytes: heapSamples.length ? Math.max(...heapSamples) : null,
-      heap_after_gc_bytes: afterHeap,
-      rss_baseline_kib: baselineRss,
-      rss_peak_kib: rssSamples.length ? Math.max(...rssSamples) : null,
-      rss_after_kib: afterRss,
-    };
-  } finally {
-    await context.close();
-  }
-}
-
 test("P-11: W1, W3, W4, W6 (five cold runs each) and the W7 negative controls through fetchFor, the scanner and the page commit", async ({
   browser,
 }, info) => {
@@ -425,53 +363,55 @@ test("P-11: W1, W3, W4, W6 (five cold runs each) and the W7 negative controls th
     });
     // A negative control that is ADMITTED, or a valid workload that is not, is a finding, not a pass mark (it is reported, never decided here).
   }
-  mkdirSync(`${PROFILE_OUT}/memory`, { recursive: true });
-  writeFileSync(
-    `${PROFILE_OUT}/memory/P-11.${engine}.json`,
-    `${JSON.stringify(
-      {
-        engine,
-        path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the network is a Playwright route stub",
-        cold: "a new browser context for every run",
-        heap:
-          engine === "chromium"
-            ? "CDP Performance.getMetrics JSHeapUsedSize sampled every 25 ms; baseline and 'after' follow HeapProfiler.collectGarbage"
-            : "not available in this engine (null)",
-        rss: "resident set of the browser process tree started by the test worker, sampled every 100 ms with ps; includes every renderer and helper of the engine, so it is an upper bound for the tab and is not comparable between engines",
-        durability_note: "ephemeral Playwright profile",
-        rows,
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  writeEvidence(`memory/P-11.${engine}.json`, {
+    engine,
+    path: "production session (fetchFor, the real stamped wrapper) -> scanner -> validator -> page commit; the network is a Playwright route stub",
+    cold: "a new browser context for every run",
+    heap:
+      engine === "chromium"
+        ? "CDP Performance.getMetrics JSHeapUsedSize sampled every 25 ms; baseline and 'after' follow HeapProfiler.collectGarbage"
+        : "not available in this engine (null)",
+    rss: "resident set of the BROWSER's own processes, sampled about every 100 ms with ps (not blocking the worker): the test worker's descendants and, for WebKit on macOS, every service of its host's launchd PID domain (WebContent, Networking, GPU), each checked against pid reuse; every run records its process set, sample count, failed samples and whether attribution was complete. It covers every renderer and helper of the engine, so it is an upper bound for the tab and is not comparable between engines",
+    durability_note: "ephemeral Playwright profile",
+    rows,
+  });
   // One summary line per workload for the measurement table.
   for (const row of rows) {
     const runs = row.runs as Array<{
-      elapsed_ms: number;
+      elapsed_ms: number | null;
       rss_peak_kib: number | null;
       heap_peak_bytes: number | null;
     }>;
+    // Every run's figure, as it is: an attempt without one (an error run) leaves a non-number in the series, which the evidence
+    // contract refuses rather than accepting a shorter distribution.
     record(
       `P-11 ${row.workload} elapsed_ms`,
       engine,
-      runs.map((r) => r.elapsed_ms),
+      runs.map((r) => r.elapsed_ms as number),
       { bytes: row.bytes, expected: row.expected },
     );
-    const rss = runs
-      .map((r) => r.rss_peak_kib)
-      .filter((v): v is number => v !== null);
-    if (rss.length)
-      record(`P-11 ${row.workload} rss_peak_kib`, engine, rss, {
+    record(
+      `P-11 ${row.workload} rss_peak_kib`,
+      engine,
+      runs.map((r) => r.rss_peak_kib as number),
+      {
         bytes: row.bytes,
-        caveat: "whole process tree of the engine",
-      });
-    const heap = runs
-      .map((r) => r.heap_peak_bytes)
-      .filter((v): v is number => v !== null);
-    if (heap.length)
-      record(`P-11 ${row.workload} heap_peak_bytes`, engine, heap, {
-        bytes: row.bytes,
+        caveat:
+          "the browser's own processes (on macOS WebKit with its launchd services); per-run attribution in memory/",
+      },
+    );
+    if (engine === "chromium")
+      record(
+        `P-11 ${row.workload} heap_peak_bytes`,
+        engine,
+        runs.map((r) => r.heap_peak_bytes as number),
+        { bytes: row.bytes },
+      );
+    else
+      recordValue(`P-11 ${row.workload} heap_peak_bytes`, engine, {
+        capability: "unavailable",
+        reason:
+          "this engine exposes no JS heap signal to the test (CDP's Performance domain is Chromium's)",
       });
   }
   // W5 is the processing path only: it runs in the device page (`/profile-harness`), covered by the protocol test below.
@@ -481,17 +421,48 @@ test("P-11: W1, W3, W4, W6 (five cold runs each) and the W7 negative controls th
       "snapshot pages are not ordinary pages; the shared processing path (scan, validate every change) runs in /profile-harness",
   });
   expect(rows.length).toBeGreaterThan(0);
+  // The stage barrier (revision 9, review 9 R2), after the file and every row are written: a run with no verdict on the page fails the
+  // stage, so the programme stops instead of measuring on. A valid workload refused, or a control admitted, stays a reported finding.
+  expect(
+    rows.flatMap((row) =>
+      unusableRuns(row.runs as Array<{ outcome: string; detail: string }>).map(
+        (problem) => `${row.workload} ${problem}`,
+      ),
+    ),
+    "cold runs without a usable outcome observation",
+  ).toEqual([]);
 });
 
 // ---- the device page itself, on this desktop: the whole protocol, validated ---------------------------------------------------------------
-test("P-11 (device page): the full /profile-harness protocol on this desktop engine, collected and written for the validator", async ({
+// It runs in the `device` stage, after the integration stage has captured W2 into the same evidence directory: the capture is picked with the
+// page's file input, as an operator picks it on a device, and every W2 run reads it back and verifies its SHA-256 (review R3).
+test("P-11 (device page): the full /profile-harness protocol on this desktop engine, W2 included, collected and written for the validator", async ({
   context,
 }, info) => {
   test.setTimeout(40 * 60_000);
   const engine = engineOf(info);
+  const capture = `${PROFILE_OUT}/w2/W2-captured.${engine}.limit-1.json`;
+  expect(
+    existsSync(capture),
+    `the device stage needs the integration stage's W2 capture ${capture}`,
+  ).toBe(true);
+  const w2 = readFileSync(capture);
+  const w2sha256 = createHash("sha256").update(w2).digest("hex");
   const page = await context.newPage();
-  await page.goto("/profile-harness?protocol=1");
-  const rssSampler = sampler(() => descendantsRssKb(), 200);
+  await page.goto("/profile-harness");
+  await page.setInputFiles("#w2-capture", {
+    name: `W2-captured.${engine}.limit-1.json`,
+    mimeType: "application/json",
+    buffer: w2,
+  });
+  await expect(page.locator("#profile-status")).toContainText(
+    `SHA-256 ${w2sha256}`,
+  );
+  // The browser's memory over the WHOLE protocol (an aggregate across 39 page loads, not a per-workload peak; attributed as P-11's is).
+  const memory = browserMemory();
+  await memory.baseline();
+  memory.start(200);
+  await page.goto(`/profile-harness?protocol=1&w2sha256=${w2sha256}`);
   await page.waitForFunction(
     () =>
       document
@@ -500,19 +471,43 @@ test("P-11 (device page): the full /profile-harness protocol on this desktop eng
     undefined,
     { timeout: 35 * 60_000, polling: 500 },
   );
-  const rss = await rssSampler.stop();
+  await memory.stop();
   const collected = await page.evaluate(() =>
-    JSON.parse(localStorage.getItem("atlas-profile-results") ?? "null"),
+    (
+      window as unknown as { __profile: { results: () => unknown } }
+    ).__profile.results(),
   );
-  expect(collected?.runs?.length).toBeGreaterThan(0);
+  const results = collected as {
+    protocol_id: string;
+    runs: Array<{ workload: string; sha256: string; protocol_id: string }>;
+  };
+  expect(results?.runs?.length).toBeGreaterThan(0);
+  // The capture route was taken: five cold W2 runs of exactly these bytes, all of one protocol.
+  const w2Runs = results.runs.filter((r) => r.workload === "W2");
+  expect(w2Runs.map((r) => r.sha256)).toEqual(Array(5).fill(w2sha256));
+  expect(new Set(results.runs.map((r) => r.protocol_id))).toEqual(
+    new Set([results.protocol_id]),
+  );
+  const text = `${JSON.stringify(collected, null, 2)}\n`;
   mkdirSync(`${PROFILE_OUT}/device-page`, { recursive: true });
-  writeFileSync(
-    `${PROFILE_OUT}/device-page/results.${engine}.json`,
-    `${JSON.stringify(collected, null, 2)}\n`,
-  );
+  writeFileSync(`${PROFILE_OUT}/device-page/results.${engine}.json`, text, {
+    flag: "wx",
+  });
+  // The row that binds the results file to this run (its SHA-256), with the protocol's aggregate memory.
   recordValue("P-11 device page", engine, {
-    runs: collected.runs.length,
-    rss_peak_kib_whole_tree: rss.length ? Math.max(...rss) : null,
+    runs: results.runs.length,
+    protocol_id: results.protocol_id,
+    results_file: `device-page/results.${engine}.json`,
+    results_sha256: createHash("sha256").update(text).digest("hex"),
+    w2_capture: {
+      file: `w2/W2-captured.${engine}.limit-1.json`,
+      sha256: w2sha256,
+    },
+    browser_memory_whole_protocol: {
+      ...memory.record(),
+      reading:
+        "an aggregate over the whole protocol's page loads: not a per-workload peak, not device memory",
+    },
   });
 });
 
@@ -672,4 +667,392 @@ test("P-Q: the storage footprint of an empty account database, of 200 queued dra
         : null,
   });
   appendFileSync(`${PROFILE_OUT}/values.jsonl`, "");
+});
+
+// ---- P-5 (dense): draining a queue of dense drafts and one 1 MiB import draft ---------------------------------------------------------
+test("P-5 (dense): draining 200 drafts each carrying a dense checklist value, and one draft carrying a 1 MiB import payload, at maxInFlight 1, 20 runs", async ({
+  browser,
+}, info) => {
+  test.setTimeout(30 * 60_000);
+  const engine = engineOf(info);
+  const drains: number[] = [];
+  const perDraft: number[] = [];
+  let bytesQueued = 0;
+  for (let run = 0; run < (QUICK > 0 ? 2 : 20); run += 1) {
+    const context = await browser.newContext({
+      baseURL: info.project.use.baseURL,
+    });
+    try {
+      await stubNetwork(context);
+      await seedSettled(context);
+      const page = await bootSession(context);
+      bytesQueued = await page.evaluate(async (account) => {
+        const data = window.__atlasData;
+        if (!data) throw new Error("no harness");
+        await data.startOutbox(account, {
+          start: false,
+          seedCursor: "cursor-0",
+        });
+        // WEB-03's dense checklist: 100 items, 40 checked, one-character labels (7,402 bytes of value).
+        const checklist = () => {
+          const items = Array.from({ length: 100 }, () => ({
+            id: crypto.randomUUID(),
+            label: "x",
+          }));
+          return {
+            kind: "checklist",
+            items,
+            checked: items.slice(0, 40).map((item) => item.id),
+          };
+        };
+        let bytes = 0;
+        const person = crypto.randomUUID();
+        for (let i = 0; i < 200; i += 1) {
+          const id = crypto.randomUUID();
+          const command = {
+            commands: [
+              {
+                kind: "create_field",
+                id,
+                person_id: person,
+                label: "Checklist",
+                value: checklist(),
+              },
+            ],
+          };
+          bytes += JSON.stringify(command).length;
+          const out = await data.enqueue({
+            endpoint: "/commands",
+            targets: [
+              {
+                resourceId: id,
+                role: "primary",
+                basis: "resource",
+                versionChecked: false,
+                seedIfUntracked: 1,
+              },
+            ],
+            command,
+          });
+          if (out.kind !== "queued") throw new Error(`draft ${i}: ${out.kind}`);
+        }
+        // Incompressible text, as P-Q's import: the engines compress what they store.
+        let payloadText = "";
+        for (let chunk = 0; chunk < 32; chunk += 1) {
+          const random = new Uint8Array(24_576);
+          crypto.getRandomValues(random);
+          payloadText += btoa(String.fromCharCode(...random));
+        }
+        const id = crypto.randomUUID();
+        const imported = {
+          commands: [
+            { kind: "create_person", id, name: "import", payload: payloadText },
+          ],
+        };
+        bytes += JSON.stringify(imported).length;
+        const out = await data.enqueue({
+          endpoint: "/commands",
+          targets: [
+            {
+              resourceId: id,
+              role: "primary",
+              basis: "resource",
+              versionChecked: false,
+              seedIfUntracked: 1,
+            },
+          ],
+          command: imported,
+        });
+        if (out.kind !== "queued") throw new Error(`import: ${out.kind}`);
+        return bytes;
+      }, ACCOUNT);
+      const started = Date.now();
+      await page.evaluate(() => window.__atlasData?.beginOutbox());
+      await expect
+        .poll(
+          () =>
+            page.evaluate(
+              async (a) =>
+                (await window.__atlasData?.queue(a))?.every(
+                  (d) => d.status === "acknowledged",
+                ),
+              ACCOUNT,
+            ),
+          { timeout: 240_000, intervals: [25, 50, 100] },
+        )
+        .toBe(true);
+      const elapsed = Date.now() - started;
+      drains.push(elapsed);
+      perDraft.push(elapsed / 201);
+    } finally {
+      await context.close();
+    }
+  }
+  const extra = {
+    queue: 201,
+    dense_drafts: 200,
+    import_drafts: 1,
+    bytes_queued: bytesQueued,
+    maxInFlight: 1,
+    method:
+      "wall time from beginOutbox to every draft acknowledged, the command endpoint a stub (includes Playwright's route round trip); every draft was queued through the facade (quota reserve and key rule applied)",
+  };
+  record("P-5 dense drain_201_ms", engine, drains, extra);
+  record("P-5 dense per_draft_ms", engine, perDraft, extra);
+});
+
+// ---- P-Q2: the inputs of the quota reserve (WEB-09c plan 4.5) --------------------------------------------------------------------------
+/** The origin's storage as the page and (Chromium only) the DevTools protocol report it, after two readings half a second apart agree. */
+async function footprint(page: Page, engine: string) {
+  const cdp =
+    engine === "chromium" ? await page.context().newCDPSession(page) : null;
+  const snapshot = async () => {
+    const estimate = await page.evaluate(async () => {
+      const e = await navigator.storage.estimate();
+      return { usage: e.usage ?? null, quota: e.quota ?? null };
+    });
+    let indexeddb: number | null = null;
+    if (cdp) {
+      const result = (await cdp.send("Storage.getUsageAndQuota", {
+        origin: new URL(page.url()).origin,
+      })) as {
+        usageBreakdown?: Array<{ storageType: string; usage: number }>;
+      };
+      indexeddb =
+        result.usageBreakdown?.find((b) => b.storageType === "indexeddb")
+          ?.usage ?? null;
+    }
+    return { usage: estimate.usage, quota: estimate.quota, indexeddb };
+  };
+  let last = await snapshot();
+  for (let i = 0; i < 16; i += 1) {
+    await sleep(500);
+    const next = await snapshot();
+    const same = next.usage === last.usage && next.indexeddb === last.indexeddb;
+    last = next;
+    if (same) break;
+  }
+  await cdp?.detach();
+  return last;
+}
+
+test("P-Q2: the quota reserve's inputs: the atlas-auth burst of three pages' stamped requests, each engine's estimate step, and the ledger cost of a reservation", async ({
+  context,
+}, info) => {
+  test.setTimeout(20 * 60_000);
+  const engine = engineOf(info);
+  await stubNetwork(context);
+  // Ordinary requests to `/probe` are HELD until released, so every lease and observation write the pages let out is outstanding at once.
+  // After the release nothing is held: requests that were waiting to be issued go straight through.
+  const waiting: Array<() => void> = [];
+  let held = 0;
+  let holding = true;
+  await context.route(/\/api\/experimental\/v1\/probe/, async (route) => {
+    if (holding) {
+      held += 1;
+      await new Promise<void>((resolve) => waiting.push(resolve));
+    }
+    await route
+      .fulfill({ status: 200, contentType: "application/json", body: "{}" })
+      .catch(() => undefined);
+  });
+  await seedSettled(context);
+  const pages = [
+    await bootSession(context),
+    await bootSession(context),
+    await bootSession(context),
+  ];
+  const [first] = pages;
+  if (!first) throw new Error("no page");
+
+  // (a) The atlas-auth burst: 3 pages x 20 stamped requests in flight together.
+  const idle = await footprint(first, engine);
+  const inFlight = pages.map((page) =>
+    page.evaluate(async (account) => {
+      const session = window.__atlasFixture?.session?.booted?.session;
+      const identity = session?.identity.get();
+      if (!session || !identity) throw new Error("no session");
+      const fetchPage = session.api.fetchFor(
+        "ordinary",
+        account,
+        identity.epoch,
+      );
+      const outcomes = await Promise.all(
+        Array.from({ length: 20 }, async () => {
+          try {
+            const response = await fetchPage(
+              new Request(
+                new URL("/api/experimental/v1/probe", location.origin),
+              ),
+            );
+            await response.arrayBuffer();
+            return "released";
+          } catch (error) {
+            return (error as { kind?: string }).kind ?? "error";
+          }
+        }),
+      );
+      return outcomes;
+    }, ACCOUNT),
+  );
+  // The plateau: as many as the pages let out together (another page's request may wait for this one's to be resolved), unchanged for 2 s.
+  let plateau = -1;
+  for (let i = 0; i < 60 && plateau !== held; i += 1) {
+    plateau = held;
+    await sleep(2_000);
+  }
+  const heldAtOnce = held;
+  const burst = await footprint(first, engine);
+  holding = false;
+  for (const release of waiting.splice(0)) release();
+  const outcomes = (await Promise.all(inFlight)).flat();
+  const after = await footprint(first, engine);
+  const growth = (to: { usage: number | null; indexeddb: number | null }) => ({
+    estimate:
+      to.usage !== null && idle.usage !== null ? to.usage - idle.usage : null,
+    indexeddb_exact:
+      to.indexeddb !== null && idle.indexeddb !== null
+        ? to.indexeddb - idle.indexeddb
+        : null,
+  });
+
+  // (b) The estimate's step: incompressible writes of 1 KiB x 2^k into a scratch database of this origin, deleted afterwards.
+  const ladder = await first.evaluate(async () => {
+    const open = () =>
+      new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("atlas-pq2-scratch", 1);
+        request.onupgradeneeded = () =>
+          request.result.createObjectStore("blobs");
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    const db = await open();
+    const usage = async () => {
+      let last = (await navigator.storage.estimate()).usage ?? null;
+      for (let i = 0; i < 16; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const next = (await navigator.storage.estimate()).usage ?? null;
+        if (next === last) break;
+        last = next;
+      }
+      return last;
+    };
+    const rows: Array<{
+      added_bytes: number;
+      total_written: number;
+      usage: number | null;
+      delta: number | null;
+    }> = [];
+    const initial = await usage();
+    let previous = initial;
+    let written = 0;
+    for (let k = 0; k <= 14; k += 1) {
+      const size = 1024 * 2 ** k;
+      const bytes = new Uint8Array(size);
+      for (let at = 0; at < size; at += 65_536)
+        crypto.getRandomValues(bytes.subarray(at, Math.min(size, at + 65_536)));
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction("blobs", "readwrite");
+        tx.objectStore("blobs").put(bytes.buffer, `k${k}`);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      written += size;
+      const now = await usage();
+      rows.push({
+        added_bytes: size,
+        total_written: written,
+        usage: now,
+        delta: now !== null && previous !== null ? now - previous : null,
+      });
+      previous = now;
+    }
+    db.close();
+    await new Promise<void>((resolve) => {
+      const request = indexedDB.deleteDatabase("atlas-pq2-scratch");
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => resolve();
+    });
+    return { initial, rows };
+  });
+  const steps = ladder.rows;
+  const firstChange = steps.find((row) => (row.delta ?? 0) > 0);
+
+  // (c) The ledger: what one reservation of the outbox's quota guard costs in the origin, over 100 reservations never settled.
+  await first.evaluate(async (account) => {
+    const data = window.__atlasData;
+    if (!data) throw new Error("no harness");
+    await data.startOutbox(account, { start: false, seedCursor: "cursor-0" });
+  }, ACCOUNT);
+  const ledgerBefore = await footprint(first, engine);
+  const verdicts: Record<string, number> = {};
+  for (let i = 0; i < 100; i += 1) {
+    const verdict = await first.evaluate(
+      () => window.__atlasData?.reserveQuota(1024) ?? "no harness",
+    );
+    verdicts[verdict] = (verdicts[verdict] ?? 0) + 1;
+  }
+  const ledgerAfter = await footprint(first, engine);
+
+  const burstBytes =
+    growth(burst).indexeddb_exact ?? growth(burst).estimate ?? null;
+  const step = firstChange?.delta ?? null;
+  const recommendation =
+    burstBytes === null || step === null
+      ? null
+      : Math.max(burstBytes * 4, step * 2);
+  recordValue("P-Q2 quota reserve inputs", engine, {
+    note: "navigator.storage.estimate() is quantised or obfuscated in Firefox and Safari; only Chromium's CDP figure (indexeddb, bytes) is exact. Desktop figures: they do not set the reserve of any device class",
+    atlas_auth_burst: {
+      pages: 3,
+      requests_per_page: 20,
+      held_at_once: heldAtOnce,
+      held_at_once_reading:
+        "the stamped requests the three pages let out together while every answer was held: fewer than 60 means a page's requests waited for another page's (the burst is that of what was out together)",
+      outcomes,
+      idle,
+      during: burst,
+      after,
+      growth_during: growth(burst),
+      growth_after: growth(after),
+    },
+    estimate_granularity: {
+      // The usage before the first write: the first write's delta is measured from it (revision 3: kept, so the ladder can be checked).
+      initial_usage: ladder.initial,
+      rows: steps,
+      smallest_write_that_moved_the_estimate: firstChange?.added_bytes ?? null,
+      estimate_step_bytes: step,
+      reading:
+        firstChange === undefined
+          ? "the estimate did not move for any write up to 16 MiB: an obfuscated or very coarse estimate"
+          : "the first write that changed the estimate, and by how much",
+    },
+    ledger: {
+      reservations: 100,
+      bytes_each: 1024,
+      verdicts,
+      // The readings the growth is taken from (revision 3: kept, so the growth can be checked).
+      before: ledgerBefore,
+      after: ledgerAfter,
+      growth: {
+        estimate:
+          ledgerAfter.usage !== null && ledgerBefore.usage !== null
+            ? ledgerAfter.usage - ledgerBefore.usage
+            : null,
+        indexeddb_exact:
+          ledgerAfter.indexeddb !== null && ledgerBefore.indexeddb !== null
+            ? ledgerAfter.indexeddb - ledgerBefore.indexeddb
+            : null,
+      },
+    },
+    derived_desktop_recommendation_bytes: recommendation,
+    derivation:
+      "max(burst x 4, estimate step x 2): the multipliers are an ENGINEERING MARGIN, not a measurement; reported against quotaReserveBytes (8 MiB), which is NOT changed",
+    quota_reserve_bytes_in_use: 8 * 1024 * 1024,
+  });
+  // The measurement happened: at least one page's twenty requests were out together while held, and every request was then answered.
+  expect(heldAtOnce).toBeGreaterThanOrEqual(20);
+  expect(outcomes.length).toBe(60);
+  expect(steps.length).toBe(15);
 });

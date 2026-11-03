@@ -424,7 +424,8 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
           stacks.map((s) => [s.name, inBrowser(s.keys, browser).length]),
         ),
       ).toEqual({
-        base: 28,
+        // WEB-09c: integration.profile-sync.spec.ts adds W2-limits, a fifth measurement case (a designed skip without ATLAS_PROFILE).
+        base: 29,
         pages: 18,
         "password-path": 8,
         i14e: 4,
@@ -446,7 +447,7 @@ describe("R22: every discovered integration case is in exactly one stack (Playwr
         // WEB-10b: I-LS1..I-LS8 on a stack of their own.
         lists: 8,
       });
-      expect(inBrowser(whole, browser)).toHaveLength(271);
+      expect(inBrowser(whole, browser)).toHaveLength(272);
     }
     // Sharing and snapshot are named by their own stacks only.
     for (const s of stacks)
@@ -637,9 +638,9 @@ describe("R23: the next stack or browser starts only after the previous one pass
     for (const browser of BROWSERS)
       expect(engines[browser]).toMatchObject({
         complete: true,
-        planned_cases: 271,
+        planned_cases: 272,
         passed: 265,
-        designed_skips: 6,
+        designed_skips: 7,
         failed: 0,
         interrupted: 0,
         not_run: 0,

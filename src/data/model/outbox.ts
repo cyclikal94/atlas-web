@@ -1178,10 +1178,14 @@ export function recomputeVersions(input: RecomputeInput): Recomputed {
 export const wireBody = (draft: Pick<DraftWithCommand, "command">): string =>
   canonicalJson(draft.command);
 
-/** One candidate row per primary target, created when a draft is claimed for sending. */
+/**
+ * One candidate row per primary target, created when a draft is claimed for sending, with the claim's `page_seq` and `request_seq` (the
+ * second: the witness a staged word is judged against, R20-SEG).
+ */
 export function candidateRows(
   draft: DraftRow,
   pageSeq: number,
+  requestSeq: number,
 ): PendingEffectRow[] {
   return draft.target_resource_ids.map((id) => ({
     resource_id: id,
@@ -1189,6 +1193,7 @@ export function candidateRows(
     resource_version: draft.bases[id] ?? null,
     created_at: draft.created_at,
     submitted_at_page_seq: pageSeq,
+    submitted_at_request_seq: requestSeq,
     last_mentioned_page_seq: null,
     display: null,
     resolved: null,
