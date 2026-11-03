@@ -1,5 +1,9 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import {
+  BOTH_LINKED,
+  PREVIEW_FORBIDDEN,
+} from "../../src/features/people/requests/copy";
+import {
   ACCOUNTS,
   bootHarness,
   expect,
@@ -2287,6 +2291,164 @@ test.describe("I-PPL17 to I-PPL23: merges, links and requests (WEB-11b A2-A9, A1
       });
     } finally {
       await aContext.close();
+    }
+  });
+
+  test("I-PPL21 both linked: the UI refuses before any command (the cause, no action); its control, one linked, offers the merge with the linked name fixed; a pair the reader owns neither of is refused 403 and not asked again by itself", async ({
+    browser,
+    provokes,
+  }, info) => {
+    // The third pair is refused by the backend itself (an ordinary 403 for a pair the reader owns neither of).
+    provokes(403);
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    const cContext = await browser.newContext();
+    // Accounts that receive no other link in the People stack; every link is undone at the end, so no later case finds a self-person.
+    const undo: Array<() => Promise<void>> = [];
+    try {
+      const { page: a, id: aId } = await boot(aContext, "pete", "/today");
+      const b = await bootHarness(bContext, "/today");
+      const bId = await signedIn(b, "bob");
+      const c = await bootHarness(cContext, "/today");
+      const cId = await signedIn(c, "carol");
+      // C's cache is open before C's person is made (seedPerson waits for it to sync), as in I-PPL19.
+      await leader(c, cId.account_id);
+      const unlinkBy = (page: Page, id: Id, person: string) => async () => {
+        const now = (await personOf(page, id, person)).body;
+        if (now.linked_account_id !== id.account_id) return;
+        expect(
+          (
+            await peopleCommand(page, id, {
+              kind: "unlink",
+              person_id: person,
+              expected_version: now.person.version,
+            })
+          ).status,
+        ).toBe(200);
+      };
+      /** The person as the reader reads it on the server: itself (not merged into an earlier profile) and linked to `account`. */
+      const linkedAs = async (person: string, account: string | null) => {
+        const now = (await personOf(a, aId, person)).body;
+        expect(now.person.id).toBe(person);
+        expect(now.linked_account_id).toBe(account);
+      };
+      const stem = unique("I-R Both");
+      const { person: x } = await seedPerson(a, aId, stem);
+      const { person: y } = await seedPerson(a, aId, stem);
+      // X: the reader's person, linked to B (B owns it now; the reader still reads it, I-PPL16).
+      await link(a, aId, b, bId, x);
+      undo.push(unlinkBy(b, bId, x));
+      await linkedAs(x, bId.account_id);
+      await linkedAs(y, null);
+      const seen = requestsOf(a);
+      const previews: number[] = [];
+      a.on("request", (r) => {
+        if (new URL(r.url()).pathname.endsWith("/people/merge-preview"))
+          previews.push(Date.now());
+      });
+      const dialog = a.getByRole("dialog");
+      const confirm = dialog.locator('[data-people-action="confirm-merge"]');
+      // Commands the UI sent while a dialog was shown (the harness's own link() calls through this page are outside these spans).
+      const uiCommands: string[] = [];
+      const during = async (phase: () => Promise<void>) => {
+        const mark = seen.length;
+        await phase();
+        for (const r of seen.slice(mark))
+          if (r.path.startsWith("POST"))
+            uiCommands.push(String(kindOf(r.body)));
+      };
+
+      // (1) CONTROL, one linked: the linked person's name is fixed and the action is offered (nothing is pressed).
+      await during(async () => {
+        await reopenBound(
+          a,
+          aId.account_id,
+          `/people/requests/merge/${y}/${x}`,
+        );
+        await expect(dialog.locator("[data-merge-name-fixed]")).toBeVisible({
+          timeout: 30_000,
+        });
+        await expect(confirm).toBeEnabled({ timeout: 30_000 });
+        await expect(dialog.getByText(BOTH_LINKED)).toHaveCount(0);
+      });
+
+      // (2) BOTH LINKED, and the reader may compare them: the reader's OWN profile (C's person, linked to the reader, so the reader owns
+      // it) and X. The cause is shown, there is no action, and nothing is sent.
+      const self = await seedPerson(c, cId, unique("I-R Self"));
+      await link(c, cId, a, aId, self.person);
+      undo.push(unlinkBy(a, aId, self.person));
+      await linkedAs(self.person, aId.account_id);
+      await during(async () => {
+        await reopenBound(
+          a,
+          aId.account_id,
+          `/people/requests/merge/${x}/${self.person}`,
+        );
+        await expect(dialog.getByText(BOTH_LINKED).first()).toBeVisible({
+          timeout: 30_000,
+        });
+        await expect(confirm).toHaveCount(0);
+        const disabled = dialog.locator("button[disabled]").last();
+        await expect(disabled).toBeDisabled();
+        await disabled.click({ force: true });
+        await a.waitForTimeout(1_000);
+      });
+
+      // (3) A pair the reader owns NEITHER of (X linked to B, Y linked to C): the backend refuses the comparison 403 and the dialog says
+      // so; once shown, the refusal is not asked again by itself through the session's re-evaluation and remount (N1 of revision 1),
+      // and nothing is sent.
+      await link(a, aId, c, cId, y);
+      undo.push(unlinkBy(c, cId, y));
+      await linkedAs(y, cId.account_id);
+      const before = previews.length;
+      let settled = 0;
+      await during(async () => {
+        await reopenBound(
+          a,
+          aId.account_id,
+          `/people/requests/merge/${y}/${x}`,
+        );
+        await expect(dialog.getByText(PREVIEW_FORBIDDEN)).toBeVisible({
+          timeout: 30_000,
+        });
+        // A fresh page load reads every summary again on each freshness signal while its first read is in flight (a cold-start burst, as
+        // for any summary). Once the refusal is shown and those reads have settled, it is NOT asked again by itself (N1: before the fix, the
+        // session's re-evaluation and remount asked about 150 times a second). The observation window is the requirement; nothing is shortened.
+        await expect
+          .poll(
+            async () => {
+              const at = previews.length;
+              await a.waitForTimeout(1_000);
+              return previews.length - at;
+            },
+            { timeout: 30_000, message: "the reads in flight settle" },
+          )
+          .toBe(0);
+        settled = previews.length;
+        await a.waitForTimeout(3_000);
+        expect(previews.length, "comparisons asked after the refusal").toBe(
+          settled,
+        );
+        expect(settled - before, "comparisons asked in all").toBeGreaterThan(0);
+      });
+
+      expect(uiCommands, "commands the dialogs sent").toEqual([]);
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({
+          x,
+          y,
+          self: self.person,
+          previews: previews.length,
+          phase3: previews.length - before,
+          commands: uiCommands.length,
+        }),
+      });
+    } finally {
+      for (const step of undo.reverse()) await step();
+      await aContext.close();
+      await bContext.close();
+      await cContext.close();
     }
   });
 

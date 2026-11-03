@@ -534,6 +534,83 @@ describe("the recipient's review (A3)", () => {
   });
 });
 
+describe("N1 (revision 1): a refused (403) preview is remembered, never asked again by itself", () => {
+  const asked = (w: ReturnType<typeof peopleWorld>, op: string) =>
+    w.api.calls.filter((call) => call.op === op).length;
+  const FORBIDDEN = { ok: false, kind: "forbidden", requestId: "ref-403" };
+
+  test("sender: a remount and an invalidation do not ask again; Reload asks once more and shows the comparison (control)", async () => {
+    const w = world();
+    w.api.next.mergePreview.push(FORBIDDEN as never);
+    await w.mount(COMPARE);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.PREVIEW_FORBIDDEN).length,
+      ).toBeGreaterThan(0),
+    );
+    expect(asked(w, "previewMerge")).toBe(1);
+    // A 403 re-evaluates the session, which remounts the tree; every summary is then read again.
+    cleanup();
+    await w.mount(COMPARE);
+    act(() => w.people.memory.invalidateSummaries());
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.PREVIEW_FORBIDDEN).length,
+      ).toBeGreaterThan(0),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(asked(w, "previewMerge")).toBe(1);
+    const reload = document.querySelector(
+      '[data-people-action="preview-again"]',
+    ) as HTMLElement;
+    expect(reload, "the refusal's explicit Reload").not.toBeNull();
+    fireEvent.click(reload);
+    await waitFor(() => expect(asked(w, "previewMerge")).toBe(2));
+    await waitFor(() => expect(action(copy.MERGE_THEM)).toBeTruthy());
+  });
+
+  test("recipient: a 403 review is remembered across a remount and does not read the lists again by itself; Reload asks once more", async () => {
+    const w = world();
+    w.api.requests.incoming = [
+      {
+        id: R,
+        sender_id: MO,
+        expires_at: Math.floor(Date.now() / 1000) + 86_400,
+        proposal: {
+          kind: "merge",
+          source_id: MOHAMMED,
+          target_id: MOPERSON,
+          name: "Mo",
+        },
+      },
+    ];
+    w.api.next.recipientPreview.push(FORBIDDEN as never);
+    await w.mount(`/people/requests/${R}`);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.PREVIEW_FORBIDDEN).length,
+      ).toBeGreaterThan(0),
+    );
+    const lists = asked(w, "readRequests");
+    cleanup();
+    await w.mount(`/people/requests/${R}`);
+    await waitFor(() =>
+      expect(
+        screen.queryAllByText(copy.PREVIEW_FORBIDDEN).length,
+      ).toBeGreaterThan(0),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(asked(w, "readRecipientPreview")).toBe(1);
+    expect(asked(w, "readRequests")).toBe(lists);
+    const reload = document.querySelector(
+      '[data-people-action="preview-again"]',
+    ) as HTMLElement;
+    expect(reload, "the refusal's explicit Reload").not.toBeNull();
+    fireEvent.click(reload);
+    await waitFor(() => expect(asked(w, "readRecipientPreview")).toBe(2));
+  });
+});
+
 describe("entry points and after-effects (A7, A9)", () => {
   test("the slots are filled by the people chunk, and route.tsx imports nothing of WEB-11b's screens", async () => {
     const { peopleSlots } = await import("../../../src/features/people/slots");

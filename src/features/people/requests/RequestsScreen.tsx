@@ -38,7 +38,14 @@ import {
   timeLeftText,
 } from "./MergeDialog";
 import { NewRequest } from "./NewRequest";
-import { currentOf, useIncoming, useSentPage } from "./reads";
+import {
+  currentOf,
+  forgetRefusal,
+  INCOMING_KEY,
+  sentKey,
+  useIncoming,
+  useSentPage,
+} from "./reads";
 import { useSenderName } from "./sender";
 
 /**
@@ -278,7 +285,16 @@ function Incoming({
       ) : view.status === "failed" ? (
         <Banner
           message={copy.REQUESTS_FAILED}
-          action={<Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>}
+          action={
+            <Button
+              onClick={() => {
+                forgetRefusal(env, INCOMING_KEY);
+                view.retry();
+              }}
+            >
+              {copy.TRY_AGAIN}
+            </Button>
+          }
         />
       ) : rows === null ? (
         <p className="text-[13.5px] text-ink-2" data-requests-state="loading">
@@ -540,7 +556,16 @@ function Sent({ env }: { env: PeopleEnv }) {
       ) : view.status === "failed" ? (
         <Banner
           message={copy.REQUESTS_FAILED}
-          action={<Button onClick={view.retry}>{copy.TRY_AGAIN}</Button>}
+          action={
+            <Button
+              onClick={() => {
+                forgetRefusal(env, sentKey(after));
+                view.retry();
+              }}
+            >
+              {copy.TRY_AGAIN}
+            </Button>
+          }
         />
       ) : page === null ? (
         <p className="text-[13.5px] text-ink-2" data-sent-state="loading">

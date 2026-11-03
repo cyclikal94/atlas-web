@@ -1,11 +1,15 @@
-import { expect, type Page, test } from "@playwright/test";
+import { type BrowserContext, expect, type Page, test } from "@playwright/test";
 import * as copy from "../../src/features/people/requests/copy";
 import { recordEvidence } from "./data-evidence";
+import { settleElsewhere } from "./data-leader-helpers";
+import { settled } from "./data-sync-helpers";
 import { pressTab, runAxe } from "./helpers";
 import {
+  API,
   atlas,
   connectivity,
   fieldP,
+  json,
   ME,
   MO,
   navigateInApp,
@@ -24,9 +28,13 @@ import {
  * review and its token; E-R5 410 and a 409 that re-reads; E-R6 sent states and paging; E-R7 Cancel and 404; E-R8 Ask to link with the
  * re-verification before the command; E-R9 Compare & merge from the duplicates (values, conflicts, focus order, exact body); E-R10 a
  * request_merge and a merged alias; E-R11 linkage pre-checks; E-R12 the detail's "Ask to link…"; E-R13 an uncertain merge across a 403
- * remount, and Decline after an uncertain Accept; E-R15 viewports, themes and axe (browser emulation, not devices); E-R16 keyboard only.
- * E-R14 (an account switch mid-read) is component-level only (`requests-screen.test.tsx`): the people harness has no session account
- * switch on a `/__session` page.
+ * remount, and Decline after an uncertain Accept; E-R15 viewports, themes and axe (browser emulation, not devices); E-R15b the comparison's
+ * internal geometry with long supported values (R5 of review 1); E-R16 keyboard only; E-R17 a refused (403) comparison asked once through
+ * the production session's re-evaluation and remount (N1 of revision 1).
+ * E-R14 (review 1, R6): the incoming read held for the displayed account across an ACTUAL account switch (another tab settles another
+ * account through the production store and posts the auth hint, as `settleElsewhere` does for E-T10), with the new account's own read
+ * shown and the old answer, delivered late, never shown; its control releases the held read with no switch. E-R1b (R3): People 01's
+ * Requests entry with nothing waiting, below 1280 px.
  */
 const ADA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const BEA = "abababab-abab-4bab-8bab-abababababab";
@@ -150,6 +158,38 @@ test.describe("E-R1: Waiting for you (A1)", () => {
       )
       .toBeGreaterThan(before);
     recordEvidence(info, "e-r1", { requestLog: served.requestLog });
+  });
+});
+
+test.describe("E-R1b: People 01's Requests entry with nothing waiting (A7; R3 of review 1)", () => {
+  test("390 px, none waiting: the entry stays (no banner, no count claimed) and opens Requests with Sent and New request; offline it stays", async ({
+    context,
+  }) => {
+    const { page } = await setup(context, "/people", [projection(ADA, "Ada")], {
+      arrange: (s) => {
+        s.incoming = [];
+        s.sent = [sentRequest(R3, "accepted")];
+      },
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const entry = page.locator(
+      'a[href="/people/requests"][data-people-action="requests"]',
+    );
+    await expect(entry).toBeVisible();
+    await expect
+      .poll(() => page.evaluate(() => document.body.innerText))
+      .not.toContain(copy.REQUESTS_WAITING(0));
+    await expect(page.locator("[data-requests-banner]")).toHaveCount(0);
+    await connectivity(context, page, false);
+    await expect(entry).toBeVisible();
+    await connectivity(context, page, true);
+    await entry.click();
+    await expect(page).toHaveURL(/\/people\/requests$/);
+    await page.getByRole("tab", { name: copy.SENT }).click();
+    await expect(sentRow(page, R3)).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: copy.NEW_REQUEST }),
+    ).toBeVisible();
   });
 });
 
@@ -885,6 +925,186 @@ test.describe("E-R13: uncertain outcomes across a 403 remount (A8, A11)", () => 
   });
 });
 
+test.describe("E-R14: an incoming read held across an actual account switch (A10; R6 of review 1)", () => {
+  const OTHER = "33333333-3333-4333-8333-333333333333";
+  const THEIRS = "10000000-0000-4000-8000-000000000014";
+  const theirRequest = linkRequest({
+    id: THEIRS,
+    sender_id: STRANGER,
+    proposal: { kind: "link", person_id: BEA, account_id: OTHER, name: "Zed" },
+  });
+  /**
+   * The identity the stub answers for (`/browser-sessions/current`, `/me`, `/sessions`), and `GET /people/requests`: while `mode` is
+   * "hold" every read is HELD and later answered with the first account's request; `release()` answers the held reads and from then on
+   * answers the first account's reads at once ("mine": an invalidation after the release reads again, and a server answers that read
+   * too); once the page has issued a request for the other account (the session trace's `request.issued`), reads are answered at once
+   * with that account's own request ("theirs").
+   */
+  async function serveIdentity(context: BrowserContext) {
+    const state = {
+      identity: { account: ME, session: "s1", username: "me" },
+      mode: "hold" as "hold" | "mine" | "theirs",
+      held: [] as Array<() => void>,
+      asked: [] as string[],
+    };
+    await context.route(`**${API}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname.replace(API, "");
+      const { account, session, username } = state.identity;
+      if (path === "/browser-sessions/current")
+        return route.fulfill(
+          json(200, {
+            account_id: account,
+            session_id: session,
+            expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+            csrf_token: `csrf.${session}`,
+          }),
+        );
+      if (path === "/me")
+        return route.fulfill(
+          json(200, {
+            id: account,
+            username,
+            has_password: true,
+            oidc_issuers: [],
+          }),
+        );
+      if (path === "/sessions")
+        return route.fulfill(
+          json(200, {
+            sessions: [
+              {
+                id: session,
+                device_id: "dev-1",
+                current: true,
+                authentication: "local",
+                created_at: new Date().toISOString(),
+                expires_at: new Date(Date.now() + 86_400_000).toISOString(),
+              },
+            ],
+          }),
+        );
+      if (path === "/people/requests" && route.request().method() === "GET") {
+        state.asked.push(state.mode);
+        if (state.mode === "theirs")
+          return route.fulfill(json(200, { items: [theirRequest] }));
+        if (state.mode === "hold")
+          await new Promise<void>((resolve) => state.held.push(resolve));
+        return route.fulfill(json(200, { items: [linkRequest()] }));
+      }
+      return route.fallback();
+    });
+    return {
+      state,
+      release: () => {
+        if (state.mode === "hold") state.mode = "mine";
+        for (const resolve of state.held.splice(0)) resolve();
+      },
+    };
+  }
+  /** The accounts the page's session issued requests for (the production kernel's own trace). */
+  const issuedFor = (page: Page) =>
+    page.evaluate(() =>
+      (window.__atlasFixture?.session?.trace ?? [])
+        .filter((entry) => entry.event === "request.issued")
+        .map((entry) => (entry.data as { account?: string }).account ?? null),
+    );
+
+  test("control: the held read, released with no switch, is shown for its own account", async ({
+    context,
+  }) => {
+    const { page } = await setup(context, "/people", [projection(ADA, "Ada")]);
+    const net = await serveIdentity(context);
+    await navigateInApp(page, "/people/requests");
+    await expect.poll(() => net.state.held.length).toBeGreaterThanOrEqual(1);
+    await expect(incomingRow(page, R1)).toHaveCount(0);
+    net.release();
+    await expect(incomingRow(page, R1)).toBeVisible();
+  });
+
+  test("another tab signs in as someone else while the read is held: the new account's own read is shown; the old answer, delivered late, never is", async ({
+    context,
+  }) => {
+    const { page } = await setup(context, "/people", [projection(ADA, "Ada")]);
+    const net = await serveIdentity(context);
+    await navigateInApp(page, "/people/requests");
+    await expect.poll(() => net.state.held.length).toBeGreaterThanOrEqual(1);
+    await expect(incomingRow(page, R1)).toHaveCount(0);
+    // The first account's own input in this page's memory: Ada chosen in Ask to link (never shown or sent under another account).
+    await page.locator('[data-people-action="choose-person"]').click();
+    await page.locator(`[data-pick-person="${ADA}"]`).click();
+    await expect(page.locator(`[data-link-person="${ADA}"]`)).toBeVisible();
+    // Another tab signs in as OTHER: the production store is written and the hint posted; this page follows it.
+    net.state.identity = { account: OTHER, session: "s2", username: "zed" };
+    await settleElsewhere(context, settled(OTHER, "s2"));
+    await expect
+      .poll(async () => (await issuedFor(page)).includes(OTHER), {
+        timeout: 20_000,
+        message: "the page should issue requests for the new account",
+      })
+      .toBe(true);
+    net.state.mode = "theirs";
+    // The new account's own read, made for it, is shown (its page memory is its own).
+    await navigateInApp(page, "/people");
+    await navigateInApp(page, "/people/requests");
+    await expect(incomingRow(page, THEIRS)).toBeVisible({ timeout: 20_000 });
+    await expect(incomingRow(page, R1)).toHaveCount(0);
+    // Nothing of the first account's page memory is shown under the next: its form starts empty.
+    await expect(
+      page.locator('[data-people-action="choose-person"]'),
+    ).toBeVisible();
+    await expect(page.locator("[data-link-person]")).toHaveCount(0);
+    const heldBefore = net.state.held.length;
+    expect(heldBefore).toBeGreaterThanOrEqual(1);
+    net.release();
+    // Long enough for a late answer to be composed and shown, were it applied (as E-T10).
+    await page.waitForTimeout(1_500);
+    await expect(incomingRow(page, R1)).toHaveCount(0);
+    await expect(incomingRow(page, THEIRS)).toBeVisible();
+    expect(net.state.held).toHaveLength(0);
+    // Both accounts' reads were really issued by this page's session, the first account's before the switch.
+    const issued = await issuedFor(page);
+    expect(issued).toContain(ME);
+    expect(issued.lastIndexOf(OTHER)).toBeGreaterThan(issued.indexOf(ME));
+  });
+});
+
+test.describe("E-R17: a refused (403) comparison is asked once (N1 of revision 1)", () => {
+  test("the production session's re-evaluation and remount do not ask again: one POST /people/merge-preview over the window; Reload asks exactly once more", async ({
+    context,
+  }) => {
+    const world = mergeWorld();
+    const { page } = await setup(
+      context,
+      "/people",
+      world.resources,
+      world.options,
+    );
+    // Every comparison is refused as the released backend refuses a pair the reader owns neither of: an ordinary Atlas 403.
+    const asked: number[] = [];
+    await context.route(`**${API}/people/merge-preview`, (route) => {
+      asked.push(Date.now());
+      return route.fulfill(json(403, atlas("forbidden")));
+    });
+    await navigateInApp(page, COMPARE);
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText(copy.PREVIEW_FORBIDDEN)).toBeVisible();
+    // The observation window is the requirement here (a storm asks hundreds of times a second); nothing is shortened.
+    await page.waitForTimeout(3_000);
+    expect(asked, "requests during the window").toHaveLength(1);
+    await expect(dialog.getByText(copy.PREVIEW_FORBIDDEN)).toBeVisible();
+    await dialog.locator('[data-people-action="preview-again"]').click();
+    await expect.poll(() => asked.length).toBe(2);
+    await page.waitForTimeout(3_000);
+    expect(asked, "after one Reload").toHaveLength(2);
+    // Nothing was sent.
+    expect(
+      (await page.evaluate(() => performance.getEntriesByType("resource")))
+        .map((e) => (e as PerformanceEntry).name)
+        .filter((name) => name.endsWith("/people-commands")),
+    ).toEqual([]);
+  });
+});
+
 test.describe("E-R15: viewports, themes and axe (A12; browser emulation, not devices)", () => {
   for (const [name, width, height] of [
     ["phone", 390, 844],
@@ -972,6 +1192,85 @@ test.describe("E-R15: viewports, themes and axe (A12; browser emulation, not dev
           await expect(panel).toBeHidden();
         }
       }
+    });
+});
+
+test.describe("E-R15b: the comparison with long supported values (A12; R5 of review 1)", () => {
+  // A valid text value of 500 characters with no break opportunity, and a long unbroken field label: both must wrap INSIDE their
+  // columns, so the comparison stays side by side within the dialog body (the document-width check of E-R15 cannot see this).
+  const LONG = "x".repeat(500);
+  const LABEL = `Label${"y".repeat(95)}`;
+  for (const [name, width, height] of [
+    ["phone", 390, 844],
+    ["tablet portrait", 834, 1112],
+    ["tablet landscape", 1180, 820],
+    ["desktop", 1440, 900],
+  ] as const)
+    test(`${name} ${width}×${height}: the comparison stays within the dialog body, each cell holds its content, the whole value is reachable`, async ({
+      context,
+    }) => {
+      const { page } = await setup(
+        context,
+        COMPARE,
+        [
+          projection(MOHAMMED, "Mohammed A."),
+          projection(MOPERSON, "Mo"),
+          fieldP(
+            PHONE_S,
+            MOHAMMED,
+            LABEL,
+            { kind: "text", text: LONG },
+            { version: 2 },
+          ),
+        ],
+        {
+          arrange: (s) => {
+            s.mergePreviews.set(`${MOHAMMED}:${MOPERSON}`, {
+              token: T1,
+              fields: [
+                { id: PHONE_S, parent_id: MOHAMMED, label: LABEL, version: 2 },
+              ],
+            });
+          },
+        },
+      );
+      await page.setViewportSize({ width, height });
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      const dialog = page.locator('[data-merge-dialog="sender"]');
+      const table = dialog.locator("[data-merge-comparison]");
+      await expect(table).toContainText(LONG);
+      const geometry = () =>
+        table.evaluate((element) => {
+          const body = element.closest(".overflow-y-auto") as HTMLElement;
+          const box = element.getBoundingClientRect();
+          const columns = [...element.querySelectorAll("thead th")].map(
+            (th) => th.getBoundingClientRect().width,
+          );
+          const spilling = [...element.querySelectorAll("th, td")]
+            .filter((cell) => cell.scrollWidth > cell.clientWidth + 1)
+            .map((cell) => (cell.textContent ?? "").slice(0, 30));
+          return {
+            table: box.width,
+            body: body.clientWidth,
+            bodyScroll: body.scrollWidth,
+            columns,
+            spilling,
+          };
+        });
+      for (const stage of ["clamped", "expanded"] as const) {
+        if (stage === "expanded")
+          await table.getByRole("button", { name: /show more/i }).click();
+        const g = await geometry();
+        const said = `${name} ${stage}: ${JSON.stringify(g)}`;
+        expect(g.table, said).toBeLessThanOrEqual(g.body + 0.5);
+        expect(g.bodyScroll, said).toBeLessThanOrEqual(g.body);
+        expect(g.spilling, said).toEqual([]);
+        // Side by side: the field and both people keep a readable column.
+        expect(g.columns.length, said).toBe(3);
+        for (const column of g.columns)
+          expect(column, said).toBeGreaterThan(g.body * 0.2);
+      }
+      expect(await axeOf(page), `${name}: axe`).toEqual([]);
     });
 });
 

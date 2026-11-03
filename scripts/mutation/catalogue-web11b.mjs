@@ -524,6 +524,36 @@ export const UNIT_WEB11B = [
     expect: /that committed \(the row is gone\)/,
     patch: (t) => sub(t, "      ...retainedKeys(env, RESPOND_PREFIX),\n", ""),
   },
+  // ---- revision 1, N1 (found by the I-PPL21 both-linked case against the released backend) ----
+  {
+    id: "MU-4148",
+    title:
+      "WEB-11b N1: a preview refused 403 is not remembered (asked again after every remount: an unbounded request storm)",
+    file: "src/features/people/requests/reads.ts",
+    tests: [DIALOG],
+    expect:
+      /a remount and an invalidation do not ask again|a 403 review is remembered/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!result.ok && result.kind === "forbidden")\n        memory.drafts.set(refusedKey(key), result);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-4149",
+    title:
+      "WEB-11b N1: the recipient's review reads the lists again on ANY refusal (a 403 does so on every remount)",
+    file: "src/features/people/requests/MergeDialog.tsx",
+    tests: [DIALOG],
+    expect: /a 403 review is remembered/,
+    patch: (t) =>
+      sub(
+        t,
+        '    !drawn.value.ok &&\n    (drawn.value.refusal.kind === "not_found" ||\n      drawn.value.refusal.kind === "expired")\n      ? drawn.value.refusal.kind\n',
+        "    !drawn.value.ok\n      ? drawn.value.refusal.kind\n",
+      ),
+  },
 ];
 
 const SPEC = "tests/e2e/fixture.people-requests.spec.ts";
@@ -592,6 +622,79 @@ export const ENGINE_WEB11B = [
         t,
         "      const verified = await untilSent(\n",
         "      setTimeout(() => void env.sharing.lookup(recipient.username), 300);\n      const verified = await ((..._ignored: unknown[]) =>\n        Promise.resolve({ ok: true as const, value: [recipient] }))(\n",
+      ),
+  },
+  // ---- revision 1 (review 1, R5 and R6) ----
+  {
+    id: "MU-4145",
+    title:
+      "WEB-11b R5: (REAL ENGINE) a comparison cell's value keeps its unbroken minimum width (a long value spills out of its column)",
+    file: "src/features/people/requests/MergeDialog.tsx",
+    spec: SPEC,
+    grep: "E-R15b:",
+    expect: /E-R15b: /,
+    patch: (t) =>
+      sub(
+        t,
+        '    <div className="min-w-0 [&_*]:[overflow-wrap:anywhere]">\n',
+        '    <div className="min-w-0">\n',
+      ),
+  },
+  {
+    id: "MU-4146",
+    title:
+      "WEB-11b R5: (REAL ENGINE) the comparison's columns are not bounded (laid out automatically, a column is squeezed beside a long value)",
+    file: "src/features/people/requests/MergeDialog.tsx",
+    spec: SPEC,
+    grep: "E-R15b:",
+    expect: /E-R15b: /,
+    patch: (t) =>
+      sub(
+        sub(
+          sub(
+            sub(
+              t,
+              '    <table className="w-full table-fixed text-left" data-merge-comparison="">\n',
+              '    <table className="w-full text-left" data-merge-comparison="">\n',
+            ),
+            'className="w-[28%] py-2 pr-2 align-top font-medium"',
+            'className="py-2 pr-2 align-top font-medium"',
+          ),
+          '          <th scope="col" className="w-[36%] py-2 pr-2 align-top font-medium">\n',
+          '          <th scope="col" className="py-2 pr-2 align-top font-medium">\n',
+        ),
+        'className="w-[36%] py-2 align-top font-medium"',
+        'className="py-2 align-top font-medium"',
+      ),
+  },
+  {
+    id: "MU-4147",
+    title:
+      "WEB-11b R6/A10: (REAL ENGINE) the people page memory is not replaced when another account is displayed (the held read of the first account is applied under the next)",
+    file: "src/features/people/memory.ts",
+    spec: SPEC,
+    grep: "E-R14:",
+    expect: /E-R14: .*another tab signs in as someone else/,
+    patch: (t) =>
+      sub(
+        t,
+        "  if (current === null || current.identity !== identity) {\n",
+        "  if (current === null) {\n",
+      ),
+  },
+  {
+    id: "MU-4150",
+    title:
+      "WEB-11b N1: (REAL ENGINE) a preview refused 403 is not remembered: the production session's re-evaluation remounts the tree and it is asked again, without end",
+    file: "src/features/people/requests/reads.ts",
+    spec: SPEC,
+    grep: "E-R17:",
+    expect: /E-R17: /,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (!result.ok && result.kind === "forbidden")\n        memory.drafts.set(refusedKey(key), result);\n',
+        "",
       ),
   },
 ];

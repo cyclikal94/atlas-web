@@ -577,18 +577,38 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
   different answer to a request whose answer is uncertain is refused ("Your earlier answer may already have been recorded. Try it again
   first."). Every press uses the comparison SHOWN: the preview object this render drew, and only while it is still the current read.
   What a command said is kept by key (`memory.requestReports`) for whichever row or dialog shows it now; an answer whose row is gone (a
-  `404` after the list was read again) stays said above the list until closed. `PeopleRefusal` gains `expired` (`410`; no longer folded
+  `404` after the list was read again) stays said above the list until closed. A command's COMPLETION belongs to the attempt it completes
+  (revision 1, R1): `runCommandFrom` keeps the input an attempt was made of (its origin: the form's revision, the person and recipient; a
+  merge's request-or-merge, name and owner) beside the retained attempt, and a replay completes with that origin, so a success names
+  whom it actually went to and clears only the input it was made of. `PeopleRefusal` gains `expired` (`410`; no longer folded
   into `not_found`) and `capacity` (a people command's `503 slice_capacity`, `classifyPeopleAnswer(…, { capacity: true })`).
 - **D-11b-10/11 New request.** Ask to link: a picker over `GET /people/summaries?scope=not_linked` (owner, not archived), 100 a page, at most
-  three pages (Q9) with "Show more" and a name filter over what was read; the recipient from the shared `DirectoryLookup` as a view; at the
+  three pages KEPT (Q9) and every later person reachable (revision 1, R2): "Show more" reads the window's next page while it has fewer
+  than three, "Show the next people" starts a new window where it ended (the earlier one is no longer kept) and "Show earlier people"
+  returns; the name filter applies to the window shown and says so while the window is not the whole list, and "none can be offered" or
+  "no one matches" is claimed only for a whole list; the recipient from the shared `DirectoryLookup` as a view; at the
   press the person's linkage must be known unlinked, its version is `expected_version`, and the recipient is checked again with the exact
   lookup (the shared sharing client's `lookup`, not a second people client): only exactly one entry with the same id sends. Ask to merge:
   "One of your people" (owner) and "The same person" (any visible, not the first); "Compare" opens the sender's dialog. The two forms keep
   their values while the other is shown (PRODUCT-DECISIONS item 2); a success clears only the input it sent.
-- **Pickers.** Each picker's read is keyed by its purpose (`picker:<scope>:<purpose>:<pages>`): Ask to merge's two pickers read the same
-  scope but keep different people (found by I-PPL19 against the released backend; MU-4135).
+- **Pickers.** Each picker's read is keyed by its purpose and window (`picker:<scope>:<purpose>:<start>:<pages>`): Ask to merge's two
+  pickers read the same scope but keep different people (found by I-PPL19 against the released backend; MU-4135).
 - **An answer whose request is no longer listed** (answered elsewhere, withdrawn, or an uncertain answer that committed) stays said above
-  the list with its reference until closed; an UNCERTAIN one also offers Try again, which resends it exactly (found by I-PPL23).
+  the list with its reference until closed; an UNCERTAIN one also offers Try again, which resends it exactly (found by I-PPL23). The list
+  above the requests is built from the reports AND the retained attempts, and Close is offered only once nothing is left to resolve, so
+  dismissing a notice never hides an unresolved attempt (revision 1, R4).
+- **Retained attempts stay reachable from the attempt** (revision 1, R1/R4): a row's Try again is offered on the action the attempt
+  carried (an uncertain Decline is retried by its own Decline, never wired to Accept); a cancel that committed while its answer was lost
+  keeps Try again on its now-Cancelled Sent row; an uncertain link request for a person the form no longer shows is listed above the form
+  with Try again; while the form names another recipient, the form says Try again sends the earlier request, as it was.
+- **People 01's "Requests" entry** is shown on every layout, whatever the count says (revision 1, R3); below 1280 px the "N requests
+  waiting for you" banner is added when requests wait.
+- **The comparison's columns are bounded** (revision 1, R5): fixed widths, and a value's text may break anywhere inside its cell (the
+  shared value renderer's `break-words` kept a whole unbroken word as its minimum width).
+- **A read refused `403` is remembered** for the page (revision 1, N1; D-12a-13): an ordinary `403` re-evaluates the session, which
+  remounts the protected tree and reads the summaries again, so a preview that asked again by itself did so without end (found by
+  I-PPL21 against the released backend: about 4,500 `POST /people/merge-preview` in 30 seconds for a pair the reader owns neither of).
+  It is asked again only by the refusal's Reload; the recipient's review reads the lists again only for a `404` or `410`.
 - **D-11b-12 aliases.** An archived person whose value names `canonical_person_id` says "Merged into {name}" (a link when this device
   holds that person, else "another person"); WEB-11a's Archive/Restore is disabled for it with "This person was merged into another;
   restore isn't available." (the backend redirects `archive` of an alias to its canonical person).
@@ -632,11 +652,13 @@ Collected for WEB-15's sign-off; none is approved by being listed. Strings marke
 | No "asked N days ago" (the contract gives only `expires_at`); time left "N days left", "N hours left", "Less than an hour left", "Expires soon" | `/people/requests` | E-R1 |
 | Recipient review: "Not visible to you" column; the drawn "Accept is checked against what Kieran can see, not what you can" replaced by "accepting checks both what {sender} can see and what you can see now"; stale, expired and withdrawn banners | `/people/requests/$id` | E-R4, E-R5 |
 | "Note (optional)" removed from Ask to link (the contract has no note) | `/people/requests` | E-R8 |
-| Pickers ("Which of your people", "One of your people", "The same person", "Filter by name", "Show more"), "Choose", "Compare"; the Ask to merge intro sentence | `/people/requests` | E-R8 |
+| Pickers ("Which of your people", "One of your people", "The same person", "Filter by name", "Show more", "Show the next people", "Show earlier people", the partial-window and partial-filter sentences), "Choose", "Compare"; the Ask to merge intro sentence | `/people/requests` | E-R8 |
+| "Try again sends your earlier request to {username}, as it was."; "Your earlier request to {username} to link {person}." | `/people/requests` | requests-screen R1 |
+| A refused comparison's "Reload" | `/people/$id/duplicates/$other`, `/people/requests/$id` | E-R17 |
 | Both-linked banner; fixed linked name with its sentence; "Not on this device yet"; "Loading the comparison…"; "Load the comparison first." | `/people/$id/duplicates/$other` | E-R9, E-R11 |
 | Merged-alias note "Merged into {name}" and disabled Archive/Restore with its reason | `/people/$alias` | E-R10 |
 | Outcome copy of D-11b-9 (capacity, out of date, already answered, couldn't confirm, answer uncertain first, account no longer exists) | all | E-R3, E-R5, E-R7, E-R8, E-R13 |
-| People 01: "Requests" with its count beside the list header (desktop); "N requests waiting for you →" banner below 1280 px | `/people` | E-R1 |
+| People 01: "Requests" with its count beside the list header (every layout); "N requests waiting for you →" banner below 1280 px | `/people` | E-R1, E-R1b |
 | The merge dialog uses the shared 440 px dialog (the drawn comparison is wider) | `/people/$id/duplicates/$other` | E-R15 |
 | "Your answer was recorded." after an uncertain answer is tried again from above the list | `/people/requests` | `requests-screen.test.tsx`, I-PPL23 |
 | Not built: self-link, `reference_account` UI, a "Swap" of the kept person | — | — |

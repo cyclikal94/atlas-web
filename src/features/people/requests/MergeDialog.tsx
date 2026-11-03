@@ -36,8 +36,11 @@ import {
 } from "./commands";
 import * as copy from "./copy";
 import {
+  askAgain,
   currentOf,
+  previewKey,
   type Refusable,
+  reviewKey,
   useIncoming,
   useMergePreview,
   usePersonSummary,
@@ -84,7 +87,14 @@ function Cell({
         {copy.NOT_ON_DEVICE}
       </span>
     );
-  return <FieldValueView raw={cell.row.value} />;
+  // R5 of review 1: every cell inherits the page's `overflow-wrap: anywhere` (`styles/base.css`), but the shared value renderer sets
+  // `break-words` on its text, whose MINIMUM width is still a whole unbroken word: a valid 500-character word then widened the automatic
+  // table far past the dialog. Inside the comparison its descendants may break anywhere again, so the value wraps within its column.
+  return (
+    <div className="min-w-0 [&_*]:[overflow-wrap:anywhere]">
+      <FieldValueView raw={cell.row.value} />
+    </div>
+  );
 }
 
 /** The side-by-side table (D-11b-6): the kept person first. Values only from this device's synced rows at the preview's version. */
@@ -109,12 +119,9 @@ function Comparison({
   const targetName = preview.target?.label ?? copy.NOT_VISIBLE;
   const sourceName = preview.source?.label ?? copy.NOT_VISIBLE;
   return (
-    // FIXED columns (R5 of review 1): a long value (a 500-character word is a valid text field) wraps inside its column instead of
-    // widening the table past the dialog, so both sides stay side by side and nothing is clipped.
-    <table
-      className="w-full table-fixed text-left [overflow-wrap:anywhere]"
-      data-merge-comparison=""
-    >
+    // BOUNDED columns (R5 of review 1): every cell may break anywhere (the page's `overflow-wrap`, and the values below), so an automatic
+    // layout squeezes a column to a character's width beside a long value. Fixed widths keep the field and both people readable.
+    <table className="w-full table-fixed text-left" data-merge-comparison="">
       <thead>
         <tr className="border-b border-hairline text-[12px] text-ink-2">
           <th scope="col" className="w-[28%] py-2 pr-2 align-top font-medium">
@@ -219,6 +226,23 @@ function ReportBanner({
   const report = reportUnder(env, reportKey);
   if (report === null) return null;
   return <Banner message={report.text} requestId={report.requestId} />;
+}
+
+/** A remembered `403` is asked again only by this explicit action (`reads.ts` `askAgain`, D-12a-13); other refusals offer none. */
+function refusedAgain(
+  env: PeopleEnv,
+  failure: Refusable<unknown> & { ok: false },
+  key: string,
+): ReactNode {
+  if (failure.refusal.kind !== "forbidden" || !env.online) return undefined;
+  return (
+    <Button
+      data-people-action="preview-again"
+      onClick={() => askAgain(env, key)}
+    >
+      {copy.RELOAD}
+    </Button>
+  );
 }
 
 /** The copy of a preview read's refusal (the sender's `POST`; the recipient's `GET` names its own `404`/`410`). */
@@ -387,6 +411,7 @@ export function SenderMerge({
       <Banner
         message={previewRefusal(drawn.value)}
         requestId={drawn.value.refusal.requestId}
+        action={refusedAgain(env, drawn.value, previewKey(sourceId, targetId))}
       />
     );
   } else if (preview !== null && naming !== null) {
@@ -631,9 +656,15 @@ export function RecipientReview({
         })
       : null;
 
-  // A request the server says is gone or expired: the lists are read again (its row disappears), once per dialog.
+  // A request the server says is gone or expired: the lists are read again (its row disappears), once per dialog. Only for those: a `403`
+  // remounts the protected tree, so a re-read on it would run again on every mount (N1 of revision 1).
   const refused =
-    drawn !== null && !drawn.value.ok ? drawn.value.refusal.kind : null;
+    drawn !== null &&
+    !drawn.value.ok &&
+    (drawn.value.refusal.kind === "not_found" ||
+      drawn.value.refusal.kind === "expired")
+      ? drawn.value.refusal.kind
+      : null;
   const reread = useRef(false);
   useEffect(() => {
     if (refused === null || reread.current) return;
@@ -708,6 +739,7 @@ export function RecipientReview({
               : previewRefusal(drawn.value)
         }
         requestId={drawn.value.refusal.requestId}
+        action={refusedAgain(env, drawn.value, reviewKey(requestId))}
       />
     );
   } else if (preview !== null) {
