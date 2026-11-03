@@ -3365,8 +3365,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";',
-        "    return m.stops.has(scope, op) && false;",
+        // Re-anchored (revision 17, R36-K): the caller is fenced under its own or its lost-answer operation; the same fault, on both.
+        '      (o) => m.stops.has(scope, o) || m.probe(scope, o) !== "unmarked",',
+        "      (o) => m.stops.has(scope, o) && false,",
       ),
   },
   {
@@ -3379,8 +3380,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        'm.probe(scope, op) !== "unmarked";',
-        'm.probe(scope, op) === "marked";',
+        // Re-anchored (revision 17, R36-K): the caller is fenced under its own or its lost-answer operation; the same fault, on both.
+        'm.probe(scope, o) !== "unmarked",',
+        'm.probe(scope, o) === "marked",',
       ),
   },
   {
@@ -3393,8 +3395,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "    return m.stops.has(scope, op) || m.probe(scope, op)",
-        "    return m.probe(scope, op)",
+        // Re-anchored (revision 17, R36-K): the caller is fenced under its own or its lost-answer operation; the same fault, on both.
+        "      (o) => m.stops.has(scope, o) || m.probe(scope, o)",
+        "      (o) => m.probe(scope, o)",
       ),
   },
   {
@@ -3428,8 +3431,9 @@ export const UNIT_10C = [
         t,
         // Re-anchored (revision 12, R36-A): a press no longer ends the instances it witnessed; an outcome written at last ends the one
         // instance it published (`reconcile`). The same fault: every marker of the operation ended, another page's included.
-        '      m.retire(scope, record.op, {\n        kind: "instance",\n        instances: [record.marker],\n      });',
-        "      m.clear(scope, record.op);",
+        // Re-anchored (revision 17, R36-K): a protected outcome's fence is published under its marker operation (`marks`); the same fault.
+        '      m.retire(scope, record.marks, {\n        kind: "instance",\n        instances: [record.marker],\n      });',
+        "      m.clear(scope, record.marks);",
       ),
   },
   {
@@ -3567,7 +3571,8 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        '    if (fenced(at, op))\n      return end(stopInMemory(item.taskId, { reason: "storage" }));\n',
+        // Re-anchored (revision 17, R36-K): the check now lets a rediscoverable fence through (`orphaned`); the same fault: none is consulted.
+        '    if (orphaned === null && fenced(at, op))\n      return end(stopInMemory(item.taskId, { reason: "storage" }));\n',
         "",
       ),
   },
@@ -3579,7 +3584,13 @@ export const UNIT_10C = [
     tests: RETRY_TESTS,
     expect:
       /never written: a marker fences the day|after a reload only the marker survives/,
-    patch: (t) => sub(t, "      if (fenced(at, op)) return storage();\n", ""),
+    // Re-anchored (revision 17, R36-K): a rediscovery's own fence check (deeper) contains the same text; the anchor names its comment.
+    patch: (t) =>
+      sub(
+        t,
+        "      // Revision 11 (R36): an outcome of this day that could not be recorded stands: nothing is transmitted for it automatically.\n      if (fenced(at, op)) return storage();\n",
+        "      // Revision 11 (R36): an outcome of this day that could not be recorded stands: nothing is transmitted for it automatically.\n",
+      ),
   },
   // ---- Revision 12 (review 13 R36-A to R36-D; design assessment Q1 to Q9) ------------------------------------------------------
   {
@@ -3827,7 +3838,8 @@ export const UNIT_10C = [
       // Revision 13 (after the native E-M2 failure): only an outcome that must be kept is published at receipt; the fault: none is.
       sub(
         t,
-        "    const published = early\n      ? publish(at, op)\n      : { marker: null, memory: null, unpublished: true };",
+        // Re-anchored (revision 17, R36-K): published under its marker operation (`marks`); the same fault.
+        "    const published = early\n      ? publish(at, marks)\n      : { marker: null, memory: null, unpublished: true };",
         "    const published = { marker: null, memory: null, unpublished: true };",
       ),
   },
@@ -4021,8 +4033,9 @@ export const UNIT_10C = [
     patch: (t) =>
       sub(
         t,
-        "    const published = early\n      ? publish(at, op)",
-        "    const published = false\n      ? publish(at, op)",
+        // Re-anchored (revision 17, R36-K): published under its marker operation (`marks`); the same fault.
+        "    const published = early\n      ? publish(at, marks)",
+        "    const published = false\n      ? publish(at, marks)",
       ),
   },
   {
@@ -4259,6 +4272,245 @@ export const UNIT_10C = [
         "  return false;",
       ),
   },
+  // ---- Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json; design assessment Q7)
+  {
+    id: "MU-3316",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a lost-answer fence is rediscovered by work that does not hold the account's lock (a peer during the owner's repair transmits)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect:
+      /failed-live: the write failed under the live owner: a peer in the first repair wait calls nothing|lost-pending: the write lost across disposal/,
+    // Revision 17 (the owner's fence lock): without Web Locks no owner can be told gone either (`ownerGone`), which alone masks this
+    // fault; the fault is made in both guards.
+    patch: (t) =>
+      sub(
+        sub(t, "    if (locks === null) return null;\n", ""),
+        "      if (locks === null) {\n        resolve(false);",
+        "      if (locks === null) {\n        resolve(true);",
+      ),
+  },
+  {
+    id: "MU-3317",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a rediscovered lost answer is counted at its ISSUE (paced from the issue, sooner than from its real observation)",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /REVISION17 R36-K/,
+    patch: (t) =>
+      sub(
+        t,
+        '    { cause: "transport" },\n    now,\n    false,\n  );',
+        '    { cause: "transport" },\n    s.issued as number,\n    false,\n  );',
+      ),
+  },
+  {
+    id: "MU-3318",
+    title:
+      "R36-K: WEB-10c A19 (review 18): an observed transport failure is fenced under its caller's own operation (never rediscovered: the reload stops for good)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /REVISION17 R36-K .*K WITNESS/,
+    patch: (t) =>
+      sub(
+        t,
+        '    const marks = keep === "observed" ? lostOf(op) : op;',
+        "    const marks = op;",
+      ),
+  },
+  {
+    id: "MU-3319",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a rediscovery ends every lost-answer fence of the caller, not only the instances it found",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /EXACT RETIREMENT/,
+    patch: (t) =>
+      sub(
+        t,
+        "    markers()?.retire(scopeOf(at.service), lostOf(op), seen);",
+        "    markers()?.clear(scopeOf(at.service), lostOf(op));",
+      ),
+  },
+  {
+    id: "MU-3320",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a lost-answer fence is rediscovered beside a fence of the caller's own operation (an earlier build's, a received answer's)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a fence under the caller's OWN operation/,
+    patch: (t) =>
+      sub(t, '    if (m.probe(scope, op) !== "unmarked") return null;\n', ""),
+  },
+  {
+    id: "MU-3321",
+    title:
+      "R36-K: WEB-10c A19 (review 18): markers that cannot be read are taken as an orphaned fence (both guards: the caller's own fence unknown, the lost-answer fence unread)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /markers that cannot be read are not absence/,
+    // Each guard alone is redundant for unreadable markers (each masks the other's fault), so the fault is made in both.
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          '    if (m.probe(scope, op) !== "unmarked") return null;',
+          '    if (m.probe(scope, op) === "marked") return null;',
+        ),
+        '    return seen.kind === "instance" && seen.instances.length > 0 ? seen : null;',
+        '    return seen.kind !== "none" ? (seen as never) : null;',
+      ),
+  },
+  {
+    id: "MU-3322",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a day's rediscovery whose write failed ends the fence it found (the outcome is then recorded nowhere)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /(command|position): a rediscovery whose write FAILS/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (out === null) return owns(at) ? storage() : lost(at);\n        if (!out.written) return storage();\n        retireLost(at, op, orphaned);",
+        "        if (out === null || !out.written) retireLost(at, op, orphaned);\n        if (out === null) return owns(at) ? storage() : lost(at);\n        if (!out.written) return storage();",
+      ),
+  },
+  {
+    id: "MU-3323",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a discovery's rediscovery whose write failed ends the fence it found",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /discovery: a rediscovery whose write FAILS/,
+    patch: (t) =>
+      sub(
+        t,
+        '      if (written === "lost") return end(lost(at));\n      if (written !== "written")\n        return end(stopInMemory(item.taskId, { reason: "storage" }));\n      retireLost(at, op, orphaned);',
+        '      retireLost(at, op, orphaned);\n      if (written === "lost") return end(lost(at));\n      if (written !== "written")\n        return end(stopInMemory(item.taskId, { reason: "storage" }));',
+      ),
+  },
+  {
+    id: "MU-3324",
+    title:
+      "R36-K: WEB-10c A19 (review 18): the person's Try again on a memory stop is held by a fence that would be rediscovered (the page stays stopped until a reload)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a rediscovery whose write FAILS/,
+    patch: (t) =>
+      sub(
+        t,
+        "      (seen?.stop || stopped !== null || orphan(at, op) === null);",
+        "      true;",
+      ),
+  },
+  {
+    id: "MU-3325",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a rediscovered uncertain command loses its attempt (a new key is minted: the server cannot tell it from a second command)",
+    file: MODEL,
+    tests: RETRY_TESTS,
+    expect: /REVISION17 R36-K/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const next = { ...row, read_failures: lost.failures, schedule: lost };",
+        "  const next = {\n    ...row,\n    attempt: null,\n    read_failures: lost.failures,\n    schedule: lost,\n  };",
+      ),
+  },
+  {
+    id: "MU-3326",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a rediscovery begins the episode's window at the rediscovery (the window ends later than from the real first failure)",
+    file: "src/features/tasks/model/retry.ts",
+    tests: RETRY_TESTS,
+    expect: /REVISION17 R36-K/,
+    patch: (t) =>
+      sub(
+        t,
+        "    { ...s, issued: null, since: s.since ?? s.issued },",
+        "    { ...s, issued: null },",
+      ),
+  },
+  {
+    id: "MU-3327",
+    title:
+      "R36-K: WEB-10c A19 (review 18; the R36-I original found failing in the revision-17 replay): the page that keeps a lost-answer outcome never holds its fence's lock (a live owner whose repairs are spent is taken for gone)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a LIVE owner whose outcome cannot be written/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (locks === null || record.hold !== null) return;",
+        "    return;",
+      ),
+  },
+  {
+    id: "MU-3328",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a lost-answer fence is rediscovered while a live page holds its lock (the owner is always taken for gone)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a LIVE owner whose outcome cannot be written/,
+    patch: (t) =>
+      sub(
+        t,
+        "            resolve(lock !== null);",
+        "            resolve(true);",
+      ),
+  },
+  {
+    id: "MU-3329",
+    title:
+      "R36-K: WEB-10c A19 (review 18; Firefox's crash cut found in the revision-17 replay): a day's fence whose outcome landed before its page went is kept (the reload stops for good)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /(command|position): CRASH CUT/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (!settledBehind(row)) return storage();",
+        "          return storage();",
+      ),
+  },
+  {
+    id: "MU-3330",
+    title:
+      "R36-K: WEB-10c A19 (review 18; Firefox's crash cut): a discovery's fence whose outcome landed before its page went is kept (the reload stops for good)",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /discovery: CRASH CUT/,
+    patch: (t) =>
+      sub(
+        t,
+        "        if (!counted(s))\n",
+        "        if (!counted(s) || s !== undefined)\n",
+      ),
+  },
+  {
+    id: "MU-3331",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a day's lost-answer fence over a row whose call is not recorded and counted (none outstanding, none counted) is ended",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a day's lost-answer fence over a row with no call outstanding/,
+    patch: (t) =>
+      sub(t, "          if (!settledBehind(row)) return storage();\n", ""),
+  },
+  {
+    id: "MU-3332",
+    title:
+      "R36-K: WEB-10c A19 (review 18): a discovery's lost-answer fence with no entry behind it (nothing recorded, nothing counted) is ended",
+    file: "src/features/tasks/catchup/runner.ts",
+    tests: RETRY_TESTS,
+    expect: /a lost-answer fence with NO call outstanding/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (!counted(s))\n          return end(stopInMemory(item.taskId, { reason: "storage" }));\n',
+        "",
+      ),
+  },
 ];
 
 /** Real-engine mutants (all three engines on macOS, one job with its control; `grep` names the native case written for each). */
@@ -4335,8 +4587,9 @@ export const ENGINE_10C = [
     patch: (t) =>
       sub(
         t,
-        '    return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";',
-        "    return m.stops.has(scope, op) && false;",
+        // Re-anchored (revision 17, R36-K): the caller is fenced under its own or its lost-answer operation; the same fault, on both.
+        '      (o) => m.stops.has(scope, o) || m.probe(scope, o) !== "unmarked",',
+        "      (o) => m.stops.has(scope, o) && false,",
       ),
   },
   // ---- Revision 15 (review 16's R36-H/I; design assessment Q5/Q7): the native lifecycle and first-outcome-write cases ----------------

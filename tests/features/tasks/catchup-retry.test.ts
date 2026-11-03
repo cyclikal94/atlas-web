@@ -29,6 +29,7 @@ import {
   type CatchUpRunner,
   createCatchUpRunner,
   fenceOf,
+  lostOf,
   REPAIR_MS,
   seenDiscovery,
   seenSequence,
@@ -54,6 +55,30 @@ import { type Session, StampedRequestError } from "../../../src/session";
 import { ACCOUNT, DB, defaultsWorld } from "../../support/data/defaults-world";
 import { FakeMarkerStorage } from "../../support/data/marker-storage";
 import { cacheRow } from "../../support/data/rows";
+
+/**
+ * REVISION17 ADAPTATION (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): an observed
+ * transport failure is now fenced under its caller's lost-answer operation (`lostOf`), not the caller's own. Every earlier probe of "the
+ * caller's fence" (marked / unmarked / unknown) reads both operations: marked if either stands, unknown if either cannot be read, unmarked
+ * only when neither stands. The assertions' intent (the caller is, or is not, fenced) is unchanged.
+ */
+function callerFence(
+  markers: {
+    probe(
+      scope: { account: string; incarnationId: string },
+      operation: string,
+    ): "marked" | "unmarked" | "unknown";
+  },
+  scope: { account: string; incarnationId: string },
+  op: string,
+): "marked" | "unmarked" | "unknown" {
+  const states = [markers.probe(scope, op), markers.probe(scope, lostOf(op))];
+  return states.includes("marked")
+    ? "marked"
+    : states.includes("unknown")
+      ? "unknown"
+      : "unmarked";
+}
 
 /**
  * Revision 10 (Decision B, review R36; design assessment Q-M1–Q-M12): the catch-up's three callers under their durable retry schedules,
@@ -2058,7 +2083,9 @@ describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences it
         account: ACCOUNT,
         incarnationId: (w.t.env.service() as AccountService).incarnationId,
       };
-      expect(m.page("p9").probe(scope, fenceOf(TASK, TODAY))).toBe("marked");
+      expect(callerFence(m.page("p9"), scope, fenceOf(TASK, TODAY))).toBe(
+        "marked",
+      );
       r.dispose();
       // A reload (a new runner, a new markers object over the same storage) and another page: nothing transmitted, the stop shown.
       for (const page of ["p2", "p3"]) {
@@ -2101,7 +2128,9 @@ describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences it
         account: ACCOUNT,
         incarnationId: (w.t.env.service() as AccountService).incarnationId,
       };
-      expect(markers.probe(scope, fenceOf(TASK, TODAY))).toBe("unmarked");
+      expect(callerFence(markers, scope, fenceOf(TASK, TODAY))).toBe(
+        "unmarked",
+      );
     } finally {
       r.dispose();
     }
@@ -2189,7 +2218,7 @@ describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences it
           second.reconnected();
           await w.idle(second);
           expect(w.sent(), `+${later} ms`).toHaveLength(1);
-          expect(m.page("p9").probe(scope, fenceOf(TASK, TODAY))).toBe(
+          expect(callerFence(m.page("p9"), scope, fenceOf(TASK, TODAY))).toBe(
             "marked",
           );
           expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
@@ -2242,7 +2271,9 @@ describe("REVIEW12 R36-2: an answer whose record fails is repaired, or fences it
       r.tryAgain(TASK, TODAY, { kind: "memory", id: stop?.id as string });
       await w.idle(r);
       expect(newer).toBe(true);
-      expect(m.page("p3").probe(scope(), fenceOf(TASK, TODAY))).toBe("marked");
+      expect(callerFence(m.page("p3"), scope(), fenceOf(TASK, TODAY))).toBe(
+        "marked",
+      );
       // The newer fence stands: nothing more is sent, and its stop is shown.
       expect(w.sent()).toHaveLength(1);
       expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
@@ -2831,7 +2862,7 @@ describe("REVIEW13 Q1: the five witnesses of review 13 and their paired controls
           expect(initial?.phase).toBe("submitting");
           expect(initial?.schedule?.issued).not.toBeNull();
           expect(
-            m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY)),
+            callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK, TODAY)),
           ).toBe("marked");
           if (recreate) {
             first.dispose();
@@ -3127,12 +3158,15 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
         await until(w, h.entered, "the first repair wait was entered");
         expect(f.failed()).toBe(1);
         // Inside the wait: the fence is durable already, for this caller's operation only.
-        expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+        expect(callerFence(m.page("observer"), scopeOf(w), c.op())).toBe(
+          "marked",
+        );
         expect(materialiseKeys(m)).toHaveLength(1);
         h.release();
         await until(
           w,
-          () => m.page("observer").probe(scopeOf(w), c.op()) === "unmarked",
+          () =>
+            callerFence(m.page("observer"), scopeOf(w), c.op()) === "unmarked",
           "the repair ended its fence",
         );
         expect(materialiseKeys(m)).toEqual([]);
@@ -3273,7 +3307,9 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
         },
         "the first repair wait was entered",
       );
-      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+      expect(callerFence(m.page("observer"), scopeOf(w), c.op())).toBe(
+        "marked",
+      );
       h.release();
       await until(
         w,
@@ -3282,7 +3318,9 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
         "the stop is shown",
       );
       expect(f.failed()).toBe(1 + REPAIR_MS.length);
-      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+      expect(callerFence(m.page("observer"), scopeOf(w), c.op())).toBe(
+        "marked",
+      );
       first.dispose();
       const reads = w.reads().length;
       const sends = w.sent().length;
@@ -3305,7 +3343,9 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
           expect(w.reads().length - reads, page).toBe(
             caller === "discovery" ? 0 : page === "p2" ? 1 : 2,
           );
-          expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+          expect(callerFence(m.page("observer"), scopeOf(w), c.op())).toBe(
+            "marked",
+          );
         } finally {
           next.dispose();
         }
@@ -3366,9 +3406,9 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
         "the stop is shown",
       );
       expect(f.failed()).toBe(1);
-      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY))).toBe(
-        "marked",
-      );
+      expect(
+        callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK, TODAY)),
+      ).toBe("marked");
       expect(w.stored()?.read_seq).toBe(5);
       r.ensure(TASK, "daily");
       r.kick();
@@ -3471,7 +3511,9 @@ describe("REVISION12 R36: protected outcomes and retry ownership", () => {
       await w.idle(first);
       expect(f.failed()).toBe(1 + REPAIR_MS.length);
       expect(first.get().unrecorded.get(TASK)?.reason).toBe("storage");
-      expect(m.page("observer").probe(scopeOf(w), c.op())).toBe("marked");
+      expect(callerFence(m.page("observer"), scopeOf(w), c.op())).toBe(
+        "marked",
+      );
       first.dispose();
       const calls = w.log.length;
       const next = w.make({ markers: m.page("p2") });
@@ -3976,12 +4018,12 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
         r.ensure(TASK, "daily");
         await until(w, h.entered, "the first outcome write was entered");
         const observedAt = w.now();
-        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+        expect(callerFence(m.page("observer"), scopeOf(w), OP[caller]())).toBe(
           "marked",
         );
         h.release(false);
         await w.idle(r);
-        expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
+        expect(callerFence(m.page("observer"), scopeOf(w), OP[caller]())).toBe(
           "unmarked",
         );
         expect(r.get().unrecorded.has(TASK)).toBe(false);
@@ -4012,14 +4054,14 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
           const before = transmissionsOf(w, caller).length;
           first.dispose();
           // Before the barrier is released: the fence is durable already.
-          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-            "marked",
-          );
+          expect(
+            callerFence(m.page("observer"), scopeOf(w), OP[caller]()),
+          ).toBe("marked");
           h.release(!lands);
           await w.settle();
-          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-            lands ? "unmarked" : "marked",
-          );
+          expect(
+            callerFence(m.page("observer"), scopeOf(w), OP[caller]()),
+          ).toBe(lands ? "unmarked" : "marked");
           second = w.make({ markers: m.page("p2") });
           second.ensure(TASK, "daily");
           await w.idle(second);
@@ -4104,15 +4146,15 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
           await until(w, h.entered, "the first outcome write was entered");
           const before = transmissionsOf(w, caller).length;
           // Torn down: no fence while the write of a call no page that goes on observed is on its way. Live: fenced at its receipt.
-          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-            torn ? "unmarked" : "marked",
-          );
+          expect(
+            callerFence(m.page("observer"), scopeOf(w), OP[caller]()),
+          ).toBe(torn ? "unmarked" : "marked");
           first.dispose();
           h.release(true);
           await w.settle();
-          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-            torn ? "unmarked" : "marked",
-          );
+          expect(
+            callerFence(m.page("observer"), scopeOf(w), OP[caller]()),
+          ).toBe(torn ? "unmarked" : "marked");
           second = w.make({ markers: m.page("p2") });
           second.ensure(TASK, "daily");
           await w.idle(second);
@@ -4154,16 +4196,16 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
           expect((w.t.env.service() as AccountService).live).toBe(true);
           // Nothing is sent in the gap; the fence stands unless the write landed (exact proof).
           expect(transmissionsOf(w, caller)).toHaveLength(before);
-          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-            applied ? "unmarked" : "marked",
-          );
+          expect(
+            callerFence(m.page("observer"), scopeOf(w), OP[caller]()),
+          ).toBe(applied ? "unmarked" : "marked");
           service = h.service;
           r.kick();
           await w.idle(r);
           expect(r.get().unrecorded.has(TASK)).toBe(false);
-          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-            "unmarked",
-          );
+          expect(
+            callerFence(m.page("observer"), scopeOf(w), OP[caller]()),
+          ).toBe("unmarked");
           const calls = transmissionsOf(w, caller).slice(before);
           expect(
             calls.length,
@@ -4248,7 +4290,9 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
           const row = w.stored();
           const entry = w.discovery();
           const scope = scopeOf(w);
-          expect(m.page("observer").probe(scope, OP[caller]())).toBe("marked");
+          expect(callerFence(m.page("observer"), scope, OP[caller]())).toBe(
+            "marked",
+          );
           if (end === "replaced") {
             // The same account, epoch and incarnation, another service object: a replacement, not the original's return.
             service = new Proxy(real, {}) as AccountService;
@@ -4278,7 +4322,9 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
             expect(w.stored()).toEqual(row);
             expect(w.discovery()).toEqual(entry);
           }
-          expect(m.page("observer").probe(scope, OP[caller]())).toBe("marked");
+          expect(callerFence(m.page("observer"), scope, OP[caller]())).toBe(
+            "marked",
+          );
         } finally {
           reload?.dispose();
           r.dispose();
@@ -4308,7 +4354,9 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
           real.ended,
           "precondition: the service ended at the answer",
         ).toBe(true);
-        expect(m.page("observer").probe(scope, OP[caller]())).toBe("unmarked");
+        expect(callerFence(m.page("observer"), scope, OP[caller]())).toBe(
+          "unmarked",
+        );
         expect(
           [...m.storage.items.keys()].filter((k) => k.includes("materialise")),
         ).toEqual([]);
@@ -4488,9 +4536,9 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
           expect(caller === "discovery" ? w.discovery() : w.stored()).toEqual(
             peer,
           );
-          expect(m.page("observer").probe(scopeOf(w), OP[caller]())).toBe(
-            "marked",
-          );
+          expect(
+            callerFence(m.page("observer"), scopeOf(w), OP[caller]()),
+          ).toBe("marked");
           expect(a.get().unrecorded.has(TASK)).toBe(true);
           // a's later work (ensure, kick, its own press) never ends the fence: nothing proves its answer was recorded.
           a.ensure(TASK, "daily");
@@ -4531,7 +4579,7 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
       );
       await w.idle(a);
       expect(a.get().unrecorded.has(TASK)).toBe(false);
-      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+      expect(callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK))).toBe(
         "unmarked",
       );
     } finally {
@@ -4576,7 +4624,7 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
       await w.idle(a);
       expect(w.discovery()).toEqual(recreated);
       expect(a.get().unrecorded.get(TASK)?.reason).toBe("storage");
-      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+      expect(callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK))).toBe(
         "marked",
       );
     } finally {
@@ -4626,9 +4674,9 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
         );
         await w.idle(a);
         expect(w.stored()).toEqual(other);
-        expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY))).toBe(
-          recreate ? "marked" : "unmarked",
-        );
+        expect(
+          callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK, TODAY)),
+        ).toBe(recreate ? "marked" : "unmarked");
         expect(a.get().unrecorded.has(TASK)).toBe(recreate);
       } finally {
         a.dispose();
@@ -4649,9 +4697,9 @@ describe("REVISION13 R36-E/F: an observed outcome is protected from its receipt"
       h.release(false);
       await w.idle(r);
       // a's own instance ended; the peer's still marks the day, so the day stays stopped here.
-      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK, TODAY))).toBe(
-        "marked",
-      );
+      expect(
+        callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK, TODAY)),
+      ).toBe("marked");
       const keys = [...m.storage.items.keys()].filter((k) =>
         k.includes("materialise"),
       );
@@ -4830,13 +4878,17 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
       );
       // The receipt fence, seen by another facade BEFORE the owner ends and before its write is released (asserted by `fences`, after
       // each case's protocol assertions, so a runner without it fails at the protocol first).
-      const atReceipt = m.page("observer").probe(scopeOf(w), OP(caller));
+      const atReceipt = callerFence(m.page("observer"), scopeOf(w), OP(caller));
       const before = s.of(caller).length;
       expect(before, "precondition: one call of the caller made").toBe(1);
       one.dispose();
       h.release(!lands);
       await w.settle();
-      const afterRelease = m.page("observer").probe(scopeOf(w), OP(caller));
+      const afterRelease = callerFence(
+        m.page("observer"),
+        scopeOf(w),
+        OP(caller),
+      );
       two = w.make({
         service: () => rec.service,
         markers: m.page("replacement"),
@@ -4889,7 +4941,9 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
       s.of(caller),
       "a fence whose outcome no page holds is never cleared by time, a kick, a reconnection or a press",
     ).toHaveLength(1);
-    expect(m.page("observer").probe(scopeOf(w), OP(caller))).toBe("marked");
+    expect(callerFence(m.page("observer"), scopeOf(w), OP(caller))).toBe(
+      "marked",
+    );
   };
 
   /** Every failure the server answered, as the production transport classifies it. */
@@ -4987,7 +5041,11 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
           expect(stateBefore).toMatchObject({ caller, unknown: 1 });
           expect(stateBefore?.issued).not.toBeNull();
           // Revision 14: the received answer is fenced before its first write is released (asserted after the protocol's assertions).
-          const atReceipt = m.page("observer").probe(scopeOf(w), OP(caller));
+          const atReceipt = callerFence(
+            m.page("observer"),
+            scopeOf(w),
+            OP(caller),
+          );
           first.dispose();
           release?.(!lands);
           await w.settle();
@@ -5307,7 +5365,11 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
           );
           expect(f.failed()).toBe(1);
           expect(s.of(caller)).toHaveLength(1);
-          const atWait = m.page("observer").probe(scopeOf(w), OP(caller));
+          const atWait = callerFence(
+            m.page("observer"),
+            scopeOf(w),
+            OP(caller),
+          );
           if (torn) {
             one.dispose();
             await w.settle();
@@ -5342,7 +5404,7 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
             (resume as (() => void) | null)?.();
             await w.idle(one);
             expect(
-              m.page("observer").probe(scopeOf(w), OP(caller)),
+              callerFence(m.page("observer"), scopeOf(w), OP(caller)),
               "the repaired outcome's instance is retired",
             ).toBe("unmarked");
             expect(one.get().unrecorded.has(TASK)).toBe(false);
@@ -5372,7 +5434,9 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
         api: s.api,
         sleep: (ms) => {
           if (REPAIR_MS.includes(ms))
-            atWaits.push(m.page("observer").probe(scopeOf(w), OP(caller)));
+            atWaits.push(
+              callerFence(m.page("observer"), scopeOf(w), OP(caller)),
+            );
           w.setNow(w.now() + ms);
           return Promise.resolve();
         },
@@ -5387,7 +5451,9 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
         );
         expect(one.get().unrecorded.has(TASK)).toBe(true);
         expect(s.of(caller), "this page made no further call").toHaveLength(1);
-        expect(m.page("observer").probe(scopeOf(w), OP(caller))).toBe("marked");
+        expect(callerFence(m.page("observer"), scopeOf(w), OP(caller))).toBe(
+          "marked",
+        );
         one.dispose();
         two = w.make({ markers: m.page("replacement"), api: s.api });
         two.ensure(TASK, "daily");
@@ -5560,7 +5626,8 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
   const schedule16 = async (
     caller: CallerName,
     failure: TasksResult<never>,
-    mode: "persisted" | "lost-pending" | "failed-live",
+    /** Revision 17 (R36-K): `failing-live`: every outcome write of the caller fails, under the owner kept live (its repairs spent). */
+    mode: "persisted" | "lost-pending" | "failed-live" | "failing-live",
     life: Life = pageLife(),
     hideBefore = false,
     /**
@@ -5571,6 +5638,8 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
       atReceipt?: (l: Life) => void;
       atFirstWrite?: (l: Life) => void;
     } = {},
+    /** Revision 17 (R36-K): the pages' Web Locks (none: pages not excluded, as before). */
+    locks: LockManager | null = null,
   ) => {
     const m = markerWorld();
     const w = await setup();
@@ -5611,6 +5680,14 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
       const s = (input.next as { schedule?: MaterialiseRetry } | null)
         ?.schedule;
       if (
+        mode === "failing-live" &&
+        entered &&
+        name === PLAN_OF[caller] &&
+        s?.caller === caller &&
+        s.issued === null
+      )
+        return { kind: "failed" };
+      if (
         !entered &&
         name === PLAN_OF[caller] &&
         s?.caller === caller &&
@@ -5622,7 +5699,8 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
         entered = true;
         classified = structuredClone(s);
         hooks.atFirstWrite?.(life);
-        if (mode === "failed-live") return { kind: "failed" };
+        if (mode === "failed-live" || mode === "failing-live")
+          return { kind: "failed" };
         if (mode === "persisted") return run();
         const fail = await new Promise<boolean>((r) => {
           release = r;
@@ -5631,11 +5709,13 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
       }
       return run();
     });
+    const originMarkers = m.page("origin");
     const owner = w.make({
       service: () => service,
-      markers: m.page("origin"),
+      markers: originMarkers,
       api,
       lifecycle: life.lifecycle,
+      locks,
       sleep: async (ms) => {
         if (mode === "failed-live" && ms === REPAIR_MS[0] && !inRepair) {
           inRepair = true;
@@ -5658,8 +5738,11 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
       inRepair: () => inRepair,
       release: (fail: boolean) => release?.(fail),
       resume: () => resume?.(),
-      probe: () => m.page("observer").probe(scopeOf(w), OP(caller)),
-      peer: (id: string) => w.make({ markers: m.page(id), api }),
+      probe: () => callerFence(m.page("observer"), scopeOf(w), OP(caller)),
+      peer: (id: string) => w.make({ markers: m.page(id), api, locks }),
+      /** Revision 17 (R36-K): the scripted API (a page made by the test itself), and the owner's own marker facade. */
+      api,
+      originMarkers,
     };
   };
   const until = async (w: World, ok: () => boolean, what: string) => {
@@ -5944,7 +6027,7 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
         await w.settle();
         expect(reads, "precondition: the discovery read was made").toBe(1);
         expect(
-          m.page("observer").probe(scopeOf(w), fenceOf(TASK)),
+          callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK)),
           torn ? "no fence from a torn-down page" : "fenced in its gap",
         ).toBe(torn ? "unmarked" : "marked");
         one.dispose();
@@ -6208,7 +6291,7 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
         expect(failed, "precondition: the success's first write failed").toBe(
           1,
         );
-        expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+        expect(callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK))).toBe(
           departs ? "unmarked" : "marked",
         );
         one.dispose();
@@ -6252,7 +6335,7 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
       for (let k = 0; k < 80 && reads === 0; k += 1) await w.settle();
       await w.settle();
       expect(reads, "precondition: the discovery read was made").toBe(1);
-      expect(m.page("observer").probe(scopeOf(w), fenceOf(TASK))).toBe(
+      expect(callerFence(m.page("observer"), scopeOf(w), fenceOf(TASK))).toBe(
         "marked",
       );
       one.dispose();
@@ -6376,4 +6459,542 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
         }
       });
   }
+
+  // ---- REVISION17 R36-K (review 18; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json, SHA-256 e1f26cdf…7b6f) ---
+  // A transport failure a live page observed is fenced at receipt under its caller's LOST-ANSWER operation. A page that holds the account's
+  // lock and finds that fence with no outcome behind it counts the call lost at that moment and paces from it (never sooner than from the
+  // real observation; a longer wait is accepted), then resumes the same work and retires exactly the instances it found. Every other fence
+  // stays a stop. FIXTURE evidence: production runner, W27 plans, account service and marker facades over the IndexedDB double and fake
+  // marker storage; an exclusive Web Lock double; scripted time.
+  /**
+   * Web Locks excluding pages by name, in request order (`request(name, fn)` or `request(name, options, fn)`); `ifAvailable` grants at
+   * once or calls back with `null`; a queued request is withdrawn when its signal aborts (a disposed runner). `heldNames`: names held now.
+   */
+  const exclusiveLocks = () => {
+    const held = new Set<string>();
+    const queued = new Map<string, Array<() => void>>();
+    const locks = {
+      request: (
+        name: string,
+        a: { signal?: AbortSignal; ifAvailable?: boolean } | (() => unknown),
+        b?: (lock: unknown) => Promise<unknown>,
+      ) => {
+        const opts = typeof a === "function" ? {} : a;
+        const fn = (typeof a === "function" ? a : b) as (
+          lock: unknown,
+        ) => Promise<unknown>;
+        return new Promise<unknown>((resolve, reject) => {
+          const go = () => {
+            held.add(name);
+            Promise.resolve(fn({ name }))
+              .then(resolve, reject)
+              .finally(() => {
+                held.delete(name);
+                queued.get(name)?.shift()?.();
+              });
+          };
+          if (!held.has(name)) {
+            go();
+            return;
+          }
+          if (opts.ifAvailable) {
+            Promise.resolve(fn(null)).then(resolve, reject);
+            return;
+          }
+          const list = queued.get(name) ?? [];
+          queued.set(name, list);
+          list.push(go);
+          opts.signal?.addEventListener("abort", () => {
+            const i = list.indexOf(go);
+            if (i < 0) return;
+            list.splice(i, 1);
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      },
+    } as unknown as LockManager;
+    return {
+      locks,
+      held: () => held.has(`atlas-materialise:${ACCOUNT}`),
+      heldNames: () => [...held],
+      waiting: () => [...queued.values()].some((l) => l.length > 0),
+    };
+  };
+  type R16 = Awaited<ReturnType<typeof schedule16>>;
+  const lostState = (r: R16, caller: CallerName) =>
+    r.m.page("observer").probe(scopeOf(r.w), lostOf(OP(caller)));
+  const ownState = (r: R16, caller: CallerName) =>
+    r.m.page("observer").probe(scopeOf(r.w), OP(caller));
+  /** The owner observed the transport failure and holds the lock; its first outcome write is held (`lost-pending`). */
+  const lostWrite = async (caller: CallerName) => {
+    const l = exclusiveLocks();
+    const r = await schedule16(
+      caller,
+      await TRANSPORT_FAILURE(),
+      "lost-pending",
+      pageLife(),
+      false,
+      {},
+      l.locks,
+    );
+    r.owner.ensure(TASK, "daily");
+    await until(
+      r.w,
+      r.entered,
+      "the failure was classified and its first outcome write reached",
+    );
+    expect(l.held(), "precondition: the owner holds the account's lock").toBe(
+      true,
+    );
+    return { l, r };
+  };
+  /** The owner goes (its page destroyed): the lock released, its held write never lands. `at`: the clock when it goes. */
+  const ownerGoes = async (r: R16, at: number) => {
+    r.owner.dispose();
+    r.w.setNow(at);
+    r.release(true);
+    await r.w.settle();
+  };
+  /** A page made by the test, over `service`, with the world's scripted API and the lock. */
+  const pageOver = (
+    r: R16,
+    l: ReturnType<typeof exclusiveLocks>,
+    id: string,
+    service?: AccountService,
+  ) =>
+    r.w.make({
+      markers: r.m.page(id),
+      api: r.api,
+      locks: l.locks,
+      ...(service === undefined ? {} : { service: () => service }),
+    });
+  /**
+   * The caller's rediscovery write by the replacement page (whose service alone is intercepted): its record of the issued call counted
+   * lost (transport, nothing issued). A discovery's expectation is the entry itself, so its issue is checked too; a sequence's is not
+   * the row (`expectationOf`), and the replacement's first such write of the caller is its rediscovery.
+   */
+  const rediscovering = (caller: CallerName, input: Commit, plan: string) => {
+    const s = (input.next as { schedule?: MaterialiseRetry } | null)?.schedule;
+    return (
+      plan === PLAN_OF[caller] &&
+      s?.caller === caller &&
+      s.issued === null &&
+      s.cause === "transport" &&
+      (caller !== "discovery" ||
+        (input.expected as { schedule?: MaterialiseRetry } | null)?.schedule
+          ?.issued != null)
+    );
+  };
+
+  for (const caller of CALLERS) {
+    test(`REVISION17 R36-K ${caller}: K WITNESS: a transport failure observed live, its first write lost when the owner goes (lock released), is rediscovered under the lock: counted and paced from then (never sooner), the same work resumed, the fence retired`, async () => {
+      const { l, r } = await lostWrite(caller);
+      let second: CatchUpRunner | undefined;
+      try {
+        expect(
+          lostState(r, caller),
+          "fenced at receipt (lost-answer operation)",
+        ).toBe("marked");
+        expect(ownState(r, caller)).toBe("unmarked");
+        // A page waiting for the lock meanwhile calls nothing: the owner's outcome may still land.
+        second = r.peer("replacement");
+        second.ensure(TASK, "daily");
+        await r.w.settle();
+        expect(l.waiting(), "precondition: the next page waits").toBe(true);
+        expect(r.of(caller)).toHaveLength(1);
+        const rediscoveredAt = r.observedAt() + 5_000;
+        await ownerGoes(r, rediscoveredAt);
+        await r.w.idle(second);
+        const selected = r.of(caller);
+        expect(selected, "recovered: the caller is called again").toHaveLength(
+          2,
+        );
+        expect(
+          selected[1]?.at,
+          "paced from the rediscovery (counted then), never from the issue",
+        ).toBeGreaterThanOrEqual(rediscoveredAt + 1_000);
+        expect(selected[1]?.at).toBeGreaterThanOrEqual(r.observedAt() + 1_000);
+        if (caller === "command")
+          expect(selected[1]?.key, "the same attempt").toBe(selected[0]?.key);
+        if (caller === "position")
+          expect(
+            r.of("command"),
+            "no other materialise after the known success",
+          ).toHaveLength(1);
+        expect(second.get().unrecorded.get(TASK)).toBeUndefined();
+        expect(
+          callerFence(r.m.page("observer"), scopeOf(r.w), OP(caller)),
+          "the fence found is retired",
+        ).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+        r.release(false);
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: CONTROL (available database, lock held): the owner's own outcome lands and retires its fence; the next call is paced from the observation exactly`, async () => {
+      const l = exclusiveLocks();
+      const r = await schedule16(
+        caller,
+        await TRANSPORT_FAILURE(),
+        "persisted",
+        pageLife(),
+        false,
+        {},
+        l.locks,
+      );
+      try {
+        r.owner.ensure(TASK, "daily");
+        await r.w.idle(r.owner);
+        const selected = r.of(caller);
+        expect(selected.length).toBeGreaterThanOrEqual(2);
+        expect(selected[1]?.at).toBe(r.observedAt() + 1_000);
+        if (caller === "command")
+          expect(selected[1]?.key).toBe(selected[0]?.key);
+        expect(
+          callerFence(r.m.page("observer"), scopeOf(r.w), OP(caller)),
+        ).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: a LIVE owner whose first write failed keeps the lock through its repairs: a waiting page calls nothing; the owner's own repair lands and paces from the observation exactly (no rediscovery)`, async () => {
+      const l = exclusiveLocks();
+      const r = await schedule16(
+        caller,
+        await TRANSPORT_FAILURE(),
+        "failed-live",
+        pageLife(),
+        false,
+        {},
+        l.locks,
+      );
+      let second: CatchUpRunner | undefined;
+      try {
+        r.owner.ensure(TASK, "daily");
+        await until(r.w, r.inRepair, "the owner waits in its first repair");
+        second = r.peer("peer");
+        second.ensure(TASK, "daily");
+        await r.w.settle();
+        expect(l.waiting(), "the peer waits for the lock").toBe(true);
+        expect(
+          callerFence(r.m.page("observer"), scopeOf(r.w), OP(caller)),
+        ).toBe("marked");
+        expect(r.of(caller)).toHaveLength(1);
+        r.resume();
+        await r.w.idle(r.owner);
+        await r.w.idle(second);
+        const selected = r.of(caller);
+        expect(selected.length).toBeGreaterThanOrEqual(2);
+        expect(selected[1]?.at, "the owner's own outcome, exactly").toBe(
+          r.observedAt() + 1_000,
+        );
+        expect(
+          callerFence(r.m.page("observer"), scopeOf(r.w), OP(caller)),
+        ).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+        r.resume();
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: a RECEIVED failure (503) whose write is lost keeps its caller's own fence under the lock: the next page calls nothing (never rediscovered)`, async () => {
+      const l = exclusiveLocks();
+      const r = await schedule16(
+        caller,
+        await http<never>(503, "temporarily_unavailable"),
+        "lost-pending",
+        pageLife(),
+        false,
+        {},
+        l.locks,
+      );
+      let second: CatchUpRunner | undefined;
+      try {
+        r.owner.ensure(TASK, "daily");
+        await until(r.w, r.entered, "the first outcome write reached");
+        await ownerGoes(r, r.observedAt() + 5_000);
+        expect(ownState(r, caller)).toBe("marked");
+        expect(lostState(r, caller)).toBe("unmarked");
+        second = r.peer("replacement");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+        r.release(false);
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: a fence under the caller's OWN operation (an earlier build's, or any other outcome's) beside the lost-answer one: nothing is rediscovered, the next page calls nothing`, async () => {
+      const { l, r } = await lostWrite(caller);
+      let second: CatchUpRunner | undefined;
+      try {
+        await ownerGoes(r, r.observedAt() + 5_000);
+        r.m.page("earlier-build").set(scopeOf(r.w), OP(caller));
+        second = pageOver(r, l, "replacement");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+        expect(lostState(r, caller), "the lost-answer fence stands").toBe(
+          "marked",
+        );
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: EXACT RETIREMENT: a lost-answer instance published while the rediscovery is written is not ended by it; the work stops (nothing outstanding to rediscover again)`, async () => {
+      const { l, r } = await lostWrite(caller);
+      let second: CatchUpRunner | undefined;
+      let late = false;
+      try {
+        await ownerGoes(r, r.observedAt() + 5_000);
+        let letGo: () => void = () => undefined;
+        const service = intercepted(r.w, async (plan, input, run) => {
+          if (!late && rediscovering(caller, input, plan)) {
+            late = true;
+            // A newer failure of a live page, which holds its fence's lock as every page that keeps a lost-answer outcome does.
+            void l.locks.request(
+              `atlas-materialise-fence:${ACCOUNT}:${scopeOf(r.w).incarnationId}:${lostOf(OP(caller))}`,
+              () =>
+                new Promise<void>((resolve) => {
+                  letGo = resolve;
+                }),
+            );
+            r.m.page("late").set(scopeOf(r.w), lostOf(OP(caller)));
+          }
+          return run();
+        });
+        second = pageOver(r, l, "replacement", service);
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(late, "precondition: the rediscovery was written").toBe(true);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(lostState(r, caller), "the later instance stands").toBe(
+          "marked",
+        );
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+        letGo();
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: a rediscovery whose write FAILS sends nothing and keeps the fence; the person's Try again on that stop rediscovers it once the store writes, and the work resumes`, async () => {
+      const { l, r } = await lostWrite(caller);
+      let second: CatchUpRunner | undefined;
+      let failedOnce = false;
+      try {
+        await ownerGoes(r, r.observedAt() + 5_000);
+        const service = intercepted(r.w, async (plan, input, run) => {
+          if (!failedOnce && rediscovering(caller, input, plan)) {
+            failedOnce = true;
+            return { kind: "failed" };
+          }
+          return run();
+        });
+        second = pageOver(r, l, "replacement", service);
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(failedOnce, "precondition: the rediscovery write failed").toBe(
+          true,
+        );
+        expect(r.of(caller)).toHaveLength(1);
+        expect(lostState(r, caller), "the fence stands").toBe("marked");
+        const stop = second.get().unrecorded.get(TASK);
+        expect(stop?.reason).toBe("storage");
+        const pressedAt = r.w.now();
+        second.tryAgain(TASK, stop?.throughDate, {
+          kind: "memory",
+          id: stop?.id as string,
+        });
+        await r.w.idle(second);
+        const selected = r.of(caller);
+        expect(selected).toHaveLength(2);
+        expect(selected[1]?.at).toBeGreaterThanOrEqual(pressedAt + 1_000);
+        if (caller === "command")
+          expect(selected[1]?.key).toBe(selected[0]?.key);
+        expect(
+          callerFence(r.m.page("observer"), scopeOf(r.w), OP(caller)),
+        ).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: markers that cannot be read are not absence: nothing is rediscovered, the next page calls nothing`, async () => {
+      const { l, r } = await lostWrite(caller);
+      let second: CatchUpRunner | undefined;
+      try {
+        await ownerGoes(r, r.observedAt() + 5_000);
+        r.m.storage.failEnumeration = true;
+        second = pageOver(r, l, "replacement");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(r.of(caller)).toHaveLength(1);
+        expect(second.get().unrecorded.get(TASK)?.reason).toBe("storage");
+        const issued =
+          caller === "discovery"
+            ? r.w.discovery()?.schedule?.issued
+            : r.w.stored()?.schedule?.issued;
+        expect(
+          issued != null,
+          "nothing rediscovered: the call is still recorded as issued",
+        ).toBe(true);
+      } finally {
+        r.m.storage.failEnumeration = false;
+        r.owner.dispose();
+        second?.dispose();
+      }
+    });
+  }
+
+  for (const caller of CALLERS) {
+    test(`REVISION17 R36-K ${caller}: a LIVE owner whose outcome cannot be written (its repairs spent, its store still failing) keeps its fence's lock: a page that takes the account's lock calls nothing; once the owner goes, the person's Try again there rediscovers it`, async () => {
+      const l = exclusiveLocks();
+      const r = await schedule16(
+        caller,
+        await TRANSPORT_FAILURE(),
+        "failing-live",
+        pageLife(),
+        false,
+        {},
+        l.locks,
+      );
+      let second: CatchUpRunner | undefined;
+      try {
+        r.owner.ensure(TASK, "daily");
+        await r.w.idle(r.owner);
+        // Its outcome not recorded: a memory stop of the owner (`storage` for a day; a discovery's keeps its answer's reason).
+        expect(r.owner.get().unrecorded.get(TASK)).toBeDefined();
+        expect(l.held(), "the owner let the account's lock go").toBe(false);
+        expect(
+          l.heldNames(),
+          "the live owner holds its fence's lock",
+        ).toContain(
+          `atlas-materialise-fence:${ACCOUNT}:${scopeOf(r.w).incarnationId}:${lostOf(OP(caller))}`,
+        );
+        second = pageOver(r, l, "peer");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        expect(
+          r.of(caller),
+          "Decision B: no other page transmits while the live owner's outcome cannot be written",
+        ).toHaveLength(1);
+        const stop = second.get().unrecorded.get(TASK);
+        expect(stop?.reason).toBe("storage");
+        expect(lostState(r, caller)).toBe("marked");
+        // The owner's page goes (the browser lets its locks go).
+        r.owner.dispose();
+        await r.w.settle();
+        const pressedAt = r.w.now();
+        second.tryAgain(TASK, stop?.throughDate, {
+          kind: "memory",
+          id: stop?.id as string,
+        });
+        await r.w.idle(second);
+        const selected = r.of(caller);
+        expect(selected).toHaveLength(2);
+        expect(selected[1]?.at).toBeGreaterThanOrEqual(pressedAt + 1_000);
+        if (caller === "command")
+          expect(selected[1]?.key).toBe(selected[0]?.key);
+        expect(
+          callerFence(r.m.page("observer"), scopeOf(r.w), OP(caller)),
+        ).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+      }
+    });
+
+    test(`REVISION17 R36-K ${caller}: CRASH CUT: the owner's outcome LANDED but its page went before it ended its fence: the next page (the owner gone) ends the instances found and goes on from the record exactly as written (paced from the observation)`, async () => {
+      const { l, r } = await lostWrite(caller);
+      let second: CatchUpRunner | undefined;
+      try {
+        // The page is destroyed between the commit and the next step: nothing it does after the commit happens.
+        r.originMarkers.retire = () => false;
+        r.owner.dispose();
+        r.release(false);
+        await r.w.settle();
+        expect(lostState(r, caller), "precondition: its fence stands").toBe(
+          "marked",
+        );
+        const recorded =
+          caller === "discovery"
+            ? r.w.discovery()?.schedule
+            : r.w.stored()?.schedule;
+        expect(recorded, "precondition: its outcome landed").toMatchObject({
+          issued: null,
+          failures: 1,
+          cause: "transport",
+          next: r.observedAt() + 1_000,
+        });
+        second = pageOver(r, l, "replacement");
+        second.ensure(TASK, "daily");
+        await r.w.idle(second);
+        const selected = r.of(caller);
+        expect(selected).toHaveLength(2);
+        expect(selected[1]?.at, "the recorded outcome, exactly").toBe(
+          r.observedAt() + 1_000,
+        );
+        if (caller === "command")
+          expect(selected[1]?.key).toBe(selected[0]?.key);
+        if (caller === "position") expect(r.of("command")).toHaveLength(1);
+        expect(
+          callerFence(r.m.page("observer"), scopeOf(r.w), OP(caller)),
+        ).toBe("unmarked");
+      } finally {
+        r.owner.dispose();
+        second?.dispose();
+      }
+    });
+  }
+
+  test("REVISION17 R36-K: a lost-answer fence with NO call outstanding (its record shows none) is not rediscovered: the discovery stops, nothing is read", async () => {
+    const m = markerWorld();
+    const w = await setup();
+    const l = exclusiveLocks();
+    m.page("earlier").set(scopeOf(w), lostOf(fenceOf(TASK)));
+    const r = w.make({ markers: m.page("replacement"), locks: l.locks });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.reads()).toHaveLength(0);
+      expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
+      expect(m.page("observer").probe(scopeOf(w), lostOf(fenceOf(TASK)))).toBe(
+        "marked",
+      );
+    } finally {
+      r.dispose();
+    }
+  });
+
+  test("REVISION17 R36-K: a day's lost-answer fence over a row with no call outstanding is not rediscovered: no materialise is sent", async () => {
+    const m = markerWorld();
+    const w = await setup({
+      seed: [row()],
+      positions: [detail("2026-10-01", true)],
+    });
+    const l = exclusiveLocks();
+    m.page("earlier").set(scopeOf(w), lostOf(fenceOf(TASK, TODAY)));
+    const r = w.make({ markers: m.page("replacement"), locks: l.locks });
+    try {
+      r.ensure(TASK, "daily");
+      await w.idle(r);
+      expect(w.sent()).toHaveLength(0);
+      expect(r.get().unrecorded.get(TASK)?.reason).toBe("storage");
+    } finally {
+      r.dispose();
+    }
+  });
 });

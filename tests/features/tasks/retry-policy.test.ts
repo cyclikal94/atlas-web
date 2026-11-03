@@ -14,6 +14,7 @@ import {
   issue,
   paused,
   readSchedule,
+  rediscovered,
   reset,
   resumable,
   type Schedule,
@@ -495,5 +496,69 @@ describe("clocks, issues and stored records", () => {
       expect(readSchedule(damaged, "position"), JSON.stringify(damaged)).toBe(
         "invalid",
       );
+  });
+});
+
+/**
+ * Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): an issued call whose
+ * transport failure a page observed and no page recorded, counted lost when it is REDISCOVERED.
+ */
+describe("REVISION17 R36-K: a lost answer rediscovered", () => {
+  test("counted as one transport failure at the rediscovery and paced from it, never from its issue; the window from the issue", () => {
+    const issued = issue(null, "command", T0);
+    const at = T0 + 25_000;
+    expect(rediscovered(issued, "command", at)).toEqual({
+      ...failed(null, "command", { cause: "transport" }, at, false),
+      since: T0,
+      seen: at,
+    });
+    expect(rediscovered(issued, "command", at)).toMatchObject({
+      issued: null,
+      failures: 1,
+      next: at + (DELAYS_MS[0] as number),
+      cause: "transport",
+      pause: null,
+    });
+    // Never sooner than the lost call counted at its issue (the existing recovery of an unanswered call).
+    expect(rediscovered(issued, "command", at).next).toBeGreaterThan(
+      unanswered(issued, "command").next,
+    );
+  });
+
+  test("an episode under way keeps its start, its count, its unrecognised streak and a server minimum still ahead", () => {
+    const first = failed(null, "position", { cause: "unrecognised" }, T0, true);
+    const limited = failed(
+      first,
+      "position",
+      { cause: "rate_limited", afterMs: 60_000 },
+      T0 + 2_000,
+      true,
+    );
+    const issued = issue(limited, "position", T0 + 62_000);
+    const at = T0 + 63_000;
+    const out = rediscovered(issued, "position", at);
+    expect(out).toMatchObject({
+      since: T0,
+      failures: 3,
+      unknown: 1,
+      next: at + (DELAYS_MS[2] as number),
+      cause: "transport",
+    });
+    const ahead = issue(limited, "position", T0 + 3_000);
+    expect(rediscovered(ahead, "position", T0 + 4_000)).toMatchObject({
+      server: T0 + 62_000,
+      next: T0 + 62_000,
+    });
+  });
+
+  test("a rediscovery at or past the window's end pauses (window); a clock behind the issue pauses (clock)", () => {
+    const issued = issue(null, "discovery", T0);
+    expect(rediscovered(issued, "discovery", T0 + WINDOW_MS)).toMatchObject({
+      pause: "window",
+      failures: 1,
+    });
+    expect(rediscovered(issued, "discovery", T0 - 1)).toMatchObject({
+      pause: "clock",
+    });
   });
 });

@@ -6,11 +6,13 @@ import type { RetryFacts } from "../api";
 import { type Attempt, canonicalBody, nextAttempt } from "./attempt";
 import {
   type Caller,
+  counted,
   failed,
   gate,
   issue,
   paused,
   readSchedule,
+  rediscovered,
   reset,
   resumable,
   type Schedule,
@@ -191,6 +193,33 @@ function failure(
     : failed(own(row), caller, facts, now, caller === "position");
   const next = { ...row, read_failures: s.failures, schedule: s };
   return s.pause === null ? next : stopped(next, "unreachable", requestId);
+}
+
+/**
+ * Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): the row's issued call,
+ * whose transport failure a page observed (its lost-answer fence stands) and whose record no page holds, counted as lost when it is
+ * REDISCOVERED at `now` (`retry.ts`'s `rediscovered`: paced from now, never sooner than from its real observation). Its caller and phase
+ * are kept: an uncertain command keeps its attempt (the same key and body is resent), a position read stays the row's own read (never
+ * another `materialise`). `null`: the row has no call outstanding (its schedule untrusted, or nothing issued): nothing is rediscovered.
+ */
+export function rediscover(row: Sequence, now: number): Sequence | null {
+  const caller = callerOf(row);
+  if (row.phase === "stopped") return null;
+  const s = readSchedule(row.schedule, caller);
+  if (s === null || s === "invalid" || s.issued == null) return null;
+  const lost = rediscovered(s, caller, now);
+  const next = { ...row, read_failures: lost.failures, schedule: lost };
+  return lost.pause === null ? next : stopped(next, "unreachable");
+}
+
+/**
+ * Revision 17 (review 18's R36-K): the row's caller has no call outstanding and its last failure is recorded (`retry.ts`'s `counted`): a
+ * lost-answer fence over it guards nothing. A stop is never so (it is shown, and only the person's Try again goes on from it).
+ */
+export function settledBehind(row: Sequence): boolean {
+  if (row.phase === "stopped") return false;
+  const s = readSchedule(row.schedule, callerOf(row));
+  return s !== "invalid" && counted(s);
 }
 
 /** The answer to the attempt held in `submitting`, observed at `now`. */

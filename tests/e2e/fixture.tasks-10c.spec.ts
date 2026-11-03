@@ -2433,6 +2433,9 @@ test.describe("E-M11: a reconnection past the first page, and a fence across a r
  *   first repair is written (R36-I); a store that keeps failing fences the caller for another tab and a reload; a page closed while its
  *   call is held publishes no fence and another tab recovers the call (E-M2, I-10C-M4a). FIXTURE evidence (the stub's answers).
  */
+// REVISION17 ADAPTATION (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): an observed
+// transport failure is fenced under its caller's lost-answer operation (`materialise-lost:…`). Every raw marker filter of E-M12 recognises
+// the caller's fence under either operation; what each case asserts of the fence (set, standing, retired, absent) is unchanged.
 test.describe("E-M12: the page's lifecycle and the first outcome write, natively (revision 15: R36-H/I)", () => {
   type Trace = { log: string[]; fail: number; prev: string };
   /**
@@ -2486,7 +2489,8 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
         const ours = (key: unknown) =>
           typeof key === "string" &&
           key.startsWith("atlas-write-failing:") &&
-          key.includes(`:materialise:${id}#`);
+          (key.includes(`:materialise:${id}#`) ||
+            key.includes(`:materialise-lost:${id}#`));
         const storage = Storage.prototype;
         const setItem = storage.setItem;
         storage.setItem = function (this: Storage, key: string, value: string) {
@@ -2512,7 +2516,8 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
         Object.keys(localStorage).filter(
           (k) =>
             k.startsWith("atlas-write-failing:") &&
-            k.includes(`:materialise:${id}#`),
+            (k.includes(`:materialise:${id}#`) ||
+              k.includes(`:materialise-lost:${id}#`)),
         ),
       taskId,
     );
@@ -2855,7 +2860,8 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
         ) {
           if (
             key.startsWith("atlas-write-failing:") &&
-            key.includes(`:materialise:${id}`)
+            (key.includes(`:materialise:${id}`) ||
+              key.includes(`:materialise-lost:${id}`))
           )
             t.markSets += 1;
           return set.call(this, key, v);
@@ -2869,7 +2875,8 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
         Object.keys(localStorage).filter(
           (k) =>
             k.startsWith("atlas-write-failing:") &&
-            k.includes(`:materialise:${id}`),
+            (k.includes(`:materialise:${id}`) ||
+              k.includes(`:materialise-lost:${id}`)),
         ),
       taskId,
     );
@@ -3142,7 +3149,8 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
           ) {
             if (
               key.startsWith("atlas-write-failing:") &&
-              key.includes(`:materialise:${id}`)
+              (key.includes(`:materialise:${id}`) ||
+                key.includes(`:materialise-lost:${id}`))
             )
               t.log.push("marker:set");
             return set.call(this, key, v);
@@ -3258,4 +3266,319 @@ test.describe("E-M12: the page's lifecycle and the first outcome write, natively
       ).toBeLessThan(hide);
       expect(await markersOf(page, task.taskId)).toHaveLength(1);
     });
+});
+
+/**
+ * Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json; design assessment Q3/Q4):
+ * a REAL reload while a second same-origin page holds a valid readwrite transaction over the account database (no product write, no
+ * injected fault), released when the navigation completes and proved complete before recovery is assessed; and a live owner whose
+ * outcome write keeps failing, with a peer tab. Maintained from Review 18's and Review 17's probes. FIXTURE evidence (stub server), real
+ * engines, IndexedDB, Web Locks and lifecycle. The ordinary E-M2 recovery observation (20 s) is kept; no production timer is changed.
+ */
+test.describe("E-M12i/j: a lost answer after a real reload under database contention, and a live owner's unwritten outcome (revision 17: R36-K)", () => {
+  type Caller = "discovery" | "command" | "position";
+  const fencesOf = (page: Page, taskId: string) =>
+    page.evaluate(
+      (id) =>
+        Object.keys(localStorage).filter(
+          (k) =>
+            k.startsWith("atlas-write-failing:") &&
+            (k.includes(`:materialise:${id}`) ||
+              k.includes(`:materialise-lost:${id}`)),
+        ),
+      taskId,
+    );
+  for (const caller of ["discovery", "command", "position"] as Caller[])
+    for (const blocked of [false, true])
+      test(`E-M12i ${caller} ${blocked ? "WITNESS (a transaction held until the reload completes)" : "CONTROL (available database)"}: the call left unanswered by a real reload is recovered by the next page${caller === "command" ? " with the same key" : caller === "position" ? " as the row's own read, no other materialise" : ""}`, async ({
+        context,
+      }, info) => {
+        const task = repeating(461, "Contended fern");
+        const first = held<Answer>();
+        let calls = 0;
+        let sent = 0;
+        let holding = false;
+        let caughtUp = false;
+        await context.route("**/__r17-blank", (r) =>
+          r.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: "<!doctype html><title>transaction owner</title>",
+          }),
+        );
+        const { page, r10c } = await setup(
+          context,
+          `/today?day=${TODAY}&tz=UTC`,
+          [task],
+          (q, r) => {
+            q.respond = (d) =>
+              dailyPage(
+                [view(task)],
+                d.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+              );
+            r.position = () => {
+              calls += 1;
+              if (caller === "discovery" && calls === 1) return first.promise;
+              if (caller === "position" && sent > 0 && !holding) {
+                holding = true;
+                return first.promise;
+              }
+              return detailOf(
+                task,
+                caughtUp || (caller === "position" && sent > 0)
+                  ? { last_date: TODAY, pending: false }
+                  : caller === "discovery"
+                    ? { last_date: TODAY, pending: false }
+                    : { last_date: yesterday(20), pending: true },
+              );
+            };
+            r.materialise = () => {
+              sent += 1;
+              if (caller === "command" && sent === 1) return first.promise;
+              caughtUp = true;
+              return { status: 200, body: { revision: 9 } };
+            };
+          },
+        );
+        await expect
+          .poll(
+            () =>
+              caller === "discovery"
+                ? calls === 1
+                : caller === "command"
+                  ? sent === 1
+                  : holding,
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+        const before = { calls, sent };
+        const helper = await context.newPage();
+        await helper.goto("/__r17-blank");
+        const initial = await helper.evaluate(
+          async ({ id, blocked, account, caller }) => {
+            const w = window as unknown as Record<string, unknown>;
+            const db = await new Promise<IDBDatabase>((resolve, reject) => {
+              const r = indexedDB.open(`atlas-${account}`);
+              r.onsuccess = () => resolve(r.result);
+              r.onerror = () => reject(r.error);
+            });
+            const all = (store: string) =>
+              new Promise<Array<Record<string, unknown>>>((resolve, reject) => {
+                const r = db.transaction(store).objectStore(store).getAll();
+                r.onsuccess = () => resolve(r.result);
+                r.onerror = () => reject(r.error);
+              });
+            const issued =
+              caller === "discovery"
+                ? (
+                    (await all("sync_state"))[0]?.materialise_discovery as
+                      | Record<string, { schedule?: { issued?: number } }>
+                      | undefined
+                  )?.[id]?.schedule?.issued
+                : (
+                    (await all("materialise_sequences")).find(
+                      (x) => x.task_id === id,
+                    )?.schedule as { issued?: number } | undefined
+                  )?.issued;
+            w.__r17db = db;
+            w.__r17hold = false;
+            w.__r17done = !blocked;
+            w.__r17cycles = 0;
+            if (blocked)
+              await new Promise<void>((resolve, reject) => {
+                const stores =
+                  caller === "discovery"
+                    ? ["sync_state"]
+                    : ["sync_state", "materialise_sequences"];
+                const tx = db.transaction(stores, "readwrite");
+                w.__r17hold = true;
+                tx.oncomplete = () => {
+                  w.__r17done = true;
+                };
+                tx.onerror = () => reject(tx.error);
+                const again = () => {
+                  const r = tx.objectStore("sync_state").getAll();
+                  r.onsuccess = () => {
+                    w.__r17cycles = (w.__r17cycles as number) + 1;
+                    if (w.__r17cycles === 1) resolve();
+                    if (w.__r17hold) again();
+                  };
+                  r.onerror = () => reject(r.error);
+                };
+                again();
+              });
+            return { issued: issued ?? null, cycles: w.__r17cycles as number };
+          },
+          { id: task.taskId, blocked, account: ACCOUNT, caller },
+        );
+        expect(
+          initial.issued,
+          "precondition: the call is durably issued",
+        ).not.toBeNull();
+        if (blocked)
+          expect(
+            initial.cycles,
+            "precondition: the transaction is held",
+          ).toBeGreaterThan(0);
+        try {
+          await reboot(page);
+        } finally {
+          await helper.evaluate(() => {
+            (window as unknown as Record<string, unknown>).__r17hold = false;
+          });
+        }
+        await helper.waitForFunction(
+          () =>
+            (window as unknown as Record<string, unknown>).__r17done === true,
+        );
+        // The ordinary E-M2 recovery observation; no timer shortened.
+        await expect
+          .poll(() => (caller === "command" ? sent : calls - before.calls), {
+            timeout: 20_000,
+          })
+          .toBeGreaterThanOrEqual(caller === "command" ? 2 : 1);
+        await info.attach("observations", {
+          body: JSON.stringify(
+            {
+              initial,
+              calls,
+              sent,
+              before,
+              fences: await fencesOf(page, task.taskId),
+              log: r10c.log.map(({ from: _, ...e }) => e),
+            },
+            null,
+            2,
+          ),
+          contentType: "application/json",
+        });
+        first.release(
+          caller === "command"
+            ? { status: 200, body: { revision: 9 } }
+            : detailOf(task, { last_date: TODAY, pending: false }),
+        );
+        await helper.evaluate(() => {
+          (
+            (window as unknown as Record<string, unknown>)
+              .__r17db as IDBDatabase
+          ).close();
+        });
+        await helper.close();
+        if (caller === "command")
+          expect(posts(r10c)[1]?.key, "the same attempt").toBe(
+            posts(r10c)[0]?.key,
+          );
+        if (caller === "position")
+          expect(sent, "no other materialise after the known success").toBe(
+            before.sent,
+          );
+        await expect
+          .poll(() => fencesOf(page, task.taskId), { timeout: 10_000 })
+          .toHaveLength(0);
+        await expect(
+          page.locator(
+            `[data-catch-up-task="${task.taskId}"][data-catch-up-stopped]`,
+          ),
+        ).toHaveCount(0);
+      });
+
+  test("E-M12j discovery: a LIVE owner whose outcome cannot be written keeps every other tab from reading for it (its fence and its lock held); once it closes, the other tab's Try again recovers the read", async ({
+    context,
+  }) => {
+    const task = repeating(462, "Owned fern");
+    const first = held<Answer>();
+    let reads = 0;
+    await context.addInitScript((id) => {
+      const w = window as unknown as {
+        __r17j: { fault: boolean; failures: number };
+      };
+      w.__r17j = { fault: false, failures: 0 };
+      const put = IDBObjectStore.prototype.put;
+      IDBObjectStore.prototype.put = function (
+        this: IDBObjectStore,
+        ...args: [unknown, IDBValidKey?]
+      ) {
+        const e = (
+          args[0] as {
+            materialise_discovery?: Record<
+              string,
+              { schedule?: { issued?: number | null; cause?: string } }
+            >;
+          }
+        )?.materialise_discovery?.[id];
+        if (
+          this.name === "sync_state" &&
+          w.__r17j.fault &&
+          e?.schedule?.issued === null &&
+          e?.schedule?.cause === "transport"
+        ) {
+          w.__r17j.failures += 1;
+          throw new DOMException("controlled outcome failure", "DataError");
+        }
+        return put.apply(this, args);
+      };
+    }, task.taskId);
+    const { page } = await setup(
+      context,
+      `/today?day=${TODAY}&tz=UTC`,
+      [task],
+      (q, r) => {
+        q.respond = (d) =>
+          dailyPage(
+            [view(task)],
+            d.scope === "joint" ? { pending_tasks: [task.taskId] } : {},
+          );
+        r.position = () => {
+          reads += 1;
+          return reads === 1
+            ? first.promise
+            : detailOf(task, { last_date: TODAY, pending: false });
+        };
+      },
+    );
+    await expect.poll(() => reads, { timeout: 15_000 }).toBe(1);
+    await page.evaluate(() => {
+      (window as unknown as { __r17j: { fault: boolean } }).__r17j.fault = true;
+    });
+    first.release(ABORTED);
+    await expect(
+      page.locator(`[data-catch-up-task="${task.taskId}"]`),
+    ).toHaveAttribute("data-catch-up-stopped", "unreachable", {
+      timeout: 15_000,
+    });
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __r17j: { failures: number } }).__r17j
+            .failures,
+      ),
+      "real IndexedDB outcome failures occurred",
+    ).toBeGreaterThan(0);
+    expect(await fencesOf(page, task.taskId), "the fence stands").toHaveLength(
+      1,
+    );
+    const other = await bootAt(context, `/today?day=${TODAY}&tz=UTC`);
+    await expect(
+      other.getByRole("heading", { name: "Today", exact: true }),
+    ).toBeVisible({
+      timeout: 15_000,
+    });
+    // A bounded observation that nothing is read (the owner's repairs end within about 1.25 s).
+    await other.waitForTimeout(3_000);
+    expect(
+      reads,
+      "Decision B: no other tab reads while the live owner's outcome cannot be written",
+    ).toBe(1);
+    const notice = other.locator(`[data-catch-up-task="${task.taskId}"]`);
+    await expect(notice).toHaveAttribute("data-catch-up-stopped", "storage", {
+      timeout: 15_000,
+    });
+    // The owner's tab closes (the browser lets its locks go): the person's Try again in the other tab rediscovers the read.
+    await page.close();
+    await notice.getByRole("button", { name: "Try again" }).click();
+    await expect.poll(() => reads, { timeout: 20_000 }).toBe(2);
+    await expect
+      .poll(() => fencesOf(other, task.taskId), { timeout: 10_000 })
+      .toHaveLength(0);
+  });
 });

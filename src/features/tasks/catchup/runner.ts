@@ -27,18 +27,22 @@ import {
   onSent,
   type Position,
   type ReadAnswer,
+  rediscover,
   resumeOnline,
   type SendAnswer,
   type Sequence,
   satisfied,
+  settledBehind,
   step,
 } from "../model/materialise";
 import {
+  counted,
   failed,
   gate,
   issue,
   paused as pausedSchedule,
   readSchedule,
+  rediscovered,
   reset,
   resumable,
   type Schedule,
@@ -213,6 +217,31 @@ import type { PageLifecycle } from "./lifecycle";
  * - A PAGE SHOWN AGAIN (a back-forward restore) publishes the fence of every outcome its departure left unpublished: failed, withheld at
  *   receipt (its write possibly on its way), or kept in a gap.
  * - What a departed page's call leaves stays recoverable as a call lost, from its admission (`unanswered`, E-M2, I-10C-M4a), unchanged.
+ *
+ * REVISION 17 (review 18's R36-K; design assessment C1/C2; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json,
+ * which supersedes D1's exact timing for this one case only). Firefox and WebKit deliver a navigation's cancellation before `pagehide`,
+ * so it is fenced as an observed failure (above); a valid transaction of another page can hold the stores until the page is gone, so its
+ * outcome is never written and, until revision 16, the next page met a fence with nothing behind it and stopped for good.
+ * - A TRANSPORT FAILURE OBSERVED (`observed`) IS FENCED UNDER ITS CALLER'S LOST-ANSWER OPERATION (`lostFenceOf`), content-free like every
+ *   marker, from its receipt as before; it fences its caller exactly as the caller's own fence does (`fenced`).
+ * - A LOST-ANSWER FENCE WITH NO OUTCOME BEHIND IT IS REDISCOVERED (`orphan`), by the work that holds the account's lock: no outcome of
+ *   the caller in this runner, no page-memory stop, the caller's own fence read as absent and the lost-answer fence read and named. Its
+ *   record's issued call is counted as one transport failure observed NOW (`rediscovered`, `rediscover`): paced from the rediscovery, so
+ *   never sooner than from its real observation (a longer wait is accepted), its window taken from the issue when none had begun, a
+ *   server minimum kept. That is written over the very record found (compare-and-set); only then are the instances named ended
+ *   (exactly those). The work then goes on from the record: the same attempt (key and body) resent, or the row's own position read.
+ * - NOTHING ELSE IS REDISCOVERED: a record with no call outstanding, an untrusted schedule, a write not recorded or another record found
+ *   keeps the fence and the `storage` stop. A received answer, a server minimum still ahead, a stop, a command's known success, a failed
+ *   write of any other outcome and every fence of an earlier build keep the caller's own operation, which is never rediscovered; an
+ *   unreadable marker stands. No outcome payload is stored anywhere.
+ * - A "Try again" that lifts no stop (a page's memory stop) is not held by a fence that would be rediscovered; the work it admits does it.
+ * - THE PAGE THAT KEEPS A LOST-ANSWER OUTCOME HOLDS ITS FENCE'S LOCK (`holdFence`, `atlas-materialise-fence:…`) from publication until the
+ *   outcome is recorded or the runner ends; the account's lock is not let go before it is granted. The browser releases it when the page
+ *   goes. A fence is rediscovered only while that lock is free (`ownerGone`, asked with `ifAvailable`), so a live page whose repairs are
+ *   spent (its store still failing) keeps every other page from transmitting for the caller (R36-I), as before.
+ * - A PAGE THAT RECORDED ITS OUTCOME AND WENT BEFORE IT ENDED ITS FENCE (the commit landed, the page was destroyed before the next step;
+ *   observed on Firefox): the record shows the call answered and counted, nothing outstanding (`counted`, `settledBehind`). The fence
+ *   guards nothing; the page that finds it (its owner gone) ends the instances found and goes on from the record as written.
  */
 export type Trigger = MaterialiseSequenceRow["trigger"];
 
@@ -373,6 +402,22 @@ export const REPAIR_MS: readonly number[] = [250, 1_000];
 /** Revision 11 (review R36): the marker operation that fences a task's discovery, or one day's sequence of it. */
 export const fenceOf = (taskId: string, day?: string) =>
   day === undefined ? `materialise:${taskId}` : `materialise:${taskId}:${day}`;
+
+/**
+ * Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): the marker operation of a
+ * caller's LOST-ANSWER fence: a transport failure (no answer) a live page observed (`mustKeep`'s `observed`), fenced from its receipt as
+ * before, but under an operation of its own, content-free like every marker. A page that holds the account's lock and finds such a fence
+ * with no outcome behind it (`orphan`) may rediscover the call (count it lost at that moment, paced from then) instead of stopping for
+ * good. Every other fence (a received answer, a server minimum, a stop, a command's known success, a failed write of another outcome,
+ * and every fence of an earlier build) keeps `fenceOf`'s operation and its stop.
+ */
+export const lostFenceOf = (taskId: string, day?: string) =>
+  day === undefined
+    ? `materialise-lost:${taskId}`
+    : `materialise-lost:${taskId}:${day}`;
+/** The lost-answer operation of a caller's `fenceOf` operation. */
+export const lostOf = (op: string) =>
+  `materialise-lost:${op.slice("materialise:".length)}`;
 
 /** The task's zone from its details, as `GET /tasks/{id}` returned them. */
 function zoneOf(execution: { value: unknown } | null): string | null {
@@ -544,6 +589,18 @@ interface Protected {
   /** The day of a sequence's outcome (none: the task's discovery). */
   day?: string;
   op: string;
+  /**
+   * Revision 17 (R36-K): the marker operation its fence is published under: the caller's lost-answer operation (`lostFenceOf`) for an
+   * observed transport failure (`observed`), else the caller's own (`fenceOf`).
+   */
+  marks: string;
+  /**
+   * Revision 17 (R36-K): while this page keeps a lost-answer outcome whose fence is published, it holds that fence's Web Lock (`holdFence`):
+   * a page that finds the fence may rediscover it only while no live page holds it (`ownerGone`). `null`: none held (or released).
+   */
+  hold: (() => void) | null;
+  /** Revision 17 (R36-K): settles once the fence's Web Lock is granted to this page (or could not be requested). */
+  granted: Promise<void> | null;
   marker: string | null;
   memory: string | null;
   /**
@@ -890,7 +947,100 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     const m = markers();
     if (m === null) return false;
     const scope = scopeOf(at.service);
-    return m.stops.has(scope, op) || m.probe(scope, op) !== "unmarked";
+    // Revision 17 (R36-K): the caller's lost-answer fence stands for it too, until it is rediscovered (`orphan`).
+    return [op, lostOf(op)].some(
+      (o) => m.stops.has(scope, o) || m.probe(scope, o) !== "unmarked",
+    );
+  };
+  /**
+   * Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): the witness of the
+   * caller's lost-answer fence when it is the ONLY thing that fences `op` and no outcome stands behind it on this page, so the work (run
+   * under the account's lock, never without one) may rediscover the call it fenced: this runner keeps no outcome of the caller (`repairs`), the page's memory
+   * holds no stop of it (either operation), the caller's own fence is read as absent (`unmarked`, never `unknown`), and the lost-answer
+   * fence is read and named (its exact instances, the only ones a rediscovery may end). `null` otherwise: the fence stands as before.
+   */
+  const orphan = (at: Binding, op: string) => {
+    // Only work that holds the account's lock (`pump`): the owner of a fence holds it through its repairs, so a fence found under the
+    // lock is one whose owner has gone or let go. Without Web Locks (no exclusion between pages) the fence stands, as before.
+    if (locks === null) return null;
+    if (repairs.has(repairKey(at.service, op))) return null;
+    const m = markers();
+    if (m === null) return null;
+    const scope = scopeOf(at.service);
+    const lost = lostOf(op);
+    if (m.stops.has(scope, op) || m.stops.has(scope, lost)) return null;
+    if (m.probe(scope, op) !== "unmarked") return null;
+    const seen = m.witness(scope, lost);
+    return seen.kind === "instance" && seen.instances.length > 0 ? seen : null;
+  };
+  /** Revision 17 (R36-K): a rediscovered call's record is written: the lost-answer fence instances its witness named end, and no other. */
+  const retireLost = (
+    at: Binding,
+    op: string,
+    seen: NonNullable<ReturnType<typeof orphan>>,
+  ) => {
+    markers()?.retire(scopeOf(at.service), lostOf(op), seen);
+  };
+  /**
+   * Revision 17 (R36-K): the Web Lock of one lost-answer fence (its account, its database lifetime and its operation). Its holder is the
+   * live page that keeps the fence's outcome; the browser releases it when that page goes.
+   */
+  const fenceLock = (service: AccountService, marks: string) =>
+    `atlas-materialise-fence:${deps.accountId}:${service.incarnationId}:${marks}`;
+  /**
+   * Revision 17 (R36-K): this page keeps a lost-answer outcome whose fence is published: it holds the fence's lock until the outcome is
+   * recorded (`reconcile`), or this runner ends or moves to another binding (`unhold`), so that a page that takes the account's lock while
+   * this one still keeps it (its repairs spent, the page still running) never rediscovers it. Requested at once; the account's lock is not
+   * let go before it is granted (`pump`).
+   */
+  const holdFence = (record: Protected) => {
+    if (locks === null || record.hold !== null) return;
+    if (!record.marks.startsWith("materialise-lost:")) return;
+    let release: () => void = () => undefined;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let granted: () => void = () => undefined;
+    record.granted = new Promise<void>((resolve) => {
+      granted = resolve;
+    });
+    record.hold = release;
+    void locks
+      .request(fenceLock(record.service, record.marks), async () => {
+        granted();
+        await done;
+      })
+      .catch(() => granted());
+  };
+  const unhold = (record: Protected) => {
+    record.hold?.();
+    record.hold = null;
+  };
+  /** Revision 17 (R36-K): no live page holds the lost-answer fence of `op` (its lock is free now). Asked under the account's lock. */
+  const ownerGone = (at: Binding, op: string) =>
+    new Promise<boolean>((resolve) => {
+      if (locks === null) {
+        resolve(false);
+        return;
+      }
+      locks
+        .request(
+          fenceLock(at.service, lostOf(op)),
+          { ifAvailable: true },
+          async (lock) => {
+            resolve(lock !== null);
+          },
+        )
+        .catch(() => resolve(false));
+    });
+  /**
+   * Revision 17 (R36-K): the witness of a lost-answer fence this work may act on (`orphan`), once no live page keeps its outcome
+   * (`ownerGone`), read again after that wait. `null`: the fence stands as before.
+   */
+  const recoverable = async (at: Binding, op: string) => {
+    if (orphan(at, op) === null) return null;
+    if (!(await ownerGone(at, op))) return null;
+    return orphan(at, op);
   };
   /**
    * Revision 12 (R36-B, C2): fences `op` NOW, in this binding's lifetime only (`null`: that lifetime ended, nothing is written), and names
@@ -926,13 +1076,14 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   const reconcile = (record: Protected) => {
     const key = repairKey(record.service, record.op);
     if (repairs.get(key) === record) repairs.delete(key);
+    unhold(record);
     const m = markers();
     if (m === null) return;
     const scope = scopeOf(record.service);
     if (record.memory !== null)
-      m.stops.release(scope, record.op, record.memory);
+      m.stops.release(scope, record.marks, record.memory);
     if (record.marker !== null)
-      m.retire(scope, record.op, {
+      m.retire(scope, record.marks, {
         kind: "instance",
         instances: [record.marker],
       });
@@ -965,8 +1116,10 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     // Judged once, now, in the step the answer is classified (the task it was delivered in).
     const left = keep === "observed" && departed(mark);
     const early = keep === "always" || (keep === "observed" && !left);
+    // Revision 17 (R36-K): an observed transport failure is fenced under the caller's lost-answer operation.
+    const marks = keep === "observed" ? lostOf(op) : op;
     const published = early
-      ? publish(at, op)
+      ? publish(at, marks)
       : { marker: null, memory: null, unpublished: true };
     if (published === null) return ENDED_P;
     const record: Protected = {
@@ -974,6 +1127,9 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       task,
       ...(day === undefined ? {} : { day }),
       op,
+      marks,
+      hold: null,
+      granted: null,
       marker: published.marker,
       memory: published.memory,
       published: !("unpublished" in published),
@@ -987,16 +1143,18 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       },
     };
     repairs.set(repairKey(at.service, op), record);
+    if (record.published) holdFence(record);
     return (await settle(at, record)) as Protection<T>;
   };
   /** Revision 13: publishes a protected outcome's fence once (`publish`; `false`: its lifetime ended, nothing written). */
   const fence = (at: Binding, record: Protected): boolean => {
     if (record.published) return true;
-    const published = publish(at, record.op);
+    const published = publish(at, record.marks);
     if (published === null) return false;
     record.marker = published.marker;
     record.memory = published.memory;
     record.published = true;
+    holdFence(record);
     return true;
   };
   /**
@@ -1157,6 +1315,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
             ? {}
             : { throughDate: item.throughDate }),
         });
+      for (const record of repairs.values()) unhold(record);
       repairs.clear();
       edgeScan = null;
       if (
@@ -1293,6 +1452,37 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     while (row !== null && row.phase !== "stopped") {
       if (!owns(at)) return lost(at);
       if (!mayRun()) return PAUSED;
+      // Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): the day's
+      // lost-answer fence with no outcome behind it (`orphan`): the row's issued call (the same attempt, or the row's own position read)
+      // is counted lost NOW (`rediscover`: paced from now, never sooner), written over this very row (compare-and-set), and then the
+      // fence instances found end, no other. A write not recorded or another row found: the fence stands. Only once no live page keeps
+      // the fence's outcome (`recoverable`: its lock free). A row whose call is already recorded and counted (its page wrote it, then
+      // went before it could end its fence: `settledBehind`) has nothing outstanding: the instances found end and the work goes on
+      // from the row as recorded. Any other row with no call outstanding keeps the fence.
+      const orphaned = await recoverable(at, op);
+      if (!owns(at)) return lost(at);
+      if (orphaned !== null) {
+        const found = rediscover(row, deps.now());
+        if (found === null) {
+          if (!settledBehind(row)) return storage();
+          retireLost(at, op, orphaned);
+          if (fenced(at, op)) return storage();
+          continue;
+        }
+        const out = await commit(
+          service,
+          service.capture(deps.epoch),
+          key,
+          row,
+          found,
+        );
+        if (out === null) return owns(at) ? storage() : lost(at);
+        if (!out.written) return storage();
+        retireLost(at, op, orphaned);
+        if (!owns(at)) return lost(at);
+        row = out.stored;
+        continue;
+      }
       // Revision 11 (R36): an outcome of this day that could not be recorded stands: nothing is transmitted for it automatically.
       if (fenced(at, op)) return storage();
       const plan = step(row, deps.now(), deps.newId);
@@ -1455,9 +1645,14 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         if (verdict !== "written" && verdict !== "landed") return held();
         reconcile(record);
       }
+    // Revision 17 (R36-K): a press that lifts no stop (a page's memory stop, e.g. a rediscovery whose write failed) is not held by a
+    // lost-answer fence with no outcome behind it: the work it admits rediscovers the call before anything is sent (`orphan`).
+    const blocks = (op: string) =>
+      fenced(at, op) &&
+      (seen?.stop || stopped !== null || orphan(at, op) === null);
     if (
-      fenced(at, fenceOf(item.taskId)) ||
-      (day !== undefined && fenced(at, fenceOf(item.taskId, day)))
+      blocks(fenceOf(item.taskId)) ||
+      (day !== undefined && blocks(fenceOf(item.taskId, day)))
     )
       return held();
     const now = deps.now();
@@ -1527,8 +1722,11 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
     const end = (outcome: Outcome) => ({ kind: "end" as const, outcome });
     if (state.unrecorded.has(item.taskId)) return end(DONE);
     const op = fenceOf(item.taskId);
+    // Revision 17 (R36-K): a lost-answer fence with no outcome behind it is rediscovered below, before anything is read.
+    const orphaned = await recoverable(at, op);
+    if (!owns(at)) return end(lost(at));
     // Revision 11 (R36): an answer of this discovery that could not be recorded stands (any page's, a reload's): nothing is read.
-    if (fenced(at, op))
+    if (orphaned === null && fenced(at, op))
       return end(stopInMemory(item.taskId, { reason: "storage" }));
     const entries = await readMaterialiseDiscoveryNow(at.service);
     if (!owns(at)) return end(lost(at));
@@ -1681,6 +1879,37 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         failures: base.failures,
       });
     let s = stored;
+    if (orphaned !== null) {
+      // Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): the issued read
+      // whose transport failure a page observed and no page recorded is counted lost NOW (`rediscovered`: paced from now, never
+      // sooner), written over this very entry (compare-and-set, the claim kept), and then the fence instances found end, no other. An
+      // entry whose read is already recorded and counted (`counted`: its page wrote it, then went before it could end its fence) has
+      // nothing outstanding: the instances found end and the entry is decided as recorded. Anything else with no read outstanding (no
+      // entry at all), a write not recorded or another entry found: the fence stands and the task stops here (`storage`).
+      if (s?.issued == null) {
+        if (!counted(s))
+          return end(stopInMemory(item.taskId, { reason: "storage" }));
+        retireLost(at, op, orphaned);
+        if (fenced(at, op))
+          return end(stopInMemory(item.taskId, { reason: "storage" }));
+        return discover(at, item, again);
+      }
+      const found = rediscovered(s, "discovery", now);
+      const written = await record(
+        at.service.capture(deps.epoch),
+        scheduled(base, found),
+      );
+      if (written === "lost") return end(lost(at));
+      if (written !== "written")
+        return end(stopInMemory(item.taskId, { reason: "storage" }));
+      retireLost(at, op, orphaned);
+      if (found.pause !== null) {
+        set({ stops: state.stops + 1 });
+        return end(DONE);
+      }
+      // Decided again from the entry written (a wait until its time; a fence that still stands stops it).
+      return discover(at, item, again);
+    }
     if (s?.issued != null) {
       // Issued and never recorded (a reload, another tab's turn): lost, when it was issued.
       s = unanswered(s, "discovery");
@@ -2024,6 +2253,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
         async () => {
           set({ waiting: false });
           await loop();
+          // Revision 17 (R36-K): the lock of every lost-answer fence this page keeps is held before the account's lock is let go.
+          await Promise.all([...repairs.values()].map((r) => r.granted));
         },
       )
       .then(finish, finish);
@@ -2321,6 +2552,8 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
       if (disposed) return;
       disposed = true;
       unshown?.();
+      // Revision 17 (R36-K): what this runner kept is lost with it: its fences' locks are let go (the fences stand).
+      for (const record of repairs.values()) unhold(record);
       wakes += 1;
       queue.length = 0;
       parked.clear();

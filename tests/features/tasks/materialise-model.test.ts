@@ -10,12 +10,13 @@ import {
   onRead,
   onSent,
   recover,
+  rediscover,
   type Sequence,
   satisfied,
   submit,
   tryAgain,
 } from "../../../src/features/tasks/model/materialise";
-import { WINDOW_MS } from "../../../src/features/tasks/model/retry";
+import { issue, WINDOW_MS } from "../../../src/features/tasks/model/retry";
 
 /**
  * The catch-up state machine (WEB-04 §3.2/§5.8, plan §4.1; A2, A3, A4): every transition, its bounds and its keys. PURE: no store, no
@@ -310,5 +311,55 @@ describe("recovery after a reload, a takeover or a crash", () => {
     expect(recover(stop)).toBe("stopped");
     expect(tryAgain(stop, T).phase).toBe("ready");
     expect(tryAgain(start(), T)).toEqual(start());
+  });
+});
+
+/** Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json). */
+describe("REVISION17 R36-K: a row's lost answer rediscovered", () => {
+  test("an uncertain command keeps its attempt (same key and body); counted at the rediscovery and paced from it", () => {
+    const sending = submit(start(), newKey);
+    const issued = { ...sending, schedule: issue(null, "command", T) };
+    const out = rediscover(issued, T + 30_000) as Sequence;
+    expect(out.phase).toBe("submitting");
+    expect(out.attempt).toEqual(sending.attempt);
+    expect(out.read_failures).toBe(1);
+    expect(out.schedule).toMatchObject({
+      caller: "command",
+      issued: null,
+      failures: 1,
+      since: T,
+      next: T + 31_000,
+      cause: "transport",
+    });
+  });
+
+  test("a position read after a known success stays the row's own read (never another materialise)", () => {
+    const awaiting = onSent(submit(start(), newKey), { kind: "ok" }, T);
+    const issued = { ...awaiting, schedule: issue(null, "position", T + 1) };
+    const out = rediscover(issued, T + 10_000) as Sequence;
+    expect(out.phase).toBe("awaiting_position_read");
+    expect(out.attempt).toBeNull();
+    expect(out.read_seq).toBe(awaiting.read_seq);
+    expect(out.schedule).toMatchObject({
+      caller: "position",
+      failures: 1,
+      next: T + 11_000,
+    });
+  });
+
+  test("nothing outstanding (no issue, no schedule, untrusted, a stop) is never rediscovered; past the window it stops", () => {
+    const ready = start();
+    expect(rediscover(ready, T)).toBeNull();
+    expect(rediscover({ ...ready, schedule: { v: 9 } as never }, T)).toBeNull();
+    const stop = onSent(submit(start(), newKey), { kind: "capacity" }, T);
+    expect(rediscover(stop, T)).toBeNull();
+    const issued = {
+      ...submit(start(), newKey),
+      schedule: issue(null, "command", T),
+    };
+    expect(rediscover(issued, T + WINDOW_MS)).toMatchObject({
+      phase: "stopped",
+      stop: { reason: "unreachable" },
+    });
   });
 });

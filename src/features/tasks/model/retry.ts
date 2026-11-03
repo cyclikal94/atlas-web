@@ -190,6 +190,36 @@ export const unanswered = (s: Schedule, caller: Caller): Schedule =>
   );
 
 /**
+ * Revision 17 (review 18's R36-K; Kieran's decision approval/web10c-r36k-conservative-recovery-20261102.json): a transmission whose
+ * transport failure a page OBSERVED (its lost-answer fence stands) but whose record no page holds, REDISCOVERED at `now` by the page that
+ * found the fence: counted as one transport failure observed at `now`, not at its issue, so the next transmission is paced from the
+ * rediscovery. The failure was observed no later than `now`, so this is never sooner than the back-off from the real observation would
+ * have allowed (the wait may be longer: accepted). The episode's window is taken from its issue when none had begun (no later than its real
+ * first failure, so the window never ends later than it would have). A server minimum still ahead is kept; a clock before the schedule's
+ * last time pauses (`clock`), as `failed` does.
+ */
+export const rediscovered = (
+  s: Schedule,
+  caller: Caller,
+  now: number,
+): Schedule =>
+  failed(
+    { ...s, issued: null, since: s.since ?? s.issued },
+    caller,
+    { cause: "transport" },
+    now,
+    false,
+  );
+
+/**
+ * Revision 17 (review 18's R36-K): the schedule shows its caller's last call answered and counted: nothing issued is outstanding, and a
+ * failure (or a pause) is recorded. A lost-answer fence over such a record guards nothing any more (its call was recorded by its own
+ * page before that page went, or rediscovered by another).
+ */
+export const counted = (s: Schedule | null): s is Schedule =>
+  s !== null && s.issued === null && (s.failures > 0 || s.pause !== null);
+
+/**
  * A reset of a paused caller at `now`: the person's Try again (`manual`: a new episode, its unrecognised streak ended) or an observed
  * reconnection (only a `window` pause; the streak is kept). A still-future server deadline is kept either way. `null`: nothing remains.
  */

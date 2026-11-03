@@ -8,7 +8,7 @@ import {
 } from "../../../src/data/leader/page-host";
 import type { TasksApi, TasksResult } from "../../../src/features/tasks/api";
 import { pageLifecycle } from "../../../src/features/tasks/catchup/lifecycle";
-import { fenceOf } from "../../../src/features/tasks/catchup/runner";
+import { fenceOf, lostOf } from "../../../src/features/tasks/catchup/runner";
 import {
   forgetCatchUp,
   runnerOf,
@@ -227,11 +227,22 @@ describe("REVISION15 runnerOf gives the runner the page's lifecycle", () => {
     // The page's next tasks (its departure judged; no repair wait of 250 ms has ended).
     for (let k = 0; k < 3; k += 1) await new Promise((r) => setTimeout(r, 0));
     expect(failedAt, "no repair written yet").toBe(1);
-    const probe = () =>
-      createWriteFailureMarkers(storage, undefined, { locks: null }).probe(
-        { account: ACCOUNT, incarnationId: real.incarnationId },
-        fenceOf(TASK),
+    // REVISION17 ADAPTATION (R36-K): the caller's fence under either of its operations (an observed transport failure is fenced under
+    // its lost-answer operation, `lostOf`); the intent (is the caller fenced) is unchanged.
+    const probe = () => {
+      const markers = createWriteFailureMarkers(storage, undefined, {
+        locks: null,
+      });
+      const scope = { account: ACCOUNT, incarnationId: real.incarnationId };
+      const states = [fenceOf(TASK), lostOf(fenceOf(TASK))].map((op) =>
+        markers.probe(scope, op),
       );
+      return states.includes("marked")
+        ? "marked"
+        : states.includes("unknown")
+          ? "unknown"
+          : "unmarked";
+    };
     const atFailure = probe();
     pageshow();
     return { atFailure, afterShow: probe() };
