@@ -3904,3 +3904,195 @@ test.describe("E-M12k: a lost call's committed pause whose fence outlived its pa
         await expect(notice).toHaveCount(0);
       });
 });
+
+test.describe("E-TM7/E-S3: a retained page follows its windows (revision 19: review 20's R40/R41)", () => {
+  // The page's clock is scripted (`Date.now`, which the production clock reads, set by an init script and moved by the test): each case
+  // moves it 20 s past a boundary. The scheduled cases deliver NO event (the page's own boundary wait, real and unshortened: one second
+  // ahead of the scripted clock); the wake cases deliver focus and a visible visibilitychange with the boundary ten seconds ahead (so the
+  // scheduled wait cannot stand in for them). Fresh-mount CONTROLS at the final instant show the state each retained page must reach. A
+  // deterministic scripted boundary, not device sleep, a background tab or a duration measurement. FIXTURE evidence, REAL IndexedDB.
+  const SECONDS = {
+    kind: "numeric",
+    minimum: "1800",
+    maximum: null,
+    unit: "seconds",
+  };
+  type Surface = "timer" | "streak";
+  const at = async (context: BrowserContext, now: number) => {
+    await context.addInitScript((start) => {
+      const w = window as unknown as { __r19now: number };
+      w.__r19now = start;
+      Date.now = () => w.__r19now;
+    }, now);
+  };
+  const move = (page: Page, now: number, wake: boolean) =>
+    page.evaluate(
+      ({ now, wake }) => {
+        (window as unknown as { __r19now: number }).__r19now = now;
+        if (wake) {
+          window.dispatchEvent(new Event("focus"));
+          document.dispatchEvent(new Event("visibilitychange"));
+        }
+      },
+      { now, wake },
+    );
+  const windowed = (
+    surface: Surface,
+    n: number,
+    boundary: "open" | "close",
+    base: number,
+    ahead: number,
+  ) =>
+    buildTask({
+      n,
+      title: "Window boundary",
+      carry: "close_incomplete",
+      opensAt: boundary === "open" ? base / 1000 + ahead : base / 1000 - 100,
+      closesAt: boundary === "close" ? base / 1000 + ahead : base / 1000 + 3600,
+      ...(surface === "timer" ? { goal: SECONDS } : {}),
+      action: { outcome: "incomplete", amount: null, checked: [] },
+    });
+  const strip = (page: Page) =>
+    page
+      .locator("[data-strip-state]")
+      .evaluateAll((ns) => ns.map((x) => x.getAttribute("data-strip-state")));
+  const starts = async (page: Page) =>
+    (await draftsOf(page)).filter((d) => d.kind === "start_timer");
+
+  for (const surface of ["timer", "streak"] as Surface[])
+    for (const { boundary, how } of [
+      { boundary: "open", how: surface === "timer" ? "wake" : "scheduled" },
+      { boundary: "close", how: surface === "timer" ? "scheduled" : "wake" },
+    ] as const)
+      for (const control of [false, true])
+        test(`${surface === "timer" ? "E-TM7" : "E-S3"} ${surface} ${boundary} by ${how}: ${control ? "CONTROL (fresh mount at the final instant)" : "WITNESS (the retained page)"}`, async ({
+          context,
+        }) => {
+          const base = Math.floor(Date.now() / 1000) * 1000;
+          const final = base + 20_000;
+          await at(context, control ? final : base);
+          const task = windowed(
+            surface,
+            9901,
+            boundary,
+            base,
+            how === "scheduled" ? 1 : 10,
+          );
+          const path =
+            surface === "timer"
+              ? `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`
+              : `/tasks/${task.taskId}/streak`;
+          const { page } = await setup(context, path, [task]);
+          const block = page.locator("[data-timer-block]");
+          const start = block.getByRole("button", {
+            name: "Start",
+            exact: true,
+          });
+          const want =
+            surface === "timer"
+              ? boundary === "close"
+              : [boundary === "open" ? "open" : "missed"];
+          const now = async () =>
+            surface === "timer" ? await start.isDisabled() : await strip(page);
+          if (surface === "timer")
+            await expect(block).toHaveAttribute("data-timer-block", "idle");
+          else
+            await expect(
+              page.locator("[data-streak-strip],[data-streak-empty]"),
+            ).toBeVisible();
+          if (!control) {
+            await expect
+              .poll(now, { message: "precondition: before the boundary" })
+              .toEqual(
+                surface === "timer"
+                  ? boundary === "open"
+                  : boundary === "open"
+                    ? []
+                    : ["open"],
+              );
+            await move(page, final, how === "wake");
+          }
+          await expect
+            .poll(now, {
+              message: "the retained page follows the current window",
+              timeout: 5_000,
+            })
+            .toEqual(want);
+          if (surface === "timer") expect(await starts(page)).toEqual([]);
+        });
+
+  for (const online of [false, true])
+    for (const late of [true, false])
+      test(`E-TM7 ${online ? "online" : "offline"}: a Start rendered before closure and pressed ${late ? "after it queues nothing and shows why (WITNESS)" : "before it queues one start at that instant (CONTROL)"}`, async ({
+        context,
+      }) => {
+        const base = Math.floor(Date.now() / 1000) * 1000 + 500;
+        await at(context, base);
+        const task = windowed("timer", 9902, "close", base - 500, 10);
+        const { page } = await setup(
+          context,
+          `/tasks/${task.taskId}?occurrence=${task.occurrenceId}`,
+          [task],
+        );
+        const block = page.locator("[data-timer-block]");
+        const start = block.getByRole("button", { name: "Start", exact: true });
+        await expect(start).toBeEnabled();
+        if (!online) await goOfflineAtBoundary(page);
+        // The clock passes the closure with nothing delivered: the control pressed is the one rendered before it.
+        if (late) await move(page, base + 20_000, false);
+        await start.click();
+        if (late) {
+          await expect(block).toContainText("This day is closed.");
+          await expect(start).toBeDisabled();
+          // An observation window for a write that must NOT happen (enqueue is one transaction): not a duration requirement.
+          await page.waitForTimeout(500);
+          expect(await starts(page), "a stale Start queues nothing").toEqual(
+            [],
+          );
+          await expect(block).toHaveAttribute("data-timer-block", "idle");
+        } else {
+          await expect.poll(async () => (await starts(page)).length).toBe(1);
+          const bodies = (await page.evaluate(
+            (acct) => window.__atlasData?.rows(acct, "draft_commands"),
+            ACCOUNT,
+          )) as Array<{ command: { command: Record<string, unknown> } }>;
+          expect(
+            bodies.find((b) => b.command.command.kind === "start_timer")
+              ?.command.command,
+          ).toMatchObject({
+            occurrence_id: task.occurrenceId,
+            started_at: Math.floor(base / 1000),
+          });
+        }
+      });
+
+  test("E-TM7 Today → detail: the occurrence opened from Today's row follows its opening on return to the page, and Start records that instant", async ({
+    context,
+  }) => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    await at(context, base);
+    const task = windowed("timer", 9903, "open", base, 10);
+    const { page } = await setup(context, `/today?day=${TODAY}&tz=UTC`, [task]);
+    await goOfflineAtBoundary(page);
+    await page
+      .getByRole("link", { name: "Window boundary", exact: true })
+      .click();
+    await expect(page).toHaveURL(new RegExp(`occurrence=${task.occurrenceId}`));
+    const block = page.locator("[data-timer-block]");
+    const start = block.getByRole("button", { name: "Start", exact: true });
+    await expect(block).toHaveAttribute("data-timer-block", "idle");
+    await expect(start).toBeDisabled();
+    await move(page, base + 20_000, true);
+    await expect(start).toBeEnabled();
+    await start.click();
+    await expect(block).toHaveAttribute("data-timer-block", "running");
+    const bodies = (await page.evaluate(
+      (acct) => window.__atlasData?.rows(acct, "draft_commands"),
+      ACCOUNT,
+    )) as Array<{ command: { command: Record<string, unknown> } }>;
+    expect(
+      bodies.find((b) => b.command.command.kind === "start_timer")?.command
+        .command,
+    ).toMatchObject({ started_at: Math.floor((base + 20_000) / 1000) });
+  });
+});

@@ -4714,6 +4714,127 @@ export const UNIT_10C = [
         "    if (row == null) return false;\n",
       ),
   },
+  {
+    id: "MU-3347",
+    title:
+      "R40: WEB-10c A12/A20 (review 20): the idle timer's clock knows no window boundary (Start keeps the state it was mounted with until a wake)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect:
+      /by scheduled: the retained idle block changes Start at the boundary/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const clock = useBoundaryClock(read, [occurrence]);\n",
+        "  const clock = useBoundaryClock(read, []);\n",
+      ),
+  },
+  {
+    id: "MU-3348",
+    title:
+      "R40: WEB-10c A12/A20 (review 20): Start is not judged again when pressed (a control rendered before closure queues a start after it)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect:
+      /a Start rendered before closure and pressed after it queues nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (startBlock({ data: row.data, nowMs: at, mayRecord, running }) !== null)\n      return;\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3349",
+    title:
+      "R40: WEB-10c A12/A20 (review 20): Start is judged at the instant it was RENDERED, not the instant it is pressed (and recorded)",
+    file: "src/features/tasks/detail/Timer.tsx",
+    tests: ["tests/features/tasks/timer-block.test.tsx"],
+    expect:
+      /a Start rendered before closure and pressed after it queues nothing/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (startBlock({ data: row.data, nowMs: at, mayRecord, running }) !== null)\n",
+        "    if (startBlock({ data: row.data, nowMs: now, mayRecord, running }) !== null)\n",
+      ),
+  },
+  {
+    id: "MU-3350",
+    title:
+      "R41: WEB-10c A6 (review 20): the opening of a saved period not shown yet is not a boundary of the strip (it joins only at another change)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /a period opening that the strip does not show yet still ends the strip's validity/,
+    patch: (t) =>
+      sub(
+        t,
+        "          if (opening === null || at < opening) opening = at;\n",
+        "          void at;\n",
+      ),
+  },
+  {
+    id: "MU-3351",
+    title:
+      "R41: WEB-10c A6 (review 20): the closing of a shown period is not a boundary of the strip (an open period stays open after it closed)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /close by scheduled: the retained strip finalises the period that closed/,
+    patch: (t) => sub(t, "      next = closes;\n", "      void closes;\n"),
+  },
+  {
+    id: "MU-3352",
+    title:
+      "R41: WEB-10c A6 (review 20): a local read that a boundary overtook is published as current",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /a read that a boundary overtakes is not published/,
+    patch: (t) =>
+      sub(
+        t,
+        '        if (read.kind !== "complete" || localCurrent(read.value, env.now()))\n',
+        '        if (read.kind !== "complete" || true)\n',
+      ),
+  },
+  {
+    id: "MU-3353",
+    title:
+      "R41: WEB-10c A6 (review 20): the strip's validity is not checked on return to the page (focus, visible visibilitychange, pageshow)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /by (focus|visibilitychange|pageshow): the retained strip/,
+    patch: (t) =>
+      sub(
+        t,
+        '    document.addEventListener("visibilitychange", resume);\n    window.addEventListener("focus", resume);\n    window.addEventListener("pageshow", resume);\n',
+        "",
+      ),
+  },
+  {
+    id: "MU-3354",
+    title:
+      "R41: WEB-10c A6 (review 20): no wait is armed for the strip's next boundary (an actively viewed page stays stale until a wake)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /by scheduled: the retained strip/,
+    patch: (t) =>
+      sub(
+        t,
+        "      timer = setTimeout(arm, Math.min(value.next * 1000 - t + 50, CAP));\n",
+        "",
+      ),
+  },
+  {
+    id: "MU-3355",
+    title:
+      "R41: WEB-10c A6 (review 20): a clock that went back before the strip's evaluation does not end its validity (no reselection)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect: /a clock that goes back before a shown period opened selects again/,
+    patch: (t) => sub(t, "  nowMs >= value.at && (", "  (true) && ("),
+  },
 ];
 
 /** Real-engine mutants (all three engines on macOS, one job with its control; `grep` names the native case written for each). */

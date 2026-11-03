@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen } from "@testing-library/react";
 import { axe } from "jest-axe";
 import { afterEach, describe, expect, test } from "vitest";
 import type { CacheRow } from "../../../src/data";
@@ -33,6 +33,7 @@ import { cacheRow, draftRow } from "../../support/data/rows";
 import {
   fakeApi,
   ME,
+  type Mounted,
   mountTasks,
   seededTask,
   TODAY,
@@ -824,4 +825,259 @@ describe("R24: the streak's stop is its task's today", () => {
       screen.getAllByRole("button", { name: copy.TRY_AGAIN }).length,
     ).toBeGreaterThan(0);
   });
+});
+
+/**
+ * REVISION 19 (review 20 R41, family `streak-window-clock-freshness`): the device's strip is evaluated at ONE instant, and stops being
+ * current at the next opening of ANY saved period (shown or not) or the next closing of a shown one; a retained page then reads it again,
+ * by its scheduled boundary and on return to the page (focus, visible `visibilitychange`, `pageshow`), offline as online, and a read a
+ * boundary overtook is never published as current. The injected clock (`env.now`) is moved; production waits are not shortened (the
+ * scheduled cases use a boundary one second ahead, the wake cases one ten seconds ahead, so the scheduled wait cannot stand in for a wake).
+ * Fresh-mount controls at the final instant show the state the retained page must reach. FIXTURE evidence; no device sleep.
+ */
+describe("R41: the strip follows period windows on a retained page", () => {
+  const states = () =>
+    Array.from(
+      document.querySelectorAll<HTMLElement>("[data-strip-state]"),
+    ).map((x) => x.dataset.stripState);
+  /** Daily, so each saved period has its own slot (and id), counted in days. */
+  const DAILY = {
+    start_date: TODAY,
+    time: null,
+    timezone: "UTC",
+    repeat: { frequency: "daily" as const, interval: 1 },
+  };
+  const incomplete = {
+    action: { outcome: "incomplete" as const, amount: null, checked: [] },
+    period: { outcome: "incomplete" as const, amount: null, checked: [] },
+  };
+  const windowed = (boundary: "open" | "close", base: number, ahead: number) =>
+    seededTask({
+      title: "Boundary streak",
+      definition: { carry: "close_incomplete", schedule: DAILY },
+      occurrence:
+        boundary === "open"
+          ? { opens_at: base / 1000 + ahead, closes_at: base / 1000 + 3600 }
+          : { opens_at: base / 1000 - 100, closes_at: base / 1000 + ahead },
+      progress: incomplete,
+    });
+  /** Another saved period of the same task, the day after the seeded one. */
+  const another = async (
+    task: Awaited<ReturnType<typeof seededTask>>,
+    over: Partial<OccurrenceData>,
+  ) => {
+    const slot = slotOn(
+      task.data.definition.schedule,
+      addDays(task.data.slot.date as string, 1),
+    );
+    return cacheRow({
+      id: await occurrenceId(task.taskId, slot.key),
+      kind: "occurrence",
+      parent_id: task.executionId,
+      label: "Occurrence",
+      value: { ...task.data, slot, ...over } as never,
+    });
+  };
+  const mountAt = async (
+    rows: CacheRow[],
+    taskId: string,
+    clock: { at: number },
+    online = false,
+  ) => {
+    const t = await mountTasks({
+      path: `/tasks/${taskId}/streak`,
+      rows,
+      env: { online, now: () => clock.at },
+    });
+    await t.until(
+      () =>
+        document.querySelector("[data-streak-strip],[data-streak-empty]") !==
+        null,
+    );
+    await t.settle();
+    return t;
+  };
+  const wake = (how: "focus" | "visibilitychange" | "pageshow") => {
+    if (how === "focus") fireEvent(window, new Event("focus"));
+    if (how === "visibilitychange")
+      fireEvent(document, new Event("visibilitychange"));
+    if (how === "pageshow") fireEvent(window, new Event("pageshow"));
+  };
+  const until = async (t: Mounted, ready: () => boolean, ms: number) => {
+    const end = Date.now() + ms;
+    while (!ready() && Date.now() < end) await t.settle();
+  };
+  const expected = (boundary: "open" | "close") =>
+    boundary === "open" ? ["open"] : ["missed"];
+
+  for (const boundary of ["open", "close"] as const)
+    for (const how of [
+      "scheduled",
+      "focus",
+      "visibilitychange",
+      "pageshow",
+    ] as const)
+      test.each([false, true])(
+        `${boundary} by ${how}: the retained strip ${boundary === "open" ? "gains the period that opened" : "finalises the period that closed"} (fresh mount at the same instant: CONTROL %s)`,
+        async (control) => {
+          const base = Math.floor(Date.now() / 1000) * 1000;
+          const clock = { at: control ? base + 20_000 : base };
+          const task = await windowed(
+            boundary,
+            base,
+            how === "scheduled" ? 1 : 10,
+          );
+          const t = await mountAt(task.rows, task.taskId, clock);
+          if (!control) {
+            expect(states(), "precondition: before the boundary").toEqual(
+              boundary === "open" ? [] : ["open"],
+            );
+            const page = document.querySelector("[data-streak-page]");
+            const drafts = t.drafts().length;
+            clock.at = base + 20_000;
+            if (how !== "scheduled") wake(how);
+            await until(
+              t,
+              () =>
+                JSON.stringify(states()) === JSON.stringify(expected(boundary)),
+              how === "scheduled" ? 4_000 : 0,
+            );
+            await t.settle();
+            // The same page, and no data activity: only time moved.
+            expect(document.querySelector("[data-streak-page]")).toBe(page);
+            expect(t.drafts().length).toBe(drafts);
+          }
+          expect(states(), "the strip follows the current window").toEqual(
+            expected(boundary),
+          );
+          const missed = boundary === "open" ? 0 : 1;
+          expect(document.body).toHaveTextContent(
+            STREAK_COPY.lastN("days", 0, missed, missed),
+          );
+        },
+        15_000,
+      );
+
+  test.each(["open", "close"] as const)(
+    "online (%s): the retained strip follows the window on focus as offline; the server's figures are separate",
+    async (boundary) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: base };
+      const task = await windowed(boundary, base, 10);
+      const t = await mountAt(task.rows, task.taskId, clock, true);
+      expect(states()).toEqual(boundary === "open" ? [] : ["open"]);
+      clock.at = base + 20_000;
+      wake("focus");
+      await t.settle();
+      expect(states()).toEqual(expected(boundary));
+    },
+    15_000,
+  );
+
+  test.each([false, true])(
+    "a period opening that the strip does not show yet still ends the strip's validity: it joins at its opening (CONTROL fresh mount %s)",
+    async (control) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: control ? base + 20_000 : base };
+      // The shown period closes an hour away; only the NOT YET SHOWN period's opening, one second away, is a boundary in reach.
+      const task = await windowed("close", base, 3600);
+      const later = await another(task, {
+        opens_at: base / 1000 + 1,
+        closes_at: base / 1000 + 3600,
+      });
+      const t = await mountAt([...task.rows, later], task.taskId, clock);
+      if (!control) {
+        expect(states(), "precondition: only the opened period").toEqual([
+          "open",
+        ]);
+        clock.at = base + 20_000;
+        await until(t, () => states().length === 2, 4_000);
+      }
+      expect(states()).toEqual(["open", "none"]);
+    },
+    15_000,
+  );
+
+  test.each([false, true])(
+    "a clock that goes back before a shown period opened selects again on return to the page (CONTROL fresh mount %s)",
+    async (control) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = { at: control ? base - 20_000 : base };
+      const task = await seededTask({
+        title: "Boundary streak",
+        definition: { carry: "close_incomplete", schedule: DAILY },
+        occurrence: {
+          opens_at: base / 1000 - 10,
+          closes_at: base / 1000 + 3600,
+        },
+        progress: incomplete,
+      });
+      const t = await mountAt(task.rows, task.taskId, clock);
+      if (!control) {
+        expect(states(), "precondition: opened").toEqual(["open"]);
+        clock.at = base - 20_000;
+        wake("focus");
+        await t.settle();
+      }
+      expect(states()).toEqual([]);
+    },
+    15_000,
+  );
+
+  test("a read that a boundary overtakes is not published: the next state shown is evaluated after the boundary", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const clock = { at: base };
+    // The shown period closes ten seconds away (no scheduled wait in reach); a sync then adds a later opened period.
+    const task = await windowed("close", base, 10);
+    const later = await another(task, {
+      opens_at: base / 1000 - 50,
+      closes_at: base / 1000 + 3600,
+    });
+    const t = await mountAt(task.rows, task.taskId, clock);
+    expect(states()).toEqual(["open"]);
+    // The re-read the sync causes walks the occurrences; the clock passes the closure DURING that walk.
+    const service = t.data.service();
+    if (service === null) throw new Error("no service");
+    const store = service.store as { run: typeof service.store.run };
+    const original = store.run.bind(service.store);
+    let armed = false;
+    store.run = ((plan, input, options) => {
+      if (
+        armed &&
+        plan.name === "data.readResourceList" &&
+        (input as { kind?: string }).kind === "occurrence"
+      ) {
+        armed = false;
+        clock.at = base + 20_000;
+      }
+      return original(plan, input, options);
+    }) as typeof service.store.run;
+    const seen: string[] = [];
+    const note = () => {
+      const now = JSON.stringify(states());
+      if (seen[seen.length - 1] !== now) seen.push(now);
+    };
+    note();
+    const observer = new MutationObserver(note);
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      characterData: true,
+    });
+    try {
+      armed = true;
+      await t.commitSync([later]);
+      await t.settle();
+      await act(async () => undefined);
+    } finally {
+      observer.disconnect();
+      store.run = original;
+    }
+    expect(armed, "precondition: the walk was overtaken").toBe(false);
+    expect(seen).toEqual([
+      JSON.stringify(["open"]),
+      JSON.stringify(["missed", "none"]),
+    ]);
+  }, 15_000);
 });

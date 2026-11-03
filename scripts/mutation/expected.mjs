@@ -1,7 +1,7 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2165;
+export const EXPECTED_UNIT = 2174;
 export const EXPECTED_ENGINE = 269;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
@@ -43,4 +43,6 @@ export const EXPECTED_ENGINE = 269;
 // WEB-10c revision 18 (review 19 R36-L; design assessment of 3 November 2026): +14 unit (MU-3333..MU-3346: the paused-record settling at
 // each entry, its record, lock, witness and binding checks, the lost-call pause predicates and the per-caller lift rule); MU-3008, MU-3225
 // and MU-3324 re-anchored (the same faults over the stopped row's settling and the per-caller lift rule).
+// WEB-10c revision 19 (review 20 R40/R41; design assessment of 3 November 2026): +9 unit (MU-3347..MU-3355: the idle timer's boundary
+// clock, Start judged at the press and at its own instant, and the strip's opening/closing boundaries, overtaken read, wake and backwards clock).
 // Combined inventory: accepted WEB-10b (1737 unit, 255 engine), WEB-08d (105 unit, 5 engine), and WEB-10c (214 unit, 3 engine).

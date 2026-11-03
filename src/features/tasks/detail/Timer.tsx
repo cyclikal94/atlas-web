@@ -15,6 +15,11 @@ import {
   useSharingDefaults,
 } from "../../../data";
 import type { TaskActions } from "../actions";
+import {
+  type BoundaryClock,
+  type BoundaryWindow,
+  useBoundaryClock,
+} from "../clock";
 import * as copy from "../copy";
 import { useTasksEnv } from "../env";
 import { momentLabel } from "../format";
@@ -84,13 +89,22 @@ export const TIMER_COPY = {
   saved: "Saved on this device. It will be sent when Atlas can.",
 } as const;
 
-/** The page's clock for a running timer: one tick a second while the page is shown (no live region). */
-function useSecond(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
+/**
+ * The timer's clock (revision 19, review R40): ONE sampled `now` for the block, from the injected clock. It moves at the occurrence's
+ * window boundaries and on return to the page (`useBoundaryClock`), also while no session is running, so an idle Start follows its window
+ * as it opens and closes; while a session runs, it is sampled once a second as well (the elapsed time; no live region).
+ */
+function useTimerClock(
+  read: () => number,
+  occurrence: BoundaryWindow,
+  running: boolean,
+): BoundaryClock {
+  const clock = useBoundaryClock(read, [occurrence]);
+  const { revalidate } = clock;
   useEffect(() => {
-    if (!active) return;
+    if (!running) return;
     const tick = () => {
-      if (document.visibilityState === "visible") setNow(Date.now());
+      if (document.visibilityState === "visible") revalidate();
     };
     const timer = setInterval(tick, 1_000);
     document.addEventListener("visibilitychange", tick);
@@ -98,8 +112,8 @@ function useSecond(active: boolean): number {
       clearInterval(timer);
       document.removeEventListener("visibilitychange", tick);
     };
-  }, [active]);
-  return now;
+  }, [running, revalidate]);
+  return clock;
 }
 
 const timerKind = (kind: string) =>
@@ -399,7 +413,8 @@ export function TimerBlock({
     // Revision 6 (R27): a lost finished session distrusts every positive up to and including its order (`positiveTrusted`).
     endedThrough: evidence.authority?.endedThrough ?? 0,
   });
-  const now = useSecond(running.length > 0);
+  const clock = useTimerClock(env.now, row.data, running.length > 0);
+  const now = clock.now;
   const [showSessions, setShowSessions] = useState(false);
   const [sevenDays, setSevenDays] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -424,15 +439,11 @@ export function TimerBlock({
         {TIMER_COPY.notUsed}
       </p>
     );
-  const block = startBlock({
-    data: row.data,
-    nowMs: now,
-    mayRecord:
-      row.streamPresent ||
-      row.streamPending ||
-      (row.data.definition.participation === "anyone" && row.canEdit),
-    running,
-  });
+  const mayRecord =
+    row.streamPresent ||
+    row.streamPending ||
+    (row.data.definition.participation === "anyone" && row.canEdit);
+  const block = startBlock({ data: row.data, nowMs: now, mayRecord, running });
   // One act at a time, also between a press and the render that shows it busy (a second activation of the same control admits nothing).
   const run = async (fn: () => Promise<unknown>) => {
     if (acting.current) return;
@@ -445,14 +456,21 @@ export function TimerBlock({
       setBusy(false);
     }
   };
-  const start = () =>
-    run(() =>
+  // Start is judged again when it is pressed (revision 19, review R40): ONE fresh sample decides whether the window admits it and is the
+  // session's `started_at`, so a control rendered before the window closed (a page that slept, a render not yet shown) queues nothing
+  // after it; the refreshed sample shows why. Offline, the act keeps this instant however late it is sent.
+  const start = () => {
+    if (acting.current) return;
+    const at = clock.revalidate();
+    if (startBlock({ data: row.data, nowMs: at, mayRecord, running }) !== null)
+      return;
+    return run(() =>
       actions.enqueue(
         startTimer({
           occurrenceId: row.id,
           sessionId: env.newId(),
           progressId: row.progressId,
-          startedAt: Math.floor(env.now() / 1000),
+          startedAt: Math.floor(at / 1000),
           firstAnyoneStream:
             row.data.definition.participation === "anyone" &&
             !row.streamPresent &&
@@ -462,6 +480,7 @@ export function TimerBlock({
         TIMER_COPY.saved,
       ),
     );
+  };
   // Stop, Discard and both 7-day choices end what was SHOWN (revision 7, review R32): the writing transaction admits the end only if that
   // observation still stands against what is stored then (`withEndExpectation`), so a retirement another page stored before the press, whose
   // notification has not reached this screen, queues nothing. The database it was observed in is the one bound when it was shown.

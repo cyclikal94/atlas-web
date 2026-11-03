@@ -108,7 +108,22 @@ interface LocalStreak {
   title: string | null;
   definition: TaskDefinition | null;
   cells: StripCell[];
+  /**
+   * The instant (ms) the cells were evaluated at, and the next instant (s) at which they stop being current, or null when no boundary
+   * lies ahead (revision 19, review R41): the earliest opening of ANY saved period still to open (one that opens joins the strip and may
+   * push the oldest out of the last 30, so a period not shown counts too) and the earliest closing of a shown period (its open state
+   * becomes its final one). Constant size: the walk keeps only the minimum, not the periods.
+   */
+  at: number;
+  next: number | null;
 }
+
+/** Whether a local strip evaluated at `value.at` still holds at `nowMs`: no boundary since, and the clock has not gone back before it. */
+export const localCurrent = (
+  value: { at: number; next: number | null },
+  nowMs: number,
+): boolean =>
+  nowMs >= value.at && (value.next === null || nowMs < value.next * 1000);
 
 /** One certified read (WEB-10a revision 3): the task, its details, its opened days and my streams and outstanding evidence for the last 30. */
 async function readLocal(
@@ -136,10 +151,17 @@ async function readLocal(
   if (taskRow === null || execution === null)
     return {
       ok: true,
-      value: { title: taskRow?.label ?? null, definition, cells: [] },
+      value: {
+        title: taskRow?.label ?? null,
+        definition,
+        cells: [],
+        at: nowMs,
+        next: null,
+      },
     };
   // Keep only the latest 30 opened days while walking every saved day (the walk is bounded per window; F-1's cost applies).
   let kept: Array<{ id: string; data: OccurrenceData }> = [];
+  let opening = null as number | null;
   const end = await scanResources(
     data,
     { kind: "occurrence", parentId: execution.id },
@@ -147,7 +169,11 @@ async function readLocal(
       for (const listed of rows) {
         const parsed = parseOccurrenceData(listed.merged.value);
         if (parsed === null || parsed.task_id !== taskId) continue;
-        if (!opened(parsed, nowMs)) continue;
+        if (!opened(parsed, nowMs)) {
+          const at = parsed.opens_at as number;
+          if (opening === null || at < opening) opening = at;
+          continue;
+        }
         kept.push({ id: listed.base.id, data: parsed });
       }
       kept = latestPeriods(kept, nowMs);
@@ -157,6 +183,16 @@ async function readLocal(
   );
   if (end !== "complete") return unread();
   const latest = kept;
+  let next = opening;
+  for (const day of latest) {
+    const closes = day.data.closes_at;
+    if (
+      closes !== null &&
+      closes * 1000 > nowMs &&
+      (next === null || closes < next)
+    )
+      next = closes;
+  }
   const streams = await Promise.all(
     latest.map((day) => progressId(day.id, me)),
   );
@@ -195,7 +231,58 @@ async function readLocal(
     }),
     nowMs,
   );
-  return { ok: true, value: { title: taskRow.label, definition, cells } };
+  return {
+    ok: true,
+    value: { title: taskRow.label, definition, cells, at: nowMs, next },
+  };
+}
+
+const CAP = 6 * 3_600_000;
+/** Attempts of one local read whose result a boundary overtook while it was read (each is evaluated afresh at its own instant). */
+const CURRENT_ATTEMPTS = 3;
+
+/**
+ * When the shown strip stops being current (revision 19, review R41): at its next boundary (plus 50 ms; a wait capped at six hours re-arms
+ * itself) and on return to the page (`visibilitychange`, `focus`, `pageshow`: a timer does not run while a device sleeps), the clock is read
+ * against the strip's OWN evaluation instant, so a boundary crossed while the page slept, or a clock that went back before it, is seen
+ * without any data change; offline as online. Each expiry calls `expire`, which asks the local read again; the last complete strip stays as it
+ * was until that read completes.
+ */
+function useLocalExpiry(
+  read: () => number,
+  value: { at: number; next: number | null } | null,
+  expire: () => void,
+): void {
+  const latest = useRef({ read, expire });
+  latest.current = { read, expire };
+  useEffect(() => {
+    if (value === null) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      clearTimeout(timer);
+      const t = latest.current.read();
+      if (!localCurrent(value, t)) {
+        latest.current.expire();
+        return;
+      }
+      if (value.next === null) return;
+      timer = setTimeout(arm, Math.min(value.next * 1000 - t + 50, CAP));
+    };
+    // A strip published after its own boundary (a slow read that a boundary overtook) is asked again at once.
+    arm();
+    const resume = () => {
+      if (document.visibilityState === "visible") arm();
+    };
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume);
+    window.addEventListener("pageshow", resume);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("focus", resume);
+      window.removeEventListener("pageshow", resume);
+    };
+  }, [value]);
 }
 
 // ---- the server's figures ---------------------------------------------------------------------------------------------------------
@@ -533,18 +620,32 @@ export function StreakPage({ taskId }: { taskId: string }) {
     position.status === "unavailable" && position.reason === "absent";
   const [attempt, setAttempt] = useState(0);
   const scope = `${env.identity}\u0000${data.service()?.incarnationId ?? "-"}\u0000${taskId}`;
+  // The strip is evaluated at one instant; a strip a boundary overtook while it was read is read again, never published as current.
+  const [expired, setExpired] = useState(0);
   const local = useScopedRead<LocalStreak>(
     scope,
-    `${composition}|${attempt}`,
-    (signal) =>
-      readCoherently(
-        data,
-        () => readLocal(data, taskId, env.accountId, env.now(), signal),
-        { signal },
-      ),
+    `${composition}|${attempt}|${expired}`,
+    async (signal) => {
+      let read: Awaited<ReturnType<typeof readCoherently<LocalStreak>>> = {
+        kind: "unstable",
+      };
+      for (let i = 0; i < CURRENT_ATTEMPTS; i += 1) {
+        const at = env.now();
+        read = await readCoherently(
+          data,
+          () => readLocal(data, taskId, env.accountId, at, signal),
+          { signal },
+        );
+        if (read.kind !== "complete" || localCurrent(read.value, env.now()))
+          return read;
+      }
+      // Overtaken every time (a clock moving on and back): not current, so not complete.
+      return read.kind === "complete" ? { kind: "unstable" } : read;
+    },
     !noDatabase,
   );
   const value = local.complete?.value ?? null;
+  useLocalExpiry(env.now, value, () => setExpired((n) => n + 1));
   const definition = value?.definition ?? null;
   const shared = definition !== null && definition.participation !== "personal";
   const figures = useStreakFigures(taskId, shared);

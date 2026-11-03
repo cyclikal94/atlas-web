@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, screen, within } from "@testing-library/react";
 import { axe } from "jest-axe";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   type AccountService,
   commitTimerCopy,
@@ -1809,4 +1809,195 @@ describe("R32: an end is admitted against what is stored when it is written", ()
     }
     expect(ends(t)).toHaveLength(during ? 0 : 1);
   });
+});
+
+/**
+ * REVISION 19 (review 20 R40, family `timer-window-clock-freshness`): an IDLE block follows its occurrence's window as it opens and closes,
+ * with no session running, no data change and no network, by its scheduled boundary and on return to the page; and Start is judged again
+ * when it is pressed, at the same instant that becomes its `started_at`. The injected clock (`env.now`) is moved; production waits are not
+ * shortened: the scheduled cases use a boundary ONE second ahead of the controlled clock, the wake cases one ten seconds ahead (so the
+ * scheduled wait cannot stand in for the wake within the test). Deterministic boundary tests, not device sleep or a background tab.
+ * Fresh-mount controls at the final instant show the state each retained page must reach. Direct detail and Today → detail.
+ */
+describe("R40: an idle Start follows its window, and is judged when pressed", () => {
+  // The page's clock is `Date.now` (the production `env.now` reads it, and the block before revision 19 read it directly), so the same
+  // cases run unchanged against the earlier candidate; real waits are measured with `performance.now`.
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+  const controlled = (at: number) => {
+    const clock = { at };
+    vi.spyOn(Date, "now").mockImplementation(() => clock.at);
+    return clock;
+  };
+  const startOf = () =>
+    within(block() as HTMLElement).getByRole("button", {
+      name: TIMER_COPY.start,
+    });
+  /** Settles until `ready()` holds or `ms` of real time have passed (a scheduled wait is real). */
+  const within_ = async (
+    t: Awaited<ReturnType<typeof mountTasks>>,
+    ready: () => boolean,
+    ms: number,
+  ) => {
+    const end = performance.now() + ms;
+    while (!ready() && performance.now() < end) await t.settle();
+  };
+  const windowed = (boundary: "open" | "close", at: number, ahead: number) =>
+    seconds({
+      definition: { carry: "close_incomplete" },
+      occurrence:
+        boundary === "open"
+          ? { opens_at: at / 1000 + ahead, closes_at: at / 1000 + 3600 }
+          : { opens_at: at / 1000 - 3600, closes_at: at / 1000 + ahead },
+    });
+  const mountAt = async (
+    task: SeededTask,
+    online: boolean,
+    via: "detail" | "today" = "detail",
+  ) => {
+    const t = await mountTasks({
+      path:
+        via === "detail"
+          ? path(task)
+          : `/today?day=${task.data.slot.date}&tz=UTC`,
+      rows: task.rows,
+      env: { online },
+    });
+    if (via === "today") {
+      await t.until(
+        () => screen.queryByRole("link", { name: "Practise piano" }) !== null,
+      );
+      fireEvent.click(screen.getByRole("link", { name: "Practise piano" }));
+    }
+    await t.until(() => block()?.dataset.timerBlock === "idle");
+    await t.settle();
+    return t;
+  };
+  const shownReason = (boundary: "open" | "close") =>
+    boundary === "open"
+      ? TIMER_COPY.blocked.not_open
+      : TIMER_COPY.blocked.closed;
+
+  for (const boundary of ["open", "close"] as const)
+    for (const path_ of [
+      "scheduled",
+      "focus",
+      "visibilitychange",
+      "pageshow",
+    ] as const)
+      test.each([false, true])(
+        `${boundary} by ${path_}: the retained idle block changes Start at the boundary (fresh mount at the same instant: CONTROL %s)`,
+        async (control) => {
+          const base = Math.floor(Date.now() / 1000) * 1000;
+          const ahead = path_ === "scheduled" ? 1 : 10;
+          const clock = controlled(control ? base + 20_000 : base);
+          const task = await windowed(boundary, base, ahead);
+          const t = await mountAt(task, false);
+          if (!control) {
+            // Precondition: the state before the boundary.
+            expect(startOf().hasAttribute("disabled")).toBe(
+              boundary === "open",
+            );
+            const shown = block();
+            const drafts = t.drafts().length;
+            clock.at = base + 20_000;
+            if (path_ === "focus") fireEvent(window, new Event("focus"));
+            if (path_ === "visibilitychange")
+              fireEvent(document, new Event("visibilitychange"));
+            if (path_ === "pageshow") fireEvent(window, new Event("pageshow"));
+            await within_(
+              t,
+              () =>
+                startOf().hasAttribute("disabled") === (boundary === "close"),
+              path_ === "scheduled" ? 4_000 : 0,
+            );
+            await t.settle();
+            // The same mounted block, and no data activity: only time moved.
+            expect(block()).toBe(shown);
+            expect(t.drafts().length).toBe(drafts);
+          }
+          expect(
+            startOf().hasAttribute("disabled"),
+            "Start follows the current window",
+          ).toBe(boundary === "close");
+          if (boundary === "close")
+            expect(block()).toHaveTextContent(shownReason("close"));
+          else expect(block()).not.toHaveTextContent(shownReason("open"));
+        },
+        15_000,
+      );
+
+  test.each([
+    ["offline", false],
+    ["online", true],
+  ] as const)(
+    "%s: a Start rendered before closure and pressed after it queues nothing and shows why (no render or wake in between); CONTROL: pressed before closure, it queues one start at the instant it was judged",
+    async (_name, online) => {
+      for (const late of [false, true]) {
+        const base = Math.floor(Date.now() / 1000) * 1000 + 500;
+        const clock = controlled(base);
+        const task = await windowed("close", base - 500, 10);
+        const t = await mountAt(task, online);
+        expect(startOf()).toBeEnabled();
+        // The press arrives after closure with nothing delivered in between: the control is the one rendered before it.
+        if (late) clock.at = base + 20_000;
+        fireEvent.click(startOf());
+        await t.settle();
+        const starts = t.drafts().filter((d) => d.kind === "start_timer");
+        if (late) {
+          expect(starts, "a stale Start queues nothing").toEqual([]);
+          expect(block()?.dataset.timerBlock).toBe("idle");
+          expect(startOf()).toBeDisabled();
+          expect(block()).toHaveTextContent(TIMER_COPY.blocked.closed);
+          expect(block()).not.toHaveTextContent(TIMER_COPY.saved);
+        } else {
+          expect(starts).toHaveLength(1);
+          expect(
+            t.bodies().find((b) => b.command.command.kind === "start_timer")
+              ?.command.command,
+          ).toMatchObject({
+            occurrence_id: task.occurrenceId,
+            started_at: Math.floor(base / 1000),
+          });
+        }
+        cleanup();
+        forgetTaskMemory();
+      }
+    },
+    20_000,
+  );
+
+  test.each(["open", "close"] as const)(
+    "Today → detail (%s): the occurrence opened from Today's row follows its window by wake and refuses a stale Start",
+    async (boundary) => {
+      const base = Math.floor(Date.now() / 1000) * 1000;
+      const clock = controlled(base);
+      const task = await windowed(boundary, base, 10);
+      const t = await mountAt(task, false, "today");
+      expect(t.router.state.location.search).toMatchObject({
+        occurrence: task.occurrenceId,
+      });
+      expect(startOf().hasAttribute("disabled")).toBe(boundary === "open");
+      clock.at = base + 20_000;
+      if (boundary === "close") {
+        // Pressed before any wake is delivered: refused at the press.
+        fireEvent.click(startOf());
+        await t.settle();
+        expect(t.drafts().filter((d) => d.kind === "start_timer")).toEqual([]);
+        expect(startOf()).toBeDisabled();
+      } else {
+        fireEvent(window, new Event("focus"));
+        await t.settle();
+        expect(startOf()).toBeEnabled();
+        fireEvent.click(startOf());
+        await t.until(() => block()?.dataset.timerBlock === "running");
+        expect(
+          t.bodies().find((b) => b.command.command.kind === "start_timer")
+            ?.command.command,
+        ).toMatchObject({ started_at: Math.floor(clock.at / 1000) });
+      }
+    },
+    15_000,
+  );
 });
