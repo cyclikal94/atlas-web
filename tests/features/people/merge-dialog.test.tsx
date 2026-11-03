@@ -13,6 +13,7 @@ import * as peopleCopy from "../../../src/features/people/copy";
 import { forgetAllPeopleMemory } from "../../../src/features/people/memory";
 import type { RecipientPreview } from "../../../src/features/people/model/requests";
 import * as copy from "../../../src/features/people/requests/copy";
+import { mergeNameDraft } from "../../../src/features/people/requests/mergeName";
 import { forgetRefusedPolicies } from "../../../src/features/sharing/api";
 import { installMatchMedia } from "../../helpers/match-media";
 import { ME, MO, record } from "../../support/people/records";
@@ -351,6 +352,10 @@ describe("the sender's merge (A6)", () => {
     expect(document.body.textContent).not.toContain(copy.MERGED_INTO("Mo"));
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(`/people/${MOPERSON}`),
+    );
+    // R1 of review 4: the success consumes only the choice ITS attempt was made of; the choice made before Try again is kept.
+    expect(mergeNameDraft(w.people.memory, MOHAMMED, MOPERSON)?.choice).toBe(
+      "target",
     );
   });
 

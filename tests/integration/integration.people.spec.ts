@@ -3,6 +3,7 @@ import {
   BOTH_LINKED,
   PREVIEW_FORBIDDEN,
 } from "../../src/features/people/requests/copy";
+import { untilTreeSettled } from "../e2e/data-sync-helpers";
 import {
   ACCOUNTS,
   bootHarness,
@@ -185,10 +186,20 @@ async function reopenBound(
   page: Page,
   account: string,
   route: string,
+  /**
+   * What must be shown BEFORE the leader starts, after which the page's session and tree are settled first (revision 4). For a route
+   * whose first read is refused 403: that refusal re-evaluates the session and remounts the protected tree, whose disposal closes the
+   * page's connection registry, so a harness open made meanwhile is refused `closed`.
+   */
+  shownFirst?: () => Promise<void>,
 ): Promise<void> {
   await page.goto(`/__session?route=${encodeURIComponent(route)}`);
   await exposeSession(page);
   await untilView(page, "displaying");
+  if (shownFirst) {
+    await shownFirst();
+    await untilTreeSettled(page, { account, connections: 0 });
+  }
   await page.evaluate(async (a) => {
     const data = window.__atlasData;
     if (!data) throw new Error("no data harness");
@@ -2403,10 +2414,17 @@ test.describe("I-PPL17 to I-PPL23: merges, links and requests (WEB-11b A2-A9, A1
       const before = previews.length;
       let settled = 0;
       await during(async () => {
+        // HARNESS ORDERING (revision 4): the leader starts once the refusal is shown and its remount has settled. The revision-4 pool runs
+        // (Chromium, twice) had the 403 answered before the harness's outbox open, which the remount's registry close refused (`closed`);
+        // the trace records the order. The assertions and the observation window below are unchanged, and run with the leader syncing.
         await reopenBound(
           a,
           aId.account_id,
           `/people/requests/merge/${y}/${x}`,
+          () =>
+            expect(dialog.getByText(PREVIEW_FORBIDDEN)).toBeVisible({
+              timeout: 30_000,
+            }),
         );
         await expect(dialog.getByText(PREVIEW_FORBIDDEN)).toBeVisible({
           timeout: 30_000,

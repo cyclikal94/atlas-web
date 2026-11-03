@@ -15,6 +15,8 @@ const MODEL = "tests/features/people/requests-model.test.ts";
 const SCREEN = "tests/features/people/requests-screen.test.tsx";
 const DIALOG = "tests/features/people/merge-dialog.test.tsx";
 const RETRY = "tests/features/people/request-retry.test.tsx";
+const OWNED = "tests/features/people/merge-name-ownership.test.tsx";
+const NAME = "tests/features/people/merge-name.test.ts";
 
 export const UNIT_WEB11B = [
   {
@@ -800,6 +802,96 @@ export const UNIT_WEB11B = [
         "  const ledger",
       ),
   },
+  // ---- revision 4 (review 4, R1: the sender's name choice is owned by its edit; requests/mergeName.ts) ----
+  {
+    id: "MU-4171",
+    title:
+      "WEB-11b R1 (review 4): a sender's success consumes the pair's name choice unconditionally (a choice made after its capture is lost)",
+    file: "src/features/people/requests/mergeName.ts",
+    tests: [OWNED, NAME],
+    expect:
+      /S03 .*a choice made while the command is held survives its success|S04 .*the earlier success keeps the newer visible choice|S06: an uncertain merge, a newer choice|a newer record \(even of the same value\) is kept/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (owned === null || memory.drafts.get(owned.key) !== owned) return "kept";\n',
+        '  if (owned === null) return "kept";\n',
+      ),
+  },
+  {
+    id: "MU-4172",
+    title:
+      "WEB-11b R1 (review 4): a success compares the name choice by VALUE, not by its edit (changed away and back, the newer edit is consumed)",
+    file: "src/features/people/requests/mergeName.ts",
+    tests: [OWNED, NAME],
+    expect:
+      /S08: changed away and back to the captured value|a newer record \(even of the same value\) is kept/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (owned === null || memory.drafts.get(owned.key) !== owned) return "kept";\n',
+        '  const now = memory.drafts.get(owned?.key ?? "") as MergeNameDraft | undefined;\n  if (owned === null || now?.choice !== owned.choice) return "kept";\n',
+      ),
+  },
+  {
+    id: "MU-4173",
+    title:
+      "WEB-11b R1 (review 4): a merge's success adopts the name choice current when it completes or is tried again, not the one its attempt captured",
+    file: "src/features/people/requests/MergeDialog.tsx",
+    tests: [OWNED, DIALOG],
+    expect:
+      /S06: an uncertain merge, a newer choice, then Try again|S07: uncertain, a newer choice|R1: a replayed merge completes as ITS attempt/,
+    patch: (t) =>
+      sub(
+        t,
+        "      consumeMergeName(memory, origin?.draft ?? null);\n",
+        "      consumeMergeName(memory, mergeNameDraft(memory, sourceId, targetId));\n",
+      ),
+  },
+  {
+    id: "MU-4174",
+    title:
+      "WEB-11b R1 (review 4): a success never consumes the name choice it was made of (an unchanged choice outlives its own success)",
+    file: "src/features/people/requests/mergeName.ts",
+    tests: [OWNED, NAME],
+    expect:
+      /S01\/S02 .*the unchanged chosen name is sent, said and consumed|its own, still current record: consumed/,
+    patch: (t) => sub(t, "  memory.drafts.delete(owned.key);\n", ""),
+  },
+  {
+    id: "MU-4175",
+    title:
+      "WEB-11b R1 (review 4): the cleanup does not check that its memory is still the identity's current one (a continuation of another identity acts)",
+    file: "src/features/people/requests/mergeName.ts",
+    tests: [NAME],
+    expect: /a continuation of a replaced memory \(another identity\)/,
+    patch: (t) =>
+      sub(t, '  if (!isCurrentMemory(memory)) return "stale";\n', ""),
+  },
+  {
+    id: "MU-4176",
+    title:
+      "WEB-11b R1 (review 4): a consumed name choice is removed without notifying its readers (another mount keeps showing it)",
+    file: "src/features/people/requests/mergeName.ts",
+    tests: [NAME],
+    expect: /its own, still current record: consumed, and readers are notified/,
+    patch: (t) =>
+      sub(
+        t,
+        '  memory.touch();\n  return "consumed";\n',
+        '  return "consumed";\n',
+      ),
+  },
+  {
+    id: "MU-4177",
+    title:
+      "WEB-11b R1 (review 4): a press captures the pair's current name choice even when its render drew an earlier one (a stale render's ticket)",
+    file: "src/features/people/requests/mergeName.ts",
+    tests: [NAME],
+    expect:
+      /a stale render \(its record is no longer the current one\) captures nothing/,
+    patch: (t) => sub(t, "  if (current !== rendered) return null;\n", ""),
+  },
 ];
 
 const SPEC = "tests/e2e/fixture.people-requests.spec.ts";
@@ -973,6 +1065,22 @@ export const ENGINE_WEB11B = [
         t,
         "  return useRequestRead(\n    env,\n    reviewKey(requestId),\n",
         "  return useSummary(reviewKey(requestId), (current) =>\n    asRead(\n      env,\n      reviewKey(requestId),\n      () => env.api.readRecipientPreview(requestId),\n      current,\n      true,\n    ),\n  );\n  return useRequestRead(\n    env,\n    reviewKey(requestId),\n",
+      ),
+  },
+  // ---- revision 4 (review 4, R1) ----
+  {
+    id: "MU-4178",
+    title:
+      "WEB-11b R1 (review 4): (REAL ENGINE) a sender's success consumes the pair's name choice unconditionally: a comparison reopened and changed while the request is held loses the newer choice",
+    file: "src/features/people/requests/mergeName.ts",
+    spec: SPEC,
+    grep: "E-R21:.*the earlier success",
+    expect: /E-R21: .*the earlier success keeps the newer visible choice/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (owned === null || memory.drafts.get(owned.key) !== owned) return "kept";\n',
+        '  if (owned === null) return "kept";\n',
       ),
   },
 ];

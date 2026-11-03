@@ -36,6 +36,14 @@ import {
 } from "./commands";
 import * as copy from "./copy";
 import {
+  captureMergeName,
+  chooseMergeName,
+  consumeMergeName,
+  type MergeNameDraft,
+  mergeNameChoice,
+  mergeNameDraft,
+} from "./mergeName";
+import {
   askAgain,
   currentOf,
   previewKey,
@@ -65,8 +73,6 @@ export const mergeKey = (sourceId: string, targetId: string): string =>
 export const RESPOND_PREFIX = "respond:";
 export const respondKey = (requestId: string): string =>
   `${RESPOND_PREFIX}${requestId}`;
-const nameDraftKey = (sourceId: string, targetId: string): string =>
-  `merge-name:${sourceId}:${targetId}`;
 
 // ---- the comparison ------------------------------------------------------------------------------------------------------------
 function Cell({
@@ -258,11 +264,15 @@ function previewRefusal(failure: Refusable<unknown> & { ok: false }): string {
 }
 
 // ---- the sender ------------------------------------------------------------------------------------------------------------------
-/** What a sender's merge attempt was made of: a request (and whom it asks) or a direct merge, and the name it carries. */
+/**
+ * What a sender's merge attempt was made of: a request (and whom it asks) or a direct merge, the name it carries, and the name choice it
+ * was captured from (R1 of review 4: the only choice its success may consume; `mergeName.ts`).
+ */
 interface MergeOrigin {
   approval: boolean;
   name: string;
   owner: string;
+  draft: MergeNameDraft;
 }
 
 export function SenderMerge({
@@ -305,11 +315,9 @@ export function SenderMerge({
     currentOf(targetSummary)?.value.summary ?? null,
   );
   const owner = recipient?.username ?? copy.THE_OTHER_OWNER;
-  const chosen =
-    (env.memory.drafts.get(nameDraftKey(sourceId, targetId)) as
-      | "source"
-      | "target"
-      | undefined) ?? "target";
+  // The choice this render draws (its record is the ticket a press captures).
+  const nameDraft = mergeNameDraft(env.memory, sourceId, targetId);
+  const chosen = mergeNameChoice(nameDraft);
   const nameOf = (
     shownPreview: MergePreview,
     which: "source" | "target",
@@ -317,8 +325,11 @@ export function SenderMerge({
     which === "source" ? shownPreview.source.label : shownPreview.target.label;
 
   const press = async () => {
-    // The comparison this render drew, and only while it is still the current read (never a token of an earlier render).
+    // The comparison this render drew, and only while it is still the current read (never a token of an earlier render); likewise the
+    // name choice this render drew, only while it is still the pair's current one.
     const drawnPreview = preview;
+    const drawnName = nameDraft;
+    const memory = env.memory;
     const sent = await runCommandFrom<MergeOrigin>(env, key, () => {
       const current = currentOf(view);
       if (drawnPreview === null || current === null || !current.value.ok)
@@ -335,14 +346,20 @@ export function SenderMerge({
       );
       if (naming.kind === "both_linked" || naming.kind === "unknown")
         return null;
+      // The choice captured WITH the body, at this original preparation (a replay never calls this: it keeps this capture).
+      const draft = captureMergeName(memory, sourceId, targetId, drawnName);
+      if (draft === null) return null;
       const name =
-        naming.kind === "fixed" ? naming.name : nameOf(drawnPreview, chosen);
+        naming.kind === "fixed"
+          ? naming.name
+          : nameOf(drawnPreview, draft.choice);
       // What this attempt is made of, kept beside it: a replay completes as THIS attempt (R1 of review 1), never as the comparison or
       // the choice shown when Try again is pressed.
       const origin: MergeOrigin = {
         approval: drawnPreview.requires_approval,
         name,
         owner,
+        draft,
       };
       return {
         body: drawnPreview.requires_approval
@@ -362,7 +379,8 @@ export function SenderMerge({
     readLinkage(env, sourceId, { force: true });
     readLinkage(env, targetId, { force: true });
     if (result.ok) {
-      env.memory.drafts.delete(nameDraftKey(sourceId, targetId));
+      // Only the choice THIS attempt was made of (R1 of review 4): a choice made after its capture stays, whichever mount shows it.
+      consumeMergeName(memory, origin?.draft ?? null);
       if (origin?.approval) {
         announcer.announce(copy.MERGE_REQUESTED(origin.owner), "polite");
         if (shown()) onClose();
@@ -449,10 +467,9 @@ export function SenderMerge({
             <Choices
               label={copy.NAME_AFTER}
               value={chosen}
-              onChange={(value) => {
-                env.memory.drafts.set(nameDraftKey(sourceId, targetId), value);
-                env.memory.touch();
-              }}
+              onChange={(value) =>
+                void chooseMergeName(env.memory, sourceId, targetId, value)
+              }
               choices={[
                 { value: "target", label: preview.target.label },
                 { value: "source", label: preview.source.label },

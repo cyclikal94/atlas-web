@@ -34,6 +34,9 @@ import {
  * the production session's re-evaluation and remount (N1 of revision 1); E-R18 a superseded (late) 403 never refuses a newer comparison
  * (R7 of review 2); E-R19 two tabs of one account, the 403 remembered in its own tab only (S10 of review 2's design assessment).
  * E-R20 a failed comparison's Try again retires every earlier answer, for the sender and the recipient (R7 of review 3).
+ * E-R21 a sender's success consumes only the name choice its own attempt captured (R1 of review 4): a choice made in a comparison
+ * reopened through either entry while the request is held survives the earlier success (and, as the control, its 409); an uncertain
+ * merge tried again exactly keeps the newer choice; two tabs of one account keep their own choices.
  * E-R14 (review 1, R6): the incoming read held for the displayed account across an ACTUAL account switch (another tab settles another
  * account through the production store and posts the auth hint, as `settleElsewhere` does for E-T10), with the new account's own read
  * shown and the old answer, delivered late, never shown; its control releases the held read with no switch. E-R1b (R3): People 01's
@@ -1187,8 +1190,11 @@ test.describe("E-R18: a superseded 403 never refuses a newer comparison (R7 of r
     });
     await navigateInApp(page, COMPARE);
     const dialog = page.getByRole("dialog");
-    await expect.poll(() => asked.length).toBe(1);
-    await becomesVisible(page);
+    // ADAPTATION (revision 4, as E-R20's in revision 3): a cold page's own invalidations may already have read again while the first
+    // read is held (Firefox control, 4 reads before the signal); the freshness signal is sent only while the held read is the only one.
+    // Either way a NEWER read (asked >= 2) answers and is shown before the first answers 403; the asserted property is unchanged.
+    await expect.poll(() => asked.length).toBeGreaterThanOrEqual(1);
+    if (asked.length === 1) await becomesVisible(page);
     await expect.poll(() => asked.length).toBeGreaterThanOrEqual(2);
     await expect(dialog.locator("[data-merge-comparison]")).toBeVisible();
     releaseFirst();
@@ -1356,6 +1362,217 @@ test.describe("E-R20: a failed comparison's Try again retires every earlier answ
           .filter((name) => name.endsWith("/people-commands")),
       ).toEqual([]);
     });
+});
+
+test.describe("E-R21: a sender's success consumes only the name choice its attempt captured (R1 of review 4)", () => {
+  /** A cross-owner pair: the sender asks mo to merge (request_merge), so a success closes only the dialog that is still shown. */
+  const asking = (s: Served) => {
+    s.mergePreviews.set(`${MOHAMMED}:${MOPERSON}`, {
+      token: T1,
+      requires_approval: true,
+    });
+    s.summaries.set(MOHAMMED, {
+      your_access: "view",
+      added_by_you: "no",
+      owner: { account_id: MO, username: "mo", you: false, person: null },
+      audience: {
+        disclosure: "partial",
+        in_home: false,
+        households: [],
+        your_direct_grant: { can_edit: false },
+        direct_grant_count: null,
+        excluded_count: null,
+      },
+    });
+  };
+  const RECEIPT = { revision: 50, person_id: MOPERSON };
+  const ENTRIES = [
+    { name: "the duplicates' Compare & merge", path: COMPARE },
+    {
+      name: "Requests' Compare",
+      path: `/people/requests/merge/${MOHAMMED}/${MOPERSON}`,
+    },
+  ];
+  const OUTCOMES = [
+    {
+      name: "success",
+      answer: (after: Promise<void>) => ({ status: 200, body: RECEIPT, after }),
+      said: null as string | null,
+    },
+    {
+      name: "refused (409)",
+      answer: (after: Promise<void>) => ({
+        status: 409,
+        body: atlas("conflict"),
+        after,
+      }),
+      said: copy.COMPARISON_CHANGED as string | null,
+    },
+  ];
+  const polite = (page: Page) =>
+    page.locator('[role="status"][aria-live="polite"]');
+  const newerChoice = (page: Page) =>
+    page.getByRole("dialog").getByRole("radio", { name: "Mohammed A." });
+  const previews = (served: Served) =>
+    served.requestLog.filter((line) => line === "POST /people/merge-preview")
+      .length;
+  /** Leaves the comparison for Requests (no dialog) and opens it again: a new mount over the same page memory. */
+  async function reopen(page: Page, path: string) {
+    await navigateInApp(page, "/people/requests");
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await navigateInApp(page, path);
+    await expect(
+      page.getByRole("dialog").locator("[data-merge-comparison]"),
+    ).toBeVisible();
+  }
+
+  for (const entry of ENTRIES)
+    for (const outcome of OUTCOMES)
+      test(`reopened through ${entry.name} and changed while the request is held: the earlier ${outcome.name} keeps the newer visible choice`, async ({
+        context,
+      }, info) => {
+        const world = mergeWorld({ arrange: asking });
+        const { page, served } = await setup(
+          context,
+          "/people",
+          world.resources,
+          world.options,
+        );
+        let release = () => {};
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        served.peopleScript.push(outcome.answer(gate));
+        await navigateInApp(page, entry.path);
+        const ask = page
+          .getByRole("dialog")
+          .getByRole("button", { name: copy.ASK_TO_MERGE_WITH("mo") });
+        await expect(ask).toBeEnabled();
+        await ask.click();
+        await expect.poll(() => served.peopleCommands.length).toBe(1);
+        expect(commandAt(served, 0)).toMatchObject({
+          kind: "request_merge",
+          name: "Mo",
+        });
+        await reopen(page, entry.path);
+        await expect(newerChoice(page)).not.toBeChecked();
+        await newerChoice(page).click();
+        await expect(newerChoice(page)).toBeChecked();
+        const before = previews(served);
+        release();
+        // The earlier attempt's completion was observed: its announcement, or what the dialog now says.
+        if (outcome.said === null)
+          await expect(polite(page)).toContainText(copy.MERGE_REQUESTED("mo"));
+        else await expect(page.getByRole("dialog")).toContainText(outcome.said);
+        await expect(page).toHaveURL(new RegExp(`${entry.path}$`));
+        await expect(
+          newerChoice(page),
+          `the earlier ${outcome.name} must not change the reopened dialog's newer choice`,
+        ).toBeChecked();
+        // ... nor does the comparison read again after it.
+        await expect.poll(() => previews(served)).toBeGreaterThan(before);
+        await expect(
+          page.getByRole("dialog").locator("[data-merge-comparison]"),
+        ).toBeVisible();
+        await expect(newerChoice(page)).toBeChecked();
+        expect(served.peopleCommands).toHaveLength(1);
+        recordEvidence(info, "e-r21-reopened", {
+          entry: entry.path,
+          outcome: outcome.name,
+          peopleCommands: served.peopleCommands,
+          requestLog: served.requestLog,
+        });
+      });
+
+  test("an uncertain merge, a newer choice, then Try again: the same key and byte-identical body, the original name said, the newer choice kept", async ({
+    context,
+  }, info) => {
+    const world = mergeWorld({ arrange: (s) => s.peopleScript.push("abort") });
+    const { page, served } = await setup(
+      context,
+      COMPARE,
+      world.resources,
+      world.options,
+    );
+    const dialog = page.getByRole("dialog");
+    await expect(
+      dialog.getByRole("button", { name: copy.MERGE_THEM }),
+    ).toBeEnabled();
+    await dialog.getByRole("button", { name: copy.MERGE_THEM }).click();
+    await expect(dialog).toContainText(copy.UNCERTAIN);
+    await newerChoice(page).click();
+    await expect(newerChoice(page)).toBeChecked();
+    const again = dialog.getByRole("button", { name: copy.TRY_AGAIN });
+    await expect(again).toBeEnabled();
+    await again.click();
+    await expect.poll(() => served.peopleCommands.length).toBe(2);
+    expect(served.peopleCommands[1]?.key).toBe(served.peopleCommands[0]?.key);
+    expect(JSON.stringify(served.peopleCommands[1]?.body)).toBe(
+      JSON.stringify(served.peopleCommands[0]?.body),
+    );
+    expect(commandAt(served, 0)).toMatchObject({ kind: "merge", name: "Mo" });
+    await expect(page).toHaveURL(new RegExp(`/people/${MOPERSON}$`));
+    await expect(polite(page)).toContainText(copy.MERGED_INTO("Mo"));
+    await expect(polite(page)).not.toContainText(
+      copy.MERGED_INTO("Mohammed A."),
+    );
+    await navigateInApp(page, COMPARE);
+    await expect(
+      page.getByRole("dialog").locator("[data-merge-comparison]"),
+    ).toBeVisible();
+    await expect(
+      newerChoice(page),
+      "the replayed success must not consume the choice made after the original capture",
+    ).toBeChecked();
+    recordEvidence(info, "e-r21-replay", {
+      peopleCommands: served.peopleCommands,
+      requestLog: served.requestLog,
+    });
+  });
+
+  test("two tabs of one account: the first tab's held success keeps the second tab's own choice, and the first tab's newer one", async ({
+    context,
+  }) => {
+    const world = mergeWorld({ arrange: asking });
+    const { page: first, served } = await setup(
+      context,
+      "/people",
+      world.resources,
+      world.options,
+    );
+    const second = await bootAt(context, "/people");
+    // The other tab has its own page memory: its comparison of the same pair is shown first (as E-R19 opens its tabs).
+    await navigateInApp(second, COMPARE);
+    await expect(
+      second.getByRole("dialog").locator("[data-merge-comparison]"),
+    ).toBeVisible();
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    served.peopleScript.push({ status: 200, body: RECEIPT, after: gate });
+    await navigateInApp(first, COMPARE);
+    const ask = first
+      .getByRole("dialog")
+      .getByRole("button", { name: copy.ASK_TO_MERGE_WITH("mo") });
+    await expect(ask).toBeEnabled();
+    await ask.click();
+    await expect.poll(() => served.peopleCommands.length).toBe(1);
+    // While the first tab's request is held, the other tab makes its own choice for the same pair.
+    await newerChoice(second).click();
+    await expect(newerChoice(second)).toBeChecked();
+    // ... and a newer choice in the first tab, after its capture.
+    await reopen(first, COMPARE);
+    await newerChoice(first).click();
+    await expect(newerChoice(first)).toBeChecked();
+    release();
+    await expect(polite(first)).toContainText(copy.MERGE_REQUESTED("mo"));
+    await expect(first).toHaveURL(new RegExp(`${COMPARE}$`));
+    await expect(newerChoice(first)).toBeChecked();
+    await expect(newerChoice(second)).toBeChecked();
+    // Only the first tab sent; the second tab's choice was never sent or consumed.
+    expect(served.peopleCommands).toHaveLength(1);
+  });
 });
 
 test.describe("E-R15: viewports, themes and axe (A12; browser emulation, not devices)", () => {

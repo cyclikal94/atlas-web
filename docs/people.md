@@ -583,8 +583,16 @@ entry and banner, the slots, the merged-alias note), `reads.ts`, `commands.ts`, 
   `404` after the list was read again) stays said above the list until closed. A command's COMPLETION belongs to the attempt it completes
   (revision 1, R1): `runCommandFrom` keeps the input an attempt was made of (its origin: the form's revision, the person and recipient; a
   merge's request-or-merge, name and owner) beside the retained attempt, and a replay completes with that origin, so a success names
-  whom it actually went to and clears only the input it was made of. `PeopleRefusal` gains `expired` (`410`; no longer folded
-  into `not_found`) and `capacity` (a people command's `503 slice_capacity`, `classifyPeopleAnswer(…, { capacity: true })`).
+  whom it actually went to and clears only the input it was made of. **The sender's name choice is owned by its edit** (review 4, R1;
+  `requests/mergeName.ts`): every real edit of "Name after merging" stores a new frozen record for the ordered pair (`merge-name:<source>:<target>`,
+  page memory only), even when it chooses the value already chosen. A fresh attempt captures the record current at its original
+  preparation (a default never chosen is made an explicit record; a stale render's record sends nothing), takes the body's name from
+  it and keeps it in the merge's origin; a replay keeps that capture. A success consumes the choice only while that exact record is
+  still the pair's current one in the identity's current memory, then notifies readers: a choice made after the capture (in the same
+  dialog while the command runs, in a reopened comparison of the pair through either entry, or before Try again) stays, and an
+  unchanged choice is consumed by its own success. Failures, uncertainty and unsent attempts consume nothing. `PeopleRefusal` gains
+  `expired` (`410`; no longer folded into `not_found`) and `capacity` (a people command's `503 slice_capacity`,
+  `classifyPeopleAnswer(…, { capacity: true })`).
 - **D-11b-10/11 New request.** Ask to link: a picker over `GET /people/summaries?scope=not_linked` (owner, not archived), 100 a page, at most
   three pages KEPT (Q9) and every later person reachable (revision 1, R2): "Show more" reads the window's next page while it has fewer
   than three, "Show the next people" starts a new window where it ended and "Show earlier people" returns (it reads that window
