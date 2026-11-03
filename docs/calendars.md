@@ -415,6 +415,23 @@ This depends on Playwright running in-process with the tests (the default) and i
 Playwright client, or another version, makes every lane fail by name until the source is requalified. Qualified on macOS in all three
 engines: Review 34's blob popup and an explicit-page control, a named blank popup, and every earlier guard case.
 
+Revision 30 makes the lane's own listeners and its context cleanup complete.
+- **Every listener is owned before it is attached.** This covers the server listener, the context's listeners, each page's navigation and
+  problem listeners, and the lane's own foreign-request and route-guard listeners. Each listener's removal is recorded before it is
+  attached, and it is removed by its exact callback; another owner's listeners on the same objects are never touched.
+- **A failed installation is undone.** If one of these attachments fails, even after an earlier one succeeded, everything attached so far
+  is removed in reverse order. The open then fails with the original cause and any removal that also failed.
+- **A failed page listener stays local.** If one of a page's own listeners fails, only that page's listeners are removed, and its
+  uncaptured problems fail the case by name.
+- **The context has one owner.** The lane takes ownership of the context as soon as Playwright returns it, before anything else can fail.
+  A failed open, settlement and a late arrival therefore all share one cleanup.
+- **Cleanup is bounded.** It closes the context while the listeners still record its final events, then removes every listener whatever
+  the close did. A close still running after the 10-second bound fails by name, its eventual result is recorded as late, and the
+  listeners are removed anyway.
+- **Every cleanup failure is reported.** A failed close and a failed removal are both reported, each by name, in the teardown record and
+  the case's error.
+- **A late context is only closed.** One that arrives after settlement began gets no listeners.
+
 The lane manager (revision 20) owns each open from the moment it is admitted, before anything is acquired. Every stage (witness, scripted
 origin, front, context, init script, publication) is registered with its disposer before it starts. Settlement enters a closing state at
 once: no open or stage is admitted after that, a result that arrives is closed rather than used, and no lane is published. It then joins

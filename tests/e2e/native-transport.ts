@@ -15,6 +15,7 @@ import type {
   ConsoleMessage,
   Page,
   PlaywrightWorkerArgs,
+  Request,
   TestInfo,
 } from "@playwright/test";
 import { expect } from "@playwright/test";
@@ -1398,7 +1399,22 @@ export function observeNavigations(
       reason:
         "the main frame has no Playwright client navigation emitter (`_eventEmitter` with on/off)",
     };
-  emitter.on(NAVIGATION_PROVENANCE_PIN.event, listener);
+  // Revision 30 (Review 35 F35-1, C2, OWN-2): an `on` that attached and then threw is removed again here (exact callback), so a refused
+  // subscription never leaves an undisclosed listener; a failing removal is named in the refusal.
+  try {
+    emitter.on(NAVIGATION_PROVENANCE_PIN.event, listener);
+  } catch (error) {
+    let rollback = "its listener was removed again";
+    try {
+      emitter.off(NAVIGATION_PROVENANCE_PIN.event, listener);
+    } catch (offError) {
+      rollback = `removing its listener again also failed: ${String(offError)}`;
+    }
+    return {
+      ok: false,
+      reason: `subscribing to the main frame's navigation events threw: ${String(error)}; ${rollback}`,
+    };
+  }
   let attached = true;
   return {
     ok: true,
@@ -1668,11 +1684,30 @@ export function observeActivations(
       }
       listener(commit);
     };
-    (server.on as (e: string, l: (f: unknown) => void) => unknown).call(
-      server,
-      ACTIVATION_SOURCE_PIN.event,
-      onCommit,
-    );
+    // Revision 30 (Review 35 F35-1, C2, OWN-2): an `on` that attached and then threw is detached again (exact callback) before the
+    // source reports itself unavailable, so the refusal never swallows an attached listener; a failing detachment is named in it.
+    try {
+      (server.on as (e: string, l: (f: unknown) => void) => unknown).call(
+        server,
+        ACTIVATION_SOURCE_PIN.event,
+        onCommit,
+      );
+    } catch (error) {
+      let rollback = "its listener was detached again";
+      try {
+        (server.off as (e: string, l: (f: unknown) => void) => unknown).call(
+          server,
+          ACTIVATION_SOURCE_PIN.event,
+          onCommit,
+        );
+      } catch (offError) {
+        rollback = `detaching its listener again also failed: ${String(offError)}`;
+      }
+      return {
+        ok: false,
+        reason: `attaching the activation source threw: ${String(error)}; ${rollback}`,
+      };
+    }
     let attached = true;
     return {
       ok: true,
@@ -1750,6 +1785,135 @@ export interface ActivationRecord {
   pairedWith?: number;
 }
 
+// ---- Revision 30: owned subscriptions and complete cleanup outcomes (Review 35 F35-1/F35-2) ------------------------------------------
+
+/** An emitter as the lane subscribes to it: Playwright's own `on`/`off` (exact callback). */
+export interface OwnedEmitter {
+  on(event: string, listener: (value: never) => void): unknown;
+  off(event: string, listener: (value: never) => void): unknown;
+}
+
+/**
+ * Revision 30 (Review 35 F35-1, family native-transport-upstream-cleanup, harness new; design assessment token 2868a8a2…, C2, invariants
+ * 1/3/4/7): a ledger of the lane's own subscriptions. Each REMOVAL obligation is recorded BEFORE its `on` runs, so an `on` that throws
+ * before attaching and one that attaches and then throws are both unwound by the same exact-callback `off` (removing a listener that never
+ * attached is a no-op on Playwright's and Node's emitters). An emitter without `on`/`off` is refused before anything is attached.
+ * `detach` attempts every obligation, newest first, whatever the others did, and returns each failure by its label (`<label> failed:
+ * <error>`); it is single use. `child` opens a nested scope (a page's own listeners) that can be rolled back alone and is otherwise
+ * detached with its parent. Nothing here calls `removeAllListeners`: another owner's listeners on the same emitters are never touched.
+ */
+export class Subscriptions {
+  private readonly entries: Array<
+    { label: string; detach: () => void } | { child: Subscriptions }
+  > = [];
+  private done = false;
+
+  /** Subscribes `listener` to `event` on `emitter`; the removal is owned first. Throws what `on` threw (the caller rolls back). */
+  add(
+    label: string,
+    emitter: unknown,
+    event: string,
+    listener: (value: never) => void,
+  ): void {
+    if (this.done)
+      throw new Error(
+        `${label}: refused, its owner's subscriptions were already detached`,
+      );
+    const on = (emitter as { on?: unknown } | null)?.on;
+    const off = (emitter as { off?: unknown } | null)?.off;
+    if (typeof on !== "function" || typeof off !== "function")
+      throw new TypeError(
+        `${label}: the emitter has no on/off of Playwright's shape (its listener could not be removed); refused before anything was attached`,
+      );
+    // The removal is read from the emitter when it runs (as the source and frame adapters do), never cached: a replaced or missing `off`
+    // is the emitter's own state then, and its failure is named.
+    this.entries.push({
+      label,
+      detach: () => {
+        const remove = (emitter as { off?: unknown }).off;
+        if (typeof remove !== "function")
+          throw new TypeError("its emitter no longer has off()");
+        remove.call(emitter, event, listener);
+      },
+    });
+    on.call(emitter, event, listener);
+  }
+
+  /** Owns an adapter's own disposer (the activation source, a navigation subscription), detached with the rest. */
+  adopt(label: string, detach: () => void): void {
+    if (this.done) {
+      throw new Error(
+        `${label}: refused, its owner's subscriptions were already detached`,
+      );
+    }
+    this.entries.push({ label, detach });
+  }
+
+  /** A nested scope, detached with this one (newest first, in its place) unless it was rolled back alone before. */
+  child(): Subscriptions {
+    if (this.done)
+      throw new Error(
+        "a nested subscription scope was refused: its owner's subscriptions were already detached",
+      );
+    const child = new Subscriptions();
+    this.entries.push({ child });
+    return child;
+  }
+
+  get detached(): boolean {
+    return this.done;
+  }
+
+  detach(): string[] {
+    if (this.done) return [];
+    this.done = true;
+    const errors: string[] = [];
+    for (const entry of [...this.entries].reverse()) {
+      if ("child" in entry) {
+        errors.push(...entry.child.detach());
+        continue;
+      }
+      try {
+        entry.detach();
+      } catch (error) {
+        errors.push(`${entry.label} failed: ${String(error)}`);
+      }
+    }
+    return errors;
+  }
+}
+
+/**
+ * Revision 30 (Review 35 F35-2, harness incomplete_fix; C3/C4, invariant 4): every cause of one cleanup, kept. `String(error)` (what the
+ * report, the teardown record and the fixture's thrown error carry) names each cause in order, so none is lost to a reader that only
+ * stringifies; `causes` keeps them separately.
+ */
+export class CleanupFailures extends Error {
+  override name = "CleanupFailures";
+  constructor(readonly causes: readonly string[]) {
+    super(
+      `${causes.length} cause${causes.length === 1 ? "" : "s"}: ${causes.map((cause, i) => `[${i + 1}] ${cause}`).join("; ")}`,
+    );
+  }
+}
+
+/**
+ * Revision 30 (F35-1, C2): installing a context's capture failed. Every registration it had made was rolled back (exact callbacks, newest
+ * first) before this was thrown; `rollback` names each removal that failed. The message carries the installation's cause first.
+ */
+export class CaptureInstallError extends Error {
+  override name = "CaptureInstallError";
+  constructor(
+    readonly installation: unknown,
+    readonly rollback: readonly string[],
+  ) {
+    super(
+      `${String(installation)}; ${rollback.length === 0 ? "every partial registration was rolled back" : `rolling back its partial registrations also failed: ${rollback.join("; ")}`}`,
+      { cause: installation },
+    );
+  }
+}
+
 // ---- Revision 28: the context's capture registry (Review 33 F33-1) ------------------------------------------------------------------
 
 /** The parts of a Playwright client frame the recorder reads (its `_eventEmitter`, the navigation provenance, is read by `observeNavigations`). */
@@ -1757,10 +1921,14 @@ export interface RecordedFrame {
   url(): string;
   parentFrame(): unknown;
 }
-/** The parts of a Playwright browser context the recorder reads (a static test drives it with an event sequence an engine was observed to emit). */
-export interface RecordedContext {
-  on(event: string, listener: (value: never) => void): unknown;
-}
+/**
+ * The parts of a Playwright browser context the recorder reads (a static test drives it with an event sequence an engine was observed to
+ * emit). Revision 30 (F35-1): its `off` too, so each listener the recorder attached is removed by its exact callback.
+ */
+export type RecordedContext = OwnedEmitter;
+
+/** How the context's close ended when the recorder was finalised (revision 30, invariant 8): only "closed" means every event arrived. */
+export type CloseStatus = "closed" | "failed" | "pending" | "not attempted";
 
 /**
  * Revision 28 (F33-1): a lane page as the recorder identifies it, from its FIRST observation, never renumbered. `via`: how the recorder
@@ -1912,12 +2080,37 @@ function rootOf(
  * Returns the disposer: it detaches every navigation-provenance subscription once, returning each detachment failure by name (the lane
  * calls it after its context closed, so a final event of the close is still recorded, including when an open fails after its context
  * arrived). An event arriving after it is a `journal.lateEvents` line, never recorded.
+ *
+ * Revision 30 (Review 35 F35-1, family native-transport-upstream-cleanup; design assessment token 2868a8a2…, C2/C3, invariants 1/3/4/7/8):
+ * installation is a TRANSACTION. Every registration the recorder makes (the activation source, each context listener, each page's
+ * navigation subscription and its own problem listeners) is owned by one exact-callback ledger (`Subscriptions`) before it is attempted.
+ * A context without Playwright's on/off is refused before anything attaches. Should any registration of the installation throw, even
+ * after an earlier one (the source) attached, every registration made so far is rolled back, newest first, and `CaptureInstallError`
+ * carries the installation's cause and each failed removal: the caller never loses a disposer it was not given. A page's own listeners
+ * are a nested scope: if one of them fails, that page's partial registrations are rolled back alone, its number and earlier evidence
+ * stay, and its uncaptured problems are a named failure. The disposer now detaches EVERY owned subscription (also the context's and the
+ * pages' client listeners, which revision 29 left attached), so an event can reach the recorder afterwards only through a listener whose
+ * removal failed (named in the disposer's result); such an event is still a `journal.lateEvents` line, never recorded. `status` is how
+ * the context's close ended: only after a completed close are an undelivered dispatched activation and an unowned undispatched one
+ * reported as missed; otherwise they are reported as unattributable because the close did not complete (still failures, never dropped).
  */
 export function recordContext(
   context: RecordedContext,
   sink: RecorderSink,
   installed: InstalledPlaywrightCore = installedPlaywrightCore(),
-): { dispose: () => string[] } {
+): { dispose: (status?: CloseStatus) => string[] } {
+  // Revision 30 (F35-1, C2): a shape refusal before anything is attached.
+  if (
+    typeof (context as { on?: unknown } | null)?.on !== "function" ||
+    typeof (context as { off?: unknown } | null)?.off !== "function"
+  )
+    throw new CaptureInstallError(
+      new TypeError(
+        "the context has no on/off of Playwright's shape (a listener attached to it could not be removed); nothing was attached",
+      ),
+      [],
+    );
+  const subscriptions = new Subscriptions();
   const { journal, next, stamp } = sink;
   journal.navigations ??= [];
   journal.navigationProvenance ??= [];
@@ -1943,7 +2136,6 @@ export function recordContext(
     documentNo: number;
     latest: RequestRecord | null;
     association: PageAssociation;
-    dispose: () => void;
     server: ServerFrameState | null;
   }
   const byRoot = new Map<unknown, PageRecord>();
@@ -2051,6 +2243,9 @@ export function recordContext(
     });
   };
   const source = observeActivations(context, onServerCommit, installed);
+  // Revision 30 (F35-1, C2): owned at once, so a later failure of the installation rolls it back with the rest.
+  if (source.ok)
+    subscriptions.adopt("detaching the activation source", source.dispose);
   if (source.ok) {
     journal.activationSource = {
       source: "playwright-server-context",
@@ -2068,10 +2263,13 @@ export function recordContext(
       `activation source unavailable (${source.reason}): an activation before Playwright dispatches a page's frame cannot be observed`,
     );
   }
-  const on = context.on.bind(context) as (
-    event: string,
-    listener: (value: never) => void,
-  ) => unknown;
+  // Revision 30 (F35-1, C2): the context's listeners are declared here in order and registered together by the installation below, each
+  // through the ledger (its removal owned before its `on` runs).
+  const declared: Array<{ event: string; listener: (value: never) => void }> =
+    [];
+  const on = <T>(event: string, listener: (value: T) => void) => {
+    declared.push({ event, listener: listener as (value: never) => void });
+  };
   const describe = (request: RecordedRequest) => {
     try {
       return `${request.method()} ${request.url()}`;
@@ -2220,18 +2418,22 @@ export function recordContext(
       documentNo: 0,
       latest: null,
       association,
-      dispose: () => undefined,
       server: null,
     };
     byRoot.set(root, page);
     // Subscribed in the listener that first met the frame, before Playwright can deliver its next event: no navigation of it is unobserved.
+    // Revision 30 (F35-1, C2, OWN-3): owned by the ledger; a subscription that attached and then threw was removed by the adapter and is
+    // this page's named capture gap below (its number and earlier evidence stay).
     const subscription = observeNavigations(
       root,
       (event) => onNavigated(page, event),
       installed,
     );
     if (subscription.ok) {
-      page.dispose = subscription.dispose;
+      subscriptions.adopt(
+        `page ${index}: detaching its navigation provenance`,
+        subscription.dispose,
+      );
       journal.navigationProvenance?.push({
         page: index,
         ...subscription.provenance,
@@ -2443,11 +2645,9 @@ export function recordContext(
       failures.push(`page ${record.index}: announced twice`);
     record.association.announced = true;
     byPage.set(page, record);
-    const own = page.on.bind(page) as (
-      event: string,
-      listener: (value: never) => void,
-    ) => unknown;
-    own("console", (message: ConsoleMessage) => {
+    // Revision 30 (F35-1, C2, OWN-3): the page's own listeners are a nested scope of the ledger. If one fails, the page's partial
+    // registrations are rolled back alone, and its uncaptured problems are a named failure; the page and its evidence so far stay.
+    const onConsole = (message: ConsoleMessage) => {
       if (message.type() === "error" || message.type() === "warning")
         problem(
           record,
@@ -2455,10 +2655,29 @@ export function recordContext(
           message.text(),
           message.location().url ?? "",
         );
-    });
-    own("pageerror", (error: Error) =>
-      problem(record, "pageerror", error.message, ""),
-    );
+    };
+    const onPageError = (error: Error) =>
+      problem(record, "pageerror", error.message, "");
+    const own = subscriptions.child();
+    try {
+      own.add(
+        `page ${record.index}: detaching its console listener`,
+        page,
+        "console",
+        onConsole as (value: never) => void,
+      );
+      own.add(
+        `page ${record.index}: detaching its pageerror listener`,
+        page,
+        "pageerror",
+        onPageError as (value: never) => void,
+      );
+    } catch (error) {
+      const rollback = own.detach();
+      failures.push(
+        `page ${record.index}: installing its own problem listeners failed (${String(error)}); its console messages and page errors after its announcement are not captured${rollback.length === 0 ? "" : `; rolling back its partial listeners also failed: ${rollback.join("; ")}`}`,
+      );
+    }
   });
   // A page's problem Playwright delivers before it announced the page reaches only the context (its page has no listener of ours yet).
   const unannounced = (page: unknown): PageRecord | null => {
@@ -2495,30 +2714,34 @@ export function recordContext(
     if (record !== null)
       problem(record, "pageerror", webError.error().message, "");
   });
+  // Revision 30 (F35-1, C2): the installation, one transaction. Should any registration throw (before or after attaching), everything
+  // registered so far, the activation source included, is rolled back newest first, and the caller receives every cause.
+  try {
+    for (const { event, listener } of declared)
+      subscriptions.add(
+        `detaching the recorder's context "${event}" listener`,
+        context,
+        event,
+        listener,
+      );
+  } catch (error) {
+    disposed = true;
+    throw new CaptureInstallError(error, subscriptions.detach());
+  }
   return {
-    dispose: () => {
+    dispose: (status: CloseStatus = "closed") => {
       if (disposed) return [];
       disposed = true;
-      const errors: string[] = [];
-      for (const page of byRoot.values())
-        try {
-          page.dispose();
-        } catch (error) {
-          errors.push(
-            `page ${page.index}: detaching its navigation provenance failed: ${String(error)}`,
-          );
-        }
-      if (source.ok)
-        try {
-          source.dispose();
-        } catch (error) {
-          errors.push(
-            `detaching the activation source failed: ${String(error)}`,
-          );
-        }
+      const errors = subscriptions.detach();
       // Revision 29 (F34-1): the lane's context has closed, so every commit Playwright dispatched has been delivered. A dispatched
       // activation without its client event was missed by a late subscription (whatever URL the page ended on); an undispatched one whose
       // frame the recorder never met belongs to no lane page. Both are named failures, never dropped.
+      // Revision 30 (F35-2, C3, invariant 8): only a COMPLETED close says so. After a failed or pending close they are still named
+      // failures, but as unattributable evidence of an incomplete close, never as proof that delivery was complete.
+      const incomplete =
+        status === "closed"
+          ? ""
+          : ` (the context's close ${status === "not attempted" ? "was not attempted" : status === "pending" ? "was still pending" : "failed"} when the recorder was finalised, so its delivery is incomplete)`;
       for (const state of serverFrames.values()) {
         const where =
           state.page === null
@@ -2526,11 +2749,13 @@ export function recordContext(
             : `page ${state.page.index}`;
         for (const { record } of state.unpaired)
           failures.push(
-            `${where}: activation #${record.seq} (${record.url}) was dispatched to Playwright's client but the recorder never received its navigation event; its documents cannot be attributed`,
+            incomplete === ""
+              ? `${where}: activation #${record.seq} (${record.url}) was dispatched to Playwright's client but the recorder never received its navigation event; its documents cannot be attributed`
+              : `${where}: activation #${record.seq} (${record.url}) was dispatched to Playwright's client and its navigation event had not arrived${incomplete}; its documents cannot be attributed`,
           );
         for (const record of state.unapplied)
           failures.push(
-            `${where}: activation #${record.seq} (${record.url}) was never attributed to a lane page`,
+            `${where}: activation #${record.seq} (${record.url}) was never attributed to a lane page${incomplete}`,
           );
       }
       return errors;
@@ -2760,6 +2985,16 @@ interface Holding {
   dispose: ((handle: unknown) => Promise<unknown>) | null;
   /** The ONE disposal of this holding (shared by every caller: an open's own unwinding, settlement and a late arrival). */
   disposalRun?: Promise<string | null>;
+  /**
+   * Revision 30 (Review 35 F35-1, C1): a handle-armed holding whose acquisition ADOPTED its resource into an owner before a later step of
+   * the same acquisition failed (the context, before its capture installation). True once adopted: the holding is then armed although
+   * its acquisition rejected, so the failed open's unwinding, settlement and a late arrival close it through that owner, once.
+   */
+  adopted?: () => boolean;
+  /** Revision 30 (F35-2, C3): the disposer bounds its own slow operation and reports every cause itself (it is not raced again). */
+  boundsItself?: boolean;
+  /** Revision 30 (C4): the disposal's failure, as reported (the snapshot keeps it beside `disposal`). */
+  disposalError?: string;
 }
 
 /** Who is disposing (for the bound's named failure and the late lines). */
@@ -2821,6 +3056,11 @@ class OpenScope {
     this.failed = true;
   }
 
+  /** Revision 30 (F35-1, C1, OWN-7): whether further set-up may still use a resource that just arrived (settlement not begun, open not failed). */
+  admits(): boolean {
+    return !this.closing() && !this.failed;
+  }
+
   acquire<T>(
     stage: OpenStage,
     start: () => Promise<T>,
@@ -2828,7 +3068,14 @@ class OpenScope {
     {
       gateAfter = true,
       arms = "handle",
-    }: { gateAfter?: boolean; arms?: Holding["arms"] } = {},
+      adopted,
+      boundsItself,
+    }: {
+      gateAfter?: boolean;
+      arms?: Holding["arms"];
+      adopted?: Holding["adopted"];
+      boundsItself?: boolean;
+    } = {},
   ): Promise<T> {
     this.gate(stage, "before");
     this.record.stage = stage;
@@ -2843,6 +3090,8 @@ class OpenScope {
       delivered: Promise.resolve(),
       arms,
       dispose: dispose as Holding["dispose"],
+      ...(adopted !== undefined ? { adopted } : {}),
+      ...(boundsItself === true ? { boundsItself } : {}),
     };
     this.record.holdings.push(holding);
     let calls = 0;
@@ -2929,19 +3178,32 @@ class OpenScope {
     const armed =
       holding.arms === "object"
         ? holding.acquisition !== "not_begun"
-        : holding.acquisition === "acquired";
+        : holding.acquisition === "acquired" || holding.adopted?.() === true;
     if (!armed || holding.dispose === null) return Promise.resolve(null);
     const dispose = holding.dispose;
     holding.disposal = "disposing";
-    holding.disposalRun = runStep(
-      {
-        label: `open ${this.record.id} ${holding.stage}`,
-        run: () => dispose(holding.handle),
-      },
-      boundMs,
-      late,
-    ).then((failure) => {
+    const step: CleanupStep = {
+      label: `open ${this.record.id} ${holding.stage}`,
+      run: () => dispose(holding.handle),
+    };
+    // Revision 30 (F35-2, C3): a self-bounded disposer reports its own pending operation and every cause; it is not raced against a
+    // second bound (which would report its complete outcome only late).
+    const run: Promise<string | null> =
+      holding.boundsItself === true
+        ? (async () => {
+            try {
+              const value = await step.run();
+              return value instanceof Error
+                ? `${step.label}: ${String(value)}`
+                : null;
+            } catch (error) {
+              return `${step.label}: ${String(error)}`;
+            }
+          })()
+        : runStep(step, boundMs, late);
+    holding.disposalRun = run.then((failure) => {
       holding.disposal = failure === null ? "disposed" : "dispose_failed";
+      if (failure !== null) holding.disposalError = failure;
       return failure;
     });
     return holding.disposalRun;
@@ -2957,6 +3219,8 @@ class OpenScope {
     if (holding.late) return;
     holding.late = true;
     const id = this.record.id;
+    // Revision 30 (F35-1, C1): a context arriving after a join bound is adopted but never installed (its open no longer admits set-up),
+    // so a late acquisition cannot reject after adopting; it arrives "acquired" and is disposed through its owner below.
     void holding.acquired.then(async () => {
       if (holding.acquisition === "rejected")
         late(
@@ -3044,6 +3308,80 @@ class OpenScope {
   }
 }
 
+/**
+ * Revision 30 (Review 35 F35-1/F35-2, family native-transport-upstream-cleanup; design assessment token 2868a8a2…, C1/C3/C4, invariants
+ * 1/3/4/5/8): the owner of one lane context and everything attached to it. It ADOPTS the raw context in the turn `newContext` delivers
+ * it, before capture is installed and before any wrapper or caller can use it; from then on the context's holding is armed even if the
+ * installation fails, so the failed open's unwinding, settlement and a late arrival all close it through this owner (no private close in
+ * the acquisition, no second close). Its ONE disposal (shared by every caller) closes the context while capture is still attached (the
+ * close's final events are captured), bounded by the dispose bound: a close still pending then is a named cause and its eventual outcome
+ * a late line. It then detaches the lane's own context listeners and finalises the capture (detaching every subscription, with the
+ * close's status), whatever the close did. Every cause (the close, each detachment, the finalisation) is collected independently and
+ * thrown together (`CleanupFailures`), so a failed close and a failed detachment are both reported.
+ */
+class ContextOwner {
+  handle: { close(): Promise<void> } | null = null;
+  installation: "none" | "installed" | "failed" | "skipped" = "none";
+  closeStatus: CloseStatus = "not attempted";
+  capture: { dispose: (status?: CloseStatus) => string[] } | null = null;
+  /** The lane's own listeners on its context (foreign requests, the page route guard). */
+  readonly lane = new Subscriptions();
+  private run: Promise<string[]> | null = null;
+  private finalised = false;
+
+  constructor(
+    private readonly label: string,
+    private readonly boundMs: number,
+    private readonly late: (line: string) => void,
+  ) {}
+
+  adopt(handle: { close(): Promise<void> }): void {
+    this.handle = handle;
+  }
+
+  /** Detaches the lane's listeners and finalises the capture, once (the disposal's second half; `seal`'s fallback). */
+  finalise(): string[] {
+    if (this.finalised) return [];
+    this.finalised = true;
+    const causes = this.lane.detach();
+    try {
+      causes.push(...(this.capture?.dispose(this.closeStatus) ?? []));
+    } catch (error) {
+      causes.push(`finalising the capture threw: ${String(error)}`);
+    }
+    return causes;
+  }
+
+  dispose(): Promise<string[]> {
+    if (this.run !== null) return this.run;
+    this.run = (async () => {
+      const causes: string[] = [];
+      const handle = this.handle;
+      if (handle !== null) {
+        const closing = await within(() => handle.close(), this.boundMs);
+        if (closing.kind === "value") this.closeStatus = "closed";
+        else if (closing.kind === "error") {
+          this.closeStatus = "failed";
+          causes.push(`closing the context failed: ${String(closing.error)}`);
+        } else {
+          this.closeStatus = "pending";
+          causes.push(
+            `closing the context was still pending ${this.boundMs} ms after it began; its capture was finalised without the close (its eventual outcome is recorded late)`,
+          );
+          void closing.later.then((o) =>
+            this.late(
+              `${this.label}: its context's close ended after its bound (${o.kind === "error" ? String(o.error) : "closed"})`,
+            ),
+          );
+        }
+      }
+      causes.push(...this.finalise());
+      return causes;
+    })();
+    return this.run;
+  }
+}
+
 /** The lane context's engine (`chromium`, `firefox`, `webkit`), or undefined when it cannot be read. */
 const engineOf = (context: BrowserContext): string | undefined => {
   try {
@@ -3064,6 +3402,7 @@ async function openLane(
   ingestion: { seam?: Ingest; late: (line: string) => void } = {
     late: () => undefined,
   },
+  disposeBoundMs: number = DISPOSE_BOUND_MS,
 ): Promise<TransportLane> {
   if ("provokes" in (options as unknown as Record<string, unknown>))
     throw new Error(
@@ -3182,50 +3521,63 @@ async function openLane(
   // Revision 28 (F33-1, C1/C5): the context's capture registry attaches in the acquisition's own turn, before the scope, a wrapper or a
   // caller can use the context (so before any page of it exists), and its disposer is the context's: it detaches after the context
   // closed, also when the open fails or the context arrives late (each detachment failure fails that disposal by name).
-  let capture: { dispose: () => string[] } | null = null;
+  // Revision 30 (Review 35 F35-1/F35-2, C1/C3): the context's OWNER exists before `newContext` is called and adopts the context in the
+  // turn it arrives, before capture is installed. The holding is armed by that adoption, so a failed installation leaves the context (and
+  // nothing else: the installation rolled itself back) to the SAME disposal the failed open's unwinding and settlement share. A context
+  // arriving once the open may no longer use it (settlement began, or the open failed) gets no capture at all; it is only closed.
+  const owner = new ContextOwner(
+    `open ${scope.record.id} context`,
+    disposeBoundMs,
+    ingestion.late,
+  );
   const context = await scope.acquire(
     "context",
     async () => {
       const made = await browser.newContext(contextOptions);
-      // Revision 29 (F34-1, C4, OWN-install): the capture registry and its activation source are attached here, after `newContext`
-      // returned. Should attaching throw, the acquisition would reject with the context never handed to the scope: close it here first,
-      // keeping both failures.
+      owner.adopt(made);
+      if (!scope.admits()) {
+        owner.installation = "skipped";
+        return made;
+      }
       try {
-        capture = recordContext(made as unknown as RecordedContext, {
+        owner.capture = recordContext(made as unknown as RecordedContext, {
           journal,
           next,
           stamp,
           ingest,
         });
+        owner.installation = "installed";
       } catch (error) {
-        let closing = "";
-        try {
-          await made.close();
-        } catch (closeError) {
-          closing = `; closing its context also failed: ${String(closeError)}`;
-        }
+        owner.installation = "failed";
         throw new Error(
-          `attaching the context's capture registry failed: ${String(error)}${closing}`,
+          `attaching the context's capture registry failed: ${error instanceof CaptureInstallError ? error.message : String(error)}`,
+          { cause: error },
         );
       }
       return made;
     },
-    (c) =>
-      c.close().finally(() => {
-        const errors = capture?.dispose() ?? [];
-        if (errors.length > 0) throw new Error(errors.join("; "));
-      }),
+    async () => {
+      const causes = await owner.dispose();
+      if (causes.length > 0) throw new CleanupFailures(causes);
+    },
+    { adopted: () => owner.handle !== null, boundsItself: true },
   );
   journal.engine = engineOf(context);
   // Playwright's own `trace: retain-on-failure` instrumentation already records every context a test creates, this one included.
   const foreign: string[] = [];
   const declaredForeign = new Set<string>();
-  context.on("request", (request) => {
-    const url = request.url();
-    if (/^(data|blob):/.test(url)) return;
-    if (new URL(url).origin !== front)
-      foreign.push(`${request.method()} ${url}`);
-  });
+  // Revision 30 (F35-1, C2): the lane's own context listeners are owned by the context's owner (exact callbacks), detached with it.
+  owner.lane.add(
+    "detaching the lane's foreign-request listener",
+    context,
+    "request",
+    ((request: Request) => {
+      const url = request.url();
+      if (/^(data|blob):/.test(url)) return;
+      if (new URL(url).origin !== front)
+        foreign.push(`${request.method()} ${url}`);
+    }) as (value: never) => void,
+  );
   await scope.acquire(
     "init script",
     () => context.addInitScript(installUiStimulus),
@@ -3243,11 +3595,13 @@ async function openLane(
     "context.setOffline (WebKit's emulation fails File reads)",
   );
   // Revision 28 (F33-1): pages are recorded by the context's capture registry (above); this only refuses a page's own routes.
-  context.on("page", (page) => {
+  owner.lane.add("detaching the lane's page route guard", context, "page", ((
+    page: Page,
+  ) => {
     const own = page as unknown as Record<string, unknown>;
     own.route = refuse("page.route");
     own.routeFromHAR = refuse("page.routeFromHAR");
-  });
+  }) as (value: never) => void);
   const routeHost =
     origin === null
       ? context
@@ -3427,11 +3781,11 @@ async function openLane(
     heldProblems: () => [...held],
     seal: () => {
       sealed = true;
-      // Normally already detached by the context's disposal (it closed first); a disposer that already ran returns nothing.
+      // Normally already finalised by the context's disposal (it closed first); a finalisation that already ran returns nothing.
+      // Revision 30: the owner's finalisation (the lane's listeners and the capture, with the close's status), never a second one.
       let detached: string[];
       try {
-        detached =
-          (capture as { dispose: () => string[] } | null)?.dispose() ?? [];
+        detached = owner.finalise();
       } catch (error) {
         detached = [`detaching the capture registry failed: ${String(error)}`];
       }
@@ -3645,6 +3999,9 @@ export function openTransportLanes(
           ? { wrapperError: h.wrapperError }
           : {}),
         ...(h.misuse !== undefined ? { misuse: h.misuse } : {}),
+        ...(h.disposalError !== undefined
+          ? { disposalError: h.disposalError }
+          : {}),
         ...(h.late ? { late: true } : {}),
         ...(h.wrapperLate ? { wrapperLate: true } : {}),
       })),
@@ -3677,6 +4034,7 @@ export function openTransportLanes(
         testInfo as TestInfo,
         scope,
         { seam: settings.ingest, late: noteLate },
+        disposeBoundMs,
       );
       await scope.acquire("publication", async () => lane, null, {
         gateAfter: false,

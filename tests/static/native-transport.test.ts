@@ -39,6 +39,7 @@ import {
   recordContext,
   runCleanup,
   runTransportLaneFixture,
+  Subscriptions,
   settleLanes,
   transportLaneFixture,
 } from "../e2e/native-transport";
@@ -1205,6 +1206,7 @@ function fakeBrowser() {
     id: number;
     closes: number;
     on: () => void;
+    off: () => void;
     addInitScript: () => Promise<void>;
     close: () => Promise<void>;
   };
@@ -1228,6 +1230,8 @@ function fakeBrowser() {
         id: made.length + 1,
         closes: 0,
         on: () => undefined,
+        // Revision 30 adaptation (F35-1): Playwright's `off` (its listeners are removed by exact callback).
+        off: () => undefined,
         addInitScript: async () => undefined,
         close: async () => {
           c.closes += 1;
@@ -2739,6 +2743,13 @@ function recorderContext(options: { pagesAtAttach?: number } = {}) {
         listener as (v: unknown) => void,
       ]);
     },
+    // Revision 30 adaptation (F35-1): Playwright's `off` (exact callback; the most recent registration of it, as an EventEmitter removes).
+    off(event: string, listener: (value: never) => void) {
+      const list = [...(listeners.get(event) ?? [])];
+      const at = list.lastIndexOf(listener as (v: unknown) => void);
+      if (at >= 0) list.splice(at, 1);
+      listeners.set(event, list);
+    },
   };
   side.bind(context, side.server);
   const emit = (event: string, value: unknown) => {
@@ -2791,6 +2802,13 @@ function recorderPage(
         ...(listeners.get(event) ?? []),
         listener as (v: unknown) => void,
       ]);
+    },
+    // Revision 30 adaptation (F35-1): Playwright's `off` (exact callback).
+    off(event: string, listener: (value: never) => void) {
+      const list = [...(listeners.get(event) ?? [])];
+      const at = list.lastIndexOf(listener as (v: unknown) => void);
+      if (at >= 0) list.splice(at, 1);
+      listeners.set(event, list);
     },
   };
   const emit = (event: string, value: unknown) => {
@@ -3451,6 +3469,8 @@ describe("F32-1 navigation provenance: unavailable, unreadable or contradicting 
       on: (event: string, listener: (value: never) => void) => {
         listeners.set(event, listener as (v: unknown) => void);
       },
+      // Revision 30 adaptation (F35-1): Playwright's `off` (the page's own listeners are owned by exact callback).
+      off: (event: string) => void listeners.delete(event),
     });
     listeners.get("framenavigated")?.(main);
     expect(j.navigationProvenance).toEqual([
@@ -3655,6 +3675,7 @@ describe("F31-1 the ingestion seam and the seal (C4)", () => {
         const made = {
           _connection: ctx.context._connection,
           on: ctx.context.on,
+          off: ctx.context.off,
           addInitScript: async () => undefined,
           close: async () => undefined,
           browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
@@ -4131,13 +4152,43 @@ describe("F33-1 recordContext: missing, contradictory or unidentifiable provenan
     ]);
     expect(d.internal.listenerCount("navigated")).toBe(0);
     expect(recorder.dispose(), "single use").toEqual([]);
+    // Revision 30 adaptation (Review 35 F35-1, C2, invariant 3): the disposer now also detaches the recorder's CONTEXT listeners (exact
+    // callbacks), so a later request or announcement reaches nothing: it is still never recorded, and no late line can arise from a
+    // listener that was removed. The old intent (an event still delivered to the recorder after it was detached is a late line, never
+    // recorded) is kept by the next case, where the context's removal fails and the listener is still attached.
+    for (const event of [
+      "request",
+      "response",
+      "requestfailed",
+      "requestfinished",
+      "page",
+      "console",
+      "weberror",
+    ])
+      expect(ctx.listeners.get(event), event).toEqual([]);
     const requests = j.requests.length;
     d.request(P);
     popup.announce();
     expect(j.requests).toHaveLength(requests);
+    expect(j.lateEvents).toBeUndefined();
+  });
+  it("revision 30: a context listener whose removal fails is named; an event still delivered through it is late, never recorded (revision 28's late-event intent)", () => {
+    const { j, d, ctx, recorder } = recorded("chromium");
+    const off = ctx.context.off;
+    ctx.context.off = (event, listener) => {
+      if (event === "request") throw new Error("off refused");
+      off(event, listener);
+    };
+    expect(recorder.dispose()).toEqual([
+      `detaching the recorder's context "request" listener failed: Error: off refused`,
+    ]);
+    expect(ctx.listeners.get("request")).toHaveLength(1);
+    expect(ctx.listeners.get("page")).toEqual([]);
+    const requests = j.requests.length;
+    d.request(P);
+    expect(j.requests).toHaveLength(requests);
     expect(j.lateEvents).toEqual([
       `a request (GET ${P}) delivered after the recorder was detached; not recorded`,
-      "a page announcement delivered after the recorder was detached; not recorded",
     ]);
   });
 });
@@ -4150,6 +4201,7 @@ describe("F33-1 C5 the capture registry is owned with its context", () => {
     const browser = {
       newContext: (async () => ({
         on: ctx.context.on,
+        off: ctx.context.off,
         addInitScript: async () => {
           // A page of the context already met (its first request) when the open fails.
           popup = recorderPage(ctx, { announce: false, url: "" });
@@ -4608,10 +4660,792 @@ describe("F34-1 OWN-install: attaching the capture registry fails after newConte
     };
     const { info } = fakeInfo();
     const lanes = openTransportLanes(browser, info);
-    await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
-      /attaching the context's capture registry failed: TypeError.*; closing its context also failed: Error: close refused/,
+    // Revision 30 adaptation (Review 35 F35-1, C1): the context is no longer closed privately inside its acquisition (an unowned close a
+    // hanging `close` would have kept pending); its owner adopted it, so the open fails at once with the attachment's cause, and the ONE
+    // disposal the failed open's unwinding and settlement share reports the close's. Both are still reported; neither masks the other.
+    const opening = lanes.open({ mode: "fixture" });
+    await expect(opening).rejects.toThrow(
+      /^attaching the context's capture registry failed: TypeError: the context has no on\/off/,
     );
-    await lanes.settle();
+    await expect(opening).rejects.not.toThrow(/close refused/);
+    const report = await lanes.settle();
+    expect(report.openErrors).toEqual([
+      expect.stringMatching(
+        /^open 1 failed at context: Error: attaching the context's capture registry failed: TypeError/,
+      ),
+    ]);
+    expect(report.closeErrors).toEqual([
+      "open 1 context: CleanupFailures: 1 cause: [1] closing the context failed: Error: close refused",
+    ]);
+  });
+});
+
+// ---- Revision 30 (Review 35 F35-1/F35-2, family native-transport-upstream-cleanup; design assessment token 2868a8a2…, C1–C5, Q1) ------
+
+/** The recorder's own context events (revision 28/29), in registration order. */
+const RECORDER_EVENTS = [
+  "request",
+  "response",
+  "requestfailed",
+  "requestfinished",
+  "page",
+  "console",
+  "weberror",
+] as const;
+/** The lane's own context listeners (openLane), registered after the context's acquisition. */
+const LANE_EVENTS = ["request", "page"] as const;
+
+/**
+ * A lane context as Playwright's client is to the lane (an EventEmitter: exact-callback on/off), with its in-process SERVER side of the
+ * pinned shape (`serverSide`), so the activation source REALLY attaches before any later step: the precondition Review 35's partial-
+ * installation schedule needs and revision 29's OWN-install double (no `_connection`) never reached. `failOn` makes the `nth` call of
+ * the context's `on` for `event` throw (`attach`: after attaching, else before); `close` decides its close; `unrelated` puts another
+ * owner's listener on every event of the context and on the server context, which must survive. Counts are exact.
+ */
+function ownedContext(
+  options: {
+    failOn?: { event: string; nth?: number; attach: boolean };
+    close?: "healthy" | "reject" | { pending: Promise<"resolve" | "reject"> };
+    sourceOff?: "throw";
+    unrelated?: boolean;
+  } = {},
+) {
+  const context = new EventEmitter() as EventEmitter & Record<string, unknown>;
+  const side = serverSide();
+  side.bind(context, side.server);
+  const other = () => undefined;
+  const events = [...new Set([...RECORDER_EVENTS, ...LANE_EVENTS])];
+  if (options.unrelated === true) {
+    for (const event of events) context.on(event, other);
+    side.server.on(ACTIVATION_SOURCE_PIN.event, other);
+  }
+  const on = context.on.bind(context);
+  const calls = new Map<string, number>();
+  context.on = ((event: string, listener: (...args: unknown[]) => void) => {
+    const n = (calls.get(event) ?? 0) + 1;
+    calls.set(event, n);
+    const fail = options.failOn;
+    if (fail !== undefined && fail.event === event && (fail.nth ?? 1) === n) {
+      if (fail.attach) on(event, listener);
+      throw new Error("CAPTURE_ATTACH_SENTINEL");
+    }
+    return on(event, listener);
+  }) as unknown as typeof context.on;
+  if (options.sourceOff === "throw")
+    side.server.off = () => {
+      throw new Error("SOURCE_DETACH_SENTINEL");
+    };
+  let closes = 0;
+  let inits = 0;
+  Object.assign(context, {
+    _connection: side.connection,
+    addInitScript: async () => {
+      inits += 1;
+    },
+    close: async () => {
+      closes += 1;
+      const mode = options.close ?? "healthy";
+      if (mode === "reject") throw new Error("CONTEXT_CLOSE_SENTINEL");
+      if (typeof mode === "object" && (await mode.pending) === "reject")
+        throw new Error("CONTEXT_CLOSE_SENTINEL (late)");
+    },
+    browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
+  });
+  const unrelatedCount = options.unrelated === true ? 1 : 0;
+  return {
+    context,
+    side,
+    other,
+    calls,
+    closes: () => closes,
+    inits: () => inits,
+    /** The source's listeners still attached (another owner's excluded). */
+    source: () =>
+      side.server.listenerCount(ACTIVATION_SOURCE_PIN.event) - unrelatedCount,
+    /** The lane's and recorder's listeners still attached on the context (another owner's excluded). */
+    owned: () =>
+      events.reduce(
+        (sum, event) => sum + context.listenerCount(event) - unrelatedCount,
+        0,
+      ),
+    /** Another owner's listeners, all still attached. */
+    unrelatedIntact: () =>
+      events.every((event) => context.listeners(event).includes(other)) &&
+      side.server.listeners(ACTIVATION_SOURCE_PIN.event).includes(other),
+  };
+}
+const ownedBrowser = (made: ReturnType<typeof ownedContext>) => ({
+  newContext: (async () => made.context) as unknown as Browser["newContext"],
+});
+
+describe("F35-1 OWN-0/OWN-1/OWN-2: capture installation is a transaction (exact callbacks; nothing undisposed)", () => {
+  it("OWN-0 healthy, direct recorder: one source listener and the seven context listeners attach; the disposer removes exactly those, another owner's survive", () => {
+    const c = ownedContext({ unrelated: true });
+    const j: Journal = {
+      problems: [],
+      requests: [],
+      attempts: [],
+      expectations: [],
+    };
+    let seq = 0;
+    const recorder = recordContext(
+      c.context as unknown as Parameters<typeof recordContext>[0],
+      {
+        journal: j,
+        next: () => {
+          seq += 1;
+          return seq;
+        },
+        stamp,
+        ingest: (p) => void j.problems.push(p),
+      },
+    );
+    expect(c.source()).toBe(1);
+    expect(c.owned()).toBe(RECORDER_EVENTS.length);
+    expect(recorder.dispose()).toEqual([]);
+    expect(c.source()).toBe(0);
+    expect(c.owned()).toBe(0);
+    expect(c.unrelatedIntact()).toBe(true);
+    expect(recorder.dispose(), "single use").toEqual([]);
+  });
+  it("OWN-0 healthy, manager: the open publishes, settlement closes once, every owned listener detaches, another owner's survive, the report is clean", async () => {
+    const c = ownedContext({ unrelated: true });
+    const { info, attached } = fakeInfo();
+    const lanes = openTransportLanes(ownedBrowser(c), info);
+    await lanes.open({ mode: "fixture" });
+    expect(c.source()).toBe(1);
+    expect(c.owned()).toBe(RECORDER_EVENTS.length + LANE_EVENTS.length);
+    const report = await lanes.settle();
+    expect(report).toEqual({
+      closeErrors: [],
+      reportErrors: [],
+      failures: [],
+      openErrors: [],
+    });
+    expect(c.closes()).toBe(1);
+    expect(c.source()).toBe(0);
+    expect(c.owned()).toBe(0);
+    expect(c.unrelatedIntact()).toBe(true);
+    expect(attached.has("transport-teardown")).toBe(true);
+  });
+  it("OWN-1 Review 35's partial installation: the source attached, then the context's first client registration throws: the open fails by name, the source is rolled back (0 listeners), the context closes once, no init script", async () => {
+    const c = ownedContext({ failOn: { event: "request", attach: false } });
+    const { info, attached } = fakeInfo();
+    const lanes = openTransportLanes(ownedBrowser(c), info);
+    await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
+      /^attaching the context's capture registry failed: Error: CAPTURE_ATTACH_SENTINEL; every partial registration was rolled back$/,
+    );
+    const report = await lanes.settle();
+    expect(c.source(), "the activation source's listener").toBe(0);
+    expect(c.owned()).toBe(0);
+    expect(c.closes(), "closed once").toBe(1);
+    expect(c.inits(), "no later stage").toBe(0);
+    expect(report.closeErrors).toEqual([]);
+    expect(report.openErrors).toEqual([
+      expect.stringMatching(
+        /^open 1 failed at context: Error: attaching the context's capture registry failed: Error: CAPTURE_ATTACH_SENTINEL/,
+      ),
+    ]);
+    const teardown = attached.get("transport-teardown") as {
+      opens: Array<{ holdings: Array<{ stage: string; disposal: string }> }>;
+    };
+    expect(
+      teardown.opens[0]?.holdings.find((h) => h.stage === "context"),
+    ).toMatchObject({ acquisition: "rejected", disposal: "disposed" });
+    expect(lanes.lanes).toEqual([]);
+  });
+  for (const [i, event] of RECORDER_EVENTS.entries())
+    for (const attach of [false, true])
+      it(`OWN-1 the recorder's registration ${i + 1} ("${event}") throws ${attach ? "AFTER attaching" : "before attaching"}: every earlier registration and the failing one are rolled back; the context closes once`, async () => {
+        const c = ownedContext({
+          failOn: { event, nth: 1, attach },
+          unrelated: true,
+        });
+        const { info } = fakeInfo();
+        const lanes = openTransportLanes(ownedBrowser(c), info);
+        await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
+          /CAPTURE_ATTACH_SENTINEL; every partial registration was rolled back$/,
+        );
+        const report = await lanes.settle();
+        expect([c.source(), c.owned(), c.closes(), c.inits()]).toEqual([
+          0, 0, 1, 0,
+        ]);
+        expect(c.unrelatedIntact()).toBe(true);
+        expect(report.closeErrors).toEqual([]);
+        expect(report.openErrors).toHaveLength(1);
+      });
+  for (const [event, nth, stage] of [
+    ["request", 2, "context"],
+    ["page", 2, "init script"],
+  ] as const)
+    it(`OWN-1 the LANE's own "${event}" listener (after the context's acquisition) attaches then throws: the open fails by name; the context's one disposal detaches it, the capture and the source`, async () => {
+      const c = ownedContext({
+        failOn: { event, nth, attach: true },
+        unrelated: true,
+      });
+      const { info } = fakeInfo();
+      const lanes = openTransportLanes(ownedBrowser(c), info);
+      await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
+        /^CAPTURE_ATTACH_SENTINEL$/,
+      );
+      const report = await lanes.settle();
+      expect([c.source(), c.owned(), c.closes()]).toEqual([0, 0, 1]);
+      expect(c.unrelatedIntact()).toBe(true);
+      expect(report.closeErrors).toEqual([]);
+      // The foreign-request listener is registered in the context stage; the page route guard after the init script's.
+      expect(report.openErrors).toEqual([
+        `open 1 failed at ${stage}: Error: CAPTURE_ATTACH_SENTINEL`,
+      ]);
+    });
+  it("OWN-1 a context without Playwright's off is refused before anything attaches (no source listener either)", () => {
+    const c = ownedContext();
+    (c.context as unknown as { off?: unknown }).off = undefined;
+    expect(() =>
+      recordContext(
+        c.context as unknown as Parameters<typeof recordContext>[0],
+        {
+          journal: {
+            problems: [],
+            requests: [],
+            attempts: [],
+            expectations: [],
+          },
+          next: () => 1,
+          stamp,
+          ingest: () => undefined,
+        },
+      ),
+    ).toThrow(/^TypeError: the context has no on\/off of Playwright's shape/);
+    expect([c.source(), c.owned()]).toEqual([0, 0]);
+  });
+  it("OWN-2 the activation source: an `on` that attaches and then throws is detached again and named; a failing re-detachment is named too; the healthy control attaches once", () => {
+    const listener = () => undefined;
+    const healthy = recorderContext();
+    const source = observeActivations(healthy.context, listener);
+    expect(source.ok).toBe(true);
+    expect(healthy.side.server.listenerCount(ACTIVATION_SOURCE_PIN.event)).toBe(
+      1,
+    );
+    const thrower = recorderContext();
+    const on = thrower.side.server.on.bind(thrower.side.server);
+    thrower.side.server.on = ((event: string, l: () => void) => {
+      on(event, l);
+      throw new Error("SOURCE_ATTACH_SENTINEL");
+    }) as unknown as typeof thrower.side.server.on;
+    expect(observeActivations(thrower.context, listener)).toEqual({
+      ok: false,
+      reason:
+        "attaching the activation source threw: Error: SOURCE_ATTACH_SENTINEL; its listener was detached again",
+    });
+    expect(thrower.side.server.listenerCount(ACTIVATION_SOURCE_PIN.event)).toBe(
+      0,
+    );
+    thrower.side.server.off = () => {
+      throw new Error("SOURCE_DETACH_SENTINEL");
+    };
+    expect(observeActivations(thrower.context, listener)).toEqual({
+      ok: false,
+      reason:
+        "attaching the activation source threw: Error: SOURCE_ATTACH_SENTINEL; detaching its listener again also failed: Error: SOURCE_DETACH_SENTINEL",
+    });
+  });
+  it("OWN-2 a frame's navigation subscription: an `on` that attaches and then throws is removed again and refused by name; another owner's listener survives", () => {
+    const emitter = new EventEmitter();
+    const other = () => undefined;
+    emitter.on("navigated", other);
+    const on = emitter.on.bind(emitter);
+    emitter.on = ((event: string, l: () => void) => {
+      on(event, l);
+      throw new Error("FRAME_ATTACH_SENTINEL");
+    }) as EventEmitter["on"];
+    expect(
+      observeNavigations({ _eventEmitter: emitter }, () => undefined),
+    ).toEqual({
+      ok: false,
+      reason:
+        "subscribing to the main frame's navigation events threw: Error: FRAME_ATTACH_SENTINEL; its listener was removed again",
+    });
+    expect(emitter.listeners("navigated")).toEqual([other]);
+  });
+  it("OWN-2 the ledger: obligations are owned before `on`; detach is newest first, attempts every one, names each failure, is single use; a nested scope rolls back alone; nothing is subscribed after detachment", () => {
+    const a = new EventEmitter();
+    const order: string[] = [];
+    const ledger = new Subscriptions();
+    const l1 = () => undefined;
+    const l2 = () => undefined;
+    ledger.add("first", a, "x", l1);
+    ledger.adopt("adopted", () => {
+      order.push("adopted");
+      throw new Error("ADOPTED_SENTINEL");
+    });
+    const nested = ledger.child();
+    nested.add("nested", a, "y", l2);
+    expect(nested.detach()).toEqual([]);
+    expect(a.listenerCount("y")).toBe(0);
+    const late = new Subscriptions();
+    late.add("late", a, "z", l1);
+    a.off = ((event: string, l: () => void) => {
+      order.push(`off ${event}`);
+      return EventEmitter.prototype.off.call(a, event, l);
+    }) as EventEmitter["off"];
+    expect(ledger.detach()).toEqual([
+      "adopted failed: Error: ADOPTED_SENTINEL",
+    ]);
+    expect(order).toEqual(["adopted", "off x"]);
+    expect(a.listenerCount("x")).toBe(0);
+    expect(ledger.detach(), "single use").toEqual([]);
+    expect(() => ledger.add("after", a, "x", l1)).toThrow(/already detached/);
+    expect(a.listenerCount("x")).toBe(0);
+    expect(a.listenerCount("z"), "another ledger's listener").toBe(1);
+  });
+});
+
+describe("F35-1 OWN-3: a page's own registrations fail locally (the page, its number and earlier evidence stay)", () => {
+  const P = `${FRONT}/api/__guard/page`;
+  it("OWN-3 the page's console listener attaches, its pageerror listener throws after attaching: both rolled back, a named capture gap; the navigation subscription and other pages are kept until the disposer", () => {
+    const { j, d, ctx, recorder } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.request(N);
+    const on = popup.page.on;
+    popup.page.on = (event, listener) => {
+      on(event, listener);
+      if (event === "pageerror") throw new Error("PAGE_ATTACH_SENTINEL");
+    };
+    popup.announce();
+    expect(j.pages?.map((p) => [p.page, p.announced])).toEqual([
+      [0, true],
+      [1, true],
+    ]);
+    expect(j.provenanceFailures).toEqual([
+      "page 1: installing its own problem listeners failed (Error: PAGE_ATTACH_SENTINEL); its console messages and page errors after its announcement are not captured",
+    ]);
+    popup.console("error", "after the gap", N);
+    expect(j.problems).toEqual([]);
+    d.console("error", "page 0 is still captured", P);
+    expect(j.problems.map((p) => [p.page, p.text])).toEqual([
+      [0, "page 0 is still captured"],
+    ]);
+    expect(popup.internal.listenerCount("navigated")).toBe(1);
+    expect(recorder.dispose()).toEqual([]);
+    expect(popup.internal.listenerCount("navigated")).toBe(0);
+    expect(d.internal.listenerCount("navigated")).toBe(0);
+  });
+  it("OWN-3 a rollback of the page's partial listeners that fails is named with the installation's cause", () => {
+    const { j, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    popup.request(N);
+    popup.page.on = (event) => {
+      if (event === "pageerror") throw new Error("PAGE_ATTACH_SENTINEL");
+    };
+    popup.page.off = (event) => {
+      if (event === "console") throw new Error("PAGE_DETACH_SENTINEL");
+    };
+    popup.announce();
+    expect(j.provenanceFailures).toEqual([
+      `page 1: installing its own problem listeners failed (Error: PAGE_ATTACH_SENTINEL); its console messages and page errors after its announcement are not captured; rolling back its partial listeners also failed: page 1: detaching its console listener failed: Error: PAGE_DETACH_SENTINEL`,
+    ]);
+  });
+  it("OWN-3 a frame's navigation subscription that attaches and then throws: the page keeps its number, provenance is unavailable by name, nothing stays subscribed", () => {
+    const { j, ctx } = recorded("chromium");
+    const popup = recorderPage(ctx, { announce: false, url: "" });
+    const on = popup.internal.on.bind(popup.internal);
+    popup.internal.on = ((event: string, l: () => void) => {
+      on(event, l);
+      throw new Error("FRAME_ATTACH_SENTINEL");
+    }) as EventEmitter["on"];
+    popup.request(N);
+    expect(j.pages?.[1]).toMatchObject({ page: 1, via: "request" });
+    expect(popup.internal.listenerCount("navigated")).toBe(0);
+    expect(j.navigationProvenance?.[1]).toEqual({
+      page: 1,
+      unavailable:
+        "subscribing to the main frame's navigation events threw: Error: FRAME_ATTACH_SENTINEL; its listener was removed again",
+    });
+    expect(classifyJournal(j).violations).toEqual([
+      expect.stringMatching(
+        /^navigation provenance: page 1: navigation provenance unavailable \(subscribing to the main frame's navigation events threw/,
+      ),
+    ]);
+  });
+});
+
+describe("F35-1/F35-2 OWN-4/OWN-5/OWN-9: one context disposal, every cause kept (close and each detachment)", () => {
+  const sentinels = (text: string) => ({
+    close: text.includes("CONTEXT_CLOSE_SENTINEL"),
+    detach: text.includes("SOURCE_DETACH_SENTINEL"),
+  });
+  for (const [mode, close, sourceOff, expected] of [
+    ["healthy", "healthy", undefined, { close: false, detach: false }],
+    ["close-only", "reject", undefined, { close: true, detach: false }],
+    ["detach-only", "healthy", "throw", { close: false, detach: true }],
+    [
+      "both (Review 35 F35-2)",
+      "reject",
+      "throw",
+      { close: true, detach: true },
+    ],
+  ] as const)
+    it(`OWN-5 a published lane, ${mode}: one close, every detachment attempted; the report, the teardown record and the holding's snapshot keep exactly the injected causes`, async () => {
+      const c = ownedContext({ close, sourceOff, unrelated: true });
+      const { info, attached } = fakeInfo();
+      const lanes = openTransportLanes(ownedBrowser(c), info);
+      await lanes.open({ mode: "fixture" });
+      const report = await lanes.settle();
+      expect(c.closes(), "one physical close").toBe(1);
+      expect(c.owned(), "every client listener detached").toBe(0);
+      expect(c.unrelatedIntact()).toBe(true);
+      // A forced failed detachment is reported, never asserted removed: its listener is still there.
+      expect(c.source()).toBe(sourceOff === "throw" ? 1 : 0);
+      expect(sentinels(report.closeErrors.join("\n"))).toEqual(expected);
+      expect(
+        sentinels(JSON.stringify(attached.get("transport-teardown"))),
+      ).toEqual(expected);
+      if (mode.startsWith("both"))
+        expect(report.closeErrors).toEqual([
+          "open 1 context: CleanupFailures: 2 causes: [1] closing the context failed: Error: CONTEXT_CLOSE_SENTINEL; [2] detaching the activation source failed: Error: SOURCE_DETACH_SENTINEL",
+        ]);
+      const holding = (
+        attached.get("transport-teardown") as {
+          opens: Array<{
+            holdings: Array<{
+              stage: string;
+              disposal: string;
+              disposalError?: string;
+            }>;
+          }>;
+        }
+      ).opens[0]?.holdings.find((h) => h.stage === "context");
+      expect(holding?.disposal).toBe(
+        mode === "healthy" ? "disposed" : "dispose_failed",
+      );
+      expect(sentinels(holding?.disposalError ?? "")).toEqual(expected);
+      expect(report.reportErrors).toEqual([]);
+      expect(report.openErrors).toEqual([]);
+      // Every other owner was still attempted (the witness, front and scripted origin closed).
+      const others = (
+        attached.get("transport-teardown") as {
+          opens: Array<{
+            holdings: Array<{ stage: string; disposal: string }>;
+          }>;
+        }
+      ).opens[0]?.holdings
+        .filter((h) => LISTENERS.includes(h.stage as OpenStage))
+        .map((h) => h.disposal);
+      expect(others).toEqual(["disposed", "disposed", "disposed"]);
+    });
+  it("OWN-5 a frame's and the source's detachments both fail, with the close: all three causes, in order", async () => {
+    const ctx = recorderContext();
+    const pages: Array<ReturnType<typeof recorderPage>> = [];
+    const browser = {
+      newContext: (async () => {
+        const made = {
+          _connection: ctx.context._connection,
+          on: ctx.context.on,
+          off: ctx.context.off,
+          addInitScript: async () => {
+            pages.push(recorderPage(ctx));
+          },
+          close: async () => {
+            throw new Error("CONTEXT_CLOSE_SENTINEL");
+          },
+          browser: () => ({ browserType: () => ({ name: () => "chromium" }) }),
+        };
+        ctx.side.bind(made, ctx.side.server);
+        return made;
+      }) as unknown as Browser["newContext"],
+    };
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(browser, info);
+    await lanes.open({ mode: "fixture" });
+    const page = pages[0];
+    if (page === undefined) throw new Error("no page");
+    page.internal.off = () => {
+      throw new Error("FRAME_DETACH_SENTINEL");
+    };
+    ctx.side.server.off = () => {
+      throw new Error("SOURCE_DETACH_SENTINEL");
+    };
+    const report = await lanes.settle();
+    expect(report.closeErrors).toEqual([
+      "open 1 context: CleanupFailures: 3 causes: [1] closing the context failed: Error: CONTEXT_CLOSE_SENTINEL; [2] page 0: detaching its navigation provenance failed: Error: FRAME_DETACH_SENTINEL; [3] detaching the activation source failed: Error: SOURCE_DETACH_SENTINEL",
+    ]);
+  });
+  for (const close of ["healthy", "reject"] as const)
+    it(`OWN-4 a failed installation whose rollback of the source fails, close ${close}: the open names the installation and the rollback failure; the ONE disposal names the close; no lane, no seal`, async () => {
+      const c = ownedContext({
+        failOn: { event: "response", attach: true },
+        sourceOff: "throw",
+        close,
+      });
+      const { info } = fakeInfo();
+      const lanes = openTransportLanes(ownedBrowser(c), info);
+      await expect(lanes.open({ mode: "fixture" })).rejects.toThrow(
+        /^attaching the context's capture registry failed: Error: CAPTURE_ATTACH_SENTINEL; rolling back its partial registrations also failed: detaching the activation source failed: Error: SOURCE_DETACH_SENTINEL$/,
+      );
+      const report = await lanes.settle();
+      expect(c.closes()).toBe(1);
+      expect(c.owned(), "the client registrations were rolled back").toBe(0);
+      expect(c.source(), "the failed removal, reported, not hidden").toBe(1);
+      expect(report.closeErrors).toEqual(
+        close === "reject"
+          ? [
+              "open 1 context: CleanupFailures: 1 cause: [1] closing the context failed: Error: CONTEXT_CLOSE_SENTINEL",
+            ]
+          : [],
+      );
+      expect(report.openErrors).toEqual([
+        expect.stringMatching(
+          /CAPTURE_ATTACH_SENTINEL.*SOURCE_DETACH_SENTINEL/,
+        ),
+      ]);
+      expect(lanes.lanes).toEqual([]);
+    });
+  for (const [what, failOn] of [
+    // The lane's own page route guard throws after the capture installed: the open fails unpublished, so no seal can finalise its capture.
+    [
+      "an UNPUBLISHED open (failing after its capture installed)",
+      { event: "page", nth: 2, attach: true },
+    ],
+    ["a PUBLISHED lane", undefined],
+  ] as const)
+    for (const eventual of ["resolve", "reject"] as const)
+      it(`OWN-9 ${what}: its close never settles within the bound: the bound fails once by name, the capture is still detached through the owner, the other owners are closed, and the close's eventual ${eventual} is a late line`, async () => {
+        const release = deferred<"resolve" | "reject">();
+        const c = ownedContext({
+          close: { pending: release.promise },
+          ...(failOn !== undefined ? { failOn } : {}),
+        });
+        const { info, attached } = fakeInfo();
+        const lateLines: string[] = [];
+        const lanes = openTransportLanes(ownedBrowser(c), info, {
+          disposeBoundMs: 50,
+          onLate: (line) => void lateLines.push(line),
+        });
+        const opening = lanes.open({ mode: "fixture" });
+        if (failOn !== undefined) {
+          await expect(opening).rejects.toThrow(/^CAPTURE_ATTACH_SENTINEL$/);
+          expect(lanes.lanes, "never published (no seal)").toEqual([]);
+        } else await opening;
+        const report = await lanes.settle();
+        expect(report.closeErrors).toEqual([
+          "open 1 context: CleanupFailures: 1 cause: [1] closing the context was still pending 50 ms after it began; its capture was finalised without the close (its eventual outcome is recorded late)",
+        ]);
+        expect(c.closes()).toBe(1);
+        expect([c.source(), c.owned()]).toEqual([0, 0]);
+        const holdings = (
+          attached.get("transport-teardown") as {
+            opens: Array<{
+              holdings: Array<{ stage: string; disposal: string }>;
+            }>;
+          }
+        ).opens[0]?.holdings;
+        expect(
+          holdings
+            ?.filter((h) => LISTENERS.includes(h.stage as OpenStage))
+            .map((h) => h.disposal),
+        ).toEqual(["disposed", "disposed", "disposed"]);
+        release.resolve(eventual);
+        expect(await until(() => lanes.late.length > 0, "the late close")).toBe(
+          "done",
+        );
+        expect(lanes.late).toEqual([
+          `open 1 context: its context's close ended after its bound (${eventual === "reject" ? "Error: CONTEXT_CLOSE_SENTINEL (late)" : "closed"})`,
+        ]);
+        expect(lateLines).toEqual(lanes.late);
+        expect(c.closes(), "never a second close").toBe(1);
+      });
+  it("OWN-9 a published lane whose close is pending: a dispatched activation whose client event never arrived is still a named failure, as incomplete delivery (never proof that delivery was complete)", async () => {
+    const release = deferred<"resolve" | "reject">();
+    const c = ownedContext({ close: { pending: release.promise } });
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(ownedBrowser(c), info, {
+      disposeBoundMs: 50,
+    });
+    const lane = await lanes.open({ mode: "fixture" });
+    const frame = {
+      url: () => "http://127.0.0.1:9/x",
+      parentFrame: () => null,
+      _currentDocument: { documentId: "n-1", request: undefined },
+    };
+    c.side.dispatch(frame);
+    c.side.commit(frame);
+    const report = await lanes.settle();
+    expect(lane.journal.provenanceFailures).toEqual([
+      "a main frame the recorder never met (server frame 0): activation #1 (http://127.0.0.1:9/x) was dispatched to Playwright's client and its navigation event had not arrived (the context's close was still pending when the recorder was finalised, so its delivery is incomplete); its documents cannot be attributed",
+    ]);
+    expect(report.failures).toEqual([
+      expect.stringMatching(
+        /^lane 0: navigation provenance: a main frame the recorder never met/,
+      ),
+    ]);
+    release.resolve("resolve");
+  });
+});
+
+describe("F35 OWN-6/OWN-7/OWN-8/OWN-10: report paths, late and held acquisitions, two managers", () => {
+  it("OWN-6 the fixture: a body failure, a close failure, a detach failure and failing attachments: the thrown error keeps the body's cause and every cleanup and report cause; every attachment is still attempted", async () => {
+    const c = ownedContext({ close: "reject", sourceOff: "throw" });
+    const tried: string[] = [];
+    const info = {
+      project: { use: { baseURL: "http://127.0.0.1:9" } },
+      attach: async (name: string) => {
+        tried.push(name);
+        throw new Error(`ATTACH_SENTINEL ${name}`);
+      },
+    } as unknown as Pick<TestInfo, "project" | "attach">;
+    let thrown: unknown;
+    try {
+      await runTransportLaneFixture(
+        ownedBrowser(c) as unknown as Browser,
+        async (open) => {
+          await open({ mode: "fixture" });
+          throw new Error("BODY_SENTINEL");
+        },
+        info,
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    const text = String(thrown);
+    expect(text).toMatch(
+      /^Error: transport lane fixture: Error: BODY_SENTINEL; teardown /,
+    );
+    for (const cause of [
+      "CONTEXT_CLOSE_SENTINEL",
+      "SOURCE_DETACH_SENTINEL",
+      "lane 0 ledger: Error: ATTACH_SENTINEL transport-ledger-0",
+      "teardown record: Error: ATTACH_SENTINEL transport-teardown",
+    ])
+      expect(text, cause).toContain(cause);
+    expect((thrown as Error).cause).toMatchObject({ message: "BODY_SENTINEL" });
+    expect(tried).toEqual(["transport-ledger-0", "transport-teardown"]);
+    expect(c.closes()).toBe(1);
+  });
+  it("OWN-7 a context arriving after settlement began: closed once by its owner, no capture installed (the source never attaches to the unused context), the late arrival recorded", async () => {
+    const c = ownedContext();
+    const arrive = deferred();
+    const browser = {
+      newContext: (async () => {
+        await arrive.promise;
+        return c.context;
+      }) as unknown as Browser["newContext"],
+    };
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(browser, info, { joinBoundMs: 50 });
+    const opening = lanes.open({ mode: "fixture" });
+    expect(
+      await until(
+        () => lanes.snapshot()[0]?.stage === "context",
+        "context admitted",
+      ),
+    ).toBe("done");
+    const report = await lanes.settle();
+    expect(report.closeErrors).toEqual([
+      "open 1: context acquisition still pending when settlement's join bound ended (its result will be disposed when it arrives)",
+      "open 1: unfinished at context when settlement's join bound ended",
+    ]);
+    arrive.resolve();
+    await expect(opening).rejects.toThrow(LaneCancelled);
+    expect(await until(() => lanes.late.length >= 2, "the late arrival")).toBe(
+      "done",
+    );
+    expect(lanes.late).toContain(
+      "open 1: late context arrived after settlement; disposed",
+    );
+    expect(c.closes()).toBe(1);
+    expect(c.calls.size, "no capture listener was attempted").toBe(0);
+    expect(c.side.server.listenerCount(ACTIVATION_SOURCE_PIN.event)).toBe(0);
+  });
+  it("OWN-8 a wrapper held after its real acquisition (capture installed): settlement disposes the owned context without waiting for the wrapper; one close; the wrapper's failure stays distinct", async () => {
+    const c = ownedContext();
+    const release = deferred();
+    const interpose: Interpose = async (stage, acquire) => {
+      const value = await acquire();
+      if (stage === "context") {
+        await release.promise;
+        throw new Error("WRAPPER_SENTINEL");
+      }
+      return value;
+    };
+    const { info } = fakeInfo();
+    const lanes = openTransportLanes(ownedBrowser(c), info, {
+      interpose,
+      joinBoundMs: 50,
+    });
+    const opening = lanes.open({ mode: "fixture" });
+    expect(await until(() => c.source() === 1, "capture installed")).toBe(
+      "done",
+    );
+    const report = await lanes.settle();
+    expect(c.closes()).toBe(1);
+    expect([c.source(), c.owned()]).toEqual([0, 0]);
+    expect(report.closeErrors).toEqual([
+      "open 1: context wrapper still pending when settlement's join bound ended (its acquired resource was disposed; its outcome will be recorded when it arrives)",
+      "open 1: unfinished at context when settlement's join bound ended",
+    ]);
+    release.resolve();
+    await expect(opening).rejects.toThrow(/WRAPPER_SENTINEL/);
+    expect(
+      await until(
+        () => lanes.late.some((l) => l.includes("WRAPPER_SENTINEL")),
+        "the late wrapper",
+      ),
+    ).toBe("done");
+    expect(c.closes(), "no second close").toBe(1);
+  });
+  it("OWN-10 two managers, one failing installation and one failing close: each manager's settlement is shared by its concurrent callers, neither disposes the other's context, the healthy lane's capture and ledger are intact", async () => {
+    const failing = ownedContext({
+      failOn: { event: "weberror", attach: true },
+    });
+    const closing = ownedContext({ close: "reject", sourceOff: "throw" });
+    const healthy = ownedContext();
+    const a = fakeInfo();
+    const b = fakeInfo();
+    const queue = [failing, closing];
+    const managerA = openTransportLanes(
+      {
+        newContext: (async () =>
+          (queue.shift() as ReturnType<typeof ownedContext>)
+            .context) as unknown as Browser["newContext"],
+      },
+      a.info,
+    );
+    const managerB = openTransportLanes(ownedBrowser(healthy), b.info);
+    const [failed, published, other] = await Promise.allSettled([
+      managerA.open({ mode: "fixture" }),
+      managerA.open({ mode: "fixture" }),
+      managerB.open({ mode: "fixture" }),
+    ]);
+    expect(failed?.status).toBe("rejected");
+    expect(published?.status).toBe("fulfilled");
+    expect(other?.status).toBe("fulfilled");
+    expect(healthy.source()).toBe(1);
+    const [a1, a2] = await Promise.all([managerA.settle(), managerA.settle()]);
+    expect(a1).toBe(a2);
+    expect(healthy.source(), "manager B's capture untouched").toBe(1);
+    expect(healthy.closes()).toBe(0);
+    const [b1, b2] = await Promise.all([managerB.settle(), managerB.settle()]);
+    expect(b1).toBe(b2);
+    expect(b1).toEqual({
+      closeErrors: [],
+      reportErrors: [],
+      failures: [],
+      openErrors: [],
+    });
+    expect(a1.openErrors).toEqual([
+      expect.stringMatching(
+        /^open 1 failed at context: .*CAPTURE_ATTACH_SENTINEL/,
+      ),
+    ]);
+    expect(a1.closeErrors).toEqual([
+      "open 2 context: CleanupFailures: 2 causes: [1] closing the context failed: Error: CONTEXT_CLOSE_SENTINEL; [2] detaching the activation source failed: Error: SOURCE_DETACH_SENTINEL",
+    ]);
+    expect([failing.closes(), closing.closes(), healthy.closes()]).toEqual([
+      1, 1, 1,
+    ]);
+    expect([failing.source(), failing.owned()]).toEqual([0, 0]);
+    expect([healthy.source(), healthy.owned()]).toEqual([0, 0]);
+    expect(b.attached.has("transport-ledger-0")).toBe(true);
   });
 });
 
