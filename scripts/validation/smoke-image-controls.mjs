@@ -249,6 +249,8 @@ const processTable = () =>
       pgid: Number(pgid),
       command,
     }));
+// A browser process: its executable (not an argument such as --project=production-chromium) is Playwright's Chromium.
+const isBrowser = (p) => /chrom|headless_shell/i.test(p.command.split(" ")[0]);
 // The descendants of a process (browsers included, whatever process group Playwright gives them).
 const descendants = (pid) => {
   const table = processTable();
@@ -294,7 +296,7 @@ function runCase(c, dir) {
         const tree = descendants(child.pid);
         if (
           !tree.some((p) => /playwright/.test(p.command)) ||
-          !tree.some((p) => /chrom/i.test(p.command))
+          !tree.some(isBrowser)
         )
           return;
         signalled = { at_ms: Date.now() - started, processes: tree };
@@ -399,7 +401,7 @@ for (const c of cases) {
         problems.push(
           `process ${p.pid} survived the signal: ${p.command.slice(0, 120)}`,
         );
-    if (!r.signalled.processes.some((p) => /chrom/i.test(p.command)))
+    if (!r.signalled.processes.some(isBrowser))
       problems.push("no browser was running when the signal was sent");
   }
   const verdict =
