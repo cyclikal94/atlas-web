@@ -1,5 +1,6 @@
 import {
   type DataLeaderHandle,
+  type DiagnosticSegmentation,
   markLeaderStarted,
   startDataLeader,
 } from "../data";
@@ -12,7 +13,10 @@ import type { Session, Trace } from "../session";
  */
 export const dataLeader = {
   announce: (): void => markLeaderStarted(),
-  start: (session: Session, trace?: Trace): DataLeaderHandle =>
-    startDataLeader(session, trace ? { trace } : {}),
+  start: (
+    session: Session,
+    trace?: Trace,
+    diagnostic?: DiagnosticSegmentation,
+  ): DataLeaderHandle => startDataLeader(session, { trace, diagnostic }),
 };
-export type { DataLeaderHandle };
+export type { DataLeaderHandle, DiagnosticSegmentation };

@@ -104,6 +104,12 @@ export interface SyncLeaderDeps {
   elapsed?: () => number;
   trace?: Trace;
   config?: Partial<typeof DATA_CONFIG>;
+  /**
+   * WEB-09c (R23-PAIR, DIAGNOSTIC ONLY): whether the server is known to segment, handed to BOTH request callers (the engine and the
+   * recovery job). The browser composition supplies it only when its page asks for the development pairing (`DiagnosticSegmentation`);
+   * production supplies none, so no request opts in until the contract is in a released, reviewed pin.
+   */
+  segmentedCapable?: () => boolean;
 }
 
 /** WEB-08c revision 4 (R9): the paced recovery-report question of a page that does not lead: first after 1 s, doubling to 30 s. */
@@ -418,6 +424,9 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
     ...(deps.elapsed ? { elapsed: deps.elapsed } : {}),
     ...(deps.trace ? { trace: deps.trace } : {}),
     ...(deps.config ? { config: deps.config } : {}),
+    ...(deps.segmentedCapable
+      ? { segmentedCapable: deps.segmentedCapable }
+      : {}),
   });
   const engine = createSyncEngine({
     service,
@@ -439,6 +448,9 @@ export function createSyncLeader(deps: SyncLeaderDeps): SyncLeader {
     ...(deps.elapsed ? { elapsed: deps.elapsed } : {}),
     ...(deps.trace ? { trace: deps.trace } : {}),
     ...(deps.config ? { config: deps.config } : {}),
+    ...(deps.segmentedCapable
+      ? { segmentedCapable: deps.segmentedCapable }
+      : {}),
   });
   const dispatcher = createOutboxDispatcher({
     service,

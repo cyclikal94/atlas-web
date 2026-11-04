@@ -1,4 +1,5 @@
 import { DATA_CONFIG, type DataConfig } from "./config";
+import { SEGMENT_CONTRACT } from "./segmented-sync";
 import type { SizingClass, SizingState } from "./types";
 
 /**
@@ -97,10 +98,20 @@ export function initialState(
   };
 }
 
+/** The next `max_changes` down: halving, never below the contract's minimum response (WEB-09c). */
+export const lowerChanges = (maxChanges: number): number =>
+  Math.max(SEGMENT_CONTRACT.minChanges, Math.floor(maxChanges / 2));
+
+/**
+ * `segmented`: the `max_changes` the failed request carried (WEB-09c, segmented delivery), or null/absent when it carried none. Below
+ * `limit = 1` the ladder continues on it, halving to the contract's minimum (one change and its ancestors) before a single floor hit is
+ * counted, so the floor is reached only by failure at the smallest response the protocol has.
+ */
 export function next(
   state: SizingState,
   outcome: SizingOutcome,
   config: Pick<DataConfig, "floorAfter"> = DATA_CONFIG,
+  segmented: number | null = null,
 ): { state: SizingState; action: SizingAction } {
   switch (outcome.kind) {
     case "admitted":
@@ -119,6 +130,15 @@ export function next(
       if (state.limit > 1)
         return {
           state: { ...state, limit: lowerRung(state.limit), attempt: null },
+          action: "retry_lower",
+        };
+      if (segmented !== null && segmented > SEGMENT_CONTRACT.minChanges)
+        return {
+          state: {
+            ...state,
+            max_changes: lowerChanges(segmented),
+            attempt: null,
+          },
           action: "retry_lower",
         };
       // A local transaction abort or error at the lowest rung is the local-write-failure class (its own bound and its own
@@ -142,6 +162,12 @@ export const resetFloor = (state: SizingState): SizingState => ({
   floor_hits: 0,
   attempt: null,
 });
+
+/** The ladder's `max_changes` for a request at the lowest rung: the stepped-down one, else the configured start (WEB-09c). */
+export const segmentBudget = (
+  state: SizingState,
+  configured: number | null,
+): number | null => state.max_changes ?? configured;
 
 export const atFloor = (
   state: SizingState,

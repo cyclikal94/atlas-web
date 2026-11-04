@@ -107,6 +107,11 @@ import {
   listPlan,
   putPlan,
 } from "./conformance";
+import type {
+  DispatchLife,
+  DispatchObserver,
+  DispatchRecord,
+} from "./dispatch-observer";
 import {
   createRuntimeLifetimeObserver,
   type RuntimeLifetime,
@@ -267,6 +272,13 @@ export interface DataHarness {
       seedCursor?: string;
       /** FIXTURE: the yield between pages, for the P-9 comparison. */
       yieldPolicy?: YieldPolicy;
+      /**
+       * FIXTURE (WEB-09c, labelled): the engine is told the server segments (BE-Q23's provisional `max_changes`), as production never is
+       * until the contract is in a released pin. Only a stubbed `/sync` answers it here.
+       */
+      segmentedCapable?: boolean;
+      /** FIXTURE (WEB-09c tuning sweep, labelled): the starting `max_changes` in place of `DATA_CONFIG.segmentedMaxChanges`. */
+      segmentedMaxChanges?: number;
     },
   ): Promise<void>;
   /**
@@ -279,6 +291,8 @@ export interface DataHarness {
       transport: (request: Request) => Promise<Response>;
       seedCursor?: string;
       deviceMemoryGiB?: number;
+      /** FIXTURE (WEB-09c, labelled): as `startSync`'s. */
+      segmentedCapable?: boolean;
     },
   ): Promise<void>;
   stopSync(): void;
@@ -382,6 +396,20 @@ export interface DataHarness {
   syncReceived: SyncMessage[];
   /** The engine's own trace events (fixed vocabulary), for assertions about why a step ran. */
   engineTrace: string[];
+  /**
+   * FIXTURE (WEB-09c revision 9, review 9 R2): every state the engines started by `startSync` published, in order, as it was published
+   * (the store notifies synchronously): which engine (`run`), when, and the trace position at that moment (`trace`: the index the next
+   * trace line takes). A profiling observation reads the whole sequence in one evaluation instead of polling for a state it might miss.
+   */
+  engineStates: EngineStateEntry[];
+  /**
+   * FIXTURE (WEB-09c revision 10, review 10 R2): this page instance's identity (a reload makes a new one and new, empty logs) and every
+   * engine start on it, `startSync`/`startSyncLocal` and `restartSync` alike (`generation` counts them; `trace` is the trace position at
+   * that start). `run` alone is no generation: `restartSync` restarts the same engine. A profiling observation names the page and the one
+   * start it observed, and is refused if another start or a reload came between.
+   */
+  page: string;
+  engineEpochs: EngineEpoch[];
   /** Listen on `atlas-sync` in this page (a follower). */
   follow(): void;
   /**
@@ -425,6 +453,12 @@ export interface DataHarness {
        * clock does not move with it) instead of the whole clock moving, which is what the maximum-age cases rely on.
        */
       quotaMonotonic?: boolean;
+      /**
+       * FIXTURE (WEB-09c revision 14, review 14 R2): records what this outbox's dispatcher does (its commits and their actual results,
+       * its writer runs, its stamped requests by `Idempotency-Key`, its lifecycle) in `dispatchLog`, through the lazily loaded
+       * `dispatch-observer.ts`. The P-4 draft sample's completion evidence. Off by default; nothing else changes.
+       */
+      observeDispatch?: boolean;
     },
   ): Promise<void>;
   /**
@@ -490,7 +524,9 @@ export interface DataHarness {
       | "data.enqueueDraft"
       | "data.discardDraft"
       | "data.supersedeDraft"
-      | "data.recordLocalWriteOutcome",
+      | "data.recordLocalWriteOutcome"
+      // Revision 14: the receipt's transaction runs at once and its result is delivered on release (completed, delivery held).
+      | "data.admitReceipt",
   ): HoldToken;
   outboxPlanHeld(): boolean;
   releaseOutboxPlan(token?: HoldToken): HoldRelease;
@@ -577,6 +613,39 @@ export interface DataHarness {
   unfence(account: AccountId, operationId: string): Promise<string>;
   outboxTrace: string[];
   /**
+   * FIXTURE (WEB-09c revision 14, review 14 R2; with `observeDispatch`): what the harness outbox is bound to NOW, as one value a page
+   * function compares across its awaits: this page, the outbox's bound account, the session's account and epoch, the bound service's
+   * serial, incarnation and liveness, the serial of the service the dispatcher resolves now (`current_service`), the dispatcher's serial,
+   * its start count and whether it is running, and whether it is observed. Synchronous. Without an observed outbox every field but the
+   * page is empty and `observing` is false.
+   */
+  dispatchIdentity(): DispatchIdentity;
+  /** FIXTURE (revision 14): the observed dispatcher's records, oldest first (bounded; see `dispatchFirst`). Empty when not observed. */
+  readonly dispatchLog: DispatchRecord[];
+  /** FIXTURE (revision 14): the sequence number of the oldest record `dispatchLog` still holds, and the one the next record takes. */
+  dispatchFirst(): number;
+  dispatchNext(): number;
+  /**
+   * FIXTURE qualification gates (revision 14; never used by a measurement). `gateDispatchCommit(plan)`: the observed dispatcher's NEXT
+   * commit of `plan` waits BEFORE it is called (its transaction not yet admitted) until `releaseDispatchCommit()`; `dispatchCommitGated()`
+   * says one is waiting. `failOutboxPlan(plan, times)`: the real transaction of the next `times` runs of `plan` through the harness
+   * outbox's service views aborts (its decision throws `StoreFailure("abort")`), an actual IndexedDB transaction failure.
+   */
+  gateDispatchCommit(plan: string): void;
+  dispatchCommitGated(): boolean;
+  releaseDispatchCommit(): void;
+  failOutboxPlan(plan: string, times: number): void;
+  /**
+   * FIXTURE (revision 14): the draft row `localId` as the BOUND service's own store holds it (`row`: null when there is none), and how many
+   * OTHER drafts are queued or in flight there. Rejects when that store cannot be read (an ended service, a failed transaction). The
+   * corroboration read of the P-4 draft sample; `failDraftReads(times)` is its labelled fault seam (the next `times` reads abort).
+   */
+  boundDraft(localId: string): Promise<{
+    row: { local_id: string; status: string } | null;
+    waiting: number;
+  }>;
+  failDraftReads(times: number): void;
+  /**
    * PROFILING (P-3): the latency, in milliseconds, of `count` writes of one kind through the production plan with its durability
    * set to `durability` (a copy of the plan: the registered plan is not changed). The hint reaches the engine through Dexie's
    * `chromeTransactionDurability` option; whether Firefox and WebKit act on it was not determined, and the results say so.
@@ -588,6 +657,23 @@ export interface DataHarness {
     count: number,
   ): Promise<number[]>;
 }
+
+/** What `dispatchIdentity` answers (see the interface). */
+export interface DispatchIdentity {
+  page: string;
+  account: string | null;
+  identity_account: string | null;
+  epoch: number | null;
+  service: number | null;
+  incarnation: string | null;
+  live: boolean;
+  current_service: number | null;
+  dispatcher: number | null;
+  run: number | null;
+  running: boolean;
+  observing: boolean;
+}
+export type { DispatchRecord };
 
 /** A flat outcome of the facade, so a Playwright `evaluate` does not have to carry the recursive row types. */
 export interface HarnessOutcome {
@@ -830,6 +916,41 @@ let quotaRelease: (() => void) | null = null;
 const syncPosted: SyncMessage[] = [];
 const syncReceived: SyncMessage[] = [];
 const engineTrace: string[] = [];
+/** One published engine state (see `DataHarness.engineStates`). */
+export interface EngineStateEntry {
+  run: number;
+  /** The engine start (`DataHarness.engineEpochs`) whose engine published it. */
+  generation: number;
+  at: number;
+  trace: number;
+  state: EngineState;
+}
+const engineStates: EngineStateEntry[] = [];
+let engineRuns = 0;
+/** One engine start on this page (see `DataHarness.engineEpochs`). */
+export interface EngineEpoch {
+  generation: number;
+  run: number;
+  trace: number;
+}
+const engineEpochs: EngineEpoch[] = [];
+let engineGenerations = 0;
+/** The started engine's current generation (`restartSync` moves it on); its state subscription reads it at each publication. */
+let engineEpoch: { run: number; generation: number } | null = null;
+// Not a secret, only distinct per page load (an insecure context has no randomUUID; the harness must still load there).
+const harnessPage =
+  typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+/** Records a start of the current engine as a new generation, before the engine publishes anything under it. */
+const beginEpoch = (epoch: { run: number; generation: number }): void => {
+  epoch.generation = ++engineGenerations;
+  engineEpochs.push({
+    generation: epoch.generation,
+    run: epoch.run,
+    trace: engineTrace.length,
+  });
+};
 
 let gateEnv: DataEnv | null = null;
 let gateSeen: CacheState[] = [];
@@ -934,6 +1055,19 @@ let engineYield: YieldPolicy = "platform";
 const yieldToEventLoop = (): Promise<void> => yieldFor(engineYield)();
 
 const outboxTrace: string[] = [];
+/**
+ * FIXTURE (revision 14): the dispatch observer once a spec asked for one (`observeDispatch`), and the observed dispatcher of the harness
+ * outbox: its life (serial, starts), the session identity it follows and the service it resolves now.
+ */
+let observer: DispatchObserver | null = null;
+let observed: {
+  life: DispatchLife;
+  identity: () => { account_id: string; epoch: number } | null;
+  current: () => AccountService;
+} | null = null;
+/** FIXTURE (revision 14): `failOutboxPlan`'s remaining aborts by plan name, and `failDraftReads`'. */
+const planFaults = new Map<string, number>();
+let draftReadFaults = 0;
 const held = new Map<AccountId, AccountStore>();
 /** FIXTURE: how many notifications of the session (its view, its identity, visibility) the leader's engine has been told of. */
 let wakeNotifications = 0;
@@ -1222,6 +1356,10 @@ interface EngineWiring {
   /** The browser's own `online` event. */
   onOnline(listener: () => void): () => void;
   deviceMemoryGiB?: number;
+  /** FIXTURE (WEB-09c): the engine's `segmentedCapable` answers true. */
+  segmentedCapable?: boolean;
+  /** FIXTURE (WEB-09c tuning sweep): the engine's starting `max_changes` (its `config.segmentedMaxChanges`). */
+  segmentedMaxChanges?: number;
 }
 
 /** The production quota guard, whose next `check` waits while the fixture holds it (R27: the asynchronous gap before a request). */
@@ -1233,6 +1371,24 @@ const heldQuota = (guard: QuotaGuard): QuotaGuard => ({
     const verdict = await guard.check(kind, estimatedBytes);
     if (hold) await hold;
     return verdict;
+  },
+  // FIXTURE FAULT INJECTION (WEB-09c revision 12, review 12 R2; labelled): an init script that sets `__fixtureLapseReservations` to n makes
+  // the next n cache reservations report their hold already ended (`live()` false), so the engine's own admission rounds lapse exactly as
+  // a hold that expires before the commit begins does. Three lapses exhaust a page's rounds (the engine traces applied/lease_lapsed and
+  // asks again); one lapse is retried within the same request. Production composes the guard unchanged.
+  reserve: async (kind, estimatedBytes) => {
+    const reservation = await guard.reserve(kind, estimatedBytes);
+    const g = globalThis as { __fixtureLapseReservations?: number };
+    if (kind !== "cache" || !((g.__fixtureLapseReservations ?? 0) > 0))
+      return reservation;
+    g.__fixtureLapseReservations = (g.__fixtureLapseReservations ?? 0) - 1;
+    // (The real hold is never asked: a `false` answer begins nothing, and its settlement releases it.)
+    return {
+      verdict: reservation.verdict,
+      unestablished: reservation.unestablished,
+      live: () => false,
+      settle: (outcome) => reservation.settle(outcome),
+    };
   },
 });
 
@@ -1279,6 +1435,12 @@ function startEngine(wiring: EngineWiring): void {
       deviceMemoryGiB: wiring.deviceMemoryGiB,
       hasStorageEstimate: true,
     },
+    ...(wiring.segmentedCapable === true
+      ? { segmentedCapable: () => true }
+      : {}),
+    ...(wiring.segmentedMaxChanges === undefined
+      ? {}
+      : { config: { segmentedMaxChanges: wiring.segmentedMaxChanges } }),
     recovery: defaultRecoverySeam,
     channel: posting,
     markers,
@@ -1291,6 +1453,21 @@ function startEngine(wiring: EngineWiring): void {
         );
       },
     },
+  });
+  // Recorded before the start, so the start's own state is the first entry of this engine.
+  const run = ++engineRuns;
+  const epoch = { run, generation: 0 };
+  beginEpoch(epoch);
+  engineEpoch = epoch;
+  const published = engine.state;
+  published.subscribe(() => {
+    engineStates.push({
+      run,
+      generation: epoch.generation,
+      at: performance.now(),
+      trace: engineTrace.length,
+      state: published.get(),
+    });
   });
   engine.start({ token: null, signal: engineAbort.signal });
 }
@@ -1410,6 +1587,20 @@ const faultableService = (service: AccountService): AccountService => {
         options: never,
       ) => {
         const answer = ((): Promise<unknown> => {
+          const faults = planFaults.get(plan.name) ?? 0;
+          if (faults > 0) {
+            planFaults.set(plan.name, faults - 1);
+            return target.run(
+              {
+                ...plan,
+                decide: () => {
+                  throw new StoreFailure("abort");
+                },
+              },
+              input,
+              options,
+            );
+          }
           if (plan.name !== readLocalWriteStops.name || stopReadFaults <= 0)
             return target.run(plan, input, options);
           stopReadFaults -= 1;
@@ -1513,6 +1704,9 @@ const harness: DataHarness = {
   tabId: registry.tabId,
   outboxTrace,
   async startOutbox(account, options) {
+    // FIXTURE (revision 14): the observer is a lazy chunk, loaded first so that everything below keeps its order.
+    if (options?.observeDispatch === true && observer === null)
+      observer = (await import("./dispatch-observer")).createDispatchObserver();
     const session = sessionOf();
     const runtime_ = ensureRuntime(session);
     const opened = await runtime_.open(account, { create: true });
@@ -1524,10 +1718,30 @@ const harness: DataHarness = {
       await harness.seedDelta(account, options.seedCursor);
     const channel = createBroadcastSyncChannel();
     outboxAbort = new AbortController();
+    const resolve = (): AccountService =>
+      runtime_.serviceFor(account) ?? service;
+    const fetchFor = (a: string, e: number) =>
+      session.api.fetchFor("ordinary", a, e);
+    // FIXTURE (revision 14): an observed dispatcher has a life of its own; its service view and its requests are recorded (`dispatchLog`).
+    const watch = options?.observeDispatch === true ? observer : null;
+    const life = watch?.built() ?? null;
+    observed =
+      life === null
+        ? null
+        : { life, identity: () => session.identity.get(), current: resolve };
     dispatcher = createOutboxDispatcher({
-      service: () => viewOf(runtime_.serviceFor(account) ?? service),
+      service: () => {
+        const raw = resolve();
+        const view = viewOf(raw);
+        return watch !== null && life !== null
+          ? watch.view(view, raw, life)
+          : view;
+      },
       identity: session.identity,
-      fetchFor: (a, e) => session.api.fetchFor("ordinary", a, e),
+      fetchFor:
+        watch !== null && life !== null
+          ? watch.requests(fetchFor, life)
+          : fetchFor,
       apiUrl: (path) => apiUrl(path),
       online: () => navigator.onLine,
       compat: session.compat,
@@ -1617,8 +1831,10 @@ const harness: DataHarness = {
       markers,
       config: options?.config,
     });
-    if (options?.start !== false)
+    if (options?.start !== false) {
+      if (watch !== null && life !== null) watch.started(life);
       dispatcher.start({ token: null, signal: outboxAbort.signal });
+    }
   },
   async prepareAccount(account) {
     const session = sessionOf();
@@ -1683,9 +1899,12 @@ const harness: DataHarness = {
   beginOutbox() {
     if (!dispatcher || !outboxAbort)
       throw new Error("the outbox is not running on this page");
+    if (observed !== null) observer?.started(observed.life);
     dispatcher.start({ token: null, signal: outboxAbort.signal });
   },
   stopOutbox() {
+    if (observed !== null) observer?.stopped(observed.life);
+    observed = null;
     dispatcher?.stop();
     // The facade this page made is let go of with it: its observation of the stop records ends too (R55, revision 36).
     outbox?.disposeObservation();
@@ -1711,7 +1930,78 @@ const harness: DataHarness = {
   endOutboxService() {
     if (outboxBound === null)
       throw new Error("the outbox is not running on this page");
+    observer?.serviceEnded(observed?.life ?? null, outboxBound.service);
     outboxBound.service.dispose("closed");
+  },
+  dispatchIdentity() {
+    const bound = outboxBound;
+    const watched = observed;
+    const identity = watched?.identity() ?? null;
+    return {
+      page: harnessPage,
+      account: watched === null ? null : (bound?.account ?? null),
+      identity_account: identity?.account_id ?? null,
+      epoch: identity?.epoch ?? null,
+      service:
+        watched === null ? null : (observer?.serial(bound?.service) ?? null),
+      incarnation:
+        watched === null ? null : (bound?.service.incarnationId ?? null),
+      live: watched !== null && bound?.service.live === true,
+      current_service:
+        watched === null ? null : (observer?.serial(watched.current()) ?? null),
+      dispatcher: watched?.life.dispatcher ?? null,
+      run: watched?.life.run ?? null,
+      running: watched?.life.running ?? false,
+      observing: watched !== null && observer !== null,
+    };
+  },
+  get dispatchLog() {
+    return observer?.log ?? [];
+  },
+  dispatchFirst: () => observer?.first() ?? 0,
+  dispatchNext: () => observer?.next() ?? 0,
+  gateDispatchCommit(plan) {
+    if (observer === null) throw new Error("the dispatcher is not observed");
+    observer.gate(plan);
+  },
+  dispatchCommitGated: () => observer?.gated() ?? false,
+  releaseDispatchCommit() {
+    observer?.release();
+  },
+  failOutboxPlan(plan, times) {
+    planFaults.set(plan, times);
+  },
+  async boundDraft(localId) {
+    const bound = outboxBound;
+    if (bound === null)
+      throw new Error("the outbox is not running on this page");
+    const plan = listPlan("drafts");
+    let read = plan;
+    if (draftReadFaults > 0) {
+      draftReadFaults -= 1;
+      read = {
+        ...plan,
+        decide: () => {
+          throw new StoreFailure("abort");
+        },
+      };
+    }
+    const rows = await bound.service.store.run(read, undefined);
+    const row = rows.find((r) => r.local_id === localId);
+    return {
+      row:
+        row === undefined
+          ? null
+          : { local_id: row.local_id, status: row.status },
+      waiting: rows.filter(
+        (r) =>
+          r.local_id !== localId &&
+          (r.status === "queued" || r.status === "in_flight"),
+      ).length,
+    };
+  },
+  failDraftReads(times) {
+    draftReadFaults = times;
   },
   diagnostics() {
     const markerKeys: string[] = [];
@@ -2005,6 +2295,9 @@ const harness: DataHarness = {
   syncPosted,
   syncReceived,
   engineTrace,
+  engineStates,
+  page: harnessPage,
+  engineEpochs,
   follow() {
     createBroadcastSyncChannel().subscribe((message) => {
       syncReceived.push(message);
@@ -2072,6 +2365,8 @@ const harness: DataHarness = {
         return () => window.removeEventListener("online", listener);
       },
       deviceMemoryGiB: options?.deviceMemoryGiB,
+      segmentedCapable: options?.segmentedCapable,
+      segmentedMaxChanges: options?.segmentedMaxChanges,
     });
   },
   async startSyncLocal(account, options) {
@@ -2089,6 +2384,7 @@ const harness: DataHarness = {
       subscribe: (listener) => identityStore.subscribe(listener),
       onOnline: () => () => undefined,
       deviceMemoryGiB: options.deviceMemoryGiB,
+      segmentedCapable: options.segmentedCapable,
     });
   },
   setPersistenceFault(mode) {
@@ -2103,6 +2399,7 @@ const harness: DataHarness = {
     if (!engine) throw new Error("no engine is running on this page");
     replacedAbort = engineAbort;
     engineAbort = new AbortController();
+    if (engineEpoch) beginEpoch(engineEpoch);
     engine.start({ token: null, signal: engineAbort.signal });
   },
   abortReplacedOwnership() {
