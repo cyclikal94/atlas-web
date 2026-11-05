@@ -2968,14 +2968,44 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       await activitySection(a)
         .getByRole("button", { name: "Show all changes" })
         .click();
-      await expect(activitySection(a)).toContainText(
-        "Couldn't load older changes.",
-        { timeout: 30_000 },
+      // The first activity read after the rule is dropped: Show all's step ("Couldn't load older changes.") or, when an invalidation
+      // re-reads at the same moment, that re-read ("Couldn't load recent changes."); a later invalidation may also re-read to the depth
+      // asked before the assertion looks (D-19-3/D-19-4). Every path ends with the 50 newest shown once, through Try again or not.
+      const tryAgain = activitySection(a).getByRole("button", {
+        name: "Try again",
+      });
+      await expect
+        .poll(
+          async () =>
+            (await tryAgain.count()) > 0 ||
+            (await shownActivity(a)).length >= 50,
+          { timeout: 30_000 },
+        )
+        .toBe(true);
+      const dropped = (await proxy.log()).filter(
+        (e) =>
+          e.path.startsWith(`${API}/people/${person}/activity`) &&
+          e.rule === drop.id,
       );
+      expect(dropped).toHaveLength(1);
       await proxy.removeRule(drop.id);
-      await activitySection(a)
-        .getByRole("button", { name: "Try again" })
-        .click();
+      if ((await tryAgain.count()) > 0) await tryAgain.click();
+      // A failed first-page re-read retried shows the preview again; Show all then asks for the 50.
+      await expect
+        .poll(
+          async () => {
+            const shown = (await shownActivity(a)).length;
+            if (shown > 0 && shown < 50)
+              await activitySection(a)
+                .getByRole("button", { name: /Show all changes|Try again/ })
+                .first()
+                .click()
+                .catch(() => undefined);
+            return shown;
+          },
+          { timeout: 30_000, intervals: [1_000, 2_000] },
+        )
+        .toBeGreaterThanOrEqual(50);
       await agrees(a, aId, person, 50);
       await activitySection(a)
         .getByRole("button", { name: "Show older changes" })
