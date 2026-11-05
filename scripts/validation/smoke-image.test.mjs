@@ -333,7 +333,7 @@ describe("the composed origin's check-only backend", () => {
 
   test("answers /health and /ready as the other stubs do, in the released shape", () => {
     const preview = read("scripts/preview-with-stub-backend.mjs");
-    // The preview stub's object literal ({ api_version: "0.29.0", status: "ok" }), read as JSON and serialised as it does.
+    // The preview stub's object literal ({ api_version: "0.31.0", status: "ok" }), read as JSON and serialised as it does.
     const previewBody = (path) =>
       JSON.stringify(
         JSON.parse(
@@ -360,7 +360,7 @@ describe("the composed origin's check-only backend", () => {
       );
     }
     assert.deepEqual(JSON.parse(literal(conf, "/health")), {
-      api_version: "0.29.0",
+      api_version: "0.31.0",
       status: "ok",
     });
   });
