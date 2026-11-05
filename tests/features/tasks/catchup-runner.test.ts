@@ -26,7 +26,7 @@ import { ACCOUNT, DB, defaultsWorld } from "../../support/data/defaults-world";
 import { cacheRow } from "../../support/data/rows";
 
 /**
- * The catch-up runner (plan §4.1; A1–A4, A19) over the PRODUCTION W27 plans and account service on the double of IndexedDB, with a
+ * The catch-up runner (plan §4.1; A1–A4, A19) over the PRODUCTION W28 plans and account service on the double of IndexedDB, with a
  * scripted `TasksApi` (the position read and `materialise`) and recorded waits instead of timers: the bound, no progress, the horizon,
  * uncertain answers with the same key, a reload in each phase, two runners and one lock, an identity that ends, and pausing offline.
  * FIXTURE evidence: no backend.
@@ -751,7 +751,7 @@ describe("R1: paused work resumes the same sequence", () => {
 
 /**
  * Revision 2 (review R13, design assessment DA-M1): the DISCOVERY (the first read of a task, before its day is known) owns a durable budget
- * and stop in W27's discovery entry. A stop admits no automatic read or send again, whichever trigger asks, across a reload or another
+ * and stop in W28's discovery entry. A stop admits no automatic read or send again, whichever trigger asks, across a reload or another
  * runner; a pause keeps the count reached; only "Try again" admits a fresh budget, once, however often or wherever it is pressed.
  */
 describe("R13: a stopped discovery stays stopped until Try again", () => {
@@ -1357,7 +1357,7 @@ describe("R17: work belongs to the binding it began with", () => {
 });
 
 /**
- * Revision 4 (review R20, family `materialise-sequence-retry-generation`): a "Try again" names the very stop it was pressed on. Every W27
+ * Revision 4 (review R20, family `materialise-sequence-retry-generation`): a "Try again" names the very stop it was pressed on. Every W28
  * write moves the row's revision, so a stop that came back the same way (same generation, phase, read and attempt key) after another
  * press's budget is not the stop a queued press saw. REVIEW4 M4 is ported verbatim: the lock double holds every callback until the
  * previous one settles and holds the first grant until both presses have queued (no send before it).

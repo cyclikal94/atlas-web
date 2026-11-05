@@ -37,6 +37,14 @@ export const DATA_CONFIG = Object.freeze({
   maxScanElements: 64_000,
   /** The delta page is written in groups of this many puts. */
   applyChunk: 100,
+  /**
+   * Segmented delta delivery (WEB-09c, BOUNDED-SYNC-PAGINATION-20261027; BE-Q23's provisional contract, `model/segmented-sync.ts`).
+   * `segmentedMaxChanges`: the ONE conservative starting `max_changes` (provisional; the tuning handover in `docs/sync-measurements.md`
+   * settles it), stepped down by device signals only. `segmentedMinApiVersion`: the server `api_version` from which the parameter exists;
+   * `null` until BE-Q23's contract is in a released, reviewed API-types pin, so production never sends a parameter an older server refuses.
+   */
+  segmentedMaxChanges: 100 as number | null,
+  segmentedMinApiVersion: null as string | null,
   /** `/sync` cursor length (`SyncPage.next_cursor` maxLength). */
   maxCursorLength: 512,
   /** The live-edge poll, the post-receipt poll and the back-off. All provisional. */
@@ -174,6 +182,26 @@ export function maxResponseBytesFor(
       config.maxChangesPerBatch *
       config.bytesPerChange *
       config.responseMargin +
+      config.responseOverhead,
+  );
+}
+
+/**
+ * `admissionBytesFor(limit, maxChanges)` (R21-QUOTA, WEB-09c): the response a delta request may bring, for the quota check BEFORE it is
+ * issued. A request that carries `max_changes = m` (the negotiated value, exactly the URL's) is answered with at most `m` changes across
+ * the whole response, ancestors included (BE-Q23 §1), whatever `limit` is; one without it (`null`: no budget, including a continuation
+ * sent without one, which the contract answers with the whole remainder) keeps the whole-batch estimate `maxResponseBytesFor(limit)`.
+ * Advisory only: the check holds no space, and what was actually received is reserved after the response. It is NOT the body ceiling
+ * that refuses a page as a contract violation, which stays `maxResponseBytesFor(limit)`.
+ */
+export function admissionBytesFor(
+  limit: number,
+  maxChanges: number | null,
+  config: DataConfig = DATA_CONFIG,
+): number {
+  if (maxChanges === null) return maxResponseBytesFor(limit, config);
+  return Math.ceil(
+    maxChanges * config.bytesPerChange * config.responseMargin +
       config.responseOverhead,
   );
 }

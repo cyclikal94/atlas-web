@@ -12,7 +12,7 @@ import type {
  * A person has at most ONE running timer per occurrence, across devices; timers of different occurrences run independently and at the
  * same time. A session is known from three places: this device's unsettled timer drafts (a start not sent, a stop or discard on its
  * way), an online read (the occurrence's own sessions, or the account's running ones), and the bounded copy of the last running read
- * kept on this device (W28). A stop of a session this device started uses its local version record; one only a read or the copy knows
+ * kept on this device (W29). A stop of a session this device started uses its local version record; one only a read or the copy knows
  * uses the version they gave.
  */
 export const SEVEN_DAYS = 604_800;
@@ -36,7 +36,7 @@ export interface RunningSession {
   /** This device's unsettled start, if any (its pending mark). */
   startDraft: DraftWithCommand | null;
   /**
-   * The place in the observation order (W28) of the server observation it is shown from (the read's or the copy's), or null when none
+   * The place in the observation order (W29) of the server observation it is shown from (the read's or the copy's), or null when none
    * gave it one: only this device's start, or a read that genuinely had none. What an end of it is admitted against (revision 7, R32).
    */
   order: number | null;
@@ -85,7 +85,7 @@ export function timerCommandOf(
 const UNSETTLED = new Set(["queued", "in_flight", "blocked", "acknowledged"]);
 
 /**
- * What reads of one day observed, as every page of this database recorded it (W28's scope, design assessment DA-T3): the order of the
+ * What reads of one day observed, as every page of this database recorded it (W29's scope, design assessment DA-T3): the order of the
  * day's latest complete read and what it listed running, and sessions listed finished.
  */
 export interface DayScope {
@@ -95,7 +95,7 @@ export interface DayScope {
 }
 
 /**
- * What decides whether a server-derived running session still stands, as ONE snapshot of this database (W28; revision 4, review R19):
+ * What decides whether a server-derived running session still stands, as ONE snapshot of this database (W29; revision 4, review R19):
  * every day's scope and the floor. `null` while it is not read (loading, or the store could not be read): nothing is known to be retired,
  * so no ordered positive is trusted (`stillRunning`), never "no corrections".
  */
@@ -188,7 +188,7 @@ export function stillRunning(
  * ONE rule for every observation (reviews R2, R11, R14; design assessment DA-T3). What a read SAYS always counts: a session listed
  * running is known (on a first page or a later one, complete or not), and one listed FINISHED, by the day's read here or by any read of
  * the day recorded in its scope, is not running whatever else says so (a finished session never runs again). What an observation does NOT
- * say is evidence only when it is COMPLETE, and only against what was seen EARLIER in this database's observation order (W28's
+ * say is evidence only when it is COMPLETE, and only against what was seen EARLIER in this database's observation order (W29's
  * `issueTimerOrder`; never the clock, DA-T2): the day's complete read (`readOrder`), the account's complete running list (the copy,
  * `copyOrder`, `copyComplete`: every row read) and the day's latest complete read in any page (`scope`). A session seen running at an
  * order below one of them, and not listed by it, was cancelled or stopped since. A session seen where the order is unknown is never
@@ -210,14 +210,14 @@ export function runningOn(
     /** The read was taken to the end of the day's list: absence in it is evidence. */
     complete?: boolean;
     copy: readonly AccountTimerSession[] | null;
-    /** The read's and the copy's places in the observation order (W28); null when unknown. */
+    /** The read's and the copy's places in the observation order (W29); null when unknown. */
     readOrder?: number | null;
     copyOrder?: number | null;
     /** The copy lists every running session of the account its read could see, every row read (review R14). */
     copyComplete?: boolean;
     /** The day's scope (DA-T3), or null. */
     scope?: DayScope | null;
-    /** The order below which the day's read is not trusted for a running session (W28's floor). */
+    /** The order below which the day's read is not trusted for a running session (W29's floor). */
     floor?: number;
     /** The account's latest complete observation (revision 5, R23), or null. */
     account?: AccountObservation | null;
@@ -450,7 +450,7 @@ export function stopChoice(
 }
 
 /**
- * Which rows of the copy (W28, opaque until parsed) a read of `occurrenceId`'s sessions retires (design assessment DA-T1): a session it
+ * Which rows of the copy (W29, opaque until parsed) a read of `occurrenceId`'s sessions retires (design assessment DA-T1): a session it
  * lists finished, always (a stopped session never runs again); one it does not list, only when the read is complete and was issued after
  * the copy (`newer`, decided by the plan from the observation order). Other occurrences' rows, and restricted ones, are never touched.
  */
@@ -472,7 +472,7 @@ export function copyCorrection(
     (finished.has(row.id) || (complete && newer && !listed.has(row.id)));
 }
 
-/** What a read of `occurrenceId`'s sessions observed of its day (W28's scope, DA-T3): the sessions it listed running, and finished. */
+/** What a read of `occurrenceId`'s sessions observed of its day (W29's scope, DA-T3): the sessions it listed running, and finished. */
 export function dayObservation(
   occurrenceId: string,
   sessions: readonly TimerSession[],

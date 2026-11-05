@@ -58,7 +58,7 @@ import type { PageLifecycle } from "./lifecycle";
 /**
  * The catch-up RUNNER of one page for one displayed identity (D-10c-1/3/5). It is an online feature service, not outbox drafts: both
  * triggers that occur against the released backend (Today's `pending_tasks`, the streak's `materialisation_required`) are online reads,
- * and so is the position read. Every attempt is sent directly through the stamped client, and the sequence record (W27) carries the
+ * and so is the position read. Every attempt is sent directly through the stamped client, and the sequence record (W28) carries the
  * attempt's key and body durably BEFORE it is sent.
  *
  * One runner per ACCOUNT across tabs: the work runs while this page holds the Web Lock `atlas-materialise:<account>` (requested and
@@ -68,11 +68,11 @@ import type { PageLifecycle } from "./lifecycle";
  *
  * One task at a time, in the order asked. At most one AUTOMATIC sequence per `(task, through_date)` per page: a stopped sequence is shown
  * and resumed only by the person's "Try again", so a stop never loops; a new day is a new key. Everything is bound to the identity and
- * the database binding it was made for: an identity that moves disposes the runner, a late answer is dropped by W27's guards, and a
+ * the database binding it was made for: an identity that moves disposes the runner, a late answer is dropped by W28's guards, and a
  * `401`, `not_sent` or `closed` answer writes nothing.
  *
  * DISCOVERY (review R13, design assessment DA-M1): the first read of a task (its zone and position, before a day and so a sequence row
- * can exist) keeps its failures and its stop in W27's discovery entry, written BEFORE another read is made, so its budget is the task's,
+ * can exist) keeps its failures and its stop in W28's discovery entry, written BEFORE another read is made, so its budget is the task's,
  * not this call's: a pause, a reload or another tab's turn carries on from the count reached, and a stop (three uncertain answers, or a
  * definite refusal) admits no automatic read again, whichever trigger asks (Today's list, the streak, a command's retry, a kick). Only
  * the person's "Try again" admits a fresh budget, once: it is made under the account's lock, against the stop it was pressed on (a
@@ -108,7 +108,7 @@ import type { PageLifecycle } from "./lifecycle";
  *
  * RETRY PROTOCOL (revision 10, Decision B, review R36; `model/retry.ts`): each caller (the discovery read, the command, the position read
  * after a successful command) has its own durable schedule, and every transmission is ADMITTED in its record first (`issued`), under the
- * same compare-and-set and guards as the rest of W27. A wait is never slept through holding the work: the work is parked until its
+ * same compare-and-set and guards as the rest of W28. A wait is never slept through holding the work: the work is parked until its
  * eligible time (`due`) and woken then, so other tasks go on, and whichever page holds the lock then (a reload, another tab) reads the same
  * schedule. An answer whose record cannot be written stops automatic work for the task on this page (a `storage` stop in memory): the
  * call it answered is never made again automatically. A discovery read is never taken as the position read of a sequence: each caller
@@ -272,7 +272,7 @@ export interface CatchUpDeps {
   identity: string;
   accountId: string;
   epoch: number;
-  /** The displayed account's open service (W27 commits), or null. */
+  /** The displayed account's open service (W28 commits), or null. */
   service(): AccountService | null;
   online(): boolean;
   writable(): boolean;
@@ -1790,7 +1790,7 @@ export function createCatchUpRunner(deps: CatchUpDeps): CatchUpRunner {
   };
 
   /**
-   * The first read of a task, ADMITTED and counted by its discovery entry (W27): its zone (its day) and position. Before each read the
+   * The first read of a task, ADMITTED and counted by its discovery entry (W28): its zone (its day) and position. Before each read the
    * entry claims it (a fresh `attempt`; revision 3, R16) and, since revision 10 (Decision B), records its issue in the entry's schedule, so
    * its answer can always be recorded and an answer never recorded counts as lost when it was issued; an answer is recorded only over its
    * own attempt, through the binding's service with its read's stamp (R17). A failed read is paced by the schedule (the work is parked

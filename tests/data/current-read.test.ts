@@ -23,6 +23,8 @@ async function controller(
     throws?: boolean;
     /** Work the command does AFTER its decode (R7, second cycle): a test can hold it. */
     interpret?: () => Promise<void>;
+    /** The rebuild answers a real request (a supersession the outbox can make). */
+    rebuilds?: boolean;
   } = {},
 ) {
   const w = await pageWorld({ cursor: "d1", phase: "delta" });
@@ -47,7 +49,20 @@ async function controller(
     rebuild: (_draft, current, related) => {
       rebuilt.push(current);
       relatedSeen.push(related);
-      return null;
+      return options.rebuilds
+        ? {
+            endpoint: "/commands",
+            targets: [
+              {
+                resourceId: "r1",
+                role: "primary",
+                basis: "resource",
+                versionChecked: true,
+              },
+            ],
+            build: () => ({ command: { kind: "edit", text: "mine again" } }),
+          }
+        : null;
     },
     ...(options.reader === false
       ? {}
@@ -95,7 +110,16 @@ async function controller(
     identity: w.identity,
     loadRuntime: async () => runtime,
     online: { get: () => true, subscribe: () => () => undefined },
-    quota: { check: async () => "admit" } as never,
+    quota: {
+      check: async () => "admit",
+      reserve: async () => ({
+        verdict: "admit",
+        live: () => true,
+        settle: () => undefined,
+      }),
+      lastFree: () => Number.MAX_SAFE_INTEGER,
+      invalidate: () => undefined,
+    } as never,
     ids: { uuid: () => crypto.randomUUID() },
     clock: { now: () => Date.now(), iso: () => new Date().toISOString() },
     fence: () => ({ hasPendingOperation: false, sessionStarted: true }),
@@ -198,6 +222,27 @@ describe("R7: the authorised current-state read of WF-QUEUE-02", () => {
       reason: "error",
     });
     throwing.ui.dispose();
+  });
+
+  test("'save as new' with the body the dialog showed (WEB-11a review 2, finding 1): a draft stored with another body is not replaced", async () => {
+    for (const shown of ["another body", "stored"] as const) {
+      const { ui, w } = await controller({ rebuilds: true });
+      const read = await ui.actions.readCurrent(LOCAL);
+      if (read.kind !== "loaded") throw new Error("setup: not loaded");
+      const [stored] = (await w.rows("drafts")) as Array<{
+        command_digest: string;
+      }>;
+      const out = await ui.actions.saveAsNew(
+        LOCAL,
+        read.value,
+        undefined,
+        shown === "stored" ? stored?.command_digest : "a-body-changed-since",
+      );
+      if (shown === "stored") expect(out.kind).toBe("superseded");
+      else
+        expect(out).toMatchObject({ kind: "refused", reason: "draft_changed" });
+      ui.dispose();
+    }
   });
 
   test("WEB-10a revision 16 (DA-A1): the other rows the read returned reach the rebuild with the reviewed value; none when none were", async () => {

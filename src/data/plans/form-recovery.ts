@@ -52,6 +52,14 @@ export interface FormWrite {
    * with none it is growth). Absent: the write may create one, because the port has admitted it (a save).
    */
   mayCreate?: boolean;
+  /**
+   * A CONDITIONAL write (WEB-11a review 2 of 22 October 2026, findings 2 and 4: a held audience change is an operation, not a form that
+   * may be typed again after its discard). `digest: null`: the row must not exist (not even as a terminal row). A digest: the stored row
+   * must be LIVE with exactly that `content_digest`. Otherwise nothing is written and the answer is `changed`, with what is stored. The
+   * condition replaces the order of captures for this write (it is judged against the stored row itself, in the same transaction): a
+   * conditional writer never overwrites a terminal row or a state it did not read, whatever generation another capture holds.
+   */
+  expect?: { digest: string | null };
 }
 
 export type FormWriteResult =
@@ -72,7 +80,9 @@ export type FormWriteResult =
   /** The hold the copy was admitted under has ended (R28): nothing was written; the port admits it again. */
   | { kind: "lease_lapsed" }
   /** The form has no row and the write was not to create one (`mayCreate: false`): nothing was written. */
-  | { kind: "absent" };
+  | { kind: "absent" }
+  /** A conditional write (`expect`) found another state: nothing was written. `stored` says what is there. */
+  | { kind: "changed"; stored: "absent" | "ended" | "live" };
 
 const generationOf = (row: Pick<FormRecoveryRow, "writer_gen">): number =>
   row.writer_gen ?? 0;
@@ -114,6 +124,21 @@ export const saveFormRecovery = singletonPlan<
     if (input.leaseLive !== undefined && !input.leaseLive())
       return { result: { kind: "lease_lapsed" } };
     const incoming = input.row;
+    if (input.expect !== undefined) {
+      const want = input.expect.digest;
+      const state = !stored ? "absent" : stored.terminal ? "ended" : "live";
+      const holds =
+        want === null
+          ? state === "absent"
+          : state === "live" && stored?.content_digest === want;
+      if (!holds) return { result: { kind: "changed", stored: state } };
+      if (state === "absent" && input.mayCreate === false)
+        return { result: { kind: "absent" } };
+      return {
+        writes: [w.put("form_recovery", incoming)],
+        result: { kind: "saved" },
+      };
+    }
     if (!stored && input.mayCreate === false)
       return { result: { kind: "absent" } };
     if (stored) {

@@ -21,7 +21,7 @@ import { issue, WINDOW_MS } from "../../../src/features/tasks/model/retry";
 
 /**
  * The catch-up state machine (WEB-04 §3.2/§5.8, plan §4.1; A2, A3, A4): every transition, its bounds and its keys. PURE: no store, no
- * network. The runner's tests drive the same transitions through W27 and a scripted client.
+ * network. The runner's tests drive the same transitions through W28 and a scripted client.
  */
 const TASK = "aaaaaaaa-0000-4000-8000-000000000001";
 const TODAY = "2026-10-25";
@@ -140,7 +140,7 @@ describe("sending: the attempt is written before it is sent", () => {
       phase: "awaiting_position_read",
       read_seq: 1,
       attempt_key: null,
-      // Revision 4 (review R20): the row's revision as stored (W27 stamps it; a row not yet written has none: 0).
+      // Revision 4 (review R20): the row's revision as stored (W28 stamps it; a row not yet written has none: 0).
       revision: 0,
     });
     expect(expectationOf({ ...ok, revision: 7 })?.revision).toBe(7);

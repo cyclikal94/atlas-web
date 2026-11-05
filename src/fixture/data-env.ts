@@ -249,8 +249,6 @@ export function fixtureData(params: URLSearchParams): FixtureData {
       start: () => () => undefined,
     },
     commands: createCommandRegistry(),
-    // No screen of this double writes a server-sized record of its own (WEB-10c's timer copy needs the real controller).
-    quota: null as never,
     actions: {
       retryUpdates: () => calls.push({ action: "retryUpdates", args: [] }),
       retryChanges: (id) => calls.push({ action: "retryChanges", args: [id] }),
@@ -295,6 +293,17 @@ export function fixtureData(params: URLSearchParams): FixtureData {
     },
     outbox: () => null,
     service: () => null,
+    // No database is ever bound here, so nothing is admitted against it.
+    quota: {
+      check: async () => "ok",
+      reserve: async () => ({
+        verdict: "ok",
+        live: () => true,
+        settle: () => undefined,
+      }),
+      lastFree: () => null,
+      invalidate: () => undefined,
+    },
     serviceStore: new Cell(null),
     attachLeader: () => () => undefined,
     attachFollower: () => () => undefined,

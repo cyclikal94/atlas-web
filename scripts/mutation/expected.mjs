@@ -1,12 +1,26 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2174;
-export const EXPECTED_ENGINE = 269;
+export const EXPECTED_UNIT = 2567;
+export const EXPECTED_ENGINE = 305;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
 // WEB-10b revision 2 (review 2 R1/R2): +10 unit (MU-2551..MU-2559, MU-2562) and +2 real-engine (MU-2560, MU-2561 over E-LS11); MU-2534 re-anchored.
 // WEB-10b revision 4 (review 4, D1 / DA-N1): +6 unit (MU-2578..MU-2583) and +2 real-engine (MU-2584, MU-2585 over E-LS13); MU-2515 and MU-2543 re-anchored.
+// WEB-11a / accepted WEB-10b merge: 1,944 + 73 unit; 276 + 11 engine. Both catalogues retained; colliding People IDs mapped separately.
+// WEB-11a revision 17 (review 16, R16.1): +20 unit (MU-2840..MU-2859); MU-2465, MU-2486..2487, MU-2587..2589, MU-2604, MU-2665, MU-2836 and the real-engine MU-2742 re-expressed.
+// Combined inventory: accepted WEB-10b (1737 unit, 255 engine) plus WEB-08d (105 unit, 5 engine).
+// WEB-11a / accepted WEB-08d merge: 2037 + 105 unit; 287 + 5 engine. Both catalogues retained; IDs do not overlap.
+// WEB-11a revision 18 (review 17, R17.1): +10 unit (MU-2860..MU-2869); MU-2842 and MU-2843 re-anchored.
+// WEB-11a revision 19 (review 19, R19.1): +5 unit (MU-2870..MU-2874).
+// WEB-11a revision 20 (review 20, R20.1): +9 unit (MU-2875..MU-2883).
+// WEB-11a revision 21 (review 21, R21.1): +5 unit (MU-2884..MU-2888).
+// WEB-11a revision 22 (review 22, R22.1): +7 unit (MU-2889..MU-2895).
+// WEB-11a revision 23 (review 23, R23.1): +16 unit (MU-2896..MU-2911).
+// WEB-11a revision 24 (review 24, R24.1): +10 unit (MU-2912..MU-2920, MU-2922).
+// WEB-11a revision 25 (review 25, R25.1): +15 unit (MU-2923..MU-2937).
+// WEB-11a revision 26 (review 26, R26.1/R26.2): +16 unit (MU-2938..MU-2953); MU-2933 and MU-2936 re-anchored.
+// WEB-11a revision 27 (review 28, R28.1): +4 real-engine (MU-2954..MU-2957) over S-GATE "R28.1" and "visible: the gate STAYS UP".
 // WEB-10c: +73 unit and +3 real-engine entries, retained alongside WEB-10b.
 // WEB-10c revision 3 (review 3 R14-R18, design assessment DA-T3): +17 unit (MU-3085..MU-3101); MU-3012, MU-3016, MU-3038, MU-3061, MU-3072,
 // MU-3079..MU-3082 re-anchored (the same faults over the moved guards).
@@ -45,4 +59,5 @@ export const EXPECTED_ENGINE = 269;
 // and MU-3324 re-anchored (the same faults over the stopped row's settling and the per-caller lift rule).
 // WEB-10c revision 19 (review 20 R40/R41; design assessment of 3 November 2026): +9 unit (MU-3347..MU-3355: the idle timer's boundary
 // clock, Start judged at the press and at its own instant, and the strip's opening/closing boundaries, overtaken read, wake and backwards clock).
-// Combined inventory: accepted WEB-10b (1737 unit, 255 engine), WEB-08d (105 unit, 5 engine), and WEB-10c (214 unit, 3 engine).
+// WEB-10c base merge of 5 November 2026: accepted main (2235 unit, 296 engine) plus WEB-10c (332 unit, 9 engine) = 2567 unit, 305 engine.
+// Both catalogues retained; IDs do not overlap (MU-3001..MU-3355 against WEB-11a's MU-2101..MU-2957).

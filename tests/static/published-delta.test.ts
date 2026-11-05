@@ -30,7 +30,8 @@ function server() {
             has_more: false,
           }),
         };
-    return JSON.parse(answer.body) as {
+    // A scripted body may be a string or exact bytes (`SyncStub.script`); both decode as UTF-8 here.
+    return JSON.parse(answer.body.toString()) as {
       batches: Array<{ revision: number; changes: unknown[] }>;
       next_cursor: string;
     };

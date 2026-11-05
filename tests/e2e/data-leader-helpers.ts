@@ -14,6 +14,8 @@ export interface SyncCall {
   page: string;
   cursor: string | null;
   limit: string | null;
+  /** WEB-09c (R21-QUOTA): the request's `max_changes`, absent: null. */
+  maxChanges?: string | null;
   at: number;
 }
 export interface Scripted {
@@ -172,6 +174,7 @@ export async function leaderNetwork(
         page: pageOf(),
         cursor: url.searchParams.get("cursor"),
         limit: url.searchParams.get("limit"),
+        maxChanges: url.searchParams.get("max_changes"),
         at: Date.now(),
       };
       net.calls.push(call);

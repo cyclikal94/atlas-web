@@ -25,7 +25,7 @@ import { addDays } from "./time";
 /**
  * The catch-up of a repeating task's occurrences (WEB-04 §3.2/§5.8, WEB-10c D-10c-1/5; WF-TODAY-01 C, WF-TASK-06 E). PURE: every
  * transition of a sequence is decided here, and the runner (`catchup/runner.ts`) only reads, sends and commits what this returns through
- * W27's compare-and-set.
+ * W28's compare-and-set.
  *
  * A sequence is the work of bringing ONE task up to date through ONE day (`[task_id, through_date]`, the day in the task's zone). Each
  * `materialise` asks for at most 16 slots (`LIMIT`) and is followed by a read of the task's position (`GET /tasks/{id}`'s
@@ -88,7 +88,7 @@ export const expectationOf = (row: Sequence): SequenceExpectation => ({
   phase: row.phase,
   read_seq: row.read_seq,
   attempt_key: row.attempt?.key ?? null,
-  // As stored; W27 reads an absent or unreadable one as 0 on both sides.
+  // As stored; W28 reads an absent or unreadable one as 0 on both sides.
   revision: row.revision ?? 0,
 });
 

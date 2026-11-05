@@ -98,8 +98,7 @@ describe("WF-SETTINGS-06 Your data (F-DATA)", () => {
 });
 
 describe("the Settings registry (F-REG)", () => {
-  // Calendar registration is retained alongside the authentication and existing Settings entries.
-  test("Signing in, Sessions & devices, Appearance, Calendars and Your data are registered in order", () => {
+  test("Signing in, Sessions & devices, Appearance, Calendars, Your data and Archived items are registered in order", () => {
     expect(
       settingsSections().map((s) => [s.id, s.label, s.owner, s.route]),
     ).toEqual([
@@ -108,6 +107,7 @@ describe("the Settings registry (F-REG)", () => {
       ["appearance", "Appearance", "WEB-07", "appearance"],
       ["calendars", "Calendars", "WEB-13", "calendars"],
       ["data", "Your data", "WEB-08", "data"],
+      ["archived", "Archived items", "WEB-11", "archived"],
     ]);
     const orders = settingsSections().map((s) => s.order);
     expect(orders).toEqual([...orders].sort((a, b) => a - b));
@@ -129,6 +129,9 @@ describe("the Settings registry (F-REG)", () => {
   });
 
   test("every registered section has a working route", async () => {
+    // "Archived items" is served by the lazy People chunk (WEB-11a). Its module is loaded first, so the query below waits for the route,
+    // never for a cold transform of the chunk (about 2 s on a cold cache, measured, against the query's 1 s).
+    await import("../../../src/features/people/screens");
     // The calendar page's heading is the wireframe's ("Calendar sources"), under its "Settings · Calendars" eyebrow (WEB-13a).
     const headings: Record<string, string> = { calendars: "Calendar sources" };
     for (const section of settingsSections()) {

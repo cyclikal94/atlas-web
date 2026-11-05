@@ -27,7 +27,7 @@ import { StampedRequestError } from "../../../src/session";
 
 /**
  * Revision 10 (Decision B, review R36; WEB-04 §5.11): the catch-up's retry protocol as PURE policy (`model/retry.ts`) and the transport
- * facts it is decided from (`api.ts`). The runner's schedules over W27 are in `catchup-retry.test.ts`.
+ * facts it is decided from (`api.ts`). The runner's schedules over W28 are in `catchup-retry.test.ts`.
  */
 const T0 = 1_800_000_000_000;
 const atlas = (code: string) => ({

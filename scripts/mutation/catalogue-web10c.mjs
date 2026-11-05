@@ -1,4 +1,4 @@
-// WEB-10c's mutants (plan §7.4: catch-up, streak, dependencies, timers, rotas and the W27/W28 records), numbered MU-3001… (the plan's
+// WEB-10c's mutants (plan §7.4: catch-up, streak, dependencies, timers, rotas and the W28/W29 records), numbered MU-3001… (the plan's
 // MU-10C-nn is MU-30nn; its N-10C-nn is MU-305n), each title starting with the plan's id. In the form and under the rules
 // of `data-catalogue.mjs`, which spreads them into its `UNIT` and `ENGINE` lists. `sub` is the catalogue's own exactly-one-occurrence
 // patcher. Every unit mutant names the test written for it (`expect`, matched against the failing test's full name): only an assertion of
@@ -10,7 +10,7 @@
 //  - MU-10C-30 (joint strip from cached streams): the strip reads only MY stream by its deterministic id; no other stream is read, so
 //    no patch can make it joint without adding a read (the shape the decision rules out).
 //  - N-10C-03 (the copy read from another account after a switch): the copy lives in the account's own database and is written only
-//    through W28's guards; the identity cases are MU-10C-12 (plan) and MU-10C-12 (screen), so a native switch adds no sensitivity.
+//    through W29's guards; the identity cases are MU-10C-12 (plan) and MU-10C-12 (screen), so a native switch adds no sensitivity.
 //  - MU-3164 (revision 6, R29: work whose implicit today resolved keeps its unresolved `currentKey`): the only schedule it changes is the
 //    same day asked explicitly during the `clearSatisfied` await between the zone being found and the day being marked `attempted`; there
 //    the duplicate is ended by `attempted` after one more position read (no send). The IndexedDB double has no resumable hold for that
@@ -125,7 +125,7 @@ export const UNIT_10C = [
   {
     id: "MU-3007",
     title:
-      "MU-10C-07: WEB-10c W27: the compare-and-set ignores the sequence's generation",
+      "MU-10C-07: WEB-10c W28: the compare-and-set ignores the sequence's generation",
     file: "src/data/plans/materialise.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /a transition applies only to the row it was decided on/,
@@ -190,7 +190,7 @@ export const UNIT_10C = [
   {
     id: "MU-3011",
     title:
-      "MU-10C-11: WEB-10c W27: a compare-and-set writes over a row it did not decide on",
+      "MU-10C-11: WEB-10c W28: a compare-and-set writes over a row it did not decide on",
     file: "src/data/plans/materialise.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /MU-10C-11|a transition applies only to the row/,
@@ -204,16 +204,16 @@ export const UNIT_10C = [
   {
     id: "MU-3012",
     title:
-      "MU-10C-12: WEB-10c W28: the timer copy's write applies no guard (another incarnation or an earlier epoch is written)",
+      "MU-10C-12: WEB-10c W29: the timer copy's write applies no guard (another incarnation or an earlier epoch is written)",
     file: "src/data/plans/timer-copy.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /MU-10C-12/,
     patch: (t) =>
       sub(
         t,
-        // Re-anchored (revision 3): two W28 plans are admitted now; this is the copy's write.
-        'name: "data.writeTimerCopy",\n  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },',
-        'name: "data.writeTimerCopy",\n  meta: { writer: "W28", guards: [], quota: "cache" },',
+        // Re-anchored (revision 3): two W29 plans are admitted now; this is the copy's write.
+        'name: "data.writeTimerCopy",\n  meta: { writer: "W29", guards: ["INC", "CLS", "EPO"], quota: "cache" },',
+        'name: "data.writeTimerCopy",\n  meta: { writer: "W29", guards: [], quota: "cache" },',
       ),
   },
   {
@@ -889,7 +889,7 @@ export const UNIT_10C = [
   {
     id: "MU-3070",
     title:
-      "DA-T1: WEB-10c W28: a replacement is compared with the copy alone, not the fence a day's correction moved",
+      "DA-T1: WEB-10c W29: a replacement is compared with the copy alone, not the fence a day's correction moved",
     file: "src/data/plans/timer-copy.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /DA-T1: a day's correction|removes it on null/,
@@ -903,7 +903,7 @@ export const UNIT_10C = [
   {
     id: "MU-3071",
     title:
-      "DA-T2: WEB-10c W28: two reads are ordered by the device clock of their issue (the pre-revision rule)",
+      "DA-T2: WEB-10c W29: two reads are ordered by the device clock of their issue (the pre-revision rule)",
     file: "src/data/plans/timer-copy.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /DA-T2|keeps a copy of a LATER order/,
@@ -1260,7 +1260,7 @@ export const UNIT_10C = [
   {
     id: "MU-3095",
     title:
-      "DA-T3: WEB-10c W28: a day's observation is recorded although its growth was not admitted",
+      "DA-T3: WEB-10c W29: a day's observation is recorded although its growth was not admitted",
     file: "src/data/plans/timer-copy.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /growth the quota ledger refused/,
@@ -1270,7 +1270,7 @@ export const UNIT_10C = [
   {
     id: "MU-3096",
     title:
-      "DA-T3: WEB-10c W28: an evicted day's observation is dropped without raising the floor",
+      "DA-T3: WEB-10c W29: an evicted day's observation is dropped without raising the floor",
     file: "src/data/plans/timer-copy.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /at most 100 days/,
@@ -1280,7 +1280,7 @@ export const UNIT_10C = [
   {
     id: "MU-3097",
     title:
-      "R16: WEB-10c W27: a new task's discovery entry is written although the quota ledger refused it",
+      "R16: WEB-10c W28: a new task's discovery entry is written although the quota ledger refused it",
     file: "src/data/plans/materialise.ts",
     tests: ["tests/data/materialise-plans.test.ts"],
     expect: /admitted, not capped/,
@@ -1304,7 +1304,7 @@ export const UNIT_10C = [
   {
     id: "MU-3099",
     title:
-      "R16: WEB-10c W27: an answer is recorded over another page's admitted read (the attempt is not compared)",
+      "R16: WEB-10c W28: an answer is recorded over another page's admitted read (the attempt is not compared)",
     file: "src/data/plans/materialise.ts",
     tests: [
       "tests/data/materialise-plans.test.ts",

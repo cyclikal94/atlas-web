@@ -7,7 +7,7 @@ import { range, w } from "../store/port";
 import { guardedPlan, readPlan } from "./builders";
 
 /**
- * W27 (WEB-10c, D-10c-1/2): the catch-up sequences in `materialise_sequences`. The data layer stores and compares rows; it knows no task
+ * W28 (WEB-10c, D-10c-1/2): the catch-up sequences in `materialise_sequences`. The data layer stores and compares rows; it knows no task
  * semantics. Every write is a COMPARE-AND-SET: it applies only if the stored row is still the one the caller decided on (its
  * generation, phase, read sequence and attempt key; or absent), so two runners, a reload or a late answer can never overwrite a newer
  * decision. A write that loses writes nothing and says what is stored (`stale`), so the caller adopts it.
@@ -100,7 +100,7 @@ export const writeMaterialiseSequence = guardedPlan<
 >({
   name: "data.writeMaterialiseSequence",
   // A row of a few hundred bytes per task and day while it catches up: a new one is admitted as a cache write (revision 5).
-  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: ["materialise_sequences"],
   durability: "strict",
   read: async (reader, input) => ({
@@ -162,7 +162,7 @@ export const deleteSatisfiedSequences = guardedPlan<
   { removed: number }
 >({
   name: "data.deleteSatisfiedSequences",
-  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: null },
+  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: null },
   scope: ["materialise_sequences"],
   durability: "strict",
   read: async (reader, input) => {
@@ -449,7 +449,7 @@ export const writeMaterialiseDiscovery = guardedPlan<
   DiscoveryWrite
 >({
   name: "data.writeMaterialiseDiscovery",
-  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: [],
   durability: "strict",
   read: async () => null,
@@ -482,7 +482,7 @@ export const writeMaterialiseDiscovery = guardedPlan<
  * Revision 4 (review R20): the person's "Try again" as ONE compare-and-set of what it was pressed on: the task's stopped discovery entry
  * and the day's stopped sequence (either may be absent). Both still stand as seen and both are replaced, or nothing is written (`stale`),
  * so a lift never clears one stop and loses the other, and a press can never lift a later stop it did not see (the sequence's revision
- * moves on every write). A discovery lift replaces an existing entry (no growth); a sequence row is the fixed-size W27 row.
+ * moves on every write). A discovery lift replaces an existing entry (no growth); a sequence row is the fixed-size W28 row.
  *
  * Revision 6 (review R30): what the press expects of the discovery is ALWAYS compared, separately from what it writes: `stopped` (that
  * very entry, replaced by `next`) or `no_stop` (the screen showed no discovery stop: one recorded since, here or in another tab, makes the
@@ -513,7 +513,7 @@ export const liftMaterialiseStops = guardedPlan<
   { kind: "written" } | { kind: "stale" }
 >({
   name: "data.liftMaterialiseStops",
-  meta: { writer: "W27", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: ["materialise_sequences"],
   durability: "strict",
   read: async (reader, input) => ({

@@ -156,6 +156,23 @@ export interface EnqueueRequest {
    */
   expectDraft?(draft: DraftRow): boolean;
   /**
+   * For an enqueue only (WEB-11a review 12, R12.1): the save this one FOLLOWS, as its caller reviewed it. The writing transaction reads
+   * that draft by its id and writes the new one only while it is stored with exactly this command digest, still names `resourceId` among
+   * its primary targets and raised it, and is the save the new one is built on (the transaction's base for `resourceId` is its base plus
+   * one, and the new draft waits on it unless it was acknowledged). Otherwise nothing is written (`predecessor_changed`). A body that has
+   * been claimed is NOT therefore frozen: a first claim that definitely did not send returns the draft to `queued` (`unclaimDraft`), where
+   * it can be edited, and its id, status and bases do not show that. Plain data, copied at the boundary; a retry of a save that was
+   * already made is recognised first.
+   */
+  expectPredecessor?: ExpectedPredecessor;
+  /**
+   * For an edit of a queued draft only (WEB-11a review 12; D-11a-15): the draft must still be the NEWEST outstanding save of each of its
+   * primary targets. When a later outstanding draft targets one of them, the edit is refused (`not_latest`) unless the new body differs
+   * from the stored one only in its top-level `defaults_revision` (the defaults review's confirmation, which changes the audience, not
+   * the content the later save was built over). Judged inside the writing transaction.
+   */
+  expectLatest?: boolean;
+  /**
    * For a request that ENDS a timer session (WEB-10c revision 7, review R32): what the person acted on must still stand when the save is
    * written. Checked inside the enqueue transaction, after a retry of a save already made is recognised and on every re-admission;
    * `false` refuses the request (`timer_ended`) and nothing is written. Enqueue only.
@@ -163,8 +180,16 @@ export interface EnqueueRequest {
   expectTimer?: TimerExpectation;
 }
 
+/** `EnqueueRequest.expectPredecessor`: the reviewed save a new one follows. */
+export interface ExpectedPredecessor {
+  resourceId: ResourceId;
+  localId: LocalId;
+  /** The `command_digest` of the predecessor's body as the caller read it. */
+  digest: string;
+}
+
 /**
- * A timer end's precondition (WEB-10c revision 7, review R32). The timer evidence (W28) and the drafts are both in this database, so the
+ * A timer end's precondition (WEB-10c revision 7, review R32). The timer evidence (W29) and the drafts are both in this database, so the
  * writing transaction is the ONE point where a retirement stored by any page, before it, refuses the end, and one stored after it does not
  * rewrite what was admitted. The data layer never decides what a session's state means: `admit` is the caller's.
  */
@@ -538,6 +563,18 @@ export function snapshotRequest(request: EnqueueRequest): EnqueueRequest {
           expectDraft: (draft: DraftRow) =>
             request.expectDraft?.call(request, draft) === true,
         }),
+    ...(request.expectPredecessor === undefined
+      ? {}
+      : {
+          expectPredecessor: {
+            resourceId: request.expectPredecessor.resourceId,
+            localId: request.expectPredecessor.localId,
+            digest: request.expectPredecessor.digest,
+          },
+        }),
+    ...(request.expectLatest === undefined
+      ? {}
+      : { expectLatest: request.expectLatest }),
     // A timer end's precondition as one value: the session checked is the one stored with it (`admit` stays the caller's).
     ...(request.expectTimer && { expectTimer: { ...request.expectTimer } }),
   };
@@ -577,6 +614,45 @@ export function validateRequest(request: EnqueueRequest): void {
     )
       throw new OutboxRequestError("join_requires_edit");
   if (versioned > 1) throw new OutboxRequestError("two_versioned_primaries");
+  const predecessor = request.expectPredecessor;
+  if (predecessor !== undefined) {
+    // A predecessor is named for a version-checked primary target of THIS request: one of another resource would check the wrong row.
+    const named = request.targets.some(
+      (target) =>
+        target.resourceId === predecessor.resourceId &&
+        target.role === "primary" &&
+        target.versionChecked,
+    );
+    if (
+      !named ||
+      typeof predecessor.localId !== "string" ||
+      predecessor.localId === "" ||
+      typeof predecessor.digest !== "string" ||
+      predecessor.digest === ""
+    )
+      throw new OutboxRequestError("predecessor");
+  }
+  if (
+    request.expectLatest !== undefined &&
+    typeof request.expectLatest !== "boolean"
+  )
+    throw new OutboxRequestError("expect_latest");
+}
+
+/**
+ * The static checks of a request for one operation: `validateRequest`, and the guards that operation can honour. A predecessor is a
+ * fact of a NEW draft (enqueue); the newest-save rule is a fact of an edit in place. Asked of another operation, either would silently
+ * check nothing, so it is refused (`OutboxRequestError`).
+ */
+export function validateRequestFor(
+  request: EnqueueRequest,
+  op: "enqueue" | "edit" | "supersede",
+): void {
+  validateRequest(request);
+  if (op !== "enqueue" && request.expectPredecessor !== undefined)
+    throw new OutboxRequestError("predecessor");
+  if (op !== "edit" && request.expectLatest !== undefined)
+    throw new OutboxRequestError("expect_latest");
 }
 
 /** Resolves a templated endpoint, or returns `null` for a draft that cannot be addressed. */
@@ -599,6 +675,8 @@ export interface EnqueueFacts {
   related: readonly DraftRow[];
   /** The draft already stored under the request's local id, if any. */
   existing: DraftRow | undefined;
+  /** The draft stored under `request.expectPredecessor.localId`, read by key in the same transaction (absent: none is stored). */
+  predecessor?: DraftRow | undefined;
   localId: LocalId;
   accountId: string;
   /** An ISO instant. */
@@ -606,7 +684,15 @@ export interface EnqueueFacts {
 }
 
 export type PlannedEnqueue =
-  | { kind: "refused"; reason: "fenced" | "closing" | "no_base" | "denied" }
+  | {
+      kind: "refused";
+      reason:
+        | "fenced"
+        | "closing"
+        | "no_base"
+        | "predecessor_changed"
+        | "denied";
+    }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   /** The same save was already made (a retry after a lost completion): nothing changes. */
   | { kind: "duplicate"; draft: DraftRow }
@@ -810,6 +896,40 @@ function composeDraft(
   };
 }
 
+/**
+ * Whether the save a new draft follows is still the one its caller reviewed (`EnqueueRequest.expectPredecessor`; WEB-11a review 12).
+ * PURE, over what the writing transaction read: `stored` (the draft under the expected id, by key), the bases it resolved and the
+ * dependencies it composed. Every condition must hold; a fact that is missing is never taken as equal:
+ *  - it is stored, under that id, with exactly the reviewed command digest (an edit in place keeps the id, status and bases: only the
+ *    body's identity shows it, and a definite non-send returns a first claim to `queued`, where it can be edited);
+ *  - it names the resource among its primary targets and raised it from a recorded base;
+ *  - its base plus one is the base this transaction resolved for the resource (no other save of the resource came between, and none of
+ *    its versions was published over it);
+ *  - the new draft waits on it, unless it was acknowledged (its body was answered and is final). A rejected or superseded draft is
+ *    settled, so nothing waits on it: it is refused by this condition.
+ */
+export function predecessorStands(
+  expected: ExpectedPredecessor,
+  stored: DraftRow | undefined,
+  bases: Bases,
+  dependsOn: readonly LocalId[],
+): boolean {
+  if (
+    stored === undefined ||
+    stored.local_id !== expected.localId ||
+    stored.command_digest !== expected.digest ||
+    !stored.target_resource_ids.includes(expected.resourceId) ||
+    !stored.bumped.includes(expected.resourceId)
+  )
+    return false;
+  const base = stored.bases[expected.resourceId];
+  if (typeof base !== "number" || bases[expected.resourceId] !== base + 1)
+    return false;
+  return (
+    stored.status === "acknowledged" || dependsOn.includes(stored.local_id)
+  );
+}
+
 export function planEnqueue(
   request: EnqueueRequest,
   facts: EnqueueFacts,
@@ -821,6 +941,17 @@ export function planEnqueue(
     return { kind: "refused", reason: "denied" };
   const resolved = resolveTargets(request.targets, facts);
   if (resolved === null) return { kind: "refused", reason: "no_base" };
+  const dependsOn = dependencies(request, facts.related, facts.localId);
+  if (
+    request.expectPredecessor !== undefined &&
+    !predecessorStands(
+      request.expectPredecessor,
+      facts.predecessor,
+      resolved.bases,
+      dependsOn,
+    )
+  )
+    return { kind: "refused", reason: "predecessor_changed" };
 
   let built: BuildResult;
   let digest: string;
@@ -836,19 +967,12 @@ export function planEnqueue(
   }
 
   const createdSeq = facts.sync.draft_seq + 1;
-  const draft = composeDraft(
-    request,
-    built,
-    digest,
-    resolved,
-    dependencies(request, facts.related, facts.localId),
-    {
-      localId: facts.localId,
-      accountId: facts.accountId,
-      createdSeq,
-      now: facts.now,
-    },
-  );
+  const draft = composeDraft(request, built, digest, resolved, dependsOn, {
+    localId: facts.localId,
+    accountId: facts.accountId,
+    createdSeq,
+    now: facts.now,
+  });
   return {
     kind: "queued",
     draft,
@@ -869,11 +993,35 @@ export type PlannedEdit =
         | "not_queued"
         | "retargeted"
         | "draft_changed"
-        /** A target the request needs to write is cached with `can_edit: false` (`TargetSpec.requiresEdit`): nothing is written. */
+        | "not_latest"
         | "denied";
     }
   | { kind: "invalid"; reason: "build_failed" | "not_json" }
   | { kind: "edited"; draft: DraftRow; command: JsonObject };
+
+/**
+ * What an edit asking for the newest-save rule (`EnqueueRequest.expectLatest`) is judged on, read in the writing transaction: for each
+ * primary target of the draft, the latest unsettled OTHER draft that targets it (`TargetFold.latest`), and the draft's stored body.
+ */
+export interface LatestFacts {
+  later: readonly DraftRow[];
+  /** The stored body of the edited draft, or undefined when it could not be read (never taken as unchanged). */
+  command: JsonObject | undefined;
+}
+
+/** Whether `next` differs from `stored` only in its top-level `defaults_revision` (the defaults review's confirmation). PURE. */
+export function onlyDefaultsRevisionChanged(
+  stored: JsonObject,
+  next: JsonObject,
+): boolean {
+  const { defaults_revision: _a, ...before } = stored;
+  const { defaults_revision: _b, ...after } = next;
+  try {
+    return digestOf(before as JsonObject) === digestOf(after as JsonObject);
+  } catch {
+    return false;
+  }
+}
 
 const sameSet = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((id) => b.includes(id));
@@ -895,12 +1043,13 @@ function sameTargets(request: EnqueueRequest, draft: DraftRow): boolean {
 }
 
 /**
- * The body of a `queued` draft, edited in place. The command is frozen the instant the status leaves `queued` (it may have been
- * transmitted), so an edit of any other status is refused and the change is a NEW draft (F-O3). The edit rebuilds from the
- * bases the draft already holds and cannot change what it targets. A known denial of a resource it needs to write (`cache`: the cached
- * rows of the request's targets, and `others`: the unsettled drafts OLDER than the edited one that write a participation it would create
- * (never the draft itself, nor a later one that depends on it), both read in the editing transaction, `knownDenial`) refuses it, as it
- * refuses a new draft.
+ * The body of a `queued` draft, edited in place. While the status is not `queued` the command may be on the wire, so an edit of any
+ * other status is refused and the change is a NEW draft (F-O3). That is not to say a claimed body never changes again: a FIRST claim
+ * that definitely did not send is returned to `queued` (`unclaimDraft`) and can be edited then, so a caller that builds a new draft on
+ * a body it saw names that body (`expectPredecessor`). The edit rebuilds from the bases the draft already holds and cannot change what
+ * it targets.
+ * A known denial of a resource it needs to write refuses the edit too: cached target permissions and older participation
+ * drafts are read in the same transaction (`knownDenial`), never the edited draft or a later dependant.
  */
 export function planEdit(
   request: EnqueueRequest,
@@ -908,6 +1057,7 @@ export function planEdit(
   sync: SyncStateRow,
   cache?: ReadonlyMap<ResourceId, CacheRow>,
   others: readonly DraftRow[] = [],
+  latest?: LatestFacts,
 ): PlannedEdit {
   if (draft === undefined) return { kind: "refused", reason: "not_found" };
   const refusal = fenceRefusal(sync);
@@ -930,6 +1080,29 @@ export function planEdit(
       kind: "invalid",
       reason: error instanceof TypeError ? "not_json" : "build_failed",
     };
+  }
+  // D-11a-15 inside the transaction (WEB-11a review 12): only the newest outstanding save of its targets is edited in place. A later
+  // save was built over THIS body; replacing it would change what that save's author reviewed. Only the audience's confirmation (the
+  // top-level `defaults_revision`, the content unchanged) may go on. Facts that were not read are never taken as "no later save".
+  if (request.expectLatest === true) {
+    const primaries = draft.target_resource_ids;
+    const later =
+      latest === undefined
+        ? null
+        : latest.later.some(
+            (other) =>
+              other.local_id !== draft.local_id &&
+              !isTerminal(other) &&
+              other.created_seq > draft.created_seq &&
+              other.index_targets.some((id) => primaries.includes(id)),
+          );
+    if (
+      later !== false &&
+      (later === null ||
+        latest?.command === undefined ||
+        !onlyDefaultsRevisionChanged(latest.command, built.command))
+    )
+      return { kind: "refused", reason: "not_latest" };
   }
   return {
     kind: "edited",
@@ -1035,10 +1208,14 @@ export function recomputeVersions(input: RecomputeInput): Recomputed {
 export const wireBody = (draft: Pick<DraftWithCommand, "command">): string =>
   canonicalJson(draft.command);
 
-/** One candidate row per primary target, created when a draft is claimed for sending. */
+/**
+ * One candidate row per primary target, created when a draft is claimed for sending, with the claim's `page_seq` and `request_seq` (the
+ * second: the witness a staged word is judged against, R20-SEG).
+ */
 export function candidateRows(
   draft: DraftRow,
   pageSeq: number,
+  requestSeq: number,
 ): PendingEffectRow[] {
   return draft.target_resource_ids.map((id) => ({
     resource_id: id,
@@ -1046,6 +1223,7 @@ export function candidateRows(
     resource_version: draft.bases[id] ?? null,
     created_at: draft.created_at,
     submitted_at_page_seq: pageSeq,
+    submitted_at_request_seq: requestSeq,
     last_mentioned_page_seq: null,
     display: null,
     resolved: null,
@@ -1335,7 +1513,12 @@ export function decideSupersede(
     accountId: facts.accountId,
     now: facts.now,
   });
-  if (planned.kind === "refused") return planned;
+  if (planned.kind === "refused") {
+    // A replacement follows no reviewed predecessor (`validateRequestFor` refuses the field on a supersession before anything is read).
+    if (planned.reason === "predecessor_changed")
+      throw new OutboxRequestError("predecessor");
+    return { kind: "refused", reason: planned.reason };
+  }
   if (planned.kind === "invalid") return planned;
   if (planned.kind === "duplicate")
     return { kind: "refused", reason: "no_base" };

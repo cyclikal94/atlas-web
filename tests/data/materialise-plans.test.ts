@@ -46,7 +46,7 @@ import { expectationOf } from "../../src/features/tasks/model/materialise";
 import { DB, defaultsWorld } from "../support/data/defaults-world";
 
 /**
- * W27 (the catch-up sequences) and W28 (the running-timer copy), WEB-10c: the compare-and-set, the guard set of a response-derived write
+ * W28 (the catch-up sequences) and W29 (the running-timer copy), WEB-10c: the compare-and-set, the guard set of a response-derived write
  * (INC, CLS, EPO) applied from the singleton read in the SAME transaction, the bounded reads, the housekeeping, the tolerant copy and
  * its quota admission. Run against the production plans over the double of IndexedDB, through the store so each guard is exercised on
  * its own, and through the slice-facing commit (G1/G2/G5 are the account service's). FIXTURE evidence.
@@ -109,7 +109,7 @@ async function bound() {
   return { t, service, seed, stored, write };
 }
 
-describe("W27: the compare-and-set", () => {
+describe("W28: the compare-and-set", () => {
   test("a new key is written only while it is absent; a second create of the same key is stale and returns what is stored", async () => {
     const { write, stored } = await bound();
     // Revision 4 (review R20): the store stamps the revision (1 for a new row), and returns the row as written.
@@ -211,7 +211,7 @@ describe("W27: the compare-and-set", () => {
   });
 });
 
-describe("W27: the guards of a response-derived write", () => {
+describe("W28: the guards of a response-derived write", () => {
   test("INC, CLS and EPO each write nothing", async () => {
     const { seed, write, stored } = await bound();
     expect(
@@ -267,7 +267,7 @@ describe("W27: the guards of a response-derived write", () => {
   });
 });
 
-describe("W27: bounded reads and housekeeping", () => {
+describe("W28: bounded reads and housekeeping", () => {
   test("reads by key, by task (its own key range only) and for the account, each at most one window", async () => {
     const { t, service } = await bound();
     const rows = [
@@ -418,7 +418,7 @@ describe("W27: bounded reads and housekeeping", () => {
   });
 });
 
-describe("W28: the running-timer copy", () => {
+describe("W29: the running-timer copy", () => {
   const session = (n: number) => ({
     access: "available",
     id: `cccccccc-0000-4000-8000-${String(n).padStart(12, "0")}`,
@@ -685,7 +685,7 @@ describe("W28: the running-timer copy", () => {
   });
 });
 
-describe("W27: a task's discovery entry (revision 2, review R13 and DA-M1)", () => {
+describe("W28: a task's discovery entry (revision 2, review R13 and DA-M1)", () => {
   const entry = (failures: number, stopped = false, retry = 0) => ({
     retry,
     failures,
@@ -924,7 +924,7 @@ describe("W27: a task's discovery entry (revision 2, review R13 and DA-M1)", () 
  * Revision 3 (review R14, design assessment DA-T3): a day's read records what it observed of its day (its scope) under the day's OWN
  * order, whatever the copy's fence; bounded, and whatever is not kept raises the floor instead (never dropped silently).
  */
-describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
+describe("W29: what a day's reads observed (revision 3, DA-T3)", () => {
   const DAY = "aaaaaaaa-0000-4000-8000-0000000000d1";
   const id = (n: number) =>
     `cccccccc-0000-4000-8000-${String(n).padStart(12, "0")}`;
@@ -1118,10 +1118,10 @@ describe("W28: what a day's reads observed (revision 3, DA-T3)", () => {
 });
 
 /**
- * Revision 4 (review R20): "Try again" over the stops it was pressed on, as ONE compare-and-set; and the row's revision, which every W27
+ * Revision 4 (review R20): "Try again" over the stops it was pressed on, as ONE compare-and-set; and the row's revision, which every W28
  * write moves, so a stop that returns to the same generation, phase, read and attempt is still another row.
  */
-describe("W27: the revision and the lift (revision 4, review R20)", () => {
+describe("W28: the revision and the lift (revision 4, review R20)", () => {
   const stoppedRow = (over: Partial<MaterialiseSequenceRow> = {}) =>
     row({
       phase: "stopped",
@@ -1308,7 +1308,7 @@ describe("W27: the revision and the lift (revision 4, review R20)", () => {
  * the day a screen works for. Its intent (a task's rows are found whatever other tasks hold, bounded per read) is kept; the read now also
  * returns the exact day asked for and the task's latest days with whether they are all of them.
  */
-describe("W27: the recovery rows by task (revision 5, review R24; revision 4, R21)", () => {
+describe("W28: the recovery rows by task (revision 5, review R24; revision 4, R21)", () => {
   test("the exact day past any number of other tasks' rows and of its own later days; the latest days, complete or not; bounded per read", async () => {
     const { t, service } = await bound();
     const others = Array.from({ length: SEQUENCE_WINDOW + 1 }, (_, i) =>
@@ -1358,7 +1358,7 @@ describe("W27: the recovery rows by task (revision 5, review R24; revision 4, R2
 });
 
 /** Revision 4 (review R19): the copy, every scope and the floor in one read; corrections of one day are not fenced by another's. */
-describe("W28: one authority (revision 4, review R19)", () => {
+describe("W29: one authority (revision 4, review R19)", () => {
   const A = "aaaaaaaa-0000-4000-8000-0000000000d1";
   const B = "aaaaaaaa-0000-4000-8000-0000000000d2";
   const S = "cccccccc-0000-4000-8000-000000000001";
@@ -1481,7 +1481,7 @@ describe("W28: one authority (revision 4, review R19)", () => {
  * Revision 5 (review 5 R23): the account's latest complete observation is kept apart from the copy, and every session a read listed
  * finished is kept (bounded, its loss recorded), so a later partial page, going offline or a reload never brings one back.
  */
-describe("W28: the complete account observation and finished sessions (revision 5, review R23)", () => {
+describe("W29: the complete account observation and finished sessions (revision 5, review R23)", () => {
   const S = "cccccccc-0000-4000-8000-0000000000e1";
   const U = "cccccccc-0000-4000-8000-0000000000e2";
   async function world() {
@@ -1629,7 +1629,7 @@ describe("W28: the complete account observation and finished sessions (revision 
  * read's own order: a later running read may be in flight). A lost complete observation stays exclusive (the floor), and a record written
  * before revision 6, or one that does not read, is settled once by the next order issued.
  */
-describe("W28: terminal loss is inclusive and covers every order issued (revision 6, review R27)", () => {
+describe("W29: terminal loss is inclusive and covers every order issued (revision 6, review R27)", () => {
   const S = "cccccccc-0000-4000-8000-0000000000f1";
   async function world() {
     const b = await bound();
@@ -1767,7 +1767,7 @@ describe("W28: terminal loss is inclusive and covers every order issued (revisio
  * Revision 6 (review 6 R28): further exact days by key (a selected day, a day a command asked for) and a longer window of latest rows
  * (the detail's "Show earlier days"), in the same bounded read; `complete` says whether the window holds every row.
  */
-describe("W27: further exact days and a longer window (revision 6, review R28)", () => {
+describe("W28: further exact days and a longer window (revision 6, review R28)", () => {
   test("exact days are found past the window and absent ones are null; a longer window is one read of the latest rows; bounds hold", async () => {
     const { t, service } = await bound();
     const days = Array.from({ length: 20 }, (_, i) =>

@@ -86,13 +86,15 @@ export interface DataActions {
    * WEB-09b (WF-QUEUE-02): "Resend as a new operation" / "Review and save as a new attempt". Only for a draft whose kind registered
    * `rebuild`: the new command is built from the draft and `current`, the value the authorised read returned and the dialog showed (`null`
    * when the person explicitly continued without it), and SUPERSEDES the draft (a new operation id). Never rebuilt on the cache.
-   * `related`: the other rows that read returned (`CurrentRead.related`), for the rebuild's checks only.
-   * `not_rebuildable`: nothing is registered, or the rebuild declined; nothing was changed.
+   * `not_rebuildable`: nothing is registered, or the rebuild declined; nothing was changed. `reviewed`: the `command_digest` of the body the
+   * dialog showed (a kind that registered `review`): the draft is superseded only while it is stored with exactly that body.
+   * `related`: the other rows that authorised read returned, for the rebuild's checks.
    */
   saveAsNew(
     localId: LocalId,
     current: CacheRow | null,
     related?: readonly CacheRow[],
+    reviewed?: string,
   ): Promise<SaveAsNewOutcome>;
   /** The next window of the queue replaces the one shown. */
   showNextQueue(): void;
@@ -122,12 +124,16 @@ export interface DataEnv {
   readonly defaults: DefaultsSource;
   readonly commands: CommandRegistry;
   readonly actions: DataActions;
-  /** The origin's quota ledger, for a slice's own server-sized cache write (WEB-10c's W28 timer copy): admitted before it commits. */
-  readonly quota: QuotaGuard;
   /** The facade of the displayed account's outbox, or null (no database yet): for the slices that save drafts. */
   outbox(): Outbox | null;
   /** The displayed account's open service, or null. Read-only views use it through the hooks; nothing here creates it. */
   service(): AccountService | null;
+  /**
+   * The page's quota guard (the one the outbox and the defaults record are admitted by), for a slice that writes through a port of its
+   * own over the displayed account's database (WEB-11a's held audience changes, written as form copies through `FormRecoveryPort`), and
+   * for a slice's own server-sized cache write (WEB-10c's W29 timer copy): admitted before it commits.
+   */
+  readonly quota: QuotaGuard;
   /** The same, observable: a database that another tab creates later appears here without a reload. */
   readonly serviceStore: Store<AccountService | null>;
   /**
@@ -1135,7 +1141,7 @@ export function createDataEnv(
         currentReads.delete(read);
       }
     },
-    saveAsNew: async (localId, base, related) => {
+    saveAsNew: async (localId, base, related, reviewed) => {
       const bound = current;
       const facade = leader.outbox ?? outbox;
       if (bound === null || facade === null || !bound.service.live)
@@ -1150,7 +1156,15 @@ export function createDataEnv(
       // R7: rebuilt on the value of the authorised current read the person reviewed, never on the cache.
       const next = commands.rebuild(draft, base, related);
       if (next === null) return { kind: "refused", reason: "not_rebuildable" };
-      return facade.supersede(localId, next);
+      // Bound to the body the person saw (WEB-11a review 2): one changed since by another page is not replaced (`draft_changed`).
+      if (reviewed === undefined) return facade.supersede(localId, next);
+      const own = next.expectDraft;
+      return facade.supersede(localId, {
+        ...next,
+        expectDraft: (stored) =>
+          stored.command_digest === reviewed &&
+          (own === undefined || own.call(next, stored)),
+      });
     },
   };
 
@@ -1166,9 +1180,9 @@ export function createDataEnv(
     defaults,
     commands,
     actions,
-    quota: deps.quota,
     outbox: () => outbox,
     service: () => (current?.service.live ? current.service : null),
+    quota: deps.quota,
     serviceStore,
     attachLeader(next) {
       // A leader that is replaced keeps what it knew of the cache it could not write an invalidation for.

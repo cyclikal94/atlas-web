@@ -1,38 +1,99 @@
 #!/usr/bin/env node
-// Checks a profiling results file (plan 7.3 and 7.5): the one the device page (`/profile-harness`) copies, or the handoff's own
-// `results.json`. It is also what a person with a device runs before sending their results back.
+// Checks a profiling results file (plan 7.3 and 7.5): the one the device page (`/profile-harness`) copies. It is also what a person with a
+// device runs before sending their results back. With `--handoff <dir>` it checks the hand-over directory instead (WEB-09c plan 4.2): every
+// consumer-map key of BE-B1 and BE-Q23 is answered with a status, evidence and an owner; no desktop row claims a device class and no device
+// row is `measured` from a desktop engine; the fixtures match the recorded hashes; SHA256SUMS covers and verifies every file; and the
+// evidence the hand-over CARRIES (`evidence/`) is resolved again against the evidence contract (scripts/lib/profile-contract.mjs), so its
+// completeness, isolation, item statuses and desktop conclusions are recomputed here and compared with what the hand-over says (review R1,
+// R2; design assessment D). A hand-over is never trusted for its own booleans.
 //
-//   node scripts/validate-profile-handoff.mjs <results.json> [--allow-partial]
+//   node scripts/validate-profile-handoff.mjs <results.json> --w2-hashes <handoff>/fixtures/W2-hashes.json [--allow-partial]
+//   node scripts/validate-profile-handoff.mjs --handoff <dir> [--allow-partial]
 //
-// It verifies (1) the schema, (2) every run's SHA-256 against the recorded hashes (scripts/lib/profile-workload-hashes.json) and that
-// the page itself verified the fixture, (3) the "at least five cold runs" rule for the workloads that decide memory (W1, W3, W4, W6),
-// (4) that every run states its expectation and its outcome, and (5) that a negative control (W7) was REFUSED and a valid workload was
-// not silently dropped. Exit code 0: complete and consistent; 1: a violation; 2 with `--allow-partial`: valid but incomplete.
-import { readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+// A results file (schema 2, scripts/lib/profile-device-results.mjs): one protocol identity, every (workload, run) once, every run's SHA-256
+// against the recorded hashes (W2: the hand-over's captures given with --w2-hashes), the page's own verification, at least five DISTINCT
+// cold runs of W1, W2, W3, W4 and W6, expectations from the workload contract, and every W7 negative control REFUSED (an admitted, timed-out,
+// failed or killed control is kept in the file and fails the control). Exit 0: complete and consistent; 1: a violation, a control that was
+// not fulfilled, or incomplete; 2 with `--allow-partial`: valid but incomplete. Invalid evidence or a failed control exits 1 even with
+// `--allow-partial`.
+//
+// Revision 3 (review 3 R2, design assessment A7/E9/E10): the hand-over's `results.json` and `report.md` are projected AGAIN from the carried
+// evidence and its fresh resolution (scripts/lib/profile-projection.mjs) with the context `results.json` records, and must be identical,
+// field for field and byte for byte: a published figure, admission list, failure, count, consumer status or candidate identity that
+// disagrees with the evidence is refused even when SHA256SUMS was regenerated after the edit. The recorded context is itself checked (the
+// pin is this candidate's, every stage ran on the candidate named at hand-over, the constants are the ones constants.md shows). In both
+// modes an INVALID cell or a failed control exits 1, `--allow-partial` or not: only a consistent programme that is merely incomplete or
+// not isolated is a partial hand-over (2 when allowed).
+//
+// Revision 4 (review 4 R2, design assessment A4/A5): a W2 capture is valid only for its CONTENTS (scripts/lib/profile-w2-capture.mjs:
+// a sync page whose seeded batch is the person and its 199 dense checklists), in both modes. In results-file mode a hash from
+// `--w2-hashes` is accepted only after the hand-over that lists it certifies that capture (its bytes in fixtures/ and evidence/w2/, its
+// P-W2 capture row and seeded person, and the observed contents); a hashes file outside such a hand-over certifies nothing.
+//
+// Revision 6 (review 6 R7): the hand-over's acceptance scope is checked against STAGED-ACCEPTANCE-20261011 as this validator pins it
+// (acceptanceScopeProblems): the physical-device rows are transferred to WEB-09d, not a prerequisite of BE-B1/BE-Q23; no published text
+// reinstates that prerequisite; a desktop-scoped decision is supported only by a complete programme with no failure; a generated package
+// claims no review and no acceptance.
+import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  CONTRACT_VERSION,
+  canonical,
+  RECORDED,
+  resolveEvidence,
+} from "./lib/profile-contract.mjs";
+import { checkDeviceResults } from "./lib/profile-device-results.mjs";
+import {
+  CONSUMER_KEYS,
+  CONSUMER_STATUSES,
+  DEVICE_KEYS,
+  EVIDENCE_KEY,
+  EVIDENCE_OWNER,
+} from "./lib/profile-evidence.mjs";
+import {
+  contextOf,
+  projectResults,
+  renderReport,
+} from "./lib/profile-projection.mjs";
+import { snapshotSourceFacts } from "./lib/profile-source-facts.mjs";
+import { observeW2Capture } from "./lib/profile-w2-capture.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args = process.argv.slice(2);
-const file = args.find((a) => !a.startsWith("--"));
 const allowPartial = args.includes("--allow-partial");
+const handoffAt = args.indexOf("--handoff");
+if (handoffAt >= 0)
+  process.exit(validateHandoff(args[handoffAt + 1], allowPartial));
+const w2At = args.indexOf("--w2-hashes");
+const w2HashesFile = w2At >= 0 ? args[w2At + 1] : null;
+const file = args.find(
+  (a, i) => !a.startsWith("--") && !(w2At >= 0 && i === w2At + 1),
+);
 if (!file) {
   console.error(
-    "usage: node scripts/validate-profile-handoff.mjs <results.json> [--allow-partial]",
+    "usage: node scripts/validate-profile-handoff.mjs <results.json> --w2-hashes <W2-hashes.json> [--allow-partial]",
   );
   process.exit(1);
 }
-
-const recorded = JSON.parse(
-  readFileSync(join(root, "scripts/lib/profile-workload-hashes.json"), "utf8"),
-);
-const hashOf = new Map(recorded.workloads.map((w) => [w.name, w.sha256]));
-const MUST_HAVE_RUNS = ["W1", "W3", "W4", "W6"];
-const REQUIRED_COLD_RUNS = 5;
-const OUTCOMES = new Set(["admitted", "refused", "error", "timeout", "killed"]);
-
-const errors = [];
-const warnings = [];
+// W2 is not generated: its runs are of the bytes the released backend produced, which the hand-over carries with their hashes. A listed
+// hash is accepted only for a capture the hand-over CERTIFIES (revision 4, review 4 R2, design assessment A5): see certifiedW2.
+let w2Hashes = null;
+let w2Uncertified = new Map();
+let w2Bytes = new Map();
+if (w2HashesFile)
+  try {
+    const certification = certifiedW2(w2HashesFile);
+    w2Hashes = certification.certified;
+    w2Uncertified = certification.uncertified;
+    w2Bytes = certification.bytes;
+    for (const message of certification.notes)
+      console.error(`WARNING ${message}`);
+  } catch (error) {
+    console.error(`cannot read ${w2HashesFile}: ${error.message}`);
+    process.exit(1);
+  }
 let data;
 try {
   data = JSON.parse(readFileSync(resolve(file), "utf8"));
@@ -40,91 +101,675 @@ try {
   console.error(`cannot read ${file}: ${error.message}`);
   process.exit(1);
 }
-
-if (data.schema !== 1) errors.push("schema must be 1");
-if (data.workload_version !== recorded.version)
-  errors.push(
-    `workload_version ${data.workload_version} is not the recorded ${recorded.version} (regenerate or re-record the fixtures)`,
-  );
-if (typeof data.machine !== "object" || data.machine === null)
-  errors.push("machine is missing");
-else {
-  for (const key of [
-    "user_agent",
-    "device_memory_gib",
-    "hardware_concurrency",
-    "platform",
-    "secure_context",
-  ])
-    if (!(key in data.machine)) errors.push(`machine.${key} is missing`);
-  if (data.machine.secure_context === false)
-    errors.push(
-      "machine.secure_context is false: Web Locks and Web Crypto need HTTPS or localhost",
-    );
-}
-if (!Array.isArray(data.runs) || data.runs.length === 0)
-  errors.push("runs is empty");
-
-const counts = new Map();
-for (const [i, run] of (Array.isArray(data.runs) ? data.runs : []).entries()) {
-  const where = `runs[${i}] (${run.workload} run ${run.run})`;
-  if (!hashOf.has(run.workload)) {
-    errors.push(`${where}: unknown workload`);
-    continue;
-  }
-  // A KILLED run never got as far as verifying anything: it counts as a cold run with its outcome, and is not held to the hash rule.
-  if (run.outcome !== "killed" && run.sha256 !== hashOf.get(run.workload))
-    errors.push(
-      `${where}: sha256 ${String(run.sha256).slice(0, 12)} is not the recorded ${hashOf.get(run.workload).slice(0, 12)}`,
-    );
-  if (run.outcome !== "killed" && run.sha256_verified !== true)
-    errors.push(`${where}: the page did not verify the fixture's hash`);
-  if (run.cold !== true) errors.push(`${where}: not a cold run`);
-  if (!OUTCOMES.has(run.outcome))
-    errors.push(
-      `${where}: outcome ${run.outcome} is not one of ${[...OUTCOMES]}`,
-    );
-  if (run.expected !== "admitted" && run.expected !== "refused")
-    errors.push(`${where}: expected is missing`);
-  if (run.workload.startsWith("W7-") && run.outcome === "admitted")
-    errors.push(`${where}: a NEGATIVE control was admitted`);
-  if (!run.workload.startsWith("W7-") && run.outcome === "error")
-    warnings.push(`${where}: outcome error (${run.detail})`);
-  if (typeof run.elapsed_ms !== "number")
-    errors.push(`${where}: elapsed_ms is missing`);
-  if (typeof run.user_agent !== "string")
-    errors.push(`${where}: user_agent is missing`);
-  counts.set(run.workload, (counts.get(run.workload) ?? 0) + 1);
-}
-
-let incomplete = false;
-for (const name of MUST_HAVE_RUNS) {
-  const n = counts.get(name) ?? 0;
-  if (n < REQUIRED_COLD_RUNS) {
-    incomplete = true;
-    warnings.push(
-      `${name}: ${n} cold run(s); at least ${REQUIRED_COLD_RUNS} are required`,
-    );
-  }
-}
-for (const w of recorded.workloads)
-  if (!counts.has(w.name)) {
-    incomplete = true;
-    warnings.push(`${w.name}: no run recorded`);
-  }
-
-for (const message of errors) console.error(`ERROR   ${message}`);
-for (const message of warnings) console.error(`WARNING ${message}`);
+const checked = checkDeviceResults(data, {
+  recorded: RECORDED,
+  w2Hashes,
+  w2Uncertified,
+  w2Bytes,
+});
+for (const message of checked.errors) console.error(`ERROR   ${message}`);
+for (const message of checked.failed_controls)
+  console.error(`FAILED CONTROL ${message}`);
+for (const message of checked.warnings) console.error(`WARNING ${message}`);
+const counted = Object.values(checked.runs).reduce((n, r) => n + r.length, 0);
 console.log(
-  `${data.runs?.length ?? 0} run(s) over ${counts.size} workload(s); ${errors.length} error(s), ${warnings.length} warning(s)`,
+  `${data.runs?.length ?? 0} run(s), ${counted} distinct, over ${Object.keys(checked.runs).length} workload(s); ${checked.errors.length} error(s), ${checked.failed_controls.length} failed control(s), ${checked.warnings.length} warning(s)`,
 );
-if (errors.length > 0) process.exit(1);
-if (incomplete) {
+if (checked.errors.length > 0 || checked.failed_controls.length > 0)
+  process.exit(1);
+if (checked.incomplete) {
   console.log(
     allowPartial
       ? "valid but INCOMPLETE (allowed)"
-      : "INCOMPLETE: not every workload has its runs",
+      : "INCOMPLETE: not every workload has its distinct runs",
   );
   process.exit(allowPartial ? 2 : 1);
 }
 console.log("complete and consistent");
+
+/**
+ * The W2 captures a results file may have run (revision 4, review 4 R2, design assessment A5). `--w2-hashes` names a hand-over's
+ * `fixtures/W2-hashes.json`; a hash there is certified only when that hand-over carries the capture's bytes (`fixtures/` and the same
+ * bytes in `evidence/w2/`), its `P-W2 capture` row records that hash for the engine with its seeded person, and the bytes are the
+ * seeded dense batch (scripts/lib/profile-w2-capture.mjs). Only limit-1 captures are the device page's W2 (docs/profiling-devices.md). A
+ * hashes file that is not inside such a hand-over certifies nothing, so no W2 run can be accepted with it: a hash identifies bytes, it
+ * does not show what they hold.
+ */
+function certifiedW2(file) {
+  const at = resolve(file);
+  const listed = JSON.parse(readFileSync(at, "utf8"));
+  const certified = new Set();
+  const uncertified = new Map();
+  const notes = [];
+  // Schema 4: the certified captures' bytes, so an admitted W2 run's effects can be derived from what it was served.
+  const bytes = new Map();
+  const handoff =
+    basename(dirname(at)) === "fixtures" ? dirname(dirname(at)) : null;
+  const valuesPath = handoff ? join(handoff, "evidence", "values.jsonl") : "";
+  if (!handoff || !existsSync(valuesPath)) {
+    const why = `${file} is not the fixtures/W2-hashes.json of a hand-over that carries its evidence: no capture is certified, so no W2 run can be accepted`;
+    notes.push(why);
+    for (const hash of Object.values(listed ?? {}))
+      if (typeof hash === "string") uncertified.set(hash, why);
+    return { certified, uncertified, notes, bytes };
+  }
+  const values = readFileSync(valuesPath, "utf8")
+    .split("\n")
+    .filter((line) => line.trim())
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    });
+  const sha = (path) =>
+    createHash("sha256").update(readFileSync(path)).digest("hex");
+  for (const [name, hash] of Object.entries(listed ?? {})) {
+    const m = /^W2-captured\.([a-z]+)\.limit-(\d+)\.json$/.exec(name);
+    const problems = [];
+    if (!m) problems.push("not a capture's name");
+    else if (m[2] !== "1")
+      problems.push(
+        "a limit-80 capture: the device page runs limit-1 captures",
+      );
+    else {
+      const fixture = join(handoff, "fixtures", name);
+      const carried = join(handoff, "evidence", "w2", name);
+      if (!existsSync(fixture)) problems.push(`fixtures/${name} is missing`);
+      else if (sha(fixture) !== hash)
+        problems.push(`fixtures/${name} does not have the listed SHA-256`);
+      if (!existsSync(carried) || sha(carried) !== hash)
+        problems.push(`evidence/w2/${name} is not the listed bytes`);
+      const rows = values.filter(
+        (r) => r?.name === "P-W2 capture" && r.engine === m[1],
+      );
+      if (rows.length !== 1)
+        problems.push(`${rows.length} "P-W2 capture" rows for ${m[1]}`);
+      else if (rows[0].captures?.limit_1?.sha256 !== hash)
+        problems.push("its P-W2 capture row records another limit-1 capture");
+      if (problems.length === 0)
+        problems.push(
+          ...observeW2Capture(readFileSync(fixture), {
+            person: rows[0].seeding?.person,
+            limit: 1,
+          }).problems,
+        );
+    }
+    if (problems.length === 0) {
+      certified.add(hash);
+      bytes.set(hash, readFileSync(join(handoff, "fixtures", name)));
+    } else {
+      const why = `${name} is NOT a certified W2 capture: ${problems.join("; ")}`;
+      if (typeof hash === "string") uncertified.set(hash, why);
+      if (!m || m[2] === "1") notes.push(why);
+    }
+  }
+  return { certified, uncertified, notes, bytes };
+}
+
+/**
+ * `--handoff <dir>`: the hand-over directory itself. Exit 0: complete and consistent; 1: a violation, or a consistent hand-over of an
+ * incomplete or unisolated programme; 2 with `--allow-partial`: a consistent PARTIAL hand-over (it says so, and draws no conclusion
+ * from what is absent).
+ */
+function validateHandoff(dir, allowPartialHandoff) {
+  if (!dir || dir.startsWith("--")) {
+    console.error(
+      "usage: node scripts/validate-profile-handoff.mjs --handoff <dir>",
+    );
+    return 1;
+  }
+  const at = resolve(dir);
+  const problems = [];
+  const sha = (path) =>
+    createHash("sha256").update(readFileSync(path)).digest("hex");
+  let results = null;
+  try {
+    results = JSON.parse(readFileSync(join(at, "results.json"), "utf8"));
+  } catch (error) {
+    problems.push(`results.json cannot be read: ${error.message}`);
+  }
+  let recomputed = null;
+  if (results) {
+    if (results.schema !== 3) problems.push("results.json: schema must be 3");
+    if (results.evidence_key !== EVIDENCE_KEY)
+      problems.push(`results.json: evidence_key must be ${EVIDENCE_KEY}`);
+    if (results.owner !== EVIDENCE_OWNER)
+      problems.push(`results.json: owner must be ${EVIDENCE_OWNER}`);
+    const map = results.consumer_map ?? {};
+    for (const key of CONSUMER_KEYS) {
+      const row = map[key];
+      if (!row) {
+        problems.push(`consumer_map: ${key} is missing`);
+        continue;
+      }
+      if (!CONSUMER_STATUSES.includes(row.status))
+        problems.push(`consumer_map: ${key} has status ${row.status}`);
+      if (!Array.isArray(row.answered_by) || row.answered_by.length === 0)
+        problems.push(`consumer_map: ${key} names no evidence`);
+      for (const field of ["reason", "owner", "environment"])
+        if (typeof row[field] !== "string" || !row[field].trim())
+          problems.push(`consumer_map: ${key} has no ${field}`);
+      const desktop = row.environment === "desktop-playwright";
+      if (row.status === "measured" && desktop && row.claims_device_class)
+        problems.push(
+          `consumer_map: ${key} is measured on a desktop engine but claims a device class`,
+        );
+      if (
+        DEVICE_KEYS.includes(key) &&
+        row.status === "measured" &&
+        row.environment !== "real-device"
+      )
+        problems.push(
+          `consumer_map: ${key} asks for real devices and cannot be measured from ${row.environment}`,
+        );
+    }
+    for (const key of Object.keys(map))
+      if (!CONSUMER_KEYS.includes(key))
+        problems.push(`consumer_map: ${key} is not a BE-B1/BE-Q23 item`);
+    if (!existsSync(join(at, "evidence")))
+      problems.push(
+        "evidence/ is missing: the hand-over carries no evidence its statements can be checked against",
+      );
+    else {
+      recomputed = resolveEvidence(join(at, "evidence"));
+      problems.push(...programmeProblems(results, recomputed, at));
+    }
+  }
+  // The fixtures: the generator's recorded hashes, and every captured W2 file against its own hash.
+  const fixtures = join(at, "fixtures");
+  try {
+    const recorded = readFileSync(
+      join(root, "scripts/lib/profile-workload-hashes.json"),
+      "utf8",
+    );
+    if (
+      JSON.stringify(
+        JSON.parse(readFileSync(join(fixtures, "hashes.json"), "utf8")),
+      ) !== JSON.stringify(JSON.parse(recorded))
+    )
+      problems.push("fixtures/hashes.json is not the recorded workload hashes");
+  } catch (error) {
+    problems.push(`fixtures/hashes.json cannot be read: ${error.message}`);
+  }
+  if (existsSync(join(fixtures, "W2-hashes.json"))) {
+    const w2 = JSON.parse(
+      readFileSync(join(fixtures, "W2-hashes.json"), "utf8"),
+    );
+    for (const [name, hash] of Object.entries(w2))
+      if (!existsSync(join(fixtures, name)))
+        problems.push(`fixtures/${name} is missing`);
+      else if (sha(join(fixtures, name)) !== hash)
+        problems.push(`fixtures/${name} does not match W2-hashes.json`);
+      else if (
+        !existsSync(join(at, "evidence", "w2", name)) ||
+        sha(join(at, "evidence", "w2", name)) !== hash
+      )
+        problems.push(`fixtures/${name} is not the capture the evidence holds`);
+  }
+  // SHA256SUMS covers every file and every line verifies.
+  const files = [];
+  const walk = (path) => {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      const p = join(path, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (entry.name !== "SHA256SUMS") files.push(relative(at, p));
+    }
+  };
+  if (existsSync(at)) walk(at);
+  let sums = new Map();
+  try {
+    sums = new Map(
+      readFileSync(join(at, "SHA256SUMS"), "utf8")
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => {
+          const [hash, ...name] = line.split("  ");
+          return [name.join("  "), hash];
+        }),
+    );
+  } catch (error) {
+    problems.push(`SHA256SUMS cannot be read: ${error.message}`);
+  }
+  for (const name of files)
+    if (!sums.has(name)) problems.push(`SHA256SUMS does not cover ${name}`);
+  for (const [name, hash] of sums)
+    if (!existsSync(join(at, name)))
+      problems.push(`SHA256SUMS names ${name}, which is missing`);
+    else if (sha(join(at, name)) !== hash)
+      problems.push(`SHA256SUMS: ${name} does not verify`);
+  for (const message of problems) console.error(`ERROR   ${message}`);
+  console.log(
+    `${files.length} file(s), ${Object.keys(results?.consumer_map ?? {}).length} consumer-map row(s); ${problems.length} error(s)`,
+  );
+  if (problems.length > 0) return 1;
+  // Invalid evidence and unfulfilled controls are never a partial hand-over: they are findings, whatever --allow-partial says.
+  const refused = recomputed.cells.filter(
+    (c) => c.status === "invalid" || c.status === "failed_control",
+  );
+  if (refused.length > 0) {
+    for (const c of refused.slice(0, 40))
+      console.error(
+        `${c.status === "invalid" ? "INVALID" : "FAILED CONTROL"} ${c.id}: ${c.reasons.join("; ")}`,
+      );
+    console.log(
+      `REFUSED: ${recomputed.counts.invalid} invalid cell(s) and ${recomputed.counts.failed_control} failed control(s) in the carried evidence${refused.length > 40 ? ` (first 40 shown; resolution.json lists all)` : ""}`,
+    );
+    return 1;
+  }
+  if (!recomputed.complete) {
+    const c = recomputed.counts;
+    console.log(
+      `PARTIAL hand-over: the desktop programme is ${recomputed.outcomes_complete ? "not isolated" : "incomplete"} (of ${recomputed.cells.length} required cells: ${c.missing} missing, ${c.invalid} invalid, ${c.failed} failed, ${c.failed_control} failed control(s), ${c.not_isolated} not isolated)${allowPartialHandoff ? " (allowed)" : ""}`,
+    );
+    return allowPartialHandoff ? 2 : 1;
+  }
+  console.log("hand-over complete and consistent");
+  return 0;
+}
+
+// A function declaration: the hand-over mode runs while this module is still being evaluated.
+function idsOf(list) {
+  return JSON.stringify(
+    (Array.isArray(list) ? list : []).map((c) => c?.id ?? c).sort(),
+  );
+}
+
+/**
+ * Revision 6 (review 6 R7): the acceptance scope, checked against the later human decision on device timing (STAGED-ACCEPTANCE-20261011)
+ * as THIS validator holds it, not as the projection does. Re-projection only shows that the assembler and the validator agree with each
+ * other; a projection that restored the superseded device gate, or let an incomplete package claim support, would agree with itself.
+ * Function declarations, not module constants: the hand-over mode runs while this module is still being evaluated.
+ */
+function stagedAcceptance() {
+  return {
+    id: "STAGED-ACCEPTANCE-20261011",
+    brief_sha256:
+      "ed8bc85b3474b4dfddff06e5cc7cfab595a4ae01ebc7ad83a7efd49158ac1ca3",
+    authority_sha256:
+      "812002ba25387c186e4d9e457d34a0304565dd173292f294336dcc098370ea63",
+    // The rows whose physical-device part moved to WEB-09d (its §4: BE-B1 items 2 to 7, BE-Q23 M1 to M9 but the source answers M3 and M6).
+    transferred: [
+      "BE-B1:2 real devices, named",
+      "BE-B1:3 workloads with bytes, nodes and changes",
+      "BE-B1:4 multi-tab on every class",
+      "BE-B1:5 metrics per run",
+      "BE-B1:6 derived values",
+      "BE-B1:7 format",
+      "BE-Q23:M1 roster",
+      "BE-Q23:M2 method",
+      "BE-Q23:M4 granularity sweep",
+      "BE-Q23:M5 multi-tab scenarios",
+      "BE-Q23:M7 cost of finer requests",
+      "BE-Q23:M8 smallest unprocessable response",
+      "BE-Q23:M9 derived values",
+    ],
+    // Statements that make physical-device results a prerequisite of BE-B1/BE-Q23 (OD-1's superseded timing), in any published text.
+    superseded: [
+      /\bBE-B1(?:\/| and )BE-Q23\b[^.;]*\b(?:remains?|stays?|are|is)\s+(?:blocked|held)\b/i,
+      /\b(?:gate|BE-B1|BE-Q23)\b[^.;]*\bheld\s+until\s+the\s+(?:device\s+)?roster\b/i,
+      /\buntil\s+the\s+(?:device\s+)?roster\s+(?:runs|has\s+run)\b/i,
+    ],
+    support:
+      "can, with each backend card's own required checks, support BE-B1/BE-Q23 scoped technical acceptance",
+  };
+}
+
+function acceptanceScopeProblems(results, recomputed, at) {
+  const policy = stagedAcceptance();
+  const problems = [];
+  const scope = results.acceptance_scope;
+  if (!scope || typeof scope !== "object")
+    return [
+      `acceptance_scope is missing: the hand-over does not state its scope under ${policy.id}`,
+    ];
+  const decision = scope.decision ?? {};
+  if (
+    decision.id !== policy.id ||
+    decision.brief_sha256 !== policy.brief_sha256 ||
+    decision.authority_sha256 !== policy.authority_sha256
+  )
+    problems.push(
+      `acceptance_scope.decision is not ${policy.id} as pinned (brief ${policy.brief_sha256}, authority ${policy.authority_sha256})`,
+    );
+  if (scope.physical_devices_block_backend !== false)
+    problems.push(
+      `acceptance_scope.physical_devices_block_backend is not false: under ${policy.id} missing physical-device results alone do not block BE-B1/BE-Q23 scoped technical completion`,
+    );
+  if (
+    scope.package?.independently_reviewed !== false ||
+    scope.package?.claims_acceptance !== false
+  )
+    problems.push(
+      "acceptance_scope.package claims a review or an acceptance: a generated hand-over records neither",
+    );
+  // What the hand-over may support follows from its OWN evidence: complete (every cell ok or a declared capability, isolated) and no
+  // valid-workload failure. Anything else supports no desktop-scoped decision and acquires no acceptance statement.
+  const supports =
+    recomputed.complete === true &&
+    recomputed.derived?.desktop_valid_workload_failure === false;
+  const stated = scope.desktop_decision ?? {};
+  if (stated.supports !== supports)
+    problems.push(
+      `acceptance_scope.desktop_decision.supports is ${JSON.stringify(stated.supports)}; this hand-over's evidence supports ${supports ? "a desktop-scoped development decision" : "none"}`,
+    );
+  if (
+    !Array.isArray(stated.needs) ||
+    (supports ? stated.needs.length === 0 : stated.needs.length > 0)
+  )
+    problems.push(
+      "acceptance_scope.desktop_decision.needs does not match what the evidence supports",
+    );
+  const first = String(results.first_paragraph ?? "");
+  if (first.includes(policy.support) !== supports)
+    problems.push(
+      supports
+        ? "first_paragraph does not state what this complete desktop hand-over can support"
+        : "first_paragraph claims support for BE-B1/BE-Q23 acceptance that this hand-over's evidence does not give",
+    );
+  if (!first.includes("transferred to WEB-09d") || !first.includes(policy.id))
+    problems.push(
+      `first_paragraph does not state that the physical-device measurements are transferred to WEB-09d (${policy.id})`,
+    );
+  const transfers = Array.isArray(scope.transferred_to_web09d)
+    ? scope.transferred_to_web09d
+    : [];
+  if (
+    JSON.stringify(transfers.map((t) => t?.item).sort()) !==
+      JSON.stringify([...policy.transferred].sort()) ||
+    transfers.some((t) => t?.owner !== "WEB-09d" || t?.status !== "not_run")
+  )
+    problems.push(
+      "acceptance_scope.transferred_to_web09d is not every BE-B1/BE-Q23 row with a physical-device part, owned by WEB-09d and not run",
+    );
+  for (const key of DEVICE_KEYS) {
+    const status = results.consumer_map?.[key]?.status;
+    if (status !== "transferred" && status !== "not_run")
+      problems.push(
+        `consumer_map: ${key} is ${status}; under ${policy.id} its physical-device measurement is transferred to WEB-09d`,
+      );
+  }
+  if (
+    !Array.isArray(scope.human_decisions) ||
+    scope.human_decisions.length === 0
+  )
+    problems.push(
+      "acceptance_scope.human_decisions is empty: the roster and any material contract choice stay with a person",
+    );
+  const held = recomputed.cells
+    .filter((c) => ["failed", "failed_control", "invalid"].includes(c.status))
+    .map((c) => c.id);
+  if (
+    idsOf(scope.held_failures?.cells) !== idsOf(held) ||
+    canonical(scope.held_failures?.workload_failures ?? null) !==
+      canonical(recomputed.failures)
+  )
+    problems.push(
+      "acceptance_scope.held_failures are not the failed, failed-control and invalid cells and the valid-workload failures the evidence resolves to",
+    );
+  const texts = [];
+  const walk = (value, path) => {
+    if (typeof value === "string") texts.push([path, value]);
+    else if (Array.isArray(value))
+      for (const [i, v] of value.entries()) walk(v, `${path}[${i}]`);
+    else if (value && typeof value === "object")
+      for (const [k, v] of Object.entries(value))
+        walk(v, path ? `${path}.${k}` : k);
+  };
+  walk(results, "");
+  try {
+    texts.push(["report.md", readFileSync(join(at, "report.md"), "utf8")]);
+  } catch {
+    // report.md's absence is the publication check's finding.
+  }
+  for (const [path, text] of texts)
+    for (const pattern of policy.superseded)
+      if (pattern.test(text)) {
+        problems.push(
+          `${path} makes physical-device results a prerequisite of BE-B1/BE-Q23 (superseded by ${policy.id}): "${pattern.exec(text)[0]}"`,
+        );
+        break;
+      }
+  return problems;
+}
+
+/**
+ * What the hand-over says against what its own evidence resolves to (review R1, R2): the contract, every cell's status, the lists, the
+ * item statuses and the desktop conclusions. A forged summary, a dropped raw file or a "complete" programme holding a not-run item is
+ * refused here, whatever SHA256SUMS says.
+ */
+function programmeProblems(results, recomputed, at) {
+  const problems = [];
+  const p = results.desktop_programme;
+  if (!p || typeof p !== "object")
+    return ["desktop_programme: the completeness inventory is missing"];
+  if (p.contract_version !== CONTRACT_VERSION)
+    problems.push(
+      `desktop_programme: contract ${p.contract_version}, not ${CONTRACT_VERSION}`,
+    );
+  if (p.complete !== recomputed.complete)
+    problems.push(
+      `desktop_programme: complete is ${p.complete}, but the evidence resolves to ${recomputed.complete}`,
+    );
+  if (p.outcomes_complete !== recomputed.outcomes_complete)
+    problems.push(
+      `desktop_programme: outcomes_complete is ${p.outcomes_complete}, but the evidence resolves to ${recomputed.outcomes_complete}`,
+    );
+  for (const [key, status] of [
+    ["missing", "missing"],
+    ["invalid", "invalid"],
+    ["failed", "failed"],
+    ["failed_controls", "failed_control"],
+    ["not_isolated", "not_isolated"],
+    ["unavailable", "unavailable"],
+  ])
+    if (
+      idsOf(p[key]) !==
+      idsOf(recomputed.cells.filter((c) => c.status === status))
+    )
+      problems.push(
+        `desktop_programme: its ${key} list is not what the evidence resolves to`,
+      );
+  let stated = null;
+  try {
+    stated = JSON.parse(readFileSync(join(at, "resolution.json"), "utf8"));
+  } catch (error) {
+    problems.push(`resolution.json cannot be read: ${error.message}`);
+  }
+  if (stated) {
+    const statusOf = new Map((stated.cells ?? []).map((c) => [c.id, c.status]));
+    const differing = recomputed.cells.filter(
+      (c) => statusOf.get(c.id) !== c.status,
+    );
+    if (differing.length || statusOf.size !== recomputed.cells.length)
+      problems.push(
+        `resolution.json: ${differing.length} cell(s) differ from the evidence (first: ${differing[0]?.id ?? "a cell outside the contract"})`,
+      );
+  }
+  const d = recomputed.derived;
+  if (
+    results.H8?.desktop_valid_workload_failure !==
+    d.desktop_valid_workload_failure
+  )
+    problems.push(
+      `H8: desktop_valid_workload_failure is ${results.H8?.desktop_valid_workload_failure}; the evidence gives ${d.desktop_valid_workload_failure}`,
+    );
+  if (
+    results.H9?.desktop_needs_finer_pagination !==
+    d.desktop_needs_finer_pagination
+  )
+    problems.push(
+      `H9: desktop_needs_finer_pagination is ${results.H9?.desktop_needs_finer_pagination}; the evidence gives ${d.desktop_needs_finer_pagination}`,
+    );
+  if (
+    JSON.stringify(results.H9?.desktop_D_largest_dense_changes_committed) !==
+    JSON.stringify(d.desktop_D_largest_dense_changes_committed)
+  )
+    problems.push(
+      "H9: the desktop dense bound D is not what the evidence gives",
+    );
+  for (const [item, resolved] of Object.entries(recomputed.items)) {
+    if (item === "stages" || item === "cases") continue;
+    const stated = results.programme?.[item]?.status;
+    if (stated !== resolved.status)
+      problems.push(
+        `programme: ${item} is ${stated}, but its evidence resolves to ${resolved.status}`,
+      );
+  }
+  if (recomputed.complete)
+    for (const [item, entry] of Object.entries(results.programme ?? {}))
+      if (entry?.status === "not_run" || entry?.status === "partial")
+        problems.push(
+          `programme: ${item} is ${entry.status} in a programme called complete`,
+        );
+  const verdicts = recomputed.cells.filter((c) => c.isolation);
+  const clean = verdicts.filter((c) => c.isolation.verdict === "clean").length;
+  if (
+    results.isolation?.summary?.judged_cells !== verdicts.length ||
+    results.isolation?.summary?.clean !== clean ||
+    results.isolation?.summary?.all_clean !==
+      (verdicts.length > 0 && clean === verdicts.length)
+  )
+    problems.push(
+      "isolation: the summary does not count the resolved verdicts",
+    );
+  for (const c of recomputed.cells.filter((x) => x.kind === "device-file")) {
+    const stated = results.device_page_validation?.[`results.${c.engine}.json`];
+    if (stated?.status !== c.status)
+      problems.push(
+        `device_page_validation: results.${c.engine}.json is ${stated?.status}; the evidence resolves to ${c.status}`,
+      );
+  }
+  problems.push(...acceptanceScopeProblems(results, recomputed, at));
+  problems.push(...publicationProblems(results, recomputed, at));
+  return problems;
+}
+
+/** The paths (up to `limit`) at which two JSON values differ. */
+function differences(a, b, path = "", out = [], limit = 12) {
+  if (out.length >= limit) return out;
+  if (canonical(a) === canonical(b)) return out;
+  const isObject = (x) => typeof x === "object" && x !== null;
+  if (Array.isArray(a) && Array.isArray(b) && a.length === b.length)
+    for (let i = 0; i < a.length; i += 1)
+      differences(a[i], b[i], `${path}[${i}]`, out, limit);
+  else if (isObject(a) && isObject(b) && !Array.isArray(a) && !Array.isArray(b))
+    for (const key of [
+      ...new Set([...Object.keys(a), ...Object.keys(b)]),
+    ].sort())
+      differences(a[key], b[key], path ? `${path}.${key}` : key, out, limit);
+  else out.push(path || "(the whole document)");
+  return out;
+}
+
+/**
+ * Every published field against the projection of the carried evidence (review 3 R2; design assessment A7/E9), the report against its
+ * regeneration, and the recorded context against what can be checked of it.
+ */
+function publicationProblems(results, recomputed, at) {
+  const problems = [];
+  const context = contextOf(results);
+  const pin = JSON.parse(readFileSync(join(root, "contract-pin.json"), "utf8"));
+  if (canonical(context.pinned) !== canonical(pin))
+    problems.push("backend.pin is not this candidate's contract-pin.json");
+  const fingerprint = context.now?.source_fingerprint;
+  const stagesDir = join(at, "evidence", "stages");
+  if (existsSync(stagesDir))
+    for (const f of readdirSync(stagesDir).filter((x) => x.endsWith(".json"))) {
+      let record = null;
+      try {
+        record = JSON.parse(readFileSync(join(stagesDir, f), "utf8"));
+      } catch {
+        continue;
+      }
+      if (record?.candidate?.source_fingerprint !== fingerprint)
+        problems.push(
+          `candidate: stage ${f.replace(/\.json$/, "")} ran on ${record?.candidate?.source_fingerprint}, not the candidate named at hand-over (${fingerprint})`,
+        );
+    }
+  let shown = null;
+  try {
+    const text = readFileSync(join(at, "constants.md"), "utf8");
+    shown = JSON.parse(/```json\n([\s\S]*?)\n```/.exec(text)?.[1] ?? "null");
+  } catch (error) {
+    problems.push(`constants.md cannot be read: ${error.message}`);
+  }
+  if (canonical(shown) !== canonical(context.configValues))
+    problems.push(
+      "programme.P-12.values are not the constants constants.md shows",
+    );
+  // Revision 5 (review 5 R6): H9's snapshot answer is a fact of the candidate's code, read here again from this candidate, and the published
+  // answer must state it in its own terms. A projection that restored a constant answer would publish the same text through the assembler
+  // and through this validator's re-projection; this check does not depend on that text agreeing with itself.
+  const facts = snapshotSourceFacts(root);
+  if (canonical(context.sourceFacts) !== canonical(facts))
+    problems.push(
+      "H9.limit_in_use.source_facts are not this candidate's snapshot source facts",
+    );
+  const limits = results?.H9?.limit_in_use;
+  if (limits?.snapshot_requests !== facts.snapshot_requests)
+    problems.push(
+      `H9.limit_in_use.snapshot_requests is ${JSON.stringify(limits?.snapshot_requests)}; this candidate's source says ${JSON.stringify(facts.snapshot_requests)}`,
+    );
+  const answer = String(limits?.snapshot ?? "");
+  if (facts.snapshot_requests === true) {
+    const unnamed = facts.links.filter((l) => !answer.includes(l.file));
+    if (
+      !answer.startsWith("sent by the production composition") ||
+      unnamed.length
+    )
+      problems.push(
+        `H9.limit_in_use.snapshot does not state this candidate's snapshot request path${unnamed.length ? ` (it names none of ${unnamed.map((l) => l.file).join(", ")})` : ""}`,
+      );
+  } else if (!answer.startsWith("UNVERIFIED"))
+    problems.push(
+      "H9.limit_in_use.snapshot gives an answer this candidate's source does not support",
+    );
+  if (limits?.snapshot_measured !== false)
+    problems.push(
+      "H9.limit_in_use.snapshot_measured is not false: this programme measures no production snapshot",
+    );
+  let projected = null;
+  try {
+    projected = JSON.parse(
+      JSON.stringify(
+        projectResults({
+          evidenceDir: join(at, "evidence"),
+          resolution: recomputed,
+          context,
+        }),
+      ),
+    );
+  } catch (error) {
+    return [
+      ...problems,
+      `results.json cannot be projected from its evidence: ${error.message}`,
+    ];
+  }
+  const differing = differences(results, projected);
+  if (differing.length)
+    problems.push(
+      `results.json is not what its evidence projects to, at ${differing.join(", ")}`,
+    );
+  let report = null;
+  try {
+    report = readFileSync(join(at, "report.md"), "utf8");
+  } catch (error) {
+    problems.push(`report.md cannot be read: ${error.message}`);
+  }
+  if (
+    report !== null &&
+    report !==
+      renderReport({
+        results: projected,
+        resolution: recomputed,
+        evidenceDir: join(at, "evidence"),
+      })
+  )
+    problems.push(
+      "report.md is not the report its evidence and results generate",
+    );
+  return problems;
+}

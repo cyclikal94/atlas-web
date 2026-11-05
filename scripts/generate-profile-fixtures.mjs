@@ -1,9 +1,16 @@
 #!/usr/bin/env node
 // Writes the recorded SHA-256 of every profiling workload (plan 7.3, H3) to scripts/lib/profile-workload-hashes.json, and copies the
-// generator source beside the handoff. `--check` verifies the recorded hashes against the generators and changes nothing.
+// generator source and the hashes into `<dir>/fixtures` (WEB-09c plan 4.1: the directory is the caller's, there is no default, and an
+// existing one is refused). `--check` verifies the recorded hashes against the generators and changes nothing.
 //
-//   node scripts/generate-profile-fixtures.mjs [--check]
-import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+//   node scripts/generate-profile-fixtures.mjs --out <dir> | --check
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -16,6 +23,21 @@ import {
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const recorded = join(root, "scripts/lib/profile-workload-hashes.json");
 const check = process.argv.includes("--check");
+const outAt = process.argv.indexOf("--out");
+const outArg = outAt >= 0 ? process.argv[outAt + 1] : undefined;
+if (!check && (!outArg || outArg.startsWith("--"))) {
+  console.error(
+    "usage: node scripts/generate-profile-fixtures.mjs --out <dir> | --check (there is no default directory)",
+  );
+  process.exit(2);
+}
+const out = check ? null : join(resolve(root, outArg), "fixtures");
+if (out && existsSync(out)) {
+  console.error(
+    `refused: ${out} already exists; use a fresh directory (nothing was changed)`,
+  );
+  process.exit(2);
+}
 
 const workloads = [];
 for (const { name, body } of allWorkloads()) {
@@ -46,7 +68,6 @@ if (check) {
 }
 
 writeFileSync(recorded, `${JSON.stringify(next, null, 2)}\n`);
-const out = join(root, ".agtx/evidence/WEB-09a/profiling/handoff/fixtures");
 mkdirSync(out, { recursive: true });
 copyFileSync(
   join(root, "scripts/lib/profile-workloads.mjs"),

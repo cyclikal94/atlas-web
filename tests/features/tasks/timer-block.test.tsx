@@ -839,7 +839,7 @@ describe("R14: a later complete account read retires what an earlier day read sa
 });
 
 /**
- * Revision 3 (design assessment DA-T3): a day's read in ANOTHER tab corrects the kept copy (W28) after this tab's read saw the session
+ * Revision 3 (design assessment DA-T3): a day's read in ANOTHER tab corrects the kept copy (W29) after this tab's read saw the session
  * running. The correction's scope and order must reach this tab's kept read too: offline (and after a remount of the protected tree) the
  * session is not brought back, with or without a copy. A correction of ANOTHER day decides nothing about this one (the control).
  * "Another tab" is this database's own production commit of a day read's correction, made with that read's own place in the order.
@@ -1516,7 +1516,7 @@ describe("R32: an end is admitted against what is stored when it is written", ()
         "sync_state",
         "singleton",
       ) as SyncStateRow;
-      // Same durable state as another page's W28 commit, before its notification is delivered.
+      // Same durable state as another page's W29 commit, before its notification is delivered.
       // The maintained account-list tests use this same double's non-notifying seeding boundary.
       if (mode !== "control")
         t.world.idb.seed(name, "sync_state", [

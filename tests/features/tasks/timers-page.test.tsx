@@ -32,7 +32,7 @@ import {
 /**
  * The account's timers under B6 (A15; D-10c-4/12): running first, then earlier sessions; an available row links to its day and offers
  * Stop and Discard while it may be modified (queued with the row's version); a restricted row shows times only; the first running page
- * is kept on this device (W28) and shown offline, each copied row titled only while its day is still in the cache. FIXTURE evidence.
+ * is kept on this device (W29) and shown offline, each copied row titled only while its day is still in the cache. FIXTURE evidence.
  */
 installMatchMedia({ width: 1440 });
 afterEach(() => {

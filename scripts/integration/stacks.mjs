@@ -95,6 +95,15 @@ export const DEFAULT_STACKS = [
     oidc: false,
     mutates: "linked calendars; paced by its stack ledger",
   },
+  // WEB-11a's People journeys share neither accounts nor sign-in pacing with another suite.
+  {
+    name: "people",
+    suffix: "-people",
+    files: [SPEC("people")],
+    oidc: false,
+    mutates:
+      "people, typed fields, policies and account links; paced by its stack ledger",
+  },
   {
     name: "traces",
     suffix: "-traces",

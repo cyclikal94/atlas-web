@@ -85,7 +85,7 @@ function callerFence(
 
 /**
  * Revision 10 (Decision B, review R36; design assessment Q-M1–Q-M12): the catch-up's three callers under their durable retry schedules,
- * over the PRODUCTION W27 plans and account service on the double of IndexedDB, with a scripted `TasksApi` whose every request is logged
+ * over the PRODUCTION W28 plans and account service on the double of IndexedDB, with a scripted `TasksApi` whose every request is logged
  * with the device clock, and waits that move that clock (or are held). Review 11's seven witnesses and three positive controls are the
  * first cases (`REVIEW11`), maintained here; the rest cover the protocol they did not. FIXTURE evidence: no backend, no browser, no real
  * reload (a reload is another runner on the same database) and no measured 180-second observation.
@@ -1489,7 +1489,7 @@ describe("Q-M6 (production hook): only an observed offline-to-online change is a
 // ---- Revision 11 (review R36; design assessment C1–C4, Q1–Q11) ----------------------------------------------------------------------
 /**
  * Review 12's four R36 witnesses with their positive controls, maintained (`REVIEW12`), and the schedules the design assessment adds
- * around each boundary. The production runner, W27 plans and account service throughout; only the commit boundary, the API's answers
+ * around each boundary. The production runner, W28 plans and account service throughout; only the commit boundary, the API's answers
  * (or, for the transport cases, the session under the production task client) and the clock are scripted. FIXTURE evidence.
  */
 type Commit = { next?: unknown; expected?: unknown };
@@ -3062,7 +3062,7 @@ describe("REVIEW13 Q1: the five witnesses of review 13 and their paired controls
 /**
  * Revision 12 (review 13 R36-A to R36-D; design assessment Q2 and Q4 to Q9): the protected outcome's lifecycle (published at its first
  * failure, repaired as the same transition, ended only as its own instance, never ended without its outcome), its withdrawal variant,
- * and the ownership of a press and a reconnection. Production runner, reducers, W27 plans, account service and marker implementation on
+ * and the ownership of a press and a reconnection. Production runner, reducers, W28 plans, account service and marker implementation on
  * the IndexedDB and storage doubles; waits are held or move the fake clock. FIXTURE evidence: no browser, no real reload.
  */
 describe("REVISION12 R36: protected outcomes and retry ownership", () => {
@@ -5601,7 +5601,7 @@ describe("REVISION14 R36-G: every failure the server answered is protected from 
 /**
  * Revision 15 (review 16's R36-H, R36-I and R39; design assessment C1–C3, Q1–Q3): review 16's eighteen transport-boundary schedules,
  * maintained with their assertions tightened (no permissive branch), the lifecycle orderings of the design assessment's matrix, and the
- * received-invalid body through the production client for each caller. FIXTURE evidence: the production runner, W27 plans, account service
+ * received-invalid body through the production client for each caller. FIXTURE evidence: the production runner, W28 plans, account service
  * and marker facades over the IndexedDB double and fake marker storage; scripted time; no browser, no real teardown (the page's lifecycle
  * is the double `pageLife`; the native order is recorded by the revision 15 lifecycle probe).
  */
@@ -6478,7 +6478,7 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
   // A transport failure a live page observed is fenced at receipt under its caller's LOST-ANSWER operation. A page that holds the account's
   // lock and finds that fence with no outcome behind it counts the call lost at that moment and paces from it (never sooner than from the
   // real observation; a longer wait is accepted), then resumes the same work and retires exactly the instances it found. Every other fence
-  // stays a stop. FIXTURE evidence: production runner, W27 plans, account service and marker facades over the IndexedDB double and fake
+  // stays a stop. FIXTURE evidence: production runner, W28 plans, account service and marker facades over the IndexedDB double and fake
   // marker storage; an exclusive Web Lock double; scripted time.
   /**
    * Web Locks excluding pages by name, in request order (`request(name, fn)` or `request(name, options, fn)`); `ifAvailable` grants at
@@ -7018,7 +7018,7 @@ describe("REVISION15 R36-H/I: a failure observed by a live page is kept from its
   // removal until the page goes (`refused`: the facade owes it and retries it on that page's reads, never on another's). A fresh page with
   // a healthy store must end exactly that fence, keep the stop as recorded (nothing sent for it, its token unchanged), and let the person's
   // Try again, or a reconnection for a window, go on from it: the same key AND body, or the row's own read. `none`: the retirement
-  // succeeded (the paired control). FIXTURE evidence: production runner, W27 plans, account service and marker facades over the doubles;
+  // succeeded (the paired control). FIXTURE evidence: production runner, W28 plans, account service and marker facades over the doubles;
   // scripted time (a scripted window boundary is not the real 180-second observation).
   type Cut = "none" | "crash" | "refused";
   const recordOf = (r: R16, caller: CallerName) =>

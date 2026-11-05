@@ -83,7 +83,7 @@ type Section =
       rows: AccountTimerSession[];
       next: string | null;
       more: "idle" | "loading" | "error";
-      /** The read's place in the observation order (W28; its first page's, for every page of it), or null (review R19). */
+      /** The read's place in the observation order (W29; its first page's, for every page of it), or null (review R19). */
       order: number | null;
       /**
        * The database incarnation it was ordered in, or null (none was bound). Its order means nothing in another one (revision 5, R23):
@@ -137,7 +137,7 @@ function useSection(state: "running" | "stopped", again: string) {
       loading: boolean;
       incarnation: string | null;
     };
-    // The running list's first page is the copy this device keeps (W28): its place in the observation order is taken at ISSUE.
+    // The running list's first page is the copy this device keeps (W29): its place in the observation order is taken at ISSUE.
     let issued: IssuedRead | null = null;
     // A history read's stamp at issue (revision 5, R23): what it lists finished is recorded only for the binding it was asked under.
     let history: {
@@ -442,7 +442,7 @@ function SessionRow({
 /**
  * The account's timers under B6 (D-10c-12, E-4): running first (`state=running`, paged), then earlier sessions (`state=stopped`, with
  * Load more). An available running row links to its day and offers Stop and Discard while `can_modify`, queued through the same
- * builders as the detail's; a restricted row shows its times only. Offline it shows the bounded copy of the last running read (W28),
+ * builders as the detail's; a restricted row shows its times only. Offline it shows the bounded copy of the last running read (W29),
  * each copied row's title only while its day is still in this device's cache (otherwise restricted); history is online only.
  */
 export function TimersPage() {

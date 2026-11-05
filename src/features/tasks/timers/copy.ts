@@ -16,13 +16,13 @@ import {
 } from "../model/timers";
 
 /**
- * The running-timer copy of the displayed account's database (W28, D-10c-4), parsed row by row: a row that does not parse is left out,
+ * The running-timer copy of the displayed account's database (W29, D-10c-4), parsed row by row: a row that does not parse is left out,
  * never guessed. `null`: no copy (none was ever written here, or it is unreadable).
  */
 export interface TimerCopy {
   /** ms, when the read the copy was written from was issued: shown ("last checked"), never compared. */
   readAt: number;
-  /** That read's place in the observation order (W28; 0 for a copy written before the order existed). */
+  /** That read's place in the observation order (W29; 0 for a copy written before the order existed). */
   order: number;
   /**
    * The copy lists every running session its read could see, and every row of it was read here (review R14): only then does a session
@@ -125,7 +125,7 @@ export function useTimerEvidence(): {
 export const epochOf = (identity: string): number =>
   Number(identity.slice(identity.lastIndexOf(":") + 1));
 
-/** A timer read about to be sent: the binding it is asked under and its place in the observation order (W28). */
+/** A timer read about to be sent: the binding it is asked under and its place in the observation order (W29). */
 export interface IssuedRead {
   service: AccountService;
   captured: ReturnType<AccountService["capture"]>;

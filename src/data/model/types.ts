@@ -154,6 +154,12 @@ export interface PendingEffectRow {
   created_at: IsoInstant;
   /** Written once, never overwritten by a resend. */
   submitted_at_page_seq: number;
+  /**
+   * WEB-09c (R20-SEG): `sync_state.request_seq` when the row was created (the claim), written once like `submitted_at_page_seq`. A word
+   * STAGED from a request captured at or before it is not evidence about this row (`stagedMentionReaches`). Absent on a row written before
+   * it: unknown (the receipt's floor, which comes later, stands in).
+   */
+  submitted_at_request_seq?: number;
   last_mentioned_page_seq: number | null;
   display: ProjectionPatch | null;
   resolved: "no_publication" | null;
@@ -203,6 +209,28 @@ export interface ReadRetryState {
 }
 
 export type SizingClass = "constrained" | "unconstrained" | "unknown";
+/**
+ * The revision being staged (`sync_state.delta_stage`; absent or null: none). `boundary_cursor` is the delta cursor the revision was asked
+ * from (the position of the live cache, which is unchanged until activation); `next_index` the segment expected next.
+ */
+export interface DeltaStage {
+  revision: number;
+  next_index: number;
+  /** The delta cursor the revision was asked from: where a broken sequence starts again. */
+  boundary_cursor: string;
+  /**
+   * The continuation the last staged segment stored as `sync_state.cursor`. The stage belongs to THAT position: any writer that replaces the
+   * cursor (an invalidation, a snapshot activation, an abandonment, a restart) leaves a stage whose cursor is no longer the row's, and such a
+   * stage is no stage at all (`stageOf`), so no writer can forget to retire it.
+   */
+  cursor: string;
+  /** Changes received in staged segments (ancestors repeated across segments counted each time) and their response bytes. */
+  changes: number;
+  bytes: number;
+  /** Client clock of the first segment. */
+  started_at: number;
+}
+
 export interface SizingState {
   /** The `limit` of the next `/sync` request, 1 to 80. Stepped down by observed outcomes only (D-09). */
   limit: number;
@@ -210,7 +238,18 @@ export interface SizingState {
   class: SizingClass | null;
   floor_hits: number;
   /** The crash-loop marker (D-09): present while a large page is being processed. */
-  attempt: null | { id: string; limit: number; started_at: number };
+  attempt: null | {
+    id: string;
+    limit: number;
+    started_at: number;
+    /** WEB-09c: the `max_changes` the attempt's request carried, when it carried one. */
+    max_changes?: number;
+  };
+  /**
+   * WEB-09c (segmented delivery, `model/segmented-sync.ts`): the `max_changes` a device signal at `limit = 1` stepped down to (halving, never
+   * below the contract's 4). Absent: the configured starting value.
+   */
+  max_changes?: number;
 }
 
 export interface ProfileState {
@@ -248,26 +287,26 @@ export interface SyncStateRow {
   draft_fence: DraftFence | null;
   defaults: unknown | null;
   /**
-   * WEB-10c (W28, D-10c-4): a bounded copy of the last COMPLETE first page of the displayed account's running timer sessions
+   * WEB-10c (W29, D-10c-4): a bounded copy of the last COMPLETE first page of the displayed account's running timer sessions
    * (`GET /timer-sessions?state=running`), so a reload offline can still show what was running. Read tolerantly (`readTimerCopy`):
    * absent (a database created before it) or damaged is "no copy". Optional, so no migration.
    */
   timer_copy?: unknown | null;
   /**
-   * WEB-10c revision 2 (W28): the last place handed out in the timer observation order (`issueTimerOrder`), and the latest order
+   * WEB-10c revision 2 (W29): the last place handed out in the timer observation order (`issueTimerOrder`), and the latest order
    * already applied to `timer_copy` (an earlier read's replacement or correction is refused). Absent: 0.
    */
   timer_order?: number;
   timer_fence?: number;
   /**
-   * WEB-10c revision 3 (W28, review R14, design assessment DA-T3): what reads of each day observed (`TimerScopeRecord` by occurrence,
+   * WEB-10c revision 3 (W29, review R14, design assessment DA-T3): what reads of each day observed (`TimerScopeRecord` by occurrence,
    * read tolerantly), and the order below which a day's read is no longer trusted for a session it saw running (what was not kept).
    * Absent: none, 0.
    */
   timer_scopes?: Record<string, unknown>;
   timer_scope_floor?: number;
   /**
-   * WEB-10c revision 5 (W28, review R23): the latest COMPLETE observation of the account's running sessions (`TimerAccountRecord`: its
+   * WEB-10c revision 5 (W29, review R23): the latest COMPLETE observation of the account's running sessions (`TimerAccountRecord`: its
    * order and the sessions it listed), kept apart from `timer_copy` so a later partial first page never erases what it proved; and the
    * sessions any read listed FINISHED (the account's history, a day's read), which never run again (`timer_ended`, bounded). Read
    * tolerantly; absent: none.
@@ -275,7 +314,7 @@ export interface SyncStateRow {
   timer_account?: unknown;
   timer_ended?: unknown;
   /**
-   * WEB-10c revision 2 (W27, review R13, design assessment DA-M1): the catch-up DISCOVERY of each task (its first read, before its day is
+   * WEB-10c revision 2 (W28, review R13, design assessment DA-M1): the catch-up DISCOVERY of each task (its first read, before its day is
    * known) that has failed: the consecutive uncertain answers it met and, once they reached the bound or a definite refusal came, its
    * stop. Kept across reloads and tabs, so the budget never starts again by itself; only the person's "Try again" (a new `retry`) does.
    * Removed when the discovery succeeds. Absent: none.
@@ -331,10 +370,15 @@ export interface SyncStateRow {
    * the cache as it is then, and clears this. Absent: nothing is owed.
    */
   recovery_reconcile_pending?: boolean;
+  /**
+   * WEB-09c: the delta revision being received in segments (`model/segmented-sync.ts`), staged in `delta_staging` and applied whole by W1.
+   * Absent or null: none. In force only while `cursor` is the continuation it stored (`stageOf`).
+   */
+  delta_stage?: DeltaStage | null;
 }
 
 /**
- * WEB-10c (W27, D-10c-1/2): one catch-up sequence of a task's occurrences through a day, in the store `materialise_sequences` that
+ * WEB-10c (W28, D-10c-1/2): one catch-up sequence of a task's occurrences through a day, in the store `materialise_sequences` that
  * WEB-09a reserved (key `[task_id+through_date]`, version 1: no schema change). The data layer knows its shape and its compare-and-set,
  * never what the phases mean: the task slice's pure state machine decides every transition.
  */
@@ -358,7 +402,7 @@ export interface MaterialiseSequenceRow {
   /** Consecutive uncertain answers (a send or a read). */
   read_failures: number;
   /**
-   * Revision 4 (review R20): +1 on EVERY write of the row, stamped by W27 itself, so a row never comes back to an identity a caller saw
+   * Revision 4 (review R20): +1 on EVERY write of the row, stamped by W28 itself, so a row never comes back to an identity a caller saw
    * before (a "Try again" pressed on one stop cannot lift a later stop that looks the same). Absent on rows of earlier builds: 0.
    */
   revision?: number;
@@ -408,7 +452,7 @@ export interface MaterialiseRetry {
   pause: null | "window" | "unrecognised" | "clock" | "legacy";
 }
 
-/** WEB-10c revision 2 (W27): one task's failed catch-up discovery (`sync_state.materialise_discovery`). */
+/** WEB-10c revision 2 (W28): one task's failed catch-up discovery (`sync_state.materialise_discovery`). */
 export interface MaterialiseDiscovery {
   /** The person's "Try again" moves it: an answer decided under an earlier one never applies. */
   retry: number;

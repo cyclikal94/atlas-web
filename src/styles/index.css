@@ -10,3 +10,6 @@
 @source "..";
 @source "../../index.html";
 @source "../../fixture.html";
+/* A hook with no classes whose DOM words (`style.transform`, the window's `resize` event) are utility names: scanned, they added two
+ * utilities nothing uses to the production CSS (WEB-11a revision 7, `detail/steady.ts`). */
+@source not "../features/people/detail/steady.ts";

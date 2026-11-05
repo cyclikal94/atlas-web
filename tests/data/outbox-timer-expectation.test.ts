@@ -19,7 +19,7 @@ import { draftRow } from "../support/data/rows";
 
 /**
  * WEB-10c revision 7 (review 7 R32): a timer end's precondition (`EnqueueRequest.expectTimer`) is decided by the WRITING transaction (W2),
- * against the timer evidence (W28) and the session's drafts as stored then. Through the PRODUCTION plan and facade over the IndexedDB
+ * against the timer evidence (W29) and the session's drafts as stored then. Through the PRODUCTION plan and facade over the IndexedDB
  * double. FIXTURE evidence: the real engines run the same plan in the e2e specs.
  */
 const SESSION = "cccccccc-0000-4000-8000-0000000000e1";

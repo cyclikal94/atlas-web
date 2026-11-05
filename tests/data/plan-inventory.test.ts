@@ -8,6 +8,7 @@ import "../../src/data/plans/fence";
 import "../../src/data/plans/commit-page";
 import "../../src/data/plans/defaults";
 import "../../src/data/plans/form-recovery";
+import "../../src/data/plans/form-operations";
 import "../../src/data/plans/outbox";
 import "../../src/data/plans/pending-reads";
 import "../../src/data/plans/profile";
@@ -128,15 +129,22 @@ const WRITER_TABLE: Readonly<Record<string, Row>> = {
     guards: ["INC", "CLS", "OWN", "EPO"],
     durability: "default",
   },
-  // WEB-10c: the catch-up sequences (a compare-and-set of the reserved store) and the running-timer copy (one record, a cache write).
-  // Revision 2: the discovery entries (W27, in the singleton) and the timer observation order and its corrections (W28, fixed-size).
+  // WEB-09c (BOUNDED-SYNC-PAGINATION-20261027): a non-final segment of a delta revision into `delta_staging`, guarded like W1.
   W27: {
+    name: "stageDeltaSegment",
+    guards: ["INC", "CLS", "CAS", "GEN", "OWN", "EPO"],
+    durability: "default",
+  },
+  // WEB-10c: the catch-up sequences (a compare-and-set of the reserved store) and the running-timer copy (one record, a cache write).
+  // Revision 2: the discovery entries (W28, in the singleton) and the timer observation order and its corrections (W29, fixed-size).
+  // The base merge of 5 November 2026 renumbered them W28 and W29 (WEB-09c's segmented delivery took W27 first in the accepted base).
+  W28: {
     // Revision 5 (reviews R24/R25): satisfied rows are deleted by an expectation-checked plan; nothing prunes by date any more.
     name: "writeMaterialiseSequence / deleteSatisfiedSequences / writeMaterialiseDiscovery / liftMaterialiseStops",
     guards: ["INC", "CLS", "EPO"],
     durability: "strict",
   },
-  W28: {
+  W29: {
     // Revision 5 (review R23): the account history's finished sessions.
     name: "writeTimerCopy / issueTimerOrder / reconcileTimerCopy / recordTimerEnded",
     guards: ["INC", "CLS", "EPO"],
@@ -176,6 +184,7 @@ const PRESENT_WRITERS: readonly string[] = [
   "W26",
   "W27",
   "W28",
+  "W29",
 ];
 
 describe("F-S7: the writer inventory", () => {
@@ -267,6 +276,28 @@ describe("F-S7: the writer inventory", () => {
     expect(by("data.editQueuedDraft")?.guards).toEqual(
       expect.arrayContaining(["INC", "FEN"]),
     );
+    // WEB-11a review 4: the hand-off also ends a form copy, so it carries that writer's guard (CLS) and its store.
+    expect(by("data.transferDraft")?.guards).toEqual(
+      expect.arrayContaining(["INC", "FEN", "CLS"]),
+    );
+    expect([...(by("data.transferDraft")?.scope ?? [])].sort()).toEqual(
+      [
+        "cache",
+        "draft_commands",
+        "drafts",
+        "form_recovery",
+        "resource_versions",
+        "sync_state",
+      ].sort(),
+    );
+    expect(by("data.saveFormOperation")).toMatchObject({
+      writer: "W9",
+      durability: "strict",
+    });
+    expect([...(by("data.saveFormOperation")?.scope ?? [])].sort()).toEqual([
+      "form_recovery",
+      "sync_state",
+    ]);
     expect(by("data.supersedeDraft")?.guards).toEqual(
       expect.arrayContaining(["INC", "FEN"]),
     );
@@ -300,14 +331,20 @@ describe("F-S7: the writer inventory", () => {
       "data.commitStagingPage",
       "data.activateSnapshot",
       "data.enqueueDraft",
+      // WEB-11a review 4: a held change's hand-off (the draft and its copy's end, one transaction), admitted like an enqueue.
+      "data.transferDraft",
       "data.editQueuedDraft",
       "data.supersedeDraft",
       "data.saveFormRecovery",
+      // WEB-11a review 4: several conditional copies in one transaction (a hold and its field's head), admitted by the conditional port.
+      "data.saveFormOperation",
       // WEB-12a: the B5 sharing snapshot is server-sized (up to 32 households of 100 members), admitted as a cache write by the defaults source.
       "data.writeDefaults",
+      // WEB-09c: a staged segment is admitted like a delta page, by the engine (or the recovery job's catch-up) that commits it.
+      "data.stageDeltaSegment",
       // WEB-10c: the running-timer copy is server-sized (up to 50 rows with titles), admitted as a cache write by its caller.
       "data.writeTimerCopy",
-      // WEB-10c revision 3: a day's timer observation (W28's scope, DA-T3) grows the singleton, admitted as a cache write by its caller.
+      // WEB-10c revision 3: a day's timer observation (W29's scope, DA-T3) grows the singleton, admitted as a cache write by its caller.
       "data.reconcileTimerCopy",
       // WEB-10c revision 3: a NEW task's discovery entry grows the singleton (no fixed cap now, R16), admitted by the runner before its read.
       "data.writeMaterialiseDiscovery",
@@ -333,9 +370,9 @@ describe("F-S7: the writer inventory", () => {
         .sort(),
     ).toEqual([...ADMITTED, ...FIXED_SIZE].sort());
   });
-  test("the table is exactly W1 to W28 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026; W27 and W28 are WEB-10c's)", () => {
+  test("the table is exactly W1 to W29 (W20 to W26 are WEB-09b's; W26 added by R8 of the review of 10 October 2026; W27 is WEB-09c's segmented delivery; W28 and W29 are WEB-10c's)", () => {
     expect(Object.keys(WRITER_TABLE)).toEqual(
-      Array.from({ length: 28 }, (_, i) => `W${i + 1}`),
+      Array.from({ length: 29 }, (_, i) => `W${i + 1}`),
     );
   });
 });

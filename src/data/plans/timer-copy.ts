@@ -2,7 +2,7 @@ import type { Captured, JsonObject, SyncStateRow } from "../model/types";
 import { guardedPlan, readPlan } from "./builders";
 
 /**
- * W28 (WEB-10c, D-10c-4): a bounded copy of the displayed account's running timer sessions, as the last first page of
+ * W29 (WEB-10c, D-10c-4): a bounded copy of the displayed account's running timer sessions, as the last first page of
  * `GET /timer-sessions?state=running` answered them, persisted as ONE record in `sync_state.timer_copy` (the precedent of W14's
  * `sync_state.defaults`; optional, so no migration). The rows are opaque here: the task slice parses each one strictly when it reads them,
  * so a damaged row is shown as nothing, never guessed.
@@ -410,7 +410,7 @@ export const issueTimerOrder = guardedPlan<
   { order: number | null }
 >({
   name: "data.issueTimerOrder",
-  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: null },
+  meta: { writer: "W29", guards: ["INC", "CLS", "EPO"], quota: null },
   scope: [],
   durability: "default",
   read: async () => null,
@@ -446,7 +446,7 @@ export const writeTimerCopy = guardedPlan<
   { written: boolean; stored: TimerCopyRecord | null; lapsed?: true }
 >({
   name: "data.writeTimerCopy",
-  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  meta: { writer: "W29", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: [],
   durability: "default",
   read: async () => null,
@@ -506,7 +506,7 @@ export const reconcileTimerCopy = guardedPlan<
   { removed: number; applied: boolean; scoped: boolean }
 >({
   name: "data.reconcileTimerCopy",
-  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  meta: { writer: "W29", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: [],
   durability: "default",
   read: async () => null,
@@ -613,7 +613,7 @@ export const recordTimerEnded = guardedPlan<
   { recorded: boolean; removed: number }
 >({
   name: "data.recordTimerEnded",
-  meta: { writer: "W28", guards: ["INC", "CLS", "EPO"], quota: "cache" },
+  meta: { writer: "W29", guards: ["INC", "CLS", "EPO"], quota: "cache" },
   scope: [],
   durability: "default",
   read: async () => null,

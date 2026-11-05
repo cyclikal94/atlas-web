@@ -795,7 +795,7 @@ are focused evidence, never integration acceptance.*
   withholds Start. "Your timers" (`/tasks/timers`, `timers/TimersPage.tsx`, linked from the task list and the timer block): running first, then
   earlier sessions, a restricted row with its times only, Stop and Discard while `can_modify` (with the detail's 7-day choice and closed-day
   rule, one act at a time, and no second Stop for a session whose stop is on its way: revision 1, review R3); offline, the kept copy of the
-  last running read (W28), each copied row titled only while its day is still in this device's cache. A current complete read of the day's
+  last running read (W29), each copied row titled only while its day is still in this device's cache. A current complete read of the day's
   sessions supersedes an older copy: a copied session it does not list (cancelled) is not running (review R2).
 - **Rotas (WF-TASK-05, CM-356, TASK-15/29/32).** On an Anyone task's participation (`detail/Rota.tsx`): "This turn: {You | username | Someone
   (abcd…) | Nobody yet}", "Take turns on this task" (`rota_consent`, online only, needs my enrolment: "Join this task first") and, for an
@@ -833,7 +833,7 @@ are focused evidence, never integration acceptance.*
 - A queued dependency or timer command goes through the builders here (their targets and version bases are the server's: a stop is checked
   against the SESSION's version; a start, stop and discard raise my stream; a completion raises my streams of the days it completes).
 - `set_rota`, `rota_consent` and `materialise` are never queued; an access command is sent online with one key per body.
-- Only the page's runner sends `materialise` (`runnerOf`/`useCatchUp`): another caller would bypass the account's lock and the W27 record.
+- Only the page's runner sends `materialise` (`runnerOf`/`useCatchUp`): another caller would bypass the account's lock and the W28 record.
 
 ## Decisions taken (D-10c-1 … D-10c-12, from the approved plan) and what Running added
 
@@ -841,12 +841,12 @@ are focused evidence, never integration acceptance.*
    (`submitting`), so an uncertain answer, a reload or a takeover resends the same key; after a success only the position is read
    (`awaiting_position_read`), never another `materialise`. A sequence adopted in `awaiting_position_read` takes the first read the new page
    makes as its position read (it was asked after the call was answered): one read, no POST (I-10C-M4).
-2. **D-10c-2** W27's compare-and-set plans (data layer, no task semantics); every write is guarded like a response (INC, CLS, EPO through
+2. **D-10c-2** W28's compare-and-set plans (data layer, no task semantics); every write is guarded like a response (INC, CLS, EPO through
    `AccountService.commit`), the person's Try again included (stronger than the plan's INC-only, for the same identity guarantees).
 3. **D-10c-3** One runner per account: Web Lock `atlas-materialise:<account>`, REQUESTED AND WAITED FOR (not `ifAvailable`): a page that does
    not hold it shows the durable records and takes over when the holder goes. Never `locks.query()`. Note (found natively): the session layer
    answers one window's requests while another window's request is in flight, so a held `materialise` also holds another tab's reads.
-4. **D-10c-4** The running-timer copy (W28) is the last complete FIRST page of `GET /timer-sessions?state=running`, per account database
+4. **D-10c-4** The running-timer copy (W29) is the last complete FIRST page of `GET /timer-sessions?state=running`, per account database
    (revision 2: ordered by the database's observation order, not the clock, and corrected by a day's own read; see below).
    Running added: the detail also keeps, in page memory per identity and day, the last complete read of the day's own sessions, so a session
    seen running stays shown offline ("Last checked …") after its start was acknowledged (found by I-10C-TM3; jsdom regression test).
@@ -912,11 +912,11 @@ own registry, so the command path has jsdom evidence only (its journey over the 
 - **R11, what a partial page lists is known.** Every session the detail accepted, on a first page or a later one, counts at once: one listed
   running withholds Start and offers Stop and Discard; one listed finished is not running whatever the copy says. Only ABSENCE needs the
   complete list (R2's rule). Offline the page memory keeps the last accepted read, complete or not, with "Last checked".
-- **DA-T2 / R10, an order that is not the clock.** Every timer read that may change the kept copy (W28) is given its place in the database's
+- **DA-T2 / R10, an order that is not the clock.** Every timer read that may change the kept copy (W29) is given its place in the database's
   observation order before it is sent (`issueTimerOrder`, a counter in its own transaction), and the copy carries its read's place, so two
   tabs never tie and a clock that goes back decides nothing. `read_at` is shown ("Last checked"), never compared. A complete day read
   supersedes the copy only when it was issued after it (R2 now compares these places).
-- **DA-T1, the kept copy is corrected by the day's read.** Each accepted page of the detail's read corrects W28 under its place: a session it
+- **DA-T1, the kept copy is corrected by the day's read.** Each accepted page of the detail's read corrects W29 under its place: a session it
   lists finished leaves the copy; once complete and later than the copy, a session of that day it does not list leaves it too; and the
   copy's fence moves to the read's place, so an account read issued earlier can no longer restore it (in this tab, another or after a
   reload). A copy written before revision 2 (format 1) reads as place 0: the first ordered read replaces or corrects it.
@@ -928,7 +928,7 @@ own registry, so the command path has jsdom evidence only (its journey over the 
   saving. Check it and choose again."), keeping the entered evidence and the refused draft. The editor's "answer of the opening read" uses
   the same comparison.
 - **R13 / DA-M1, a stopped discovery stays stopped.** The first read of a task's catch-up (its zone and position, before a day is known)
-  keeps its failures and its stop in W27's discovery entry (`sync_state.materialise_discovery`), written before the next read: a pause, a
+  keeps its failures and its stop in W28's discovery entry (`sync_state.materialise_discovery`), written before the next read: a pause, a
   reload or another tab's turn carries on from the count reached, and a stop (three uncertain answers, or a definite refusal) admits no
   automatic read or send, whichever trigger asks (Today's list, the streak, a command's retry, a kick). "Try again" alone admits a fresh
   budget, once: it is made under the account's lock against the stop it was pressed on, so a second press (here or in another tab) adds
@@ -946,7 +946,7 @@ own registry, so the command path has jsdom evidence only (its journey over the 
 jsdom: `materialise-model`, `catchup-runner` (bound, no progress, horizon, uncertain with one key, a reload in each phase, two runners and
 one lock, an identity that ends, offline), `catchup-banner`, `catchup-conflicts`, `streak-model`, `streak-page`, `dependency-model`,
 `dependency-dialog`, `commands-10c`, `timer-block`, `timer-model` (revision 1), `timers-page`, `rota`, `ids`; data: `materialise-plans`
-(W27/W28), `outbox-defaults-review` (the seeded supersession, revision 1). Native (fixture, three engines): `fixture.tasks-10c.spec.ts` E-M1,
+(W28/W29), `outbox-defaults-review` (the seeded supersession, revision 1). Native (fixture, three engines): `fixture.tasks-10c.spec.ts` E-M1,
 E-M2 (two), E-M4, E-S1, E-S2 (390, 1180, 1440), E-D1 (1440, 390, 1180), E-TM1, E-R1, and (revision 1) E-D1/E-R1 identity with their two
 controls. Released backend: `integration.tasks-10c.spec.ts` (20 cases, in the `tasks` stack: revision 1 adds I-10C-TM5's two and I-10C-SU1
 check 6). Mutants: `scripts/mutation/catalogue-web10c.mjs` (MU-3001…MU-3035 unit, MU-3051/3052/3054 real-engine; revision 1 adds

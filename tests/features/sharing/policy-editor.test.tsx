@@ -2,18 +2,21 @@ import {
   act,
   cleanup,
   fireEvent,
+  render,
   screen,
   waitFor,
   within,
 } from "@testing-library/react";
 import { axe } from "jest-axe";
-import { useState } from "react";
+import { StrictMode, useState } from "react";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { SnapshotHousehold } from "../../../src/data";
+import { DataEnvProvider, type SnapshotHousehold } from "../../../src/data";
 import type { SharingResult } from "../../../src/features/sharing/api";
 import * as copy from "../../../src/features/sharing/copy";
+import { SharingEnvProvider } from "../../../src/features/sharing/env";
 import { ResourcePolicyEditor } from "../../../src/features/sharing/ResourcePolicyEditor";
 import { forgetAllRetained } from "../../../src/features/sharing/retained";
+import { UiProviders } from "../../helpers/providers";
 import { draftRow } from "../../support/data/rows";
 import {
   HOME,
@@ -28,6 +31,7 @@ import {
   type Answer,
   fakeSharingApi,
   ok,
+  sharingEnv,
 } from "../../support/sharing/fake-api";
 import { merged, mountSharing, RESOURCE } from "../../support/sharing/mount";
 
@@ -1018,5 +1022,99 @@ describe("DA-M1: the policy editor's membership read has its own loading, failur
     expect(count(t.api, "readPolicy")).toBe(1);
     expect(dialog().querySelector("[data-exclusion]")).toBeNull();
     expect(homeName()).toBe("Home");
+  });
+});
+
+/**
+ * WEB-11a review 23: what a host learns from the editor (`onPolicyRead`, R23.1), and the editor under development's StrictMode, whose
+ * replay of every effect (cleanup, then mount again) the People field editor's composition runs it under. Before the correction the replay
+ * dropped the first read and never asked another (the editor stayed "Loading"), and a save's answer was dropped as if unmounted.
+ */
+describe("WEB-11a review 23: the read it reports, and development's StrictMode replay", () => {
+  test("onPolicyRead reports each read that answered, as the server holds it, never the draft", async () => {
+    const env = stubEnv();
+    env.setResource(RESOURCE, merged({ policy_version: 2 }));
+    const api = fakeSharingApi();
+    const read = {
+      version: 2,
+      policy: {
+        grants: [{ kind: "household" as const, id: HOME, edit: false }],
+        exclude_accounts: [PRIYA],
+      },
+    };
+    api.defaults.policy = ok(read);
+    api.defaults.households = ok([home]);
+    const onPolicyRead = vi.fn();
+    mountSharing(
+      <ResourcePolicyEditor
+        resourceId={RESOURCE}
+        open
+        onOpenChange={() => undefined}
+        onPolicyRead={onPolicyRead}
+      />,
+      { env, api },
+    );
+    await waitFor(() => expect(onPolicyRead).toHaveBeenCalledTimes(1));
+    expect(onPolicyRead).toHaveBeenCalledWith(read);
+    fireEvent.click(
+      within(dialog()).getByRole("button", { name: /^Remove exclusion:/ }),
+    );
+    // An edit is not a read.
+    expect(onPolicyRead).toHaveBeenCalledTimes(1);
+  });
+
+  test("under StrictMode it reads, saves and closes, reporting the receipt", async () => {
+    const env = stubEnv();
+    env.setResource(RESOURCE, merged({ policy_version: 2 }));
+    const api = fakeSharingApi();
+    api.defaults.policy = ok({
+      version: 2,
+      policy: {
+        grants: [{ kind: "household", id: HOME, edit: false }],
+        exclude_accounts: [PRIYA],
+      },
+    });
+    api.defaults.households = ok([home]);
+    const onOpenChange = vi.fn();
+    const onSaved = vi.fn();
+    // StrictMode at the ROOT, as the protected providers put it: nested under another root it does not replay a mount's effects.
+    render(
+      <StrictMode>
+        <UiProviders>
+          <DataEnvProvider env={env}>
+            <SharingEnvProvider value={sharingEnv(api)}>
+              <ResourcePolicyEditor
+                resourceId={RESOURCE}
+                open
+                onOpenChange={onOpenChange}
+                onSaved={onSaved}
+              />
+            </SharingEnvProvider>
+          </DataEnvProvider>
+        </UiProviders>
+      </StrictMode>,
+    );
+    await waitFor(() =>
+      expect(
+        dialog().querySelector('[data-policy-state="editing"]'),
+      ).not.toBeNull(),
+    );
+    fireEvent.click(
+      within(dialog()).getByRole("button", { name: /^Remove exclusion:/ }),
+    );
+    fireEvent.click(dialog().querySelector("[data-save]") as Element);
+    await waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false));
+    expect(api.sent[0]?.commands).toEqual([
+      {
+        kind: "replace_policy",
+        id: RESOURCE,
+        expected_version: 2,
+        policy: {
+          grants: [{ kind: "household", id: HOME, edit: false }],
+          exclude_accounts: [],
+        },
+      },
+    ]);
+    expect(onSaved).toHaveBeenCalledTimes(1);
   });
 });

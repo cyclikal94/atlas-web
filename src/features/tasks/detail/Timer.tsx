@@ -139,7 +139,7 @@ interface Kept {
   sessions: TimerSession[];
   /** ms, when the read's first page was issued. */
   at: number;
-  /** Its place in the observation order (W28), or null. */
+  /** Its place in the observation order (W29), or null. */
   order: number | null;
   complete: boolean;
   issued: number;
@@ -191,7 +191,7 @@ interface Accepted {
   next: string | null;
   /** When the read's FIRST page was issued (ms): a later page cannot make it newer than that. */
   askedAt: number;
-  /** Its place in the observation order (W28), or null: the read genuinely had none (no open service, a store failure at issue). */
+  /** Its place in the observation order (W29), or null: the read genuinely had none (no open service, a store failure at issue). */
   order: number | null;
   /** The database incarnation it was issued under, or null (none was bound). */
   incarnation: string | null;
@@ -202,7 +202,7 @@ interface Accepted {
  *
  * ONE read owns what this shows (review R10): a new read (mount, another identity, day, connection or answered draft, Retry) takes over
  * at once, so an answer to an earlier one, success or failure, is dropped before it reaches the screen, the page memory or the copy; and
- * a further page is accepted only for the chain and cursor that asked for it, one at a time. Each accepted page corrects the copy (W28)
+ * a further page is accepted only for the chain and cursor that asked for it, one at a time. Each accepted page corrects the copy (W29)
  * under the read's place in the observation order: a session it lists finished, and, once complete, one it does not list; and records
  * what it observed of the day (its scope, revision 3), for every page of this database. What was accepted keeps its provenance whatever
  * happens to a later request (revision 7, R31); one ordered in another database incarnation than the one bound now decides nothing here,
@@ -357,7 +357,7 @@ function useDaySessions(occurrenceId: string, again: string) {
         : accepted !== null && accepted.next === null,
     /** When the sessions shown offline were read (ms), or null for a read now. */
     keptAt: kept?.at ?? null,
-    /** The shown read's place in the observation order (W28), as it was issued; null only for a read that had none. */
+    /** The shown read's place in the observation order (W29), as it was issued; null only for a read that had none. */
     order: kept !== null ? kept.order : (accepted?.order ?? null),
     /** The database incarnation bound now: what an end acted on is checked against it (revision 7, R32). */
     bound,

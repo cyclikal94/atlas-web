@@ -340,8 +340,8 @@ export const UNIT_R17 = [
     patch: (t) =>
       sub(
         t,
-        `    return { draft, cache, others: [...others.values()] };`,
-        `    return { draft, cache, others: [] };`,
+        `    return { draft, cache, others: [...others.values()], latest };`,
+        `    return { draft, cache, others: [], latest };`,
       ),
   },
 ];

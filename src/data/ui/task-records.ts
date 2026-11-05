@@ -44,7 +44,7 @@ import type { DataEnv } from "./env";
 import { useWatch } from "./react";
 
 /**
- * WEB-10c's records in the account database (W27 catch-up sequences, W28 the running-timer copy), in a module of their own: only the
+ * WEB-10c's records in the account database (W28 catch-up sequences, W29 the running-timer copy), in a module of their own: only the
  * lazy task screens import it, so its plans stay out of every initial bundle. The task slice owns what the rows mean; this owns how they
  * are read, compared and committed.
  */
@@ -184,7 +184,7 @@ const settled = <O>(
       : { kind: "failed" };
 
 /**
- * W27's compare-and-set write, through the service's commit (G1, G2, G5 and the plan's INC, CLS, EPO). A NEW row grows the store: with
+ * W28's compare-and-set write, through the service's commit (G1, G2, G5 and the plan's INC, CLS, EPO). A NEW row grows the store: with
  * `env`, it is admitted through the origin's quota ledger first (revision 5), and a refusal is `refused` (nothing written). Never throws.
  */
 export async function commitMaterialiseSequence(
@@ -224,7 +224,7 @@ export async function commitMaterialiseSequence(
 }
 
 /**
- * W27: the person's "Try again" over the stops it was pressed on, as one compare-and-set (revision 4, review R20): `written` lifted them
+ * W28: the person's "Try again" over the stops it was pressed on, as one compare-and-set (revision 4, review R20): `written` lifted them
  * all, `stale` lifted nothing (one no longer stands as seen). Never throws.
  */
 export async function commitMaterialiseLift(
@@ -242,7 +242,7 @@ export async function commitMaterialiseLift(
 }
 
 /**
- * W27 (revision 5): removes the task's rows whose need the caller established is satisfied, each only while it is still the row decided
+ * W28 (revision 5): removes the task's rows whose need the caller established is satisfied, each only while it is still the row decided
  * on (`deleteSatisfiedSequences`). Never throws.
  */
 export async function clearSatisfiedSequences(
@@ -331,7 +331,7 @@ export async function readMaterialiseDiscoveryNow(
 }
 
 /**
- * W27's compare-and-set of one task's discovery entry (G1, G2, G5; INC, CLS, EPO). An entry that ADDS a task (expected absent) grows the
+ * W28's compare-and-set of one task's discovery entry (G1, G2, G5; INC, CLS, EPO). An entry that ADDS a task (expected absent) grows the
  * singleton: with `env`, it is admitted through the origin's quota ledger first (revision 3, R16), and a refusal is `refused` (nothing
  * written). Never throws.
  */
@@ -372,7 +372,7 @@ export async function commitMaterialiseDiscovery(
 }
 
 /**
- * W28's observation order: the place of a timer read about to be sent (`captured`: the stamp of its issue). `null`: none was given (no
+ * W29's observation order: the place of a timer read about to be sent (`captured`: the stamp of its issue). `null`: none was given (no
  * service, another identity, a store failure): the read is then shown but decides nothing against the copy and writes nothing to it.
  */
 export async function issueTimerOrderNow(
@@ -390,7 +390,7 @@ export async function issueTimerOrderNow(
 }
 
 /**
- * W28: the copy corrected by a read of one occurrence's sessions, and that read's observation of its day recorded (`reconcileTimerCopy`;
+ * W29: the copy corrected by a read of one occurrence's sessions, and that read's observation of its day recorded (`reconcileTimerCopy`;
  * revision 3, DA-T3). The observation's growth is admitted as a cache write through the origin's quota ledger first; a refusal still
  * corrects the copy and raises the floor instead. Never throws.
  */
@@ -448,7 +448,7 @@ const endedBytes = (ids: readonly string[]) =>
       );
 
 /**
- * W28 (revision 5, review R23): the sessions a page of the account's history listed, recorded as finished and taken out of the copy
+ * W29 (revision 5, review R23): the sessions a page of the account's history listed, recorded as finished and taken out of the copy
  * (`recordTimerEnded`), the growth admitted as a cache write through the origin's quota ledger first; a refusal still takes them out of
  * the copy and records the loss. `captured` is the stamp of the history read's issue. Never throws.
  */
@@ -485,7 +485,7 @@ export async function commitTimerEnded(
 }
 
 /**
- * W28's authority as stored NOW (revision 5, review R23): what an act re-checks after its own waits, so a correction whose watch has not
+ * W29's authority as stored NOW (revision 5, review R23): what an act re-checks after its own waits, so a correction whose watch has not
  * been delivered yet still counts. `undefined`: the store could not be read.
  */
 export async function readTimerAuthorityNow(
@@ -501,7 +501,7 @@ export async function readTimerAuthorityNow(
 }
 
 /**
- * W28: replaces the running-timer copy with `copy` (or removes it), admitted as a cache write through the origin's quota ledger first (a
+ * W29: replaces the running-timer copy with `copy` (or removes it), admitted as a cache write through the origin's quota ledger first (a
  * refusal writes nothing), then committed through the service (G1, G2, G5; INC, CLS, EPO). `captured` is the stamp of the READ's issue.
  */
 export async function commitTimerCopy(

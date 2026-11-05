@@ -3,7 +3,7 @@ import type { RetryFacts } from "../api";
 
 /**
  * The catch-up's retry protocol (revision 10, Decision B; WEB-04 §5.11). PURE: each of its three callers (the discovery read, the
- * `materialise` command and the position read after a successful command) keeps its own durable schedule in W27 (`MaterialiseRetry`), and
+ * `materialise` command and the position read after a successful command) keeps its own durable schedule in W28 (`MaterialiseRetry`), and
  * every transmission, answer and reset is decided here; the runner persists what this returns BEFORE it transmits.
  *
  * - A recognised transient answer (`500 internal_error`, `503 temporarily_unavailable`), no answer, a `429` and an unrecognised COMMAND

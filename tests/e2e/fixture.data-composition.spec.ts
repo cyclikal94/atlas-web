@@ -1,6 +1,7 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import {
   accountDatabaseName,
+  COMPOSITION_BARRIER_VERSION,
   SCHEMA_VERSION,
 } from "../../src/data/model/schema";
 import type { HarnessEnqueue } from "../../src/fixture/data-harness/main";
@@ -164,7 +165,12 @@ test.describe("E-CG2: version 3 closes an older build's connection and an older 
       account,
     );
     expect(description?.version).toBe(SCHEMA_VERSION * 10);
-    expect(SCHEMA_VERSION).toBe(3);
+    // WEB-09c ADAPTATION (labelled, BOUNDED-SYNC-PAGINATION-20261027): the current version is 4 (it adds `delta_staging`), so the line
+    // `expect(SCHEMA_VERSION).toBe(3)` is now false by design. Its intent, that this build stands at or above the version-3 composition
+    // barrier, is kept: the barrier is still 3 and the current version is above it; the upgraded database has the version-4 store.
+    expect(COMPOSITION_BARRIER_VERSION).toBe(3);
+    expect(SCHEMA_VERSION).toBeGreaterThan(COMPOSITION_BARRIER_VERSION);
+    expect(Object.keys(description?.stores ?? {})).toContain("delta_staging");
     const older = await page.evaluate(
       () => (window as unknown as { __older?: number | null }).__older,
     );
@@ -183,6 +189,20 @@ test.describe("E-CG2: version 3 closes an older build's connection and an older 
       name,
     );
     expect(refused).toBe("VersionError");
+    // WEB-09c: a build of version 3 (IndexedDB version 30, before `delta_staging`) cannot open it either.
+    const refused3 = await page.evaluate(
+      (db) =>
+        new Promise<string>((resolve) => {
+          const request = indexedDB.open(db, 30);
+          request.onsuccess = () => {
+            request.result.close();
+            resolve("opened");
+          };
+          request.onerror = () => resolve(request.error?.name ?? "error");
+        }),
+      name,
+    );
+    expect(refused3).toBe("VersionError");
     recordEvidence(info, "e-cg2", {
       version: description?.version,
       older,

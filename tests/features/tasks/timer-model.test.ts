@@ -25,7 +25,7 @@ import { draftRow } from "../../support/data/rows";
 /**
  * Which source says a timer is running (review R2, revised by review R11 and design assessment DA-T2; D-10c-4, B6). What a read of the
  * day's sessions LISTS always counts, on a partial page too (R11). What it OMITS counts only for a COMPLETE read issued after the copy in
- * the database's observation order (`readOrder` > `copyOrder`, W28; never the clock): it supersedes the copy; a copy taken after it, an
+ * the database's observation order (`readOrder` > `copyOrder`, W29; never the clock): it supersedes the copy; a copy taken after it, an
  * unknown order or a partial read leave the copy standing (offline fallback); this device's unsettled start stays until its draft settles.
  *
  * Adaptation (revision 2): the revision-1 cases compared issue times in ms (`readAt` ≥ `copyAt`); each is kept with the same intent over
