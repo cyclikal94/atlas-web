@@ -2770,17 +2770,54 @@ const textCommandField = (
   label,
   value,
 });
+/** HARNESS: one field as `GET /fields?parent_id=` lists it (archived or not); the contract has no single-field read. */
+async function fieldOf(
+  page: Page,
+  id: Id,
+  person: string,
+  field: string,
+): Promise<Projection> {
+  for (const archived of [false, true]) {
+    const found = (await fieldsOf(page, id, person, archived)).find(
+      (row) => row.id === field,
+    );
+    if (found) return found;
+  }
+  throw new Error(`field ${field} is not listed under ${person}`);
+}
+/** HARNESS: `resource` shared as `policy` (a content create carries no household or account grant: made private, then replaced). */
+async function share(
+  page: Page,
+  id: Id,
+  resource: string,
+  policy: unknown,
+): Promise<void> {
+  const current = await policyOf(page, id, resource);
+  expect(
+    (
+      await management(page, id, [
+        {
+          kind: "replace_policy",
+          id: resource,
+          expected_version: current.body.version,
+          policy,
+        },
+      ])
+    ).status,
+  ).toBe(200);
+}
+/** HARNESS: archive or restore a person (`person` itself) or one of its fields, at its current version. */
 async function archiveRaw(
   page: Page,
   id: Id,
+  person: string,
   resource: string,
   archived: boolean,
 ): Promise<void> {
   const row =
-    (await raw(page, id, "GET", `/people/${resource}`)).status === 200
-      ? (await personOf(page, id, resource)).body.person
-      : ((await raw(page, id, "GET", `/fields/${resource}`))
-          .body as Projection);
+    resource === person
+      ? (await personOf(page, id, person)).body.person
+      : await fieldOf(page, id, person, resource);
   const made = await taskCommand(page, id, {
     kind: "archive",
     id: resource,
@@ -2789,8 +2826,6 @@ async function archiveRaw(
   });
   expect(made.status).toBe(200);
 }
-const fieldOf = async (page: Page, id: Id, field: string) =>
-  (await raw(page, id, "GET", `/fields/${field}`)).body as Projection;
 
 test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", () => {
   test("I-PPL24 the owner's journey: field added, edited, renamed, archived and restored; the person renamed, archived and restored; newest first, 'You', current labels only, Recorded since from the API", async ({
@@ -2807,7 +2842,7 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       await go(a, `/people/${person}`);
       await expect(detail(a, person)).toBeVisible({ timeout: 30_000 });
       await agrees(a, aId, person, 2);
-      let row = await fieldOf(a, aId, field);
+      let row = await fieldOf(a, aId, person, field);
       expect(
         (
           await content(a, aId, [
@@ -2815,7 +2850,7 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
           ])
         ).status,
       ).toBe(200);
-      row = await fieldOf(a, aId, field);
+      row = await fieldOf(a, aId, person, field);
       expect(
         (
           await content(a, aId, [
@@ -2823,8 +2858,8 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
           ])
         ).status,
       ).toBe(200);
-      await archiveRaw(a, aId, field, true);
-      await archiveRaw(a, aId, field, false);
+      await archiveRaw(a, aId, person, field, true);
+      await archiveRaw(a, aId, person, field, false);
       const now = (await personOf(a, aId, person)).body.person;
       expect(
         (
@@ -2840,8 +2875,8 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
           ])
         ).status,
       ).toBe(200);
-      await archiveRaw(a, aId, person, true);
-      await archiveRaw(a, aId, person, false);
+      await archiveRaw(a, aId, person, person, true);
+      await archiveRaw(a, aId, person, person, false);
       // Nine events: the preview shows the newest five, Show all the rest.
       await agrees(a, aId, person, 5);
       await activitySection(a)
@@ -2911,7 +2946,7 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       );
       const field = fields[0] as string;
       for (let n = 1; n <= 58; n += 1) {
-        const row = await fieldOf(a, aId, field);
+        const row = await fieldOf(a, aId, person, field);
         expect(
           (
             await content(a, aId, [
@@ -2989,34 +3024,21 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       const { page: a, id: aId } = await boot(aContext, "ivan", "/today");
       const { page: b, id: bId } = await boot(bContext, "grace", "/today");
       const home = await household(a, aId, b, bId);
-      const person = crypto.randomUUID();
-      const field = crypto.randomUUID();
       const editable = {
         grants: [{ kind: "household", id: home, edit: true }],
         exclude_accounts: [],
       };
-      expect(
-        (
-          await content(a, aId, [
-            {
-              kind: "create_person",
-              id: person,
-              name: unique("I-AC Actors"),
-              initial_policy: HOME_VIEW_OF(home),
-            },
-            {
-              kind: "create_field",
-              id: field,
-              person_id: person,
-              label: "Shared note",
-              value: "a",
-              initial_policy: editable,
-            },
-          ])
-        ).status,
-      ).toBe(200);
+      const { person, fields } = await seedPerson(
+        a,
+        aId,
+        unique("I-AC Actors"),
+        [{ label: "Shared note", text: "a" }],
+      );
+      const field = fields[0] as string;
+      await share(a, aId, person, HOME_VIEW_OF(home));
+      await share(a, aId, field, editable);
       await cached(b, bId, field);
-      const row = await fieldOf(b, bId, field);
+      const row = await fieldOf(b, bId, person, field);
       expect(
         (
           await content(b, bId, [
@@ -3086,40 +3108,23 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       const { page: a, id: aId } = await boot(aContext, "erin", "/today");
       const { page: b, id: bId } = await boot(bContext, "mia", "/today");
       const home = await household(a, aId, b, bId);
-      const person = crypto.randomUUID();
-      const secret = crypto.randomUUID();
-      const open = crypto.randomUUID();
-      expect(
-        (
-          await content(a, aId, [
-            {
-              kind: "create_person",
-              id: person,
-              name: unique("I-AC Hidden"),
-              initial_policy: HOME_VIEW_OF(home),
-            },
-            {
-              kind: "create_field",
-              id: open,
-              person_id: person,
-              label: "Open note",
-              value: "o",
-              initial_policy: HOME_VIEW_OF(home),
-            },
-            {
-              kind: "create_field",
-              id: secret,
-              person_id: person,
-              label: "Private detail",
-              value: "s",
-              initial_policy: HOME_VIEW_OF(home),
-            },
-          ])
-        ).status,
-      ).toBe(200);
+      const { person, fields } = await seedPerson(
+        a,
+        aId,
+        unique("I-AC Hidden"),
+        [
+          { label: "Open note", text: "o" },
+          { label: "Private detail", text: "s" },
+        ],
+      );
+      const open = fields[0] as string;
+      const secret = fields[1] as string;
+      await share(a, aId, person, HOME_VIEW_OF(home));
+      await share(a, aId, open, HOME_VIEW_OF(home));
+      await share(a, aId, secret, HOME_VIEW_OF(home));
       // Newest first: the secret field's edits are the newest four, then the open field's event, then its own creation.
       for (let n = 1; n <= 4; n += 1) {
-        const row = await fieldOf(a, aId, secret);
+        const row = await fieldOf(a, aId, person, secret);
         expect(
           (
             await content(a, aId, [
@@ -3132,9 +3137,11 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       await go(b, `/people/${person}`);
       await expect(detail(b, person)).toBeVisible({ timeout: 30_000 });
       const before = await agrees(b, bId, person, 5);
+      // The preview is the secret field's four edits and its creation: the page's own cursor is an event about that field.
+      expect(
+        before.slice(0, 5).every((event) => event.target.id === secret),
+      ).toBe(true);
       const cursor = before[4]?.id as string;
-      expect(before[4]?.target.id).toBe(open);
-      expect(before[3]?.target.id).toBe(secret);
       // B's sync is held from here, so the narrowing reaches B's page only through the timeline's own read.
       const hold = await proxy.addRule({
         method: "GET",
@@ -3154,16 +3161,15 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
           ])
         ).status,
       ).toBe(200);
-      // A cursor B was given for a now-hidden event is refused, the same as any other (raw).
-      const hiddenCursor = before[0]?.id as string;
+      // That cursor is now an event B cannot see: refused, the same as any other value (raw), so it reveals nothing.
       expect(
-        (await activityRaw(b, bId, person, `?limit=5&after=${hiddenCursor}`))
-          .status,
+        (await activityRaw(b, bId, person, `?limit=45&after=${cursor}`)).status,
       ).toBe(422);
-      // The page's own cursor (the open field's event) is still valid: page from it and from the first page agree with the API.
-      expect(
-        (await activityRaw(b, bId, person, `?limit=5&after=${cursor}`)).status,
-      ).toBe(200);
+      const log = async () =>
+        (await proxy.log()).filter((e) =>
+          e.path.startsWith(`${API}/people/${person}/activity`),
+        );
+      const before422 = (await log()).length;
       await activitySection(b)
         .getByRole("button", { name: "Show all changes" })
         .click();
@@ -3176,6 +3182,10 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
           { timeout: 30_000 },
         )
         .toBe(false);
+      // The UI's Show all asked after its now-hidden cursor (422) and read again from the first page (B's sync still held).
+      const afterPress = (await log()).slice(before422);
+      expect(afterPress.map((e) => e.status)).toContain(422);
+      expect(afterPress.length).toBeGreaterThanOrEqual(2);
       await proxy.release(hold.id);
       await proxy.removeRule(hold.id);
       const after = await agrees(b, bId, person);
@@ -3228,9 +3238,8 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
         grants: [{ kind: "account", id: bId.account_id, edit: false }],
         exclude_accounts: [],
       };
-      const { person: target } = await seedPerson(a, aId, stem, [], {
-        policy: grantB,
-      });
+      const { person: target } = await seedPerson(a, aId, stem);
+      await share(a, aId, target, grantB);
       const { person: source } = await seedPerson(a, aId, `${stem} dup`, [
         { label: "Source note", text: "s" },
       ]);
@@ -3250,10 +3259,8 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       await cached(a, aId, target);
       await go(a, `/people/${target}`);
       await expect(detail(a, target)).toBeVisible({ timeout: 30_000 });
-      await activitySection(a)
-        .getByRole("button", { name: "Show all changes" })
-        .click();
-      const api = await agrees(a, aId, target);
+      // Four events (the target added, the source added, its field added, the merge): the preview shows them all.
+      const api = await agrees(a, aId, target, 4);
       const merge = api.find((event) => event.type === "person_merged");
       expect(merge?.merged_from).toEqual({ id: source, label: `${stem} dup` });
       await expect(activitySection(a)).toContainText(
@@ -3318,7 +3325,7 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
         [{ label: "Diagnosis: example", text: "x" }],
       );
       const field = fields[0] as string;
-      let row = await fieldOf(a, aId, field);
+      let row = await fieldOf(a, aId, person, field);
       expect(
         (
           await content(a, aId, [
@@ -3326,7 +3333,7 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
           ])
         ).status,
       ).toBe(200);
-      row = await fieldOf(a, aId, field);
+      row = await fieldOf(a, aId, person, field);
       expect(
         (
           await content(a, aId, [
@@ -3334,7 +3341,7 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
           ])
         ).status,
       ).toBe(200);
-      await archiveRaw(a, aId, field, true);
+      await archiveRaw(a, aId, person, field, true);
       await go(a, `/people/${person}`);
       await expect(detail(a, person)).toBeVisible({ timeout: 30_000 });
       const api = await agrees(a, aId, person, 5);
