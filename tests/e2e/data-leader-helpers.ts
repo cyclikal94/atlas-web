@@ -103,7 +103,7 @@ export async function leaderNetwork(
     route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ status: "ok", api_version: "0.29.0" }),
+      body: JSON.stringify({ status: "ok", api_version: "0.31.0" }),
     }),
   );
   await context.route("**/api/experimental/v1/**", async (route: Route) => {

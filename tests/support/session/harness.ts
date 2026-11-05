@@ -281,7 +281,7 @@ export class Fixture {
         trace: new FakeTrace(world, id, surface),
       },
       {
-        supportedRange: rangeFromPin("0.29.0-rc.1"),
+        supportedRange: rangeFromPin("0.31.0-rc.1"),
         config: { ...this.options.config, ...options.config },
       },
     );

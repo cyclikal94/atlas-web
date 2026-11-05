@@ -12,10 +12,10 @@ import { randomBytes } from "node:crypto";
 import { acquireImage, labelArgs } from "./docker-resources.mjs";
 import { Cancelled } from "./ownership.mjs";
 
-// Pins: the backend's container image index digest (release asset container-image.txt, v0.29.0-rc.1) and the PostgreSQL index digest this repository
+// Pins: the backend's container image index digest (release asset container-image.txt, v0.31.0-rc.1) and the PostgreSQL index digest this repository
 // already pins for its Compose example (deploy/base-images.env).
 export const BACKEND_IMAGE =
-  "ghcr.io/cyclikal94/atlas@sha256:261b9074a212f84e4fe10c1b82afb04807ce918951a8101b40018badaadec7da";
+  "ghcr.io/cyclikal94/atlas@sha256:ac29d2d5311b34427ce8307293fa195e4af33e6547f5b8717644ffed5b59ff37";
 export const POSTGRES_IMAGE =
   "postgres:17.11@sha256:d74eeac9a635390a49bc21bd49fccd973de707e2a53a76ac49b552b8712ec46f";
 
