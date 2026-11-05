@@ -23,6 +23,7 @@ import {
  * id once. E-AC4 a refused cursor restarts; a 404 clears the section; a field removed by /sync is withheld before the re-read answers.
  * E-AC5 offline shows nothing earlier; online reads again. E-AC6 a merged alias's route; targets this device does not hold are plain.
  * E-AC7 a second device of the same account reads the same ids in the same order. E-AC8 keyboard only, names, and 360 px wide.
+ * E-AC9 keyboard focus, the items and the controls survive a refresh whose re-read is held (review 1, R-1).
  */
 const P = "55555555-5555-4555-8555-555555555555";
 const ALIAS = "57575757-5757-4757-8757-575757575757";
@@ -478,5 +479,102 @@ test.describe("E-AC8: keyboard, names and a narrow screen (A19-11)", () => {
       .boundingBox();
     expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
     recordEvidence(info, "e-ac8", { focused: eid(5) });
+  });
+});
+
+test.describe("E-AC9: keyboard across a refresh (A19-11; review 1, R-1)", () => {
+  test("focus on Show older changes stays through a synced change and its held re-read, on the same items; Enter then shows older and moves focus", async ({
+    context,
+  }, info) => {
+    const events = edits(120);
+    const { page, net, served } = await open(context, events);
+    await ready(page);
+    const tabTo = async (selector: string) => {
+      for (let i = 0; i < 80; i += 1) {
+        if (
+          await page.evaluate(
+            (wanted) => document.activeElement?.matches(wanted) ?? false,
+            selector,
+          )
+        )
+          return true;
+        await pressTab(page);
+      }
+      return false;
+    };
+    await page.locator("[data-activity] h3").click();
+    expect(await tabTo("[data-activity-extend]")).toBe(true);
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-activity-event]")).toHaveCount(50);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          document.activeElement?.getAttribute("data-activity-event"),
+        ),
+      )
+      .toBe(eid(6));
+    expect(await tabTo("[data-activity-extend]")).toBe(true);
+    // Mark the first item's node: a remount would replace it.
+    await page
+      .locator(`[data-activity-event="${eid(1)}"]`)
+      .evaluate((item) => item.setAttribute("data-e-ac9", "kept"));
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    served.activityScript.push(() => held);
+    const before = served.activityLog.length;
+    await publishChanges(
+      page,
+      net,
+      [
+        {
+          kind: "upsert",
+          resource: fieldP(
+            F1,
+            P,
+            "Phone",
+            { kind: "text", text: "0771" },
+            { version: 2 },
+          ),
+        },
+      ],
+      { start: false },
+    );
+    await expect.poll(() => served.activityLog.length).toBeGreaterThan(before);
+    await expect(section(page)).toHaveAttribute("data-activity", "loading");
+    const focusedNow = () =>
+      page.evaluate(() => ({
+        extend: document.activeElement?.hasAttribute("data-activity-extend"),
+        label: document.activeElement?.textContent,
+      }));
+    expect(await focusedNow()).toEqual({
+      extend: true,
+      label: "Show older changes",
+    });
+    await expect(
+      section(page).getByRole("button", { name: "Show fewer" }),
+    ).toBeVisible();
+    await expect(page.locator("[data-activity-event]")).toHaveCount(50);
+    release();
+    await ready(page);
+    expect(await focusedNow()).toEqual({
+      extend: true,
+      label: "Show older changes",
+    });
+    await expect(
+      page.locator(`[data-activity-event="${eid(1)}"]`),
+    ).toHaveAttribute("data-e-ac9", "kept");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("[data-activity-event]")).toHaveCount(100);
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          document.activeElement?.getAttribute("data-activity-event"),
+        ),
+      )
+      .toBe(eid(51));
+    await expect(page.locator("body")).toContainText("50 older changes shown.");
+    recordEvidence(info, "e-ac9", { activityLog: served.activityLog });
   });
 });

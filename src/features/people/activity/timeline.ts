@@ -71,21 +71,27 @@ function failureOf(result: { kind: string }): "failed" | "not_found" {
 
 /**
  * One read of the timeline from its first page until `depth` events are held or the start of the recorded history is reached. `current`
- * is asked before and after every page: once it says no, the walk stops (`superseded`).
+ * is asked before and after every page: once it says no, the walk stops (`superseded`). `depth` is asked before every page too: a
+ * "Show all changes" / "Show older changes" / "Show fewer" pressed while this read is on its way (the earlier answer shown, busy) moves
+ * the depth this read stops at, within its one piece (R-1).
  */
 export async function walkActivity(
   api: Pick<PeopleApi, "readPersonActivity">,
   personId: string,
-  depth: number,
+  depthNow: () => number,
   current: () => boolean,
 ): Promise<ActivityWalk> {
   const items: PersonActivityEvent[] = [];
   const seen = new Set<string>();
   let after: string | null = null;
   let coverage: number | null = null;
+  let depth = depthNow();
   // Bounded whatever the server answers: each page is at least one event, and a page of repeats still moves the cursor.
-  const pages = 2 * Math.ceil(depth / ACTIVITY_STEP) + 1;
-  for (let page = 0; page < pages; page += 1) {
+  for (
+    let page = 0;
+    page < 2 * Math.ceil(Math.min(depth, ACTIVITY_MAX) / ACTIVITY_STEP) + 1;
+    page += 1
+  ) {
     if (!current()) return { kind: "superseded" };
     const result: PeopleResult<PersonActivityPage> =
       await api.readPersonActivity(personId, {
@@ -115,6 +121,7 @@ export async function walkActivity(
       items.push(event);
     }
     after = answer.next_after;
+    depth = depthNow();
     if (after === null || items.length >= depth) break;
   }
   return {
@@ -151,11 +158,11 @@ export function readActivity(
   void (async () => {
     let state: ActivityEntry["state"] = { kind: "failed", reason: "stale" };
     for (let attempt = 0; attempt < STALE_RETRIES; attempt += 1) {
-      // Asked afresh each time: "Show older changes" may have raised it meanwhile.
+      // Asked afresh before every page: "Show older changes" may have raised it meanwhile.
       const outcome = await walkActivity(
         env.api,
         personId,
-        depthOf(memory, personId),
+        () => depthOf(memory, personId),
         current,
       );
       if (outcome.kind === "superseded" || !current()) return;
@@ -199,12 +206,20 @@ function stillCurrent(
  * "Show all changes" / "Show older changes": the depth rises first (an invalidation meanwhile re-reads to the new depth), then the next
  * events are read after the held timeline's cursor, within its generation. A refused cursor (`422`) reads the timeline again from its
  * first page; a `404` loses it; any other failure keeps what is held and says so.
+ *
+ * Pressed while a re-read is on its way (the earlier answer shown, busy; R-1), only the depth rises: that re-read reads to it.
  */
 export function extendActivity(env: PeopleEnv, personId: string): void {
   const memory = env.memory;
   const entry = memory.activity.get(personId);
+  if (entry === undefined || entry.state.kind === "loading") {
+    const depth = depthOf(memory, personId);
+    if (depth >= ACTIVITY_MAX) return;
+    memory.activityDepth.set(personId, nextDepth(depth));
+    memory.touch();
+    return;
+  }
   if (
-    entry === undefined ||
     entry.state.kind !== "ready" ||
     entry.state.extending ||
     entry.generation !== memory.summaryGeneration

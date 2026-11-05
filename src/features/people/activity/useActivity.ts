@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { usePeopleEnv } from "../env";
+import { type PeopleEnv, usePeopleEnv } from "../env";
 import { type PeopleMemory, useMemoryRevision } from "../memory";
 import {
   ACTIVITY_MAX,
@@ -15,34 +15,29 @@ import {
  *
  *  - Offline: nothing (never an earlier answer: the summaries' rule, D-19-8).
  *  - While a re-read is on its way, the timeline this view showed for the SAME person under the same identity stays (`previous`, marked
- *    busy); a failure, a `404`, a merge note, going offline or another person or identity lets go of it at once (D-19-3).
+ *    busy), with the same controls as when it was ready (R-1: the section keeps one tree, so focus and the controls survive a refresh);
+ *    a failure, a `404`, a merge note, going offline or another person or identity lets go of it at once (D-19-3).
  *  - `ready`: the held timeline cut to the depth asked for. `canExtend`: "Show all changes"/"Show older changes" can show more (held, or
  *    recorded before what is held); `atCap`: the 500 most recent are shown and more were recorded.
  */
+export interface ActivityShown {
+  timeline: ActivityTimeline;
+  checkedAt: number;
+  depth: number;
+  extending: boolean;
+  extendFailed: boolean;
+  canExtend: boolean;
+  atCap: boolean;
+  /** Every event recorded since coverage began is shown: nothing earlier exists. */
+  startReached: boolean;
+  extend(): void;
+  collapse(): void;
+}
+
 export type ActivityView =
   | { status: "offline" }
-  | {
-      status: "loading";
-      previous: {
-        timeline: ActivityTimeline;
-        checkedAt: number;
-        depth: number;
-      } | null;
-    }
-  | {
-      status: "ready";
-      timeline: ActivityTimeline;
-      checkedAt: number;
-      depth: number;
-      extending: boolean;
-      extendFailed: boolean;
-      canExtend: boolean;
-      atCap: boolean;
-      /** Every event recorded since coverage began is shown: nothing earlier exists. */
-      startReached: boolean;
-      extend(): void;
-      collapse(): void;
-    }
+  | { status: "loading"; previous: ActivityShown | null }
+  | ({ status: "ready" } & ActivityShown)
   | { status: "failed"; reason: "failed" | "stale"; retry(): void }
   | { status: "gone" }
   | { status: "merged"; canonicalId: string };
@@ -52,6 +47,32 @@ const cut = (timeline: ActivityTimeline, depth: number): ActivityTimeline =>
   timeline.items.length <= depth
     ? timeline
     : { ...timeline, items: timeline.items.slice(0, depth) };
+
+/** What `held` shows at `depth`, and what its controls can do (the same whether it is the answer now or the one a re-read will replace). */
+function shownOf(
+  env: PeopleEnv,
+  personId: string,
+  held: ActivityTimeline,
+  checkedAt: number,
+  depth: number,
+  step: { extending: boolean; extendFailed: boolean },
+): ActivityShown {
+  const more = held.items.length > depth || held.next !== null;
+  return {
+    timeline: cut(held, depth),
+    checkedAt,
+    depth,
+    extending: step.extending,
+    extendFailed: step.extendFailed,
+    canExtend: more && (depth < ACTIVITY_MAX || held.items.length < depth),
+    atCap: depth >= ACTIVITY_MAX && held.items.length >= depth && more,
+    startReached: !more,
+    extend: () => extendActivity(env, personId),
+    collapse: () => collapseActivity(env.memory, personId),
+  };
+}
+
+const IDLE = { extending: false, extendFailed: false } as const;
 
 export function useActivity(personId: string): ActivityView {
   const env = usePeopleEnv();
@@ -90,11 +111,14 @@ export function useActivity(personId: string): ActivityView {
       previous:
         previous === null
           ? null
-          : {
-              timeline: cut(previous.timeline, depth),
-              checkedAt: previous.checkedAt,
+          : shownOf(
+              env,
+              personId,
+              previous.timeline,
+              previous.checkedAt,
               depth,
-            },
+              IDLE,
+            ),
     };
   }
   if (state.kind !== "ready") {
@@ -116,18 +140,8 @@ export function useActivity(personId: string): ActivityView {
     checkedAt: state.checkedAt,
   };
   const held = state.timeline;
-  const more = held.items.length > depth || held.next !== null;
   return {
     status: "ready",
-    timeline: cut(held, depth),
-    checkedAt: state.checkedAt,
-    depth,
-    extending: state.extending,
-    extendFailed: state.extendFailed,
-    canExtend: more && (depth < ACTIVITY_MAX || held.items.length < depth),
-    atCap: depth >= ACTIVITY_MAX && held.items.length >= depth && more,
-    startReached: !more,
-    extend: () => extendActivity(env, personId),
-    collapse: () => collapseActivity(memory, personId),
+    ...shownOf(env, personId, held, state.checkedAt, depth, state),
   };
 }

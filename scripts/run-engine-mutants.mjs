@@ -79,7 +79,7 @@ if (args.includes("--only") && only.length === 0)
 if (only.some((id) => !ENGINE.some((m) => m.id === id)))
   throw new Error("Unknown --only mutant ID");
 const selected = ENGINE.filter((m) => !only.length || only.includes(m.id));
-const EXPECTED_ENGINE = 311; // WEB-11a (287) plus the five accepted WEB-08d browser mutants, plus WEB-11b's twelve (MU-4131..MU-4134, MU-4145..MU-4147, MU-4150, MU-4158, MU-4169, MU-4170, MU-4178), plus WEB-19's three (MU-6151..MU-6153).
+const EXPECTED_ENGINE = 312; // WEB-11a (287) plus the five accepted WEB-08d browser mutants, plus WEB-11b's twelve (MU-4131..MU-4134, MU-4145..MU-4147, MU-4150, MU-4158, MU-4169, MU-4170, MU-4178), plus WEB-19's four (MU-6151..MU-6154).
 // Opt-in concurrency is restricted to native adapter conformance. Expiry/wake,
 // quota/ownership, wipe and other groups have barriers even with --jobs > 1.
 const mayParallelise = (m) =>

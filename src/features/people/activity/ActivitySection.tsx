@@ -1,18 +1,34 @@
 import { Link } from "@tanstack/react-router";
-import { type RefObject, useEffect, useId, useRef, useState } from "react";
+import {
+  type RefObject,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   type Announcement,
   useAnnouncer,
 } from "../../../components/ui/announcer";
 import { Button } from "../../../components/ui/button";
 import { List } from "../../../components/ui/list";
-import { useCachedResource, useCachedResources } from "../../../data";
+import {
+  type ListedResource,
+  useCachedResource,
+  useCachedResources,
+} from "../../../data";
 import type { PersonActivityEvent } from "../model/activity";
 import * as copy from "./copy";
 import { type ActivityPart, describeActivity } from "./describe";
 import { formatSince, formatWhen, isoOf } from "./format";
 import { ACTIVITY_MAX, ACTIVITY_PREVIEW, ACTIVITY_STEP } from "./timeline";
-import { type ActivityView, useActivity } from "./useActivity";
+import {
+  type ActivityShown,
+  type ActivityView,
+  useActivity,
+} from "./useActivity";
 
 /**
  * WEB-19: "Recent changes" on the person detail (D-19-1, after "Shared with"), from `GET /people/{id}/activity` while online
@@ -25,7 +41,8 @@ import { type ActivityView, useActivity } from "./useActivity";
  *  - Honest coverage: "Recorded since …" from the server's `coverage_started_at`, never from the oldest event; nothing is made up from this
  *    device's own saves; a note says only changes the reader can see now are listed, with current names (shown to every reader alike).
  *  - While a re-read is on its way, the earlier answer stays (busy), but a field row whose field this device no longer holds is withheld at
- *    once (D-19-3): access changes arrive by sync before the re-read answers.
+ *    once (D-19-3): access changes arrive by sync before the re-read answers. It stays as the same tree (R-1): its items, controls,
+ *    keyboard focus and the announcement survive every refresh (a synced change, a receipt, the 60-second tick, a return to the tab).
  */
 export function ActivitySection({ personId }: { personId: string }) {
   const heading = useId();
@@ -64,30 +81,32 @@ function Body({ view, personId }: { view: ActivityView; personId: string }) {
     case "merged":
       return <MergedNote canonicalId={view.canonicalId} />;
     case "loading":
+      // R-1: the earlier answer is the SAME `Ready` element as the answer it will become (one type at one position), so React keeps its
+      // tree across `ready -> loading -> ready`: the list's nodes, keyboard focus, the controls and the per-press state survive a re-read.
       return view.previous === null ? (
         <p aria-busy="true" className={note} data-activity-checking="">
           {copy.CHECKING}
         </p>
       ) : (
-        <div aria-busy="true" className="flex min-w-0 flex-col gap-2">
-          <Events
-            events={view.previous.timeline.items}
-            personId={personId}
-            withhold
-          />
-          <Coverage since={view.previous.timeline.coverageStartedAt} />
-        </div>
+        <Ready view={view.previous} refreshing personId={personId} />
       );
     case "ready":
-      return <Ready view={view} personId={personId} />;
+      return <Ready view={view} refreshing={false} personId={personId} />;
   }
 }
 
+/**
+ * A shown timeline: the answer now, or (`refreshing`) the earlier one while a re-read is on its way, marked busy, its field rows withheld
+ * once this device no longer holds the field (D-19-3). Its controls stay while refreshing; a press then moves the depth the re-read
+ * reads to (`extendActivity`).
+ */
 function Ready({
   view,
+  refreshing,
   personId,
 }: {
-  view: Extract<ActivityView, { status: "ready" }>;
+  view: ActivityShown;
+  refreshing: boolean;
   personId: string;
 }) {
   const items = view.timeline.items;
@@ -95,12 +114,14 @@ function Ready({
   const controlsRef = useRef<HTMLDivElement>(null);
   const announcer = useAnnouncer();
   const said = useRef<Announcement | null>(null);
-  // "Show older changes" moves focus to the first event it shows, and says how many it showed (once the read is over), through the
-  // page's one polite live region (lint R6).
+  const busy = refreshing || view.extending;
+  // "Show older changes" moves focus to the first event it shows, and says how many it showed (once the read is over, whichever read
+  // it was: its own step, or a re-read that arrived meanwhile and read to the new depth), through the page's one polite live region
+  // (lint R6).
   const [asked, setAsked] = useState<number | null>(null);
   const [refocus, setRefocus] = useState(false);
   useEffect(() => {
-    if (asked === null || view.extending) return;
+    if (asked === null || busy) return;
     setAsked(null);
     said.current?.retract();
     if (view.extendFailed) {
@@ -113,7 +134,7 @@ function Ready({
     listRef.current
       ?.querySelectorAll<HTMLElement>("[data-activity-event]")
       [asked]?.focus();
-  }, [asked, view.extending, view.extendFailed, items.length, announcer]);
+  }, [asked, busy, view.extendFailed, items.length, announcer]);
   useEffect(() => () => said.current?.retract(), []);
   useEffect(() => {
     if (!refocus) return;
@@ -123,65 +144,72 @@ function Ready({
       ?.querySelector<HTMLElement>("[data-activity-extend]")
       ?.focus();
   }, [refocus]);
-  if (items.length === 0)
-    return (
-      <>
-        <p className={note} data-activity-empty="">
-          {copy.EMPTY(formatSince(view.timeline.coverageStartedAt))}
-        </p>
-        <p className={note}>{copy.SCOPE_NOTE}</p>
-      </>
-    );
   const extend = () => {
     setAsked(items.length);
     view.extend();
   };
   return (
     <div
-      aria-busy={view.extending ? "true" : undefined}
+      aria-busy={busy ? "true" : undefined}
       className="flex min-w-0 flex-col gap-2"
     >
-      <Events events={items} personId={personId} listRef={listRef} />
-      <Coverage
-        since={view.timeline.coverageStartedAt}
-        startReached={view.startReached}
-      />
-      {view.atCap ? (
-        <p className={note} data-activity-cap="">
-          {copy.CAP(ACTIVITY_MAX)}
-        </p>
-      ) : null}
-      {view.extending ? (
-        <p className={note} data-activity-status="loading">
-          {copy.LOADING_OLDER}
-        </p>
-      ) : view.extendFailed ? (
-        <p className={note} data-activity-status="failed">
-          {copy.OLDER_FAILED}
-        </p>
-      ) : null}
-      <div ref={controlsRef} className="flex flex-wrap items-center gap-2">
-        {view.canExtend ? (
-          <Button variant="quiet" onClick={extend} data-activity-extend="">
-            {view.extendFailed
-              ? copy.TRY_AGAIN
-              : view.depth < ACTIVITY_STEP
-                ? copy.SHOW_ALL
-                : copy.SHOW_OLDER}
-          </Button>
-        ) : null}
-        {view.depth > ACTIVITY_PREVIEW ? (
-          <Button
-            variant="quiet"
-            onClick={() => {
-              view.collapse();
-              setRefocus(true);
-            }}
-          >
-            {copy.SHOW_FEWER}
-          </Button>
-        ) : null}
-      </div>
+      {items.length === 0 ? (
+        <>
+          <p className={note} data-activity-empty="">
+            {copy.EMPTY(formatSince(view.timeline.coverageStartedAt))}
+          </p>
+          <p className={note}>{copy.SCOPE_NOTE}</p>
+        </>
+      ) : (
+        <>
+          <Events
+            events={items}
+            personId={personId}
+            withhold={refreshing}
+            listRef={listRef}
+          />
+          <Coverage
+            since={view.timeline.coverageStartedAt}
+            startReached={view.startReached}
+          />
+          {view.atCap ? (
+            <p className={note} data-activity-cap="">
+              {copy.CAP(ACTIVITY_MAX)}
+            </p>
+          ) : null}
+          {view.extending || (refreshing && asked !== null) ? (
+            <p className={note} data-activity-status="loading">
+              {copy.LOADING_OLDER}
+            </p>
+          ) : view.extendFailed ? (
+            <p className={note} data-activity-status="failed">
+              {copy.OLDER_FAILED}
+            </p>
+          ) : null}
+          <div ref={controlsRef} className="flex flex-wrap items-center gap-2">
+            {view.canExtend ? (
+              <Button variant="quiet" onClick={extend} data-activity-extend="">
+                {view.extendFailed
+                  ? copy.TRY_AGAIN
+                  : view.depth < ACTIVITY_STEP
+                    ? copy.SHOW_ALL
+                    : copy.SHOW_OLDER}
+              </Button>
+            ) : null}
+            {view.depth > ACTIVITY_PREVIEW ? (
+              <Button
+                variant="quiet"
+                onClick={() => {
+                  view.collapse();
+                  setRefocus(true);
+                }}
+              >
+                {copy.SHOW_FEWER}
+              </Button>
+            ) : null}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -208,7 +236,30 @@ function Coverage({
   );
 }
 
-/** The events, a slice of at most 50 at a time (one cached read of each slice's items, under the store's working set of 100). */
+type CachedRows = Readonly<Record<string, ListedResource | null>>;
+
+/** The ids the events read from this device's cache: their targets, except the person itself, each once, as they first appear. */
+const targetsOf = (
+  events: readonly PersonActivityEvent[],
+  personId: string,
+): string[] => [
+  ...new Set(
+    events
+      .filter(
+        (event) =>
+          event.target.kind === "field" || event.target.id !== personId,
+      )
+      .map((event) => event.target.id),
+  ),
+];
+
+/**
+ * The events, in ONE list (an item never moves between parents when newer events push it down, so it keeps its node and any focus in
+ * it: R-1). This device's cached rows of their targets are read at most 50 targets at a time (one cached read each, under the store's
+ * working set of 100; each target in exactly one read) and kept here by id: a read that restarts (its targets changed) keeps what it last
+ * said of each id until it answers, so a link does not flash out on a refresh, while every answer that says a field is gone applies at
+ * once.
+ */
 function Events({
   events,
   personId,
@@ -221,73 +272,82 @@ function Events({
   withhold?: boolean;
   listRef?: RefObject<HTMLDivElement | null>;
 }) {
-  const slices: PersonActivityEvent[][] = [];
-  for (let start = 0; start < events.length; start += ACTIVITY_STEP)
-    slices.push(events.slice(start, start + ACTIVITY_STEP));
+  const [rows, setRows] = useState<ReadonlyMap<string, ListedResource | null>>(
+    () => new Map(),
+  );
+  const learn = useCallback(
+    (answer: CachedRows) =>
+      setRows((known) => {
+        const entries = Object.entries(answer);
+        if (
+          entries.every(([id, row]) => known.has(id) && known.get(id) === row)
+        )
+          return known;
+        const next = new Map(known);
+        for (const [id, row] of entries) next.set(id, row);
+        return next;
+      }),
+    [],
+  );
+  // Each target is read by exactly one of them (its targets in the order they first appear, 50 to a read).
+  const targets = targetsOf(events, personId);
+  const reads: string[][] = [];
+  for (let start = 0; start < targets.length; start += ACTIVITY_STEP)
+    reads.push(targets.slice(start, start + ACTIVITY_STEP));
   return (
     <div ref={listRef} className="min-w-0">
       <List className="flex min-w-0 flex-col gap-2">
-        {slices.map((slice, index) => (
-          <Slice
-            // A slice is a position in the list (its first 50, its next 50…), not a page of a read.
-            // biome-ignore lint/suspicious/noArrayIndexKey: the slice's position is its identity
-            key={index}
-            events={slice}
-            personId={personId}
-            withhold={withhold}
-          />
-        ))}
+        {events.map((event) => {
+          const row = rows.get(event.target.id)?.merged ?? null;
+          // D-19-3: while an earlier answer is shown, a field this device no longer holds (or cannot say it holds) is not shown.
+          if (
+            withhold &&
+            event.target.kind === "field" &&
+            (row === null || row.kind !== "field")
+          )
+            return null;
+          return (
+            <EventItem
+              key={event.id}
+              event={event}
+              personId={personId}
+              linkable={
+                isCurrentField(event, row, personId) ||
+                isCachedAlias(event, row, personId)
+              }
+            />
+          );
+        })}
       </List>
+      {reads.map((ids, index) => (
+        <CachedRowsOf
+          // A read is a position in the list (its first 50, its next 50…), not a page of a read.
+          // biome-ignore lint/suspicious/noArrayIndexKey: the slice's position is its identity
+          key={index}
+          ids={ids}
+          onRows={learn}
+        />
+      ))}
     </div>
   );
 }
 
-function Slice({
-  events,
-  personId,
-  withhold,
+/** One cached read of a slice's targets; says what it found before paint (an answer that a field is gone withholds it at once). */
+function CachedRowsOf({
+  ids,
+  onRows,
 }: {
-  events: readonly PersonActivityEvent[];
-  personId: string;
-  withhold: boolean;
+  ids: readonly string[];
+  onRows(rows: CachedRows): void;
 }) {
-  const ids = [
-    ...new Set(
-      events
-        .filter(
-          (event) =>
-            event.target.kind === "field" || event.target.id !== personId,
-        )
-        .map((event) => event.target.id),
-    ),
-  ];
   const cached = useCachedResources(ids);
-  const rows = cached.status === "ready" ? cached.value : null;
-  return (
-    <>
-      {events.map((event) => {
-        const row = rows?.[event.target.id]?.merged ?? null;
-        // D-19-3: while an earlier answer is shown, a field this device no longer holds (or cannot say it holds) is not shown.
-        if (
-          withhold &&
-          event.target.kind === "field" &&
-          (row === null || row.kind !== "field")
-        )
-          return null;
-        return (
-          <EventItem
-            key={event.id}
-            event={event}
-            personId={personId}
-            linkable={
-              isCurrentField(event, row, personId) ||
-              isCachedAlias(event, row, personId)
-            }
-          />
-        );
-      })}
-    </>
-  );
+  useLayoutEffect(() => {
+    if (cached.status === "ready") onRows(cached.value);
+    // No database (absent, closed, failed): nothing is held.
+    else if (cached.status === "unavailable")
+      onRows(Object.fromEntries(ids.map((id) => [id, null])));
+  }, [cached, ids, onRows]);
+  return null;
 }
 
 /** The current, unarchived field of this person, as the server and this device both say: its editor can be opened. */

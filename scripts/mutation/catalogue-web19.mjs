@@ -215,8 +215,8 @@ export const UNIT_WEB19 = [
     patch: (t) =>
       sub(
         t,
-        '          withhold &&\n          event.target.kind === "field" &&\n',
-        '          false &&\n          event.target.kind === "field" &&\n',
+        '            withhold &&\n            event.target.kind === "field" &&\n',
+        '            false &&\n            event.target.kind === "field" &&\n',
       ),
   },
   {
@@ -256,6 +256,102 @@ export const UNIT_WEB19 = [
       /a synced change, a receipt \(queue counts\)|every 60 seconds while shown and visible/,
     patch: (t) => sub(t, "    this.activity.clear();\n", ""),
   },
+  // Revision 1 (review 1, R-1: a refresh rebuilt the timeline's DOM): one mutant per new assertion of the "R-1" cases.
+  {
+    id: "MU-6118",
+    title:
+      "WEB-19: the earlier answer shown while a re-read is on its way is another element than the answer (every refresh remounts the list)",
+    file: "src/features/people/activity/ActivitySection.tsx",
+    tests: [TIMELINE],
+    expect:
+      /a refresh keeps the list's nodes, its controls and keyboard focus|the item Show all moved focus to keeps it across a refresh/,
+    patch: (t) =>
+      sub(
+        t,
+        "        <Ready view={view.previous} refreshing personId={personId} />\n",
+        "        <div>\n          <Ready view={view.previous} refreshing personId={personId} />\n        </div>\n",
+      ),
+  },
+  {
+    id: "MU-6119",
+    title:
+      "WEB-19: Show all / Show older changes is hidden while a re-read is on its way (the focused control vanishes)",
+    file: "src/features/people/activity/ActivitySection.tsx",
+    tests: [TIMELINE],
+    expect: /a refresh keeps the list's nodes, its controls and keyboard focus/,
+    patch: (t) =>
+      sub(
+        t,
+        "            {view.canExtend ? (\n",
+        "            {view.canExtend && !refreshing ? (\n",
+      ),
+  },
+  {
+    id: "MU-6120",
+    title:
+      "WEB-19: a re-read that arrives during Show older ends the press (no focus move, no announcement once it is over)",
+    file: "src/features/people/activity/ActivitySection.tsx",
+    tests: [TIMELINE],
+    expect:
+      /a synced change during Show older: the re-read reads to the new depth/,
+    patch: (t) =>
+      sub(
+        t,
+        "    if (asked === null || busy) return;\n",
+        "    if (asked === null || view.extending) return;\n",
+      ),
+  },
+  {
+    id: "MU-6121",
+    title:
+      "WEB-19: Show older pressed while a re-read is on its way is ignored (the control does nothing)",
+    file: "src/features/people/activity/timeline.ts",
+    tests: [TIMELINE],
+    expect: /Show older pressed while a re-read is on its way/,
+    patch: (t) =>
+      sub(
+        t,
+        '  if (entry === undefined || entry.state.kind === "loading") {\n',
+        "  if (entry === undefined) return;\n  if (false) {\n",
+      ),
+  },
+  {
+    id: "MU-6122",
+    title:
+      "WEB-19: a re-read stops at the depth asked for when it began (a press meanwhile is lost)",
+    file: "src/features/people/activity/timeline.ts",
+    tests: [TIMELINE],
+    expect: /Show older pressed while a re-read is on its way/,
+    patch: (t) => sub(t, "    depth = depthNow();\n", ""),
+  },
+  {
+    id: "MU-6123",
+    title:
+      "WEB-19: an item pushed past a 50-event boundary moves to another parent (its node, and the focus in it, is replaced)",
+    file: "src/features/people/activity/ActivitySection.tsx",
+    tests: [TIMELINE],
+    expect: /an item pushed past the 50th by newer events keeps its node/,
+    patch: (t) =>
+      sub(
+        sub(
+          t,
+          "        {events.map((event) => {\n",
+          "        {events.map((event, index) => {\n",
+        ),
+        "              key={event.id}\n",
+        "              key={Math.floor(index / ACTIVITY_STEP) + event.id}\n",
+      ),
+  },
+  {
+    id: "MU-6124",
+    title:
+      "WEB-19: a cached read that restarts forgets its rows until it answers (links flash out on a refresh)",
+    file: "src/features/people/activity/ActivitySection.tsx",
+    tests: [TIMELINE],
+    expect: /an item pushed past the 50th by newer events keeps its node/,
+    patch: (t) =>
+      sub(t, '    else if (cached.status === "unavailable")\n', "    else\n"),
+  },
 ];
 
 export const ENGINE_WEB19 = [
@@ -280,8 +376,8 @@ export const ENGINE_WEB19 = [
     patch: (t) =>
       sub(
         t,
-        '          withhold &&\n          event.target.kind === "field" &&\n',
-        '          false &&\n          event.target.kind === "field" &&\n',
+        '            withhold &&\n            event.target.kind === "field" &&\n',
+        '            false &&\n            event.target.kind === "field" &&\n',
       ),
   },
   {
@@ -296,6 +392,21 @@ export const ENGINE_WEB19 = [
         t,
         '  if (!env.online) {\n    shown.current = null;\n    return { status: "offline" };\n  }\n',
         '  if (!env.online && shown.current === null) {\n    return { status: "offline" };\n  }\n',
+      ),
+  },
+  {
+    id: "MU-6154",
+    title:
+      "WEB-19: (REAL ENGINE) every refresh remounts the timeline: keyboard focus on Show older changes is lost to the page",
+    file: "src/features/people/activity/ActivitySection.tsx",
+    spec: SPEC,
+    grep: "E-AC9:",
+    expect: /E-AC9: /,
+    patch: (t) =>
+      sub(
+        t,
+        "        <Ready view={view.previous} refreshing personId={personId} />\n",
+        "        <div>\n          <Ready view={view.previous} refreshing personId={personId} />\n        </div>\n",
       ),
   },
 ];

@@ -433,7 +433,8 @@ archive is folded over its row. A projected row is never a base for a version-ch
   (the contract's own bound). Each invalidation re-reads every summary shown (a list step's join, the person's summary, the fields' step).
 - Search in In Home / Shared with me / Not linked matches the names shown, this device's unsent renames folded over the server's (revision
   7); who is in each view is still the server's, so a new person not sent yet is in none of them.
-- "Recent changes" (the drawn rail's second panel) is still not built: no history endpoint exists.
+- "Recent changes" (the drawn rail's second panel) was not built by WEB-11a (no history endpoint existed then); WEB-19 adds it below "Shared
+  with" (the WEB-19 section of this document).
 
 - Hidden form values (PRODUCT-DECISIONS-20261011 item 2): the field type switch keeps each type's value; the new person's hidden note keeps
   its text; a save sends only what applies, with no warning. A refused or uncertain save keeps everything. Inputs are locked while saving.
@@ -712,7 +713,7 @@ as the server names them (you, the person's current owner or linked account; any
 | `activity/timeline.ts` | `walkActivity`, `readActivity`, `extendActivity`, `collapseActivity`: the reads and their rules below. |
 | `activity/useActivity.ts` | The view: offline, loading (with the previous answer of the same person and identity), ready, failed, gone, merged. |
 | `activity/describe.ts`, `format.ts`, `copy.ts` | The client's sentences (D-19-5), `en-GB` dates and times, and the provisional strings. |
-| `activity/ActivitySection.tsx` | The section: a list of events (each with its sentence, tags and `<time>`), the notes and the controls. |
+| `activity/ActivitySection.tsx` | The section: one list of events (each with its sentence, tags and `<time>`), the notes and the controls; one tree for the answer and the previous answer shown while a re-read is on its way (R-1). |
 
 ## Rules as built
 
@@ -723,6 +724,12 @@ as the server names them (you, the person's current owner or linked account; any
   invalidations are never stitched. While a re-read is on its way the previous answer stays (busy), except that a field row whose field this
   device no longer holds is withheld at once (access changes arrive by sync). A failure, a `404`, offline, a merge note, another person or
   another identity drops the previous rows at once.
+- **Busy, not rebuilt (revision 1, review 1 R-1).** The previous answer is shown by the same component as the answer it will become, so a
+  refresh keeps the list's nodes, its controls, keyboard focus, a pending "Show older changes" and the last announcement; the section is
+  `aria-busy` meanwhile. The events are one flat list (an item pushed past the 50th by newer events keeps its node and any focus in it); the
+  cached rows of their targets are read at most 50 targets per read, each target in one read, and kept by id while a read whose targets
+  changed restarts, so links do not flash out. A press of "Show all/older changes" or "Show fewer" while a re-read is on its way moves the
+  depth that re-read stops at (the walk asks the depth before every page), still in one piece; the depth never exceeds 500.
 - **Freshness (D-19-4).** The timeline is invalidated with the summaries (`memory.invalidateSummaries`): any synced change, any receipt or
   online command, reconnection, households and the primary household, every 60 seconds while shown and visible, the page becoming visible.
   A re-authentication is a new epoch, so a new memory (P-11). An answer that arrives after an invalidation or under another identity is

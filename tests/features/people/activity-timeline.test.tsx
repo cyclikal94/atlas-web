@@ -744,6 +744,224 @@ describe("S-AC14: keyboard and screen reader", () => {
   });
 });
 
+describe("R-1: a refresh keeps the timeline's tree (keyboard and screen reader across a re-read)", () => {
+  /** Holds the next read's first page until `resolve`; the pages after it are the fake server's. */
+  const holdNextRead = (w: PeopleWorld) => {
+    const held = deferred<PeopleResult<PersonActivityPage>>();
+    w.api.next.activity.push(() => held.promise);
+    return held;
+  };
+  const item = (n: number) =>
+    document.querySelector(
+      `[data-activity-event="${eventId(n)}"]`,
+    ) as HTMLElement | null;
+  const button = (name: string) =>
+    within(section() as HTMLElement).queryByRole("button", { name });
+
+  test("a refresh keeps the list's nodes, its controls and keyboard focus while the re-read is on its way, and after it", async () => {
+    const events = manyEdits(60, phone);
+    const w = world(events);
+    await w.mount(`/people/${P}`);
+    await until("ready");
+    press("Show all changes");
+    await waitFor(() => expect(shownIds()).toHaveLength(50));
+    const older = button("Show older changes") as HTMLElement;
+    older.focus();
+    const first = item(1);
+    const list = section()?.querySelector("ul");
+    const held = holdNextRead(w);
+    act(() => {
+      w.advanceRevision();
+    });
+    await until("loading");
+    expect(shownIds()).toHaveLength(50);
+    expect(item(1)).toBe(first);
+    expect(section()?.querySelector("ul")).toBe(list);
+    expect(button("Show older changes")).toBe(older);
+    expect(button("Show fewer")).not.toBeNull();
+    expect(document.activeElement).toBe(older);
+    expect(section()?.querySelector("[aria-busy='true']")).not.toBeNull();
+    held.resolve(page(events.slice(0, 50), eventId(50)));
+    await until("ready");
+    expect(item(1)).toBe(first);
+    expect(button("Show older changes")).toBe(older);
+    expect(document.activeElement).toBe(older);
+    expect(section()?.querySelector("[aria-busy='true']")).toBeNull();
+  });
+
+  test("the item Show all moved focus to keeps it across a refresh, and its announcement is not withdrawn", async () => {
+    const events = manyEdits(60, phone);
+    const w = world(events);
+    await w.mount(`/people/${P}`);
+    await until("ready");
+    press("Show all changes");
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-activity-event")).toBe(
+        eventId(6),
+      ),
+    );
+    await waitFor(() =>
+      expect(document.body).toHaveTextContent("45 older changes shown."),
+    );
+    const focused = document.activeElement;
+    const held = holdNextRead(w);
+    act(() => {
+      w.advanceRevision();
+    });
+    await until("loading");
+    expect(document.activeElement).toBe(focused);
+    expect(document.body).toHaveTextContent("45 older changes shown.");
+    held.resolve(page(events.slice(0, 50), eventId(50)));
+    await until("ready");
+    expect(document.activeElement).toBe(focused);
+    expect(document.body).toHaveTextContent("45 older changes shown.");
+  });
+
+  test("a synced change during Show older: the re-read reads to the new depth, then focus moves to the first new item and it says how many", async () => {
+    const events = manyEdits(120, phone);
+    const w = world(events);
+    await w.mount(`/people/${P}`);
+    await until("ready");
+    press("Show all changes");
+    await waitFor(() => expect(shownIds()).toHaveLength(50));
+    const step = holdNextRead(w);
+    press("Show older changes");
+    await waitFor(() =>
+      expect(section()).toHaveTextContent("Loading older changes…"),
+    );
+    act(() => {
+      w.advanceRevision();
+    });
+    await waitFor(() => expect(shownIds()).toHaveLength(100));
+    await until("ready");
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-activity-event")).toBe(
+        eventId(51),
+      ),
+    );
+    await waitFor(() =>
+      expect(document.body).toHaveTextContent("50 older changes shown."),
+    );
+    // The superseded step's answer applies nothing.
+    step.resolve(page(events.slice(50, 100), eventId(100)));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    expect(shownIds()).toEqual(events.slice(0, 100).map((e) => e.id));
+  });
+
+  test("Show older pressed while a re-read is on its way: that one re-read reads to the new depth (one piece), then focus moves and it says so", async () => {
+    const events = manyEdits(120, phone);
+    const w = world(events);
+    await w.mount(`/people/${P}`);
+    await until("ready");
+    press("Show all changes");
+    await waitFor(() => expect(shownIds()).toHaveLength(50));
+    const held = holdNextRead(w);
+    act(() => {
+      w.advanceRevision();
+    });
+    await until("loading");
+    const calls = w.api.activityCalls.length;
+    press("Show older changes");
+    expect(section()).toHaveTextContent("Loading older changes…");
+    expect(shownIds()).toHaveLength(50);
+    // The re-read asked for 50 before the press; once that page is in, it goes on to 100.
+    held.resolve(page(events.slice(0, 50), eventId(50)));
+    await until("ready");
+    await waitFor(() => expect(shownIds()).toHaveLength(100));
+    expect(w.api.activityCalls.slice(calls - 1)).toEqual([
+      { id: P, after: null, limit: 50 },
+      { id: P, after: eventId(50), limit: 50 },
+    ]);
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-activity-event")).toBe(
+        eventId(51),
+      ),
+    );
+    await waitFor(() =>
+      expect(document.body).toHaveTextContent("50 older changes shown."),
+    );
+  });
+
+  test("an item pushed past the 50th by newer events keeps its node and a focused link; no link flashes out while the reads catch up", async () => {
+    const email = fieldTarget(F(3), "Email");
+    const events = manyEdits(120, phone);
+    const w = world(events);
+    w.putCache(fieldRow({ id: F(3), parent_id: P, label: "Email" }));
+    await w.mount(`/people/${P}`);
+    await until("ready");
+    press("Show all changes");
+    await waitFor(() => expect(shownIds()).toHaveLength(50));
+    press("Show older changes");
+    await waitFor(() => expect(shownIds()).toHaveLength(100));
+    const fiftieth = item(50) as HTMLElement;
+    const link = fiftieth.querySelector("[data-activity-link]") as HTMLElement;
+    expect(link).not.toBeNull();
+    link.focus();
+    // What leaves the DOM: whole items (by id), or a link alone (its item kept, the link replaced by plain text).
+    const removed: string[] = [];
+    const watcher = new MutationObserver((records) => {
+      for (const record of records)
+        for (const node of record.removedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+          const id = node.getAttribute("data-activity-event");
+          if (id !== null) removed.push(`item ${id}`);
+          else if (
+            node.matches("[data-activity-link]") ||
+            node.querySelector("[data-activity-link]") !== null
+          )
+            removed.push("link");
+        }
+    });
+    watcher.observe(section() as HTMLElement, {
+      childList: true,
+      subtree: true,
+    });
+    // Another device edits Email: a newer event about another field arrives on the refresh.
+    w.api.activity.events.set(P, [
+      activityEvent(200, "field_edited", email),
+      ...events,
+    ]);
+    act(() => {
+      w.advanceRevision();
+    });
+    await waitFor(() => expect(shownIds()[0]).toBe(eventId(200)));
+    await until("ready");
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+    watcher.disconnect();
+    expect(shownIds().indexOf(eventId(50))).toBe(50);
+    expect(item(50)).toBe(fiftieth);
+    expect(document.activeElement).toBe(link);
+    // Only the oldest, pushed beyond the 100 shown, left; no link flashed out of an item that stayed.
+    expect(removed).toEqual([`item ${eventId(100)}`]);
+    expect(
+      item(200)?.querySelector(`[data-activity-link="${F(3)}"]`),
+    ).not.toBeNull();
+  });
+
+  test("the rules that drop the earlier answer still drop it: a failed re-read shows no rows and no controls", async () => {
+    const events = manyEdits(60, phone);
+    const w = world(events);
+    await w.mount(`/people/${P}`);
+    await until("ready");
+    press("Show all changes");
+    await waitFor(() => expect(shownIds()).toHaveLength(50));
+    const held = holdNextRead(w);
+    act(() => {
+      w.advanceRevision();
+    });
+    await until("loading");
+    held.resolve({ ok: false, kind: "uncertain" });
+    await until("failed");
+    expect(shownIds()).toEqual([]);
+    expect(button("Show older changes")).toBeNull();
+    expect(button("Show fewer")).toBeNull();
+  });
+});
+
 describe("D-19-4: freshness (joins the summaries' invalidation)", () => {
   const settle = async (w: PeopleWorld) => {
     await w.mount(`/people/${P}`);
