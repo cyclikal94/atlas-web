@@ -30,8 +30,9 @@ const createdAt = async (f: DataTestWorld, page = f.page("A")) => {
 
 describe("the declared version", () => {
   test("Dexie's declared version n is IndexedDB version n * 10", () => {
-    expect(SCHEMA_VERSION).toBe(3);
-    expect(DECLARED_IDB_VERSION).toBe(30);
+    // Accepted main's schema version 4 (WEB-09c `delta_staging`, merged 5 November 2026; WEB-14a's D-P8 pinned 3 / 30 on its base).
+    expect(SCHEMA_VERSION).toBe(4);
+    expect(DECLARED_IDB_VERSION).toBe(40);
   });
 });
 

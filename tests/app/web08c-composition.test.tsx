@@ -248,9 +248,8 @@ describe("Review this device (G-10)", () => {
       /onReviewDevice: \(\) => lifecycle\.reviewDevice\(session\)/,
     );
     const watcher = boot.indexOf("lifecycle.startAttemptEndWatcher(session)");
-    // The PWA composition keeps this promise while starting the update coordinator.
-    // The watcher must still precede the actual session.start call.
-    const start = boot.indexOf("const started = session.start(");
+    const start = boot.indexOf("await session.start(");
+    // Base merge of 5 November 2026: boot awaits the start in place again (WEB-09c's `boot_leads_by_default`); the start must be found.
     expect(start).toBeGreaterThan(0);
     expect(watcher).toBeGreaterThan(0);
     expect(watcher).toBeLessThan(start);
