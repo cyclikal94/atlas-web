@@ -692,3 +692,75 @@ Collected for WEB-15's sign-off; none is approved by being listed. Strings marke
 | The merge dialog uses the shared 440 px dialog (the drawn comparison is wider) | `/people/$id/duplicates/$other` | E-R15 |
 | "Your answer was recorded." after an uncertain answer is tried again from above the list | `/people/requests` | `requests-screen.test.tsx`, I-PPL23 |
 | Not built: self-link, `reference_account` UI, a "Swap" of the kept person | — | — |
+
+# WEB-19: the activity timeline ("Recent changes")
+
+The person detail's "Recent changes" section (D-19-1: after "Shared with", before "New fields start as"; only for a published person) reads
+`GET /people/{id}/activity` of the released `v0.31.0-rc.1` (BE-PEOPLE-ACTIVITY, API 0.30.2; backend `docs/people.md` "Activity timeline").
+It follows Kieran's timeline-first policy of 1 November 2026 (`delivery/handoffs/people-activity-policy-20261101.md`, SHA-256
+`24e48c4dea8d320b535ec6e93dc42fed423f17d62af22b9a33082312e76bffe4`; authority `approval/people-activity-timeline-policy-20261101.json`,
+SHA-256 `9528779562bdda2fe1c88e50ae9f66a1d4825786d1f594d4bfd590c58c721451`): metadata only, the items' CURRENT labels, actors named only
+as the server names them (you, the person's current owner or linked account; anyone else "Someone else"), and no sharing rows.
+
+## Modules
+
+| Module | What it does |
+| --- | --- |
+| `model/activity.ts` | Strict parser of `PersonActivityPage` (exact keys, the eleven types and their fixed phrases, the members each type carries, `next_after` = last id, at most `limit` items, each id once). A body that breaks it is `uncertain` and shown as failed, never in part (D-19-9). |
+| `api.ts` | `readPersonActivity(id, { after, limit })`: `404` is `not_found` (access lost), `422 invalid_value` is `invalid` (a cursor the reader may no longer follow). |
+| `memory.ts` | `activity` (per route person, current invalidation only) and `activityDepth` (how many events were asked for: a count, kept across invalidations and remounts). |
+| `activity/timeline.ts` | `walkActivity`, `readActivity`, `extendActivity`, `collapseActivity`: the reads and their rules below. |
+| `activity/useActivity.ts` | The view: offline, loading (with the previous answer of the same person and identity), ready, failed, gone, merged. |
+| `activity/describe.ts`, `format.ts`, `copy.ts` | The client's sentences (D-19-5), `en-GB` dates and times, and the provisional strings. |
+| `activity/ActivitySection.tsx` | The section: a list of events (each with its sentence, tags and `<time>`), the notes and the controls. |
+
+## Rules as built
+
+- **Preview and steps (D-19-2).** The newest 5 (`limit=5`); "Show all changes" to 50; "Show older changes" 50 more each (from
+  `next_after`), at most 500 (then "Showing the 500 most recent changes."); "Show fewer" back to 5 with no read. A failed step keeps what is
+  shown, says "Couldn't load older changes." and "Try again" reads that same step.
+- **One piece (D-19-3).** Every read walks from the first page to the depth asked and replaces what was held in one step; pages of two
+  invalidations are never stitched. While a re-read is on its way the previous answer stays (busy), except that a field row whose field this
+  device no longer holds is withheld at once (access changes arrive by sync). A failure, a `404`, offline, a merge note, another person or
+  another identity drops the previous rows at once.
+- **Freshness (D-19-4).** The timeline is invalidated with the summaries (`memory.invalidateSummaries`): any synced change, any receipt or
+  online command, reconnection, households and the primary household, every 60 seconds while shown and visible, the page becoming visible.
+  A re-authentication is a new epoch, so a new memory (P-11). An answer that arrives after an invalidation or under another identity is
+  never applied. The entry is not released when its view unmounts: a remount (StrictMode's rehearsal, a `403`'s remount) joins the read on
+  its way instead of asking again.
+- **Access.** `404` shows "You can no longer see this person's changes." and nothing else. A `422` on a later page (a cursor that became
+  hidden) restarts from the first page, at most three times in a row, then fails. The server applies current access per event; the client
+  adds nothing and never infers a count of hidden events.
+- **Order and identity.** The server's order (commit order) is kept, never re-sorted by `occurred_at`; an event id is shown once.
+- **Merged alias (D-19-7).** If the answer's `person_id` is not the route's person, nothing is listed: "This profile was merged. Its changes
+  are shown on the person it was merged into." with a link to that person when this device holds it.
+- **Links (D-19-6).** A field is linked (to its editor) only while the server says it is current and unarchived and this device holds it as
+  an unarchived field of this person; a profile merged into this person is linked while this device holds it; the person itself never is.
+  Tags beside the time: "Archived", "Merged profile".
+- **Honest coverage.** "Recorded since {date}." from `coverage_started_at` (never the oldest event), "Earlier changes weren't recorded."
+  once everything since then is shown, and "Shows changes to what you can see now, with current names." for every reader. Nothing is made
+  from this device's own saves: a queued change is not an event until the server records it.
+- **No client persistence.** The timeline lives in page memory only: never IndexedDB, `/sync`, `localStorage` or the service worker (which
+  precaches the build and routes navigations only: `tests/static/sw-activity.test.ts`). The server answers `Cache-Control: private, no-store`.
+
+## Deviations from the plan, as built
+
+- `releaseActivity` (plan §3.4) was not kept: releasing on unmount made StrictMode's rehearsal ask twice and dropped the read on its way;
+  every invalidation clears the entry, and generation plus entry identity keep a late answer out.
+- Tags are shown on the line of the time, not inside the sentence (a screen reader read "Old noteArchived" as one word).
+- The "Show older" announcement goes through the page's one polite live region (`useAnnouncer`, lint R6), not a region of its own.
+- Real-backend cases make their changes with harness commands (the UI paths that send them are I-PPL1 to I-PPL21's); a confirmed-empty
+  timeline cannot occur on the real backend for a person created since coverage began (its `person_created` is recorded), so the empty
+  state is fixture evidence only.
+
+## Not claimed (WEB-19)
+
+`tests/features/people/activity-*.test.*` and `tests/e2e/fixture.people-activity.spec.ts` are fixture evidence. I-PPL24 to I-PPL29 are
+focused consumer evidence against the released `v0.31.0-rc.1` on SQLite, not integration acceptance; `integration_passed` stays false. No
+PostgreSQL, HTTPS, device or manual screen-reader evidence (WEB-09d), no copy or visual approval (WEB-15). Hard deletion does not exist
+(policy), so deletion is not applicable, not passed; value history is PEOPLE-VALUE-HISTORY's (unscheduled).
+
+## Additions for the connected-app checkpoint (WEB-19)
+
+Every string in `activity/copy.ts` is provisional; the People 02 mock's sharing row ("narrowed … to only you") is deliberately absent. The
+rename sentence says "changed the name of {current label}" (or "renamed this person") and never presents the label shown as the earlier one.

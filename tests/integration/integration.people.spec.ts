@@ -1,5 +1,13 @@
 import type { BrowserContext, Page } from "@playwright/test";
 import {
+  sentenceOf as activitySentence,
+  describeActivity,
+} from "../../src/features/people/activity/describe";
+import {
+  type PersonActivityEvent,
+  parsePersonActivityPage,
+} from "../../src/features/people/model/activity";
+import {
   BOTH_LINKED,
   PREVIEW_FORBIDDEN,
 } from "../../src/features/people/requests/copy";
@@ -30,6 +38,8 @@ import {
  * audience change; I-PPL6 rename; I-PPL7 unlink; I-PPL8 N5 (a)(b)(c); I-PPL9 archive and restore; I-PPL10 PPL-3; I-PPL11 PPL-5; I-PPL12 PPL-6; I-PPL13 lost
  * responses; I-PPL14 a real defaults_changed. Finding 8 (API 0.29's viewer-safe summaries): I-PPL15 the owner's complete view and a Home member's
  * partial one (list lines, scopes, rails, field tags, revocation); I-PPL16 attribution across a link, and In Home without a primary household.
+ * WEB-19 (the activity timeline, `v0.31.0-rc.1`): I-PPL24 the owner's journey; I-PPL25 pagination, a dropped answer and a second device;
+ * I-PPL26 actors; I-PPL27 a narrowed field and revoked access; I-PPL28 merges; I-PPL29 redaction by rename and archive.
  */
 const API = "/api/experimental/v1";
 
@@ -2667,6 +2677,692 @@ test.describe("I-PPL17 to I-PPL23: merges, links and requests (WEB-11b A2-A9, A1
     } finally {
       await aContext.close();
       await bContext.close();
+    }
+  });
+});
+
+// ---- WEB-19: the activity timeline (I-PPL24 to I-PPL29) ------------------------------------------------------------------------------
+/**
+ * WEB-19 against the released backend (`v0.31.0-rc.1`: BE-PEOPLE-ACTIVITY, API 0.30.2): "Recent changes" on the person detail. Every case
+ * compares the ids the DOM shows, in order, with the raw `GET /people/{id}/activity` pages the harness reads for the same account, and
+ * each sentence with the client's own sentence of that raw event; every raw page is parsed by the STRICT parser the screens use (A19-13).
+ * Changes are made through harness commands (the UI paths that send them are I-PPL1 to I-PPL21's evidence); the timeline is read only by
+ * the UI under test. FOCUSED REAL-BACKEND EVIDENCE, not integration acceptance.
+ */
+const activityRaw = (page: Page, id: Id, person: string, query = "") =>
+  raw(page, id, "GET", `/people/${person}/activity${query}`);
+/** The whole visible timeline as the API pages it (pages of 100 from the first), each page parsed strictly. */
+async function apiTimeline(
+  page: Page,
+  id: Id,
+  person: string,
+): Promise<PersonActivityEvent[]> {
+  const events: PersonActivityEvent[] = [];
+  let after: string | null = null;
+  for (let i = 0; i < 10; i += 1) {
+    const answer = await activityRaw(
+      page,
+      id,
+      person,
+      `?limit=100${after ? `&after=${after}` : ""}`,
+    );
+    expect(answer.status).toBe(200);
+    const parsed = parsePersonActivityPage(answer.body, 100);
+    expect(parsed, JSON.stringify(answer.body)).not.toBeNull();
+    events.push(...(parsed?.items ?? []));
+    after = parsed?.next_after ?? null;
+    if (after === null) break;
+  }
+  return events;
+}
+const shownActivity = (page: Page) =>
+  page.locator("[data-activity-event]").evaluateAll((items) =>
+    items.map((item) => ({
+      id: item.getAttribute("data-activity-event"),
+      text: item.querySelector("p")?.textContent ?? "",
+    })),
+  );
+/**
+ * The DOM shows the newest `count` events of the API's timeline for `person`, in its order, each with the client's sentence (or, when
+ * `count` is omitted, as many as it shows and at least one). Nudges the page's sync while it waits (a change reaches it by `/sync`).
+ */
+async function agrees(
+  page: Page,
+  id: Id,
+  person: string,
+  count?: number,
+): Promise<PersonActivityEvent[]> {
+  let api: PersonActivityEvent[] = [];
+  await expect
+    .poll(
+      async () => {
+        await nudge(page);
+        api = await apiTimeline(page, id, person);
+        const shown = await shownActivity(page);
+        const n = count ?? Math.min(api.length, shown.length);
+        const want = api.slice(0, n).map((event) => ({
+          id: event.id,
+          text: activitySentence(describeActivity(event, { personId: person })),
+        }));
+        return JSON.stringify(shown) === JSON.stringify(want) && n > 0
+          ? "agrees"
+          : JSON.stringify({
+              shown: shown.slice(0, 6),
+              want: want.slice(0, 6),
+            });
+      },
+      { timeout: 60_000, intervals: [500, 1_000, 2_000] },
+    )
+    .toBe("agrees");
+  return api;
+}
+const activitySection = (page: Page) => page.locator("[data-activity]");
+const textCommandField = (
+  field: string,
+  current: Projection,
+  label: string,
+  value: string,
+) => ({
+  kind: "edit",
+  id: field,
+  expected_version: current.version,
+  expected_policy_version: current.policy_version,
+  label,
+  value,
+});
+async function archiveRaw(
+  page: Page,
+  id: Id,
+  resource: string,
+  archived: boolean,
+): Promise<void> {
+  const row =
+    (await raw(page, id, "GET", `/people/${resource}`)).status === 200
+      ? (await personOf(page, id, resource)).body.person
+      : ((await raw(page, id, "GET", `/fields/${resource}`))
+          .body as Projection);
+  const made = await taskCommand(page, id, {
+    kind: "archive",
+    id: resource,
+    expected_version: row.version,
+    archived,
+  });
+  expect(made.status).toBe(200);
+}
+const fieldOf = async (page: Page, id: Id, field: string) =>
+  (await raw(page, id, "GET", `/fields/${field}`)).body as Projection;
+
+test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", () => {
+  test("I-PPL24 the owner's journey: field added, edited, renamed, archived and restored; the person renamed, archived and restored; newest first, 'You', current labels only, Recorded since from the API", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "heidi", "/today");
+      const stem = unique("I-AC Owner");
+      const { person, fields } = await seedPerson(a, aId, stem, [
+        { label: "Old wording", text: "first" },
+      ]);
+      const field = fields[0] as string;
+      await go(a, `/people/${person}`);
+      await expect(detail(a, person)).toBeVisible({ timeout: 30_000 });
+      await agrees(a, aId, person, 2);
+      let row = await fieldOf(a, aId, field);
+      expect(
+        (
+          await content(a, aId, [
+            textCommandField(field, row, "Old wording", "second"),
+          ])
+        ).status,
+      ).toBe(200);
+      row = await fieldOf(a, aId, field);
+      expect(
+        (
+          await content(a, aId, [
+            textCommandField(field, row, "Contact", "second"),
+          ])
+        ).status,
+      ).toBe(200);
+      await archiveRaw(a, aId, field, true);
+      await archiveRaw(a, aId, field, false);
+      const now = (await personOf(a, aId, person)).body.person;
+      expect(
+        (
+          await content(a, aId, [
+            {
+              kind: "edit",
+              id: person,
+              expected_version: now.version,
+              expected_policy_version: now.policy_version,
+              label: `${stem} B`,
+              value: "",
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      await archiveRaw(a, aId, person, true);
+      await archiveRaw(a, aId, person, false);
+      // Nine events: the preview shows the newest five, Show all the rest.
+      await agrees(a, aId, person, 5);
+      await activitySection(a)
+        .getByRole("button", { name: "Show all changes" })
+        .click();
+      const api = await agrees(a, aId, person, 9);
+      expect(api.map((event) => event.type)).toEqual([
+        "person_restored",
+        "person_archived",
+        "person_renamed",
+        "field_restored",
+        "field_archived",
+        "field_edited",
+        "field_edited",
+        "field_created",
+        "person_created",
+      ]);
+      expect(api[5]?.changed).toEqual(["label"]);
+      expect(api[6]?.changed).toEqual(["value"]);
+      expect(api.every((event) => event.actor.kind === "you")).toBe(true);
+      // Current labels only: the field's earlier label is in no event, on the page or in any body.
+      const bodies = JSON.stringify(
+        (await activityRaw(a, aId, person, "?limit=100")).body,
+      );
+      expect(bodies).not.toContain("Old wording");
+      await expect(activitySection(a)).not.toContainText("Old wording");
+      await expect(activitySection(a)).toContainText(
+        "You changed the name of Contact.",
+      );
+      const coverage = (
+        (await activityRaw(a, aId, person, "?limit=1")).body as {
+          coverage_started_at: number;
+        }
+      ).coverage_started_at;
+      await expect(activitySection(a)).toContainText(
+        `Recorded since ${new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric" }).format(new Date(coverage * 1000))}.`,
+      );
+      await expect(activitySection(a)).toContainText(
+        "Earlier changes weren't recorded.",
+      );
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({
+          person,
+          field,
+          types: api.map((e) => e.type),
+          coverage,
+        }),
+      });
+    } finally {
+      await aContext.close();
+    }
+  });
+
+  test("I-PPL25 pagination and duplicates: more than 55 events read as 5, 50, then the rest; the DOM equals the API's pages with no repeats; a dropped answer retried; a second device shows the same ids in the same order", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    const deviceContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "kate", "/today");
+      const { person, fields } = await seedPerson(
+        a,
+        aId,
+        unique("I-AC Pages"),
+        [{ label: "Counter", text: "0" }],
+      );
+      const field = fields[0] as string;
+      for (let n = 1; n <= 58; n += 1) {
+        const row = await fieldOf(a, aId, field);
+        expect(
+          (
+            await content(a, aId, [
+              textCommandField(field, row, "Counter", String(n)),
+            ])
+          ).status,
+        ).toBe(200);
+      }
+      await go(a, `/people/${person}`);
+      await expect(detail(a, person)).toBeVisible({ timeout: 30_000 });
+      await agrees(a, aId, person, 5);
+      // The next activity answer is lost after the backend answered it: the step fails, and Try again reads it again.
+      const drop = await proxy.addRule({
+        method: "GET",
+        path: `${API}/people/${person}/activity`,
+        ordinal: 1,
+        action: "drop_after_forward",
+      });
+      await activitySection(a)
+        .getByRole("button", { name: "Show all changes" })
+        .click();
+      await expect(activitySection(a)).toContainText(
+        "Couldn't load older changes.",
+        { timeout: 30_000 },
+      );
+      await proxy.removeRule(drop.id);
+      await activitySection(a)
+        .getByRole("button", { name: "Try again" })
+        .click();
+      await agrees(a, aId, person, 50);
+      await activitySection(a)
+        .getByRole("button", { name: "Show older changes" })
+        .click();
+      const api = await agrees(a, aId, person, 60);
+      expect(api).toHaveLength(60);
+      const ids = (await shownActivity(a)).map((e) => e.id);
+      expect(new Set(ids).size).toBe(60);
+      await expect(activitySection(a)).toContainText(
+        "Earlier changes weren't recorded.",
+      );
+      const reads = (await proxy.log())
+        .filter((e) => e.path === `${API}/people/${person}/activity`)
+        .map((e) => e.status);
+      // A second device of the same account, after a reload: the same ids in the same order.
+      const { page: d, id: dId } = await boot(
+        deviceContext,
+        "kate",
+        `/people/${person}`,
+      );
+      await expect(detail(d, person)).toBeVisible({ timeout: 30_000 });
+      await activitySection(d)
+        .getByRole("button", { name: "Show all changes" })
+        .click();
+      await activitySection(d)
+        .getByRole("button", { name: "Show older changes" })
+        .click();
+      await agrees(d, dId, person, 60);
+      expect((await shownActivity(d)).map((e) => e.id)).toEqual(ids);
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ person, events: api.length, reads }),
+      });
+    } finally {
+      await aContext.close();
+      await deviceContext.close();
+    }
+  });
+
+  test("I-PPL26 actors and accounts: a Home member's edit is 'Someone else' to the owner until the member is the linked account; then the owner sees the member's username and the member sees 'You'", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "ivan", "/today");
+      const { page: b, id: bId } = await boot(bContext, "grace", "/today");
+      const home = await household(a, aId, b, bId);
+      const person = crypto.randomUUID();
+      const field = crypto.randomUUID();
+      const editable = {
+        grants: [{ kind: "household", id: home, edit: true }],
+        exclude_accounts: [],
+      };
+      expect(
+        (
+          await content(a, aId, [
+            {
+              kind: "create_person",
+              id: person,
+              name: unique("I-AC Actors"),
+              initial_policy: HOME_VIEW_OF(home),
+            },
+            {
+              kind: "create_field",
+              id: field,
+              person_id: person,
+              label: "Shared note",
+              value: "a",
+              initial_policy: editable,
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      await cached(b, bId, field);
+      const row = await fieldOf(b, bId, field);
+      expect(
+        (
+          await content(b, bId, [
+            textCommandField(field, row, "Shared note", "by b"),
+          ])
+        ).status,
+      ).toBe(200);
+      await cached(a, aId, person);
+      await go(a, `/people/${person}`);
+      await expect(detail(a, person)).toBeVisible({ timeout: 30_000 });
+      let api = await agrees(a, aId, person, 3);
+      expect(api[0]?.actor).toEqual({ kind: "someone_else" });
+      await expect(activitySection(a)).toContainText(
+        "Someone else changed the value of Shared note.",
+      );
+      // B becomes the person's linked account (A's request, B's acceptance).
+      await link(a, aId, b, bId, person);
+      api = await agrees(a, aId, person, 4);
+      const linked = api.find((event) => event.type === "person_linked");
+      expect(linked?.account).toEqual({
+        kind: "account",
+        account_id: bId.account_id,
+        username: ACCOUNTS.grace.username,
+      });
+      const bEdit = api.find((event) => event.type === "field_edited");
+      expect(bEdit?.actor).toEqual({
+        kind: "account",
+        account_id: bId.account_id,
+        username: ACCOUNTS.grace.username,
+      });
+      await expect(activitySection(a)).toContainText(
+        `${ACCOUNTS.grace.username} changed the value of Shared note.`,
+      );
+      // B, on the same person: B's own events are "You".
+      await go(b, `/people/${person}`);
+      await expect(detail(b, person)).toBeVisible({ timeout: 30_000 });
+      const bApi = await agrees(b, bId, person, 4);
+      expect(bApi.find((e) => e.type === "field_edited")?.actor).toEqual({
+        kind: "you",
+      });
+      await expect(activitySection(b)).toContainText(
+        "You changed the value of Shared note.",
+      );
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({
+          person,
+          field,
+          a: api.map((e) => [e.type, e.actor.kind]),
+          b: bApi.map((e) => [e.type, e.actor.kind]),
+        }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL27 hidden fields and revoked access: a narrowed field leaves the member's timeline (DOM and API); its old cursor is 422, and the UI restarts from the first page; a revoked person shows nothing of its history", async ({
+    browser,
+    provokes,
+  }, info) => {
+    provokes(404, 422);
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "erin", "/today");
+      const { page: b, id: bId } = await boot(bContext, "mia", "/today");
+      const home = await household(a, aId, b, bId);
+      const person = crypto.randomUUID();
+      const secret = crypto.randomUUID();
+      const open = crypto.randomUUID();
+      expect(
+        (
+          await content(a, aId, [
+            {
+              kind: "create_person",
+              id: person,
+              name: unique("I-AC Hidden"),
+              initial_policy: HOME_VIEW_OF(home),
+            },
+            {
+              kind: "create_field",
+              id: open,
+              person_id: person,
+              label: "Open note",
+              value: "o",
+              initial_policy: HOME_VIEW_OF(home),
+            },
+            {
+              kind: "create_field",
+              id: secret,
+              person_id: person,
+              label: "Private detail",
+              value: "s",
+              initial_policy: HOME_VIEW_OF(home),
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      // Newest first: the secret field's edits are the newest four, then the open field's event, then its own creation.
+      for (let n = 1; n <= 4; n += 1) {
+        const row = await fieldOf(a, aId, secret);
+        expect(
+          (
+            await content(a, aId, [
+              textCommandField(secret, row, "Private detail", `v${n}`),
+            ])
+          ).status,
+        ).toBe(200);
+      }
+      await cached(b, bId, secret);
+      await go(b, `/people/${person}`);
+      await expect(detail(b, person)).toBeVisible({ timeout: 30_000 });
+      const before = await agrees(b, bId, person, 5);
+      const cursor = before[4]?.id as string;
+      expect(before[4]?.target.id).toBe(open);
+      expect(before[3]?.target.id).toBe(secret);
+      // B's sync is held from here, so the narrowing reaches B's page only through the timeline's own read.
+      const hold = await proxy.addRule({
+        method: "GET",
+        path: `/^${API.replace(/\//g, "\\/")}\\/sync/`,
+        action: "hold",
+      });
+      const policy = await policyOf(a, aId, secret);
+      expect(
+        (
+          await management(a, aId, [
+            {
+              kind: "replace_policy",
+              id: secret,
+              expected_version: policy.body.version,
+              policy: PRIVATE,
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      // A cursor B was given for a now-hidden event is refused, the same as any other (raw).
+      const hiddenCursor = before[0]?.id as string;
+      expect(
+        (await activityRaw(b, bId, person, `?limit=5&after=${hiddenCursor}`))
+          .status,
+      ).toBe(422);
+      // The page's own cursor (the open field's event) is still valid: page from it and from the first page agree with the API.
+      expect(
+        (await activityRaw(b, bId, person, `?limit=5&after=${cursor}`)).status,
+      ).toBe(200);
+      await activitySection(b)
+        .getByRole("button", { name: "Show all changes" })
+        .click();
+      await expect
+        .poll(
+          async () =>
+            (await shownActivity(b)).some((e) =>
+              e.text.includes("Private detail"),
+            ),
+          { timeout: 30_000 },
+        )
+        .toBe(false);
+      await proxy.release(hold.id);
+      await proxy.removeRule(hold.id);
+      const after = await agrees(b, bId, person);
+      expect(after.some((event) => event.target.id === secret)).toBe(false);
+      expect(JSON.stringify(after)).not.toContain("Private detail");
+      await expect(activitySection(b)).not.toContainText("Private detail");
+      const reads = (await proxy.log())
+        .filter((e) => e.path.startsWith(`${API}/people/${person}/activity`))
+        .map((e) => e.status);
+      // A revokes B's access to the person (the household grant goes): B's section says so and nothing else.
+      const personPolicy = await policyOf(a, aId, person);
+      expect(
+        (
+          await management(a, aId, [
+            {
+              kind: "replace_policy",
+              id: person,
+              expected_version: personPolicy.body.version,
+              policy: PRIVATE,
+            },
+          ])
+        ).status,
+      ).toBe(200);
+      expect((await activityRaw(b, bId, person, "?limit=5")).status).toBe(404);
+      await nudge(b);
+      await expect
+        .poll(async () => (await shownActivity(b)).length, { timeout: 60_000 })
+        .toBe(0);
+      await expect(b.locator("body")).not.toContainText("Open note");
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({ person, secret, open, reads }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL28 merges and missing targets: the target's person_merged names the source; the source's events are tagged Merged profile; its alias detail points to the target; a reader who never saw the source gets the generic sentence and none of its events", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    const bContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "pete", "/today");
+      const { page: b, id: bId } = await boot(bContext, "nora", "/today");
+      const stem = unique("I-AC Merge");
+      const grantB = {
+        grants: [{ kind: "account", id: bId.account_id, edit: false }],
+        exclude_accounts: [],
+      };
+      const { person: target } = await seedPerson(a, aId, stem, [], {
+        policy: grantB,
+      });
+      const { person: source } = await seedPerson(a, aId, `${stem} dup`, [
+        { label: "Source note", text: "s" },
+      ]);
+      const preview = await raw(a, aId, "POST", "/people/merge-preview", {
+        source_id: source,
+        target_id: target,
+      });
+      expect(preview.status).toBe(200);
+      const merged = await peopleCommand(a, aId, {
+        kind: "merge",
+        source_id: source,
+        target_id: target,
+        preview_token: (preview.body as { token: string }).token,
+        name: stem,
+      });
+      expect(merged.status).toBe(200);
+      await cached(a, aId, target);
+      await go(a, `/people/${target}`);
+      await expect(detail(a, target)).toBeVisible({ timeout: 30_000 });
+      await activitySection(a)
+        .getByRole("button", { name: "Show all changes" })
+        .click();
+      const api = await agrees(a, aId, target);
+      const merge = api.find((event) => event.type === "person_merged");
+      expect(merge?.merged_from).toEqual({ id: source, label: `${stem} dup` });
+      await expect(activitySection(a)).toContainText(
+        `You merged ${stem} dup into this person.`,
+      );
+      const fromSource = api.filter(
+        (event) => event.target.kind === "person" && event.target.id === source,
+      );
+      expect(fromSource.length).toBeGreaterThan(0);
+      for (const event of fromSource)
+        await expect(
+          a.locator(`[data-activity-event="${event.id}"] [data-activity-tag]`),
+        ).toHaveText("Merged profile");
+      // The alias's own detail: nothing listed, the note links to the target.
+      await go(a, `/people/${source}`);
+      await expect(activitySection(a)).toHaveAttribute(
+        "data-activity",
+        "merged",
+        { timeout: 30_000 },
+      );
+      await expect(
+        activitySection(a).getByRole("link", { name: "Open that person" }),
+      ).toHaveAttribute("href", `/people/${target}`);
+      expect((await shownActivity(a)).length).toBe(0);
+      // B could see the target, never the source: the generic sentence, and none of the source's events.
+      await cached(b, bId, target);
+      await go(b, `/people/${target}`);
+      await expect(detail(b, target)).toBeVisible({ timeout: 30_000 });
+      const bApi = await agrees(b, bId, target);
+      const bMerge = bApi.find((event) => event.type === "person_merged");
+      expect(bMerge?.merged_from).toBeUndefined();
+      expect(bApi.some((event) => event.target.id === source)).toBe(false);
+      await expect(activitySection(b)).toContainText(
+        "merged another profile into this person.",
+      );
+      await expect(activitySection(b)).not.toContainText(`${stem} dup`);
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({
+          target,
+          source,
+          a: api.map((e) => e.type),
+          b: bApi.map((e) => e.type),
+        }),
+      });
+    } finally {
+      await aContext.close();
+      await bContext.close();
+    }
+  });
+
+  test("I-PPL29 redaction by rename and archive: a field renamed to remove sensitive wording shows only its new label everywhere (DOM and every API body); an archived field's events are tagged, with no link; hard deletion does not exist (not applicable)", async ({
+    browser,
+  }, info) => {
+    const aContext = await browser.newContext();
+    try {
+      const { page: a, id: aId } = await boot(aContext, "judy", "/today");
+      const { person, fields } = await seedPerson(
+        a,
+        aId,
+        unique("I-AC Redact"),
+        [{ label: "Diagnosis: example", text: "x" }],
+      );
+      const field = fields[0] as string;
+      let row = await fieldOf(a, aId, field);
+      expect(
+        (
+          await content(a, aId, [
+            textCommandField(field, row, "Diagnosis: example", "y"),
+          ])
+        ).status,
+      ).toBe(200);
+      row = await fieldOf(a, aId, field);
+      expect(
+        (
+          await content(a, aId, [
+            textCommandField(field, row, "Medical note", "y"),
+          ])
+        ).status,
+      ).toBe(200);
+      await archiveRaw(a, aId, field, true);
+      await go(a, `/people/${person}`);
+      await expect(detail(a, person)).toBeVisible({ timeout: 30_000 });
+      const api = await agrees(a, aId, person, 5);
+      const body = JSON.stringify(
+        (await activityRaw(a, aId, person, "?limit=100")).body,
+      );
+      expect(body).not.toContain("Diagnosis");
+      await expect(activitySection(a)).not.toContainText("Diagnosis");
+      for (const event of api.filter((e) => e.target.id === field)) {
+        await expect(
+          a.locator(`[data-activity-event="${event.id}"] [data-activity-tag]`),
+        ).toHaveText("Archived");
+        await expect(
+          a.locator(`[data-activity-event="${event.id}"] a`),
+        ).toHaveCount(0);
+      }
+      info.annotations.push({
+        type: "evidence",
+        description: JSON.stringify({
+          person,
+          field,
+          types: api.map((e) => e.type),
+          hardDeletion:
+            "not applicable: Atlas has no resource deletion (policy of 1 November 2026)",
+        }),
+      });
+    } finally {
+      await aContext.close();
     }
   });
 });

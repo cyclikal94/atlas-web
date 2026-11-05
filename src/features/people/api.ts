@@ -7,6 +7,10 @@ import {
   type SharingFailure,
 } from "../sharing";
 import {
+  type PersonActivityPage,
+  parsePersonActivityPage,
+} from "./model/activity";
+import {
   type IncomingRequest,
   type MergePreview,
   parseIncomingRequests,
@@ -29,7 +33,7 @@ import {
 } from "./model/summary";
 
 /**
- * The people endpoints of the pinned contract (`v0.29.0-rc.1`, API 0.29.0) that WEB-11a uses ONLINE (D-11a-14): the person read that says
+ * The people endpoints of the pinned contract (first `v0.29.0-rc.1`, API 0.29.0; now `v0.31.0-rc.1`, API 0.31.0) that WEB-11a uses ONLINE (D-11a-14): the person read that says
  * who controls a profile, the duplicate suggestions, the viewer-safe summaries (finding 8: `model/summary.ts`), the two profile commands
  * and a shared field create. Every call goes through the
  * session's STAMPED typed client for the displayed `(account, epoch)` (lint R1); nothing here queues.
@@ -41,6 +45,9 @@ import {
  * WEB-11b adds the request reads (`model/requests.ts`) and two refusals: `expired` (a `410`, the recipient preview of a request that expired
  * and is not swept yet; it is no longer folded into `not_found`) and `capacity` (a people command's `503 slice_capacity`: the recipient
  * already has the most requests waiting, and nothing was made; any other `503` stays uncertain).
+ *
+ * WEB-19 adds the person's activity timeline (`GET /people/{id}/activity`, API 0.30.2, `model/activity.ts`): a `404` is `not_found` (the
+ * person is not visible now: access lost), a `422 invalid_value` for `after` is `invalid` (the cursor is not one the reader may follow now).
  */
 export type PeopleRefusal =
   | "conflict"
@@ -85,6 +92,12 @@ export interface SummaryPageQuery {
   archived: boolean;
 }
 
+/** One page of the activity timeline: after the cursor (an event id the reader was given), at most `limit` (1–100) events. */
+export interface ActivityPageQuery {
+  after: string | null;
+  limit: number;
+}
+
 export interface PeopleApi {
   readPerson(id: string): Promise<PeopleResult<PersonDetailAnswer>>;
   /** `GET /people/summaries`: one page of the reader's visible people in `scope`, filtered by the server BEFORE pagination. */
@@ -103,6 +116,11 @@ export interface PeopleApi {
     id: string,
     page: { after?: string | null; limit: number },
   ): Promise<PeopleResult<ProjectionPage>>;
+  /** WEB-19, `GET /people/{id}/activity`: one page of the person's recorded activity (newest first, in commit order). */
+  readPersonActivity(
+    id: string,
+    page: ActivityPageQuery,
+  ): Promise<PeopleResult<PersonActivityPage>>;
   /** `GET /people/requests`: the pending requests addressed to the reader (at most 100). */
   readRequests(): Promise<PeopleResult<IncomingRequest[]>>;
   /** `GET /people/requests/sent`: one page of the reader's sent requests, every state, with no age limit (Q16). */
@@ -428,6 +446,23 @@ export function createPeopleApi(
               },
             }),
           (body) => parseSummaryPage(body, page, parseFieldAudience),
+        ),
+      ),
+    readPersonActivity: async (id, page) =>
+      offline() ??
+      readUntilSent(() =>
+        call(
+          () =>
+            client().GET("/people/{id}/activity", {
+              params: {
+                path: { id },
+                query: {
+                  limit: page.limit,
+                  ...(page.after ? { after: page.after } : {}),
+                },
+              },
+            }),
+          (body) => parsePersonActivityPage(body, page.limit),
         ),
       ),
     readRequests: async () =>
