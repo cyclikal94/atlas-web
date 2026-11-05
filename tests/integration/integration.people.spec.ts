@@ -2990,21 +2990,9 @@ test.describe("I-PPL24 to I-PPL29: the activity timeline (WEB-19, API 0.30.2)", 
       expect(dropped).toHaveLength(1);
       await proxy.removeRule(drop.id);
       if ((await tryAgain.count()) > 0) await tryAgain.click();
-      // A failed first-page re-read retried shows the preview again; Show all then asks for the 50.
+      // Try again repeats what failed (the step to 50, or the re-read at the depth already asked: 50).
       await expect
-        .poll(
-          async () => {
-            const shown = (await shownActivity(a)).length;
-            if (shown > 0 && shown < 50)
-              await activitySection(a)
-                .getByRole("button", { name: /Show all changes|Try again/ })
-                .first()
-                .click()
-                .catch(() => undefined);
-            return shown;
-          },
-          { timeout: 30_000, intervals: [1_000, 2_000] },
-        )
+        .poll(async () => (await shownActivity(a)).length, { timeout: 30_000 })
         .toBeGreaterThanOrEqual(50);
       await agrees(a, aId, person, 50);
       await activitySection(a)
