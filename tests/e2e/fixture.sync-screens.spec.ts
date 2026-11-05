@@ -258,7 +258,15 @@ for (const scheme of ["dark", "light"] as const) {
           if (screen.url.startsWith("/__gate")) await fixturePageReady(page);
           await expect(page.getByText(screen.expect).first()).toBeVisible();
           await settle(page, screen);
-          const violations = await runAxe(page);
+          // Revision 56 (C-S2, extended to axe on Kieran's decision after run 7): the Today screen is left out of axe as it is of the
+          // 44 px measurement. Settled, its own controls can sit under the shell's sticky tab bar at 320 px (floor-a: "Try again"), and
+          // they are WEB-20's to judge (D-A2). Everything else on the page is still scanned.
+          const violations = await runAxe(
+            page,
+            screen.url.startsWith("/today")
+              ? { exclude: [TODAY_SCREEN] }
+              : undefined,
+          );
           expect(
             violations,
             JSON.stringify(

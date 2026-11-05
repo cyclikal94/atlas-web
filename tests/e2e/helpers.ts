@@ -122,10 +122,13 @@ interface AxeViolation {
   nodes: Array<{ target: unknown[]; html: string }>;
 }
 
-/** Runs axe-core in the real page, with real layout, so colour-contrast is evaluated (jsdom cannot). */
+/**
+ * Runs axe-core in the real page, with real layout, so colour-contrast is evaluated (jsdom cannot). `context`: a selector to scan, or
+ * (WEB-14a revision 56, C-S2) the parts of the document to leave out; by default the whole document.
+ */
 export async function runAxe(
   page: Page,
-  context?: string,
+  context?: string | { exclude: string[] },
 ): Promise<AxeViolation[]> {
   await page.evaluate(axeSource);
   return page.evaluate(async (selector) => {
