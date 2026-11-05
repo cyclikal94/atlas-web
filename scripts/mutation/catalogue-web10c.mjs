@@ -4890,11 +4890,12 @@ export const UNIT_10C = [
     tests: ["tests/features/tasks/streak-page.test.tsx"],
     expect:
       /R42 scheduled boundary, (a fault that stays: .*the paced attempts are bounded|ONE failed re-read: .*first paced attempt)/,
+    // Re-anchored in revision 20 (the unified watcher, after the scheduled unstable case found a dormant watcher): the same fault (attempts at once).
     patch: (t) =>
       sub(
         t,
-        "      latest.current.expire();\n    }, delay);\n",
-        "      latest.current.expire();\n    }, 0);\n",
+        "            latest.current.expire();\n          }, delay);\n",
+        "            latest.current.expire();\n          }, 0);\n",
       ),
   },
   {
@@ -4905,11 +4906,12 @@ export const UNIT_10C = [
     tests: ["tests/features/tasks/streak-page.test.tsx"],
     expect:
       /R42 scheduled boundary, a fault that stays: the strip stays marked with its Try again and the paced attempts are bounded/,
+    // Re-anchored in revision 20 (the unified watcher, after the scheduled unstable case found a dormant watcher): the same fault (the ladder not advanced).
     patch: (t) =>
       sub(
         t,
-        "      step.current += 1;\n      latest.current.expire();\n",
-        "      latest.current.expire();\n",
+        "            step.current += 1;\n            latest.current.expire();\n",
+        "            latest.current.expire();\n",
       ),
   },
   {
@@ -4934,15 +4936,12 @@ export const UNIT_10C = [
     tests: ["tests/features/tasks/streak-page.test.tsx"],
     expect:
       /R42 (focus|visibilitychange|pageshow) after a period (opened|closed) with a fault: .*a later wake with the fault gone is current/,
+    // Re-anchored in revision 20 (the unified watcher, after the scheduled unstable case found a dormant watcher): the same fault, more exactly: only the return-to-page listeners are left off while the last read did not complete.
     patch: (t) =>
       sub(
-        sub(
-          t,
-          "    step.current = 0;\n    if (value === null) return;\n",
-          '    step.current = 0;\n    if (value === null || outcome === "failed") return;\n',
-        ),
-        "  }, [value]);\n",
-        "  }, [value, outcome]);\n",
+        t,
+        '    document.addEventListener("visibilitychange", resume);\n    window.addEventListener("focus", resume);\n    window.addEventListener("pageshow", resume);\n',
+        '    if (!failing) {\n      document.addEventListener("visibilitychange", resume);\n      window.addEventListener("focus", resume);\n      window.addEventListener("pageshow", resume);\n    }\n',
       ),
   },
   {
@@ -4953,11 +4952,12 @@ export const UNIT_10C = [
     tests: ["tests/features/tasks/streak-page.test.tsx"],
     expect:
       /R42 another (identity|task) while a paced attempt is due: the old scope's attempt never runs/,
+    // Re-anchored in revision 20 (the unified watcher, after the scheduled unstable case found a dormant watcher): the same fault: the cleanup no longer cancels a due wait (the listeners are still removed).
     patch: (t) =>
       sub(
         t,
-        "    return () => clearTimeout(timer);\n  }, [value, outcome]);\n",
-        "    void timer;\n  }, [value, outcome]);\n",
+        "    return () => {\n      clearTimeout(timer);\n      document.removeEventListener",
+        "    return () => {\n      document.removeEventListener",
       ),
   },
   {
@@ -4984,6 +4984,21 @@ export const UNIT_10C = [
         t,
         "        {noDatabase || failed ? null : value === null ? (\n",
         "        {failed ? null : value === null ? (\n",
+      ),
+  },
+  {
+    id: "MU-3368",
+    title:
+      "R42: WEB-10c A6 (review 22): a kept strip still current after a read that did not complete never waits for its boundary again (the watcher goes dormant once an expiry consumed its wait)",
+    file: "src/features/tasks/streak/StreakPage.tsx",
+    tests: ["tests/features/tasks/streak-page.test.tsx"],
+    expect:
+      /R42 scheduled boundary whose expiry re-read keeps changing, the clock last read before it: .*the watcher stays armed/,
+    patch: (t) =>
+      sub(
+        t,
+        "      if (value.next === null) return;\n      timer = setTimeout(arm, Math.min(",
+        "      if (value.next === null || failing) return;\n      timer = setTimeout(arm, Math.min(",
       ),
   },
 ];

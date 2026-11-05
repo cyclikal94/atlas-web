@@ -1531,6 +1531,86 @@ describe("R42: a strip whose local read did not complete is never shown as curre
       15_000,
     );
 
+  // ---- the expiry re-read: failed or unstable, offline and online, with the fresh-mount control at the final instant -------------------
+  for (const online of [false, true])
+    for (const kind of ["failed", "unstable"] as const)
+      test.each([false, true])(
+        `R42 ${online ? "online" : "offline"}, focus after a closure whose expiry re-read ${kind === "failed" ? "fails" : "keeps changing"}: marked ${kind}; a later focus on a steady clock is current (CONTROL fresh mount at the final instant %s)`,
+        async (control) => {
+          const base = Math.floor(Date.now() / 1000) * 1000;
+          const final = base + 20_000;
+          const clock = { at: control ? final : base };
+          const task = await windowed("close", base, 10);
+          const api = fakeApi({ readStreak: async () => streak(0, 1) });
+          const t = await mountAt(task.rows, task.taskId, clock, {
+            online,
+            api,
+          });
+          if (control) {
+            expect(states(), "control: the period has closed").toEqual([
+              "missed",
+            ]);
+            expect(marker()).toBeNull();
+            return;
+          }
+          expect(states(), "precondition: before the closure").toEqual([
+            "open",
+          ]);
+          // failed: the walk is refused; unstable: each attempt's walk moves the clock across the closure, forward then back.
+          const f = kind === "failed" ? fault(t, "occurrence", null) : null;
+          const s = kind === "unstable" ? seesaw(t, clock, final, base) : null;
+          try {
+            clock.at = final;
+            wake("focus");
+            await t.until(() => marker() !== null);
+            await t.settle();
+            if (s) expect(s.log.walks, "every attempt was overtaken").toBe(3);
+            expect(states(), "the last complete strip is kept").toEqual([
+              "open",
+            ]);
+            expectMarked(kind);
+          } finally {
+            f?.restore();
+            s?.end(final);
+          }
+          wake("focus");
+          await t.until(() => marker() === null);
+          await t.settle();
+          expect(states()).toEqual(["missed"]);
+          expect(marker()).toBeNull();
+        },
+        15_000,
+      );
+
+  test("R42 scheduled boundary whose expiry re-read keeps changing, the clock last read before it: marked unstable at once; the watcher stays armed, and once the boundary is past again a paced attempt is current with no wake", async () => {
+    const base = Math.floor(Date.now() / 1000) * 1000;
+    const final = base + 20_000;
+    const clock = { at: base };
+    const task = await windowed("close", base, 1);
+    const t = await mountAt(task.rows, task.taskId, clock);
+    expect(states()).toEqual(["open"]);
+    clock.at = final;
+    const s = seesaw(t, clock, final, base);
+    try {
+      await realWait(t, () => marker() !== null, 5_000);
+      expect(
+        s.log.walks,
+        "the scheduled read's attempts were all overtaken",
+      ).toBe(3);
+      expect(states()).toEqual(["open"]);
+      expectMarked("unstable");
+    } finally {
+      s.end(final);
+    }
+    // The overtaken attempts left the clock before the boundary: the kept strip judged current, so its boundary wait (about 1 s) is armed
+    // again; past it, the paced attempt (2 s) reads it again.
+    await realWait(t, () => JSON.stringify(states()) === '["missed"]', 6_000);
+    expect(states(), "the paced attempt reads it again, no event").toEqual([
+      "missed",
+    ]);
+    expect(marker()).toBeNull();
+  }, 20_000);
+
   // ---- Q3: what a failed read keeps -------------------------------------------------------------------------------------------------
   test.each([false, true])(
     "R42 a clock gone back before the strip's instant with a fault: marked, then the recovered read selects again (CONTROL healthy %s)",

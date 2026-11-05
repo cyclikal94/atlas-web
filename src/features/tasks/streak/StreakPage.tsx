@@ -261,10 +261,12 @@ type LocalOutcome = "reading" | "complete" | "failed" | "unstable" | "other";
  * without any data change; offline as online. Each expiry calls `expire`, which asks the local read again; the last complete strip stays as it
  * was until that read completes.
  *
- * Revision 20 (review R42): a re-read that does not complete leaves the same strip retained (the page marks it stale), so nothing here waits
- * for a new strip to go on. While the retained strip is no longer current and the last read failed or kept changing, the paced attempts of
- * `EXPIRY_RETRIES_MS` ask again on their own; they start afresh with each complete strip and end with the scope (the effects' cleanup).
- * The return-to-page listeners stay armed for as long as a strip is retained, whatever its reads did, so a wake always asks again.
+ * Revision 20 (review R42): a re-read that does not complete leaves the same strip retained (the page marks it stale), so the watcher is
+ * judged on the strip AND how its last read ended, and always knows what it waits for next. A current strip waits for its boundary, whatever
+ * its last read did; a lapsed strip with a read in progress waits for that read; a lapsed strip whose last read failed or kept changing gets
+ * the next paced attempt of `EXPIRY_RETRIES_MS` (none once they are spent); any other lapsed strip is asked again at once. A return to the
+ * page asks again for a lapsed strip whatever its last read did: the listeners stay armed for as long as a strip is retained. The paced
+ * attempts start afresh with each complete strip and a due one ends with the scope or the page (the effect's cleanup).
  */
 function useLocalExpiry(
   read: () => number,
@@ -274,16 +276,33 @@ function useLocalExpiry(
 ): void {
   const latest = useRef({ read, expire });
   latest.current = { read, expire };
-  /** The next paced attempt's place in `EXPIRY_RETRIES_MS`; 0 again for each complete strip. */
+  /** The next paced attempt's place in `EXPIRY_RETRIES_MS`, counted for the strip in `counted`; 0 again for each complete strip. */
   const step = useRef(0);
+  const counted = useRef(value);
   useEffect(() => {
-    step.current = 0;
+    if (counted.current !== value) {
+      counted.current = value;
+      step.current = 0;
+    }
     if (value === null) return;
+    const failing = outcome === "failed" || outcome === "unstable";
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const arm = () => {
+    const arm = (wake = false) => {
       clearTimeout(timer);
       const t = latest.current.read();
       if (!localCurrent(value, t)) {
+        // A read in progress answers for this strip (a wake still asks: its read is then the latest asked).
+        if (outcome === "reading" && !wake) return;
+        if (failing && !wake) {
+          // This lapsed strip's last re-read did not complete: the next paced attempt, if one is left.
+          const delay = expiryRetryDelay(step.current);
+          if (delay === null) return;
+          timer = setTimeout(() => {
+            step.current += 1;
+            latest.current.expire();
+          }, delay);
+          return;
+        }
         latest.current.expire();
         return;
       }
@@ -293,7 +312,7 @@ function useLocalExpiry(
     // A strip published after its own boundary (a slow read that a boundary overtook) is asked again at once.
     arm();
     const resume = () => {
-      if (document.visibilityState === "visible") arm();
+      if (document.visibilityState === "visible") arm(true);
     };
     document.addEventListener("visibilitychange", resume);
     window.addEventListener("focus", resume);
@@ -304,19 +323,6 @@ function useLocalExpiry(
       window.removeEventListener("focus", resume);
       window.removeEventListener("pageshow", resume);
     };
-  }, [value]);
-  useEffect(() => {
-    if (value === null) return;
-    if (outcome !== "failed" && outcome !== "unstable") return;
-    // A strip that is still current waits for its boundary like a healthy one; only one that has lapsed is asked again on its own.
-    if (localCurrent(value, latest.current.read())) return;
-    const delay = expiryRetryDelay(step.current);
-    if (delay === null) return;
-    const timer = setTimeout(() => {
-      step.current += 1;
-      latest.current.expire();
-    }, delay);
-    return () => clearTimeout(timer);
   }, [value, outcome]);
 }
 

@@ -1,7 +1,7 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2577;
+export const EXPECTED_UNIT = 2578;
 export const EXPECTED_ENGINE = 307;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
@@ -61,6 +61,6 @@ export const EXPECTED_ENGINE = 307;
 // clock, Start judged at the press and at its own instant, and the strip's opening/closing boundaries, overtaken read, wake and backwards clock).
 // WEB-10c base merge of 5 November 2026: accepted main (2235 unit, 296 engine) plus WEB-10c (332 unit, 9 engine) = 2567 unit, 305 engine.
 // Both catalogues retained; IDs do not overlap (MU-3001..MU-3355 against WEB-11a's MU-2101..MU-2957).
-// WEB-10c revision 20 (review 22 R42; design assessment of 5 November 2026): +10 unit (MU-3356..MU-3365: the strip's status rule with a strip
+// WEB-10c revision 20 (review 22 R42; design assessment of 5 November 2026): +11 unit (MU-3356..MU-3365, MU-3368: the strip's status rule with a strip
 // retained, its own Try again, the paced attempts after a lapsed strip's re-read did not complete, the wake listeners kept, the ladder's
-// cleanup with the scope, unknown never shown as empty, and the no-database presentation); +2 real-engine (MU-3366, MU-3367 over E-S4).
+// cleanup with the scope, unknown never shown as empty, and the no-database presentation, and the boundary wait re-armed after a read that did not complete); MU-3359, MU-3360, MU-3362 and MU-3363 re-anchored to the unified watcher; +2 real-engine (MU-3366, MU-3367 over E-S4).
