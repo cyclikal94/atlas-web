@@ -1,4 +1,5 @@
 import { useCallback, useLayoutEffect, useRef } from "react";
+import { endPeopleRecovery } from "./form-recovery";
 import { isCurrentMemory, type PeopleMemory } from "./memory";
 
 /**
@@ -97,13 +98,15 @@ export function sessionOf(kept: unknown): string | undefined {
  * still reachable has no say). Only that session: another session kept under the same key (a later "Add a field") is never touched, so a
  * caller names the session it SHOWS, never whichever one the key holds when it runs. Works whether or not a form of the session could be
  * drawn (an editor whose reads failed shows none). A save already admitted is not undone: it settles its own claim, and its completion
- * finds nothing to close (`completeSession` answers `gone`).
+ * finds nothing to close (`completeSession` answers `gone`). WEB-14a (F-INT-PEOPLE-Q4): the session's recoverable model ends with it, so
+ * its copies are discarded and never come back after a later reload (`form-recovery.ts`).
  */
 export function retireSession(
   memory: PeopleMemory,
   key: string,
   session: string,
 ): void {
+  endPeopleRecovery(memory.identity, key, session);
   if (sessionOf(memory.drafts.get(key)) === session) memory.drafts.delete(key);
   memory.reports.delete(session);
   memory.prepared.delete(session);
@@ -139,6 +142,12 @@ export function completeSession(
   }
   if (keptHere) memory.drafts.delete(key);
   memory.reports.delete(session);
+  // WEB-14a revision 50 (review of revision 49, F-R49-2): with no form of the session mounted, nothing else ends its recoverable model,
+  // and a re-binding the save itself left in it (`settle`: a confirmed audience) moved the model's input past the save's ticket, so the
+  // ticket's success cannot cover it. The session's save completed for its current input (no later revision was typed: a re-binding is
+  // never a revision), so its model ends here as a mounted form's close ends it (`retireSession`). Only THIS session's model (a later
+  // session's is never ended: `endPeopleRecovery` checks the session), and only here; a mounted form closes as before.
+  if (owner === undefined) endPeopleRecovery(memory.identity, key, session);
   owner?.close(saved);
   return "closed";
 }

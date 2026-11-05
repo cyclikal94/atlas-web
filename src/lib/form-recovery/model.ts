@@ -103,6 +103,8 @@ export interface ModelView {
   unavailable: boolean;
   /** The look has read the store (or there is nothing to look in yet). */
   ready: boolean;
+  /** Revision 53 (D-R53-1): the last look withheld a copy another page seemed to hold (`look.ts`): offer `checkAgain`. Absent: no. */
+  withheld?: boolean;
 }
 
 /** A submission of the model's input (as `useRecoverableForm().submitting`): take it in the same step as reading the input you send. */
@@ -127,6 +129,8 @@ export interface RecoveryControls {
   /** "Discard instead": the copies are discarded and the editor shows where it starts from. */
   discard(): Promise<DiscardResult>;
   retry(): Promise<boolean>;
+  /** Revision 53 (D-R53-1): "Check saved copies again". */
+  checkAgain(): Promise<boolean>;
   restoreAlternative(copy: RecoverySnapshot): Promise<ModelAlternativeResult>;
   discardAlternative(copy: RecoverySnapshot): Promise<DiscardResult>;
 }
@@ -212,6 +216,13 @@ export interface RecoverableModel {
   unfinishedText(): string | null;
   /** Revision 7 (R13): makes a look that could not read the store again; true once it has. */
   retry(): Promise<boolean>;
+  /**
+   * Revision 53 (D-R53-1, Kieran, 3 November 2026): "Check saved copies again", the person's explicit repeat of a look that has finished:
+   * the same reads and ownership rules, and what it finds is only OFFERED (never restored, submitted or removed). A copy still held by a
+   * live page stays withheld. A later check replaces an earlier one still reading; false (nothing read) while an update reload is
+   * prepared, before the first look has finished, while it is unavailable (`retry`) or once retired.
+   */
+  checkAgain(): Promise<boolean>;
   restoreAlternative(tabInstanceId: string): Promise<ModelAlternativeResult>;
   discardAlternative(tabInstanceId: string): Promise<DiscardResult>;
   view(): ModelView;
@@ -360,22 +371,28 @@ export function createRecoverableModel(
         if (mode === "restore") current.look = "none";
         current.recovery = "unavailable";
         current.relook = () => retry();
-        setView({ unavailable: true, ready: false });
+        setView({ unavailable: true, ready: false, withheld: false });
         return false;
       }
       current.recovery = "ok";
       current.relook = null;
       claimLeft(current, found);
       const { candidates, lineage, offered } = chooseLeft(current, found);
+      const withheld = found.withheld;
       if (mode === "offer") {
+        // Read when the answer is applied: the copy shown, and (revision 53) the copy this session was restored from, discarded since
+        // the look began included (its removal may not have landed), are never offered again.
         const showing = view.restored?.tabInstanceId;
+        const source = current.persisted.source?.id;
         setView({
           unavailable: false,
           ready: true,
+          withheld,
           alternatives: offered(null).filter(
             (copy) =>
               copy.tabInstanceId !== found.own &&
-              copy.tabInstanceId !== showing,
+              copy.tabInstanceId !== showing &&
+              copy.tabInstanceId !== source,
           ),
         });
         return true;
@@ -405,6 +422,7 @@ export function createRecoverableModel(
         setView({
           unavailable: false,
           ready: true,
+          withheld,
           restored: newest,
           alternatives: offered(newest),
         });
@@ -412,6 +430,7 @@ export function createRecoverableModel(
         setView({
           unavailable: false,
           ready: true,
+          withheld,
           alternatives: offered(null),
         });
       return true;
@@ -432,6 +451,16 @@ export function createRecoverableModel(
     if (current.recovery !== "unavailable") return Promise.resolve(true);
     setView({ unavailable: false });
     return look(current, current.look === "done" ? "offer" : "restore");
+  };
+  const checkAgain = (): Promise<boolean> => {
+    const current = session;
+    return current &&
+      !current.retired &&
+      !registry.frozen() &&
+      current.look === "done" &&
+      current.recovery === "ok"
+      ? look(current, "offer")
+      : Promise.resolve(false);
   };
 
   const model: RecoverableModel = {
@@ -606,6 +635,7 @@ export function createRecoverableModel(
       return dirty ? text : null;
     },
     retry,
+    checkAgain,
     restoreAlternative(tabInstanceId) {
       const current = session;
       if (registry.frozen() || !current || current.retired)

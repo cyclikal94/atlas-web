@@ -383,6 +383,7 @@ export function useRecoverableEditor<T>(options: {
       return removal;
     },
     retry: () => model.retry(),
+    checkAgain: model.checkAgain,
     restoreAlternative: (copy) => model.restoreAlternative(copy.tabInstanceId),
     discardAlternative: (copy) => model.discardAlternative(copy.tabInstanceId),
   };

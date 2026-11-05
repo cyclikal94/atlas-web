@@ -12,6 +12,7 @@ import {
   useRecoverableEditor,
   useRecoveryHost,
 } from "../../lib/form-recovery/editor";
+import { firstControl } from "../../lib/form-recovery/focus";
 import { RecoveryNotice } from "../../lib/form-recovery/RecoveryNotice";
 import { AudienceSummary } from "./AudienceSummary";
 import {
@@ -245,6 +246,14 @@ function PolicyEditorDialog({
   const [busy, setBusy] = useState(false);
   // Held synchronously while a save is being sent: a second click or a Try again cannot send it twice at once.
   const sending = useRef(false);
+  // WEB-14a revision 51 (F-R51-1): the restored policy, and "Discard instead", focus its first grant (that grant's chosen access), or the
+  // grants' first control for a policy with none ("Add account grant"), read from the committed DOM at each attempt, since a reset can
+  // insert or remove grants.
+  const grants = useRef<HTMLDivElement>(null);
+  const grantsFocus = () =>
+    grants.current?.querySelector<HTMLElement>(
+      '[data-grant] [role="radio"][data-state="checked"]',
+    ) ?? firstControl(grants.current);
   const uncertain = useRef<Attempt | null>(null);
   const mounted = useRef(true);
   // Set on every mount: development's replay of every effect runs this cleanup and then mounts again (WEB-11a review 23).
@@ -542,7 +551,7 @@ function PolicyEditorDialog({
           </strong>{" "}
           {copy.POLICY_ONLINE_ONLY}
         </p>
-        <RecoveryNotice recovery={recovery} />
+        <RecoveryNotice recovery={recovery} firstFieldRef={grantsFocus} />
         {restored ? (
           <p className="text-[12.5px] text-ink-1" data-policy-restored="">
             {copy.RESTORED_UNSAVED}
@@ -561,16 +570,18 @@ function PolicyEditorDialog({
           membersAsOf={known ? formatWhen(known.at, env.now()) : null}
           parentLabel={parentLabel}
         />
-        <PolicyGrantsEditor
-          policy={draft.policy}
-          labels={labels}
-          membership={membership}
-          onRetryMembership={retryMembership}
-          disabled={busy}
-          refused={draft.refused}
-          dispatch={dispatch}
-          onLookup={(purpose) => setView(purpose)}
-        />
+        <div ref={grants}>
+          <PolicyGrantsEditor
+            policy={draft.policy}
+            labels={labels}
+            membership={membership}
+            onRetryMembership={retryMembership}
+            disabled={busy}
+            refused={draft.refused}
+            dispatch={dispatch}
+            onLookup={(purpose) => setView(purpose)}
+          />
+        </div>
         <OutcomeBanner
           outcome={outcome}
           onReload={reload}

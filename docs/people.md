@@ -66,6 +66,14 @@ reopens it with its draft), and `/settings/archived`.
    command path must do the same. Queued commands are covered by the queue's counts and the applied revision (`useAppliedRevision`).
 5. **Q4 recovery contexts** (`model/recovery.ts`): `people-field:<personId>:<fieldId|new:<formId>>`, `people-rename:<personId>`,
    `people-new:<formId>`. WEB-14a captures them; WEB-11a does not touch `src/lib/form-recovery`. A restore fills a form and never submits.
+   **Adopted** (WEB-14a integration revision, review of 2 November 2026, F-INT-PEOPLE-Q4): `form-recovery.ts` gives each form a
+   recoverable model that follows its editing session in page memory (`docs/pwa.md`, "The People forms"). The new person's and a new
+   field's form id is `dialog` (page memory keeps one such form at a time), so the page after a reload finds the copy. The held changes
+   (`people-held:`) stay operations of the conditional port, never a form. Revision 50: the field editor's "Save mine on the current
+   version" and Archive are outstanding page work for an update until they end (never the input's ticket), and a save that completes with
+   no form of its session mounted ends that session's model (`completeSession`).
+   Revision 51 (F-R51-1): each form names its first field, Name, to `RecoveryNotice`: a restored form focuses it, and a keyboard
+   "Discard instead" leaves focus there (`docs/pwa.md`, "Restored-form focus").
 
 ## Decisions (D-11a-1 to D-11a-26)
 

@@ -4,7 +4,8 @@
 //
 //  - a backend path (/api, /health, /ready, /auth, /oidc and below) is a 404 that never carries the shell, except the stub `/health` and
 //    `/ready` (the `/health` body is set from the control port: the `api_version` gate's fixture cases) and, once set, the stub identity read
-//    `browser-sessions/current`, `me`, `sessions` and empty Today/defaults reads (so a seeded account has a healthy landing without a backend);
+//    `browser-sessions/current`, `me`, `sessions` and empty Today/defaults reads (so a seeded account has a healthy landing without a backend),
+//    and, once set, the CANNED READS below (WEB-14a revision 50: a seeded person's People reads, so a person's page has its backend answers);
 //  - `/assets/` files are immutable and a missing one is a 404; the unhashed entry points (index.html, sw.js, manifest.webmanifest, ...) and
 //    every other file revalidate (`no-cache`); a missing file with an extension is a 404; anything else is the shell (history fallback);
 //  - every response carries the production security headers (deploy/nginx/security-headers.conf), the content security policy included;
@@ -27,6 +28,11 @@
 //   POST /identity/hold?on=1|0    hold every identity read (`browser-sessions/current`) unanswered from now on, or answer every held one
 //                                 as the stub stands and stop holding; answers {"hold", "held"} (WEB-14a revision 13, F-8: a page's
 //                                 session check that does not finish, in every engine: Playwright's WebKit routing misses this page's request)
+//   POST /reads                   WEB-14a revision 50 (review of revision 49): CANNED READS, `{"<path>": <JSON body>, ...}` (an empty body:
+//                                 none). While the stub identity is set, a GET or HEAD of exactly one of these paths (the query is not
+//                                 part of the match) answers 200 with that JSON body, `no-store`; every other backend path is still the
+//                                 backend's 404. Replaces the whole set. Only GET and HEAD, as everywhere: the canned reads never accept
+//                                 a write, so nothing a page submits can succeed through them.
 //   GET  /log                     every request served so far: [{ "id", "method", "path", "at", "status", "end" }]
 //   POST /log/clear               empties /log only (the ledger below keeps every request)
 //   GET  /ledger?after=<id>       WEB-14a revision 43 (F-FRESH-2): the APPEND-ONLY ledger of every request the app port has received, in
@@ -94,6 +100,8 @@ let dark = false;
 let identity = null;
 /** While true, identity reads wait in `heldReads` (each answers when released, or never if its page went away). */
 let holdIdentity = false;
+/** WEB-14a revision 50: the canned reads (`POST /reads`), by exact path; empty: none (the backend's 404, as before). */
+let reads = new Map();
 const heldReads = [];
 const log = [];
 /** WEB-14a revision 43: every request, never cleared (the `/log` view above is clearable). */
@@ -239,6 +247,13 @@ const app = createServer((request, response) => {
       { "content-type": "application/json", "Cache-Control": "no-store" },
       JSON.stringify({ items: [] }),
     );
+  // WEB-14a revision 50: a canned read set from the control port (a seeded person's People reads), for the stub identity only.
+  if (identity !== null && reads.has(path))
+    return answer(
+      200,
+      { "content-type": "application/json", "Cache-Control": "no-store" },
+      JSON.stringify(reads.get(path)),
+    );
   if (BACKEND.test(path))
     return answer(
       404,
@@ -331,6 +346,20 @@ const control = createServer((request, response) => {
         const held = heldReads.length;
         if (!holdIdentity) for (const release of heldReads.splice(0)) release();
         return done({ hold: holdIdentity, held });
+      }
+      case "/reads": {
+        const given = body ? JSON.parse(body) : {};
+        if (
+          typeof given !== "object" ||
+          given === null ||
+          Array.isArray(given) ||
+          !Object.keys(given).every((key) => BACKEND.test(key))
+        ) {
+          response.writeHead(400).end("reads are {backend path: JSON body}");
+          return;
+        }
+        reads = new Map(Object.entries(given));
+        return done({ reads: [...reads.keys()] });
       }
       case "/log":
         return done(log);

@@ -182,3 +182,152 @@ export const renameRecoveryFields = (name: string): Record<string, string> => ({
 });
 export const restoreRename = (fields: Record<string, string>): string | null =>
   typeof fields.name === "string" ? fields.name : null;
+
+/**
+ * WEB-14a (review of 2 November 2026, F-INT-PEOPLE-Q4): the CODECS the people forms' recoverable models use (`form-recovery.ts`), built on
+ * the serialisers above. Each copy is ONE explicitly versioned canonical text (`v`), holding the form's captured fields and what its input
+ * was composed against, so a restored save keeps the form's own guards: the rename's and the field editor's binding (`snapshot`, the
+ * versions the form opened on), where the field edit began (`origin`) and the id a new field is created under (`newFieldId`: a retried
+ * create of the same input is the same field, never a second one). Never an attempt, a request id or a secret. A text of another version,
+ * or one whose part does not read back with its shape, is not this build's (null: offered, never restored in part).
+ *
+ * The forms' contexts are stable for the form and its target: a new person's and a new field's form id is `dialog` (page memory keeps one
+ * such form at a time, `new-person` and `field:<person>:new`), so the page after a reload finds the copy.
+ */
+export const NEW_FORM_ID = "dialog";
+
+/** The binding an edit was composed against (`model/snapshot.ts` `EditSnapshot`). */
+export interface RecoveredSnapshot {
+  version: number;
+  policyVersion: number | null;
+  expectedBase: number;
+  latestLocalId: string | null;
+  latestDigest: string | null;
+}
+/** Where a field edit began (the field editor's `EditOrigin`). */
+export type RecoveredOrigin =
+  | { kind: "new" }
+  | { kind: "field" }
+  | { kind: "create"; localId: string | null; digest: string | null };
+
+const isInteger = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value);
+const textOrNull = (value: unknown): value is string | null =>
+  value === null || typeof value === "string";
+
+function readSnapshot(value: unknown): RecoveredSnapshot | null {
+  if (!isObject(value)) return null;
+  const { version, policyVersion, expectedBase, latestLocalId, latestDigest } =
+    value;
+  if (!isInteger(version) || !isInteger(expectedBase)) return null;
+  if (policyVersion !== null && !isInteger(policyVersion)) return null;
+  if (!textOrNull(latestLocalId) || !textOrNull(latestDigest)) return null;
+  return { version, policyVersion, expectedBase, latestLocalId, latestDigest };
+}
+
+function readOrigin(value: unknown): RecoveredOrigin | null {
+  if (!isObject(value)) return null;
+  if (value.kind === "new" || value.kind === "field")
+    return { kind: value.kind };
+  if (
+    value.kind === "create" &&
+    textOrNull(value.localId) &&
+    textOrNull(value.digest)
+  )
+    return { kind: "create", localId: value.localId, digest: value.digest };
+  return null;
+}
+
+/** A versioned copy's parts (null: not version 1, or its fields are not texts). */
+function envelope(
+  text: string,
+): { fields: Record<string, string>; rest: Obj } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!isObject(parsed) || parsed.v !== 1 || !isObject(parsed.fields))
+    return null;
+  const fields: Record<string, string> = {};
+  for (const [name, value] of Object.entries(parsed.fields)) {
+    if (typeof value !== "string") return null;
+    fields[name] = value;
+  }
+  return { fields, rest: parsed };
+}
+
+export const personCodec = {
+  context: newPersonContext(NEW_FORM_ID),
+  encode: (state: NewPersonState): string =>
+    canonicalBody({ v: 1, fields: personRecoveryFields(state) }),
+  decode: (text: string): NewPersonState | null => {
+    const read = envelope(text);
+    return read === null ? null : restorePersonForm(read.fields);
+  },
+};
+
+export interface RenameInput {
+  name: string;
+  snapshot: RecoveredSnapshot;
+}
+
+export const renameCodec = (personId: string) => ({
+  context: renameContext(personId),
+  encode: (value: RenameInput): string =>
+    canonicalBody({
+      v: 1,
+      fields: renameRecoveryFields(value.name),
+      snapshot: value.snapshot,
+    }),
+  decode: (text: string): RenameInput | null => {
+    const read = envelope(text);
+    if (read === null) return null;
+    const name = restoreRename(read.fields);
+    const snapshot = readSnapshot(read.rest.snapshot);
+    return name === null || snapshot === null ? null : { name, snapshot };
+  },
+});
+
+export interface FieldInput {
+  form: FieldFormState;
+  touched: boolean;
+  snapshot: RecoveredSnapshot | null;
+  origin: RecoveredOrigin;
+  newFieldId: string;
+}
+
+export const fieldCodec = (personId: string, fieldId: string | null) => ({
+  context: fieldContext(
+    personId,
+    fieldId === null ? { formId: NEW_FORM_ID } : { fieldId },
+  ),
+  encode: (value: FieldInput): string =>
+    canonicalBody({
+      v: 1,
+      fields: fieldRecoveryFields(value.form),
+      touched: value.touched,
+      snapshot: value.snapshot,
+      origin: value.origin,
+      newFieldId: value.newFieldId,
+    }),
+  decode: (text: string): FieldInput | null => {
+    const read = envelope(text);
+    if (read === null) return null;
+    const form = restoreFieldForm(read.fields);
+    const { touched, snapshot, origin, newFieldId } = read.rest;
+    const binding = snapshot === null ? null : readSnapshot(snapshot);
+    const began = readOrigin(origin);
+    if (
+      form === null ||
+      typeof touched !== "boolean" ||
+      (snapshot !== null && binding === null) ||
+      began === null ||
+      typeof newFieldId !== "string" ||
+      newFieldId === ""
+    )
+      return null;
+    return { form, touched, snapshot: binding, origin: began, newFieldId };
+  },
+});

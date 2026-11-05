@@ -51,6 +51,12 @@ export interface Generations {
    * holding (`false`). Answers how many were held when it was called.
    */
   holdIdentity(on: boolean): Promise<number>;
+  /**
+   * WEB-14a revision 50 (review of revision 49): the server's CANNED READS (`POST /reads` of scripts/serve-generations.mjs): a GET of
+   * exactly one of these backend paths answers 200 with its JSON body while the stub identity is set (a seeded person's People reads).
+   * Replaces the whole set; `{}`: none, every backend path the backend's 404 again. Never a write.
+   */
+  reads(answers: Record<string, unknown>): Promise<void>;
   log(): Promise<LogEntry[]>;
   clearLog(): Promise<void>;
   /**
@@ -139,6 +145,9 @@ async function startGenerations(
     holdIdentity: async (on) =>
       ((await post(`/identity/hold?on=${on ? 1 : 0}`)) as { held: number })
         .held,
+    reads: async (answers) => {
+      await post("/reads", JSON.stringify(answers));
+    },
     log: async () =>
       (await (
         await fetch(`${urls.control}/log`, { method: "GET" })
@@ -360,8 +369,9 @@ export async function seedAccount(
   /**
    * WEB-14a revision 37 (R40): the account's empty cache is also VALID (`seedDelta`: the delta phase at `cursor`), so the task screens
    * show their editors as they do for an account that has synced; the real first snapshot is WEB-09b's. Off: the database is only created.
+   * WEB-14a revision 50: `rows` are synced resources (sync projections) put into the account's cache first, as the snapshot would.
    */
-  options: { validCache?: string } = {},
+  options: { validCache?: string; rows?: object[] } = {},
 ): Promise<void> {
   await world.identity({ account, session });
   const page = await context.newPage();
@@ -380,16 +390,26 @@ export async function seedAccount(
   await page.goto(`${world.url}/__data`);
   await page.waitForFunction(() => window.__atlasData !== undefined);
   const created = await page.evaluate(
-    async ({ id, cursor }) => {
+    async ({ id, cursor, rows }) => {
       const data = window.__atlasData;
       if (!data) throw new Error("the data harness is not loaded");
       data.setIdentity(id);
       const result = await data.open(id, { create: true });
+      if (rows.length > 0)
+        await data.put(
+          id,
+          "cache",
+          rows.map((row) => ({ kind_date: null, ...row })),
+        );
       if (cursor !== null) await data.seedDelta(id, cursor);
       data.close(id);
       return result;
     },
-    { id: account, cursor: options.validCache ?? null },
+    {
+      id: account,
+      cursor: options.validCache ?? null,
+      rows: options.rows ?? [],
+    },
   );
   expect(created).toBe("created");
   await page.close();

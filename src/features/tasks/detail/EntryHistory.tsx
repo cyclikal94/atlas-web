@@ -9,6 +9,7 @@ import {
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { useFormRecoveryPort } from "../../../data";
+import { headingFocus } from "../../../lib/form-recovery/focus";
 import {
   createRecoverableModel,
   type ModelTicket,
@@ -520,6 +521,36 @@ export function EntryHistory({
   );
   /** The model's text now: what was last given to it (null: it holds no input). */
   const modelText = useRef<string | null>(null);
+  // WEB-14a revision 51 (F-R51-1; decision D1, Kieran, 3 November 2026): where the restored fix puts focus, read from the committed DOM at
+  // each attempt. An open fix: its new value (a quantity), else its first action (a tick or an item has no field). A parked fix (nothing
+  // opened by the restore, as before): its entry's "Fix this entry" when shown, else this history's heading. A focused "Discard instead"
+  // removes the fix, open or parked, so it returns focus to the entry it belonged to the same way: its "Fix this entry", else the heading.
+  const historyRef = useRef<HTMLElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const discardedEntry = useRef<string | null>(null);
+  const entryFocus = (entryId: string | null) => {
+    const root = historyRef.current;
+    if (!root) return null;
+    for (const item of root.querySelectorAll<HTMLElement>("[data-entry]"))
+      if (item.getAttribute("data-entry") === entryId) {
+        const control = item.querySelector<HTMLElement>(
+          "button:not([disabled])",
+        );
+        if (control && !control.closest("[data-fix-form]")) return control;
+      }
+    return headingFocus(headingRef.current);
+  };
+  const restoredFocus = () => {
+    const form =
+      historyRef.current?.querySelector<HTMLElement>("[data-fix-form]");
+    if (form)
+      return (
+        form.querySelector<HTMLElement>("input") ??
+        form.querySelector<HTMLElement>("button:not([disabled])")
+      );
+    return entryFocus(parked.current?.entryId ?? null);
+  };
+  const discardFocus = () => entryFocus(discardedEntry.current);
   const shownRef = useRef<Shown[]>([]);
   const canFixRef = useRef<(entry: Shown) => boolean>(() => false);
   const pendingReplacedRef = useRef<ReadonlySet<string>>(new Set());
@@ -1298,6 +1329,7 @@ export function EntryHistory({
   const fixShown = fix !== null && shown.some((s) => s.id === fix.entry.id);
   return (
     <section
+      ref={historyRef}
       aria-labelledby={heading}
       className="flex flex-col gap-2"
       data-entry-history=""
@@ -1306,10 +1338,16 @@ export function EntryHistory({
       data-stream-version={row.progressVersion ?? ""}
       data-journal-version={journal?.version ?? ""}
     >
-      <h2 id={heading} className="text-[15px] font-medium text-ink-1">
+      <h2
+        ref={headingRef}
+        id={heading}
+        className="text-[15px] font-medium text-ink-1"
+      >
         {full ? HISTORY_COPY.full : HISTORY_COPY.heading}
       </h2>
       <RecoveryNotice
+        firstFieldRef={restoredFocus}
+        discardFocus={discardFocus}
         recovery={{
           view: recoveryView,
           locked,
@@ -1319,6 +1357,8 @@ export function EntryHistory({
             if (!recovery.model.accepting())
               return Promise.resolve<DiscardResult>("failed");
             const result = recovery.model.discard("");
+            discardedEntry.current =
+              fixRef.current?.entry.id ?? parked.current?.entryId ?? null;
             sel.current += 1;
             modelText.current = null;
             parked.current = null;
@@ -1327,6 +1367,7 @@ export function EntryHistory({
             return result;
           },
           retry: () => recovery.model.retry(),
+          checkAgain: recovery.model.checkAgain,
           restoreAlternative: (copy) =>
             recovery.model.restoreAlternative(copy.tabInstanceId),
           discardAlternative: (copy) =>

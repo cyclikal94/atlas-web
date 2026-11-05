@@ -1,5 +1,9 @@
 import { useCallback, useSyncExternalStore } from "react";
 import type { Policy } from "../../data";
+import {
+  forgetPeopleRecovery,
+  retirePeopleRecoveryExcept,
+} from "./form-recovery";
 import type { EditingSession } from "./lifetime";
 import type { Attempt } from "./model/attempt";
 import type { LinkageState } from "./model/linkage";
@@ -245,6 +249,8 @@ export function peopleMemory(identity: string): PeopleMemory {
   if (current === null || current.identity !== identity) {
     const previous = current;
     current = new PeopleMemory(identity);
+    // WEB-14a (F-INT-PEOPLE-Q4): the forms' recoverable models of another identity leave the page's registry with its page memory.
+    retirePeopleRecoveryExcept(identity);
     previous?.touch();
   }
   return current;
@@ -258,6 +264,7 @@ export const isCurrentMemory = (memory: PeopleMemory): boolean =>
 export function forgetAllPeopleMemory(): void {
   const previous = current;
   current = null;
+  forgetPeopleRecovery();
   previous?.touch();
 }
 

@@ -853,6 +853,17 @@ function LayerForm({
 
   // The sync control keeps what is on screen (the dialog asks every open form); a discard is the session's.
   const latest = useRef<RetainedForm | null>(null);
+  // WEB-14a revision 51 (F-R51-1): this layer's restored choice, and "Discard instead", focus the layer's CHOSEN option (read from the
+  // committed DOM at each attempt: a discard's reset selects another), never by choosing one; with two layers restored at once, the first
+  // in the page takes focus and the other's request ends (decision D2, Kieran, 3 November 2026: the existing arbiter).
+  const choices = useRef<HTMLDivElement>(null);
+  const choiceFocus = () =>
+    choices.current?.querySelector<HTMLElement>(
+      '[role="radio"][data-state="checked"]',
+    ) ??
+    choices.current?.querySelector<HTMLElement>(
+      '[role="radio"]:not([disabled])',
+    );
   latest.current =
     changed || uncertain.current !== null
       ? {
@@ -1025,40 +1036,42 @@ function LayerForm({
   const household = layer === "household";
   return (
     <div className="flex flex-col gap-3" data-layer-form={layer}>
-      <RecoveryNotice recovery={recovery} />
+      <RecoveryNotice recovery={recovery} firstFieldRef={choiceFocus} />
       {kept !== undefined ? (
         <p className="text-[12.5px] text-ink-1" data-layer-restored="">
           {copy.RESTORED_UNSAVED}
         </p>
       ) : null}
-      <ChoiceGroup<ChoiceValue>
-        label={label}
-        value={choice}
-        orientation="vertical"
-        disabled={busy}
-        onChange={(next) => {
-          if (!change({ choice: next })) return;
-          edited();
-          setChoice(next);
-        }}
-        choices={
-          household
-            ? [
-                { value: "private", label: copy.CHOICE_PRIVATE },
-                { value: "read", label: copy.CHOICE_HOUSEHOLD_READ },
-                { value: "edit", label: copy.CHOICE_HOUSEHOLD_EDIT },
-                { value: "explicit", label: copy.CHOICE_EXPLICIT },
-                { value: "inherit", label: inheritLabel },
-              ]
-            : [
-                { value: "inherit", label: inheritLabel },
-                { value: "private", label: copy.CHOICE_PRIVATE },
-                { value: "read", label: copy.CHOICE_PRIMARY_READ },
-                { value: "edit", label: copy.CHOICE_PRIMARY_EDIT },
-                { value: "explicit", label: copy.CHOICE_EXPLICIT },
-              ]
-        }
-      />
+      <div ref={choices}>
+        <ChoiceGroup<ChoiceValue>
+          label={label}
+          value={choice}
+          orientation="vertical"
+          disabled={busy}
+          onChange={(next) => {
+            if (!change({ choice: next })) return;
+            edited();
+            setChoice(next);
+          }}
+          choices={
+            household
+              ? [
+                  { value: "private", label: copy.CHOICE_PRIVATE },
+                  { value: "read", label: copy.CHOICE_HOUSEHOLD_READ },
+                  { value: "edit", label: copy.CHOICE_HOUSEHOLD_EDIT },
+                  { value: "explicit", label: copy.CHOICE_EXPLICIT },
+                  { value: "inherit", label: inheritLabel },
+                ]
+              : [
+                  { value: "inherit", label: inheritLabel },
+                  { value: "private", label: copy.CHOICE_PRIVATE },
+                  { value: "read", label: copy.CHOICE_PRIMARY_READ },
+                  { value: "edit", label: copy.CHOICE_PRIMARY_EDIT },
+                  { value: "explicit", label: copy.CHOICE_EXPLICIT },
+                ]
+          }
+        />
+      </div>
       {choice === "explicit" ? (
         <PolicyGrantsEditor
           policy={explicit.policy}

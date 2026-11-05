@@ -38,6 +38,7 @@ import {
   type RecoverableForm,
   useRecoverableForm,
 } from "../../src/lib/form-recovery/use-recoverable-form";
+import { Locks } from "../support/recovery-pages";
 
 /**
  * WEB-14a revision 6 (review of 11 October 2026, R13 `recovery-shared-source-reload-coverage`, incomplete fix; design assessment of 11
@@ -56,63 +57,8 @@ const TITLE: readonly RecoverableFieldSpec[] = [{ name: "title" }];
 const ORIGINAL = "ORIGINAL UNSENT";
 const THIRD = "THIRD PAGE DIFFERENT";
 
-/** A Web Locks double shared by every page of the test: exclusive locks, `ifAvailable`, `signal`, released when the holder leaves. */
-class Locks {
-  readonly held = new Map<string, string>();
-  private waiting: Array<{ name: string; wake: () => void }> = [];
-  /** Lock names whose requests are refused (the lock manager throws). */
-  refuse: (name: string) => boolean = () => false;
-  forPage(page: string): Pick<LockManager, "request"> {
-    return {
-      request: ((
-        name: string,
-        options: LockOptions,
-        callback: LockGrantedCallback<unknown>,
-      ) => this.request(page, name, options, callback)) as never,
-    };
-  }
-  private async request(
-    page: string,
-    name: string,
-    options: LockOptions,
-    callback: LockGrantedCallback<unknown>,
-  ): Promise<unknown> {
-    if (this.refuse(name))
-      throw new DOMException("refused", "InvalidStateError");
-    while (this.held.has(name)) {
-      if (options.ifAvailable) return callback(null);
-      await new Promise<void>((resolve, reject) => {
-        const entry = { name, wake: resolve };
-        this.waiting.push(entry);
-        options.signal?.addEventListener("abort", () => {
-          this.waiting = this.waiting.filter((other) => other !== entry);
-          reject(new DOMException("aborted", "AbortError"));
-        });
-      });
-    }
-    this.held.set(name, page);
-    const result = callback({ name, mode: "exclusive" } as Lock);
-    void Promise.resolve(result).then(
-      () => this.release(name, page),
-      () => this.release(name, page),
-    );
-    return result;
-  }
-  private release(name: string, page: string): void {
-    if (this.held.get(name) !== page) return;
-    this.held.delete(name);
-    const next = this.waiting.find((entry) => entry.name === name);
-    if (next) {
-      this.waiting = this.waiting.filter((entry) => entry !== next);
-      next.wake();
-    }
-  }
-  /** The page goes: every lock it holds is released. */
-  leave(page: string): void {
-    for (const [name, holder] of [...this.held])
-      if (holder === page) this.release(name, page);
-  }
-}
+// The Web Locks double shared by every page of the test is, since revision 52 (F-R52-1), the one of `tests/support/recovery-pages.tsx`,
+// which models shared observations as well as exclusive locks (this file's own exclusive-only copy made two observers contend).
 
 /** A tab's session storage (a `Storage` double); `failing` makes every write throw. */
 class TabStorage {

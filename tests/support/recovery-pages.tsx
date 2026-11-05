@@ -47,11 +47,32 @@ export const TITLE: readonly RecoverableFieldSpec[] = [{ name: "title" }];
 export const ORIGINAL = "ORIGINAL UNSENT";
 export const THIRD = "THIRD PAGE DIFFERENT";
 
-/** A Web Locks double shared by every page of a test: exclusive locks, `ifAvailable`, `signal`, released when the holder leaves. */
+/**
+ * A Web Locks double shared by every page of a test: exclusive and SHARED locks, `ifAvailable`, `signal`, released when the holder leaves
+ * (as a browser does at unload). Revision 52 (F-R52-1; design assessment of 3 November 2026, C3): shared mode is modelled as the Web Locks
+ * specification grants it: a shared request is granted while no exclusive lock is held AND no exclusive request waits for the name (any
+ * number of shared holders at once); an exclusive request only while nothing is held. A probe's hold lasts until its callback's result
+ * settles (a microtask after it returns), so overlapping probes really overlap, as in a browser. `held` is the exclusive holder of a name
+ * (a test may set it to stand for another page); `requests` records every request's name, page and mode, in order.
+ */
 export class Locks {
   readonly held = new Map<string, string>();
-  /** The requests waiting for a lock now (name, page). */
-  waiting: Array<{ name: string; page: string; wake: () => void }> = [];
+  /** The shared holds of a name now: one entry per hold (a page may hold a name shared more than once). */
+  readonly shared = new Map<string, string[]>();
+  /** Every request made, in order (name, page, mode, `ifAvailable`). */
+  readonly requests: Array<{
+    name: string;
+    page: string;
+    mode: LockMode;
+    ifAvailable: boolean;
+  }> = [];
+  /** The requests waiting for a lock now (name, page, mode). */
+  waiting: Array<{
+    name: string;
+    page: string;
+    mode: LockMode;
+    wake: () => void;
+  }> = [];
   /** Lock names whose requests are refused (the lock manager throws). */
   refuse: (name: string) => boolean = () => false;
   forPage(page: string): Pick<LockManager, "request"> {
@@ -69,18 +90,33 @@ export class Locks {
       (entry) => entry.page === page && entry.name.startsWith(prefix),
     );
   }
+  /** Whether a request of `mode` for `name` must wait (or, `ifAvailable`, is refused) now. */
+  private blocked(name: string, mode: LockMode): boolean {
+    if (this.held.has(name)) return true;
+    if (mode === "exclusive") return (this.shared.get(name)?.length ?? 0) > 0;
+    return this.waiting.some(
+      (entry) => entry.name === name && entry.mode === "exclusive",
+    );
+  }
   private async request(
     page: string,
     name: string,
     options: LockOptions,
     callback: LockGrantedCallback<unknown>,
   ): Promise<unknown> {
+    const mode: LockMode = options.mode ?? "exclusive";
+    this.requests.push({
+      name,
+      page,
+      mode,
+      ifAvailable: options.ifAvailable === true,
+    });
     if (this.refuse(name))
       throw new DOMException("refused", "InvalidStateError");
-    while (this.held.has(name)) {
+    while (this.blocked(name, mode)) {
       if (options.ifAvailable) return callback(null);
       await new Promise<void>((resolve, reject) => {
-        const entry = { name, page, wake: resolve };
+        const entry = { name, page, mode, wake: resolve };
         this.waiting.push(entry);
         options.signal?.addEventListener("abort", () => {
           this.waiting = this.waiting.filter((other) => other !== entry);
@@ -88,17 +124,34 @@ export class Locks {
         });
       });
     }
-    this.held.set(name, page);
-    const result = callback({ name, mode: "exclusive" } as Lock);
-    void Promise.resolve(result).then(
-      () => this.release(name, page),
-      () => this.release(name, page),
-    );
+    if (mode === "shared")
+      this.shared.set(name, [...(this.shared.get(name) ?? []), page]);
+    else this.held.set(name, page);
+    const result = callback({ name, mode } as Lock);
+    const end = () =>
+      mode === "shared"
+        ? this.releaseShared(name, page)
+        : this.release(name, page);
+    void Promise.resolve(result).then(end, end);
     return result;
+  }
+  private releaseShared(name: string, page: string): void {
+    const holders = this.shared.get(name) ?? [];
+    const at = holders.indexOf(page);
+    if (at < 0) return;
+    const rest = holders.filter((_, index) => index !== at);
+    if (rest.length > 0) this.shared.set(name, rest);
+    else {
+      this.shared.delete(name);
+      this.wake(name);
+    }
   }
   private release(name: string, page: string): void {
     if (this.held.get(name) !== page) return;
     this.held.delete(name);
+    this.wake(name);
+  }
+  private wake(name: string): void {
     const next = this.waiting.find((entry) => entry.name === name);
     if (next) {
       this.waiting = this.waiting.filter((entry) => entry !== next);
@@ -109,6 +162,9 @@ export class Locks {
   leave(page: string): void {
     for (const [name, holder] of [...this.held])
       if (holder === page) this.release(name, page);
+    for (const [name, holders] of [...this.shared])
+      for (const holder of holders)
+        if (holder === page) this.releaseShared(name, page);
   }
 }
 

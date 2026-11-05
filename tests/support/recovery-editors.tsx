@@ -26,6 +26,11 @@ import { fakeApi, ME, seededTask, tasksEnv } from "./tasks/world";
  * whose recovery port is OPEN over a memory store the test can hold at its boundaries.
  */
 const locks = new Locks();
+/**
+ * WEB-14a revision 53: the page's Web Locks double, so a test can hold a recovery owner's lock as ANOTHER page does (a live tab, or an
+ * older build's exclusive probe: `held.set(name, "OLD")` until `leave("OLD")`).
+ */
+export const recoveryLocks = (): Locks => locks;
 
 /** The page's recovery identity is made at its first use from `navigator.locks` (jsdom has none): call in `beforeAll`. */
 export function installRecoveryLocks(): void {

@@ -1,7 +1,7 @@
-import { type RefObject, useEffect } from "react";
+import { useEffect } from "react";
 import { useAnnouncer } from "../../components/ui/announcer";
 import { Button } from "../../components/ui/button";
-import { useRestoredFocus } from "./focus";
+import { type FocusTarget, resolveTarget, useRestoredFocus } from "./focus";
 
 /**
  * Recovery banners for form-recovery-reload.html, states 2 and 3. They never submit anything and never
@@ -35,9 +35,16 @@ export interface RecoveryBannerProps {
   state: RecoveryBannerState;
   /**
    * The form's first field. On restore, focus goes here, never to the banner (state 3; it also wins over a state-1 prompt of the same
-   * arrival, `focus.ts`), and here again after "Discard instead". Render it with the restored form, or no field is focused.
+   * arrival, `focus.ts`), and here again after "Discard instead". Render it with the restored form, or no field is focused. A ref, or a
+   * resolver read at each attempt (WEB-14a revision 51: a target the form's state chooses, `FocusTarget`).
    */
-  firstFieldRef?: RefObject<HTMLElement | null>;
+  firstFieldRef?: FocusTarget;
+  /**
+   * WEB-14a revision 51 (F-R51-1): "Discard instead" used from the keyboard, with the button used. The owner that outlives this banner
+   * takes focus back to its form after its reset (`useDiscardFocus`, `RecoveryNotice`). Without it the banner focuses `firstFieldRef` at the
+   * gesture, which serves only a field that is already there and stays.
+   */
+  onFocusedDiscard?(from: HTMLElement): void;
 }
 
 export const SAVE_FAILED_TEXT =
@@ -55,7 +62,11 @@ export const UNAVAILABLE_WHILE_RELOADING =
 export const RESTORED_TEXT =
   "Restored your unfinished form from before the update. Nothing was submitted automatically — review and submit when ready.";
 
-export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
+export function RecoveryBanner({
+  state,
+  firstFieldRef,
+  onFocusedDiscard,
+}: RecoveryBannerProps) {
   const { announce } = useAnnouncer();
   const kind = state.kind;
 
@@ -168,9 +179,12 @@ export function RecoveryBanner({ state, firstFieldRef }: RecoveryBannerProps) {
             variant="quiet"
             onClick={(event) => {
               // The banner goes with the copy: the person continues in the form they were reviewing (revision 19).
-              const used = event.currentTarget === document.activeElement;
+              const button = event.currentTarget;
+              const used = button === document.activeElement;
               state.onDiscard();
-              if (used) firstFieldRef?.current?.focus();
+              if (!used) return;
+              if (onFocusedDiscard) onFocusedDiscard(button);
+              else resolveTarget(firstFieldRef)?.focus();
             }}
           >
             Discard instead

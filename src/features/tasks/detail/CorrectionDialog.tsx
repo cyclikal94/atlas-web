@@ -397,6 +397,7 @@ export function CorrectionDialog({
       return result;
     },
     retry: () => model.retry(),
+    checkAgain: model.checkAgain,
     restoreAlternative: (copy) => model.restoreAlternative(copy.tabInstanceId),
     discardAlternative: (copy) => model.discardAlternative(copy.tabInstanceId),
   };

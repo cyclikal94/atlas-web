@@ -94,6 +94,12 @@ export function RecordCard({
   );
   const { mode, amount } = input.value;
   const amountRef = useRef<HTMLInputElement>(null);
+  // WEB-14a revision 51 (DA-N1, F-R51-1): the restored card's first field is the amount when "Log an amount" is chosen, else the chosen
+  // mode itself ("Just checked on it" has no amount field), read from the committed DOM at each attempt, so "Discard instead" from the
+  // observe mode focuses the amount field its reset brings back. A goal with neither (nothing of it is kept) falls back to the card.
+  const modeRef = useRef<HTMLInputElement>(null);
+  const restoredFocus = () =>
+    amountRef.current ?? modeRef.current ?? section.current;
   const [error, setError] = useState<string | null>(null);
   const [running, setBusy] = useState(false);
   const busy = running || input.busy;
@@ -130,7 +136,10 @@ export function RecordCard({
         {RECORD_COPY.heading}
       </h2>
       {input.recovery ? (
-        <RecoveryNotice recovery={input.recovery} firstFieldRef={amountRef} />
+        <RecoveryNotice
+          recovery={input.recovery}
+          firstFieldRef={restoredFocus}
+        />
       ) : null}
       {goal.kind === "checkbox" ? (
         <span>
@@ -171,6 +180,7 @@ export function RecordCard({
                 className="inline-flex min-h-11 items-center gap-2 text-[13.5px] text-ink-1"
               >
                 <input
+                  ref={mode === m ? modeRef : undefined}
                   type="radio"
                   name={`${heading}-mode`}
                   checked={mode === m}

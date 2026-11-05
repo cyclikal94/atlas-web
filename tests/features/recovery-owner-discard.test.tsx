@@ -103,6 +103,24 @@ async function lateDiscard(steps: {
   await waitFor(() => expect(store().discard).toHaveBeenCalled());
 }
 
+/**
+ * WEB-14a revision 51 (F-R51-1, family `restored-form-focus-exposure-order`; design assessment Q2/Q3/Q8): "Discard instead" used from the
+ * keyboard (focused when pressed: jsdom does not focus on click, so the control focuses it first). Returns once the banner has gone.
+ */
+async function keyboardDiscard(scope?: () => HTMLElement): Promise<void> {
+  const button = discardButton(scope?.());
+  button.focus();
+  expect(button, "the control: Discard instead has focus").toHaveFocus();
+  fireEvent.click(button);
+  await waitFor(() =>
+    expect(
+      (scope?.() ?? document.body).querySelector(
+        '[data-recovery-state="restored"]',
+      ),
+    ).toBeNull(),
+  );
+}
+
 /** The editor's recoverable model holds what it shows: the update's save writes the newer input as the copy of `context`. */
 async function savedAs(context: string): Promise<unknown[]> {
   expect(await flushDirty(pageFormRegistry)).not.toContain("failed");
@@ -194,6 +212,16 @@ describe("calendar Add source (AddSourceDialog.tsx)", () => {
     expect(label().value).toBe("");
     await waitFor(async () => expect(await texts(ADD_CONTEXT)).toEqual([]));
     expect(pageFormRegistry.dirty()).toHaveLength(0);
+  });
+
+  test("revision 51 POSITIVE CONTROL (a caller that always named its field): restore focuses Label; a keyboard discard leaves it there", async () => {
+    await left(ADD_CONTEXT, restoredCopy);
+    mount();
+    await waitFor(() => expect(label().value).toBe("Old restored label"));
+    await waitFor(() => expect(label()).toHaveFocus());
+    await keyboardDiscard();
+    expect(label().value).toBe("");
+    expect(label()).toHaveFocus();
   });
 
   test("while an update reload is prepared Discard instead is unavailable and nothing changes", async () => {
@@ -342,6 +370,105 @@ describe("households: create and invite (HouseholdsMinimal.tsx)", () => {
     await waitFor(() => expect(t.api.sent).toHaveLength(1));
     await waitFor(() => expect(createName().value).toBe(""));
   });
+
+  /**
+   * Revision 52 (Review52 F-R52-2; design assessment Q8): the production household screen renders one invitation form per managed
+   * household, so three restored owners on one screen are an existing composition. Each household's recovery read is held, then released
+   * C, B, A (reverse document order): every value is restored, and focus ends on the first in the page, A, with no gesture before any
+   * focus assertion and nothing sent.
+   */
+  const threeHouseholds = () =>
+    [0, 1, 2].map((n) =>
+      household({
+        id: `66666666-6666-4666-8666-66666666666${n}`,
+        name: `House ${n}`,
+        members: [
+          { account_id: SHARING_ME, username: "me", role: "manager" },
+          { account_id: SAM, username: "sam", role: "member" },
+        ],
+      }),
+    );
+  async function threeRestoredInvites(
+    tabs: string[],
+    together = false,
+  ): Promise<void> {
+    const houses = threeHouseholds();
+    const contexts = houses.map((h) => `household-invite:${h.id}`);
+    for (const [n, context] of contexts.entries())
+      await left(context, textCopy(`restored-${n}`), { tab: tabs[n] });
+    const release = new Map<string, () => void>();
+    const entered = new Set<string>();
+    const gates = new Map(
+      contexts.map((c) => [
+        c,
+        new Promise<void>((resolve) => release.set(c, resolve)),
+      ]),
+    );
+    const original = store().list.bind(store());
+    vi.spyOn(store(), "list").mockImplementation(async (c) => {
+      const gate = gates.get(c);
+      if (gate) {
+        entered.add(c);
+        await gate;
+      }
+      return original(c);
+    });
+    const api = fakeSharingApi();
+    api.defaults.households = ok(houses);
+    mountSharing(<HouseholdsMinimal />, { env: withRecovery(stubEnv()), api });
+    await waitFor(() => expect(entered.size).toBe(3));
+    const fields = houses.map(
+      (h) =>
+        screen.getByLabelText(
+          sharingCopy.INVITE_LABEL(h.name),
+        ) as HTMLInputElement,
+    );
+    if (together) {
+      // Every read answers at once: the three looks observe the same closed owner concurrently.
+      await act(async () => {
+        for (const n of [2, 1, 0]) release.get(contexts[n] as string)?.();
+      });
+      for (const [n, field] of fields.entries())
+        await waitFor(() =>
+          expect(field.value, `invitation ${n} restored`).toBe(`restored-${n}`),
+        );
+      expect(fields[0], "the first in the page has focus").toHaveFocus();
+    }
+    for (const n of together ? [] : [2, 1, 0]) {
+      await act(async () => {
+        release.get(contexts[n] as string)?.();
+      });
+      await waitFor(() => expect(fields[n]?.value).toBe(`restored-${n}`));
+      expect(
+        fields[n],
+        n === 0
+          ? "the first in the page takes focus from the current restored holder"
+          : "this restored form, first in the page so far, takes focus",
+      ).toHaveFocus();
+    }
+    for (const [n, field] of fields.entries())
+      expect(field.value).toBe(`restored-${n}`);
+    expect(
+      api.calls.filter((call) => !call.op.startsWith("read")),
+      "nothing is sent (no invitation, lookup or management command)",
+    ).toEqual([]);
+  }
+
+  test("revision 52 (F-R52-2): three restored invitations released C, B, A end with focus on A (distinct closed tabs)", async () => {
+    await threeRestoredInvites(["gone-0", "gone-1", "gone-2"]);
+  });
+
+  test("revision 52 (F-R52-2): the same three invitations left by ONE closed tab, reads released C, B, A one at a time, end with focus on A", async () => {
+    await threeRestoredInvites(["gone-tab", "gone-tab", "gone-tab"]);
+  });
+
+  test("revision 52 (F-R52-1): the three invitations left by ONE closed tab, read at once, are all restored; focus on A", async () => {
+    await threeRestoredInvites(["gone-tab", "gone-tab", "gone-tab"], true);
+  });
+
+  test("CONTROL (F-R52-1): three invitations left by three closed tabs, read at once, are all restored; focus on A", async () => {
+    await threeRestoredInvites(["gone-0", "gone-1", "gone-2"], true);
+  });
 });
 
 describe("sharing defaults, one layer (DefaultsEditor.tsx)", () => {
@@ -425,6 +552,109 @@ describe("sharing defaults, one layer (DefaultsEditor.tsx)", () => {
     expect(checked()).not.toBe(sharingCopy.CHOICE_PRIVATE);
     await waitFor(async () => expect(await texts(PERSONAL)).toEqual([]));
   });
+
+  const focusedChoice = (scope: HTMLElement) =>
+    within(scope)
+      .getAllByRole("radio")
+      .find((radio) => radio === document.activeElement)?.textContent ?? null;
+
+  test("revision 51 (F-R51-1): restore focuses the layer's CHOSEN option; a keyboard discard focuses the option its reset chose, choosing nothing", async () => {
+    await left(PERSONAL, layerCopy("private"));
+    mount();
+    await waitFor(() =>
+      expect(personal() && checked()).toBe(sharingCopy.CHOICE_PRIVATE),
+    );
+    await waitFor(() =>
+      expect(focusedChoice(personal())).toBe(sharingCopy.CHOICE_PRIVATE),
+    );
+    expect(checked(), "focusing chose nothing").toBe(
+      sharingCopy.CHOICE_PRIVATE,
+    );
+    await keyboardDiscard(personal);
+    const reset = checked();
+    expect(reset).not.toBe(sharingCopy.CHOICE_PRIVATE);
+    await waitFor(() => expect(focusedChoice(personal())).toBe(reset));
+    expect(checked(), "focusing chose nothing").toBe(reset);
+  });
+
+  test("revision 51, decision D2 (Kieran, 3 November 2026): both layers restored at once: the first in the page takes focus, the other never takes it later", async () => {
+    const HOUSEHOLD = `sharing-defaults:household:${HOME}:field`;
+    await left(HOUSEHOLD, layerCopy("read"), { tab: "gone-tab-2" });
+    await left(PERSONAL, layerCopy("private"));
+    mount();
+    const householdForm = () =>
+      document.querySelector<HTMLElement>(
+        '[data-layer-form="household"]',
+      ) as HTMLElement;
+    await waitFor(() =>
+      expect(
+        householdForm()?.querySelector('[data-recovery-state="restored"]'),
+      ).not.toBeNull(),
+    );
+    await waitFor(() =>
+      expect(
+        personal()?.querySelector('[data-recovery-state="restored"]'),
+      ).not.toBeNull(),
+    );
+    const order = householdForm().compareDocumentPosition(personal());
+    expect(
+      order & Node.DOCUMENT_POSITION_FOLLOWING,
+      "the household layer comes first in the page",
+    ).toBeTruthy();
+    await waitFor(() =>
+      expect(focusedChoice(householdForm())).toBe(
+        sharingCopy.CHOICE_HOUSEHOLD_READ,
+      ),
+    );
+    // No oscillation: a later change to the document (the personal layer's own re-render) does not move focus to the other layer.
+    document.body.appendChild(document.createElement("p"));
+    await act(async () => undefined);
+    expect(focusedChoice(householdForm())).toBe(
+      sharingCopy.CHOICE_HOUSEHOLD_READ,
+    );
+    expect(focusedChoice(personal())).toBeNull();
+    // Discarding one layer touches only that layer: the other stays restored.
+    await keyboardDiscard(householdForm);
+    expect(
+      personal().querySelector('[data-recovery-state="restored"]'),
+    ).not.toBeNull();
+    expect(checked()).toBe(sharingCopy.CHOICE_PRIVATE);
+    await waitFor(() => expect(focusedChoice(householdForm())).not.toBeNull());
+  });
+
+  test("revision 52 (F-R52-1): both layers left by ONE closed tab (one recovery id) are both restored; the first in the page takes focus", async () => {
+    // Review52's witness: the same two-layer composition, with both copies saved by the same page (every form of a page saves under its one
+    // identifier). The D2 case above keeps distinct ids as its isolation control.
+    const HOUSEHOLD = `sharing-defaults:household:${HOME}:field`;
+    await left(HOUSEHOLD, layerCopy("read"), { tab: "gone-tab" });
+    await left(PERSONAL, layerCopy("private"), { tab: "gone-tab" });
+    mount();
+    const householdForm = () =>
+      document.querySelector<HTMLElement>(
+        '[data-layer-form="household"]',
+      ) as HTMLElement;
+    await waitFor(() =>
+      expect(
+        householdForm()?.querySelector('[data-recovery-state="restored"]'),
+        "the household layer is restored",
+      ).not.toBeNull(),
+    );
+    await waitFor(() =>
+      expect(
+        personal()?.querySelector('[data-recovery-state="restored"]'),
+        "the personal layer, left by the same closed tab, is restored too",
+      ).not.toBeNull(),
+    );
+    expect(checked()).toBe(sharingCopy.CHOICE_PRIVATE);
+    await waitFor(() =>
+      expect(focusedChoice(householdForm())).toBe(
+        sharingCopy.CHOICE_HOUSEHOLD_READ,
+      ),
+    );
+    // Restoring removed neither copy (only this page's own saves or the person's discard may).
+    expect(await texts(HOUSEHOLD)).toHaveLength(1);
+    expect(await texts(PERSONAL)).toHaveLength(1);
+  });
 });
 
 describe("a resource's sharing policy (ResourcePolicyEditor.tsx)", () => {
@@ -507,6 +737,49 @@ describe("a resource's sharing policy (ResourcePolicyEditor.tsx)", () => {
     expect(access()).toBe(sharingCopy.READ);
     await waitFor(async () => expect(await texts(CONTEXT)).toEqual([]));
   });
+
+  test("revision 51 (F-R51-1): restore focuses the first grant (its chosen access); a keyboard discard focuses that grant as read again, choosing nothing", async () => {
+    await left(CONTEXT, restoredCopy);
+    mount();
+    await waitFor(() => expect(access()).toBe(sharingCopy.EDIT));
+    await waitFor(() =>
+      expect(document.activeElement?.textContent).toBe(sharingCopy.EDIT),
+    );
+    expect(grant().contains(document.activeElement)).toBe(true);
+    await keyboardDiscard();
+    expect(access()).toBe(sharingCopy.READ);
+    await waitFor(() =>
+      expect(document.activeElement?.textContent).toBe(sharingCopy.READ),
+    );
+    expect(grant().contains(document.activeElement)).toBe(true);
+    expect(access(), "focusing chose nothing").toBe(sharingCopy.READ);
+  });
+
+  test("revision 51 (Q3): a restored policy with NO grants focuses Add account grant; the discard's reset inserts the grant read, which is focused", async () => {
+    await left(
+      CONTEXT,
+      encodePolicyDraft({
+        policy: { grants: [], exclude_accounts: [PRIYA] },
+        base: 2,
+      }),
+    );
+    mount();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: sharingCopy.ADD_ACCOUNT }),
+      ).toHaveFocus(),
+    );
+    expect(
+      screen.queryByRole("radiogroup", {
+        name: `Home: ${sharingCopy.READ} or ${sharingCopy.EDIT}`,
+      }),
+    ).toBeNull();
+    await keyboardDiscard();
+    await waitFor(() => expect(access()).toBe(sharingCopy.READ));
+    await waitFor(() =>
+      expect(grant().contains(document.activeElement)).toBe(true),
+    );
+  });
 });
 
 describe("CONTROLS with a synchronous discard before revision 38: Record progress and the correction", () => {
@@ -584,5 +857,36 @@ describe("CONTROLS with a synchronous discard before revision 38: Record progres
       newer: "16",
     });
     expect(minimum().value).toBe("16");
+  });
+});
+
+describe("Record progress restored in its observe mode (RecordCard.tsx; design assessment DA-N1, WEB-14a revision 51)", () => {
+  test("restore focuses the chosen mode, Just checked on it (no amount field); a keyboard discard focuses the amount field its reset brings back", async () => {
+    const row = await rowFor();
+    const context = `record:${row.progressId}`;
+    await left(context, JSON.stringify({ v: 1, mode: "observe", amount: "" }));
+    render(
+      protectedTree(
+        <RecordCard
+          row={row}
+          actions={{ record: vi.fn<TaskActions["record"]>() }}
+          now={Date.now()}
+          zone="UTC"
+          writable
+        />,
+      ),
+    );
+    const observe = () =>
+      screen.getByRole("radio", { name: RECORD_COPY.checkedOn });
+    await waitFor(() => expect(observe()).toBeChecked());
+    expect(screen.queryByLabelText(`${RECORD_COPY.amount} (cups)`)).toBeNull();
+    await waitFor(() => expect(observe()).toHaveFocus());
+    await keyboardDiscard();
+    const amount = await screen.findByLabelText(`${RECORD_COPY.amount} (cups)`);
+    expect(
+      screen.getByRole("radio", { name: RECORD_COPY.logAmount }),
+    ).toBeChecked();
+    await waitFor(() => expect(amount).toHaveFocus());
+    expect((amount as HTMLInputElement).value).toBe("");
   });
 });

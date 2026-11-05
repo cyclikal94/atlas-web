@@ -7,7 +7,7 @@
  *  - While the page lives it holds the Web Lock `atlas-recovery-tab-<id>`, granted before its first copy is written. A copy whose
  *    identifier's lock is still held belongs to a tab that is OPEN (it may still be editing that form), so a restoring page never takes it
  *    over or discards it; only copies of tabs that have gone are offered for restore. Ownership is probed with `ifAvailable` (never
- *    `locks.query`, which some engines answer inconsistently).
+ *    `locks.query`, which some engines answer inconsistently), in shared mode (revision 52, F-R52-1): see `observe`.
  *  - OWNERSHIP PRECEDES EXPOSURE (revision 3, R12). An identifier is the page's only once its lock is GRANTED: a candidate being acquired
  *    is not advertised, and a request that fails (the lock manager rejects or throws) rejects every waiter with a
  *    `RecoveryIdentityError`, so no copy is written under an identifier nobody holds (a live page's copy would look like a gone tab's to
@@ -57,11 +57,24 @@ export const recoveryLockName = (id: string): string =>
 export const handoffLockName = (id: string): string =>
   `atlas-recovery-handoff-${id}`;
 
-/** Granted only when nobody holds `name`: the probe's own hold ends when the callback returns. */
-const free = (locks: Pick<LockManager, "request">, name: string) =>
+/**
+ * A PASSIVE observation (WEB-14a revision 52, F-R52-1 and DA-N1; design assessment of 3 November 2026, C1, L1-L3): whether nobody holds
+ * `name` exclusively now and no exclusive request waits for it, without waiting. It asks in SHARED mode, so observations are compatible with
+ * one another: any number of pages (or forms of one page) looking at one closed owner, or one abandoned hand-off, at once all find it free.
+ * An exclusive probe made each observer a momentary owner of the lock it probed, so a concurrent observer saw a live owner and a closed
+ * tab's second copy was not offered. Authority stays exclusive and is never made here: a page's identifier, a hand-off claim
+ * (`holdHandoff`) and an action over an abandoned hand-off (`whileFree`) each hold the lock exclusively, so an observation is refused
+ * while any of them holds it or waits for it, and is never authority to change a copy. The shared hold ends when the callback returns (it
+ * can briefly delay an exclusive request, as the exclusive probe did). Rejects when the lock manager refuses: callers keep their
+ * conservative answer.
+ */
+const observe = (
+  locks: Pick<LockManager, "request">,
+  name: string,
+): Promise<boolean> =>
   locks.request(
     name,
-    { mode: "exclusive", ifAvailable: true },
+    { mode: "shared", ifAvailable: true },
     (lock) => lock !== null,
   );
 
@@ -116,12 +129,8 @@ export function createRecoveryTab(deps: RecoveryTabDeps): RecoveryTab {
       const locks = deps.locks;
       if (!locks) return false;
       try {
-        // Granted only when nobody holds it: the owner has gone. The probe's own hold ends when the callback returns.
-        return await locks.request(
-          recoveryLockName(id),
-          { mode: "exclusive", ifAvailable: true },
-          (lock) => lock === null,
-        );
+        // Free (no page holds it exclusively): the owner has gone. Another observer of the same owner is never mistaken for it.
+        return !(await observe(locks, recoveryLockName(id)));
       } catch {
         // A probe that cannot be made says nothing: the copy is treated as another open tab's and left alone.
         return true;
@@ -176,7 +185,7 @@ export function createRecoveryTab(deps: RecoveryTabDeps): RecoveryTab {
       const locks = deps.locks;
       if (!locks) return false;
       try {
-        return !(await free(locks, handoffLockName(id)));
+        return !(await observe(locks, handoffLockName(id)));
       } catch {
         return true;
       }

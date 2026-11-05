@@ -273,6 +273,70 @@ describe("a fix of an entry, parked and opened by the entry history (EntryHistor
     },
   );
 
+  /** WEB-14a revision 51 (F-R51-1): "Discard instead" used from the keyboard (focused when pressed; jsdom does not focus on click). */
+  function keyboardDiscard(): void {
+    const button = screen.getByRole("button", { name: "Discard instead" });
+    button.focus();
+    expect(button, "the control: Discard instead has focus").toHaveFocus();
+    fireEvent.click(button);
+  }
+  const history = () =>
+    document.querySelector("[data-entry-history]") as HTMLElement;
+  const fixButtonOf = (n: number) =>
+    within(
+      history().querySelector(`[data-entry="${entryId(n)}"]`) as HTMLElement,
+    ).getByRole("button", { name: "Fix this entry" });
+
+  test(
+    "revision 51 (F-R51-1, decision D1): the opened restored fix focuses its new value; a keyboard discard closes it and focus goes to that entry's Fix this entry",
+    SLOW,
+    async () => {
+      const j = await restored([["gone-tab", "777", new Date().toISOString()]]);
+      expect(valueInput()?.value).toBe("777");
+      await waitFor(() => expect(valueInput()).toHaveFocus());
+      keyboardDiscard();
+      await j.t.settle();
+      expect(forms()).toHaveLength(0);
+      expect(fixButtonOf(20), "the entry's surviving control").toHaveFocus();
+      expect(records(j.t)).toHaveLength(0);
+    },
+  );
+
+  test(
+    "revision 51, decision D1: a restored fix PARKED (its entry cannot be fixed by me now) opens nothing; focus goes to the history's heading, and stays there after a keyboard discard",
+    SLOW,
+    async () => {
+      const other = "99999999-9999-4999-8999-999999999999";
+      const mine = (n: number) => entry(n, { recorded_by: other });
+      const j = await mountWith(
+        () => journalOf(19).concat(mine(20)),
+        [mine(20)],
+      );
+      const context = `entry-fix:${j.task.progressId}`;
+      await leftThrough(
+        j.t.data.formRecovery,
+        context,
+        JSON.stringify({ v: 1, entry: entryId(20), amount: "777" }),
+      );
+      forgetKeptFixes();
+      j.t.remount();
+      await j.t.until(
+        () => !!history()?.querySelector('[data-recovery-state="restored"]'),
+      );
+      expect(forms(), "a parked fix opens no editor").toHaveLength(0);
+      const heading = within(history()).getByRole("heading");
+      await waitFor(() => expect(heading).toHaveFocus());
+      keyboardDiscard();
+      await j.t.settle();
+      expect(
+        history().querySelector('[data-recovery-state="restored"]'),
+      ).toBeNull();
+      expect(within(history()).getByRole("heading")).toHaveFocus();
+      expect(forms()).toHaveLength(0);
+      expect(records(j.t)).toHaveLength(0);
+    },
+  );
+
   test(
     "S3: after the automatic restore, the other saved copy chosen replaces the fix the history holds; nothing is recorded",
     SLOW,

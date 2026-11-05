@@ -84,6 +84,21 @@ async function reload(t: Mounted): Promise<void> {
 const detailReady = (id: string) => () =>
   document.querySelector(`[data-list-detail="${id}"]`) !== null;
 
+/**
+ * WEB-14a revision 51 (F-R51-1, family `restored-form-focus-exposure-order`): "Discard instead" used from the keyboard (the button has
+ * focus when it is pressed; jsdom does not focus on click, so the control focuses it first). The banner goes with the copy.
+ */
+async function keyboardDiscard(t: Mounted): Promise<void> {
+  const button = within(dialog() as HTMLElement).getByRole("button", {
+    name: "Discard instead",
+  });
+  button.focus();
+  expect(button, "the control: Discard instead has focus").toHaveFocus();
+  fireEvent.click(button);
+  await t.settle();
+  expect(within(dialog() as HTMLElement).queryByText(RESTORED_TEXT)).toBeNull();
+}
+
 describe("create (CreateListDialog, opened again by the Lists pane)", () => {
   const CONTEXT = newListFormContext("dialog");
 
@@ -118,6 +133,31 @@ describe("create (CreateListDialog, opened again by the Lists pane)", () => {
         id: expect.any(String),
         name: "Weekend groceries",
       });
+    },
+  );
+
+  test(
+    "revision 51 (F-R51-1): the restored copy focuses Name; Discard instead from the keyboard clears it, keeps the dialog and leaves focus on Name",
+    SLOW,
+    async () => {
+      const t = await mountTasks({ path: "/tasks/lists" });
+      await t.until(() => document.querySelector("[data-new-list]") !== null);
+      press("+ New list");
+      await t.settle();
+      fireEvent.change(nameField(), { target: { value: "Weekend groceries" } });
+      expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
+      await reload(t);
+      await t.until(() => dialog() !== null);
+      expect(nameField().value).toBe("Weekend groceries");
+      expect(nameField()).toHaveFocus();
+      await keyboardDiscard(t);
+      expect(dialog(), "a recovery discard is not Cancel").not.toBeNull();
+      expect(nameField().value).toBe("");
+      expect(nameField(), "focus stays in the form, on Name").toHaveFocus();
+      expect(bodies(t, "create_list")).toEqual([]);
+      await t.settle();
+      expect(await copies(t, CONTEXT)).toEqual([]);
+      expect(nameField()).toHaveFocus();
     },
   );
 
@@ -183,6 +223,64 @@ describe("rename (RenameListDialog, opened again by the list's detail)", () => {
           name: "Groceries",
         },
       ]);
+    },
+  );
+});
+
+describe("rename and the task picker: focus after restore and a keyboard discard (WEB-14a revision 51, F-R51-1)", () => {
+  test(
+    "Rename: the restored copy focuses Name; Discard instead from the keyboard puts back the list's name and leaves focus on Name",
+    SLOW,
+    async () => {
+      const id = listId();
+      const t = await mountTasks({
+        path: `/tasks/lists/${id}`,
+        rows: [listRow(id, "Weekly groceries", [])],
+        env: { online: false },
+      });
+      await t.until(detailReady(id));
+      press(DETAIL.rename);
+      await t.settle();
+      fireEvent.change(nameField(), { target: { value: "Groceries" } });
+      expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
+      await reload(t);
+      await t.until(() => dialog() !== null);
+      expect(nameField().value).toBe("Groceries");
+      expect(nameField()).toHaveFocus();
+      await keyboardDiscard(t);
+      expect(dialog()).not.toBeNull();
+      expect(nameField().value).not.toBe("Groceries");
+      expect(nameField()).toHaveFocus();
+      expect(bodies(t, "edit_list")).toEqual([]);
+    },
+  );
+
+  test(
+    "the task picker: the restored copy focuses its search; Discard instead from the keyboard clears it and leaves focus on the search",
+    SLOW,
+    async () => {
+      const id = listId();
+      const t = await mountTasks({
+        path: `/tasks/lists/${id}`,
+        rows: [listRow(id, "Errands", []), taskRow(taskId(2), "Post office")],
+        env: { online: false },
+      });
+      await t.until(detailReady(id));
+      press(DETAIL.add);
+      await t.settle();
+      const search = () =>
+        screen.getByLabelText(PICKER.searchLabel) as HTMLInputElement;
+      fireEvent.change(search(), { target: { value: "o" } });
+      expect(await flushDirty(pageFormRegistry)).toEqual(["saved"]);
+      await reload(t);
+      await t.until(() => dialog() !== null);
+      expect(search().value).toBe("o");
+      expect(search()).toHaveFocus();
+      await keyboardDiscard(t);
+      expect(dialog()).not.toBeNull();
+      expect(search().value).toBe("");
+      expect(search()).toHaveFocus();
+      expect(bodies(t, "list_item")).toEqual([]);
     },
   );
 });

@@ -222,12 +222,15 @@ function NameField({
   problem,
   placeholder,
   onChange,
+  fieldRef,
 }: {
   id: string;
   value: string;
   problem: ListNameProblem | null;
   placeholder?: string;
   onChange(value: string): void;
+  /** The name input itself: a restored copy and "Discard instead" focus it (WEB-14a revision 51, F-R51-1). */
+  fieldRef: RefObject<HTMLInputElement | null>;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
@@ -235,6 +238,7 @@ function NameField({
         {CREATE.name}
       </label>
       <input
+        ref={fieldRef}
         id={id}
         value={value}
         data-field-edge=""
@@ -290,6 +294,7 @@ export function CreateListDialog({
   );
   const [problem, setProblem] = useState<ListNameProblem | null>(null);
   const field = useId();
+  const nameRef = useRef<HTMLInputElement>(null);
   const discard = () => disownKept(key);
   /** `again`: the person's decision to start a new change after an earlier save this device could not settle (D1). */
   const save = async (again = false) => {
@@ -398,9 +403,12 @@ export function CreateListDialog({
           void save();
         }}
       >
-        {kept.recovery ? <RecoveryNotice recovery={kept.recovery} /> : null}
+        {kept.recovery ? (
+          <RecoveryNotice recovery={kept.recovery} firstFieldRef={nameRef} />
+        ) : null}
         <fieldset disabled={kept.busy} className="flex flex-col gap-3">
           <NameField
+            fieldRef={nameRef}
             id={field}
             value={kept.value.name}
             problem={problem}
@@ -479,6 +487,7 @@ export function RenameListDialog({
   const [problem, setProblem] = useState<ListNameProblem | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
   const field = useId();
+  const nameRef = useRef<HTMLInputElement>(null);
   const discard = () => disownKept(key);
   const queuedCreate = list?.create?.status === "queued" ? list.create : null;
   const policyVersion = list?.projected ? undefined : list?.row.policy_version;
@@ -668,9 +677,12 @@ export function RenameListDialog({
           void save();
         }}
       >
-        {kept.recovery ? <RecoveryNotice recovery={kept.recovery} /> : null}
+        {kept.recovery ? (
+          <RecoveryNotice recovery={kept.recovery} firstFieldRef={nameRef} />
+        ) : null}
         <fieldset disabled={kept.busy} className="flex flex-col gap-3">
           <NameField
+            fieldRef={nameRef}
             id={field}
             value={kept.value.name}
             problem={problem}

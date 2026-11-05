@@ -34,6 +34,13 @@ export interface Found {
   gone: RecoverySnapshot[];
   left: RecoverySnapshot[];
   own: string | null;
+  /**
+   * WEB-14a revision 53 (D-R53-1, Kieran, 3 November 2026): a copy was listed but not offered because another page seemed to hold it (its
+   * tab open, or an abandoned hand-off held). That can be a genuine owner, or only an older build's brief exclusive probe of the same lock,
+   * which an observation cannot tell apart from one. The person may then check again ("Check saved copies again"); nothing looks again
+   * by itself.
+   */
+  withheld: boolean;
 }
 
 /**
@@ -71,12 +78,12 @@ export async function readLeft(
   const gone: RecoverySnapshot[] = listed.copies.filter(
     (copy) => copy.tabInstanceId === own,
   );
+  let withheld = false;
   for (const copy of listed.copies)
-    if (
-      copy.tabInstanceId !== own &&
-      !(await current.tab.ownerOpen(copy.tabInstanceId))
-    )
-      gone.push(copy);
+    if (copy.tabInstanceId !== own) {
+      if (await current.tab.ownerOpen(copy.tabInstanceId)) withheld = true;
+      else gone.push(copy);
+    }
   // Hand-offs no live page holds (their page never came back): offered, never restored at once, never removed by this page.
   const abandoned = await readCopies(through, handoffContext(context));
   if (abandoned.kind === "unavailable") return null;
@@ -84,11 +91,14 @@ export async function readLeft(
   for (const copy of abandoned.copies)
     if (
       copy.tabInstanceId !== handed?.tabInstanceId &&
-      !current.handoffs.written.has(copy.tabInstanceId) &&
-      !(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false))
-    )
-      left.push(copy);
-  return { handed, gone, left, own };
+      !current.handoffs.written.has(copy.tabInstanceId)
+    ) {
+      if (!(await (current.tab.handoffHeld?.(copy.tabInstanceId) ?? false)))
+        left.push(copy);
+      // The hand-off this page claimed is held by this page: nothing is withheld from it.
+      else if (copy.tabInstanceId !== current.claimed) withheld = true;
+    }
+  return { handed, gone, left, own, withheld };
 }
 
 /**

@@ -223,6 +223,14 @@ export interface RecoverableForm {
   unavailable: boolean;
   /** Revision 7 (R13): makes the look again; true once it has read the store. */
   retry(): Promise<boolean>;
+  /** Revision 53 (D-R53-1): the last look withheld a copy another page seemed to hold (`look.ts`): offer `checkAgain`. */
+  withheld: boolean;
+  /**
+   * Revision 53 (D-R53-1, Kieran, 3 November 2026): "Check saved copies again", the person's explicit repeat of a finished look, as the
+   * model's (`model.ts`): what it finds is only offered; false (nothing read) while `locked`, before the look has finished or while
+   * `unavailable`.
+   */
+  checkAgain(): Promise<boolean>;
   /** Revision 2 (R3): this tab is preparing an update reload; the recovery actions are unavailable (disable their controls). */
   locked: boolean;
   /** Before sending a submission (revision 2, R3); null while `locked`: send nothing then. */
@@ -274,6 +282,7 @@ export function useRecoverableForm(
   const [ready, setReady] = useState(false);
   // Revision 7 (R13): the mount's last look could not read the store.
   const [unavailable, setUnavailable] = useState(false);
+  const [withheld, setWithheld] = useState(false);
   const locked = useSyncExternalStore(
     registry.subscribe,
     registry.frozen,
@@ -448,11 +457,13 @@ export function useRecoverableForm(
           current.relook = () => retryRef.current();
           setUnavailable(true);
           setReady(false);
+          setWithheld(false);
           return false;
         }
         current.recovery = "ok";
         current.relook = null;
         setUnavailable(false);
+        setWithheld(found.withheld);
         const { handed, own } = found;
         // Holding its lock, read just now: the hand-off is this page's to restore (its source, once restored or chosen); revision 40
         // (R42): never to remove (`claimLeft`).
@@ -460,12 +471,16 @@ export function useRecoverableForm(
         const { candidates, lineage, offered } = chooseLeft(current, found);
         if (mode === "offer") {
           offerOwed.current = false;
+          // Revision 53: the copy this session was restored from, discarded since included, is never offered again (as `model.ts`).
           const showing = current.view.restored?.tabInstanceId;
+          const source = current.persisted.source?.id;
           setView({
             restored: current.view.restored,
             alternatives: offered(null).filter(
               (copy) =>
-                copy.tabInstanceId !== own && copy.tabInstanceId !== showing,
+                copy.tabInstanceId !== own &&
+                copy.tabInstanceId !== showing &&
+                copy.tabInstanceId !== source,
             ),
           });
           setReady(true);
@@ -550,6 +565,19 @@ export function useRecoverableForm(
   }, [startLook]);
   const retryRef = useRef(retry);
   retryRef.current = retry;
+
+  const checkAgain = useCallback((): Promise<boolean> => {
+    const current = session.current;
+    const shown = attachment.current;
+    return current &&
+      shown &&
+      current.attached?.token === shown.token &&
+      !registry.frozen() &&
+      current.look === "done" &&
+      current.recovery === "ok"
+      ? startLook(current, shown, "offer").done
+      : Promise.resolve(false);
+  }, [registry, startLook]);
 
   // The binding: the first time the form and the port are both there, the mount shows its session (the one this page already has for
   // this form and database, or a new one), and a session that has not looked for copies to restore looks once.
@@ -950,6 +978,8 @@ export function useRecoverableForm(
     ready,
     unavailable,
     retry,
+    withheld,
+    checkAgain,
     locked,
     submitting,
     onSubmitted,

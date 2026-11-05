@@ -57,7 +57,7 @@ Focus (revision 19, R26/R27; `src/lib/form-recovery/focus.ts`; form-recovery-rel
 | Q4 state 2, a failed save, on either surface | "Retry save" |
 | A refused save (only "Discard and reload anyway" is offered) | The banner region itself, never the destructive choice |
 | A discard that failed | "Try again" |
-| Q4 state 3, a restored form | Its first field (`RecoveryBanner`'s `firstFieldRef`), also after "Discard instead" |
+| Q4 state 3, a restored form | Its first field (`RecoveryBanner`'s `firstFieldRef`), also after "Discard instead" (revision 51: the owner's destination, see "Restored-form focus" below) |
 | A choice made in the banner whose button goes ("Save and reload", "Retry save", "Discard and reload anyway", "Try again", "Reload anyway") | The banner region, until a failure focuses its own action (or the page reloads) |
 | "Not now" or the close button, used from the banner | Where the prompt took focus from, when that is still on the same surface and focusable; otherwise the surface's page heading |
 
@@ -337,6 +337,33 @@ if (ticket) send(values).then(() => ticket.succeeded(), () => ticket.failed()); 
   `RecoveryIdentityError`, so the save fails honestly (`failed`, input kept, nothing written) and the next save makes a new acquisition. A page
   without `navigator.locks` has no recovery identity: it saves no copy, and every copy it finds belongs to another tab. (`locks: null` in
   `createRecoveryTab` is a test double only.)
+- **Observing an owner never makes the observer one (revision 52; Review52 F-R52-1, design assessment DA-N1/C1).** Every form of a page
+  saves under the page's one identifier, so a tab that closed with several forms saved leaves several copies with one id, and the new page's
+  forms (or several new tabs) look at that one id at once. Whether a copy's tab, or an abandoned hand-off's page, is still open is therefore
+  a PASSIVE observation: a `shared`, `ifAvailable` Web Lock request (`tab-identity.ts`, `observe`), compatible with every other observation
+  and refused only while a real owner holds the lock exclusively or waits for it. (An exclusive probe made each observer a momentary owner,
+  so a concurrent observer saw a live tab and the closed tab's second copy was neither restored nor offered.) Authority stays exclusive and
+  unchanged: the page's identifier, a hand-off claim (`holdHandoff`) and an action over an abandoned hand-off (`whileFree`, two actions
+  still exclude each other). An observation is never authority to remove or change a copy; a refused or throwing lock manager still says
+  "open"/"held". A page of an OLDER build still probes exclusively, and during its probe the lock is indistinguishable from a live
+  owner's, so its brief overlap can omit a copy from a newer page's look (nothing is removed). Coverage: `tests/lib/recovery-observation.test.tsx`
+  (primitive, both adapters, two tabs, a choice, hand-offs), the same-tab Defaults and household cases in
+  `tests/features/recovery-owner-discard.test.tsx`, and a native diagnostic in Chromium, Firefox and WebKit (revision 52 evidence).
+- **"Check saved copies again" (revision 53; decision D-R53-1, Kieran, 3 November 2026).** A look that withheld a listed copy because
+  another page seemed to hold it (`look.ts`, `Found.withheld`: an ordinary copy whose tab looked open, or an abandoned hand-off that looked
+  held, never this page's own claimed hand-off) says so in the form's recovery notice ("A saved copy of this form may still be open in
+  another tab.") with the action "Check saved copies again" (`RecoveryNotice`, `RecoverableModel.checkAgain`; the DOM adapter has the same
+  `checkAgain`/`withheld`). The check is the person's explicit repeat of the finished look in `offer` mode: the same pinned reads,
+  observations and guards; what it finds is OFFERED beside what is shown, never restored, submitted or removed (restoring it is the
+  ordinary guarded choice, read again). A genuine owner still withholds. Nothing looks again by itself: no polling, timer or automatic
+  re-offer. A later check replaces one still reading; it reads nothing while an update reload is prepared (shown unavailable with its
+  reason), before the first look has finished, while the look is unavailable (that is "Try again") or once retired; a database replaced
+  meanwhile applies nothing. An offer look never offers the copy this session was restored from (shown, or discarded while the check
+  read). Once used, the action stays in that notice (focus stays on it) and each finished check is said politely (copies listed, none
+  found, or still withheld). The wording is PROPOSED, not accepted. Coverage: `tests/lib/recovery-check-again.test.tsx` (both adapters,
+  an older build's exclusive probe modelled exactly, omitted-all/omitted-one, live owner, repeats, late reads, guards, hand-offs),
+  `tests/features/recovery-check-again.test.tsx` (the household screen) and the native household journey in
+  `tests/e2e/fixture.pwa-editors.spec.ts` (Chromium, Firefox, WebKit).
 - **What this does not cover.** Only the app-update reload is guarded. The sync-recovery "Reload" action (`SyncBlocked`, through the session's
   own reload) and browser reload/close are outside the update coordinator; they are not claimed protected (design assessment, 10 October
   2026; the owning slice decides). The newest eligible copy stays the default after a reload (WEB-04 8): another tab can save a newer copy
@@ -485,6 +512,107 @@ once a copy had been restored automatically (R40-B). Each action is now one step
   local-work, wipe and quota totals; a tab copied from the writer restores it too. A form's `discarded` result means every copy that page
   may remove has gone, not that the retained hand-off has. No released build wrote or read hand-offs before this rule (WEB-14a is
   unreleased), so there is no older consumer to migrate.
+
+## The People forms (integration revision; review of 2 November 2026, F-INT-PEOPLE-Q4)
+
+The accepted People implementation (WEB-11a) merged three editors whose input lives in People PAGE memory with an editing session
+(`src/features/people/memory.ts` `drafts`, `lifetime.ts`): new person, rename and the field editor. None was registered, so an accepted
+update reloaded over typed input (the review's witness: `registry=[]`, one reload). Each now takes part through `src/features/people/
+form-recovery.ts`, one recoverable model (`model.ts`) per displayed identity and Q4 context, owned by People memory as kept-input is by
+the task feature:
+
+- **One model session per People session.** A form beginning a new editing session begins the model's; a session kept in page memory
+  (a remount, the dialog's sync control, leaving and coming back) resumes it. A session that ends without a save (Cancel, Escape, the
+  close icon, "Discard mine", leaving an unread editor: `retireSession`; the editor's archive) ends the model's and discards its copies.
+- **Every change in the same step.** The person's change goes to the model before the form takes it and is refused while an update
+  reload is being prepared (Save shows "unavailable while reloading"). A save's report that re-binds the form is `settle`, not an edit.
+- **Listed while it matters.** Shown while mounted; while dirty or with a save outstanding it stays listed with no form mounted, so a
+  session the sync control kept is still saved by the update (the review's unmounted case).
+- **A save is a ticket.** Taken in the same step as the People admission (none while frozen: nothing sent, nothing admitted); only a
+  durable success (queued, a receipt, a durable hold) covers what it sent; a refusal, an uncertain online attempt, a stale binding or a
+  partial save keeps the input. The update waits for a ticket outstanding before its last save.
+- **Every other admitted operation of a session is outstanding too** (revision 50; review of revision 49, F-R49-1). The field editor's
+  "Save mine on the current version" (it sends the stored conflicted save) and its Archive admit, in the same step as their People
+  admission, page work (`lib/form-recovery/activity.ts` `admitActivity`; none while frozen: nothing admitted or sent). The update waits for
+  it whatever shows the editor meanwhile (its sync control, a remount), until its outcome is told and, for a successful archive, the
+  session's input ended. Neither is the model's ticket: neither sends the editor's input, so neither marks it saved (input typed before
+  "Save mine" stays unfinished, and the update saves it).
+- **A success with no form mounted ends the session's model** (revision 50, F-R49-2). A save that completes for the session's current
+  input (`completeSession` "closed") while no form of the session is mounted ends that session's model as a mounted form's close does: a
+  re-binding the save itself made (`settle`, a confirmed audience) moves the model's input past the ticket, so the ticket alone could not
+  cover it. Only that session's model (a later session under the same key is never ended); later typed input (`kept`), refusals,
+  uncertain and partial saves, another identity and the held operations are unchanged.
+- **Codecs** (`model/recovery.ts`): one canonical, versioned (`v: 1`) text holding the WEB-11a serialisers' fields (the field editor's
+  hidden typed slots included) and what the input was composed against: the rename's and field edit's binding (`snapshot`), where a
+  field edit began (`origin`) and a new field's id (`newFieldId`, so a retried create of restored input is the same field). Never an
+  attempt, request id or secret. A copy that does not read back with its shape is offered, never restored in part.
+- **Restore hosts.** The people list reopens "New person", the identity header reopens Rename, on a copy found while no form shows the
+  context and page memory keeps no input for it (kept as a new editing session; never submitted). The field editor is route-addressed:
+  its own mount looks. Restored rename and field edits keep their original binding, so a person or field changed since is reviewed
+  ("changed since"), never silently overwritten.
+- **Not changed.** The held audience changes (`people-held:`) remain operations of the conditional port (compare-and-set by content
+  digest); no model, look, save or discard touches them. Uncertain online attempts stay in page memory, unchanged; after a reload a
+  restored save is a new attempt under the original binding and ids. Other identities' models retire with their page memory.
+- **Native coverage** (`tests/e2e/fixture.pwa-people.spec.ts`, three engines): New person, Rename and the field editor on a typed field,
+  each saved by "Save and reload" and restored on B without being submitted (nothing written, nothing queued), and each refusing the
+  reload when the save fails, then saving on "Retry save". Rename and the field editor live on a person's page: since revision 50 the PWA
+  world SEEDS a synced person (`seedAccount` `rows`) and the generation server answers that person's People reads (the list's summaries,
+  the person, its summary and duplicates) from its CANNED READS (`POST /reads` of `scripts/serve-generations.mjs`: GET only, set per
+  test, none by default). Fixture evidence of the client, not of a released backend. Running person pages offline remains unsupported
+  in this world (WebKit's Playwright build fails worker-served loads under `setOffline`).
+
+## Restored-form focus: every product editor names its destination (revision 51; review of revision 50, F-R51-1; design assessment of 3 November 2026)
+
+Review51 found the restored People forms and the sharing editors showing the right values while focus stayed on the page heading or a
+dialog's sync control, and a keyboard "Discard instead" leaving focus on the body: their `RecoveryNotice` named no field, and a dialog's
+own initial focus hid some of it. The approved behaviour (form-recovery-reload.html "Focus order": focus returns to the restored form's
+first field on mount, and `RecoveryBanner`'s revision-19 "Discard instead" contract) is now a REQUIRED part of the caller contract:
+
+- **`RecoveryNotice` requires `firstFieldRef`** (a `FocusTarget`, `lib/form-recovery/focus.ts`): a ref to the control itself (never a
+  wrapper), or a resolver the owner answers from its committed DOM at each attempt, for a target its state chooses. Optional
+  `discardFocus` names a different destination after a discard, for an owner whose discard removes the editor. Type checking makes a
+  forgotten destination a build error; behaviour tests catch a target that is null, conditional or gone.
+- **"Discard instead" from the keyboard** returns focus through a request held by the OWNER (`useDiscardFocus`, in `RecoveryNotice`), not
+  by the banner, which goes with the copy. It is admitted at the gesture and resolved after the owner's reset is committed (a target the
+  reset inserts or replaces is the one focused), never when the copy's removal completes. It ends without focusing as soon as focus is
+  placed anywhere else (the person, a prompt, a failure), at a navigation, at a newer discard or the owner's unmount; a discard that was
+  not admitted (the banner still there once the gesture's commit is done) leaves focus on its button. A pointer discard that did not
+  focus the button moves nothing. Not a restored request: DA-F1 and DA-F2 are unchanged.
+- **Destinations.** People New person, Rename and the field editor, list Create/Rename: Name. The task picker: its search. Record
+  progress: the amount when "Log an amount" is chosen, else the chosen mode (design assessment DA-N1: "Just checked on it" has no amount
+  field; its discard focuses the amount field the reset brings back). The preset picker: the checked preset. Sharing defaults: the
+  layer's chosen option. A resource's policy: its first grant's chosen access, or the grants' first control ("Add account grant") for a
+  policy with none. Focusing never chooses a value. Calendar, device name, households, the task form and the correction already named
+  theirs.
+- **Decision D1 (Kieran, 3 November 2026): no field to focus, the owner's surviving control, else its heading.** The entry history: an
+  opened restored fix focuses its new value (a tick or an item, its first action); a PARKED fix (its entry cannot be fixed now; nothing is
+  opened by the restore) focuses that entry's "Fix this entry" when shown, else the history's heading; after a discard (the fix goes, open
+  or parked), the same. The preset picker with no choice to show (offline, failed, no presets): the dialog's own opening focus, never the
+  banner; while the presets are read nothing is focused yet.
+- **Decision D2 (Kieran, 3 November 2026): restored forms of one arrival, the first in the page.** Requests pending together are attempted
+  in page order. One restored later takes focus from another only when it comes first in the page AND focus is still on that other form's
+  field; otherwise its request ends, so focus the person moved is never taken by a later restore and nothing goes back and forth.
+  Revision 52 (Review52 F-R52-2): the comparison is with the CURRENT grant, the restore that most recently took focus (and the element
+  focus actually landed on), never the first restore that once did; a successful pre-emption replaces it. So any number of restored forms,
+  in any order, settle on the first in the page (three household invitations restored C, B, A end on A). Focus moved elsewhere, including
+  onto an earlier, superseded restored field, is never taken. When the current grant's owner withdraws its restore (its copy discarded, or
+  it unmounted) with focus nowhere or where the arbiter put it, the grant ends; with focus moved elsewhere by anyone else, it stays until
+  the next navigation, so a later restore still takes nothing. When the granted field itself is replaced and focus is nowhere, a later
+  restore may take focus (it takes nobody's). Completed requests remain history only (a same-arrival prompt stays suppressed, DA-F1).
+- **Coverage.** `tests/lib/recovery-discard-focus.test.tsx` (the request and D2), each caller's restore and keyboard discard in the
+  People, lists, preset, owner-discard and owner-host tests, and `tests/e2e/fixture.pwa-people.spec.ts`: on B the restored form's first
+  field has focus before any test gesture, native keyboard traversal reaches "Discard instead" and Enter leaves focus on that field, in
+  Chromium, Firefox and WebKit.
+- **Another copy chosen while a copy is restored (revision 53; decision D-R53-2, Kieran, 3 November 2026; design assessment Q7).** The
+  restored banner stays mounted, so `useRestoredFocus` sees no new presentation. The notice's choice of another saved copy therefore makes
+  a fresh "chosen" request (`useChoiceFocus`) once the choice is APPLIED, for the restored form's first eligible field (`firstFieldRef`;
+  D1's owner-control or heading fallback where it has none), never the removed button. It follows the discard return's rules: pending
+  until the target can take focus and the used control has gone; ended without focusing once focus is placed anywhere other than where it
+  was at the choice (a browser that does not focus a clicked button keeps focus where it was), by a navigation, a newer choice or the
+  owner's unmount. A choice not applied (refused, gone, unreadable) requests nothing. A landed choice supersedes an automatic restore still
+  waiting; it is not a D2 grant, so a later automatic restore follows the current grant's rule and does not take it. A choice made with no
+  restored banner shown is focused by the banner's own arrival (D2), as before. Coverage: `tests/lib/recovery-discard-focus.test.tsx`
+  (revision 53 cases), `tests/features/recovery-check-again.test.tsx` (household and policy editors) and the native household journey.
 
 ## Test builds and constants
 

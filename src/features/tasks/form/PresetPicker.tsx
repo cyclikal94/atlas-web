@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/ui/button";
 import { Dialog } from "../../../components/ui/dialog";
+import { openingFocus } from "../../../lib/form-recovery/focus";
 import { UNAVAILABLE_WHILE_RELOADING } from "../../../lib/form-recovery/RecoveryBanner";
 import { RecoveryNotice } from "../../../lib/form-recovery/RecoveryNotice";
 import * as copy from "../copy";
@@ -130,6 +131,21 @@ export function PresetPicker({
     };
   }, [env.api, env.online, zone, env]);
   const locked = choice.recovery?.locked === true;
+  // WEB-14a revision 51 (F-R51-1, D1): a restored choice, and "Discard instead", focus the chosen preset (the checked radio, read from the
+  // committed DOM: a discard checks the first). While the presets are read nothing is focused yet (the request waits for them); offline,
+  // failed or with no presets there is no choice, so the dialog's own opening focus is used (decision D1, Kieran, 3 November 2026).
+  const body = useRef<HTMLDivElement>(null);
+  const kind = useRef(state.kind);
+  kind.current = state.kind;
+  const choiceFocus = () => {
+    const root = body.current;
+    if (!root || kind.current === "loading") return null;
+    return (
+      root.querySelector<HTMLElement>('input[type="radio"]:checked') ??
+      root.querySelector<HTMLElement>('input[type="radio"]') ??
+      openingFocus(root)
+    );
+  };
   // The person's choice while it is offered, else the first preset.
   const chosen =
     state.kind !== "ready"
@@ -187,8 +203,13 @@ export function PresetPicker({
         )
       }
     >
-      <div data-preset-picker={state.kind}>
-        {choice.recovery ? <RecoveryNotice recovery={choice.recovery} /> : null}
+      <div ref={body} data-preset-picker={state.kind}>
+        {choice.recovery ? (
+          <RecoveryNotice
+            recovery={choice.recovery}
+            firstFieldRef={choiceFocus}
+          />
+        ) : null}
         {state.kind === "loading" ? (
           <div aria-busy="true" className="flex flex-col gap-2">
             <span className="sr-only">{PRESET_COPY.loading}</span>

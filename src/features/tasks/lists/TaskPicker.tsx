@@ -181,6 +181,8 @@ export function TaskPicker({
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const [note, setNote] = useState<string | null>(null);
   const search = useId();
+  // The search field: a restored copy and "Discard instead" focus it (WEB-14a revision 51, F-R51-1).
+  const searchRef = useRef<HTMLInputElement>(null);
   const caption = useId();
   const decision = useId();
   const query = useDeferredValue(kept.value.query);
@@ -403,11 +405,14 @@ export function TaskPicker({
       }
     >
       <div className="flex flex-col gap-3" data-task-picker="">
-        {kept.recovery ? <RecoveryNotice recovery={kept.recovery} /> : null}
+        {kept.recovery ? (
+          <RecoveryNotice recovery={kept.recovery} firstFieldRef={searchRef} />
+        ) : null}
         <label htmlFor={search} className="sr-only">
           {PICKER.searchLabel}
         </label>
         <input
+          ref={searchRef}
           id={search}
           type="search"
           value={kept.value.query}

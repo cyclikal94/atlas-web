@@ -188,6 +188,101 @@ describe("the preset picker's recovery (PresetPicker.tsx, DA-R40-E)", () => {
     },
   );
 
+  /** WEB-14a revision 51 (F-R51-1): "Discard instead" used from the keyboard (focused when pressed; jsdom does not focus on click). */
+  function keyboardDiscard(): void {
+    const button = screen.getByRole("button", { name: "Discard instead" });
+    button.focus();
+    expect(button, "the control: Discard instead has focus").toHaveFocus();
+    fireEvent.click(button);
+  }
+  const focusedChoice = () =>
+    (document.activeElement as HTMLInputElement | null)?.type === "radio"
+      ? (document.activeElement?.closest("label")?.textContent ?? "")
+      : null;
+
+  test(
+    "revision 51 (F-R51-1): the restored choice is focused (the checked preset); a keyboard discard focuses the preset its reset checks, choosing nothing",
+    SLOW,
+    async () => {
+      const t = await restored();
+      expect(checked()).toContain("Shared chore");
+      await t.until(() => focusedChoice() !== null);
+      expect(focusedChoice()).toContain("Shared chore");
+      keyboardDiscard();
+      await t.settle();
+      expect(checked()).toContain("First preset");
+      expect(focusedChoice()).toContain("First preset");
+      expect(checked(), "focusing chose nothing").toContain("First preset");
+      expect(formShown()).toBe(false);
+    },
+  );
+
+  test(
+    "revision 51, decision D1 (Kieran, 3 November 2026): restored with NO choice to show (the presets could not be read): the dialog's own opening focus, never the banner; a keyboard discard returns there",
+    SLOW,
+    async () => {
+      let failing = false;
+      const api = fakeApi({
+        readPresets: async () =>
+          failing
+            ? { ok: false, kind: "uncertain", requestId: "req-51" }
+            : {
+                ok: true,
+                value: [
+                  {
+                    id: "first",
+                    title: "First preset",
+                    definition: definition(),
+                  },
+                  {
+                    id: "chore",
+                    title: "Shared chore",
+                    definition: definition(),
+                  },
+                ],
+              },
+      });
+      const t = await mountTasks({ path: "/tasks/new", api });
+      await t.until(() => screen.queryAllByRole("radio").length > 0);
+      expect(
+        await t.data.formRecovery.save({
+          formContext: "task-form:new:preset",
+          tabInstanceId: "gone-tab",
+          values: { model: encodePresetChoice("chore") },
+          savedAt: new Date().toISOString(),
+          capture: "gone-capture",
+        }),
+      ).toBe("saved");
+      failing = true;
+      await reload(t);
+      await t.until(
+        () => screen.queryByText(RESTORED_TEXT, { selector: "p" }) !== null,
+      );
+      const dialog = screen.getByRole("dialog");
+      expect(
+        dialog.querySelector('[data-preset-picker="failed"]'),
+        "the presets could not be read",
+      ).not.toBeNull();
+      expect(screen.queryAllByRole("radio")).toHaveLength(0);
+      const opening = () => {
+        const active = document.activeElement as HTMLElement | null;
+        return active !== null &&
+          dialog.contains(active) &&
+          active.closest("[data-recovery-state]") === null
+          ? active
+          : null;
+      };
+      await t.until(() => opening() !== null);
+      const first = opening();
+      expect(first, "focus is in the dialog, not on the banner").not.toBeNull();
+      keyboardDiscard();
+      await t.settle();
+      expect(screen.queryByText(RESTORED_TEXT, { selector: "p" })).toBeNull();
+      expect(document.activeElement, "the same opening control").toBe(first);
+      expect(formShown()).toBe(false);
+    },
+  );
+
   test(
     "while an update reload is prepared the footer opens no form (Use preset and Start from scratch are unavailable)",
     SLOW,
