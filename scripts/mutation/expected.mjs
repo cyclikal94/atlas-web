@@ -58,3 +58,6 @@ export const EXPECTED_ENGINE = 315;
 // Both catalogues retained. The 249 WEB-13b IDs (unit and real-engine) that collided with accepted IDs moved to MU-5001..MU-5249 in
 // ascending order (`web13b-id-map-20261105.json`); the WEB-13b IDs in the history lines above are the ones they were written with.
 // WEB-13b revision 33 (review 40 F40-1, F40-2): +7 unit (MU-5250..MU-5256) in `catalogue-web13b-r33.mjs`. WEB-13b now 257 unit, 7 engine.
+// Base merge of accepted main 2c4e7fb (revision 34): no catalogue change. Review 41 O-2: the eight live WEB-13b unit IDs that were also
+// IDs of WEB-11a's RETIRED entries (MU-2710..MU-2712, MU-2714..MU-2718) moved to MU-5257..MU-5264 (`web13b-retired-id-map-20261105.json`);
+// a rename only, counts unchanged.

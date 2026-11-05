@@ -16,7 +16,7 @@ const T_RET = "tests/features/calendars/import-retention.test.tsx";
 
 export const UNIT_13B_R11 = [
   {
-    id: "MU-2715",
+    id: "MU-5261",
     title:
       "WEB-13b R7f (revision 11): what a reading establishes (the opening read, a publication, the first database adopted) makes a new session ready without telling the dialog showing it (it stays `acquiring` until something else renders it)",
     file: KEPT,
@@ -31,7 +31,7 @@ export const UNIT_13B_R11 = [
       ),
   },
   {
-    id: "MU-2716",
+    id: "MU-5262",
     title:
       "WEB-13b R7f (revision 11): every reading judged is told, whether or not the session's status changed (a repeated or an advancing publication tells a ready session again)",
     file: KEPT,

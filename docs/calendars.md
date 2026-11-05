@@ -270,8 +270,8 @@ and 1, then one press with and without W18 before W2, the chooser's entry absent
 `import-editor.test.ts`, `import-kept.test.ts`, E-IMP7 and E-IMP8 (a 403 remount then 410/W18/W23, row and chooser, with controls; two pages
 with the follower's cross-tab wakes delivered or held; revision 8: E-IMP9, a pending source on an empty cache, first fill alone versus fill,
 410 and refill, the follower's wakes held) in `tests/e2e/fixture.calendar-import.spec.ts`; mutants MU-5110 to MU-5128, MU-5129 to MU-5141
-(revision 8: re-anchored, MU-5139 re-expressed), MU-5142 to MU-5160, MU-5161 to MU-5180 (revision 9) and MU-5181, MU-5182 and MU-2710 to MU-2714 (revision 10;
-MU-2713 retired as equivalent after it ran). WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
+(revision 8: re-anchored, MU-5139 re-expressed), MU-5142 to MU-5160, MU-5161 to MU-5180 (revision 9) and MU-5181, MU-5182 and MU-5257 to MU-5260 (revision 10;
+its MU-2713 retired as equivalent after it ran). WEB-13a's own calendar dialogs (Add source, Link a calendar…, Manage) are unchanged by this revision. The binding read is the task screen's: `readAnchor(taskId, live)` asks whether the person is at the task's screen and the device's
 connectivity before EVERY admission, so a read never sent is never sent after the person left the task (R6, `untilSentWhile`).
 
 **Review items** (`model/review.ts`, `ReviewPanel.tsx`). "Anchor review needed" lists the cached unresolved `review` rows (private to the
@@ -283,7 +283,7 @@ review it is. The list and the card's read are published separately, so a card d
 one Acknowledge resolved. Until its read arrives the card says it is loading and offers nothing; a review the read no longer finds is "no
 longer available", and one it sees resolved goes, before the list says so. `tests/features/calendars/review-panel.test.tsx` (revision 12:
 both publication orders for Acknowledge, Acknowledge (keep current timing) and Acknowledge again, a change inside the replacement's write,
-privacy, navigation, permission, gone, resolved and loading, through the production `DataProvider`), mutants MU-2717, MU-2718 and MU-5183 to MU-5186; "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
+privacy, navigation, permission, gone, resolved and loading, through the production `DataProvider`), mutants MU-5263, MU-5264 and MU-5183 to MU-5186; "Review this move…" (a `work_started` review) links to the task's day with `?move=`,
 which the task screen reads strictly and consumes once to fill a NEW correction session (it never resolves the review); a
 `context_unavailable` review shows no date, title or task; one that leaves the cache while shown is "no longer available". The panel
 reads a page (100) at a time; "Show more reviews" shows 20 more and then the next page, and "Show previous reviews" goes back a page,

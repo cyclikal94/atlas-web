@@ -53,7 +53,7 @@ export const UNIT_13B_R10 = [
       ),
   },
   {
-    id: "MU-2710",
+    id: "MU-5257",
     title:
       "WEB-13b R7d (revision 10): a showing's read asked before its basis was known is not followed by another read (the session waits for good)",
     file: KEPT,
@@ -68,7 +68,7 @@ export const UNIT_13B_R10 = [
   },
   // ---- R7e: no import without an established history -------------------------------------------------------------------------------
   {
-    id: "MU-2711",
+    id: "MU-5258",
     title:
       "WEB-13b R7e (revision 10): a new session that does not know its history yet is ready and states none (the optional-token path restored)",
     file: KEPT,
@@ -83,7 +83,7 @@ export const UNIT_13B_R10 = [
       ),
   },
   {
-    id: "MU-2712",
+    id: "MU-5259",
     title:
       "WEB-13b R7e (revision 10): the dialog offers Import while its new session is acquiring (only the press refuses it)",
     file: DIALOG,
@@ -98,7 +98,7 @@ export const UNIT_13B_R10 = [
       ),
   },
   {
-    id: "MU-2714",
+    id: "MU-5260",
     title:
       "WEB-13b R7e (revision 10): the import request leaves out the history its press captured (W2 then compares nothing)",
     file: COMMANDS,

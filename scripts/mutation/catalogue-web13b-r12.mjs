@@ -16,7 +16,7 @@ const T_REVIEWS = "tests/features/calendars/review-panel.test.tsx";
 
 export const UNIT_13B_R12 = [
   {
-    id: "MU-2717",
+    id: "MU-5263",
     title:
       "WEB-13b R8 (revision 12): the card shows the list's copy of the review while Acknowledge is built from the card's own reading (a newer, unseen review is acknowledged; an older one is shown while the newer is known)",
     file: PANEL,
@@ -35,7 +35,7 @@ export const UNIT_13B_R12 = [
       ),
   },
   {
-    id: "MU-2718",
+    id: "MU-5264",
     title:
       "WEB-13b R8 (revision 12): whether the review may be acknowledged comes from the list's copy (edit access lost is still offered)",
     file: PANEL,

@@ -1006,7 +1006,8 @@ test.describe("I-CAL10: turned off while refreshing (cause 6a)", () => {
 
 // =====================================================================================================================================
 // WEB-13b (I-CAL-IMP1-4, I-CAL-ANC1, I-CAL-REV1; prefixed I-CAL so that every historical schedule keeps them in the calendar stack):
-// local ICS import, task anchors and review items, against the released backend pinned now (v0.29.0-rc.1, 4396c99), on the
+// local ICS import, task anchors and review items, against the released backend that contract-pin.json names (v0.29.0-rc.1, 4396c99,
+// when these were written; v0.31.0-rc.1, 7dc51e3, since the base merge of 5 November 2026, whose calendar code is unchanged), on the
 // same stack (its loopback feed, accounts and paced sign-ins). FOCUSED EVIDENCE FOR A FIXTURE-STAGE TASK, not integration acceptance:
 // BE-Q22, BE-B8 and BE-CH3 have no completion record. Not exercised here, with the reason (plan §9.6): `409 stale_refresh` for an import
 // (needs a generation change inside the parse window: not schedulable from the client), `503 slice_capacity` (10,000 installation

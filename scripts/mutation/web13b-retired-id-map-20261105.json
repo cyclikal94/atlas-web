@@ -1,0 +1,15 @@
+{
+  "reason": "Review 41 observation O-2 (WEB-13b revision 34, 5 November 2026): eight live WEB-13b unit mutant IDs, which collided with no live accepted ID and so kept their IDs in web13b-id-map-20261105.json, are also IDs of WEB-11a's retired real-engine entries in accepted main's RETIRED list (data-catalogue.mjs). They move, in ascending order, to the next unused IDs after MU-5256, so that every live and retired ID names one mutant. A rename only: patches, files, tests and expected catches are unchanged. MU-2713, WEB-13b's revision-10 mutant retired as equivalent after it ran, was never a catalogue entry (only a comment in catalogue-web13b-r10.mjs) and keeps its historical name; the RETIRED entry MU-2713 is WEB-11a's. Historical reports, evidence and the history comments of expected.mjs retain the IDs they were written with.",
+  "from_commit": "5dd767a27e15b3a07f0436194cccdf611a0d639a",
+  "accepted_main": "2c4e7fb8249587648df5131bca70d59033d21211",
+  "ids": {
+    "MU-2710": "MU-5257",
+    "MU-2711": "MU-5258",
+    "MU-2712": "MU-5259",
+    "MU-2714": "MU-5260",
+    "MU-2715": "MU-5261",
+    "MU-2716": "MU-5262",
+    "MU-2717": "MU-5263",
+    "MU-2718": "MU-5264"
+  }
+}
