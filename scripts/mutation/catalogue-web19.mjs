@@ -289,16 +289,30 @@ export const UNIT_WEB19 = [
   {
     id: "MU-6120",
     title:
-      "WEB-19: a re-read that arrives during Show older ends the press (no focus move, no announcement once it is over)",
+      "WEB-19: a press of Show older while a re-read is on its way is settled at once (no focus move, no announcement once the re-read is over)",
     file: "src/features/people/activity/ActivitySection.tsx",
     tests: [TIMELINE],
-    expect:
-      /a synced change during Show older: the re-read reads to the new depth/,
+    expect: /Show older pressed while a re-read is on its way/,
     patch: (t) =>
       sub(
         t,
         "    if (asked === null || busy) return;\n",
         "    if (asked === null || view.extending) return;\n",
+      ),
+  },
+  {
+    id: "MU-6125",
+    title:
+      "WEB-19: a refresh is not busy for the timeline (a Show older on its way is settled by the refresh, and the section is not aria-busy)",
+    file: "src/features/people/activity/ActivitySection.tsx",
+    tests: [TIMELINE],
+    expect:
+      /a synced change during Show older: the re-read reads to the new depth|a refresh keeps the list's nodes, its controls and keyboard focus/,
+    patch: (t) =>
+      sub(
+        t,
+        "  const busy = refreshing || view.extending;\n",
+        "  const busy = view.extending;\n",
       ),
   },
   {

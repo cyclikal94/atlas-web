@@ -829,9 +829,14 @@ describe("R-1: a refresh keeps the timeline's tree (keyboard and screen reader a
     await waitFor(() =>
       expect(section()).toHaveTextContent("Loading older changes…"),
     );
+    // The re-read's first page is held, as on a real network: the earlier answer is shown, busy, meanwhile.
+    const reread = holdNextRead(w);
     act(() => {
       w.advanceRevision();
     });
+    await until("loading");
+    expect(section()).toHaveTextContent("Loading older changes…");
+    reread.resolve(page(events.slice(0, 50), eventId(50)));
     await waitFor(() => expect(shownIds()).toHaveLength(100));
     await until("ready");
     await waitFor(() =>
@@ -863,7 +868,9 @@ describe("R-1: a refresh keeps the timeline's tree (keyboard and screen reader a
     });
     await until("loading");
     const calls = w.api.activityCalls.length;
-    press("Show older changes");
+    const older = button("Show older changes");
+    expect(older).not.toBeNull();
+    fireEvent.click(older as HTMLElement);
     expect(section()).toHaveTextContent("Loading older changes…");
     expect(shownIds()).toHaveLength(50);
     // The re-read asked for 50 before the press; once that page is in, it goes on to 100.
