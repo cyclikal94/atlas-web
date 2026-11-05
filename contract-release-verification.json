@@ -1,20 +1,13 @@
 {
   "verified_by": "github-api-and-release-download",
-  "pin_sha256": "651aeba0ef2aa6d4bce39dd76f38835f2866b347a7a90592e60f9802bdb4f0d2",
+  "pin_sha256": "28cf0bf46d0de04b59b3a32baf6b47e42372a837576fabfd53d9e6b4e428df3e",
   "repository": "cyclikal94/atlas",
-  "release_id": 414286887,
-  "asset_id": 645204829,
-  "verified_at": "2026-10-15T21:25:27.466242+00:00",
-  "verification_transport": "Python urllib: public GitHub REST API and release downloads",
-  "published_checksums_verified": [
-    "SHA256SUMS",
-    "atlas-api-types-0.29.0-rc.1.tgz.sha256"
-  ],
-  "source_verified": true,
-  "release_url": "https://github.com/cyclikal94/atlas/releases/download/v0.29.0-rc.1/atlas-api-types-0.29.0-rc.1.tgz",
-  "backend_tag": "v0.29.0-rc.1",
-  "backend_commit": "4396c99300d00798fc10e61d459f4d9fce699ee8",
-  "tarball_sha256": "8718c00c15afcff13f52d27a52e678143ad6168563e7c86b4db192d9dfc17b7d",
-  "contract_sha256": "369ca0de5ab0cd5983252b55d4a546263819c236fa285a386b0dd374bf82b6e0",
-  "version": "0.29.0-rc.1"
+  "release_id": 434659030,
+  "asset_id": 711605049,
+  "release_url": "https://github.com/cyclikal94/atlas/releases/download/v0.31.0-rc.1/atlas-api-types-0.31.0-rc.1.tgz",
+  "backend_tag": "v0.31.0-rc.1",
+  "backend_commit": "7dc51e39fdf296b14ba7c438ad9730fa3485d964",
+  "tarball_sha256": "f7a50c868ae2b9cd332bd49161b559aec95c129916e723d2f2616888a7427f90",
+  "contract_sha256": "c43796e63d2c5adc54d2c9f9769dcc9e6b85e635f984b15a08520b2db6fee848",
+  "version": "0.31.0-rc.1"
 }

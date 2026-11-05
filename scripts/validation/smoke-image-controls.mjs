@@ -115,7 +115,7 @@ const cases = [
       "the stub's /health lacks api_version: readiness fails by name, the browser never starts",
     text: stubVariant(
       "malformed-health",
-      `'{"api_version":"0.29.0","status":"ok"}'`,
+      `'{"api_version":"0.31.0","status":"ok"}'`,
       `'{"status":"ok"}'`,
     ),
     env: ARM,

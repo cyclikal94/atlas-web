@@ -23,14 +23,14 @@ describe("the seam is diagnostic only", () => {
       dependencies: Record<string, string>;
     };
     expect(pkg.dependencies["@atlas/api-types"]).toBe(
-      "file:vendor/atlas-api-types-0.29.0-rc.1.tgz",
+      "file:vendor/atlas-api-types-0.31.0-rc.1.tgz",
     );
     const pin = JSON.parse(read("contract-pin.json")) as {
       version: string;
       backend_tag: string;
     };
-    expect(pin.version).toBe("0.29.0-rc.1");
-    expect(pin.backend_tag).toBe("v0.29.0-rc.1");
+    expect(pin.version).toBe("0.31.0-rc.1");
+    expect(pin.backend_tag).toBe("v0.31.0-rc.1");
   });
 
   it("main.tsx passes no diagnostic; boot hands it only to the leader's start; the shim forwards it only to the browser composition", () => {

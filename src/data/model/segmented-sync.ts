@@ -3,7 +3,8 @@
  *
  * THE CONTRACT IS BE-Q23's, AND PROVISIONAL. This module is the ONE place the client spells it: BE-Q23's plan §5.2 (Option C, 11 October 2026,
  * `.agtx/plan.md` SHA-256 `e088522a…4189` of task f3852338), which the new authority asks BE-Q23 to reconcile and publish as the single
- * cross-repository contract. The pinned API types (`0.29.0-rc.1`) do not contain it, so nothing here is integration: production never opts in
+ * cross-repository contract. The pinned API types (`0.31.0-rc.1`) now carry the published form (`max_changes` 4..800, `Batch.segment`); this
+ * provisional spelling still has to be reconciled against it by the consumer task, so nothing here is integration: production never opts in
  * until `DATA_CONFIG.segmentedSync.minApiVersion` is set from a released, reviewed pin. If the published contract differs, this module and its
  * tests change; the staging and activation do not.
  *

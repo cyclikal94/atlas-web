@@ -7,7 +7,17 @@ import { type FieldValue, formatValue, parseFieldValue } from "../model/values";
  * a link (new tab, said so); "Yes"/"No"; the selected choices "of {n}"; a checklist "{checked} of {n} done" with its items in a disclosure.
  * A value that does not parse strictly is "This value can't be shown on this device", never guessed.
  */
-export function FieldValueView({ raw }: { raw: unknown }) {
+export function FieldValueView({
+  raw,
+  anywhere = false,
+}: {
+  raw: unknown;
+  /**
+   * WEB-11b revision 1 (R5): the text may break at any point. `break-words` keeps a whole unbroken word as the text's MINIMUM width, which
+   * widens an automatic layout (the merge comparison); set inline, so it adds nothing to the stylesheet.
+   */
+  anywhere?: boolean;
+}) {
   const value = parseFieldValue(raw);
   if (value === null)
     return (
@@ -15,10 +25,10 @@ export function FieldValueView({ raw }: { raw: unknown }) {
         {copy.UNREADABLE_VALUE}
       </span>
     );
-  return <Known value={value} />;
+  return <Known value={value} anywhere={anywhere} />;
 }
 
-function Known({ value }: { value: FieldValue }) {
+function Known({ value, anywhere }: { value: FieldValue; anywhere: boolean }) {
   const [open, setOpen] = useState(false);
   const id = useId();
   switch (value.kind) {
@@ -29,6 +39,7 @@ function Known({ value }: { value: FieldValue }) {
           <span
             id={id}
             className={`whitespace-pre-wrap break-words text-[13.5px] text-ink-1 ${!open && long ? "line-clamp-2" : ""}`}
+            style={anywhere ? { overflowWrap: "anywhere" } : undefined}
           >
             {value.text}
           </span>

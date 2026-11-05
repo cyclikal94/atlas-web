@@ -3,7 +3,8 @@
  * path.
  *  - `peopleSlots`: WEB-11b fills `headerActions` ("Ask to link…") and `duplicateActions` ("Compare & merge"); WEB-11a renders nothing in them.
  *  - `usePersonLinkage(personId)`: who controls a profile, from an online `GET /people/{id}` only (never inferred), with Try again.
- *  - `personPath`, `duplicatesPath`: deep links.
+ *  - `personPath`, `duplicatesPath`: deep links; WEB-11b adds `requestsPath()` (WF-PEOPLE-06) and `mergePath(personId, otherId)` ("Compare &
+ *    merge": `otherId` merged into `personId`).
  *  - the field value model (parse, validate, format) for every `FieldValue` kind.
  *  - `PeopleBoundary`: the people env (and the sharing env it builds on) for a screen outside the People routes.
  *  - `archivedLedgerKinds`: where WEB-10a/WEB-10b add their kinds to Settings → "Archived items".
@@ -28,4 +29,10 @@ export {
 } from "./model/values";
 export { usePersonLinkage } from "./reads";
 export { registerPeopleCommands } from "./register";
-export { duplicatesPath, peopleSlots, personPath } from "./route";
+export {
+  duplicatesPath,
+  mergePath,
+  peopleSlots,
+  personPath,
+  requestsPath,
+} from "./route";

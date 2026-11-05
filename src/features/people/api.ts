@@ -7,6 +7,16 @@ import {
   type SharingFailure,
 } from "../sharing";
 import {
+  type IncomingRequest,
+  type MergePreview,
+  parseIncomingRequests,
+  parseMergePreview,
+  parseRecipientPreview,
+  parseSentPage,
+  type RecipientPreview,
+  type SentPage,
+} from "./model/requests";
+import {
   type FieldAudience,
   type PersonSummary,
   type PersonSummaryDetail,
@@ -27,6 +37,10 @@ import {
  * Answers are classified with the sharing slice's rules (`classifyAnswer`, `classifyThrown`): a refusal needs an Atlas error body, a
  * `200` body is validated strictly (TypeScript types are not validation) and one that is not the contract's answer is `uncertain`. The
  * people-specific refusal `identity_grant_required` (a shared field whose audience cannot see the person) is told apart.
+ *
+ * WEB-11b adds the request reads (`model/requests.ts`) and two refusals: `expired` (a `410`, the recipient preview of a request that expired
+ * and is not swept yet; it is no longer folded into `not_found`) and `capacity` (a people command's `503 slice_capacity`: the recipient
+ * already has the most requests waiting, and nothing was made; any other `503` stays uncertain).
  */
 export type PeopleRefusal =
   | "conflict"
@@ -34,7 +48,9 @@ export type PeopleRefusal =
   | "forbidden"
   | "not_found"
   | "invalid"
-  | "identity_grant_required";
+  | "identity_grant_required"
+  | "expired"
+  | "capacity";
 
 export type PeopleResult<T> =
   | { ok: true; value: T }
@@ -87,7 +103,26 @@ export interface PeopleApi {
     id: string,
     page: { after?: string | null; limit: number },
   ): Promise<PeopleResult<ProjectionPage>>;
-  /** `rename_profile` or `unlink` (`/people-commands`), one command per request. */
+  /** `GET /people/requests`: the pending requests addressed to the reader (at most 100). */
+  readRequests(): Promise<PeopleResult<IncomingRequest[]>>;
+  /** `GET /people/requests/sent`: one page of the reader's sent requests, every state, with no age limit (Q16). */
+  readSentRequests(page: {
+    after: string | null;
+    limit: number;
+  }): Promise<PeopleResult<SentPage>>;
+  /** `GET /people/requests/{id}/merge-preview`: the recipient's own comparison of a merge request (Q16). */
+  readRecipientPreview(
+    requestId: string,
+  ): Promise<PeopleResult<RecipientPreview>>;
+  /** `POST /people/merge-preview`: the caller's comparison of two people (a READ: no idempotency key, nothing changes). */
+  previewMerge(
+    sourceId: string,
+    targetId: string,
+  ): Promise<PeopleResult<MergePreview>>;
+  /**
+   * One command per request on `/people-commands`: `rename_profile` and `unlink` (WEB-11a), and `request_link`, `request_merge`, `merge`,
+   * `respond_request` and `cancel_request` (WEB-11b).
+   */
   peopleCommand(
     attempt: CommandAttempt,
   ): Promise<PeopleResult<{ revision: number; person_id: string }>>;
@@ -222,20 +257,31 @@ function fromSharing(failure: SharingFailure): PeopleFailure {
     case "last_manager":
       return { ...failure, kind: "invalid" };
     case "gone":
-      return { ...failure, kind: "not_found" };
+      return { ...failure, kind: "expired" };
     default:
       return failure as PeopleFailure;
   }
 }
 
-/** What a response that is not `2xx` means, with `identity_grant_required` told apart. */
+/**
+ * What a response that is not `2xx` means, with `identity_grant_required` told apart. `capacity`: for a people command only, a `503` with
+ * Atlas's `slice_capacity` body is the definite refusal it is (nothing was made); every other `5xx` is uncertain.
+ */
 export function classifyPeopleAnswer(
   status: number,
   contentType: string | null,
   body: unknown,
+  options: { capacity?: boolean } = {},
 ): PeopleFailure {
   const classified = fromSharing(classifyAnswer(status, contentType, body));
   const atlas = recogniseAtlasError(contentType, body);
+  if (options.capacity && status === 503 && atlas?.code === "slice_capacity")
+    return {
+      ok: false,
+      kind: "capacity",
+      requestId: atlas.request_id,
+      message: atlas.message,
+    };
   if (
     atlas !== null &&
     atlas.code === "identity_grant_required" &&
@@ -260,6 +306,7 @@ interface Answered {
 async function call<T>(
   run: () => Promise<Answered>,
   parse: (body: unknown) => T | null,
+  options: { capacity?: boolean } = {},
 ): Promise<PeopleResult<T>> {
   try {
     const { data, error, response } = await run();
@@ -273,6 +320,7 @@ async function call<T>(
       response.status,
       response.headers.get("content-type"),
       error,
+      options,
     );
   } catch (error) {
     return fromSharing(classifyThrown(error));
@@ -382,6 +430,49 @@ export function createPeopleApi(
           (body) => parseSummaryPage(body, page, parseFieldAudience),
         ),
       ),
+    readRequests: async () =>
+      offline() ??
+      readUntilSent(() =>
+        call(() => client().GET("/people/requests"), parseIncomingRequests),
+      ),
+    readSentRequests: async (page) =>
+      offline() ??
+      readUntilSent(() =>
+        call(
+          () =>
+            client().GET("/people/requests/sent", {
+              params: {
+                query: {
+                  limit: page.limit,
+                  ...(page.after ? { after: page.after } : {}),
+                },
+              },
+            }),
+          (body) => parseSentPage(body, page),
+        ),
+      ),
+    readRecipientPreview: async (id) =>
+      offline() ??
+      readUntilSent(() =>
+        call(
+          () =>
+            client().GET("/people/requests/{id}/merge-preview", {
+              params: { path: { id } },
+            }),
+          parseRecipientPreview,
+        ),
+      ),
+    previewMerge: async (sourceId, targetId) =>
+      offline() ??
+      readUntilSent(() =>
+        call(
+          () =>
+            client().POST("/people/merge-preview", {
+              body: { source_id: sourceId, target_id: targetId },
+            }),
+          parseMergePreview,
+        ),
+      ),
     peopleCommand: async (attempt) =>
       offline() ??
       call(
@@ -391,6 +482,7 @@ export function createPeopleApi(
             body: JSON.parse(attempt.body) as never,
           }),
         parsePersonReceipt,
+        { capacity: true },
       ),
     putFieldShared: async (attempt) =>
       offline() ??

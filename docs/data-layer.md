@@ -440,7 +440,7 @@ Whether that suffices on a real constrained device is exactly what the measureme
 **What it is for.** A delta revision is indivisible on the wire today: at `limit = 1` the smallest response is one whole revision (up to 800 changes with ancestors). BE-Q23 owns an
 opt-in protocol that splits an oversized revision into ordered SEGMENTS (`max_changes`, `Batch.segment { index, last }`, a continuation cursor). The client's half is here. It is
 built against BE-Q23's **provisional** contract (its plan §5.2, SHA-256 `e088522a…4189`), spelt in ONE module (`model/segmented-sync.ts`), and **switched off in production**:
-the pinned API types (`0.29.0-rc.1`) do not contain it, `DATA_CONFIG.segmentedMinApiVersion` is `null` and the engine's `segmentedCapable` is absent, so no request carries the
+the pinned API types (`0.31.0-rc.1`) now carry the published form (shipped in API 0.30.0, same 4..800 bound) but this provisional spelling has not yet been reconciled against it, `DATA_CONFIG.segmentedMinApiVersion` is `null` and the engine's `segmentedCapable` is absent, so no request carries the
 parameter (an older server answers an unknown query parameter with `400 malformed_request`). It is integration only once BE-Q23's contract is released into a reviewed pin.
 
 **The rule: staged, never shown, activated whole.**

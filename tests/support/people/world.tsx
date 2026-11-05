@@ -59,6 +59,17 @@ import {
 } from "../../../src/features/people/field/held-store";
 import { peopleMemory } from "../../../src/features/people/memory";
 import {
+  type IncomingRequest,
+  type MergePreview,
+  parseIncomingRequests,
+  parseMergePreview,
+  parseRecipientPreview,
+  parseSentPage,
+  type RecipientPreview,
+  type SentPage,
+  type SentRequest,
+} from "../../../src/features/people/model/requests";
+import {
   type AudienceSummary,
   type FieldAudience,
   type PeopleHome,
@@ -128,6 +139,21 @@ export interface FakePeopleApi extends PeopleApi {
     summaries: PeopleAnswer<SummaryPage<PersonSummary>>[];
     personSummary: PeopleAnswer<PersonSummaryDetail>[];
     fieldAudiences: PeopleAnswer<SummaryPage<FieldAudience>>[];
+    requests: PeopleAnswer<IncomingRequest[]>[];
+    sent: PeopleAnswer<SentPage>[];
+    recipientPreview: PeopleAnswer<RecipientPreview>[];
+    mergePreview: PeopleAnswer<MergePreview>[];
+  };
+  /**
+   * WEB-11b's fake server state: the incoming requests (default answer of `readRequests`), the sent history (paged in id order by
+   * `readSentRequests`), the recipient previews by request id (absent: `not_found`), and the merge previews' `requires_approval` and token
+   * by `source:target` (default: computed from the cache, no approval, token `"a"×64`). Every answer is checked by the real strict parser.
+   */
+  requests: {
+    incoming: IncomingRequest[];
+    sent: SentRequest[];
+    previews: Map<string, RecipientPreview>;
+    merge: Map<string, Partial<MergePreview>>;
   };
   /** Linked accounts by person id (the default answer of `readPerson`); a person absent from the cache is `not_found`. */
   linked: Map<string, string | null>;
@@ -229,6 +255,10 @@ export function fakePeopleApi(
       summaries: [],
       personSummary: [],
       fieldAudiences: [],
+      requests: [],
+      sent: [],
+      recipientPreview: [],
+      mergePreview: [],
     },
     summary: {
       persons: new Map(),
@@ -236,6 +266,12 @@ export function fakePeopleApi(
       fields: new Map(),
       home: null,
       preferencesVersion: 1,
+    },
+    requests: {
+      incoming: [],
+      sent: [],
+      previews: new Map(),
+      merge: new Map(),
     },
     summaryOf(id) {
       const row = cache().get(id);
@@ -329,18 +365,119 @@ export function fakePeopleApi(
         value: { items: [], next_after: null },
       }));
     },
+    async readRequests() {
+      api.calls.push({ op: "readRequests", args: [] });
+      return take(api.next.requests, () => {
+        const value = parseIncomingRequests(
+          JSON.parse(JSON.stringify({ items: api.requests.incoming })),
+        );
+        if (value === null)
+          throw new Error("the fake incoming requests break the contract");
+        return { ok: true, value };
+      });
+    },
+    async readSentRequests(page) {
+      api.calls.push({ op: "readSentRequests", args: [page] });
+      return take(api.next.sent, () => {
+        const rest = [...api.requests.sent]
+          .sort((a, b) => (a.id < b.id ? -1 : 1))
+          .filter((item) => page.after === null || item.id > page.after);
+        const items = rest.slice(0, page.limit);
+        const value = parseSentPage(
+          JSON.parse(
+            JSON.stringify({
+              items,
+              next_after:
+                items.length === page.limit ? (items.at(-1)?.id ?? null) : null,
+            }),
+          ),
+          page,
+        );
+        if (value === null)
+          throw new Error("the fake sent page breaks the contract");
+        return { ok: true, value };
+      });
+    },
+    async readRecipientPreview(id) {
+      api.calls.push({ op: "readRecipientPreview", args: [id] });
+      return take(api.next.recipientPreview, () => {
+        const preview = api.requests.previews.get(id);
+        if (preview === undefined) return { ok: false, kind: "not_found" };
+        const value = parseRecipientPreview(
+          JSON.parse(JSON.stringify(preview)),
+        );
+        if (value === null)
+          throw new Error("the fake recipient preview breaks the contract");
+        return { ok: true, value };
+      });
+    },
+    async previewMerge(sourceId, targetId) {
+      api.calls.push({ op: "previewMerge", args: [sourceId, targetId] });
+      return take(api.next.mergePreview, () => {
+        const strip = (row: CacheRow | undefined) => {
+          if (row === undefined) return undefined;
+          const { kind_date: _k, ...projection } = row;
+          return projection;
+        };
+        const source = strip(cache().get(sourceId));
+        const target = strip(cache().get(targetId));
+        if (source === undefined || target === undefined)
+          return { ok: false, kind: "not_found" };
+        const fields = [...cache().values()]
+          .filter(
+            (row) =>
+              row.kind === "field" &&
+              !row.archived &&
+              (row.parent_id === sourceId || row.parent_id === targetId),
+          )
+          .sort((a, b) => (a.id < b.id ? -1 : 1))
+          .map((row) => ({
+            id: row.id,
+            parent_id: row.parent_id,
+            label: row.label,
+            version: row.version,
+          }));
+        const value = parseMergePreview(
+          JSON.parse(
+            JSON.stringify({
+              token: "a".repeat(64),
+              source,
+              target,
+              fields,
+              requires_approval: false,
+              combines_identity_audiences: true,
+              freezes_field_policies: true,
+              ...(api.requests.merge.get(`${sourceId}:${targetId}`) ?? {}),
+            }),
+          ),
+        );
+        if (value === null)
+          throw new Error("the fake merge preview breaks the contract");
+        return { ok: true, value };
+      });
+    },
     async peopleCommand(attempt: CommandAttempt) {
       api.calls.push({
         op: "peopleCommand",
         args: [attempt.key, JSON.parse(attempt.body)],
       });
       revision += 1;
+      // A receipt names the canonical person (WEB-11b: a merge's target; a request or an answer: the person it is about).
+      const command = JSON.parse(attempt.body).command as Record<
+        string,
+        unknown
+      >;
+      const about = [...api.requests.incoming, ...api.requests.sent].find(
+        (request) => request.id === command.id,
+      )?.proposal;
+      const personId =
+        (command.person_id as string | undefined) ??
+        (command.target_id as string | undefined) ??
+        (about?.kind === "link" ? about.person_id : about?.target_id) ??
+        ME;
       return take(api.next.people, () => ({
         ok: true,
-        value: {
-          revision,
-          person_id: JSON.parse(attempt.body).command.person_id,
-        },
+        value: { revision, person_id: personId },
       }));
     },
     async putFieldShared(attempt: CommandAttempt) {
@@ -513,6 +650,17 @@ export function peopleWorld(
           merged: row,
         },
       };
+    },
+    // WEB-11b: the merge comparison's cached field values (`useCachedResources`), by id; a row the cache does not hold is null.
+    "data.readResourcesById": (input) => {
+      if (failing) return { status: "unavailable", reason: "error" };
+      const value: Record<string, unknown> = {};
+      for (const id of input.ids as string[]) {
+        const row = cache.get(id) ?? null;
+        value[id] =
+          row === null ? null : { base: row, merged: row, pending: 0 };
+      }
+      return { status: "ready", value };
     },
     "data.readResourceList": (input) => {
       if (failing) return { status: "unavailable", reason: "error" };

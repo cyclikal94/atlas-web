@@ -764,10 +764,11 @@ export function linkageIn(
 
 /**
  * The linkage of one person: read when online and not yet known, or known only of an earlier version than the latest one known
- * (`synced`: the synced row's version, see `linkageIn`); `retry` asks again (after a failure or a refusal).
+ * (`synced`: the synced row's version, see `linkageIn`); `retry` asks again (after a failure or a refusal). `personId` null (WEB-11b: a
+ * side of a merge the reader cannot see): nothing is read, and the linkage is unknown.
  */
 export function usePersonLinkage(
-  personId: string,
+  personId: string | null,
   synced?: number,
 ): {
   linkage: LinkageState;
@@ -776,24 +777,32 @@ export function usePersonLinkage(
   const env = usePeopleEnv();
   useMemoryRevision(env.memory);
   const memory = env.memory;
-  const floor = Math.max(personFloor(memory, personId), synced ?? 0);
-  const kept = memory.linkage.get(personId);
+  const id = personId ?? "";
+  const floor = Math.max(personFloor(memory, id), synced ?? 0);
+  const kept = memory.linkage.get(id);
   // Whether an ordinary read would be asked now: it changes when a later version is known or a read settles before it was met, and only
   // then (an unchanged answer, another person's summary or any other notification asks nothing).
   const due =
     currentLinkage(kept?.state, floor) === null &&
-    !memory.refused.has(personId) &&
-    !memory.linkageReads.has(personId) &&
+    !memory.refused.has(id) &&
+    !memory.linkageReads.has(id) &&
     (kept === undefined
-      ? !memory.failed.has(personId)
-      : (memory.linkageAsked.get(personId) ?? 0) < floor);
+      ? !memory.failed.has(id)
+      : (memory.linkageAsked.get(id) ?? 0) < floor);
   // biome-ignore lint/correctness/useExhaustiveDependencies: `due` is the reason to read again; its value is not used
   useEffect(() => {
+    if (personId === null) return;
     if (synced !== undefined) notePersonVersion(env.memory, personId, synced);
     if (env.online) readLinkage(env, personId);
   }, [env, personId, synced, due]);
   const retry = useCallback(() => {
-    readLinkage(env, personId, { force: true });
+    if (personId !== null) readLinkage(env, personId, { force: true });
   }, [env, personId]);
-  return { linkage: linkageIn(env, personId, synced), retry };
+  return {
+    linkage:
+      personId === null
+        ? unknownLinkage("refused")
+        : linkageIn(env, personId, synced),
+    retry,
+  };
 }

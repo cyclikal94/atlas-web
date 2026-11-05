@@ -1,8 +1,8 @@
 // The INDEPENDENT expected size of each mutation catalogue (`data-catalogue.mjs`): a catalogue that lost or gained an entry by accident
 // fails against it. Change a count only together with the catalogue entries it accounts for (WEB-10a revision 11, R24). The real-engine
 // driver (`run-engine-mutants.mjs`, an adopted routing hook) keeps its own copy of the engine count.
-export const EXPECTED_UNIT = 2578;
-export const EXPECTED_ENGINE = 307;
+export const EXPECTED_UNIT = 2641;
+export const EXPECTED_ENGINE = 319;
 // WEB-10b: +34 unit (MU-2501..MU-2532, MU-2535, MU-2536) and +3 real-engine (MU-2534, MU-2537, MU-2538) in `catalogue-web10b.mjs`.
 // WEB-10b revision 1 (review R1-R5): +10 unit (MU-2539..MU-2546, MU-2549, MU-2550) and +2 real-engine (MU-2547 N-LS1, MU-2548 N-LS2).
 // WEB-10b revision 2 (review 2 R1/R2): +10 unit (MU-2551..MU-2559, MU-2562) and +2 real-engine (MU-2560, MU-2561 over E-LS11); MU-2534 re-anchored.
@@ -64,3 +64,11 @@ export const EXPECTED_ENGINE = 307;
 // WEB-10c revision 20 (review 22 R42; design assessment of 5 November 2026): +11 unit (MU-3356..MU-3365, MU-3368: the strip's status rule with a strip
 // retained, its own Try again, the paced attempts after a lapsed strip's re-read did not complete, the wake listeners kept, the ladder's
 // cleanup with the scope, unknown never shown as empty, and the no-database presentation, and the boundary wait re-armed after a read that did not complete); MU-3359, MU-3360, MU-3362 and MU-3363 re-anchored to the unified watcher; +2 real-engine (MU-3366, MU-3367 over E-S4).
+// WEB-11b: +28 unit (MU-4101..MU-4121, MU-4123, MU-4124, MU-4126, MU-4128..MU-4130, MU-4135) and +4 real-engine (MU-4131..MU-4134, N-R1..N-R4) in
+// `catalogue-web11b.mjs`; MU-4122, MU-4125 and MU-4127 are not catalogued (reasons in that module).
+// WEB-11b revision 1 (review 1, R1–R4, and N1): +11 unit (MU-4136..MU-4149 but MU-4145..MU-4147, which are real-engine); MU-4104, MU-4105, MU-4124, MU-4130 and MU-4135 re-anchored (same defects); +4 real-engine (MU-4145, MU-4146 over E-R15b; MU-4147 over E-R14; MU-4150 over E-R17).
+// WEB-11b revision 2 (review 2, R7 and R2, and DA-N1): +7 unit (MU-4151..MU-4157); MU-4135, MU-4148 and MU-4150 re-anchored (same defects); +1 real-engine (MU-4158 over E-R18).
+// WEB-11b revision 3 (review 3, R7: failed-read Try again): +10 unit (MU-4159..MU-4168) and +2 real-engine (MU-4169, MU-4170 over E-R20).
+// WEB-11b revision 4 (review 4, R1: sender name-choice ownership): +7 unit (MU-4171..MU-4177) and +1 real-engine (MU-4178 over E-R21).
+// WEB-10c maintenance merge of accepted main 2c4e7fb (5 November 2026): base a7e0b7d (2235 unit, 296 engine) plus WEB-10c (343 unit, 11 engine) plus
+// WEB-11b (63 unit, 12 engine) = 2641 unit, 319 engine, counted from the merged catalogue; IDs do not overlap (MU-3001..MU-3368 against MU-4101..MU-4178).
